@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cli.Infra;
@@ -38,7 +39,7 @@ public static class LocalModelScanner
 
         foreach (string rootName in spec.Roots)
         {
-            string root = Path.Combine(modelsRoot, ModelFolders.MapSubdir(rootName));
+            string root = CaseInsensitivePath.ResolveDirectory(modelsRoot, ModelFolders.MapSubdir(rootName));
             if (!Directory.Exists(root))
                 continue;
 

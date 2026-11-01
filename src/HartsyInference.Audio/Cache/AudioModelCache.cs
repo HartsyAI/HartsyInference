@@ -448,7 +448,7 @@ public static class AudioModelCache
         // Audio package's dependency direction -- Engine depends on Audio, not the reverse.
         string? modelsRoot = EngineKnobs.ModelsRoot.Value;
         // Matched like AudioModelRoot's folder, so the cache and placed checkpoints stay in one tree.
-        if (!string.IsNullOrEmpty(modelsRoot)) return CaseInsensitivePath.ResolveDirectory(modelsRoot, "audio");
+        if (!string.IsNullOrEmpty(modelsRoot)) return CaseInsensitivePath.ResolveDirectory(modelsRoot, ModelFolders.Physical(ModelFolders.Audio));
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return Path.Combine(home, ".cache", "hartsyinference", "models");
     }
