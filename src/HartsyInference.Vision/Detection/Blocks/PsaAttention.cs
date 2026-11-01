@@ -47,12 +47,12 @@ public sealed unsafe class PsaAttention
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _qkvWeight = EnsureF32(weights[$"{prefix}.qkv.conv.weight"]);
-        _qkvBias = EnsureF32(weights[$"{prefix}.qkv.conv.bias"]);
-        _projWeight = EnsureF32(weights[$"{prefix}.proj.conv.weight"]);
-        _projBias = EnsureF32(weights[$"{prefix}.proj.conv.bias"]);
-        _peWeight = EnsureF32(weights[$"{prefix}.pe.conv.weight"]);
-        _peBias = EnsureF32(weights[$"{prefix}.pe.conv.bias"]);
+        _qkvWeight = TensorCasts.LoadF32(weights, $"{prefix}.qkv.conv.weight");
+        _qkvBias = TensorCasts.LoadF32(weights, $"{prefix}.qkv.conv.bias");
+        _projWeight = TensorCasts.LoadF32(weights, $"{prefix}.proj.conv.weight");
+        _projBias = TensorCasts.LoadF32(weights, $"{prefix}.proj.conv.bias");
+        _peWeight = TensorCasts.LoadF32(weights, $"{prefix}.pe.conv.weight");
+        _peBias = TensorCasts.LoadF32(weights, $"{prefix}.pe.conv.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -196,7 +196,4 @@ public sealed unsafe class PsaAttention
             }
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) =>
-        t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 }
