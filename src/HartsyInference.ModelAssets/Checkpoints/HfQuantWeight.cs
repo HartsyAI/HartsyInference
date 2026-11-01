@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.ModelAssets.Checkpoints;
 
@@ -10,6 +11,7 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 /// <param name="SourceKey">The stored tensor (or GPTQ module prefix) it reads.</param>
 /// <param name="StackedSource">The fused expert stack it is a slice of, or null.</param>
 /// <param name="StackedExpert">Expert index within <paramref name="StackedSource"/>.</param>
+/// <param name="Binding">The block-scale recipe of a <see cref="HfWeightStorage.BlockRecipe"/> weight, or null.</param>
 /// <param name="StackedRowOffset">First row within the expert's slab (the up half of a gate/up stack starts past the gate rows).</param>
 public sealed record HfQuantWeight(string Name, TensorShape Shape, HfWeightStorage Storage, DType StoredDType, string SourceKey,
-    string? StackedSource = null, int StackedExpert = 0, long StackedRowOffset = 0);
+    string? StackedSource = null, int StackedExpert = 0, long StackedRowOffset = 0, QuantBinding? Binding = null);

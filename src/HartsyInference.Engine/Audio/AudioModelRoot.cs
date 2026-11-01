@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
 
 namespace HartsyInference.Engine.Audio;
@@ -15,7 +16,7 @@ internal static class AudioModelRoot
     }
 
     /// <summary>The audio models root without first linking converted stand-ins into it.</summary>
-    internal static string Location() => CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), "audio");
+    internal static string Location() => CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), ModelFolders.Physical(ModelFolders.Audio));
 
     /// <summary>The directory a category/prefix pair's weights live in.</summary>
     internal static string WeightsDirectory(string category, string prefix) => Path.Combine(Root(), category, prefix);

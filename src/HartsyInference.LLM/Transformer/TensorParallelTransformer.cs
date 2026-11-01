@@ -56,6 +56,8 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
         if (cfg.Moe is not null) unsupported.Add("MoE");
         if (cfg.CrossAttnLayers.Count > 0) unsupported.Add("cross-attention layers");
         if (cfg.AttnSink) unsupported.Add("attention sink");
+        if (cfg.Indexer is not null) unsupported.Add("sparse-attention indexer");
+        if (cfg.Activation == ActivationKind.SwigluOai) unsupported.Add("clamped alpha-SwiGLU");
         if (cfg.AlibiMaxBias > 0f) unsupported.Add("ALiBi");
         if (cfg.ParallelResidual) unsupported.Add("parallel residual");
         if (cfg.AbsolutePositionEmbeddings) unsupported.Add("absolute position embeddings");

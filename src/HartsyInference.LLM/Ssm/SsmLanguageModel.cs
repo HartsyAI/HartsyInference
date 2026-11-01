@@ -56,14 +56,12 @@ public sealed class SsmLanguageModel : IDisposable
         Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
         try
         {
-            using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
-            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, [model.Config.EosTokenId], "<|startoftext|>", "<|im_end|>");
+            (ILlmTokenizer tokenizer, IChatTemplate template) = HfChatAssets.Load(directory, [model.Config.EosTokenId], "<|startoftext|>", "<|im_end|>");
             if (tokenizer.BosId != model.Config.BosTokenId || tokenizer.EosId != model.Config.EosTokenId)
             {
                 throw new InvalidDataException(
                     $"tokenizer.json maps <|startoftext|> to {tokenizer.BosId} and <|im_end|> to {tokenizer.EosId}; config.json says {model.Config.BosTokenId} and {model.Config.EosTokenId}.");
             }
-            IChatTemplate template = new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja")));
             return new SsmLanguageModel(model, Lfm3Config.ModelType, tokenizer, template);
         }
         catch
