@@ -1,11 +1,14 @@
 using System.Text.Json;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests;
 
@@ -28,9 +31,11 @@ public sealed unsafe class FlintTransformersParityTests : IDisposable
     private readonly JsonElement _config;
     private readonly JsonDocument _configDocument;
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
 
-    public FlintTransformersParityTests()
+    public FlintTransformersParityTests(ITestOutputHelper output)
     {
+        _out = output;
         _hf.Load(Path.Combine(Dir, "flint_tiny.safetensors"));
         _expected.Load(Path.Combine(Dir, "flint_tiny_expected.safetensors"));
         _configDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "flint_tiny_config.json")));
@@ -70,6 +75,39 @@ public sealed unsafe class FlintTransformersParityTests : IDisposable
         {
             using Tensor hidden = Transformer.Forward(_backend, Ids.AsSpan(pos, 1), pos, cache);
             using Tensor logits = Transformer.ProjectLogits(_backend, hidden, 1);
+            AssertRowsMatch(logits.AsReadOnlySpan<float>(), pos, 1);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void Prefill_LogitsMatchTransformers_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using KvCache cache = NewCache();
+        using Tensor hidden = Transformer.Forward(backend, Ids, 0, cache);
+        using Tensor logits = Transformer.ProjectLogits(backend, hidden, Ids.Length);
+        AssertRowsMatch(logits.AsReadOnlySpan<float>(), 0, Ids.Length);
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void PrefillThenDecode_LogitsMatchTransformers_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using KvCache cache = NewCache();
+        const int prefill = 5;
+        using (Tensor hidden = Transformer.Forward(backend, Ids.AsSpan(0, prefill), 0, cache))
+        using (Tensor logits = Transformer.ProjectLogits(backend, hidden, prefill))
+            AssertRowsMatch(logits.AsReadOnlySpan<float>(), 0, prefill);
+        for (int pos = prefill; pos < Ids.Length; pos++)
+        {
+            using Tensor hidden = Transformer.Forward(backend, Ids.AsSpan(pos, 1), pos, cache);
+            using Tensor logits = Transformer.ProjectLogits(backend, hidden, 1);
             AssertRowsMatch(logits.AsReadOnlySpan<float>(), pos, 1);
         }
     }
