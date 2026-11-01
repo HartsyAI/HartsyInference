@@ -328,6 +328,9 @@ public sealed class VideoCommand : Command<VideoCommand.Settings>
         if (!CommandRunner.RequireModelOrPath(settings.Model, settings.ModelPath, "--model", "--model-path", out exitCode))
             return exitCode;
 
+        if (!CommandRunner.RequireFilePath(settings.PreviewOutput, "--preview-output", out exitCode))
+            return exitCode;
+
         // Only flags the user actually passed are forwarded; anything omitted stays unset so the engine applies the
         // resolved family's official defaults instead of a generic guess.
         ParamState parameters = new ParamState(Modality.Video) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
