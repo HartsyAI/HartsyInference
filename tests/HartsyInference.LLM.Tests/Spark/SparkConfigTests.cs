@@ -33,6 +33,14 @@ public sealed class SparkConfigTests
         Assert.Equal(1, c.EosTokenId);
     }
 
+    [Fact]
+    public void ReadsAnEosListAsItsFirstId()
+    {
+        string json = Json.Replace("\"eos_token_id\": 1", "\"eos_token_id\": [1, 7]");
+        Assert.NotEqual(Json, json);
+        Assert.Equal(1, SparkConfig.FromJson(json).EosTokenId);
+    }
+
     [Theory]
     [InlineData("\"model_type\": \"spark2_5\"", "\"model_type\": \"llama\"", typeof(NotSupportedException))]
     [InlineData("\"hidden_act\": \"gelu\"", "\"hidden_act\": \"silu\"", typeof(NotSupportedException))]
@@ -43,6 +51,7 @@ public sealed class SparkConfigTests
     [InlineData("\"sliding_attention\", \"sliding_attention\", \"sliding_attention\", \"full_attention\"", "\"sliding_attention\", \"full_attention\"", typeof(InvalidDataException))]
     [InlineData("\"sliding_window\": 512", "\"sliding_window\": 0", typeof(InvalidDataException))]
     [InlineData("\"num_key_value_heads\": 4", "\"num_key_value_heads\": 5", typeof(InvalidDataException))]
+    [InlineData("\"eos_token_id\": 1", "\"eos_token_id\": \"1\"", typeof(InvalidDataException))]
     public void RefusesUnsupportedLayouts(string from, string to, Type expected)
     {
         string json = Json.Replace(from, to);

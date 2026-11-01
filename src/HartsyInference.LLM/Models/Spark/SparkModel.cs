@@ -172,7 +172,7 @@ public sealed unsafe class SparkModel : ISsmModel
         _owner?.Dispose();
     }
 
-    /// <summary>Loads the Hugging Face directory <paramref name="directory"/> (<c>config.json</c> and the <c>model-*.safetensors</c> shards); the model owns the mapped weights.</summary>
+    /// <summary>Loads the Hugging Face directory <paramref name="directory"/> (<c>config.json</c> and the <c>*.safetensors</c> files); the model owns the mapped weights.</summary>
     public static SparkModel Load(string directory, int maxSequenceLength)
     {
         SparkConfig config = SparkConfig.FromJson(File.ReadAllText(Path.Combine(directory, "config.json")));
@@ -280,6 +280,11 @@ public sealed unsafe class SparkModel : ISsmModel
         foreach (string proj in (string[])["q_k_v_proj", "g_proj", "out_proj"])
         {
             Stage(src, dst, $"{p}.self_attn.{proj}.weight", asF32: false);
+        }
+        long qkvRows = (long)Config.HeadDim * (Config.NumHeads + 2 * Config.NumKvHeads);
+        if (dst[$"{p}.self_attn.q_k_v_proj.weight"].Shape[0] != qkvRows)
+        {
+            throw new InvalidDataException($"Spark-X layer {i} q_k_v_proj has {dst[$"{p}.self_attn.q_k_v_proj.weight"].Shape[0]} rows; config.json's {Config.NumHeads} heads, {Config.NumKvHeads} KV heads and head_dim {Config.HeadDim} need {qkvRows}.");
         }
     }
 

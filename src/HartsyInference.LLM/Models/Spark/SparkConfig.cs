@@ -141,6 +141,13 @@ public sealed record SparkConfig
     private static bool Bool(JsonElement e, string name, bool fallback) =>
         e.TryGetProperty(name, out JsonElement v) && (v.ValueKind is JsonValueKind.True or JsonValueKind.False) ? v.GetBoolean() : fallback;
 
-    private static int Int(JsonElement e, string name) =>
-        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+    /// <summary>A token id: a number, the first entry of a list (HF configs list several end ids), or 0 when absent.</summary>
+    /// <exception cref="InvalidDataException">The field is neither a number nor a list that starts with one.</exception>
+    private static int Int(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out JsonElement v) || v.ValueKind == JsonValueKind.Null) return 0;
+        if (v.ValueKind == JsonValueKind.Number) return v.GetInt32();
+        if (v.ValueKind == JsonValueKind.Array && v.GetArrayLength() > 0 && v[0].ValueKind == JsonValueKind.Number) return v[0].GetInt32();
+        throw new InvalidDataException($"config.json {name} must be a number or a list of numbers.");
+    }
 }
