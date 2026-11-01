@@ -113,7 +113,7 @@ public sealed class VoiceModelSet : IAsyncDisposable
                 + "device and reach the language model's card with LlmDevice.", nameof(engine));
         }
         // The small front-end files first, so a missing VAD or denoiser fails before the speech models load.
-        WakeModelSet frontEnd = LoadFrontEnd(wakeModelRoot ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake"), options,
+        WakeModelSet frontEnd = LoadFrontEnd(wakeModelRoot ?? ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.Audio, "wake"), options,
             out Func<IVadModel> createVad, out Func<RnnoiseStream>? createDenoiser);
         VoiceLeaseSpeech? speech = null;
         try

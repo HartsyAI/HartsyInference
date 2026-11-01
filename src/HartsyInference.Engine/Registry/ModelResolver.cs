@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.IO;
 using HartsyInference.Engine.Dispatch;
@@ -91,7 +92,7 @@ public static class ModelResolver
             return null;
         }
         string root = RepoPaths.ModelsRoot();
-        string relative = Path.Combine(subdir, id);
+        string relative = Path.Combine(ModelFolders.MapName(subdir), id);
         string candidate = ignoreCase ? CaseInsensitivePath.ResolveEntry(root, relative) : Path.Combine(root, relative);
         if (File.Exists(candidate))
             return Path.GetFullPath(candidate);

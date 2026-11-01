@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <None Include="Fixtures\Exl3\*.i16;Fixtures\Exl3\*.f16" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\MiniMaxM3\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

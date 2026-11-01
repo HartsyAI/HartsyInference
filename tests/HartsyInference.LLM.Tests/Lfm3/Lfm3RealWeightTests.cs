@@ -97,7 +97,7 @@ public sealed class Lfm3RealWeightTests(ITestOutputHelper output)
     {
         string dir = TestPaths.Llm.Lfm3Dir;
         if (!RealWeightGate.Require(output.WriteLine, Path.Combine(dir, "tokenizer.json"), Path.Combine(dir, "model.safetensors"))) return;
-        using SsmLanguageModel model = SsmLanguageModel.LoadLfm3(dir, 64);
+        using SsmLanguageModel model = SsmLanguageModel.LoadHuggingFace(dir, Lfm3Config.ModelType, 64);
         Assert.Equal(Prompt, model.Tokenizer.EncodeOrdinary("The capital of France is Paris. The capital of Germany is"));
     }
 
