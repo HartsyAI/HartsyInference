@@ -1,3 +1,5 @@
+using HartsyInference.Core.IO;
+
 namespace HartsyInference.Core.Configuration;
 
 /// <summary>A top-level folder under the models root: its catalog name, its default name on disk (the name SwarmUI
@@ -74,9 +76,10 @@ public static class ModelFolders
             : Distinct(onDisk, spelled);
     }
 
-    /// <summary>The path of a model folder under the models root, plus any further segments.</summary>
+    /// <summary>The path of a model folder under the models root, plus any further segments. A folder that already exists
+    /// spelled in another case is used, as the downloads and lookups use it, so a helper never starts a second folder.</summary>
     public static string Under(string modelsRoot, ModelFolder folder, params string[] rest) =>
-        Path.Combine([modelsRoot, Physical(folder), .. rest]);
+        Path.Combine([CaseInsensitivePath.ResolveDirectory(modelsRoot, Physical(folder)), .. rest]);
 
     private static string? Override(ModelFolder folder) =>
         folder.Override() is { Length: > 0 } name ? name : null;
