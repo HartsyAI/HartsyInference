@@ -8,19 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.396
-
+- **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. `HfChatAssets` loads a Hugging Face directory's byte-level BPE tokenizer and chat template (LFM3 uses it too); MiniMax's match transformers' ids. The catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the block selection runs on the host and CUDA and Vulkan refuse the attention call that carries its bias, so the model runs on the CPU backend only.
+- **Added: model folders are settings (`paths.folder.*`).** Every top-level model folder (LLM, Audio, Stable-Diffusion,
 - **Added: XHToken Spark-X2.6-4B text model.** Dense GELU-gated decoder with fused QKV, a head-wise sigmoid output gate, and sliding or full attention with a partial RoPE, run from a Hugging Face directory on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match an F32 PyTorch script, also with a short sliding window. CUDA, Vulkan and quantized weights are not covered.
 - **Added: Python-style tuple literals in Jinja templates.** `x in ('a', 'b')` and `()` parse, so Spark-X's chat template renders; a parenthesized expression without a comma still groups.
 - **Changed: LFM3 and Spark-X share one head-gated attention helper and one Hugging Face stateful-family loader.** No behavior change for LFM3.
-- **Added: model folders are settings (`paths.folder.*`).** Every top-level model folder (LLM, Audio, Stable-Diffusion,
-  VAE, text_encoders, and the rest) names its folder on disk through a setting, defaulting to the name SwarmUI uses.
-  Catalog entries keep their logical names; the resolver, the scanner, the downloads and the file locators all map
-  through the same setting.
-
-## alpha.399
-
-- **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. `HfChatAssets` loads a Hugging Face directory's byte-level BPE tokenizer and chat template (LFM3 uses it too); MiniMax's match transformers' ids. The catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the block selection runs on the host and CUDA and Vulkan refuse the attention call that carries its bias, so the model runs on the CPU backend only.
 
 ## alpha.393
 
