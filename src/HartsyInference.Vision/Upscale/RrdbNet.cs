@@ -53,8 +53,8 @@ public sealed class Conv2dLayer
     /// <summary>Loads <c>{prefix}.weight</c> and <c>{prefix}.bias</c> (cast to F32).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.LoadF32(weights, $"{prefix}.weight");
+        _bias = TensorCasts.LoadF32(weights, $"{prefix}.bias");
     }
 
     /// <summary>Yields weight + bias for GPU preload.</summary>

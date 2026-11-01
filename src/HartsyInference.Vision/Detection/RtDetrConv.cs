@@ -33,8 +33,8 @@ public sealed class RtDetrConv(int strideH, int strideW, int padH, int padW, RtD
     /// <summary>Loads the folded conv <c>{prefix}.weight</c> and <c>{prefix}.bias</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.LoadF32(weights, $"{prefix}.weight");
+        _bias = TensorCasts.LoadF32(weights, $"{prefix}.bias");
     }
 
     /// <summary>Yields the conv weight + bias for GPU preloading.</summary>

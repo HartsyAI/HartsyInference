@@ -30,9 +30,9 @@ public sealed class RtDetrLinear
     /// <summary>Loads <c>{prefix}.weight</c> (and <c>{prefix}.bias</c> when this layer has a bias).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
+        _weight = TensorCasts.LoadF32(weights, $"{prefix}.weight");
         if (_hasBias)
-            _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
+            _bias = TensorCasts.LoadF32(weights, $"{prefix}.bias");
     }
 
     /// <summary>Yields the weight (and bias) for GPU preloading.</summary>

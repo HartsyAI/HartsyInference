@@ -52,9 +52,9 @@ public sealed unsafe class SiglipVisionEncoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "vision_model")
     {
-        _patchEmbeddingWeight = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.patch_embedding.weight"]);
-        _patchEmbeddingBias = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.patch_embedding.bias"]);
-        _positionEmbedding = TensorCasts.EnsureF32(weights[$"{prefix}.embeddings.position_embedding.weight"]);
+        _patchEmbeddingWeight = TensorCasts.LoadF32(weights, $"{prefix}.embeddings.patch_embedding.weight");
+        _patchEmbeddingBias = TensorCasts.LoadF32(weights, $"{prefix}.embeddings.patch_embedding.bias");
+        _positionEmbedding = TensorCasts.LoadF32(weights, $"{prefix}.embeddings.position_embedding.weight");
 
         for (int i = 0; i < _layers.Length; i++)
             _layers[i].LoadWeights(weights, $"{prefix}.encoder.layers.{i}");
@@ -65,24 +65,24 @@ public sealed unsafe class SiglipVisionEncoder
             // Post-encoder LN is applied to the patch tokens before they feed into the attention
             // pooling head. Most SigLIP checkpoints have it.
             _postLnWeight = TensorCasts.EnsureF32(postLn);
-            _postLnBias = TensorCasts.EnsureF32(weights[$"{prefix}.post_layernorm.bias"]);
+            _postLnBias = TensorCasts.LoadF32(weights, $"{prefix}.post_layernorm.bias");
         }
 
         // Attention pooling head.
-        _headProbe = TensorCasts.EnsureF32(weights[$"{prefix}.head.probe"]);
-        _headAttnInProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.head.attention.in_proj_weight"]);
-        _headAttnInProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.head.attention.in_proj_bias"]);
-        _headAttnOutProjWeight = TensorCasts.EnsureF32(weights[$"{prefix}.head.attention.out_proj.weight"]);
-        _headAttnOutProjBias = TensorCasts.EnsureF32(weights[$"{prefix}.head.attention.out_proj.bias"]);
+        _headProbe = TensorCasts.LoadF32(weights, $"{prefix}.head.probe");
+        _headAttnInProjWeight = TensorCasts.LoadF32(weights, $"{prefix}.head.attention.in_proj_weight");
+        _headAttnInProjBias = TensorCasts.LoadF32(weights, $"{prefix}.head.attention.in_proj_bias");
+        _headAttnOutProjWeight = TensorCasts.LoadF32(weights, $"{prefix}.head.attention.out_proj.weight");
+        _headAttnOutProjBias = TensorCasts.LoadF32(weights, $"{prefix}.head.attention.out_proj.bias");
         if (_headSlices is not null) foreach (Tensor? t in _headSlices) t?.Dispose();
         _headSlices = null;
         _headAttention = null;
-        _headLnWeight = TensorCasts.EnsureF32(weights[$"{prefix}.head.layernorm.weight"]);
-        _headLnBias = TensorCasts.EnsureF32(weights[$"{prefix}.head.layernorm.bias"]);
-        _headMlpFc1Weight = TensorCasts.EnsureF32(weights[$"{prefix}.head.mlp.fc1.weight"]);
-        _headMlpFc1Bias = TensorCasts.EnsureF32(weights[$"{prefix}.head.mlp.fc1.bias"]);
-        _headMlpFc2Weight = TensorCasts.EnsureF32(weights[$"{prefix}.head.mlp.fc2.weight"]);
-        _headMlpFc2Bias = TensorCasts.EnsureF32(weights[$"{prefix}.head.mlp.fc2.bias"]);
+        _headLnWeight = TensorCasts.LoadF32(weights, $"{prefix}.head.layernorm.weight");
+        _headLnBias = TensorCasts.LoadF32(weights, $"{prefix}.head.layernorm.bias");
+        _headMlpFc1Weight = TensorCasts.LoadF32(weights, $"{prefix}.head.mlp.fc1.weight");
+        _headMlpFc1Bias = TensorCasts.LoadF32(weights, $"{prefix}.head.mlp.fc1.bias");
+        _headMlpFc2Weight = TensorCasts.LoadF32(weights, $"{prefix}.head.mlp.fc2.weight");
+        _headMlpFc2Bias = TensorCasts.LoadF32(weights, $"{prefix}.head.mlp.fc2.bias");
         HeadAttention();
     }
 
@@ -290,22 +290,22 @@ internal sealed unsafe class SiglipTransformerLayer
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _ln1W = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm1.weight"]);
-        _ln1B = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm1.bias"]);
-        _qW = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_proj.weight"]);
-        _qB = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.q_proj.bias"]);
-        _kW = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_proj.weight"]);
-        _kB = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.k_proj.bias"]);
-        _vW = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.v_proj.weight"]);
-        _vB = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.v_proj.bias"]);
-        _oW = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.out_proj.weight"]);
-        _oB = TensorCasts.EnsureF32(weights[$"{prefix}.self_attn.out_proj.bias"]);
-        _ln2W = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm2.weight"]);
-        _ln2B = TensorCasts.EnsureF32(weights[$"{prefix}.layer_norm2.bias"]);
-        _fc1W = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc1.weight"]);
-        _fc1B = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc1.bias"]);
-        _fc2W = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc2.weight"]);
-        _fc2B = TensorCasts.EnsureF32(weights[$"{prefix}.mlp.fc2.bias"]);
+        _ln1W = TensorCasts.LoadF32(weights, $"{prefix}.layer_norm1.weight");
+        _ln1B = TensorCasts.LoadF32(weights, $"{prefix}.layer_norm1.bias");
+        _qW = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.q_proj.weight");
+        _qB = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.q_proj.bias");
+        _kW = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.k_proj.weight");
+        _kB = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.k_proj.bias");
+        _vW = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.v_proj.weight");
+        _vB = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.v_proj.bias");
+        _oW = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.out_proj.weight");
+        _oB = TensorCasts.LoadF32(weights, $"{prefix}.self_attn.out_proj.bias");
+        _ln2W = TensorCasts.LoadF32(weights, $"{prefix}.layer_norm2.weight");
+        _ln2B = TensorCasts.LoadF32(weights, $"{prefix}.layer_norm2.bias");
+        _fc1W = TensorCasts.LoadF32(weights, $"{prefix}.mlp.fc1.weight");
+        _fc1B = TensorCasts.LoadF32(weights, $"{prefix}.mlp.fc1.bias");
+        _fc2W = TensorCasts.LoadF32(weights, $"{prefix}.mlp.fc2.weight");
+        _fc2B = TensorCasts.LoadF32(weights, $"{prefix}.mlp.fc2.bias");
         _attn = new AttentionLayer(
             new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
             new AttentionLayerWeights

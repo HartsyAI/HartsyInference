@@ -47,12 +47,12 @@ public sealed unsafe class PsaAttention
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _qkvWeight = TensorCasts.EnsureF32(weights[$"{prefix}.qkv.conv.weight"]);
-        _qkvBias = TensorCasts.EnsureF32(weights[$"{prefix}.qkv.conv.bias"]);
-        _projWeight = TensorCasts.EnsureF32(weights[$"{prefix}.proj.conv.weight"]);
-        _projBias = TensorCasts.EnsureF32(weights[$"{prefix}.proj.conv.bias"]);
-        _peWeight = TensorCasts.EnsureF32(weights[$"{prefix}.pe.conv.weight"]);
-        _peBias = TensorCasts.EnsureF32(weights[$"{prefix}.pe.conv.bias"]);
+        _qkvWeight = TensorCasts.LoadF32(weights, $"{prefix}.qkv.conv.weight");
+        _qkvBias = TensorCasts.LoadF32(weights, $"{prefix}.qkv.conv.bias");
+        _projWeight = TensorCasts.LoadF32(weights, $"{prefix}.proj.conv.weight");
+        _projBias = TensorCasts.LoadF32(weights, $"{prefix}.proj.conv.bias");
+        _peWeight = TensorCasts.LoadF32(weights, $"{prefix}.pe.conv.weight");
+        _peBias = TensorCasts.LoadF32(weights, $"{prefix}.pe.conv.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

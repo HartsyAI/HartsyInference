@@ -28,8 +28,8 @@ public sealed class RtDetrLayerNorm
     /// <summary>Loads <c>{prefix}.weight</c> and <c>{prefix}.bias</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.LoadF32(weights, $"{prefix}.weight");
+        _bias = TensorCasts.LoadF32(weights, $"{prefix}.bias");
     }
 
     /// <summary>Yields the weight + bias for GPU preloading.</summary>

@@ -34,8 +34,8 @@ public sealed class DwConvBnSilu
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _weight = TensorCasts.EnsureF32(weights[$"{prefix}.weight"]);
-        _bias = TensorCasts.EnsureF32(weights[$"{prefix}.bias"]);
+        _weight = TensorCasts.LoadF32(weights, $"{prefix}.weight");
+        _bias = TensorCasts.LoadF32(weights, $"{prefix}.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

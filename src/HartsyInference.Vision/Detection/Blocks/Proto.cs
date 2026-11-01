@@ -55,8 +55,8 @@ public sealed class Proto
         _cv3.LoadWeights(weights, $"{prefix}.cv3.conv");
         // The upsample ConvTranspose2d carries weight+bias directly (no BN to fold; PyTorch's
         // nn.ConvTranspose2d has bias=True here per Ultralytics).
-        _upsampleWeight = TensorCasts.EnsureF32(weights[$"{prefix}.upsample.weight"]);
-        _upsampleBias = TensorCasts.EnsureF32(weights[$"{prefix}.upsample.bias"]);
+        _upsampleWeight = TensorCasts.LoadF32(weights, $"{prefix}.upsample.weight");
+        _upsampleBias = TensorCasts.LoadF32(weights, $"{prefix}.upsample.bias");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
