@@ -121,7 +121,20 @@ public static class RequestExtras
         }
         try
         {
-            return Convert.ToDouble(value, CultureInfo.InvariantCulture);
+            // A request body deserializes extras as JsonElement, which Convert cannot read: take the number directly.
+            double number = value switch
+            {
+                JsonElement { ValueKind: JsonValueKind.Number } json => json.GetDouble(),
+                JsonElement { ValueKind: JsonValueKind.String } json => double.Parse(json.GetString() ?? "", CultureInfo.InvariantCulture),
+                JsonElement json => throw new FormatException($"expected a number, got {json.ValueKind}"),
+                _ => Convert.ToDouble(value, CultureInfo.InvariantCulture),
+            };
+            // double.Parse accepts "NaN" and "Infinity"; a non-finite extra is never a valid setting.
+            if (!double.IsFinite(number))
+            {
+                throw new FormatException($"expected a finite number, got '{value}'");
+            }
+            return number;
         }
         catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
         {

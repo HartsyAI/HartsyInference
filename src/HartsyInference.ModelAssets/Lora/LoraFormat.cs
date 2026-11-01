@@ -48,6 +48,12 @@ public enum LoraFormat
     /// <summary>Fibo 2.0 in its ComfyUI-native spelling (<c>diffusion_model.layers.N.attention.qkv.lora_down.weight</c> on the fused modules, with <c>.diff</c>/<c>.diff_b</c> full-weight deltas) or its diffusers/PEFT one (<c>transformer.layers.N.attention.to_q…</c>), recognized by the modules only Fibo 2.0 has (the Perceiver, the injection blocks' cross-attention, the fused <c>feed_forward.w13</c>).</summary>
     Fibo2,
 
+    /// <summary>Anima in its ComfyUI spelling (<c>diffusion_model.blocks.N.self_attn.q_proj.lora_down.weight</c>), the checkpoint's own
+    /// <c>net.</c> root, or a bare <c>blocks.</c> root. Recognized by the block modules only Anima has (<c>self_attn.output_proj</c>,
+    /// <c>mlp.layer1</c>, <c>adaln_modulation_*</c>), which the Wan rename table would otherwise mangle. The kohya underscored spelling is
+    /// <see cref="KohyaGeneric"/>.</summary>
+    Anima,
+
     /// <summary>Kohya/musubi-tuner <c>lora_unet_&lt;module path with '.' written as '_'&gt;</c> keys no specific kohya layout claims (Krea 2: <c>lora_unet_blocks_0_attn_wq</c>). The module names are resolved against the target model's own weight names when the LoRA is applied, as ComfyUI does, so any DiT works without a per-family table. Detected after every other format.</summary>
     KohyaGeneric,
 }
