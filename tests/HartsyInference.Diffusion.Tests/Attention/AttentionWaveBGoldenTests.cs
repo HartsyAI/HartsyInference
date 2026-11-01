@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests.Attention;
@@ -16,6 +17,8 @@ public sealed class AttentionWaveBGoldenTests
     public void Block_ReproducesThePreMigrationOutputBitForBit(string name)
     {
         Assert.True(Golden.Value.TryGetValue(name, out string? expected), $"Case '{name}' is missing from the fixture.");
+        // The fixture was captured before the exact GELU default (#592), so pin the tanh approximation it was captured with.
+        using IDisposable tanh = KnobProfile.Create("wave-b-golden").With(EngineKnobs.AnimaExactGelu, false).Push();
         Assert.Equal(expected, AttentionWaveBGoldenCases.Run(name));
     }
 

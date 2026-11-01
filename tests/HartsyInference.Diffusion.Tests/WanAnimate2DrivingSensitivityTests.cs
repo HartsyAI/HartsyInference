@@ -127,6 +127,7 @@ public unsafe class WanAnimate2DrivingSensitivityTests
     [Fact]
     public void DifferentDrivingVideos_ProduceDifferentDenoiserOutput_Cuda()
     {
+        if (!CudaContext.IsAvailable()) return; // no CUDA device on this machine
         WanVideoConfig c = Config(layers: 2);
         Dictionary<string, Tensor> weights = WanSyntheticWeights.BuildTransformer(c);
         using CudaBackend backend = new CudaBackend(0, PtxDir());
