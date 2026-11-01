@@ -13,6 +13,9 @@ stable release will require. Dates are UTC.
 - **Added: XHToken Spark-X2.6-4B text model.** Dense GELU-gated decoder with fused QKV, a head-wise sigmoid output gate, and sliding or full attention with a partial RoPE, run from a Hugging Face directory on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match an F32 PyTorch script, also with a short sliding window. CUDA, Vulkan and quantized weights are not covered.
 - **Added: Python-style tuple literals in Jinja templates.** `x in ('a', 'b')` and `()` parse, so Spark-X's chat template renders; a parenthesized expression without a comma still groups.
 - **Changed: LFM3 and Spark-X share one head-gated attention helper and one Hugging Face stateful-family loader.** No behavior change for LFM3.
+- **Added: Nanbeige4.3-33B catalog entry (`nanbeige43`).** A plain Llama, so it runs on the existing GGUF path; the catalog points at bartowski's Q4_K_M GGUF. Its header, tokenizer and chat template match the checkpoint's own through transformers; the model itself has not been run.
+- **Fixed: SentencePiece GGUF tokenizers honor `tokenizer.ggml.metaspace.prepend_scheme = first`.** Text after a special token such as `<|im_start|>` no longer takes a leading `▁`, so a ChatML prompt tokenizes like the checkpoint's own tokenizer. GGUFs without that key are unchanged.
+- **Fixed: Jinja templates drop one trailing newline of the template source,** as Jinja2 does by default. A template that ended its source with a newline after the last tag added an extra newline to the prompt (Nanbeige's ended `<think>` with two). This also changes the prompt of existing models whose template ends that way: Llama 3.x's assistant header now ends with `\n\n`, the format Meta documents, where it ended with `\n\n\n`.
 
 ## alpha.393
 

@@ -132,6 +132,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Nanbeige4.3-33B (Apache-2.0): a plain Llama architecture (52 layers, hidden 7168, GQA 56/8, rope theta 1.2e8, vocab 166912), so the
+                // existing GGUF transformer path runs it. The header of bartowski's GGUF matches config.json, and its SentencePiece tokenizer and chat
+                // template reproduce the ids of the checkpoint's own tokenizer through transformers. No full-model run: the weights do not fit the dev box
+                // (the CPU backend widens GGUF weights to F32), and no GPU run yet.
+                Id = "nanbeige43", Modality = txt, DisplayName = "Nanbeige4.3 (33B, dense Llama)",
+                Architecture = "Llama dense transformer, GQA 56/8, rope theta 1.2e8", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF", RepoPath = "Nanbeige_Nanbeige4.3-33B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/nanbeige43", Role = "transformer",
+                        Sha256 = "2cef79855ca47ee6571e166db32a07089e34f3cf78e0397b262d124ddb814c37" },
+                },
+            },
+
+            new CatalogEntry
+            {
                 // XHToken Spark-X2.6-4B (Apache-2.0): dense GELU-gated decoder, fused QKV, head-wise sigmoid output gate, sliding (512) and
                 // full attention with a partial RoPE (SparkModel, Hugging Face directory). CPU logits and a 12-token greedy decode match an F32
                 // PyTorch script written from modeling_spark.py, including with a lowered sliding window; no CUDA or Vulkan run yet. Pass the
