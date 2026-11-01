@@ -113,7 +113,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
         using Lfm3Model model = new(_weights, _config, 32);
         float[] actual = model.ForwardLastLogits(backend, Prompt);
         Assert.Equal(expected.Length, actual.Length);
-        LogMaxDifference(expected, actual);
+        BackendGate.LogMaxDifference(expected, actual, _out.WriteLine);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 2e-4f, expected[v] + 2e-4f);
@@ -138,28 +138,11 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
             actual = chunked.ForwardLastLogits(backend, chunk);
         }
         Assert.Equal(Prompt.Length, chunked.Position);
-        LogMaxDifference(expected, actual);
+        BackendGate.LogMaxDifference(expected, actual, _out.WriteLine);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
         }
-    }
-
-    /// <summary>Logs the largest absolute difference and where it is, so a failing device case says how far off it is, not only that it is.</summary>
-    private void LogMaxDifference(float[] expected, float[] actual)
-    {
-        float worst = 0f;
-        int at = 0;
-        for (int v = 0; v < expected.Length; v++)
-        {
-            float difference = MathF.Abs(actual[v] - expected[v]);
-            if (difference > worst)
-            {
-                worst = difference;
-                at = v;
-            }
-        }
-        _out.WriteLine($"max |Δ| = {worst} at logit {at}");
     }
 
     [Fact]

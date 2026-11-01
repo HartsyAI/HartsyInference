@@ -90,6 +90,24 @@ public static class BackendGate
         return true;
     }
 
+    /// <summary>Logs the largest absolute difference between two logit vectors and where it is, so a failing device case says how far off it is, not only that it is.</summary>
+    public static void LogMaxDifference(ReadOnlySpan<float> expected, ReadOnlySpan<float> actual, Action<string> log)
+    {
+        ArgumentNullException.ThrowIfNull(log);
+        float worst = 0f;
+        int at = 0;
+        for (int v = 0; v < expected.Length && v < actual.Length; v++)
+        {
+            float difference = MathF.Abs(actual[v] - expected[v]);
+            if (difference > worst)
+            {
+                worst = difference;
+                at = v;
+            }
+        }
+        log($"max |Δ| = {worst} at logit {at}");
+    }
+
     /// <summary>Why <paramref name="kind"/> cannot be opened here, or null when it can. Probed once per kind.</summary>
     public static string? UnavailableReason(string kind)
     {
