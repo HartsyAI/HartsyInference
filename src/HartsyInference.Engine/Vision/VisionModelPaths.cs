@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Features;
@@ -46,8 +47,8 @@ public static class VisionModelPaths
         }
         string root = RepoPaths.ModelsRoot();
         return FirstSafetensors(ignoreCase
-            ? CaseInsensitivePath.ResolveDirectory(root, subfolder)
-            : Path.Combine(root, subfolder));
+            ? CaseInsensitivePath.ResolveDirectory(root, ModelFolders.MapSubdir(subfolder))
+            : Path.Combine(root, ModelFolders.MapSubdir(subfolder)));
     }
 
     /// <summary>Finds the Grounding DINO <c>model.safetensors</c> + BERT <c>vocab.txt</c> pair; both must sit in the same directory (the HF snapshot layout, optionally nested one level). Returns nulls when not installed.</summary>
@@ -131,7 +132,7 @@ public static class VisionModelPaths
                 }
             }
         }
-        string root = CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), subfolder);
+        string root = CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), ModelFolders.MapSubdir(subfolder));
         if (Directory.Exists(root))
         {
             yield return root;

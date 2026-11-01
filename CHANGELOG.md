@@ -8,8 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-
 - **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. `HfChatAssets` loads a Hugging Face directory's byte-level BPE tokenizer and chat template (LFM3 uses it too); MiniMax's match transformers' ids. The catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the block selection runs on the host and CUDA and Vulkan refuse the attention call that carries its bias, so the model runs on the CPU backend only.
+- **Added: model folders are settings (`paths.folder.*`).** Every top-level model folder (LLM, Audio, Stable-Diffusion, VAE, text_encoders, clip_vision, controlnet, Lora, Embedding, ipadapter, Vision, Decision, Video, diffusion_models, grounding-dino, sam2, rtdetr, clipseg) has a setting that names its folder under the models root. Unset, each uses the name SwarmUI downloads into, so the text models' default is now lowercase `llm`. An existing `LLM/` keeps resolving, and a download goes into it rather than beside it. `docs/SETTINGS.md` lists every setting.
 
 ## alpha.393
 

@@ -1,5 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Text.RegularExpressions;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -155,7 +156,7 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     /// <summary>Ensures the ERNIE tokenizer.json is present under the models root, downloading it from <see cref="TokenizerRepo"/> on first use.</summary>
     private static string EnsureTokenizerJson()
     {
-        string path = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "ERNIE", "tokenizer.json");
+        string path = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.TextEncoders, "ERNIE", "tokenizer.json");
         if (!File.Exists(path))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);

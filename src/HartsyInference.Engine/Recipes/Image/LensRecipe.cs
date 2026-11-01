@@ -1,5 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Text.Json;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
@@ -94,7 +95,7 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// <summary>Ensures the GPT-OSS <c>vocab.json</c> + <c>merges.txt</c> pair <see cref="GptOssTokenizer"/> consumes exists on disk, downloading and splitting the HuggingFace <c>tokenizer.json</c> once. Inlines the SwarmUI backend's <c>TokenizerExport.EnsureVocabMerges</c>.</summary>
     private static (string VocabPath, string MergesPath) EnsureGptOssVocabMerges()
     {
-        string dir = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "Lens");
+        string dir = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.TextEncoders, "Lens");
         string vocabPath = Path.Combine(dir, "gpt_oss_vocab.json");
         string mergesPath = Path.Combine(dir, "gpt_oss_merges.txt");
         if (File.Exists(vocabPath) && File.Exists(mergesPath))
