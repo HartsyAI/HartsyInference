@@ -1,7 +1,11 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.LLM.Models.Shared;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Lfm3;
 
@@ -28,10 +32,12 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     private readonly Dictionary<string, Tensor> _weights = new();
     private readonly Dictionary<string, float[]> _host = new();
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
     private uint _state = 0x1F2E3D4Cu;
 
-    public Lfm3ModelTests()
+    public Lfm3ModelTests(ITestOutputHelper output)
     {
+        _out = output;
         int h = _config.HiddenSize, hd = _config.HeadDim, inner = _config.IntermediateSize;
         Add("model.embed_tokens.weight", _config.VocabSize, h);
         AddNorm("model.embedding_norm.weight", h);
@@ -88,6 +94,51 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
             actual = chunked.ForwardLastLogits(_backend, chunk);
         }
         Assert.Equal(Prompt.Length, chunked.Position);
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
+        }
+    }
+
+    // The weights are host tensors; each backend uploads them on first use, so the device variants reuse them.
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void MatchesHostReference_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
+        float[] expected = Reference(Prompt);
+        using Lfm3Model model = new(_weights, _config, 32);
+        float[] actual = model.ForwardLastLogits(backend, Prompt);
+        Assert.Equal(expected.Length, actual.Length);
+        BackendGate.LogMaxDifference(expected, actual, _out.WriteLine);
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 2e-4f, expected[v] + 2e-4f);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void ChunkedPrefillAndDecodeMatchOneShot_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
+        using Lfm3Model whole = new(_weights, _config, 32);
+        float[] expected = whole.ForwardLastLogits(backend, Prompt);
+        using Lfm3Model chunked = new(_weights, _config, 32);
+        int[][] chunks = [Prompt[..4], Prompt[4..5], Prompt[5..6], Prompt[6..]];
+        float[] actual = [];
+        foreach (int[] chunk in chunks)
+        {
+            actual = chunked.ForwardLastLogits(backend, chunk);
+        }
+        Assert.Equal(Prompt.Length, chunked.Position);
+        BackendGate.LogMaxDifference(expected, actual, _out.WriteLine);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
@@ -217,7 +268,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     {
         int n = normed.Length, hq = _config.NumHeads, hkv = _config.NumKvHeads, hd = _config.HeadDim, group = hq / hkv;
         string a = $"{p}.self_attn";
-        Lfm3RopeParameters rope = _config.RopeOf(layer);
+        LayerRopeParameters rope = _config.RopeOf(layer);
         double[][][] q = new double[n][][], k = new double[n][][], v = new double[n][][];
         for (int t = 0; t < n; t++)
         {
@@ -256,7 +307,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
         return result;
     }
 
-    private double[] Rope(double[] x, int pos, Lfm3RopeParameters rope)
+    private double[] Rope(double[] x, int pos, LayerRopeParameters rope)
     {
         int hd = x.Length, half = hd / 2, angles = rope.RotatedPairs(hd);
         double[] y = (double[])x.Clone();

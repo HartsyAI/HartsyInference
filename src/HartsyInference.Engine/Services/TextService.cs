@@ -17,7 +17,6 @@ using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
-using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.OutputParsing;
@@ -898,9 +897,9 @@ public sealed class TextService : ITextService, IDisposable
         if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
-        if (string.Equals(checkpoint.ModelType, Lfm3Config.ModelType, StringComparison.Ordinal))
+        if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
-            LoadLfm3Directory(slot, deviceKey, checkpoint, path);
+            LoadStatefulDirectory(slot, deviceKey, checkpoint, path);
             return;
         }
         if (string.Equals(checkpoint.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal))
@@ -990,18 +989,18 @@ public sealed class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded MiniMax-M3 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU backend.");
     }
 
-    /// <summary>Loads a LiquidAI LFM3 directory into the slot's SSM-style model, which carries its own conv windows and KV cache, on the requested device.</summary>
-    private void LoadLfm3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    /// <summary>Loads a stateful-family directory (LFM3, Spark-X) into the slot's SSM-style model, which carries its own state and KV cache, on the requested device.</summary>
+    private void LoadStatefulDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         // A layer-split GGUF leaves its last stage as the slot backend; a single-device load must not reuse it.
         if (slot.ExtraStageBackends is not null)
             DisposeStageBackends(slot);
         IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
-        slot.SsmModel = HfTextDirectoryLoader.LoadLfm3(checkpoint);
+        slot.SsmModel = HfTextDirectoryLoader.LoadStateful(checkpoint);
         slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
-        Logs.Info($"[TextService] Loaded LFM3 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on {deviceKey}.");
+        Logs.Info($"[TextService] Loaded {checkpoint.ModelType} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on {deviceKey}.");
     }
 
     /// <summary>Refuses a V4.1 load that would not fit: the weights stay as mapped checkpoint bytes the kernel can drop and re-read, so what must fit in RAM is the working set (sequence state, prefill activations, small widened tensors and Engram row caches) plus a fixed margin.</summary>

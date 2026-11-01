@@ -28,7 +28,7 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
     // the single remap below is exact for all of them. The MoE members (olmoe, qwen2moe, qwen3moe, and Mixtral
     // under the plain "llama" arch) add the stacked-expert + router tensors handled below; the dense members
     // simply never carry those keys. Registering each explicitly resolves it by name (no heuristic-fallback warning).
-    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "starcoder2", "exaone", "gpt-oss", "gptoss", "minicpm", "minimax-m3"];
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "starcoder2", "exaone", "gpt-oss", "gptoss", "minicpm", "flint", "minimax-m3"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {

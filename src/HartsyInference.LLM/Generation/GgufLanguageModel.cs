@@ -75,7 +75,9 @@ public sealed class GgufLanguageModel : IDisposable
             float[]? scores = meta.GetFloatArray("tokenizer.ggml.scores")
                 ?? throw new NotSupportedException("SentencePiece GGUF missing tokenizer.ggml.scores.");
             bool addSpacePrefix = meta.GetBool("tokenizer.ggml.add_space_prefix", true);
-            return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix);
+            // Only "first" changes behavior; "always" is the existing default and "never" has not appeared next to add_space_prefix.
+            bool prefixOnlyAtTextStart = string.Equals(meta.GetString("tokenizer.ggml.metaspace.prepend_scheme"), "first", StringComparison.Ordinal);
+            return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix, prefixOnlyAtTextStart);
         }
 
         // RWKV World (tokenizer.ggml.model == "rwkv"): fixed byte-string vocab, greedy longest-prefix trie
@@ -86,11 +88,28 @@ public sealed class GgufLanguageModel : IDisposable
             return new RwkvWorldTokenizer(tokens, tokenType, bos, eos, extraStops);
         }
 
+        // llama.cpp's list of every end-of-generation id (Flint ends turns on several control tokens). Only the byte-level BPE path reads it, so
+        // SentencePiece and RWKV GGUFs that carry the key keep their stops.
+        if (meta.GetIntArray("tokenizer.ggml.eog_token_ids") is { } eog) extraStops.AddRange(eog);
+
         // A wrong split gives wrong token ids, so the pre-tokenizer name fixes both the split and ignore_merges.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre),
-            ignoreMerges: PreTokenizerFamilyFor(pre) is PreTokenizerFamily.Llama3 or PreTokenizerFamily.Tekken);
+            ignoreMerges: PreTokenizerFamilyFor(pre) is PreTokenizerFamily.Llama3 or PreTokenizerFamily.Tekken,
+            preTokenizer: PreTokenizerPipelineFor(pre));
     }
+
+    /// <summary>The Hugging Face <c>pre_tokenizer</c> of Flint (digit groups, CJK runs, then words), which no single split regex expresses.</summary>
+    private const string FlintPreTokenizerJson = """{"type": "Sequence", "pretokenizers": [{"type": "Split", "pattern": {"Regex": "\\p{N}{1,3}"}, "behavior": "Isolated", "invert": false}, {"type": "Split", "pattern": {"Regex": "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+"}, "behavior": "Isolated", "invert": false}, {"type": "Split", "pattern": {"Regex": "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"}, "behavior": "Isolated", "invert": false}, {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": false}]}""";
+
+    private static readonly Lazy<PreTokenizerPipeline> FlintPipeline = new(() =>
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(FlintPreTokenizerJson);
+        return PreTokenizerPipeline.FromJson(doc.RootElement);
+    });
+
+    /// <summary>The multi-stage pre-tokenizer a <c>tokenizer.ggml.pre</c> name stands for, or null when a single regex (or the default) is enough.</summary>
+    internal static PreTokenizerPipeline? PreTokenizerPipelineFor(string pre) => pre == "flint" ? FlintPipeline.Value : null;
 
     /// <summary>The pre-tokenizer families that choose a split regex.</summary>
     internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2, Tekken }

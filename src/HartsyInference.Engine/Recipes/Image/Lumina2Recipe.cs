@@ -1,4 +1,5 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
@@ -153,7 +154,7 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     private static string EnsureTokenizer(string encoderPath)
     {
         string encoderDir = Path.GetDirectoryName(encoderPath) ?? "";
-        string canonicalDir = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "Gemma2");
+        string canonicalDir = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.TextEncoders, "Gemma2");
         string canonical = Path.Combine(canonicalDir, "tokenizer.model");
         foreach (string candidate in new[]
         {
