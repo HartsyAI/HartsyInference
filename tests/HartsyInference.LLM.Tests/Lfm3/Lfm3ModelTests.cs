@@ -1,6 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.LLM.Models.Shared;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests.Lfm3;
@@ -217,7 +218,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     {
         int n = normed.Length, hq = _config.NumHeads, hkv = _config.NumKvHeads, hd = _config.HeadDim, group = hq / hkv;
         string a = $"{p}.self_attn";
-        Lfm3RopeParameters rope = _config.RopeOf(layer);
+        LayerRopeParameters rope = _config.RopeOf(layer);
         double[][][] q = new double[n][][], k = new double[n][][], v = new double[n][][];
         for (int t = 0; t < n; t++)
         {
@@ -256,7 +257,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
         return result;
     }
 
-    private double[] Rope(double[] x, int pos, Lfm3RopeParameters rope)
+    private double[] Rope(double[] x, int pos, LayerRopeParameters rope)
     {
         int hd = x.Length, half = hd / 2, angles = rope.RotatedPairs(hd);
         double[] y = (double[])x.Clone();
