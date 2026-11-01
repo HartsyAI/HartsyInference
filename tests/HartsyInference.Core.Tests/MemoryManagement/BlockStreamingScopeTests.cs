@@ -24,10 +24,16 @@ public sealed class BlockStreamingScopeTests
         private readonly TaggedStreamingBlock _shared;
 
         public FakeDenoiser(int blockCount, long blockBytes = BlockBytes)
+            : this(Enumerable.Repeat(blockBytes, blockCount).ToArray())
+        {
+        }
+
+        /// <summary>One block per entry, each as wide as its entry — for denoisers whose blocks differ in size.</summary>
+        public FakeDenoiser(long[] blockBytes)
         {
             _shared = new TaggedStreamingBlock("shared", 0);
-            _blocks = new TaggedStreamingBlock[blockCount];
-            for (int i = 0; i < blockCount; i++) _blocks[i] = new TaggedStreamingBlock($"b{i}", blockBytes);
+            _blocks = new TaggedStreamingBlock[blockBytes.Length];
+            for (int i = 0; i < blockBytes.Length; i++) _blocks[i] = new TaggedStreamingBlock($"b{i}", blockBytes[i]);
         }
 
         public int BlockCount => _blocks.Length;
@@ -87,6 +93,32 @@ public sealed class BlockStreamingScopeTests
         Assert.Equal(4, scope.ResidentPrefixBlocks);
         Assert.Equal(4, scope.StreamedBlocks);
         Assert.True(scope.Streaming);
+    }
+
+    /// <summary>HunyuanVideo's blocks are not one size: wide double-stream blocks lead, narrow single-stream blocks follow.
+    /// Sizing every block at block 0's width streams a checkpoint whose real footprint fits whole.</summary>
+    [Fact]
+    public void Sizes_The_Prefix_By_Each_Blocks_Own_Footprint()
+    {
+        long[] sizes = { 384 * Mb, 384 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb };
+        // 1344 MB of blocks; with 512 MB headroom the 1344 MB spendable covers all eight.
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), 1344 * Mb + 512 * Mb);
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, new FakeDenoiser(sizes), 512 * Mb));
+
+        Assert.Equal(8, scope.ResidentPrefixBlocks);
+        Assert.False(scope.Streaming);
+    }
+
+    [Fact]
+    public void Heterogeneous_Prefix_Stops_At_The_First_Block_That_Does_Not_Fit()
+    {
+        // The first three blocks total 864 MB; the fourth (960 MB cumulative) exceeds the 914 MB spendable.
+        long[] sizes = { 384 * Mb, 384 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb, 96 * Mb };
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), 914 * Mb + 512 * Mb);
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, new FakeDenoiser(sizes), 512 * Mb));
+
+        Assert.Equal(3, scope.ResidentPrefixBlocks);
+        Assert.Equal(5, scope.StreamedBlocks);
     }
 
     [Fact]
@@ -340,6 +372,18 @@ public sealed class BlockStreamingScopeTests
         int legacy = (int)Math.Clamp((free - headroom) / Math.Max(blockBytes, 1), 0, blockCount);
         Assert.Equal(expected, legacy);
         Assert.Equal(legacy, ResidentPrefixSizing.Size(free, headroom, blockBytes, blockCount));
+    }
+
+    [Theory]
+    [InlineData(768, 0, 384, 48)]
+    [InlineData(1000, 0, 384, 48)]
+    [InlineData(long.MaxValue, 0, 384, 48)]
+    [InlineData(4096, 512, 96, 8)]
+    public void Size_Over_Per_Block_Footprints_Matches_The_Uniform_Clamp(long free, long headroom, long blockBytes, int blockCount)
+    {
+        long[] sizes = Enumerable.Repeat(blockBytes, blockCount).ToArray();
+        Assert.Equal(ResidentPrefixSizing.Size(free, headroom, blockBytes, blockCount),
+            ResidentPrefixSizing.Size(free, headroom, sizes));
     }
 
     // ── Forced streaming must displace an already-resident set ───────────
