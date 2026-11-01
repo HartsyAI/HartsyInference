@@ -101,6 +101,20 @@ public static class CommandRunner
         return false;
     }
 
+    /// <summary>Returns false when <paramref name="path"/> names a directory. The preview is one PNG rewritten at each step, so a directory
+    /// is refused here, before the model loads, rather than failing at the first write.</summary>
+    internal static bool RequireFilePath(string? path, string flag, out int exitCode)
+    {
+        if (string.IsNullOrWhiteSpace(path) || (!Directory.Exists(path) && !Path.EndsInDirectorySeparator(path)))
+        {
+            exitCode = 0;
+            return true;
+        }
+        AnsiConsole.MarkupLine($"[#2ea5e0]{flag}[/] [red]takes a file path, not a directory. Try[/] [#2ea5e0]{Markup.Escape(Path.Combine(path, "preview.png"))}[/][red].[/]");
+        exitCode = 1;
+        return false;
+    }
+
     /// <summary>Picks a display label: catalog id, else checkpoint file name, else the model token, else <paramref name="fallback"/>.</summary>
     internal static string ResolveLabel(ModelSpec spec, string model, string? modelPath = null, string? fallback = null)
     {
