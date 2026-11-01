@@ -1728,12 +1728,17 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             backend.RmsNorm(kNormed, kRaw, _idxKNorm!, _cfg.RmsNormEps);
             kRaw.Dispose();
             backend.ApplyRopeSingle(kNormed, cos, sin, rotary);
-            SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
-            ReadOnlySpan<float> keys = SparseBlockIndexer.AppendKeys(cache, layerIndex, posStart, kNormed.AsReadOnlySpan<float>(), index.KeyLength);
-            Tensor bias = SparseBlockIndexer.BuildBias(qNormed.AsReadOnlySpan<float>(), keys, t, posStart, _cfg.NumHeads, index);
-            qNormed.Dispose();
-            kNormed.Dispose();
-            return bias;
+            try
+            {
+                SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
+                ReadOnlySpan<float> keys = SparseBlockIndexer.AppendKeys(cache, layerIndex, posStart, kNormed.AsReadOnlySpan<float>(), index.KeyLength);
+                return SparseBlockIndexer.BuildBias(qNormed.AsReadOnlySpan<float>(), keys, t, posStart, _cfg.NumHeads, index);
+            }
+            finally
+            {
+                qNormed.Dispose();
+                kNormed.Dispose();
+            }
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
