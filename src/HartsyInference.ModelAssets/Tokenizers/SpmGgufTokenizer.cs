@@ -22,6 +22,7 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
     private readonly HashSet<int> _specialIds;
     private readonly int _unkId;
     private readonly bool _addSpacePrefix;
+    private readonly bool _prefixOnlyAtTextStart;
 
     public int? BosId { get; }
     public int? EosId { get; }
@@ -29,9 +30,9 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
     public string? EosToken { get; }
     public IReadOnlyList<int> StopIds { get; }
 
-    /// <summary>Builds from GGUF metadata arrays. <paramref name="scores"/> is the per-token SentencePiece score (parallel to <paramref name="tokens"/>); <paramref name="tokenType"/> marks control/user-defined/byte tokens. <paramref name="addSpacePrefix"/> mirrors <c>tokenizer.ggml.add_space_prefix</c> (Llama-2 true, Gemma-3 false) — when true a leading ▁ is added so the first word is treated like any space-prefixed word.</summary>
+    /// <summary>Builds from GGUF metadata arrays. <paramref name="scores"/> is the per-token SentencePiece score (parallel to <paramref name="tokens"/>); <paramref name="tokenType"/> marks control/user-defined/byte tokens. <paramref name="addSpacePrefix"/> mirrors <c>tokenizer.ggml.add_space_prefix</c> (Llama-2 true, Gemma-3 false) — when true a leading ▁ is added so the first word is treated like any space-prefixed word. <paramref name="prefixOnlyAtTextStart"/> mirrors <c>tokenizer.ggml.metaspace.prepend_scheme = first</c>: text after a special token takes no prefix.</summary>
     public SpmGgufTokenizer(string[] tokens, float[] scores, int[]? tokenType,
-        int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null, bool addSpacePrefix = false)
+        int? bosId, int? eosId, IReadOnlyList<int>? extraStopIds = null, bool addSpacePrefix = false, bool prefixOnlyAtTextStart = false)
     {
         if (tokens is null || tokens.Length == 0) throw new ArgumentException("GGUF tokens array is empty.", nameof(tokens));
         if (scores is null || scores.Length != tokens.Length)
@@ -40,6 +41,7 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
         _tokens = tokens;
         _scores = scores;
         _addSpacePrefix = addSpacePrefix;
+        _prefixOnlyAtTextStart = prefixOnlyAtTextStart;
         _tokenToId = new Dictionary<string, int>(tokens.Length, StringComparer.Ordinal);
         for (int i = 0; i < tokens.Length; i++) _tokenToId.TryAdd(tokens[i], i);
 
@@ -94,19 +96,25 @@ public sealed class SpmGgufTokenizer : ILlmTokenizer
             string? matched = MatchSpecialAt(text, i);
             if (matched is not null) { ids.Add(_specialByLiteral[matched]); i += matched.Length; continue; }
             int next = NextSpecialIndex(text, i);
-            ids.AddRange(EncodeOrdinary(text[i..next]));
+            // Metaspace prepend_scheme "first": only a segment that opens the text takes the prefix, not one after a special token.
+            ids.AddRange(EncodeSegment(text[i..next], _addSpacePrefix && (i == 0 || !_prefixOnlyAtTextStart)));
             i = next;
         }
         return [.. ids];
     }
 
-    public int[] EncodeOrdinary(string text)
+    public int[] EncodeOrdinary(string text) => EncodeSegment(text, _addSpacePrefix);
+
+    /// <inheritdoc/>
+    public int[] EncodeAfterSpecial(string text) => EncodeSegment(text, _addSpacePrefix && !_prefixOnlyAtTextStart);
+
+    private int[] EncodeSegment(string text, bool addSpacePrefix)
     {
         if (text.Length == 0) return [];
 
         // SentencePiece normalization: spaces → ▁ (and an optional leading ▁ for add_space_prefix).
         string normalized = text.Replace(' ', SpaceMeta);
-        if (_addSpacePrefix && (normalized.Length == 0 || normalized[0] != SpaceMeta))
+        if (addSpacePrefix && (normalized.Length == 0 || normalized[0] != SpaceMeta))
             normalized = SpaceMeta + normalized;
 
         // Initial symbols = single Unicode code points.

@@ -79,7 +79,8 @@ public static class SpecialLiteralEscaper
         {
             if (restore.TryGetValue(span[k], out char original)) span[k] = original;
         }
-        ids.AddRange(tokenizer.EncodeOrdinary(span.ToString()));
+        // A span after the first id follows a special token.
+        ids.AddRange(ids.Count == 0 ? tokenizer.EncodeOrdinary(span.ToString()) : tokenizer.EncodeAfterSpecial(span.ToString()));
         span.Clear();
     }
 

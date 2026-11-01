@@ -69,7 +69,8 @@ public sealed class GgufLanguageModel : IDisposable
             float[]? scores = meta.GetFloatArray("tokenizer.ggml.scores")
                 ?? throw new NotSupportedException("SentencePiece GGUF missing tokenizer.ggml.scores.");
             bool addSpacePrefix = meta.GetBool("tokenizer.ggml.add_space_prefix", true);
-            return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix);
+            bool prefixOnlyAtTextStart = string.Equals(meta.GetString("tokenizer.ggml.metaspace.prepend_scheme"), "first", StringComparison.Ordinal);
+            return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix, prefixOnlyAtTextStart);
         }
 
         // RWKV World (tokenizer.ggml.model == "rwkv"): fixed byte-string vocab, greedy longest-prefix trie
