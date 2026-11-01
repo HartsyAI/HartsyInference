@@ -1,5 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Registry;
 using Xunit;
 
 namespace HartsyInference.Cli.Tests;
@@ -41,6 +42,17 @@ public sealed class ModelFolderSettingsTests : IDisposable
         File.WriteAllText(Path.Combine(dir, "model.gguf"), "x");
 
         Assert.Equal(Path.Combine(dir, "model.gguf"), ModelDownloader.TargetPath(Asset("LLM/demo")));
+    }
+
+    [Fact]
+    public void TextModelResolvedFromTheFolderSetInSettings()
+    {
+        KnobStore.Set(EngineKnobs.ModelFolderLlm, "my-llms");
+        string file = Path.Combine(_root, "my-llms", "demo", "model.gguf");
+        Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllText(file, "x");
+
+        Assert.Equal(Path.GetFullPath(file), ModelResolver.Resolve("demo", null, Modality.Text).LocalPath);
     }
 
     private static ModelAsset Asset(string targetSubdir) => new()

@@ -48,4 +48,22 @@ public sealed class ModelFoldersTests : IDisposable
     [Fact]
     public void Under_JoinsTheFolderOnDiskWithTheRest() =>
         Assert.Equal(Path.Combine("root", "audio", "wake"), ModelFolders.Under("root", ModelFolders.Audio, "wake"));
+
+    [Fact]
+    public void Under_UsesAnExistingFolderSpelledInAnotherCase()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"hartsy-under-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(root, "LLM"));
+        try
+        {
+            // Case-insensitive filesystems report the folder under the spelling asked for, so compare ignoring case.
+            Assert.Equal(Path.Combine(root, "LLM", "wake"), ModelFolders.Under(root, ModelFolders.Llm, "wake"), StringComparer.OrdinalIgnoreCase);
+            Assert.True(Directory.Exists(ModelFolders.Under(root, ModelFolders.Llm)));
+            Assert.Single(Directory.GetDirectories(root));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
 }

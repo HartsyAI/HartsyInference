@@ -110,7 +110,9 @@ model's own subfolder (`LLM/nanbeige43/`) sits under whichever folder the settin
 
 A lookup tries the folders in order. With a setting, the setting's folder comes first and the catalog's spelling second.
 Without one, the catalog's spelling comes first, so a folder that already holds models keeps resolving, and the default
-name second. Downloads go to the name the setting or the default chooses.
+name second. Downloads go to the name the setting or the default chooses, or into an existing folder spelled in another
+case. A helper that builds a path itself (a tokenizer, a wake-word model) takes that same folder, so it never starts a
+second one beside it.
 
 ## Scope: when a setting takes effect
 
