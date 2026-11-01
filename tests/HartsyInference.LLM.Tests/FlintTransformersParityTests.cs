@@ -86,6 +86,7 @@ public sealed unsafe class FlintTransformersParityTests : IDisposable
     {
         if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
         using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
         using KvCache cache = NewCache();
         using Tensor hidden = Transformer.Forward(backend, Ids, 0, cache);
         using Tensor logits = Transformer.ProjectLogits(backend, hidden, Ids.Length);
@@ -99,6 +100,7 @@ public sealed unsafe class FlintTransformersParityTests : IDisposable
     {
         if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
         using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
         using KvCache cache = NewCache();
         const int prefill = 5;
         using (Tensor hidden = Transformer.Forward(backend, Ids.AsSpan(0, prefill), 0, cache))

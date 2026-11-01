@@ -184,8 +184,9 @@ public static class ModelCatalog
                 // RoPE layers and full-attention layers without positional encoding. The official int4 GGUF (Q4_1, 26 GB) loads through the `flint`
                 // architecture. A tiny random Flint matches transformers through the real GGUF path, and the official GGUF's header, tokenizer and chat
                 // template match the checkpoint's. No full-model run: it does not fit the dev box (the CPU backend widens GGUF weights to F32), and no GPU run yet.
+                // CliDrivable stays off until the full model has generated once.
                 Id = "flint", Modality = txt, DisplayName = "Flint (40B-A2.5B, coding MoE)",
-                Architecture = "MoE 256 experts top-6 + shared expert, sinks, sliding/NoPE attention", Status = vp, CliDrivable = true,
+                Architecture = "MoE 256 experts top-6 + shared expert, sinks, sliding/NoPE attention", Status = vp, CliDrivable = false,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "RecursiveSI/flint-int4-gguf", RepoPath = "flint-int4-q4_1.gguf", TargetSubdir = "LLM/flint", Role = "transformer",
