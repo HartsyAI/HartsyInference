@@ -23,8 +23,9 @@ public static class SparseBlockIndexer
             : $"The sparse-attention block bias for {t} tokens over {keyCount} keys needs {biasElements * 4 >> 20} MiB; feed the prompt in chunks of at most {chunk} tokens.");
     }
 
-    /// <summary>Appends this step's index keys <c>[tNew * keyLength]</c> to <paramref name="cache"/>'s sequence and returns every key so far; <paramref name="posStart"/> 0 starts the sequence over.</summary>
-    /// <exception cref="InvalidOperationException">The cache was rolled back or re-used, so its index keys no longer line up with the sequence.</exception>
+    /// <summary>Sets the sequence's index keys from <paramref name="posStart"/> onward to this step's <c>[tNew * keyLength]</c> and returns every key so far. Keys past <paramref name="posStart"/> are replaced, so a step the attention refused
+    /// can be retried and a cache rolled back to <paramref name="posStart"/> tokens continues from there; <paramref name="posStart"/> 0 starts the sequence over.</summary>
+    /// <exception cref="InvalidOperationException">The store holds fewer keys than <paramref name="posStart"/>, so the cache was filled by something that did not store index keys (a prefix restored from another cache).</exception>
     public static ReadOnlySpan<float> AppendKeys(IKvCache cache, int layer, int posStart, ReadOnlySpan<float> stepKeys, int keyLength)
     {
         IndexKeyStore store = Stores.GetValue(cache, static _ => new IndexKeyStore());
@@ -95,10 +96,12 @@ public static class SparseBlockIndexer
         public ReadOnlySpan<float> Append(int layer, int posStart, ReadOnlySpan<float> stepKeys, int keyLength)
         {
             (float[] data, int length) = posStart == 0 || !_layers.TryGetValue(layer, out (float[] Data, int Length) held) ? ([], 0) : held;
-            if (length != posStart * keyLength)
+            long keep = (long)posStart * keyLength;
+            if (length < keep)
             {
-                throw new InvalidOperationException($"The sparse-attention index keys of layer {layer} hold {length / keyLength} tokens but the step starts at {posStart}; rolling the cache back is not supported.");
+                throw new InvalidOperationException($"The sparse-attention index keys of layer {layer} hold {length / keyLength} tokens but the step starts at {posStart}; the cache holds tokens whose index keys were never stored.");
             }
+            length = (int)keep;
             if (data.Length < length + stepKeys.Length) Array.Resize(ref data, Math.Max(data.Length * 2, length + stepKeys.Length));
             stepKeys.CopyTo(data.AsSpan(length));
             length += stepKeys.Length;

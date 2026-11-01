@@ -142,6 +142,22 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
     }
 
     [Fact]
+    public void IndexKeyStore_ReplaysARetriedStep_AndFollowsARolledBackCache()
+    {
+        using KvCache cache = NewCache();
+        float[] first = [1f, 2f, 3f, 4f];   // two tokens of two dims
+        float[] second = [5f, 6f];
+        Assert.Equal(2, SparseBlockIndexer.AppendKeys(cache, 0, 0, first, 2).Length / 2);
+        Assert.Equal(3, SparseBlockIndexer.AppendKeys(cache, 0, 2, second, 2).Length / 2);
+        // The same step again (a refused attention retried) replaces its keys instead of failing.
+        Assert.Equal([1f, 2f, 3f, 4f, 5f, 6f], SparseBlockIndexer.AppendKeys(cache, 0, 2, second, 2).ToArray());
+        // A cache rolled back to one token continues from there.
+        Assert.Equal([1f, 2f, 9f, 9f], SparseBlockIndexer.AppendKeys(cache, 0, 1, [9f, 9f], 2).ToArray());
+        // A step past the stored keys means the cache holds tokens whose keys were never stored.
+        Assert.Throws<InvalidOperationException>(() => SparseBlockIndexer.AppendKeys(cache, 0, 5, second, 2));
+    }
+
+    [Fact]
     public void HfDirectoryConfig_MatchesTheGgufConfig()
     {
         _ = HfDirectoryTransformer();
