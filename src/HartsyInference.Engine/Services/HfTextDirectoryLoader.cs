@@ -48,12 +48,12 @@ internal static class HfTextDirectoryLoader
         }
         if (stateful)
         {
-            string weights = string.Equals(info.ModelType, Lfm3Config.ModelType, StringComparison.Ordinal) ? "model.safetensors" : "model.safetensors.index.json";
-            foreach (string file in (string[])[weights, "chat_template.jinja"])
-            {
-                if (!File.Exists(Path.Combine(info.Root, file)))
-                    throw new HartsyInferenceException($"'{info.Root}' has no {file}, which the {info.ModelType} Text path needs.");
-            }
+            bool single = string.Equals(info.ModelType, Lfm3Config.ModelType, StringComparison.Ordinal);
+            bool hasWeights = single ? File.Exists(Path.Combine(info.Root, "model.safetensors")) : Directory.EnumerateFiles(info.Root, "*.safetensors").Any();
+            if (!hasWeights)
+                throw new HartsyInferenceException($"'{info.Root}' has no {(single ? "model.safetensors" : "*.safetensors file")}, which the {info.ModelType} Text path needs.");
+            if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+                throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the {info.ModelType} Text path needs.");
         }
         if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
             throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the Text path needs to build its prompt.");

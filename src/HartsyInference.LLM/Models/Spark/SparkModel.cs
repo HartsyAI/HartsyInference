@@ -129,17 +129,26 @@ public sealed unsafe class SparkModel : ISsmModel
             }
             Qwen35Model.CopyEmbeddingRow(table, ids[s], d, (float*)h.DataPointer + (long)s * d);
         }
+        (Tensor Cos, Tensor Sin)?[] ropes = new (Tensor, Tensor)?[2];
         try
         {
             for (int i = 0; i < Config.NumLayers; i++)
             {
-                h = RunLayer(backend, h, i, seq);
+                h = RunLayer(backend, h, i, seq, ropes);
             }
         }
         catch
         {
             ResetState();
             throw;
+        }
+        finally
+        {
+            foreach ((Tensor Cos, Tensor Sin)? entry in ropes)
+            {
+                entry?.Cos.Dispose();
+                entry?.Sin.Dispose();
+            }
         }
         Tensor normed = new(h.Shape, DType.F32);
         backend.RmsNorm(normed, h, W($"{Prefix}.norm.weight"), Config.NormEps);
@@ -180,13 +189,13 @@ public sealed unsafe class SparkModel : ISsmModel
         }
     }
 
-    private Tensor RunLayer(IBackend backend, Tensor h, int i, int seq)
+    private Tensor RunLayer(IBackend backend, Tensor h, int i, int seq, (Tensor Cos, Tensor Sin)?[] ropes)
     {
         string p = $"{Prefix}.layers.{i}";
         TensorShape shape = h.Shape;
         Tensor xn = new(shape, DType.F32);
         backend.RmsNorm(xn, h, W($"{p}.input_layernorm.weight"), Config.NormEps);
-        Tensor attended = Attention(backend, xn, i, seq);
+        Tensor attended = Attention(backend, xn, i, seq, ropes);
         xn.Dispose();
         Tensor afterAttention = new(shape, DType.F32);
         backend.Add(afterAttention, h, attended);
@@ -215,7 +224,7 @@ public sealed unsafe class SparkModel : ISsmModel
     }
 
     /// <summary>Fused-QKV grouped-query attention with partial RoPE, an optional sliding window and a sigmoid output gate per head.</summary>
-    private Tensor Attention(IBackend backend, Tensor xn, int i, int seq)
+    private Tensor Attention(IBackend backend, Tensor xn, int i, int seq, (Tensor Cos, Tensor Sin)?[] ropes)
     {
         string p = $"{Prefix}.layers.{i}.self_attn";
         int hq = Config.NumHeads, hkv = Config.NumKvHeads, hd = Config.HeadDim;
@@ -235,15 +244,19 @@ public sealed unsafe class SparkModel : ISsmModel
         Tensor gateLogits = new(new TensorShape(1, seq, hq), DType.F32);
         backend.Linear(gateLogits, xn, W($"{p}.g_proj.weight"), null);
 
+        // The two layer types share their tables for the whole pass, so they are built once per type.
         LayerRopeParameters rope = Config.RopeOf(i);
-        int rotaryDim = rope.RotaryDim(hd);
-        Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
-        Tensor sin = new(cos.Shape, DType.F32);
-        RopeTables.BuildRope(cos, sin, seq, _pos, hd, rotaryDim, rope.Theta, RopeScaling.None);
-        backend.ApplyRopeSingle(q, cos, sin, rotaryDim);
-        backend.ApplyRopeSingle(k, cos, sin, rotaryDim);
-        cos.Dispose();
-        sin.Dispose();
+        int rotaryDim = rope.RotaryDim(hd), slot = Config.SlidingLayers[i] ? 1 : 0;
+        if (ropes[slot] is null)
+        {
+            Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
+            Tensor sin = new(cos.Shape, DType.F32);
+            RopeTables.BuildRope(cos, sin, seq, _pos, hd, rotaryDim, rope.Theta, RopeScaling.None);
+            ropes[slot] = (cos, sin);
+        }
+        (Tensor ropeCos, Tensor ropeSin) = ropes[slot]!.Value;
+        backend.ApplyRopeSingle(q, ropeCos, ropeSin, rotaryDim);
+        backend.ApplyRopeSingle(k, ropeCos, ropeSin, rotaryDim);
 
         int window = Config.SlidingLayers[i] ? Config.SlidingWindow : 0;
         Tensor output = HeadGatedAttention.Attend(backend, _attention, _kv, i, q, k, v, gateLogits, _pos, window, W($"{p}.out_proj.weight"));
