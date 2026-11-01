@@ -108,6 +108,10 @@ uses by default (`llm`, `audio`, `Stable-Diffusion`, `VAE`, `text_encoders`, `cl
 `clipseg`). The catalog keeps its logical names (`LLM/…`, `Audio/…`): only the first path segment is mapped, so a
 model's own subfolder (`LLM/nanbeige43/`) sits under whichever folder the setting names.
 
+A lookup tries the folders in order. With a setting, the setting's folder comes first and the catalog's spelling second.
+Without one, the catalog's spelling comes first, so a folder that already holds models keeps resolving, and the default
+name second. Downloads go to the name the setting or the default chooses.
+
 ## Scope: when a setting takes effect
 
 | scope | meaning |
