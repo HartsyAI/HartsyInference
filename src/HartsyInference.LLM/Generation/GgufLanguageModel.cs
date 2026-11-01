@@ -69,6 +69,7 @@ public sealed class GgufLanguageModel : IDisposable
             float[]? scores = meta.GetFloatArray("tokenizer.ggml.scores")
                 ?? throw new NotSupportedException("SentencePiece GGUF missing tokenizer.ggml.scores.");
             bool addSpacePrefix = meta.GetBool("tokenizer.ggml.add_space_prefix", true);
+            // Only "first" changes behavior; "always" is the existing default and "never" has not appeared next to add_space_prefix.
             bool prefixOnlyAtTextStart = string.Equals(meta.GetString("tokenizer.ggml.metaspace.prepend_scheme"), "first", StringComparison.Ordinal);
             return new SpmGgufTokenizer(tokens, scores, tokenType, bos, eos, extraStops, addSpacePrefix, prefixOnlyAtTextStart);
         }

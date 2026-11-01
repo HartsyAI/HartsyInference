@@ -7,7 +7,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests;
 
-/// <summary>Nanbeige4.3-33B (a plain Llama architecture) through its community GGUF header only: the metadata against the checkpoint's <c>config.json</c>, and the GGUF tokenizer and chat template against ids from the checkpoint's own <c>tokenizer.json</c> and chat template through Hugging Face transformers. The tensors are never read, so the first 100 MB of any quant of bartowski/Nanbeige_Nanbeige4.3-33B-GGUF is enough. Skips when absent (set NANBEIGE_GGUF_PATH).</summary>
+/// <summary>Nanbeige4.3-33B (a plain Llama architecture) through its community GGUF header only (reference ids: <c>tests/python-reference/dump_nanbeige_tokenizer_reference.py</c>): the metadata against the checkpoint's <c>config.json</c>, and the GGUF tokenizer and chat template against ids from the checkpoint's own <c>tokenizer.json</c> and chat template through Hugging Face transformers. The tensors are never read, so the first 100 MB of any quant of bartowski/Nanbeige_Nanbeige4.3-33B-GGUF is enough. Skips when absent (set NANBEIGE_GGUF_PATH).</summary>
 public sealed class NanbeigeGgufHeaderTests(ITestOutputHelper output)
 {
     public static TheoryData<string, int[]> Samples() => new()
