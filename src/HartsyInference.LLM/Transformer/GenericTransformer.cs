@@ -1730,6 +1730,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             backend.RmsNorm(kNormed, kRaw, _idxKNorm!, _cfg.RmsNormEps);
             kRaw.Dispose();
             backend.ApplyRopeSingle(kNormed, cos, sin, rotary);
+            SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
             ReadOnlySpan<float> keys = SparseBlockIndexer.AppendKeys(cache, layerIndex, posStart, kNormed.AsReadOnlySpan<float>(), index.KeyLength);
             Tensor bias = SparseBlockIndexer.BuildBias(qNormed.AsReadOnlySpan<float>(), keys, t, posStart, _cfg.NumHeads, index);
             qNormed.Dispose();

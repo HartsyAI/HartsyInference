@@ -168,8 +168,10 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     {
         using (scale)
         {
+            float divisor = scale.AsReadOnlySpan<float>()[0];
+            if (divisor == 0f || !float.IsFinite(divisor)) throw new InvalidDataException($"The NVFP4 global scale is {divisor}; it must be finite and non-zero.");
             Tensor inverse = new(scale.Shape, DType.F32);
-            inverse.AsSpan<float>()[0] = 1f / scale.AsReadOnlySpan<float>()[0];
+            inverse.AsSpan<float>()[0] = 1f / divisor;
             return inverse;
         }
     }

@@ -3,13 +3,25 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>MiniMax sparse attention's block selection: every query scores all earlier index keys, max-pools the scores per block of keys, and keeps its top blocks plus the blocks right before it.</summary>
+/// <summary>MiniMax sparse attention's block selection: every query scores all earlier index keys, max-pools the scores per block of keys, and keeps its top-k blocks after boosting the blocks right before it, so the local blocks count against k.</summary>
 public static class SparseBlockIndexer
 {
     /// <summary>The largest dense bias (in elements) built for one layer's step: 1 GiB of F32.</summary>
     public const long MaxBiasElements = 1L << 28;
 
     private static readonly ConditionalWeakTable<IKvCache, IndexKeyStore> Stores = new();
+
+    /// <summary>Refuses a step whose dense bias would exceed <see cref="MaxBiasElements"/>. Checked before the step's keys are stored, so a caller that retries with a smaller chunk finds the key store where it was.</summary>
+    /// <exception cref="NotSupportedException">The bias is too large.</exception>
+    public static void RequireBiasFits(int numHeads, int t, int keyCount)
+    {
+        long biasElements = (long)numHeads * t * keyCount;
+        if (biasElements <= MaxBiasElements) return;
+        long chunk = MaxBiasElements / ((long)numHeads * keyCount);
+        throw new NotSupportedException(chunk < 1
+            ? $"The sparse-attention block bias over {keyCount} keys does not fit {MaxBiasElements * 4 >> 20} MiB even for one token; the context is too long."
+            : $"The sparse-attention block bias for {t} tokens over {keyCount} keys needs {biasElements * 4 >> 20} MiB; feed the prompt in chunks of at most {chunk} tokens.");
+    }
 
     /// <summary>Appends this step's index keys <c>[tNew * keyLength]</c> to <paramref name="cache"/>'s sequence and returns every key so far; <paramref name="posStart"/> 0 starts the sequence over.</summary>
     /// <exception cref="InvalidOperationException">The cache was rolled back or re-used, so its index keys no longer line up with the sequence.</exception>
@@ -28,11 +40,7 @@ public static class SparseBlockIndexer
         int keyCount = keys.Length / headDim;
         int blocks = (keyCount + cfg.BlockSize - 1) / cfg.BlockSize;
         int groupSize = numHeads / cfg.Heads;
-        long biasElements = (long)numHeads * t * keyCount;
-        if (biasElements > MaxBiasElements)
-        {
-            throw new NotSupportedException($"The sparse-attention block bias for {t} tokens over {keyCount} keys needs {biasElements * 4 >> 20} MiB; feed the prompt in chunks of at most {MaxBiasElements / ((long)numHeads * keyCount)} tokens.");
-        }
+        RequireBiasFits(numHeads, t, keyCount);
         int topK = Math.Min(cfg.TopKBlocks, blocks);
         Tensor bias = new(new TensorShape(1, numHeads, t, keyCount), DType.F32);
         Span<float> output = bias.AsSpan<float>();

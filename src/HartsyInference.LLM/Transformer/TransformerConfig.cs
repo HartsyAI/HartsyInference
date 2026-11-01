@@ -32,7 +32,7 @@ public enum ActivationKind
     SwigluOai,
 }
 
-/// <summary>Block-max "lightning indexer" of MiniMax Sparse Attention: per query and per KV group it scores every key with a small dot-product branch, max-pools the scores over blocks of keys and keeps the top blocks plus the local ones.</summary>
+/// <summary>Block-max "lightning indexer" of MiniMax Sparse Attention: per query and per KV group it scores every key with a small dot-product branch, max-pools the scores over blocks of keys and keeps its top-k blocks after boosting the local ones, which count against k.</summary>
 public sealed record IndexerConfig
 {
     /// <summary>Index heads; one per KV head, so each KV group makes its own block selection.</summary>

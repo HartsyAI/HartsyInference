@@ -4,7 +4,7 @@
 Builds a MiniMaxM3VLForCausalLM from transformers' own modeling code with a shrunken text config that keeps every structural
 trait of MiniMax-M3.1-Flash: Gemma-form RMSNorm, per-head QK norm, partial RoPE, three dense layers then sparse MoE layers (sigmoid
 router with a selection-only bias, routed scaling, one shared expert) using the clamped alpha-SwiGLU, and MiniMax Sparse Attention on
-every layer (a block-max lightning indexer with its own key cache). The indexer blocks are 4 keys wide and keep 2 plus the local block,
+every layer (a block-max lightning indexer with its own key cache). The indexer blocks are 4 keys wide and keep 2 blocks, the local block among them,
 so the 24-token prompt really prunes (6 blocks). Every parameter is re-drawn so each path carries signal, then the weights (HF on-disk
 names, F32), config.json and the float32 reference logits are written to tests/HartsyInference.LLM.Tests/Fixtures/MiniMaxM3/.
 

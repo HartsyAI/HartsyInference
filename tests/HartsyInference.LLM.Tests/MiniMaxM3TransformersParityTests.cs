@@ -13,7 +13,7 @@ namespace HartsyInference.LLM.Tests;
 /// match <see cref="GenericTransformer"/> loaded through the GGUF path: the Hugging Face weights are written as a <c>minimax-m3</c> GGUF (norm weights with the Gemma +1 baked in,
 /// fused gate/up split, router bias as <c>exp_probs_b</c>, indexer tensors under <c>indexer.*</c>), then loaded by <see cref="GgufModelLoader"/>, <see cref="GgufLanguageModel.PrepareWeights"/>
 /// and <see cref="GgufConfigFactory"/>. The fixture keeps the release's block traits: two dense layers then sigmoid-routed MoE layers with a selection bias, routed scaling and a shared expert,
-/// the clamped alpha-SwiGLU, and block-sparse attention on every layer whose 24-token prompt really prunes (6 key blocks, 2 selected plus the local one). The GGUF tensor names for the indexer are
+/// the clamped alpha-SwiGLU, and block-sparse attention on every layer whose 24-token prompt really prunes (6 key blocks, 2 kept per query, the local block among them). The GGUF tensor names for the indexer are
 /// this port's own; no upstream GGUF exists yet.</summary>
 public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
 {
