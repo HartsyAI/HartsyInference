@@ -99,6 +99,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
         }
     }
 
+    // The weights are host tensors; each backend uploads them on first use, so the device variants reuse them.
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     [Trait("Category", "GpuIntegration")]
