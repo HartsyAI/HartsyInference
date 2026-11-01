@@ -1,7 +1,10 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Lfm3;
 
@@ -28,10 +31,12 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     private readonly Dictionary<string, Tensor> _weights = new();
     private readonly Dictionary<string, float[]> _host = new();
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
     private uint _state = 0x1F2E3D4Cu;
 
-    public Lfm3ModelTests()
+    public Lfm3ModelTests(ITestOutputHelper output)
     {
+        _out = output;
         int h = _config.HiddenSize, hd = _config.HeadDim, inner = _config.IntermediateSize;
         Add("model.embed_tokens.weight", _config.VocabSize, h);
         AddNorm("model.embedding_norm.weight", h);
@@ -86,6 +91,46 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
         foreach (int[] chunk in chunks)
         {
             actual = chunked.ForwardLastLogits(_backend, chunk);
+        }
+        Assert.Equal(Prompt.Length, chunked.Position);
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void MatchesHostReference_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        float[] expected = Reference(Prompt);
+        using Lfm3Model model = new(_weights, _config, 32);
+        float[] actual = model.ForwardLastLogits(backend, Prompt);
+        Assert.Equal(expected.Length, actual.Length);
+        for (int v = 0; v < expected.Length; v++)
+        {
+            Assert.InRange(actual[v], expected[v] - 2e-4f, expected[v] + 2e-4f);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void ChunkedPrefillAndDecodeMatchOneShot_OnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using Lfm3Model whole = new(_weights, _config, 32);
+        float[] expected = whole.ForwardLastLogits(backend, Prompt);
+        using Lfm3Model chunked = new(_weights, _config, 32);
+        int[][] chunks = [Prompt[..4], Prompt[4..5], Prompt[5..6], Prompt[6..]];
+        float[] actual = [];
+        foreach (int[] chunk in chunks)
+        {
+            actual = chunked.ForwardLastLogits(backend, chunk);
         }
         Assert.Equal(Prompt.Length, chunked.Position);
         for (int v = 0; v < expected.Length; v++)
