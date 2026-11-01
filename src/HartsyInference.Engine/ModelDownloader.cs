@@ -28,15 +28,27 @@ public static class ModelDownloader
     internal static string? FindExisting(ModelAsset asset, bool ignoreCase)
     {
         string root = RepoPaths.ModelsRoot();
-        string? found = Existing(root, Path.Combine(ModelFolders.MapSubdir(asset.TargetSubdir), asset.FileName), ignoreCase);
+        string? found = ExistingInFolders(root, asset.TargetSubdir, asset.FileName, ignoreCase);
         // The canonical name moved (usually to match what SwarmUI downloads) and this install still holds the
         // file under the old one. Resolving to it beats re-fetching multi-gigabyte bytes we already have, and
         // keeps the strict no-download callers (MageFlowRecipe and friends) from reporting it missing.
         for (int i = 0; found is null && i < asset.LegacyTargetNames.Count; i++)
         {
-            found = Existing(root, Path.Combine(ModelFolders.MapSubdir(asset.TargetSubdir), asset.LegacyTargetNames[i]), ignoreCase);
+            found = ExistingInFolders(root, asset.TargetSubdir, asset.LegacyTargetNames[i], ignoreCase);
         }
         return found;
+    }
+
+    /// <summary>The file under each spelling of the asset's folder, in the order <see cref="ModelFolders.Spellings"/> gives.</summary>
+    private static string? ExistingInFolders(string root, string targetSubdir, string fileName, bool ignoreCase)
+    {
+        foreach (string folder in ModelFolders.Spellings(targetSubdir))
+        {
+            string? found = Existing(root, Path.Combine(folder, fileName), ignoreCase);
+            if (found is not null)
+                return found;
+        }
+        return null;
     }
 
     /// <summary>The subset of <paramref name="entry"/>'s assets not already present on disk.</summary>
