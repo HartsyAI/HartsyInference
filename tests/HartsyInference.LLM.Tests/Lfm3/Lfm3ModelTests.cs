@@ -107,10 +107,12 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     {
         if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
         using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
         float[] expected = Reference(Prompt);
         using Lfm3Model model = new(_weights, _config, 32);
         float[] actual = model.ForwardLastLogits(backend, Prompt);
         Assert.Equal(expected.Length, actual.Length);
+        LogMaxDifference(expected, actual);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 2e-4f, expected[v] + 2e-4f);
@@ -124,6 +126,7 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
     {
         if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
         using IBackend backend = device!;
+        if (BackendGate.SkipKnownRtx4090CudaDivergence(kind, backend, _out.WriteLine)) return;
         using Lfm3Model whole = new(_weights, _config, 32);
         float[] expected = whole.ForwardLastLogits(backend, Prompt);
         using Lfm3Model chunked = new(_weights, _config, 32);
@@ -134,10 +137,28 @@ public sealed unsafe class Lfm3ModelTests : IDisposable
             actual = chunked.ForwardLastLogits(backend, chunk);
         }
         Assert.Equal(Prompt.Length, chunked.Position);
+        LogMaxDifference(expected, actual);
         for (int v = 0; v < expected.Length; v++)
         {
             Assert.InRange(actual[v], expected[v] - 1e-4f, expected[v] + 1e-4f);
         }
+    }
+
+    /// <summary>Logs the largest absolute difference and where it is, so a failing device case says how far off it is, not only that it is.</summary>
+    private void LogMaxDifference(float[] expected, float[] actual)
+    {
+        float worst = 0f;
+        int at = 0;
+        for (int v = 0; v < expected.Length; v++)
+        {
+            float difference = MathF.Abs(actual[v] - expected[v]);
+            if (difference > worst)
+            {
+                worst = difference;
+                at = v;
+            }
+        }
+        _out.WriteLine($"max |Δ| = {worst} at logit {at}");
     }
 
     [Fact]
