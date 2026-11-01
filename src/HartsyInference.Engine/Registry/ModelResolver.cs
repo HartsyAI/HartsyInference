@@ -92,7 +92,19 @@ public static class ModelResolver
             return null;
         }
         string root = RepoPaths.ModelsRoot();
-        string relative = Path.Combine(ModelFolders.MapName(subdir), id);
+        foreach (string folder in ModelFolders.Spellings(subdir))
+        {
+            string? located = LocateInFolder(root, folder, id, modality, ignoreCase);
+            if (located is not null)
+                return located;
+        }
+        return null;
+    }
+
+    /// <summary>The model <paramref name="id"/> under one spelling of its modality folder, or null.</summary>
+    private static string? LocateInFolder(string root, string folder, string id, Modality modality, bool ignoreCase)
+    {
+        string relative = Path.Combine(folder, id);
         string candidate = ignoreCase ? CaseInsensitivePath.ResolveEntry(root, relative) : Path.Combine(root, relative);
         if (File.Exists(candidate))
             return Path.GetFullPath(candidate);
