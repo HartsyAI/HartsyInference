@@ -2,7 +2,7 @@
 
 Source snapshot 2026-11-01: `MiniMaxAI/MiniMax-M3.1-Flash` (`model_type: minimax_m3_vl`, `MiniMaxM3SparseForConditionalGeneration`) and
 transformers 5.22.1's native `minimax_m3_vl` (`modeling_minimax_m3_vl.py`, a library, not remote code). **Not implemented in the engine.** This
-records what the checkpoint and the reference contain so the port starts from facts. Where code and this note disagree, the code is right.
+records what the checkpoint and the reference contain so the port starts from facts. Where the checkpoint or the reference and this note disagree, they are right.
 
 ## Why it is not built yet
 
@@ -37,7 +37,7 @@ its own key cache. Blocks are anchored to absolute key slots, so left padding ch
 `language_model.model.layers.N.…` for the decoder, `vision_tower.vision_model.…`, `multi_modal_projector.*`, `patch_merge_mlp.*`; 89,632 tensors.
 
 - **Attention, dense MLP, shared expert, index projections: MXFP8.** `X.weight` is F8_E4M3 `[out, in]` and `X.weight_scale_inv` is U8 `[out, in/32]`
-  (`quant_method: mxfp8`, `weight_block_size: [1, 32]`; E8M0 scales are the natural reading, not yet checked against a value).
+  (`quant_method: mxfp8`, `weight_block_size: [1, 32]`). The scales are E8M0: `weight = e4m3 × 2^(byte − 127)`. On `q_proj` of layers 3 and 20 the scale bytes are 114-117 and the dequantized rows have a standard deviation of 0.026 and 0.042, against about 150 for the raw E4M3 values.
 - **Routed experts: NVFP4-style (compressed-tensors names).** `block_sparse_moe.experts.E.{w1,w2,w3}.weight_packed` is U8 `[3072, 3072]` for `w1`
   (two FP4 values per byte over 6144), with `weight_scale`, `weight_global_scale` and `input_global_scale` (F32 scalars). `w1`/`w3` are gate/up, `w2` is down.
 - **Unquantized:** router `gate.weight` (F32 `[128, 6144]`), `e_score_correction_bias`, norms (BF16), the vision tower and projectors.
@@ -58,8 +58,8 @@ indexer's keys, the vision tower, and the `minimax_m3_vl` config and key mapping
 
 ## Verification plan
 
-1. A tiny random `minimax_m3_vl` from transformers' own modeling code (as `tests/python-reference/dump_flint_tiny_reference.py` does for Flint), keeping a
-   sequence longer than the 128-token block × 16 so selection actually prunes, then engine logits against it.
+1. A tiny random `minimax_m3_vl` from transformers' own modeling code (the Flint port builds its tiny reference the same way), with the indexer's block size and
+   top-k shrunk in the config so a short sequence already prunes (at the released 128 × 16 the prompt would need more than 2048 tokens), then engine logits against it.
 2. Dequantize one MXFP8 and one NVFP4 tensor from the real checkpoint and compare with the same rows' reference values.
 3. Real-weight generation needs about 250 GB of host or device memory; plan GPU hardware first.
 
@@ -68,4 +68,4 @@ indexer's keys, the vision tower, and the `minimax_m3_vl` config and key mapping
 MiniMax Community License (not an OSI license). Free for non-commercial use. A **Commercial Use** (paid products or services built on the model,
 commercial API use, or any commercial deployment of a post-trained or fine-tuned derivative) must display "Built with MiniMax M3.1-Flash"; it needs a
 one-time notice to `api@minimax.io`, and prior written authorization when the product or service earns more than US$20 million a year. An appendix
-prohibits uses including military purposes, content harmful to minors, and deliberate disinformation. Flag every catalog entry accordingly before shipping.
+prohibits uses including military purposes, content harmful to minors, and deliberate disinformation. This is a summary; the `LICENSE` file in the model repository is the binding text. Flag every catalog entry accordingly before shipping.
