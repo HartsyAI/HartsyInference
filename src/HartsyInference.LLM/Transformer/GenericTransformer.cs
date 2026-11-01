@@ -716,7 +716,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
 
     /// <summary>Every graph-decode condition except the sliding window and soft-cap, which <see cref="SupportsGraphDecodeCore"/> checks against the backend.</summary>
     private bool GraphShapeSupported(IBackend backend) =>
-        backend.LlmGraphDecodeSupported && _cfg.Mla is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
+        backend.LlmGraphDecodeSupported && _cfg.Mla is null && _cfg.Indexer is null && MoeGraphReady(backend) && _cfg.CrossAttnLayers.Count == 0
         // Sliding-window, attention soft-cap, and dual local/global RoPE (the Gemma-2/3 trio) are CUDA graph-supported
         // as of 2026-07-22: the split-K decode-attention kernel handles window/softcap with a device position,
         // FlashAttentionDev plumbs them through as per-layer capture constants, and ForwardGraphDecodeStep
@@ -984,6 +984,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     public Tensor ForwardBatchDecode(IBackend backend, Tensor embeds, ReadOnlySpan<int> positions, IKvCache[] caches)
     {
         ThrowIfDisposed();
+        if (_cfg.Indexer is not null) throw new NotSupportedException("Batched decode does not run sparse-attention indexer models.");
         int b = (int)embeds.Shape[1];
         if (positions.Length != b || caches.Length != b)
             throw new ArgumentException($"positions ({positions.Length}) / caches ({caches.Length}) must match batch B={b}.");
@@ -1204,6 +1205,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         private Tensor? _qkW, _qkB;
         private Tensor? _qNorm, _kNorm, _qNormBias, _kNormBias;
         private Tensor? _sink;   // GPT-OSS: per-head attention-sink logits [Hq]
+        private Tensor? _idxQW, _idxKW, _idxQNorm, _idxKNorm;   // MiniMax sparse attention: indexer q/k projections and their norms
         private Tensor? _alibiSlopes;   // ALiBi: per-head slopes [Hq] (MPT/BLOOM/Falcon-classic); these models use no RoPE
         private Tensor? _kvAProj, _kvANorm, _kvBProj;   // MLA: KV down-proj (+latent norm) and up-proj
         private Tensor? _qAProj, _qANorm, _qBProj;      // MLA q-LoRA: Q down-proj (+norm) and up-proj (DeepSeek-V3/Kimi)
@@ -1370,6 +1372,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 }
             }
             if (_cfg.AttnSink) _sink = EnsureF32(w[$"{prefix}.self_attn.sinks.weight"]);
+            if (_cfg.Indexer is not null)
+            {
+                _idxQW = w[$"{prefix}.self_attn.indexer.q_proj.weight"];
+                _idxKW = w[$"{prefix}.self_attn.indexer.k_proj.weight"];
+                _idxQNorm = LoadNorm(w[$"{prefix}.self_attn.indexer.q_norm.weight"], _cfg.RmsNormAddOne);
+                _idxKNorm = LoadNorm(w[$"{prefix}.self_attn.indexer.k_norm.weight"], _cfg.RmsNormAddOne);
+            }
             // ALiBi slopes are a config constant (geometric per-head schedule), not a checkpoint tensor — materialize
             // a small [Hq] device tensor so the attention kernel can add the per-head distance bias.
             if (_cfg.AlibiMaxBias > 0f && _cfg.AlibiSlopes.Count >= _cfg.NumHeads)
@@ -1509,7 +1518,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
                 // GluActivate pass over the concatenated projection output.
                 bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]
-                    && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared);
+                    && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared or ActivationKind.SwigluOai);
                 if (gluFusable)
                 {
                     int ffDim = (int)_gateW!.Shape[0];
@@ -1525,7 +1534,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     Tensor gate = new(ff, DType.F32);
                     ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up);
+                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha);
                 }
             }
             else
@@ -1639,7 +1648,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             bool gluFused = _gateUpW is not null;
             Tensor?[] primary = [_inNorm, _postNorm, _postAttnNorm, _postFfnNorm, _normBias, _postNormBias, _parFfnNorm, _parFfnNormBias,
                 qkvFused || qkFused ? null : _qW, _qB, qkvFused || qkFused ? null : _kW, _kB, qkvFused ? null : _vW, _vB, _oW, _oB,
-                _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _alibiSlopes, _vNormOnes,
+                _qkvW, _qkvB, _qkW, _qkB, _qNorm, _kNorm, _qNormBias, _kNormBias, _sink, _idxQW, _idxKW, _idxQNorm, _idxKNorm, _alibiSlopes, _vNormOnes,
                 _kvAProj, _kvANorm, _kvBProj, _qAProj, _qANorm, _qBProj,
                 gluFused ? null : _gateW, _gateB, gluFused ? null : _upW, _upB, _gateUpW, _gateUpB, _downW, _downB,
                 _pleInpGate, _pleProj, _plePostNorm, _ffnPreNorm2, _ffnPostNorm1, _ffnPostNorm2, _moeGateInpScale,
@@ -1702,6 +1711,31 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             }
         }
 
+        /// <summary>MiniMax sparse attention: projects, norms and rotates the index queries and keys of <paramref name="pre"/>, extends the sequence's index keys, and returns the per-head block-selection bias for this step's attention. The caller disposes it.</summary>
+        private Tensor SelectBlocks(IBackend backend, Tensor pre, int t, int posStart, IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
+        {
+            IndexerConfig index = _cfg.Indexer!;
+            int rotary = _cfg.RotaryDimFor(layerIndex);
+            Tensor qRaw = new(new TensorShape(1, t, index.Heads, index.KeyLength), DType.F32);
+            Project(backend, qRaw, pre, _idxQW!, null, _cfg.LowVramQuant);
+            Tensor qNormed = new(qRaw.Shape, DType.F32);
+            backend.RmsNorm(qNormed, qRaw, _idxQNorm!, _cfg.RmsNormEps);
+            qRaw.Dispose();
+            backend.ApplyRopeSingle(qNormed, cos, sin, rotary);
+            Tensor kRaw = new(new TensorShape(1, t, 1, index.KeyLength), DType.F32);
+            Project(backend, kRaw, pre, _idxKW!, null, _cfg.LowVramQuant);
+            Tensor kNormed = new(kRaw.Shape, DType.F32);
+            backend.RmsNorm(kNormed, kRaw, _idxKNorm!, _cfg.RmsNormEps);
+            kRaw.Dispose();
+            backend.ApplyRopeSingle(kNormed, cos, sin, rotary);
+            SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
+            ReadOnlySpan<float> keys = SparseBlockIndexer.AppendKeys(cache, layerIndex, posStart, kNormed.AsReadOnlySpan<float>(), index.KeyLength);
+            Tensor bias = SparseBlockIndexer.BuildBias(qNormed.AsReadOnlySpan<float>(), keys, t, posStart, _cfg.NumHeads, index);
+            qNormed.Dispose();
+            kNormed.Dispose();
+            return bias;
+        }
+
         public Tensor Forward(IBackend backend, Tensor hidden, int t, int posStart,
             IKvCache cache, int layerIndex, Tensor cos, Tensor sin, Tensor? perLayerInput = null)
         {
@@ -1731,6 +1765,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             }
             ProjectQkv(backend, q, k, v, pre, t, hasOwnKv, _cfg.LowVramQuant);
             Tensor? gate = ProjectAttnGate(backend, pre, t);
+            Tensor? blockBias = _idxQW is null ? null : SelectBlocks(backend, pre, t, posStart, cache, layerIndex, cos, sin);
             if (!_cfg.ParallelResidual) pre.Dispose();   // parallel residual reuses `pre` for the FFN below
 
             // Gemma-4: weightless RMSNorm on V (v / rms(v), no learned scale — the "weight" is a constant ones
@@ -1789,8 +1824,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 new KvAttentionCall
                 {
                     KvLength = posStart + t, QueryOffset = posStart, SlidingWindow = window, Softcap = _cfg.AttnLogitSoftcap,
-                    Sinks = _sink, AlibiSlopes = _alibiSlopes,
+                    Sinks = _sink, AlibiSlopes = _alibiSlopes, Bias = blockBias,
                 });
+            blockBias?.Dispose();
             attn = NormHeads(backend, attn);
 
             // hq*d (not _cfg.QDim, which is the GLOBAL head dim) — Gemma-4 local/SWA layers project to a

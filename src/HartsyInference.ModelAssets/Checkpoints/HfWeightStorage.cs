@@ -15,4 +15,8 @@ public enum HfWeightStorage
     /// <summary>bitsandbytes 4-bit NF4: a U8 nibble blob named by the weight, with <c>.absmax</c>, <c>.quant_map</c> and a
     /// <c>.quant_state.bitsandbytes__nf4</c> JSON blob beside it.</summary>
     Nf4,
+
+    /// <summary>A block-scaled weight read through its <see cref="HfQuantWeight.Binding"/>: F8 E4M3 values with U8 E8M0 scales (MXFP8,
+    /// <c>weight_scale_inv</c>), or compressed-tensors NVFP4 (<c>weight_packed</c>, <c>weight_scale</c>, <c>weight_global_scale</c>).</summary>
+    BlockRecipe,
 }

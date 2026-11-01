@@ -176,6 +176,29 @@ public static class GgufConfigFactory
         // carries no value). Sigmoid routing + the o200k tokenizer come from the existing MoE/tokenizer paths.
         bool isGptOss = arch is "gpt-oss" or "gptoss";
 
+        // MiniMax-M3: the clamped alpha-SwiGLU in every FFN, sigmoid routing with a selection bias, and block-sparse attention selected by a small per-layer indexer.
+        bool isMiniMaxM3 = arch == "minimax-m3";
+        float swigluAlpha = isMiniMaxM3 ? metadata.GetFloat32($"{arch}.swiglu_alpha", 0f) : 0f;
+        float swigluLimit = isMiniMaxM3 ? metadata.GetFloat32($"{arch}.swiglu_limit", 0f) : 0f;
+        IndexerConfig? indexer = isMiniMaxM3
+            ? new IndexerConfig
+            {
+                Heads = (int)metadata.GetUInt32($"{arch}.attention.indexer.head_count", 0u),
+                KeyLength = (int)metadata.GetUInt32($"{arch}.attention.indexer.key_length", 0u),
+                BlockSize = (int)metadata.GetUInt32($"{arch}.attention.indexer.block_size", 0u),
+                TopKBlocks = (int)metadata.GetUInt32($"{arch}.attention.indexer.top_k_blocks", 0u),
+                LocalBlocks = (int)metadata.GetUInt32($"{arch}.attention.indexer.local_blocks", 0u),
+            }
+            : null;
+        if (isMiniMaxM3 && (swigluAlpha <= 0f || swigluLimit <= 0f))
+        {
+            throw new InvalidDataException($"minimax-m3 needs positive {arch}.swiglu_alpha and {arch}.swiglu_limit metadata.");
+        }
+        if (indexer is not null && (indexer.Heads <= 0 || indexer.KeyLength != headDim || indexer.BlockSize <= 0 || indexer.TopKBlocks <= 0 || heads % indexer.Heads != 0))
+        {
+            throw new NotSupportedException($"minimax-m3 needs attention.indexer keys with a key_length equal to the head dimension ({headDim}) and head_count dividing the {heads} attention heads.");
+        }
+
         // mllama (Llama-3.2-Vision): some decoder layers are gated cross-attention (read vision features) instead
         // of causal self-attention. Detect them by tensor presence (robust to the Ollama-converter metadata
         // naming) — any layer carrying a cross_attn q-projection is a cross-attention layer.
@@ -230,7 +253,7 @@ public static class GgufConfigFactory
                 AttnScale = mlaScale,
             };
         }
-        float expertWeightsScale = isDeepseek || isMuseSpark ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
+        float expertWeightsScale = isDeepseek || isMuseSpark || isMiniMaxM3 ? metadata.GetFloat32($"{arch}.expert_weights_scale", 1f) : 1f;
 
         // Mixture-of-Experts: the spine already implements the routed FFN; wire it from the GGUF expert metadata.
         // The stacked per-expert tensors are split downstream (GgufLanguageModel). Covers Mixtral / Qwen-MoE /
@@ -299,7 +322,9 @@ public static class GgufConfigFactory
                 RoutedScalingFactor = expertWeightsScale,
                 // Gemma-4's MoE branch uses GeGLU (tanh-GELU), matching its dense FFN; every other MoE arch here
                 // (Mixtral/Qwen-MoE/OLMoE/DeepSeek) uses SwiGLU (the record default).
-                Activation = isGemma4 ? ActivationKind.GeluTanh : ActivationKind.Silu,
+                Activation = isGemma4 ? ActivationKind.GeluTanh : isMiniMaxM3 ? ActivationKind.SwigluOai : ActivationKind.Silu,
+                SwigluAlpha = swigluAlpha,
+                SwigluLimit = swigluLimit,
                 // Muse Spark runs its experts in a narrower latent space entered through ffn_latent_down/ffn_pre_exp_norm.
                 LatentSize = (int)metadata.GetUInt32($"{arch}.moe_latent_size", 0u),
                 LatentNormEps = rmsEps,
@@ -340,6 +365,7 @@ public static class GgufConfigFactory
             LowVramQuant = lowVramQuant,
             // Activation: Gemma/GPT-2/BLOOM = tanh-approx GELU; Nemotron = squared ReLU; everything else SwiGLU SiLU.
             Activation = isNemotron ? ActivationKind.ReluSquared
+                : isMiniMaxM3 ? ActivationKind.SwigluOai
                 : isGemma || isGpt2 || isBloom || isStarcoder2 || isGptneox ? ActivationKind.GeluTanh : ActivationKind.Silu,
             SandwichNorm = sandwich,
             // llama.cpp's GGUF converter already bakes Gemma's (1+w) offset into the stored norm weights, so the
@@ -368,6 +394,9 @@ public static class GgufConfigFactory
             AttnLogitSoftcap = attnCap,
             FinalLogitSoftcap = finalCap,
             AttnSink = isGptOss || arch == "flint",
+            SwigluAlpha = swigluAlpha,
+            SwigluLimit = swigluLimit,
+            Indexer = indexer,
             CrossAttnLayers = crossAttnLayers,
             Moe = moe,
             VNorm = isGemma4,

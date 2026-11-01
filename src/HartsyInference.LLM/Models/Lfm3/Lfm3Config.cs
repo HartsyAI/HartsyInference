@@ -1,4 +1,5 @@
 using System.Text.Json;
+using HartsyInference.LLM.Models.Shared;
 
 namespace HartsyInference.LLM.Models.Lfm3;
 
@@ -13,13 +14,6 @@ public enum Lfm3LayerKind
 
     /// <summary>Causal attention limited to the last <see cref="Lfm3Config.SlidingWindow"/> tokens.</summary>
     SlidingAttention,
-}
-
-/// <summary>RoPE of one attention layer type: the base and the fraction of the head dimension that rotates.</summary>
-public readonly record struct Lfm3RopeParameters(float Theta, float PartialRotaryFactor)
-{
-    /// <summary>Rotated frequency pairs; the remaining pairs have zero frequency and leave their dimensions unrotated.</summary>
-    public int RotatedPairs(int headDim) => (int)(PartialRotaryFactor * headDim) / 2;
 }
 
 /// <summary>A HuggingFace LFM3 text config (<c>lfm3</c>): a stack of gated short-conv, full-attention and sliding-attention layers with sandwich norms.</summary>
@@ -57,9 +51,9 @@ public sealed record Lfm3Config
     public required IReadOnlyList<Lfm3LayerKind> Layers { get; init; }
 
     /// <summary>RoPE of full-attention layers; sliding layers read <see cref="SlidingRope"/>.</summary>
-    public required Lfm3RopeParameters FullRope { get; init; }
+    public required LayerRopeParameters FullRope { get; init; }
 
-    public required Lfm3RopeParameters SlidingRope { get; init; }
+    public required LayerRopeParameters SlidingRope { get; init; }
 
     public int BosTokenId { get; init; }
 
@@ -69,7 +63,7 @@ public sealed record Lfm3Config
 
     /// <summary>RoPE of attention layer <paramref name="layer"/>.</summary>
     /// <exception cref="InvalidOperationException">The layer is a conv layer.</exception>
-    public Lfm3RopeParameters RopeOf(int layer) => Layers[layer] switch
+    public LayerRopeParameters RopeOf(int layer) => Layers[layer] switch
     {
         Lfm3LayerKind.FullAttention => FullRope,
         Lfm3LayerKind.SlidingAttention => SlidingRope,
@@ -148,7 +142,7 @@ public sealed record Lfm3Config
         return config;
     }
 
-    private static Lfm3RopeParameters ReadRope(JsonElement rope, List<Lfm3LayerKind> layers, string type)
+    private static LayerRopeParameters ReadRope(JsonElement rope, List<Lfm3LayerKind> layers, string type)
     {
         Lfm3LayerKind kind = type == "full_attention" ? Lfm3LayerKind.FullAttention : Lfm3LayerKind.SlidingAttention;
         if (!layers.Contains(kind))
@@ -165,7 +159,7 @@ public sealed record Lfm3Config
             throw new NotSupportedException($"LFM3 rope_type '{ropeType}' is not supported.");
         }
         float partial = scope.TryGetProperty("partial_rotary_factor", out JsonElement pf) ? (float)pf.GetDouble() : 1f;
-        return new Lfm3RopeParameters((float)scope.GetProperty("rope_theta").GetDouble(), partial);
+        return new LayerRopeParameters((float)scope.GetProperty("rope_theta").GetDouble(), partial);
     }
 
     private static bool Bool(JsonElement e, string name, bool fallback) =>

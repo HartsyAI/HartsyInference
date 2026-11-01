@@ -28,7 +28,7 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
     // the single remap below is exact for all of them. The MoE members (olmoe, qwen2moe, qwen3moe, and Mixtral
     // under the plain "llama" arch) add the stacked-expert + router tensors handled below; the dense members
     // simply never carry those keys. Registering each explicitly resolves it by name (no heuristic-fallback warning).
-    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "starcoder2", "exaone", "gpt-oss", "gptoss", "minicpm", "flint"];
+    public IReadOnlyCollection<string> Architectures => ["llama", "qwen2", "qwen3", "olmo2", "olmoe", "qwen2moe", "qwen3moe", "granite", "granitemoe", "cohere2", "command-r", "stablelm", "internlm2", "nemotron", "starcoder2", "exaone", "gpt-oss", "gptoss", "minicpm", "flint", "minimax-m3"];
 
     public bool MatchesByKeys(IEnumerable<string> tensorNames)
     {
@@ -91,6 +91,11 @@ public sealed class LlamaKeyMapper : IGgufKeyMapper
                 // split into per-expert 2D projections downstream (GgufLanguageModel). Shared-expert tensors
                 // (Qwen-MoE) map to the shared_expert.* names the MoE block expects.
                 "ffn_gate_inp.weight" => "mlp.gate.weight",                    // router
+                "exp_probs_b.bias" => "mlp.gate.e_score_correction_bias",     // selection-only router bias (MiniMax-M3)
+                "indexer.attn_q.weight" => "self_attn.indexer.q_proj.weight",   // MiniMax-M3 sparse-attention indexer
+                "indexer.attn_k.weight" => "self_attn.indexer.k_proj.weight",
+                "indexer.attn_q_norm.weight" => "self_attn.indexer.q_norm.weight",
+                "indexer.attn_k_norm.weight" => "self_attn.indexer.k_norm.weight",
                 "ffn_gate_exps.weight" => "mlp.gate_exps.weight",             // stacked → split
                 "ffn_up_exps.weight" => "mlp.up_exps.weight",
                 "ffn_down_exps.weight" => "mlp.down_exps.weight",
