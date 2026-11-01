@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.LLM.Transformer;
 
 /// <summary>MiniMax sparse attention's block selection: every query scores all earlier index keys, max-pools the scores per block of keys, and keeps its top-k blocks after boosting the blocks right before it, so the local blocks count against k.</summary>
+/// <remarks>The key store of a cache is not synchronized: one thread drives a cache, as everywhere else in the transformer.</remarks>
 public static class SparseBlockIndexer
 {
     /// <summary>The largest dense bias (in elements) built for one layer's step: 1 GiB of F32.</summary>
