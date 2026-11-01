@@ -670,9 +670,17 @@ internal static class ExprParser
         if (t.TryNumber(out long num)) return new LiteralExpr(num);
         if (t.TrySymbol("("))
         {
+            if (t.TrySymbol(")")) return new ListLiteralExpr([]);
             Expr e = ParseTernary(t);
+            if (!t.PeekSymbol(",")) { t.ExpectSymbol(")"); return e; }
+            List<Expr> tuple = [e];   // a comma makes it a tuple, as in Python: ('high', 'low')
+            while (t.TrySymbol(","))
+            {
+                if (t.PeekSymbol(")")) break;
+                tuple.Add(ParseTernary(t));
+            }
             t.ExpectSymbol(")");
-            return e;
+            return new ListLiteralExpr(tuple);
         }
         if (t.TrySymbol("["))
         {
