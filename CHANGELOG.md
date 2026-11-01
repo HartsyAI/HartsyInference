@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.397
+
+- **Added: Nanbeige4.3-33B catalog entry (`nanbeige43`).** A plain Llama, so it runs on the existing GGUF path; the catalog points at bartowski's Q4_K_M GGUF. Its header, tokenizer and chat template match the checkpoint's own through transformers; the model itself has not been run.
+- **Fixed: SentencePiece GGUF tokenizers honor `tokenizer.ggml.metaspace.prepend_scheme = first`.** Text after a special token such as `<|im_start|>` no longer takes a leading `▁`, so a ChatML prompt tokenizes like the checkpoint's own tokenizer. GGUFs without that key are unchanged.
+- **Fixed: Jinja templates drop one trailing newline of the template source,** as Jinja2 does by default. A template that ended its source with a newline after the last tag added an extra newline to the prompt (Nanbeige's ended `<think>` with two).
+
 ## alpha.393
 
 - **Added: LiquidAI LFM3-1.7B text model.** Gated short-conv, full-attention and sliding-attention layers with sandwich norms, run from a Hugging Face directory (`config.json`, `model.safetensors`, `tokenizer.json`, `chat_template.jinja`) on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match transformers F32. CUDA, Vulkan, quantized weights and packed documents are not covered. The weights are under the LFM Open License v1.0, which allows commercial use only below USD 10M annual revenue.
