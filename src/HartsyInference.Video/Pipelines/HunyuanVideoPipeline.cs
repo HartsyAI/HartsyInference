@@ -32,6 +32,9 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
     private const int VaeTemporal = 4;
     private const float VaeScalingFactor = 0.476986f;
 
+    /// <summary>VRAM kept free beside the DiT weights for one forward's activations and workspace.</summary>
+    private const long ActivationHeadroomBytes = 6L << 30;
+
     private readonly HunyuanVideoDit _dit = dit;
     private readonly HunyuanVideoVaeDecoder _vae = vae;
     private readonly HunyuanVideoConfig _config = config;
@@ -92,30 +95,16 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             $"seed={seed} (latent {tLat}x{hLat}x{wLat}, shift={shift:F2})");
         Logs.Warning("HunyuanVideo pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
 
-        // Keep the DiT fully resident when it fits (fp8 ~13 GB on a 24 GB card — no per-step streaming tax);
-        // stream the 60 double+single blocks only when it doesn't (24 GB bf16 DiT).
-        long ditWeightBytes = 0;
-        foreach (Tensor t in _dit.EnumerateWeights()) ditWeightBytes += t.Shape.ElementCount * t.DType.SizeInBytes;
-        const long residentMarginBytes = 6L << 30;   // activations + workspace headroom for one forward
-        bool resident = Backend.StreamingCache is null
-            || ditWeightBytes + residentMarginBytes <= Backend.FreeMemoryBytes();
-        BlockStreamingController? streamer = null;
-        if (!resident)
+        // Weight placement is BlockStreamingScope's: the bf16 DiT (~24 GB) streams its 60 double+single blocks behind
+        // a measured resident prefix, the fp8 one (~13 GB) stays resident on a 24 GB card. Block 0 is a double block,
+        // the widest kind, so the prefix sizing budgets conservatively for the single-stream tail.
+        BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
         {
-            Backend.PreloadWeights(_dit.EnumerateSharedWeights());
-            IStreamingBlock[] blocks = new IStreamingBlock[_dit.BlockCount];
-            for (int b = 0; b < blocks.Length; b++) blocks[b] = _dit.GetBlock(b);
-            streamer = new BlockStreamingController(
-                Backend.StreamingCache!, blocks, prefetchAhead: 2, retainBehind: 0, backend: Backend);
-            _dit.BeforeBlockForward = streamer.BeforeBlockForward;
-            streamer.Prime();
-            Logs.Info($"HunyuanVideo streaming: {blocks.Length} blocks, ~{streamer.EstimatedTotalWeightBytes / (1024 * 1024)} MB total");
-        }
-        else
-        {
-            Backend.PreloadWeights(_dit.EnumerateWeights());
-            Logs.Info($"HunyuanVideo DiT resident: {ditWeightBytes / (1024 * 1024)} MB preloaded (no block streaming).");
-        }
+            Backend = Backend,
+            Denoiser = _dit,
+            ModelName = "HunyuanVideo",
+            HeadroomBytes = ActivationHeadroomBytes,
+        });
 
         Tensor latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
@@ -184,24 +173,17 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             // holds the fixed input/output buffers at the addresses the capture bakes — freeing them here would
             // corrupt the replay. Re-checked each step so a mid-gen self-disable re-enables the sweep.
             if (!_dit.StepGraphActive) Backend.FreeActivations(trimPool: false);
+            stream.EndStep();
         }
 
         Backend.Sync();
         // The captured step graph bakes the DiT weight device pointers; the frees below (and the next gen's
         // re-upload) would leave it replaying against freed memory — invalidate it before releasing the weights.
         _dit.InvalidateStepGraph(Backend);
-        if (streamer is not null)
-        {
-            _dit.BeforeBlockForward = null;
-            streamer.EvictAll();
-            streamer.Dispose();
-            Backend.FreeWeights(_dit.EnumerateSharedWeights());
-            // Also purge the block weights: the streaming cache registers each uploaded block in the backend weight
-            // cache, and any block still cached at the end (or not caught by EvictAll's state machine) would stay
-            // resident and starve the VAE decode (was the decode OOM — ~23 GB DiT still held, <1 GB free).
-            Backend.FreeWeights(_dit.EnumerateWeights());
-        }
-        else Backend.FreeWeights(_dit.EnumerateWeights());
+        stream.Dispose();
+        // Every weight, not just the resident prefix: blocks the stream uploaded are registered in the backend weight
+        // cache, and any still cached here would starve the VAE decode.
+        Backend.FreeWeights(_dit.EnumerateWeights());
         Backend.FreeActivations();
         Logs.Info($"HunyuanVideo: DiT freed, {Backend.FreeMemoryBytes() / (1024 * 1024)} MB free before VAE decode.");
 

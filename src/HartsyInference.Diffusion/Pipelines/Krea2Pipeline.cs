@@ -345,7 +345,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 long avail = Backend.StreamingCache.QueryAvailableWeightCacheBytes(reserve);
                 long perBlock = blocks.Length > 0 ? blocks[0].EstimatedWeightBytes : 0;
                 int prefetchAhead = PrefetchDepth.Choose(avail, perBlock);
-                streamer = new BlockStreamingController(Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0);
+                streamer = new BlockStreamingController(
+                    Backend.StreamingCache, blocks, prefetchAhead: prefetchAhead, retainBehind: 0, backend: Backend);
                 _transformer.BeforeBlockForward = streamer.BeforeBlockForward;
                 streamer.Prime();
                 _ditResident = false;
@@ -555,7 +556,8 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                     });
                     previewLatent.Dispose();
                 }
-                TrimPoolOnStreamedPath(streamer);
+                // Both loop exits trim: the patchified fast path continues before the loop body's tail.
+                streamer?.TrimAfterStep();
                 continue;
             }
 
@@ -608,7 +610,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                 Latent = latent,
                 LatentArch = LatentArchitecture.Anima,
             });
-            TrimPoolOnStreamedPath(streamer);
+            streamer?.TrimAfterStep();
         }
 
         // Fast path: bring the final patchified latent back to pixel space once for the VAE. Graph mode reads a
@@ -786,21 +788,6 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             return (scaled, null);
         }
         return (t2iNoise, null);
-    }
-
-    /// <summary>Streamed path only: returns the stream-ordered pool's reservations to the driver once per step.</summary>
-    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>vram.mempoolKeep</c> (on
-    /// by default) raises the pool's release threshold so those bytes stay reserved. That is a pure win when the DiT
-    /// is resident (the same buffers get reused), but on the streamed path the pool grows by roughly a block per step.
-    /// Measured on Ideogram 4: 4.1 → 11.6 GiB — the entire card — by step 17, versus a flat 5.1 GiB with this trim,
-    /// for +1.4% wall-clock. See benchmarks/results/2026-07-27_lowvram_leak_fix.md §5f. Called from BOTH loop exits:
-    /// the patchified fast path <c>continue</c>s before the loop body's tail.</remarks>
-    private void TrimPoolOnStreamedPath(BlockStreamingController? streamer)
-    {
-        if (streamer is not null)
-        {
-            Backend.TrimMemoryPool();
-        }
     }
 
     /// <summary>Per-forward activation/workspace estimate for one Krea 2 pass over the joint <c>[text, image]</c> sequence.</summary>
