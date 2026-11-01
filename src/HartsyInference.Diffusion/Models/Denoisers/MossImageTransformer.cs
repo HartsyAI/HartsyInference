@@ -467,45 +467,15 @@ public sealed class MossImageTransformer : IDisposable
         DType act = backend.SupportsF16Activations ? DitDtype.Act : DType.F32;
         using TimeRows zero = ComputeTimeRows(backend, 0f);
         using MossImageModulation modulation = MossImageModulation.Split(backend, zero.Block, zero.Head, _config.HiddenSize);
-        using ReferenceKvCache.Builder builder = new(_blocks.Length);
-        Tensor stream = references.Embedded;
-        bool ownsStream = false;
-        try
-        {
-            for (int i = 0; i < _blocks.Length; i++)
-            {
-                if (skipLayers.Contains(i))
-                    continue;
-                Tensor next = _blocks[i].ForwardPrefix(backend, stream, modulation, references.Cos!, references.Sin!, act,
-                    out Tensor keys, out Tensor values);
-                try
-                {
-                    builder.Set(i, keys, values);
-                }
-                catch
-                {
-                    keys.Dispose();
-                    values.Dispose();
-                    next.Dispose();
-                    throw;
-                }
-                if (ownsStream)
-                    stream.Dispose();
-                stream = next;
-                ownsStream = true;
-            }
-        }
-        finally
-        {
-            if (ownsStream)
-                stream.Dispose();
-        }
         HashCode fingerprint = new();
         fingerprint.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(conditioning));
         fingerprint.Add(conditioning.TextLength);
         fingerprint.Add(references.TokenCount);
         fingerprint.Add(SkipKey(skipLayers));
-        return builder.Build(backend, fingerprint.ToHashCode(), "MOSS-Image");
+        return ReferenceKvPrepass.Build(backend, _blocks.Length, skipLayers, references.Embedded,
+            (int i, Tensor stream, out Tensor keys, out Tensor values) => _blocks[i].ForwardPrefix(backend, stream, modulation,
+                references.Cos!, references.Sin!, act, out keys, out values),
+            fingerprint.ToHashCode(), "MOSS-Image");
     }
 
     /// <summary>A skipped-layer set as a bitmask: exact and order-independent, so two sets never share a cache.</summary>

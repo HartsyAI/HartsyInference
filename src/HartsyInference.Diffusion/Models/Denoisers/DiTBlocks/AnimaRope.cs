@@ -172,6 +172,50 @@ public sealed unsafe class AnimaRope
         }
     }
 
+    /// <summary>The device-table cache slot reference frames use, apart from the target grid's slot 0, so a reference's prepass
+    /// never evicts the denoising step's own tables.</summary>
+    private const int ReferenceSlot = 1;
+
+    /// <summary>Device tables for a reference grid placed at frame <paramref name="tFrameIndex"/>, shifted by
+    /// <paramref name="rowOffset"/> rows and <paramref name="columnOffset"/> columns: the RoPE positions a reference frame reads at.
+    /// The tables are borrowed. They stay valid until the returned lease is disposed, which the caller does once the prepass that
+    /// reads them has finished.</summary>
+    internal RopeTableLease AcquireFrameTables(IBackend backend, int tFrameIndex, int hPatched, int wPatched, int rowOffset,
+        int columnOffset, out Tensor cos, out Tensor sin)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentOutOfRangeException.ThrowIfNegative(tFrameIndex);
+        ArgumentOutOfRangeException.ThrowIfNegative(rowOffset);
+        ArgumentOutOfRangeException.ThrowIfNegative(columnOffset);
+        ValidateGrid(1, hPatched, wPatched);
+        float[] positions = FrameGridPositions(tFrameIndex, hPatched, wPatched, rowOffset, columnOffset);
+        lock (_gpuTableLock)
+        {
+            RopeTableLease lease = _deviceTables.Acquire(backend, ReferenceSlot, positions.Length / 3, positions);
+            (cos, sin) = DeviceTablesOf(lease);
+            return lease;
+        }
+    }
+
+    /// <summary>Per-token <c>(t, h, w)</c> positions of a grid at frame <paramref name="tFrameIndex"/>, with its rows and columns shifted.</summary>
+    private static float[] FrameGridPositions(int tFrameIndex, int hPatched, int wPatched, int rowOffset, int columnOffset)
+    {
+        int seqLen = checked(hPatched * wPatched);
+        float[] positions = new float[checked(seqLen * 3)];
+        int s = 0;
+        for (int h = 0; h < hPatched; h++)
+        {
+            for (int w = 0; w < wPatched; w++)
+            {
+                positions[s * 3] = tFrameIndex;
+                positions[s * 3 + 1] = h + rowOffset;
+                positions[s * 3 + 2] = w + columnOffset;
+                s++;
+            }
+        }
+        return positions;
+    }
+
     /// <summary>Releases this backend's device tables and any lease held for it. Idempotent. A failed free leaves the
     /// tables tracked, so the next call retries.</summary>
     public void ReleaseGpuTables(IBackend backend)

@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>Per-layer keys and values of a DiT's in-context reference tokens, computed once in a prepass and appended to
-/// the live sequence's keys and values on every step (<see cref="ConcatTokens"/>). Each entry is token-major
+/// the live sequence's keys and values on every step (<see cref="JoinTokens"/>). Each entry is token-major
 /// <c>[1, S_ref, heads, headDim]</c>, keys already normalized and rotated; a layer the prepass skipped has none. Entries
 /// are pinned as activations so they survive the per-step activation sweep; disposing unpins and frees them.</summary>
 public sealed class ReferenceKvCache : IDisposable
@@ -15,13 +15,14 @@ public sealed class ReferenceKvCache : IDisposable
     private readonly Tensor?[] _values;
     private int _disposed;
 
-    private ReferenceKvCache(IBackend backend, Tensor?[] keys, Tensor?[] values, int tokens, long fingerprint)
+    private ReferenceKvCache(IBackend backend, Tensor?[] keys, Tensor?[] values, int tokens, long fingerprint, int? targetGridH)
     {
         _backend = backend;
         _keys = keys;
         _values = values;
         Tokens = tokens;
         Fingerprint = fingerprint;
+        TargetGridH = targetGridH;
     }
 
     /// <summary>Reference tokens per entry.</summary>
@@ -32,6 +33,10 @@ public sealed class ReferenceKvCache : IDisposable
 
     /// <summary>Identity of what the cache was built from, for step-graph signatures.</summary>
     public long Fingerprint { get; }
+
+    /// <summary>The target grid height in patched rows the cache was built for, when the family's reference placement depends on it;
+    /// null when the cache is valid for any target.</summary>
+    public int? TargetGridH { get; }
 
     /// <summary>Layer <paramref name="layer"/>'s keys, or null when the prepass skipped it.</summary>
     public Tensor? Keys(int layer) => _keys[layer];
@@ -44,22 +49,22 @@ public sealed class ReferenceKvCache : IDisposable
     public static long EstimateBytes(int activeLayers, int tokens, int hidden, DType dtype) =>
         2L * activeLayers * tokens * hidden * dtype.SizeInBytes;
 
-    /// <summary>Returns <c>[1, S_live + S_ref, heads, headDim]</c>: <paramref name="live"/>'s tokens, then
-    /// <paramref name="cached"/>'s. Neither input is disposed.</summary>
-    public static Tensor ConcatTokens(IBackend backend, Tensor live, Tensor cached)
+    /// <summary>Joins <paramref name="first"/> and <paramref name="second"/> along the token axis, as <c>[1, S1 + S2, heads, headDim]</c>.
+    /// Neither input is disposed.</summary>
+    internal static Tensor JoinTokens(IBackend backend, Tensor first, Tensor second)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(live);
-        ArgumentNullException.ThrowIfNull(cached);
-        if (live.Shape.Rank != 4 || cached.Shape.Rank != 4 || live.Shape[0] != 1 || cached.Shape[0] != 1
-            || live.Shape[2] != cached.Shape[2] || live.Shape[3] != cached.Shape[3] || live.DType != cached.DType)
+        ArgumentNullException.ThrowIfNull(first);
+        ArgumentNullException.ThrowIfNull(second);
+        if (first.Shape.Rank != 4 || second.Shape.Rank != 4 || first.Shape[0] != 1 || second.Shape[0] != 1
+            || first.Shape[2] != second.Shape[2] || first.Shape[3] != second.Shape[3] || first.DType != second.DType)
         {
             throw new ArgumentException(
-                $"Cached keys/values {cached.Shape} {cached.DType} cannot extend live {live.Shape} {live.DType}; "
+                $"Cached keys/values {second.Shape} {second.DType} cannot join {first.Shape} {first.DType}; "
                 + "both must be [1, S, heads, headDim] of one dtype.");
         }
-        Tensor joined = new(new TensorShape(1, live.Shape[1] + cached.Shape[1], live.Shape[2], live.Shape[3]), live.DType);
-        backend.Concat(joined, [live, cached], 1);
+        Tensor joined = new(new TensorShape(1, first.Shape[1] + second.Shape[1], first.Shape[2], first.Shape[3]), first.DType);
+        backend.Concat(joined, [first, second], 1);
         return joined;
     }
 
@@ -111,7 +116,7 @@ public sealed class ReferenceKvCache : IDisposable
         }
 
         /// <summary>Pins every entry on <paramref name="backend"/> and returns the cache, which now owns them.</summary>
-        public ReferenceKvCache Build(IBackend backend, long fingerprint, string family)
+        public ReferenceKvCache Build(IBackend backend, long fingerprint, string family, int? targetGridH = null)
         {
             ArgumentNullException.ThrowIfNull(backend);
             if (_built)
@@ -132,7 +137,7 @@ public sealed class ReferenceKvCache : IDisposable
             _built = true;
             Logs.Info($"{family}: cached reference keys/values for {active} of {_keys.Length} layers, {_tokens} tokens, "
                 + $"{bytes / (1024 * 1024)} MiB.");
-            return new ReferenceKvCache(backend, _keys, _values, _tokens, fingerprint);
+            return new ReferenceKvCache(backend, _keys, _values, _tokens, fingerprint, targetGridH);
         }
 
         /// <summary>Frees the entries if the cache was never built.</summary>

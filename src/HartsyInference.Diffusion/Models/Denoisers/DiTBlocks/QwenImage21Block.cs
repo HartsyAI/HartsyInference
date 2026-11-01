@@ -159,38 +159,9 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         Tensor attn = _attention!.Forward(backend, modulated, modulated, new AttentionCallContext
         {
             QueryRotation = rope, KeyRotation = rope, ReleaseInputs = true,
-            KvRewrite = prefixed ? new PrefixKv(prefixKey!, prefixValue!) : null,
+            KvRewrite = prefixed ? new ReferenceKvRewrite(prefixKey!, prefixValue!, ReferenceKvOrder.Prepend) : null,
         });
         return FinishBlock(backend, x, attn, mod, seq);
-    }
-
-    /// <summary>Prepends the cached prefix K/V to the target's own <c>[1, S, H, D]</c> K/V.</summary>
-    private sealed class PrefixKv(Tensor key, Tensor value) : IKvRewrite
-    {
-        public (Tensor K, Tensor V) Rewrite(IBackend backend, Tensor k, Tensor v)
-        {
-            TensorShape joint = new(1, key.Shape[1] + k.Shape[1], k.Shape[2], k.Shape[3]);
-            Tensor? keys = null, values = null;
-            try
-            {
-                keys = new(joint, k.DType);
-                backend.Concat(keys, [key, k], 1);
-                values = new(joint, v.DType);
-                backend.Concat(values, [value, v], 1);
-                return (keys, values);
-            }
-            catch
-            {
-                keys?.Dispose();
-                values?.Dispose();
-                throw;
-            }
-            finally
-            {
-                k.Dispose();
-                v.Dispose();
-            }
-        }
     }
 
     /// <summary>The two gated residuals and the MLP between them: <c>x += gate1·attn</c>, then

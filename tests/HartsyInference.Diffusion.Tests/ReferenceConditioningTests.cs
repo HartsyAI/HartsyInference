@@ -81,18 +81,18 @@ public sealed unsafe class ReferenceConditioningTests
     }
 
     [Fact]
-    public void KvCache_ConcatTokens_PutsLiveTokensFirst()
+    public void KvCache_JoinTokens_PutsLiveTokensFirst()
     {
         using IBackend backend = new CpuBackend();
         using Tensor live = Random(new TensorShape(1, 2, 3, 4), 11);
         using Tensor cached = Random(new TensorShape(1, 5, 3, 4), 12);
-        using Tensor joined = ReferenceKvCache.ConcatTokens(backend, live, cached);
+        using Tensor joined = ReferenceKvCache.JoinTokens(backend, live, cached);
         Assert.Equal(new TensorShape(1, 7, 3, 4), joined.Shape);
         ReadOnlySpan<float> j = new((void*)joined.DataPointer, (int)joined.ElementCount);
         Assert.True(j[..24].SequenceEqual(new ReadOnlySpan<float>((void*)live.DataPointer, 24)));
         Assert.True(j[24..].SequenceEqual(new ReadOnlySpan<float>((void*)cached.DataPointer, 60)));
         using Tensor wrongHeads = Random(new TensorShape(1, 5, 2, 4), 13);
-        Assert.Throws<ArgumentException>(() => ReferenceKvCache.ConcatTokens(backend, live, wrongHeads));
+        Assert.Throws<ArgumentException>(() => ReferenceKvCache.JoinTokens(backend, live, wrongHeads));
     }
 
     [Fact]
