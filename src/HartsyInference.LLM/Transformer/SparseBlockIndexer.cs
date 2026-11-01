@@ -6,6 +6,9 @@ namespace HartsyInference.LLM.Transformer;
 /// <summary>MiniMax sparse attention's block selection: every query scores all earlier index keys, max-pools the scores per block of keys, and keeps its top blocks plus the blocks right before it.</summary>
 public static class SparseBlockIndexer
 {
+    /// <summary>The largest dense bias (in elements) built for one layer's step: 1 GiB of F32.</summary>
+    public const long MaxBiasElements = 1L << 28;
+
     private static readonly ConditionalWeakTable<IKvCache, IndexKeyStore> Stores = new();
 
     /// <summary>Appends this step's index keys <c>[tNew * keyLength]</c> to <paramref name="cache"/>'s sequence and returns every key so far; <paramref name="posStart"/> 0 starts the sequence over.</summary>
@@ -25,12 +28,17 @@ public static class SparseBlockIndexer
         int keyCount = keys.Length / headDim;
         int blocks = (keyCount + cfg.BlockSize - 1) / cfg.BlockSize;
         int groupSize = numHeads / cfg.Heads;
+        long biasElements = (long)numHeads * t * keyCount;
+        if (biasElements > MaxBiasElements)
+        {
+            throw new NotSupportedException($"The sparse-attention block bias for {t} tokens over {keyCount} keys needs {biasElements * 4 >> 20} MiB; feed the prompt in chunks of at most {MaxBiasElements / ((long)numHeads * keyCount)} tokens.");
+        }
         int topK = Math.Min(cfg.TopKBlocks, blocks);
         Tensor bias = new(new TensorShape(1, numHeads, t, keyCount), DType.F32);
         Span<float> output = bias.AsSpan<float>();
         output.Fill(float.NegativeInfinity);
         float[] blockScores = new float[blocks];
-        int[] order = new int[blocks];
+        bool[] picked = new bool[blocks];
         for (int h = 0; h < cfg.Heads; h++)
         {
             for (int i = 0; i < t; i++)
@@ -38,6 +46,7 @@ public static class SparseBlockIndexer
                 int position = posStart + i;
                 ReadOnlySpan<float> q = queries.Slice((i * cfg.Heads + h) * headDim, headDim);
                 Array.Fill(blockScores, float.NegativeInfinity);
+                Array.Clear(picked);
                 int visible = Math.Min(keyCount, position + 1);
                 for (int j = 0; j < visible; j++)
                 {
@@ -49,13 +58,15 @@ public static class SparseBlockIndexer
                 }
                 int queryBlock = position / cfg.BlockSize;
                 for (int l = 0; l < cfg.LocalBlocks; l++) blockScores[Math.Max(queryBlock - l, 0)] = float.PositiveInfinity;
-                for (int b = 0; b < blocks; b++) order[b] = b;
-                float[] scores = blockScores;
-                Array.Sort(order, (x, y) => scores[y] != scores[x] ? scores[y].CompareTo(scores[x]) : x.CompareTo(y));
                 for (int s = 0; s < topK; s++)
                 {
-                    int block = order[s];
+                    int block = -1;
+                    for (int b = 0; b < blocks; b++)
+                    {
+                        if (!picked[b] && (block < 0 || blockScores[b] > blockScores[block])) block = b;
+                    }
                     if (float.IsNegativeInfinity(blockScores[block])) break;
+                    picked[block] = true;
                     int begin = block * cfg.BlockSize;
                     int end = Math.Min(begin + cfg.BlockSize, keyCount);
                     for (int g = 0; g < groupSize; g++)

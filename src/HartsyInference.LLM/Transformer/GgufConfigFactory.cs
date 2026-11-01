@@ -190,6 +190,10 @@ public static class GgufConfigFactory
                 LocalBlocks = (int)metadata.GetUInt32($"{arch}.attention.indexer.local_blocks", 0u),
             }
             : null;
+        if (isMiniMaxM3 && (swigluAlpha <= 0f || swigluLimit <= 0f))
+        {
+            throw new InvalidDataException($"minimax-m3 needs positive {arch}.swiglu_alpha and {arch}.swiglu_limit metadata.");
+        }
         if (indexer is not null && (indexer.Heads <= 0 || indexer.KeyLength != headDim || indexer.BlockSize <= 0 || indexer.TopKBlocks <= 0 || heads % indexer.Heads != 0))
         {
             throw new NotSupportedException($"minimax-m3 needs attention.indexer keys with a key_length equal to the head dimension ({headDim}) and head_count dividing the {heads} attention heads.");

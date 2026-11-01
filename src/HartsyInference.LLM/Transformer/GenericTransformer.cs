@@ -1715,6 +1715,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         private Tensor SelectBlocks(IBackend backend, Tensor pre, int t, int posStart, IKvCache cache, int layerIndex, Tensor cos, Tensor sin)
         {
             IndexerConfig index = _cfg.Indexer!;
+            if (backend.Device != DeviceKind.Cpu)
+                throw new NotSupportedException("Sparse-attention indexer models select blocks on the host and run on the CPU backend only.");
             int rotary = _cfg.RotaryDimFor(layerIndex);
             Tensor qRaw = new(new TensorShape(1, t, index.Heads, index.KeyLength), DType.F32);
             Project(backend, qRaw, pre, _idxQW!, null, _cfg.LowVramQuant);
