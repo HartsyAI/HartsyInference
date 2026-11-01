@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.396
+
+- **Added: XHToken Spark-X2.6-4B text model.** Dense GELU-gated decoder with fused QKV, a head-wise sigmoid output gate, and sliding or full attention with a partial RoPE, run from a Hugging Face directory on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match an F32 PyTorch script, also with a short sliding window. CUDA, Vulkan and quantized weights are not covered.
+- **Added: Python-style tuple literals in Jinja templates.** `x in ('a', 'b')` and `()` parse, so Spark-X's chat template renders; a parenthesized expression without a comma still groups.
+- **Changed: LFM3 and Spark-X share one head-gated attention helper and one Hugging Face stateful-family loader.** No behavior change for LFM3.
+
 ## alpha.393
 
 - **Added: LiquidAI LFM3-1.7B text model.** Gated short-conv, full-attention and sliding-attention layers with sandwich norms, run from a Hugging Face directory (`config.json`, `model.safetensors`, `tokenizer.json`, `chat_template.jinja`) on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match transformers F32. CUDA, Vulkan, quantized weights and packed documents are not covered. The weights are under the LFM Open License v1.0, which allows commercial use only below USD 10M annual revenue.
