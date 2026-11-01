@@ -27,6 +27,28 @@ public enum ActivationKind
 
     /// <summary>ReLU² (squared ReLU, non-gated FFN). Nemotron.</summary>
     ReluSquared,
+
+    /// <summary>Clamped alpha-SwiGLU (MiniMax-M3): <c>(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)</c> with <c>g = min(gate, limit)</c>; alpha and limit come from the config.</summary>
+    SwigluOai,
+}
+
+/// <summary>Block-max "lightning indexer" of MiniMax Sparse Attention: per query and per KV group it scores every key with a small dot-product branch, max-pools the scores over blocks of keys and keeps its top-k blocks after boosting the local ones, which count against k.</summary>
+public sealed record IndexerConfig
+{
+    /// <summary>Index heads; one per KV head, so each KV group makes its own block selection.</summary>
+    public required int Heads { get; init; }
+
+    /// <summary>Channels of an index head and of the single index key.</summary>
+    public required int KeyLength { get; init; }
+
+    /// <summary>Keys pooled into one scored block.</summary>
+    public required int BlockSize { get; init; }
+
+    /// <summary>Blocks each query attends, the forced local ones included.</summary>
+    public required int TopKBlocks { get; init; }
+
+    /// <summary>Blocks up to and including the query's own that are always selected.</summary>
+    public required int LocalBlocks { get; init; }
 }
 
 /// <summary>Where the per-sublayer norm sits relative to the residual: <see cref="PreNorm"/> (Llama/Qwen/Gemma: norm the input to attn/FFN) vs <see cref="PostNorm"/> (OLMo-2: attn/FFN read the <i>raw</i> residual and their output is normed before the add — <c>x = x + norm(attn(x))</c>, <c>x = x + norm(mlp(x))</c>; no input/pre-FFN norm).</summary>
@@ -76,6 +98,12 @@ public sealed record MoeConfig
 
     /// <summary>Expert/shared-expert FFN activation; default SiLU (SwiGLU: Qwen-MoE/Mixtral/DeepSeek), Gemma-4's MoE layers use <see cref="ActivationKind.GeluTanh"/> (GeGLU), matching its dense FFN.</summary>
     public ActivationKind Activation { get; init; } = ActivationKind.Silu;
+
+    /// <summary>Sigmoid gain of <see cref="ActivationKind.SwigluOai"/>.</summary>
+    public float SwigluAlpha { get; init; }
+
+    /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/>.</summary>
+    public float SwigluLimit { get; init; }
 
     /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>); 0 (default) makes every layer MoE.</summary>
     public int FirstDenseLayers { get; init; }
@@ -190,6 +218,15 @@ public sealed record TransformerConfig
 
     /// <summary>FFN activation. Default SiLU (SwiGLU); Gemma uses <see cref="ActivationKind.GeluTanh"/>.</summary>
     public ActivationKind Activation { get; init; } = ActivationKind.Silu;
+
+    /// <summary>Sigmoid gain of <see cref="ActivationKind.SwigluOai"/> in the dense FFN.</summary>
+    public float SwigluAlpha { get; init; }
+
+    /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/> in the dense FFN.</summary>
+    public float SwigluLimit { get; init; }
+
+    /// <summary>MiniMax Sparse Attention indexer, present on every layer that carries indexer weights; null for dense attention.</summary>
+    public IndexerConfig? Indexer { get; init; }
 
     /// <summary>Whether the FFN is gated (SwiGLU/GeGLU: <c>down(act(gate(x)) · up(x))</c>, the Llama/Qwen/Gemma default) or a plain non-gated MLP (<c>down(act(up(x)))</c>, no <c>gate_proj</c>) for GPT-2/Falcon/BLOOM/MPT/Nemotron/StarCoder.</summary>
     public bool GatedFfn { get; init; } = true;

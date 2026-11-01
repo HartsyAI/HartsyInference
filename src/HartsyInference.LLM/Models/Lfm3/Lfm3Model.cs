@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Models.Shared;
 using HartsyInference.LLM.Ssm;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
@@ -302,36 +303,8 @@ public sealed unsafe class Lfm3Model : ISsmModel
         cos.Dispose();
         sin.Dispose();
 
-        Tensor qMh = new(new TensorShape(1, hq, seq, hd), DType.F32);
-        Tensor kMh = new(new TensorShape(1, hkv, seq, hd), DType.F32);
-        Tensor vMh = new(kMh.Shape, DType.F32);
-        backend.Permute0213(qMh, q, seq, hq, hd);
-        backend.Permute0213(kMh, k, seq, hkv, hd);
-        backend.Permute0213(vMh, v, seq, hkv, hd);
-        q.Dispose();
-        k.Dispose();
-        v.Dispose();
-        KvAttentionCall call = new()
-        {
-            KvLength = _pos + seq,
-            QueryOffset = _pos,
-            SlidingWindow = Config.Layers[i] == Lfm3LayerKind.SlidingAttention ? Config.SlidingWindow : 0,
-        };
-        Tensor attended = _attention.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, _kv, i, i, call);
-
-        Tensor flat = new(new TensorShape(1, seq, hq * hd), DType.F32);
-        backend.Permute0213(flat, attended, hq, seq, hd);
-        attended.Dispose();
-        // The shared head gate multiplies by 2*sigmoid; halving restores sigmoid.
-        backend.Ltx2HeadGate(flat, gateLogits, seq, hq, hd);
-        gateLogits.Dispose();
-        Tensor gated = new(flat.Shape, DType.F32);
-        backend.Scale(gated, flat, 0.5f);
-        flat.Dispose();
-        Tensor output = new(new TensorShape(1, seq, Config.HiddenSize), DType.F32);
-        backend.Linear(output, gated, W($"{p}.o_proj.weight"), null);
-        gated.Dispose();
-        return output;
+        int window = Config.Layers[i] == Lfm3LayerKind.SlidingAttention ? Config.SlidingWindow : 0;
+        return HeadGatedAttention.Attend(backend, _attention, _kv, i, q, k, v, gateLogits, _pos, window, W($"{p}.o_proj.weight"));
     }
 
     /// <summary>One projection reshaped to <c>[1, seq, heads, headDim]</c> and, when <paramref name="norm"/> is set, RMS-normalized per head.</summary>
@@ -353,7 +326,7 @@ public sealed unsafe class Lfm3Model : ISsmModel
     private void BuildZeroTailRope(Tensor cos, Tensor sin, int seq, int layer)
     {
         int hd = Config.HeadDim, half = hd / 2;
-        Lfm3RopeParameters rope = Config.RopeOf(layer);
+        LayerRopeParameters rope = Config.RopeOf(layer);
         RopeTables.BuildRope(cos, sin, seq, _pos, hd, hd, rope.Theta, RopeScaling.None);
         float* c = (float*)cos.DataPointer;
         float* s = (float*)sin.DataPointer;

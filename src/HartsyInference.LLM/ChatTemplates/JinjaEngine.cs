@@ -8,7 +8,11 @@ public sealed class JinjaEngine
 {
     private readonly List<Node> _program;
 
-    public JinjaEngine(string template) => _program = Parser.Parse(Lexer.Lex(template));
+    /// <summary>Compiles <paramref name="template"/>; like Jinja2's default (<c>keep_trailing_newline=False</c>), one newline at the very end of the source is not part of the output.</summary>
+    public JinjaEngine(string template) => _program = Parser.Parse(Lexer.Lex(StripTrailingNewline(template)));
+
+    private static string StripTrailingNewline(string template) =>
+        template.EndsWith("\r\n", StringComparison.Ordinal) ? template[..^2] : template.EndsWith('\n') ? template[..^1] : template;
 
     /// <summary>Renders the template against <paramref name="context"/> (variable name → value; values are string/bool/long/double/List&lt;object?&gt;/Dictionary&lt;string,object?&gt;/null).</summary>
     public string Render(Dictionary<string, object?> context)

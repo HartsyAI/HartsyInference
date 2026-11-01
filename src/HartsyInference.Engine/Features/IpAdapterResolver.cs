@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
@@ -232,7 +233,7 @@ public static class IpAdapterResolver
             return await ModelDownloader.EnsureSideModelAsync(dl.BinAsset, null, ct).ConfigureAwait(false);
         }
         throw new InvalidOperationException(
-            $"IP-Adapter model '{adapterModel}' was not found under '{Path.Combine(RepoPaths.ModelsRoot(), "ipadapter")}'.");
+            $"IP-Adapter model '{adapterModel}' was not found under '{ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.Ipadapter)}'.");
     }
 
     /// <summary>FaceID image encoding: per reference image detect the strongest face, align it to the ArcFace template, embed with ArcFace IR-50, then average the L2-normalized embeddings and renormalize. Returns <c>[1, 512]</c>.</summary>
@@ -569,7 +570,7 @@ public static class IpAdapterResolver
                 string arcFacePath = ModelFileLocator.Find(ArcFaceWeightsFile, _ipaFolders)
                     ?? throw new InvalidOperationException(
                         $"IP-Adapter FaceID needs the ArcFace face-embedding weights at "
-                        + $"'{Path.Combine(RepoPaths.ModelsRoot(), "ipadapter", ArcFaceWeightsFile)}'. Convert insightface buffalo_l's "
+                        + $"'{ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.Ipadapter, ArcFaceWeightsFile)}'. Convert insightface buffalo_l's "
                         + "w600k_r50.onnx with tests/python-reference/convert_arcface_onnx.py.");
                 arcFaceLoader = new SafeTensorsLoader();
                 arcFaceLoader.Load(arcFacePath);
@@ -662,7 +663,7 @@ public static class IpAdapterResolver
         string root = RepoPaths.ModelsRoot();
         foreach (string sub in DetectorFolders)
         {
-            string dir = Path.Combine(root, sub);
+            string dir = Path.Combine(root, ModelFolders.MapSubdir(sub));
             if (!Directory.Exists(dir))
             {
                 continue;

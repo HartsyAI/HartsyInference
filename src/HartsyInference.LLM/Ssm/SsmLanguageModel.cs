@@ -1,6 +1,7 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.LLM.Models.Spark;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -49,28 +50,47 @@ public sealed class SsmLanguageModel : IDisposable
         }
     }
 
-    /// <summary>Loads the LiquidAI LFM3 Hugging Face directory <paramref name="directory"/>: the decoder plus a tokenizer from <c>tokenizer.json</c> and the template from <c>chat_template.jinja</c>.</summary>
+    /// <summary>True for the Hugging Face <c>model_type</c> values <see cref="LoadHuggingFace"/> loads.</summary>
+    public static bool IsHuggingFaceFamily(string modelType) => modelType is Lfm3Config.ModelType or SparkConfig.ModelType;
+
+    /// <summary>Loads a Hugging Face directory of a family that carries its own state: the decoder plus a tokenizer from <c>tokenizer.json</c> and the template from <c>chat_template.jinja</c>.</summary>
     /// <param name="maxSequenceLength">Longest sequence (prompt plus generation) the model accepts.</param>
-    public static SsmLanguageModel LoadLfm3(string directory, int maxSequenceLength)
+    /// <exception cref="NotSupportedException"><paramref name="modelType"/> is not one <see cref="IsHuggingFaceFamily"/> accepts.</exception>
+    public static SsmLanguageModel LoadHuggingFace(string directory, string modelType, int maxSequenceLength)
     {
-        Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
+        (ISsmModel model, string bos, string eos, int bosId, int eosId) = modelType switch
+        {
+            Lfm3Config.ModelType => LoadLfm3(directory, maxSequenceLength),
+            SparkConfig.ModelType => LoadSpark(directory, maxSequenceLength),
+            _ => throw new NotSupportedException($"'{modelType}' is not a Hugging Face family this loader handles."),
+        };
         try
         {
-            using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
-            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, [model.Config.EosTokenId], "<|startoftext|>", "<|im_end|>");
-            if (tokenizer.BosId != model.Config.BosTokenId || tokenizer.EosId != model.Config.EosTokenId)
+            (ILlmTokenizer tokenizer, IChatTemplate template) = HfChatAssets.Load(directory, [eosId], bos, eos);
+            if (tokenizer.BosId != bosId || tokenizer.EosId != eosId)
             {
                 throw new InvalidDataException(
-                    $"tokenizer.json maps <|startoftext|> to {tokenizer.BosId} and <|im_end|> to {tokenizer.EosId}; config.json says {model.Config.BosTokenId} and {model.Config.EosTokenId}.");
+                    $"tokenizer.json maps {bos} to {tokenizer.BosId} and {eos} to {tokenizer.EosId}; config.json says {bosId} and {eosId}.");
             }
-            IChatTemplate template = new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja")));
-            return new SsmLanguageModel(model, Lfm3Config.ModelType, tokenizer, template);
+            return new SsmLanguageModel(model, modelType, tokenizer, template);
         }
         catch
         {
             model.Dispose();
             throw;
         }
+    }
+
+    private static (ISsmModel, string, string, int, int) LoadLfm3(string directory, int maxSequenceLength)
+    {
+        Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
+        return (model, "<|startoftext|>", "<|im_end|>", model.Config.BosTokenId, model.Config.EosTokenId);
+    }
+
+    private static (ISsmModel, string, string, int, int) LoadSpark(string directory, int maxSequenceLength)
+    {
+        SparkModel model = SparkModel.Load(directory, maxSequenceLength);
+        return (model, "<｜start▁of▁sentence｜>", "<｜end▁of▁sentence｜>", model.Config.BosTokenId, model.Config.EosTokenId);
     }
 
     public void Dispose()

@@ -1,14 +1,15 @@
 # MiniMax-M3.1-Flash — architecture and checkpoint notes
 
 Source snapshot 2026-11-01: `MiniMaxAI/MiniMax-M3.1-Flash` (`model_type: minimax_m3_vl`, `MiniMaxM3SparseForConditionalGeneration`) and
-transformers 5.22.1's native `minimax_m3_vl` (`modeling_minimax_m3_vl.py`, a library, not remote code). **Not implemented in the engine.** This
-records what the checkpoint and the reference contain so the port starts from facts. Where the checkpoint or the reference and this note disagree, they are right.
+transformers 5.22.1's native `minimax_m3_vl` (`modeling_minimax_m3_vl.py`, a library, not remote code). This records what the checkpoint and the reference contain so the port starts from facts. Where the checkpoint or the reference and this note disagree, they are right.
 
-## Why it is not built yet
+## Engine status
 
-The checkpoint is 252 GB in 48 shards (about 428B parameters, 23B active), so nothing here has been run on real weights, and the CPU backend
-widens quantized weights to F32. The port needs three pieces the engine does not have: a sparse-attention indexer, a binding of this checkpoint's
-two quantized layouts to the engine's existing block-scale decoders (see below), and a vision tower. Each needs real verification before it counts as done.
+The text decoder is in the engine: `MiniMaxM3HfLoader` reads the release directory's text layers (MXFP8 attention, NVFP4 experts) and the host-side sparse indexer runs on the CPU backend. It is checked against a tiny model in the release layout and against real weight rows. Still missing: a device indexer, a placement path that keeps quantized weights resident (the real model is about 250 GB), and the vision tower. Hosting the directory through `TextService` is the next step and has its own PR.
+
+## Why the real model cannot run yet
+
+The checkpoint is 252 GB in 48 shards (about 428B parameters, 23B active), and the CPU backend widens quantized weights to F32 (over 1 TB), so nothing here has been run end to end. Running it needs the device indexer and quantized placement, and the vision tower is not built. Each needs real verification before it counts as done.
 
 ## Text decoder
 

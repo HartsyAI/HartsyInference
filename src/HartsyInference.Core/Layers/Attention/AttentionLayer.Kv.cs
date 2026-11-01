@@ -41,8 +41,10 @@ public sealed partial class AttentionLayer
             if (call.KvLength > keys.Shape[2] || call.KvLength > values.Shape[2])
                 throw new ArgumentException($"{call.KvLength} keys do not fit buffers of {keys.Shape[2]} and {values.Shape[2]} rows.", nameof(call));
             attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
-            backend.Attention(AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
-                call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes));
+            AttentionCall flash = AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
+                call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes);
+            if (call.Bias is not null) flash = flash with { Mask = flash.Mask with { Bias = call.Bias } };
+            backend.Attention(in flash);
             if (ownQ) qMh.Dispose();
             if (source is null)
             {
@@ -106,8 +108,8 @@ public sealed partial class AttentionLayer
     public Tensor AttendDevice(IBackend backend, Tensor qMh, Tensor keys, Tensor values, ulong devicePositions,
         in KvAttentionCall call, bool consumeQuery = true)
     {
-        if (call.Sinks is not null || call.AlibiSlopes is not null)
-            throw new NotSupportedException("The device-position attention carries neither sinks nor ALiBi.");
+        if (call.Sinks is not null || call.AlibiSlopes is not null || call.Bias is not null)
+            throw new NotSupportedException("The device-position attention carries no sinks, ALiBi or bias.");
         CheckKvOperands(qMh, keys);
         Tensor attn = new(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
         try

@@ -130,6 +130,69 @@ public static class ModelCatalog
                         Sha256 = "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818" },
                 },
             },
+            new CatalogEntry
+            {
+                // Nanbeige4.3-33B (Apache-2.0): a plain Llama architecture (52 layers, hidden 7168, GQA 56/8, rope theta 1.2e8, vocab 166912), so the
+                // existing GGUF transformer path runs it. The header of bartowski's GGUF matches config.json, and its SentencePiece tokenizer and chat
+                // template reproduce the ids of the checkpoint's own tokenizer through transformers. No full-model run: the weights do not fit the dev box
+                // (the CPU backend widens GGUF weights to F32), and no GPU run yet.
+                Id = "nanbeige43", Modality = txt, DisplayName = "Nanbeige4.3 (33B, dense Llama)",
+                Architecture = "Llama dense transformer, GQA 56/8, rope theta 1.2e8", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/Nanbeige_Nanbeige4.3-33B-GGUF", RepoPath = "Nanbeige_Nanbeige4.3-33B-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/nanbeige43", Role = "transformer",
+                        Sha256 = "2cef79855ca47ee6571e166db32a07089e34f3cf78e0397b262d124ddb814c37" },
+                },
+            },
+
+            new CatalogEntry
+            {
+                // XHToken Spark-X2.6-4B (Apache-2.0): dense GELU-gated decoder, fused QKV, head-wise sigmoid output gate, sliding (512) and
+                // full attention with a partial RoPE (SparkModel, Hugging Face directory). CPU logits and a 12-token greedy decode match an F32
+                // PyTorch script written from modeling_spark.py, including with a lowered sliding window; no CUDA or Vulkan run yet. Pass the
+                // downloaded directory as the model path; the Text path reads it as a Hugging Face checkpoint.
+                Id = "spark-x2.6", Modality = txt, DisplayName = "Spark-X2.6 (4B, gated attention)",
+                Architecture = "dense GELU decoder, head-wise gated GQA, sliding/full attention", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model-00001-of-00005.safetensors", TargetSubdir = "LLM/spark", Role = "transformer",
+                        Sha256 = "9ba8a59a47ce4197d5c749c76c04272e0b4b880747b31b9167a82d8757e90665" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model-00002-of-00005.safetensors", TargetSubdir = "LLM/spark", Role = "transformer",
+                        Sha256 = "f0cad973670dda858a177d62a1845f9ec3c3e2a7a1cdbd34f98ab6789fbd452d" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model-00003-of-00005.safetensors", TargetSubdir = "LLM/spark", Role = "transformer",
+                        Sha256 = "479c8aecd24d1d4c6c2243541b36acc6a84df4c0706a7ccaacda748eac46b8e8" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model-00004-of-00005.safetensors", TargetSubdir = "LLM/spark", Role = "transformer",
+                        Sha256 = "766cd843c58676b0be533b465368a76f574f36bea074f4d16f7e37d910423d08" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model-00005-of-00005.safetensors", TargetSubdir = "LLM/spark", Role = "transformer",
+                        Sha256 = "e2cb22cc6aa1dccdc30042170841058a1a8cffb7e9eb57356c86ae14fc4ca0e3" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "model.safetensors.index.json", TargetSubdir = "LLM/spark", Role = "config",
+                        Sha256 = "77a11d49b279b5e44fcb1f2453f71a8023237f93992fe5275d842e149d896edd" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "config.json", TargetSubdir = "LLM/spark", Role = "config",
+                        Sha256 = "767161ece8ed2891e44345afdf98d29c1cacb964116cb6db7d20dc1c757490ad" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "tokenizer.json", TargetSubdir = "LLM/spark", Role = "tokenizer",
+                        Sha256 = "710cce15cf3565674c499f9413997c6e8101f2bdd96245cff8f0311fb501248c" },
+                    new() { Repo = "XHToken/Spark-X2.6-4B", RepoPath = "chat_template.jinja", TargetSubdir = "LLM/spark", Role = "chat template",
+                        Sha256 = "480576bd2ef80726a0dba6406d72ca37f4f4f9ca747c7f1c8d159dbdf40f6929" },
+                },
+            },
+
+            new CatalogEntry
+            {
+                // Recursive Flint (Apache-2.0): 39.8B-total / 2.5B-active MoE for coding agents. 49 layers (2 dense, 47 MoE: 256 routed experts with
+                // sigmoid routing and normalized top-6, plus an ungated shared expert), per-head QK RMSNorm, learned attention sinks, sliding-window (513)
+                // RoPE layers and full-attention layers without positional encoding. The official int4 GGUF (Q4_1, 26 GB) loads through the `flint`
+                // architecture. A tiny random Flint matches transformers through the real GGUF path, and the official GGUF's header, tokenizer and chat
+                // template match the checkpoint's. No full-model run: it does not fit the dev box (the CPU backend widens GGUF weights to F32), and no GPU run yet.
+                // CliDrivable stays off until the full model has generated once.
+                Id = "flint", Modality = txt, DisplayName = "Flint (40B-A2.5B, coding MoE)",
+                Architecture = "MoE 256 experts top-6 + shared expert, sinks, sliding/NoPE attention", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "RecursiveSI/flint-int4-gguf", RepoPath = "flint-int4-q4_1.gguf", TargetSubdir = "LLM/flint", Role = "transformer",
+                        Sha256 = "43c07baccdba42eb7528a9630ee15699b1942c297291dc1b39a061f508ee1a4b" },
+                },
+            },
             // Qwen3.5/3.6 Gated-DeltaNet hybrid (SSM path, Qwen35Model). `qwen35` = dense 0.8B, verified 2026-07-27
             // for BOTH text and vision (its mmproj sidecar downloads alongside → `hartsy text -m qwen35 -i img.png`
             // captions/OCRs correctly). See MODEL_STATUS_LLM.md + docs/Design/TRENDING_MODELS_PHASED_PLAN.md.

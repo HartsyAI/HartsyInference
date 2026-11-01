@@ -516,6 +516,9 @@ public static class TestPaths
         /// <summary>LiquidAI/LFM3-1.7B Hugging Face directory (<c>config.json</c> and <c>model.safetensors</c>).</summary>
         public static string Lfm3Dir => Resolve("LFM3_DIR", Path.Combine(ModelsDir, "llm", "lfm3"));
 
+        /// <summary>XHToken/Spark-X2.6-4B Hugging Face directory (<c>config.json</c>, <c>model-*.safetensors</c>, <c>tokenizer.json</c>, <c>chat_template.jinja</c>).</summary>
+        public static string SparkDir => Resolve("SPARK_DIR", Path.Combine(ModelsDir, "llm", "spark"));
+
         /// <summary>Cloudflare Clef Q2_K GGUF. Clef is a 64-layer Qwen3.5 hybrid VLM; its mmproj sidecar is
         /// discovered from the checkpoint directory by <c>TextService</c>.</summary>
         public static string ClefQ2K => Resolve("CLEF_GGUF_PATH", Path.Combine(ModelsDir, "llm", "clef", "Cloudflare_clef-Q2_K.gguf"));
