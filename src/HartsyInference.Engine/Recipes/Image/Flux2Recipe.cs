@@ -1,4 +1,5 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -201,7 +202,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     /// <summary>Ensures the Mistral-Small-3 HF tokenizer.json is present under the models root, downloading the official conversion on first use (Flux.2 Dev only).</summary>
     private static string EnsureMistralTokenizerJson()
     {
-        string path = Path.Combine(RepoPaths.ModelsRoot(), "text_encoders", "mistral3_flux2_tokenizer.json");
+        string path = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.TextEncoders, "mistral3_flux2_tokenizer.json");
         if (!File.Exists(path))
         {
             Logs.Info("[Flux2Recipe] Downloading Mistral tokenizer.json (unsloth/Mistral-Small-3.1-24B-Instruct-2503)...");
