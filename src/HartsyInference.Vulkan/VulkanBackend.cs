@@ -968,7 +968,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             }
         }
         // Outside the scope: Accumulate re-enters through the public ops, exactly as an ordinary caller would.
-        if (weight.LowRankAdjunct is LowRankAdjunct adjunct)
+        if (weight.LowRankAdjunct is { IsActive: true } adjunct)
         {
             LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
         }
@@ -986,7 +986,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 DispatchMatmul(output, input, quantWeight, transposeA: false, transposeB: true, bias: bias);
         }
         // A LoRA that cannot merge into packed blocks rides as an adjunct; outside the scope, as Linear applies it.
-        if (quantWeight.LowRankAdjunct is LowRankAdjunct adjunct)
+        if (quantWeight.LowRankAdjunct is { IsActive: true } adjunct)
         {
             LowRankAdjunctGemm.Accumulate(this, output, input, adjunct);
         }

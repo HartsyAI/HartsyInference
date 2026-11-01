@@ -15,11 +15,12 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Lora;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Anima recipe (Cosmos-Predict2-2B lineage): the single-file checkpoint carries BOTH the DiT trunk and the Anima-specific <c>llm_adapter</c> sub-transformer, while the Qwen-3 0.6B text encoder (<see cref="SideModels.Qwen3_0_6B"/>) and the Qwen-Image 3D-causal VAE (<see cref="SideModels.QwenImageVae"/>) resolve as side models. Lifted from the SwarmUI backend's <c>AnimaLoader</c>; constructs the components and drives generation through <see cref="AnimaRecipePipeline"/>.</summary>
-public sealed class AnimaRecipe : IArchitectureRecipe
+public sealed class AnimaRecipe : IArchitectureRecipe, IReferenceAdapterRecipe
 {
     /// <summary>Anima trains with T5 inputs tokenized to <c>max_length=512</c>; the pipeline right-pads the LlmAdapter output to exactly 512 and throws beyond it, so the T5 ids must be capped here.</summary>
     internal const int T5MaxTokens = 512;
@@ -37,7 +38,12 @@ public sealed class AnimaRecipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora
+        | ImageFeatures.RefEdit;
+
+    /// <summary>Two reference images (the reference adapter reads one, a side-by-side pair of them) plus the init image, which may
+    /// itself be the reference in Reference mode.</summary>
+    public ImageInputLimits InputLimits => new ImageInputLimits(3, ReferencesRequireInitImage: false, MaxReferences: 2);
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "anima", StringComparison.OrdinalIgnoreCase);
@@ -101,10 +107,17 @@ public sealed class AnimaRecipe : IArchitectureRecipe
             AnimaTransformer transformer = new AnimaTransformer(animaConfig);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
+            // The reference adapter, when the request uses one: resolved and read here, and attached on its own gate by the same merge that
+            // applies the request's LoRAs. The pipeline switches the gate per generation, so strength and on/off never rebuild the model.
+            ReferenceAdapterSpec? adapterSpec = context.ReferenceAdapter is null ? null
+                : ReferenceAdapterResolver.Resolve(context.ReferenceAdapter.Length == 0 ? null : context.ReferenceAdapter, context.Cancel);
+            using LoraFile? adapterFile = adapterSpec is null ? null : LoraFile.Load(adapterSpec.Path);
+            AdjunctGate? referenceGate = adapterFile is null ? null : new AdjunctGate();
             MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
                 context,
                 new LoraMergeTargets { Transformer = converted.Transformer },
-                "AnimaRecipe");
+                "AnimaRecipe",
+                adapterFile is null ? null : [new GatedLora(adapterFile, referenceGate!)]);
             transformer.LoadWeights(converted.Transformer);
             AnimaLlmAdapter llmAdapter = new AnimaLlmAdapter(animaConfig.LlmAdapter);
             llmAdapter.LoadWeights(converted.LlmAdapter);
@@ -143,7 +156,8 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
             AnimaPipeline pipeline = new AnimaPipeline(context.Backend, transformer, llmAdapter, vae, vaeEncoder, animaConfig);
             Logs.Info("[AnimaRecipe] Anima ready (scheduler=FlowMatchEuler shift=3.0).");
-            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders, loraStack);
+            return new AnimaRecipePipeline(pipeline, qwen, tokenizer, t5Tokenizer, transformer, llmAdapter, context.Backend, checkpoint, loaders,
+                loraStack, referenceGate, adapterSpec);
         }
         catch (Exception ex)
         {

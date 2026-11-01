@@ -99,12 +99,12 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         ArgumentNullException.ThrowIfNull(weights);
         string p = prefix ?? string.Empty;
 
-        _patchProjW = EnsureF32(Get(weights, $"{p}trunk.patch_embed.proj.weight"));
-        _patchProjB = EnsureF32(Get(weights, $"{p}trunk.patch_embed.proj.bias"));
+        _patchProjW = TensorCasts.EnsureF32(Get(weights, $"{p}trunk.patch_embed.proj.weight"));
+        _patchProjB = TensorCasts.EnsureF32(Get(weights, $"{p}trunk.patch_embed.proj.bias"));
 
         // Positional embeds are optional (absent in some exported variants); skip cleanly when missing.
-        if (weights.TryGetValue($"{p}trunk.pos_embed", out Tensor? pe)) _posEmbed = EnsureF32(pe);
-        if (weights.TryGetValue($"{p}trunk.pos_embed_window", out Tensor? pw)) _posEmbedWindow = EnsureF32(pw);
+        if (weights.TryGetValue($"{p}trunk.pos_embed", out Tensor? pe)) _posEmbed = TensorCasts.EnsureF32(pe);
+        if (weights.TryGetValue($"{p}trunk.pos_embed_window", out Tensor? pw)) _posEmbedWindow = TensorCasts.EnsureF32(pw);
 
         for (int i = 0; i < _blocks.Length; i++)
         {
@@ -113,8 +113,8 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
 
         for (int s = 0; s < 4; s++)
         {
-            _neckConvW[s] = EnsureF32(Get(weights, $"{p}neck.convs.{3 - s}.conv.weight"));
-            _neckConvB[s] = EnsureF32(Get(weights, $"{p}neck.convs.{3 - s}.conv.bias"));
+            _neckConvW[s] = TensorCasts.EnsureF32(Get(weights, $"{p}neck.convs.{3 - s}.conv.weight"));
+            _neckConvB[s] = TensorCasts.EnsureF32(Get(weights, $"{p}neck.convs.{3 - s}.conv.bias"));
         }
     }
 
@@ -323,8 +323,6 @@ public sealed unsafe class HieraImageEncoder : ISamImageEncoder
         backend.Transpose2D(t, v, h * w, c);
         return t.Reshape(new TensorShape(b, c, h, w));
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType != DType.F32 ? t.CastTo(DType.F32) : t;
 
     private static Tensor Get(IReadOnlyDictionary<string, Tensor> weights, string key)
     {

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -120,6 +121,94 @@ public sealed unsafe class AnimaTransformer : IDisposable
         _rope.ReleaseGpuTables(backend);
     }
 
+    /// <summary>Caches a reference latent's keys and values for <see cref="Forward"/>. The reference runs once through every block at
+    /// timestep 0, on the RoPE positions <paramref name="placement"/> gives it against a target grid of
+    /// <paramref name="targetGridH"/> patched rows. The cache records that grid, so <see cref="Forward"/> refuses it for any other target, including one whose
+    /// reference placement would not change.</summary>
+    /// <param name="referenceLatent">The reference latent <c>[1, C, H, W]</c>, normalized as the target latent is.</param>
+    /// <param name="identity">The reference's identity and the adapter's effective strength; folded into the fingerprint so a
+    /// different reference or strength rebuilds the cache.</param>
+    /// <returns>The cache, which the caller disposes.</returns>
+    public ReferenceKvCache BuildReferenceCache(IBackend backend, Tensor referenceLatent, int targetGridH,
+        ReferencePlacement placement, long identity)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(referenceLatent);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(targetGridH);
+        if (referenceLatent.Shape.Rank != 4 || referenceLatent.Shape[0] != 1 || referenceLatent.Shape[1] != _config.InChannels)
+            throw new ArgumentException(
+                $"A reference latent is [1, {_config.InChannels}, H, W]; got {referenceLatent.Shape}.", nameof(referenceLatent));
+        if (referenceLatent.DType != DType.F32)
+            throw new NotSupportedException($"AnimaTransformer caches references from F32 latents; got {referenceLatent.DType}.");
+        int latentH = (int)referenceLatent.Shape[2];
+        int latentW = (int)referenceLatent.Shape[3];
+        int patchH = _config.PatchSize.H;
+        int patchW = _config.PatchSize.W;
+        if (latentH % patchH != 0 || latentW % patchW != 0)
+            throw new ArgumentException(
+                $"Reference latent {latentH}x{latentW} not divisible by patch {patchH}x{patchW}.", nameof(referenceLatent));
+        int gridH = latentH / patchH;
+        int gridW = latentW / patchW;
+
+        Tensor expanded = _config.ConcatPaddingMask ? AppendPaddingMaskChannel(backend, referenceLatent) : referenceLatent;
+        Tensor tokens;
+        try
+        {
+            tokens = PatchEmbed(backend, expanded, 1, (int)expanded.Shape[1], gridH, gridW);
+        }
+        finally
+        {
+            if (!ReferenceEquals(expanded, referenceLatent))
+                DisposeBestEffort(expanded, "expanded reference latent");
+        }
+
+        try
+        {
+            (Tensor temb, Tensor embeddedTimestep) = TimeEmbed(backend, 0f, 1);
+            try
+            {
+                RopeTableLease lease = _rope.AcquireFrameTables(backend, placement.TFrameIndex, gridH, gridW,
+                    placement.RowOffset(targetGridH), placement.ColumnOffset, out Tensor cos, out Tensor sin);
+                try
+                {
+                    return ReferenceKvPrepass.Build(backend, _blocks.Length, Array.Empty<int>(), tokens,
+                        (int i, Tensor stream, out Tensor keys, out Tensor values) => _blocks[i].ForwardPrefix(backend, stream,
+                            embeddedTimestep, temb, cos, sin, _rope, out keys, out values),
+                        ReferenceFingerprint(identity, gridH, gridW, targetGridH, placement), "Anima", targetGridH);
+                }
+                finally
+                {
+                    lease.Dispose();
+                }
+            }
+            finally
+            {
+                temb.Dispose();
+                embeddedTimestep.Dispose();
+            }
+        }
+        finally
+        {
+            tokens.Dispose();
+        }
+    }
+
+    /// <summary>What a <see cref="ReferenceKvCache"/> was built from: the reference's identity and grid, the target grid, and the
+    /// placement. Compare it before reusing a cache; a match means the cache still describes the request.</summary>
+    public static long ReferenceFingerprint(long identity, int referenceGridH, int referenceGridW, int targetGridH,
+        ReferencePlacement placement)
+    {
+        HashCode hash = new();
+        hash.Add(identity);
+        hash.Add(referenceGridH);
+        hash.Add(referenceGridW);
+        hash.Add(targetGridH);
+        hash.Add(placement.TFrameIndex);
+        hash.Add(placement.RowOffset(targetGridH));
+        hash.Add(placement.ColumnOffset);
+        return hash.ToHashCode();
+    }
+
     /// <summary>Forward pass: predicts velocity for one denoising step.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="latent">VAE latent <c>[B, in_channels=16, H, W]</c>.</param>
@@ -127,7 +216,9 @@ public sealed unsafe class AnimaTransformer : IDisposable
     /// <param name="textEmbeds">Refined text features from <see cref="AnimaLlmAdapter"/>, <c>[B, T, 1024]</c>.</param>
     /// <param name="textAttentionMask">Optional padded-text mask <c>[B, T]</c> (1=valid, 0=padded). When non-null,
     /// converted to an additive cross-attn mask.</param>
-    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int[]? textAttentionMask = null)
+    /// <param name="reference">A cache from <see cref="BuildReferenceCache"/> for this target grid, joined into every block. Batch 1 only.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, float timestep, Tensor textEmbeds, int[]? textAttentionMask = null,
+        ReferenceKvCache? reference = null)
     {
         if (latent.Shape.Rank != 4)
             throw new ArgumentException($"Latent must be 4D [B, C, H, W], got {latent.Shape}.", nameof(latent));
@@ -155,6 +246,18 @@ public sealed unsafe class AnimaTransformer : IDisposable
             throw new ArgumentOutOfRangeException(nameof(timestep), "Anima timestep must be finite.");
 
         int batch = (int)latent.Shape[0];
+        if (reference is not null)
+        {
+            if (batch != 1)
+                throw new NotSupportedException($"A cached reference joins at batch 1; got batch {batch}.");
+            int targetGridH = (int)latent.Shape[2] / _config.PatchSize.H;
+            if (reference.TargetGridH is { } cachedGridH && cachedGridH != targetGridH)
+                throw new ArgumentException(
+                    $"The reference cache was built for a target grid of {cachedGridH} rows; this latent has {targetGridH}.", nameof(reference));
+            if (reference.Layers != _blocks.Length)
+                throw new ArgumentException(
+                    $"The reference cache spans {reference.Layers} layers; this model has {_blocks.Length}.", nameof(reference));
+        }
         int latentH = (int)latent.Shape[2];
         int latentW = (int)latent.Shape[3];
         int hidden = _config.HiddenSize;
@@ -212,7 +315,8 @@ public sealed unsafe class AnimaTransformer : IDisposable
         Tensor x = imgTokens;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            Tensor next = _blocks[i].Forward(backend, x, textEmbeds, embeddedTimestep, temb, ropeCos, ropeSin, _rope, crossMask);
+            Tensor next = _blocks[i].Forward(backend, x, textEmbeds, embeddedTimestep, temb, ropeCos, ropeSin, _rope, crossMask,
+                reference?.Keys(i), reference?.Values(i));
             x.Dispose();
             x = next;
             AnimaDebugDump.Dump($"block_{i}", x);

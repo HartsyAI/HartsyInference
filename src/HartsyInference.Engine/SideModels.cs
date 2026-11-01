@@ -405,6 +405,17 @@ public static class SideModels
         Sha256 = "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b"
     };
 
+    /// <summary>The released Anima reference adapter (v2, rank 64): a LoRA read by the reference path. Its weights are CircleStone
+    /// Non-Commercial; Hartsy serves them free of charge.</summary>
+    public static readonly ModelAsset AnimaRefAdapterV2 = new ModelAsset
+    {
+        Repo = "ElectronGirl/anima-ref-adapter",
+        RepoPath = "anima_ref_adapter_v2_r64.safetensors",
+        TargetSubdir = "Lora",
+        Role = "lora",
+        Sha256 = "71dda6079e18d354e16e3347bc49a9b710afd9495c378efbb833d30cac9cb81b",
+    };
+
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
     public static readonly ModelAsset QwenImageVae = new ModelAsset
     {
@@ -460,6 +471,17 @@ public static class SideModels
         TargetSubdir = "VAE",
         TargetName = "MageFlow/mage_vae.safetensors",
         Role = "vae",
+    };
+
+    /// <summary>SDXL VAE: the standalone stabilityai/sdxl-vae build (fp32, MIT). A checkpoint that omits its own VAE takes this one, as SD3 takes <see cref="Sd35Vae"/>. The fp16-fix build is a different file and is not pinned here.</summary>
+    public static readonly ModelAsset SdxlVae = new ModelAsset
+    {
+        Repo = "stabilityai/sdxl-vae",
+        RepoPath = "sdxl_vae.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "SDXL/sdxl_vae.safetensors",
+        Role = "vae",
+        Sha256 = "63aeecb90ff7bc1c115395962d3e803571385b61938377bc7089b36e81e92e2e"
     };
 
     /// <summary>SD3 / SD3.5 VAE — 16-channel autoencoder shared by every SD3.x variant; already diffusers-keyed, so it stages through <see cref="Features.LoaderVaeUtils.LoadFluxVaeF32"/> unchanged. Same mcmonkey/swarm-vaes repo as <see cref="FluxAe"/>, so a SwarmUI install shares the file.</summary>

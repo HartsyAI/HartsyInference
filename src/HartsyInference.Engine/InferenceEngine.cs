@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Engine.Features;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
@@ -283,7 +284,11 @@ public sealed class InferenceEngine : IInferenceEngine
         IArchitectureRecipe recipe = ResolveRecipe(spec);
         ResolvedModelVariant? variant = RecipeResolution.ResolveVariant(recipe.Variants, spec);
         // LoRA, component overrides and the variant are baked into the loaded pipeline, so they are cache identity.
-        string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        // A reference adapter is attached at construction, so the adapter a request uses is identity like a LoRA. Only a recipe that takes
+        // one carries it, so a family without a reference path never rebuilds its pipeline for a reference request.
+        string? referenceAdapter = request is not null && recipe is IReferenceAdapterRecipe ? ReferenceAdapterSettings.RequestedAdapter(request) : null;
+        string referenceKey = referenceAdapter is null ? "" : $"refadapter:{referenceAdapter};";
+        string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{referenceKey}{_placement.CacheKey()}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
@@ -303,6 +308,7 @@ public sealed class InferenceEngine : IInferenceEngine
             Cancel = cancel,
             Components = request?.Components,
             Loras = request?.Loras,
+            ReferenceAdapter = referenceAdapter,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
         // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the

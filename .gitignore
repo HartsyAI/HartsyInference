@@ -71,7 +71,10 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/MuseSpark/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Flint/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/MiniMaxM3/*.safetensors
 !/tests/HartsyInference.ModelAssets.Tests/Fixtures/GgmlCodecs/*.safetensors
+!/tests/HartsyInference.ModelAssets.Tests/Fixtures/MiniMaxM3/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoley/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
@@ -152,3 +155,4 @@ src/HartsyInference.Cuda/Kernels/**/*.ptx
 # Pinned Engram hash constants (dumped from upstream engram.py; embedded into HartsyInference.LLM)
 !/src/HartsyInference.LLM/DeepSeekV41/Engram/Constants/*.bin
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyVideo/*.safetensors
+.model-watch-state.json

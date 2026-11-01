@@ -71,8 +71,10 @@ public sealed record AnimaConfig
     /// <summary>Maximum supported latent grid <c>(T, H, W)</c> in tokens (post-patch). Drives RoPE table sizing.</summary>
     public (int T, int H, int W) MaxSize { get; init; } = (128, 240, 240);
 
-    /// <summary>RoPE NTK frequency scaling per axis. Cosmos default <c>(2.0, 1.0, 1.0)</c>.</summary>
-    public (float T, float H, float W) RopeScale { get; init; } = (2.0f, 1.0f, 1.0f);
+    /// <summary>RoPE NTK frequency scaling per axis, as ComfyUI configures the 16-channel Anima checkpoint
+    /// (<c>comfy/model_detection.py</c>: <c>rope_t/h/w_extrapolation_ratio</c> = 1.0 / 4.0 / 4.0). The diffusers Cosmos
+    /// class default <c>(2.0, 1.0, 1.0)</c> is not what ComfyUI configures for this checkpoint.</summary>
+    public (float T, float H, float W) RopeScale { get; init; } = (1.0f, 4.0f, 4.0f);
 
     /// <summary>RoPE base period before NTK scaling.</summary>
     public float RopeTheta { get; init; } = 10000.0f;
@@ -116,7 +118,7 @@ public sealed record AnimaConfig
         OutChannels = 16,
         PatchSize = (1, 2, 2),
         MaxSize = (128, 240, 240),
-        RopeScale = (2.0f, 1.0f, 1.0f),
+        RopeScale = (1.0f, 4.0f, 4.0f),
         RopeTheta = 10000.0f,
         ConcatPaddingMask = true,
         ConditionDim = 6144,

@@ -1,5 +1,7 @@
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Models.Lfm3;
+using HartsyInference.LLM.Models.Spark;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -46,6 +48,49 @@ public sealed class SsmLanguageModel : IDisposable
             model.Dispose();
             throw;
         }
+    }
+
+    /// <summary>True for the Hugging Face <c>model_type</c> values <see cref="LoadHuggingFace"/> loads.</summary>
+    public static bool IsHuggingFaceFamily(string modelType) => modelType is Lfm3Config.ModelType or SparkConfig.ModelType;
+
+    /// <summary>Loads a Hugging Face directory of a family that carries its own state: the decoder plus a tokenizer from <c>tokenizer.json</c> and the template from <c>chat_template.jinja</c>.</summary>
+    /// <param name="maxSequenceLength">Longest sequence (prompt plus generation) the model accepts.</param>
+    /// <exception cref="NotSupportedException"><paramref name="modelType"/> is not one <see cref="IsHuggingFaceFamily"/> accepts.</exception>
+    public static SsmLanguageModel LoadHuggingFace(string directory, string modelType, int maxSequenceLength)
+    {
+        (ISsmModel model, string bos, string eos, int bosId, int eosId) = modelType switch
+        {
+            Lfm3Config.ModelType => LoadLfm3(directory, maxSequenceLength),
+            SparkConfig.ModelType => LoadSpark(directory, maxSequenceLength),
+            _ => throw new NotSupportedException($"'{modelType}' is not a Hugging Face family this loader handles."),
+        };
+        try
+        {
+            (ILlmTokenizer tokenizer, IChatTemplate template) = HfChatAssets.Load(directory, [eosId], bos, eos);
+            if (tokenizer.BosId != bosId || tokenizer.EosId != eosId)
+            {
+                throw new InvalidDataException(
+                    $"tokenizer.json maps {bos} to {tokenizer.BosId} and {eos} to {tokenizer.EosId}; config.json says {bosId} and {eosId}.");
+            }
+            return new SsmLanguageModel(model, modelType, tokenizer, template);
+        }
+        catch
+        {
+            model.Dispose();
+            throw;
+        }
+    }
+
+    private static (ISsmModel, string, string, int, int) LoadLfm3(string directory, int maxSequenceLength)
+    {
+        Lfm3Model model = Lfm3Model.Load(directory, maxSequenceLength);
+        return (model, "<|startoftext|>", "<|im_end|>", model.Config.BosTokenId, model.Config.EosTokenId);
+    }
+
+    private static (ISsmModel, string, string, int, int) LoadSpark(string directory, int maxSequenceLength)
+    {
+        SparkModel model = SparkModel.Load(directory, maxSequenceLength);
+        return (model, "<｜start▁of▁sentence｜>", "<｜end▁of▁sentence｜>", model.Config.BosTokenId, model.Config.EosTokenId);
     }
 
     public void Dispose()

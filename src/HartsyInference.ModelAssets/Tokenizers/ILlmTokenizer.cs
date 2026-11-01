@@ -9,6 +9,9 @@ public interface ILlmTokenizer
     /// <summary>Ordinary BPE encode with no special-token handling (plain content text).</summary>
     int[] EncodeOrdinary(string text);
 
+    /// <summary>Ordinary encode of text that directly follows a special token; the same as <see cref="EncodeOrdinary"/> unless the tokenizer prefixes only the start of a text (SentencePiece <c>prepend_scheme = first</c>).</summary>
+    int[] EncodeAfterSpecial(string text) => EncodeOrdinary(text);
+
     /// <summary>Decodes ids back to UTF-8 text (byte-level reversed), skipping special/control tokens.</summary>
     string Decode(IReadOnlyList<int> ids);
 

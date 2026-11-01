@@ -1856,7 +1856,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         Tensor gateLogits, int heads, int headDim)
     {
         bool fused = FuseHeadGateIntoQuant && input.DType == DType.F16 && gateLogits.DType == DType.F16
-            && weight.LowRankAdjunct is null
+            && weight.LowRankAdjunct is not { IsActive: true }
             && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi && qi.ConvRotGroupSize > 0
             && CanRunResidentInt8(output, input, weight, qi, 0, -1) && _kernels is not null
             && _kernels.HasFusedGatedConvRotQuant((int)weight.Shape[1], qi.ConvRotGroupSize, srcF16: true, heads, headDim);
@@ -1889,7 +1889,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block — writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
     public unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
-        bool fused = weight.LowRankAdjunct is null && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
+        bool fused = weight.LowRankAdjunct is not { IsActive: true } && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
             && CanRunResidentInt8(output, input, weight, qi, 0, -1);
         LinearImpl(output, input, weight, bias, cacheWeightCast: true, fuseGelu: fused);
         if (!fused) Gelu(output, output);
@@ -1910,7 +1910,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         for (int i = 0; i < ops.Length; i++)
         {
             LinearOp op = ops[i];
-            eligible[i] = GroupedLinear && op.Weight.LowRankAdjunct is null
+            eligible[i] = GroupedLinear && op.Weight.LowRankAdjunct is not { IsActive: true }
                 && op.Weight.DType == DType.I8 && op.Weight.QuantInfo is { RowScale: not null } qi
                 && CanRunResidentInt8(op.Output, input, op.Weight, qi, 0, -1)
                 && (k == 0 || ((int)op.Weight.Shape[1] == k && qi.ConvRotGroupSize == group));
@@ -2035,7 +2035,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         LinearCore(output, input, weight, bias, cacheWeightCast, weightRowOffset, weightRowCount, fuseGelu,
             preGate, preGateHeads, preGateHeadDim);
-        if (weight.LowRankAdjunct is not LowRankAdjunct adjunct)
+        if (weight.LowRankAdjunct is not { IsActive: true } adjunct)
         {
             return;
         }

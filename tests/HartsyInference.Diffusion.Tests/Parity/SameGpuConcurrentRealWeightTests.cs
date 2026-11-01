@@ -21,10 +21,14 @@ namespace HartsyInference.Diffusion.Tests;
 /// class filter-isolated in its own test-host process.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
-public sealed class SameGpuConcurrentRealWeightTests
+public sealed class SameGpuConcurrentRealWeightTests : IDisposable
 {
     private readonly ITestOutputHelper _output;
     public SameGpuConcurrentRealWeightTests(ITestOutputHelper output) => _output = output;
+
+    /// <summary>The first line of the test sets the process-wide knob, skipped or not. Clearing it here keeps a skipped
+    /// run from leaving the device gate off for every later test in the process.</summary>
+    public void Dispose() => KnobStore.Clear(EngineKnobs.SameGpuConcurrent);
 
     [Fact]
     public async Task TwoEnginesOneGpu_ConcurrentGenerations_BitIdenticalToSerialized()

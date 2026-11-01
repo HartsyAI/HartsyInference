@@ -30,6 +30,8 @@ public static class LoraFormatDetector
         bool hasFlux3 = false;
         bool hasMossImage = false;
         bool hasFibo2 = false;
+        bool hasAnima = false;
+        bool hasKrea2 = false;
         bool hasKohyaGeneric = false;
 
         foreach (string key in descriptors.Keys)
@@ -52,6 +54,18 @@ public static class LoraFormatDetector
             if (HasLoraSuffix(key) && Fibo2LoraMapper.IsDistinctive(key))
             {
                 hasFibo2 = true;
+            }
+            // Anima in its dotted spellings. Its `diffusion_model.blocks.N.` roots would otherwise be claimed by the Wan arm, whose
+            // rename table mangles the self_attn.q_proj / output_proj / adaln_modulation names Anima uses.
+            if (HasLoraSuffix(key) && AnimaLoraMapper.IsDistinctive(key))
+            {
+                hasAnima = true;
+            }
+            // Krea 2 under its ComfyUI / ai-toolkit wrapper. Its `diffusion_model.blocks.N.` roots would otherwise be claimed by the
+            // Wan arm, whose rename table has no attn.wq / attn.gate, so every module would match 0 weights and the LoRA would be refused.
+            if (HasLoraSuffix(key) && Krea2LoraMapper.IsDistinctive(key))
+            {
+                hasKrea2 = true;
             }
             // No wrapper prefix at all — the root IS the checkpoint's own key (MiniMax-H3's published Turbo LoRA:
             // `blocks.0.attn.qkv_proj.lora_A.weight`, `token_refiner.blocks.0.mlp.fc1.lora_B.weight`). Recorded
@@ -129,6 +143,12 @@ public static class LoraFormatDetector
             {
                 hasKohyaFluxBlocks = true;
             }
+            // Anima's kohya spelling shares the Wan block root and attention names; its own module names (`self_attn_q_proj`,
+            // `mlp_layer1`) claim it first, for the generic kohya mapper that resolves names against the target weights.
+            else if (AnimaLoraMapper.IsKohyaSpelling(key))
+            {
+                hasKohyaGeneric = true;
+            }
             // Kohya/musubi-tuner Wan: flat `blocks_{i}` (no down/up/mid/double/single) with the Wan
             // attention names as the distinguishing marker.
             else if (key.StartsWith("lora_unet_blocks_", StringComparison.Ordinal)
@@ -164,6 +184,8 @@ public static class LoraFormatDetector
         if (hasFlux3) return LoraFormat.Flux3;
         if (hasMossImage) return LoraFormat.MossImage;
         if (hasFibo2) return LoraFormat.Fibo2;
+        if (hasAnima) return LoraFormat.Anima;
+        if (hasKrea2) return LoraFormat.Krea2;
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
         if (hasZImage) return LoraFormat.ComfyZImageDit;

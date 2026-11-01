@@ -53,7 +53,13 @@ public sealed class BlockStreamingScope : IDisposable
 
         IStreamingBlock[] blocks = new IStreamingBlock[blockCount];
         for (int b = 0; b < blockCount; b++) blocks[b] = denoiser.GetBlock(b);
-        long blockBytes = blocks[0].EstimatedWeightBytes;
+        long[] blockBytes = new long[blockCount];
+        long totalBlockBytes = 0;
+        for (int b = 0; b < blockCount; b++)
+        {
+            blockBytes[b] = blocks[b].EstimatedWeightBytes;
+            totalBlockBytes += blockBytes[b];
+        }
 
         // Both planners preload the shared weights themselves — the resident-prefix one has to do it before it
         // frees and re-sizes a pinned prefix, the all-or-nothing one after the planner's availability query.
@@ -66,7 +72,7 @@ public sealed class BlockStreamingScope : IDisposable
         }
         if (prefix >= blockCount)
         {
-            Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {ByteFormat.Mb(blockBytes)}, " +
+            Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks, {ByteFormat.Mb(totalBlockBytes)} total, " +
                 $"resident prefix {blockCount}, streamed 0.");
             return new BlockStreamingScope(options, blockCount, streamer: null);
         }
@@ -77,9 +83,11 @@ public sealed class BlockStreamingScope : IDisposable
             prefetchAhead: options.PrefetchAhead, retainBehind: 0, backend: options.PerStepTrim ? backend : null);
         denoiser.BeforeBlockForward = i => { if (i >= prefix) streamer.BeforeBlockForward(i - prefix); };
         streamer.Prime();
-        Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks × {ByteFormat.Mb(blockBytes)}, " +
+        long streamedBytes = 0;
+        for (int b = prefix; b < blockCount; b++) streamedBytes += blockBytes[b];
+        Logs.Info($"[VRAM] {options.ModelName}/denoise: {blockCount} blocks, {ByteFormat.Mb(totalBlockBytes)} total, " +
             $"resident prefix {prefix}{(options.Pin?.Resident == true ? " (persistent, no re-upload)" : "")}, " +
-            $"streamed {streamed.Length} ({ByteFormat.Mb(streamed.Length * blockBytes)}/forward), " +
+            $"streamed {streamed.Length} ({ByteFormat.Mb(streamedBytes)}/forward), " +
             $"prefetchAhead={options.PrefetchAhead}, headroom {ByteFormat.Mb(options.HeadroomBytes)}.");
         return new BlockStreamingScope(options, prefix, streamer);
     }
@@ -133,13 +141,12 @@ public sealed class BlockStreamingScope : IDisposable
 
     /// <summary>The <see cref="BlockStreamingPolicy.ResidentPrefix"/> split: trim, measure, park what fits.</summary>
     private static int PlanResidentPrefix(BlockStreamingOptions options, VramPlanner planner,
-        IStreamingBlock[] blocks, long blockBytes)
+        IStreamingBlock[] blocks, long[] blockBytes)
     {
         IBackend backend = options.Backend;
         IStreamableDenoiser denoiser = options.Denoiser;
         ResidentPrefixPin? pin = options.Pin;
         long headroom = options.HeadroomBytes;
-        int blockCount = blocks.Length;
         bool forceStream = planner.Mode == LowVramMode.ForceOn;
 
         backend.PreloadWeights(denoiser.EnumerateSharedWeights());
@@ -174,13 +181,13 @@ public sealed class BlockStreamingScope : IDisposable
         int prefix;
         if (pin is null)
         {
-            prefix = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes, blockCount);
+            prefix = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
         }
         else
         {
             if (pin.PinnedBlocks < 0 || options.TokenLoad > pin.SizedTokens)
             {
-                pin.PinnedBlocks = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes, blockCount);
+                pin.PinnedBlocks = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
                 pin.SizedTokens = options.TokenLoad;
             }
             prefix = pin.PinnedBlocks;
@@ -188,7 +195,7 @@ public sealed class BlockStreamingScope : IDisposable
             {
                 // Re-upload path: free VRAM can be tighter than the sizing generation saw. Squeeze THIS generation
                 // to what fits but keep the pin, so a later one tops back up instead of re-sizing downward forever.
-                int fit = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes, blockCount);
+                int fit = ResidentPrefixSizing.Size(backend.FreeMemoryBytes(), headroom, blockBytes);
                 if (fit < prefix)
                 {
                     Logs.Info($"[VRAM] {options.ModelName}/denoise: pinned prefix {prefix} squeezed to {fit} for " +

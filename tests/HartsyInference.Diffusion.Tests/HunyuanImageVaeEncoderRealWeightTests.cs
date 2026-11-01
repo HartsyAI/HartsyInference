@@ -22,6 +22,7 @@ public sealed class HunyuanImageVaeEncoderRealWeightTests
     [Fact]
     public void EncodeDecodeRoundtrip_ReconstructsTheImage()
     {
+        if (!CudaContext.IsAvailable()) return; // no CUDA device on this machine
         if (!File.Exists(VaePath))
         {
             return; // VAE not downloaded on this machine — nothing to validate against.

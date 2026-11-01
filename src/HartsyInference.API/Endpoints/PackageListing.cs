@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
 using HartsyInference.Engine;
 using HartsyInference.ModelAssets.Checkpoints;
@@ -7,7 +8,7 @@ namespace HartsyInference.API.Endpoints;
 /// <summary>The <c>/admin/packages?root=</c> route: the text model packages under a directory, discovered from disk. Nothing is loaded.</summary>
 internal static class PackageListing
 {
-    /// <summary>Lists the packages under <paramref name="root"/>, or under the default text folder (the <c>LLM</c> folder in the models root) when none is given. The root must be
+    /// <summary>Lists the packages under <paramref name="root"/>, or under the default text folder (the text models folder in the models root) when none is given. The root must be
     /// the models root or a directory under it, and a relative root is taken under it; any other root is a 400. A root that is given but does not exist is a 404, and a
     /// default folder that does not exist lists nothing. Error messages repeat the root as given, never the resolved server path.</summary>
     public static IResult Respond(string? root)
@@ -40,9 +41,9 @@ internal static class PackageListing
         });
     }
 
-    /// <summary>The default scan folder: the text models folder under the models root. The engine names it <c>LLM</c>, so the folder is matched in any case; a
-    /// lowercase guess finds nothing on a case-sensitive filesystem.</summary>
-    internal static string DefaultRoot(string modelsRoot) => CaseInsensitivePath.ResolveDirectory(modelsRoot, "LLM");
+    /// <summary>The default scan folder: the text models folder under the models root, named by its setting (<c>paths.folder.llm</c>) or else
+    /// by its default (<c>llm</c>). A folder spelled in another case, such as the catalog's <c>LLM</c>, is matched too.</summary>
+    internal static string DefaultRoot(string modelsRoot) => CaseInsensitivePath.ResolveDirectory(modelsRoot, ModelFolders.Physical(ModelFolders.Llm));
 
     /// <summary>Whether <paramref name="path"/> is <paramref name="root"/> or lies under it, by name with the platform's case rule. Links are not resolved, so a link
     /// placed under the models root is followed by the scan.</summary>

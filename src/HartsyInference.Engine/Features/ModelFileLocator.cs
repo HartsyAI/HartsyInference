@@ -27,9 +27,9 @@ public static class ModelFileLocator
         {
             return rooted;
         }
-        string[] folders = Array.ConvertAll(subfolders, sub => Path.Combine(root, sub));
+        string[] folders = Array.ConvertAll(subfolders, sub => Path.Combine(root, ModelFolders.MapSubdir(sub)));
         // Case variants come second, so a file the spelled folders hold is still the one returned.
-        return Search(nameOrPath, root, folders) ?? Search(nameOrPath, null, CaseVariants(root, subfolders, folders));
+        return Search(nameOrPath, root, folders) ?? Search(nameOrPath, null, CaseVariants(root, Array.ConvertAll(subfolders, ModelFolders.MapSubdir), folders));
     }
 
     /// <summary>Resolves like <see cref="Find"/> but throws a descriptive error instead of returning null.</summary>

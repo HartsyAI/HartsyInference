@@ -41,6 +41,32 @@ public sealed class SdxlRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.CfgParallel | MemoryCapabilities.ComponentPlacement;
 
+    private static string ResolveComponent(ModelAsset asset, string component, CancellationToken cancel)
+    {
+        string target = ModelDownloader.TargetPath(asset);
+        try
+        {
+            return ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, cancel).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[SdxlRecipe] {component} could not be resolved as a separate file.", ex);
+            throw new InvalidOperationException(
+                $"SDXL: this checkpoint does not bundle {component}, and it could not be resolved as a separate file. "
+                + $"Looked for '{target}'; the download from HuggingFace '{asset.Repo}/{asset.RepoPath}' failed: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>Guards against a file that opens but carries none of the expected tensors.</summary>
+    private static Dictionary<string, Tensor> RequireWeights(Dictionary<string, Tensor> weights, string component, string path)
+    {
+        if (weights.Count == 0)
+        {
+            throw new InvalidOperationException($"SDXL: the {component} file '{path}' contains no usable {component} tensors.");
+        }
+        return weights;
+    }
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -57,6 +83,18 @@ public sealed class SdxlRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> clipLWeights = WeightStaging.ToOwnedF32(converted.ClipL);
             Dictionary<string, Tensor> clipGWeights = WeightStaging.ToOwnedF32(converted.ClipG);
             Dictionary<string, Tensor> vaeWeights = WeightStaging.ToOwnedF32(converted.Vae);
+            if (vaeWeights.Count == 0)
+            {
+                // A checkpoint that omits its VAE takes the canonical SDXL VAE from its own file, as the SD3 recipe does.
+                string path = ResolveComponent(SideModels.SdxlVae, "VAE", context.Cancel);
+                (Dictionary<string, Tensor> staged, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(path);
+                using (vaeLoader)
+                {
+                    // The copy is taken before the file is released, as the checkpoint's own weights are.
+                    vaeWeights = RequireWeights(WeightStaging.ToOwnedF32(staged), "VAE", path);
+                }
+                Logs.Info($"[SdxlRecipe] VAE resolved as a separate file: {path}.");
+            }
 
             loraStack = RecipeLoraMerge.Apply(
                 context,

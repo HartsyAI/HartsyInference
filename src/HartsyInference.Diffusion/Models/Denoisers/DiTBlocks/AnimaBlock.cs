@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -160,6 +161,60 @@ public sealed unsafe class AnimaBlock
         if (_mlp2 is not null) yield return _mlp2;
     }
 
+    /// <summary>Runs the reference stream through this block: self-attention and the MLP, with no cross-attention, and the rotated
+    /// keys and values of the self-attention handed back for a <see cref="ReferenceKvCache"/>. Batch 1 only.</summary>
+    /// <param name="keys">This block's rotated keys <c>[1, S, heads, headDim]</c>, for the cache to take over.</param>
+    /// <param name="values">This block's values, as <paramref name="keys"/>.</param>
+    /// <returns>The next reference stream, <c>[1, S, hidden]</c>.</returns>
+    public Tensor ForwardPrefix(IBackend backend, Tensor hidden, Tensor embeddedTimestep, Tensor temb,
+        Tensor ropeCos, Tensor ropeSin, AnimaRope rope, out Tensor keys, out Tensor values)
+    {
+        int batch = (int)hidden.Shape[0];
+        if (batch != 1)
+            throw new NotSupportedException($"A reference prefix runs at batch 1; got batch {batch}.");
+        int seqLen = (int)hidden.Shape[1];
+        TensorShape hiddenShape = new TensorShape(batch, seqLen, _hidden);
+
+        CapturedKv captured = new();
+        Tensor? norm1 = null, gate1 = null, attn1Out = null, afterAttn1 = null, norm3 = null, gate3 = null, ffOut = null, result = null;
+        bool succeeded = false;
+        try
+        {
+            (norm1, gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb, _adaSelfL1!, _adaSelfL2!, batch, seqLen);
+            attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, null, captured);
+            afterAttn1 = new Tensor(hiddenShape, DType.F32);
+            backend.GatedResidualLastDim(afterAttn1, hidden, attn1Out, gate1);
+
+            (norm3, gate3) = ApplyAdaLnLora(backend, afterAttn1, embeddedTimestep, temb, _adaMlpL1!, _adaMlpL2!, batch, seqLen);
+            ffOut = FeedForward(backend, norm3, batch, seqLen);
+            result = new Tensor(hiddenShape, DType.F32);
+            backend.GatedResidualLastDim(result, afterAttn1, ffOut, gate3);
+            if (captured.Key is null || captured.Value is null)
+                throw new InvalidOperationException("Self-attention did not capture the reference's keys and values.");
+            keys = captured.Key;
+            values = captured.Value;
+            succeeded = true;
+            return result;
+        }
+        finally
+        {
+            // Every intermediate is released on both paths; the result and the captured keys and values go to the caller only on success.
+            norm1?.Dispose();
+            gate1?.Dispose();
+            attn1Out?.Dispose();
+            afterAttn1?.Dispose();
+            norm3?.Dispose();
+            gate3?.Dispose();
+            ffOut?.Dispose();
+            if (!succeeded)
+            {
+                result?.Dispose();
+                captured.Key?.Dispose();
+                captured.Value?.Dispose();
+            }
+        }
+    }
+
     /// <summary>Runs self-attention, cross-attention, then MLP, each residual-gated by its own AdaLN-LoRA modulator.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="hidden">Image token sequence <c>[B, S, hidden]</c>.</param>
@@ -170,19 +225,23 @@ public sealed unsafe class AnimaBlock
     /// <param name="ropeSin">RoPE sin table <c>[S, headDim]</c> for image self-attn.</param>
     /// <param name="rope">RoPE applier (re-used across blocks).</param>
     /// <param name="crossAttentionMask">Optional cross-attn mask <c>[B, 1, 1, T]</c>.</param>
+    /// <param name="referenceKeys">Cached reference keys <c>[1, S_ref, heads, headDim]</c> from <see cref="ForwardPrefix"/>, appended after the
+    /// live keys so every image token also attends to the reference. Null for none; given together with <paramref name="referenceValues"/>.</param>
+    /// <param name="referenceValues">The cached reference values, as <paramref name="referenceKeys"/>.</param>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor encoderHidden,
         Tensor embeddedTimestep, Tensor temb,
         Tensor ropeCos, Tensor ropeSin, AnimaRope rope,
-        Tensor? crossAttentionMask)
+        Tensor? crossAttentionMask, Tensor? referenceKeys = null, Tensor? referenceValues = null)
     {
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
         TensorShape hiddenShape = new TensorShape(batch, seqLen, _hidden);
+        IKvRewrite? rewrite = JoinReference(batch, referenceKeys, referenceValues);
 
         // ── 1. AdaLN-LoRA #1 + self-attention ──
         (Tensor norm1, Tensor gate1) = ApplyAdaLnLora(backend, hidden, embeddedTimestep, temb,
             _adaSelfL1!, _adaSelfL2!, batch, seqLen);
-        Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch);
+        Tensor attn1Out = SelfAttention(backend, norm1, ropeCos, ropeSin, rope, batch, rewrite, null);
         norm1.Dispose();
         Tensor afterAttn1 = new Tensor(hiddenShape, DType.F32);
         backend.GatedResidualLastDim(afterAttn1, hidden, attn1Out, gate1);
@@ -266,13 +325,27 @@ public sealed unsafe class AnimaBlock
 
     /// <summary>Self-attention with QK-RMSNorm and 3D RoPE on Q,K. One batch item rotates before the head permute on the device;
     /// AnimaRope's table is position-only, so a batch rotates on the host after it.</summary>
-    private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch)
+    private Tensor SelfAttention(IBackend backend, Tensor x, Tensor ropeCos, Tensor ropeSin, AnimaRope rope, int batch,
+        IKvRewrite? rewrite, IKvCapture? capture)
     {
         QkRotation paired = new(QkRotationKind.RotateHalfPaired, ropeCos, ropeSin);
         AttentionCallContext context = batch == 1
-            ? new AttentionCallContext { QueryRotation = paired, KeyRotation = paired }
+            ? new AttentionCallContext { QueryRotation = paired, KeyRotation = paired, KvRewrite = rewrite, KvCapture = capture }
             : new AttentionCallContext { HeadMajorRotation = new HostRotation(rope, ropeCos, ropeSin) };
         return _selfAttention!.Forward(backend, x, x, in context);
+    }
+
+    /// <summary>Builds the reference join for <see cref="Forward"/>, or null for none. The join runs only on the batch-1 context
+    /// (the head-major route cannot take a rewrite), so a batched call with a reference is refused.</summary>
+    private static IKvRewrite? JoinReference(int batch, Tensor? referenceKeys, Tensor? referenceValues)
+    {
+        if ((referenceKeys is null) != (referenceValues is null))
+            throw new ArgumentException("Reference keys and values come together.", nameof(referenceValues));
+        if (referenceKeys is null)
+            return null;
+        if (batch != 1)
+            throw new NotSupportedException($"A cached reference joins at batch 1; got batch {batch}.");
+        return new ReferenceKvRewrite(referenceKeys, referenceValues!, ReferenceKvOrder.Append);
     }
 
     /// <summary>Cross-attention from image tokens (Q) to text tokens (K, V from the LlmAdapter output). No RoPE; the K/V
@@ -297,7 +370,9 @@ public sealed unsafe class AnimaBlock
         backend.Linear(proj1, x, _mlp1!, null);
 
         Tensor activated = new Tensor(ffShape, DType.F32);
-        backend.Gelu(activated, proj1);
+        // Exact erf GELU matches the reference nn.GELU(); numerics.animaExactGelu=false selects the tanh approximation.
+        if (EngineKnobs.AnimaExactGelu.Value) backend.GeluErf(activated, proj1);
+        else backend.Gelu(activated, proj1);
         proj1.Dispose();
 
         Tensor output = new Tensor(inShape, DType.F32);

@@ -214,7 +214,8 @@ xfm = CosmosTransformer3DModel(
     adaln_lora_dim=256,
     max_size=(128, 240, 240),
     patch_size=(1, 2, 2),
-    rope_scale=(2.0, 1.0, 1.0),
+    # (t, h, w) NTK scales as ComfyUI sets them for the 16-channel Anima checkpoint (comfy/model_detection.py).
+    rope_scale=(1.0, 4.0, 4.0),
     concat_padding_mask=True,
     extra_pos_embed_type=None,
     use_crossattn_projection=False,
