@@ -28,7 +28,7 @@ public sealed class MiniMaxM3HfLoader : IDisposable
 
     /// <summary>Reads <paramref name="directory"/>'s config and weights; matrices are produced as <paramref name="weightType"/> (F32 when a row is not whole blocks), norms, the router and its bias as F32.</summary>
     /// <exception cref="HartsyInferenceException">The directory is not a supported MiniMax-M3 checkpoint.</exception>
-    /// <param name="memoryBudgetBytes">The host memory the weights may take, or 0 for no limit; a checkpoint that would take more is refused before any matrix is read.</param>
+    /// <param name="memoryBudgetBytes">The host memory the weights may take, or 0 for no limit; a checkpoint that would take more is refused before any matrix is read. It counts the weights only: the KV cache and tokenizer are small beside them.</param>
     public static MiniMaxM3HfLoader Load(string directory, DType weightType, long memoryBudgetBytes = 0)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));

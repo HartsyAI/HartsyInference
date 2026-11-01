@@ -966,20 +966,25 @@ public sealed class TextService : ITextService, IDisposable
         if (availableBytes <= 0)
             Logs.Warning("[TextService] Free host memory is unknown, so the MiniMax-M3 memory guard is off; a load larger than RAM will not be refused.");
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "MiniMax-M3");
+        GgufLanguageModel? model = null;
         try
         {
-            slot.Model = HfTextDirectoryLoader.LoadMiniMaxM3(checkpoint, backend, availableBytes);
+            // Everything that can throw is built before the slot is touched, so a failed load leaves nothing half-assigned.
+            model = HfTextDirectoryLoader.LoadMiniMaxM3(checkpoint, backend, availableBytes);
+            slot.Pipeline = new TextGenerationPipeline(model.Transformer, model.Tokenizer, backend, model.Template);
         }
         catch
         {
+            model?.Dispose();
             backend.Dispose();
             throw;
         }
+        slot.Model = model;
         slot.Backend = backend;
-        slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.Scheduler = null;
         slot.PlannedPlacement = null;
         slot.PlacementRequested = null;
+        slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         Logs.Info($"[TextService] Loaded MiniMax-M3 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU backend.");
