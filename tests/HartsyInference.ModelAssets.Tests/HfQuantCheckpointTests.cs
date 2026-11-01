@@ -481,6 +481,33 @@ public sealed class HfQuantCheckpointTests : IDisposable
         }
     }
 
+    /// <summary>The first rows of MiniMax-M3.1-Flash's real attention (MXFP8, U8 E8M0 scales per 32) and expert (compressed-tensors NVFP4, scalar
+    /// global scale as the divisor) weights read back as the values <c>tests/python-reference/dump_minimax_m3_quant_rows.py</c> computed in plain Python.</summary>
+    [Theory]
+    [InlineData("language_model.model.layers.3.self_attn.q_proj.weight", "attn")]
+    [InlineData("language_model.model.layers.3.block_sparse_moe.experts.0.w1.weight", "expert")]
+    public void MiniMaxRealRows_DequantizeToThePythonReference(string weight, string expectedKey)
+    {
+        string dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "MiniMaxM3");
+        using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([Path.Combine(dir, "quant_rows.safetensors")]);
+        using SafeTensorsLoader expected = new();
+        expected.Load(Path.Combine(dir, "quant_rows_expected.safetensors"));
+        Assert.Equal(HfWeightStorage.BlockRecipe, checkpoint.Weights[weight].Storage);
+        using Tensor got = checkpoint.DequantizeF32(weight);
+        ReadOnlySpan<float> want = expected.GetTensor(expectedKey).AsReadOnlySpan<float>();
+        ReadOnlySpan<float> have = got.AsReadOnlySpan<float>();
+        Assert.Equal(want.Length, have.Length);
+        for (int i = 0; i < want.Length; i++) Assert.Equal(want[i], have[i], 1e-7f);
+        Assert.True(want.ToArray().Max(MathF.Abs) > 0.05f);
+    }
+
+    [Fact]
+    public void MiniMaxRealRows_ScaleCompanionsAreNotLogicalWeights()
+    {
+        using HfQuantCheckpoint checkpoint = HfQuantCheckpoint.OpenFiles([Path.Combine(AppContext.BaseDirectory, "Fixtures", "MiniMaxM3", "quant_rows.safetensors")]);
+        Assert.Equal(2, checkpoint.Weights.Count);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Gguf;
@@ -18,6 +19,10 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 public sealed partial class HfQuantCheckpoint : IDisposable
 {
     private const string Weight = ".weight";
+    private const int Mxfp8BlockWidth = 32;
+    private const int Nvfp4BlockWidth = 16;
+    private const string PackedWeight = ".weight_packed";
+    private const string GlobalScaleSuffix = ".weight_global_scale";
     private readonly ShardedSafeTensorSet _set;
     private readonly Dictionary<string, HfQuantWeight> _weights = new(StringComparer.Ordinal);
     private int _disposed;
@@ -119,6 +124,8 @@ public sealed partial class HfQuantCheckpoint : IDisposable
                     return GptqInt4Codec.Dequantize(qweight, scales, qzeros, gIdx, GptqGroupSize);
                 }
             }
+            case HfWeightStorage.BlockRecipe:
+                return DecodeRecipe(w);
             case HfWeightStorage.Nf4:
             {
                 Tensor decoded = DecodeNf4(w);
@@ -130,6 +137,40 @@ public sealed partial class HfQuantCheckpoint : IDisposable
                 using Tensor view = Borrow(name);
                 return view.CastTo(DType.F32);
             }
+        }
+    }
+
+    private Tensor DecodeRecipe(HfQuantWeight w)
+    {
+        List<Tensor> held = [];
+        try
+        {
+            using Tensor stored = _set.GetTensor(w.SourceKey);
+            QuantWeightInfo info = w.Binding!.ToWeightInfo(key =>
+            {
+                Tensor part = key.EndsWith(GlobalScaleSuffix, StringComparison.Ordinal) ? Reciprocal(_set.GetTensor(key)) : _set.GetTensor(key);
+                held.Add(part);
+                return part;
+            });
+            float[] values = WeightDequantizer.ToF32(stored, info);
+            Tensor result = new(w.Shape, DType.F32);
+            values.AsSpan().CopyTo(result.AsSpan<float>());
+            return result;
+        }
+        finally
+        {
+            foreach (Tensor part in held) part.Dispose();
+        }
+    }
+
+    /// <summary>compressed-tensors stores the NVFP4 global scale as the divisor of the dequantized value; the codec multiplies, so it gets the reciprocal.</summary>
+    private static Tensor Reciprocal(Tensor scale)
+    {
+        using (scale)
+        {
+            Tensor inverse = new(scale.Shape, DType.F32);
+            inverse.AsSpan<float>()[0] = 1f / scale.AsReadOnlySpan<float>()[0];
+            return inverse;
         }
     }
 
@@ -253,8 +294,14 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         foreach ((string key, TensorLocation location) in _set.Inventory)
         {
             if (nf4Parts.Contains(key) || key.EndsWith("_scale_inv", StringComparison.Ordinal) || key.EndsWith(".scales", StringComparison.Ordinal)
-                || key.EndsWith(".qzeros", StringComparison.Ordinal) || key.EndsWith(".g_idx", StringComparison.Ordinal))
+                || key.EndsWith(".qzeros", StringComparison.Ordinal) || key.EndsWith(".g_idx", StringComparison.Ordinal)
+                || IsNvfp4Companion(key))
             {
+                continue;
+            }
+            if (key.EndsWith(PackedWeight, StringComparison.Ordinal))
+            {
+                AddNvfp4(key, location);
                 continue;
             }
             if (key.EndsWith(".qweight", StringComparison.Ordinal))
@@ -273,11 +320,59 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             if (location.DType == DType.F8E4M3)
             {
                 RequireCompanion(key + "_scale_inv", key);
+                if (_set.Inventory[key + "_scale_inv"].DType == DType.U8)
+                {
+                    AddMxfp8(key, location);
+                    continue;
+                }
                 Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.Fp8Block, location.DType, key));
                 continue;
             }
             Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.Plain, location.DType, key));
         }
+    }
+
+    /// <summary>MXFP8: a U8 E8M0 scale per 32 inputs of each row, <c>[out, in/32]</c>.</summary>
+    private void AddMxfp8(string key, TensorLocation location)
+    {
+        string scaleKey = key + "_scale_inv";
+        TensorLocation scale = _set.Inventory[scaleKey];
+        if (location.Shape.Rank != 2 || scale.Shape.Rank != 2 || scale.Shape[0] != location.Shape[0] || scale.Shape[1] * Mxfp8BlockWidth != location.Shape[1])
+        {
+            throw new InvalidDataException($"MXFP8 weight '{key}' {location.Shape} needs U8 scales [{location.Shape[0]}, {location.Shape[1] / Mxfp8BlockWidth}]; '{scaleKey}' is {scale.Shape}.");
+        }
+        QuantBinding binding = new(key, QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(1, Mxfp8BlockWidth), DType.U8,
+            location.Shape[0], location.Shape[1], scaleKey);
+        Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.BlockRecipe, location.DType, key, Binding: binding));
+    }
+
+    /// <summary>compressed-tensors NVFP4 (<c>nvfp4-pack-quantized</c>): packed <c>[out, in/2]</c> U8, an E4M3 scale per 16 inputs and a scalar F32 global scale.</summary>
+    private void AddNvfp4(string key, TensorLocation location)
+    {
+        string module = key[..^PackedWeight.Length];
+        string scaleKey = module + ".weight_scale", globalKey = module + GlobalScaleSuffix;
+        RequireCompanion(scaleKey, key);
+        RequireCompanion(globalKey, key);
+        TensorLocation scale = _set.Inventory[scaleKey];
+        TensorLocation global = _set.Inventory[globalKey];
+        long rows = location.Shape[0], cols = location.Shape[1] * 2;
+        if (location.DType != DType.U8 || location.Shape.Rank != 2 || scale.DType != DType.F8E4M3 || scale.Shape.Rank != 2 || scale.Shape[0] != rows
+            || scale.Shape[1] * Nvfp4BlockWidth != cols || global.DType != DType.F32 || global.Shape.ElementCount != 1)
+        {
+            throw new InvalidDataException(
+                $"NVFP4 weight '{key}' ({location.DType.Name} {location.Shape}) needs F8_E4M3 scales [{rows}, {cols / Nvfp4BlockWidth}] and a scalar F32 '{globalKey}'; got {scale.DType.Name} {scale.Shape} and {global.DType.Name} {global.Shape}.");
+        }
+        QuantBinding binding = new(module + Weight, QuantEncoding.Nvfp4, new BlockGeometry(1, Nvfp4BlockWidth), DType.F8E4M3, rows, cols, scaleKey, globalKey);
+        Add(new HfQuantWeight(module + Weight, new TensorShape(rows, cols), HfWeightStorage.BlockRecipe, DType.U8, key, Binding: binding));
+    }
+
+    private bool IsNvfp4Companion(string key)
+    {
+        foreach (string suffix in (string[])[".weight_scale", GlobalScaleSuffix, ".input_global_scale"])
+        {
+            if (key.EndsWith(suffix, StringComparison.Ordinal) && _set.Inventory.ContainsKey(key[..^suffix.Length] + PackedWeight)) return true;
+        }
+        return false;
     }
 
     private void AddFusedExperts(Match fused, string key, TensorLocation location)
