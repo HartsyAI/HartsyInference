@@ -1,11 +1,14 @@
 using System.Text.Json;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests;
 
@@ -28,13 +31,15 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
     private readonly JsonElement _config;
     private readonly JsonDocument _configDocument;
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
     private readonly string _hfDirectory = Path.Combine(Path.GetTempPath(), $"minimax-m3-tiny-{Guid.NewGuid():N}");
     private GenericTransformer? _hfTransformer;
     private TransformerConfig? _hfConfig;
     private MiniMaxM3HfLoader? _hfWeights;
 
-    public MiniMaxM3TransformersParityTests()
+    public MiniMaxM3TransformersParityTests(ITestOutputHelper output)
     {
+        _out = output;
         _hf.Load(Path.Combine(Dir, "minimax_m3_tiny.safetensors"));
         _expected.Load(Path.Combine(Dir, "minimax_m3_tiny_expected.safetensors"));
         _configDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "minimax_m3_tiny_config.json")));
@@ -84,6 +89,18 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
         }
     }
 
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void IndexerBias_IsRefusedExplicitlyOnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using KvCache cache = NewCache();
+        AttentionUnsupportedException refusal = Assert.Throws<AttentionUnsupportedException>(() => Transformer.Forward(backend, Ids, 0, cache).Dispose());
+        Assert.Contains("an additive bias", refusal.Message);
+    }
+
     [Fact]
     public void GgufConfig_DescribesTheMiniMaxLayout()
     {
@@ -122,6 +139,22 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
         Assert.Contains(from, json);
         using JsonDocument document = JsonDocument.Parse(json.Replace(from, to));
         Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MiniMaxM3HfConfigReader.FromHuggingFace(document.RootElement));
+    }
+
+    [Fact]
+    public void IndexKeyStore_ReplaysARetriedStep_AndFollowsARolledBackCache()
+    {
+        using KvCache cache = NewCache();
+        float[] first = [1f, 2f, 3f, 4f];   // two tokens of two dims
+        float[] second = [5f, 6f];
+        Assert.Equal(2, SparseBlockIndexer.AppendKeys(cache, 0, 0, first, 2).Length / 2);
+        Assert.Equal(3, SparseBlockIndexer.AppendKeys(cache, 0, 2, second, 2).Length / 2);
+        // The same step again (a refused attention retried) replaces its keys instead of failing.
+        Assert.Equal([1f, 2f, 3f, 4f, 5f, 6f], SparseBlockIndexer.AppendKeys(cache, 0, 2, second, 2).ToArray());
+        // A cache rolled back to one token continues from there.
+        Assert.Equal([1f, 2f, 9f, 9f], SparseBlockIndexer.AppendKeys(cache, 0, 1, [9f, 9f], 2).ToArray());
+        // A step past the stored keys means the cache holds tokens whose keys were never stored.
+        Assert.Throws<InvalidOperationException>(() => SparseBlockIndexer.AppendKeys(cache, 0, 5, second, 2));
     }
 
     [Fact]
