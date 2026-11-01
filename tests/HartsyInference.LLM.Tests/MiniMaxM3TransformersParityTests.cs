@@ -1,11 +1,14 @@
 using System.Text.Json;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.Tests.Common;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests;
 
@@ -28,13 +31,15 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
     private readonly JsonElement _config;
     private readonly JsonDocument _configDocument;
     private readonly CpuBackend _backend = new();
+    private readonly ITestOutputHelper _out;
     private readonly string _hfDirectory = Path.Combine(Path.GetTempPath(), $"minimax-m3-tiny-{Guid.NewGuid():N}");
     private GenericTransformer? _hfTransformer;
     private TransformerConfig? _hfConfig;
     private MiniMaxM3HfLoader? _hfWeights;
 
-    public MiniMaxM3TransformersParityTests()
+    public MiniMaxM3TransformersParityTests(ITestOutputHelper output)
     {
+        _out = output;
         _hf.Load(Path.Combine(Dir, "minimax_m3_tiny.safetensors"));
         _expected.Load(Path.Combine(Dir, "minimax_m3_tiny_expected.safetensors"));
         _configDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "minimax_m3_tiny_config.json")));
@@ -82,6 +87,18 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
             using Tensor logits = transformer.ProjectLogits(_backend, hidden, 1);
             AssertRowsMatch(logits.AsReadOnlySpan<float>(), pos, 1);
         }
+    }
+
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    [Trait("Category", "GpuIntegration")]
+    public void IndexerBias_IsRefusedExplicitlyOnDevice(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? device)) return;
+        using IBackend backend = device!;
+        using KvCache cache = NewCache();
+        AttentionUnsupportedException refusal = Assert.Throws<AttentionUnsupportedException>(() => Transformer.Forward(backend, Ids, 0, cache).Dispose());
+        Assert.Contains("an additive bias", refusal.Message);
     }
 
     [Fact]
