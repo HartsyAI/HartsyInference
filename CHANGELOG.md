@@ -17,13 +17,13 @@ stable release will require. Dates are UTC.
 ## alpha.392
 
 - **Fixed: streaming Moonshine small and medium failed to load on CUDA.** Tiny is unchanged; see [PARITY](docs/Checklists/PARITY_VERIFICATION.md#stt).
-- **Fixed: speech-to-text no longer drops audio past a model's window.** Long clips are split at quiet points, transcribed per window and joined; silent windows are skipped.
+- **Fixed: speech-to-text no longer drops audio past a model's window.** Long clips are split at quiet points, transcribed per window and joined; silent windows are skipped. A hard cut can split a word, and the log says so.
 - **Added: `TranscriptResult.Duration` and `TranscriptResult.WindowCount`,** returned by `/v1/native/transcribe`.
 - **Added: `vram.transcribeMaxSeconds` (default 7200).** Longer audio is refused with a named error for models that have a window.
-- **Changed: Moonshine's decode budget scales with clip length.** `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget at 6.5 tokens per second.
+- **Changed: Moonshine's decode budget scales with clip length.** `MoonshineOptions.MaxNewTokens` now defaults to 0, which derives the budget at 6.5 tokens per second (was a fixed 180).
 - **Changed: streaming Moonshine windows are capped at 30 s.** Medium can still decode a window to nothing; see [PARITY](docs/Checklists/PARITY_VERIFICATION.md#stt).
 - **Changed: diarization covers a whole long clip** instead of stopping near 6.4 minutes; a clip that hits the span cap gets coarser spans.
-- **Changed: `ITranscriberLease.Transcribe` windows long clips.** Disposing the lease mid-call throws `ObjectDisposedException` and discards the text so far.
+- **Changed: `ITranscriberLease.Transcribe` windows long clips.** It throws `ArgumentException` past `vram.transcribeMaxSeconds`; disposing the lease mid-call throws `ObjectDisposedException` and discards the text so far.
 - **Changed: the diarization speaker merge distance is 0.60 (was 0.40).** Similar voices can now fold together, and the value is uncalibrated, so speaker counts can differ from alpha.391.
 - **Changed: `WhisperPipeline` warns when given more than one window directly.** The engine splits long audio first, so only direct pipeline callers see it.
 
