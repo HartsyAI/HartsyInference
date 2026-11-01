@@ -79,7 +79,7 @@ public static class SpecialLiteralEscaper
         {
             if (restore.TryGetValue(span[k], out char original)) span[k] = original;
         }
-        // A span after the first id follows a special token.
+        // A span after the first id follows a special token. This relies on nothing being in ids before the first span: the caller adds BOS after rendering, so seeding ids with it would strip the first span's prefix under prepend_scheme=first.
         ids.AddRange(ids.Count == 0 ? tokenizer.EncodeOrdinary(span.ToString()) : tokenizer.EncodeAfterSpecial(span.ToString()));
         span.Clear();
     }
