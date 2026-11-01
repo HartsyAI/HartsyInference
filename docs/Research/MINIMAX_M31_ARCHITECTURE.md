@@ -7,8 +7,8 @@ records what the checkpoint and the reference contain so the port starts from fa
 ## Why it is not built yet
 
 The checkpoint is 252 GB in 48 shards (about 428B parameters, 23B active), so nothing here has been run on real weights, and the CPU backend
-widens quantized weights to F32. The port needs three pieces the engine does not have (a sparse-attention indexer, two quantized weight
-formats read from safetensors, and a vision tower); each is small next to the verification it needs.
+widens quantized weights to F32. The port needs three pieces the engine does not have: a sparse-attention indexer, a binding of this checkpoint's
+two quantized layouts to the engine's existing block-scale decoders (see below), and a vision tower. Each needs real verification before it counts as done.
 
 ## Text decoder
 
@@ -51,9 +51,15 @@ Images are tiled on a pinpoint grid up to 2016×2016; video segments take at mos
 ## Existing pieces to reuse
 
 Sigmoid routing with a selection bias and a shared expert (DeepSeek-V3 and Muse Spark paths in `GgufConfigFactory`/`MoeFeedForward`), clamped SwiGLU
-(GPT-OSS), NVFP4 handling (`Nvfp4HostReference` and the NVFP4-AWQ notes in `MINIMAX_H3.md`), the DeepSeek-V4.1 indexer and sparse-attention
-references (`IndexerScoresReference`, `SparseLatentAttentionReference`), and the attention contract's exclusion tensor
-([ATTENTION_CONTRACT.md](../ATTENTION_CONTRACT.md)). Missing: an MXFP8 reader, the block-max indexer with a block-index attention input, the cache for the
+(GPT-OSS), the DeepSeek-V4.1 indexer and sparse-attention references (`IndexerScoresReference`, `SparseLatentAttentionReference`), and the attention
+contract's exclusion tensor ([ATTENTION_CONTRACT.md](../ATTENTION_CONTRACT.md)).
+
+The two weight formats already have decoders. `Fp8BlockE8M0Codec` reads F8 E4M3 with row-major E8M0 scales (the `[out, in/32]` `weight_scale_inv`),
+and `ModelOptNvfp4Codec` reads packed e2m1 with a row-major E4M3 scale per 16 and a scalar global scale, both through `QuantBinding` and
+`WeightDequantizer`; `HfQuantCheckpoint` is where the checkpoint's logical weights are read. The Comfy-layout `Mxfp8Codec` and `Nvfp4Codec` expect swizzled
+padded scales and do not fit these row-major ones. The compressed-tensors `weight_global_scale` is the divisor of the dequantized value (ModelOpt's is a
+multiplier), so the binding must hand the codec its reciprocal. `Nvfp4HostReference` is a test helper, not a runtime piece. Missing: that binding for
+`weight_scale_inv` and `weight_packed`/`weight_scale`/`weight_global_scale`, the block-max indexer with a block-index attention input, the cache for the
 indexer's keys, the vision tower, and the `minimax_m3_vl` config and key mapping.
 
 ## Verification plan
