@@ -58,6 +58,8 @@ public sealed class GgufLanguageModel : IDisposable
         int? eot = meta.ContainsKey("tokenizer.ggml.eot_token_id") ? (int)meta.GetUInt32("tokenizer.ggml.eot_token_id") : null;
         List<int> extraStops = [];
         if (eot is int e) extraStops.Add(e);
+        // llama.cpp's list of every end-of-generation id (Flint ends turns on several control tokens).
+        if (meta.GetIntArray("tokenizer.ggml.eog_token_ids") is { } eog) extraStops.AddRange(eog);
 
         // SentencePiece (tokenizer.ggml.model == "llama" for Gemma-1/2/3 and Llama-1/2; "gemma4" is the same
         // SPM/Unigram algorithm under a new model-field label). Score-driven merges + byte fallback, a different
@@ -83,8 +85,21 @@ public sealed class GgufLanguageModel : IDisposable
         // A wrong split gives wrong token ids, so the pre-tokenizer name fixes both the split and ignore_merges.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre),
-            ignoreMerges: PreTokenizerFamilyFor(pre) is PreTokenizerFamily.Llama3 or PreTokenizerFamily.Tekken);
+            ignoreMerges: PreTokenizerFamilyFor(pre) is PreTokenizerFamily.Llama3 or PreTokenizerFamily.Tekken,
+            preTokenizer: PreTokenizerPipelineFor(pre));
     }
+
+    /// <summary>The Hugging Face <c>pre_tokenizer</c> of Flint (digit groups, CJK runs, then words), which no single split regex expresses.</summary>
+    private const string FlintPreTokenizerJson = """{"type": "Sequence", "pretokenizers": [{"type": "Split", "pattern": {"Regex": "\\p{N}{1,3}"}, "behavior": "Isolated", "invert": false}, {"type": "Split", "pattern": {"Regex": "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+"}, "behavior": "Isolated", "invert": false}, {"type": "Split", "pattern": {"Regex": "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"}, "behavior": "Isolated", "invert": false}, {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": false}]}""";
+
+    private static readonly Lazy<PreTokenizerPipeline> FlintPipeline = new(() =>
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(FlintPreTokenizerJson);
+        return PreTokenizerPipeline.FromJson(doc.RootElement);
+    });
+
+    /// <summary>The multi-stage pre-tokenizer a <c>tokenizer.ggml.pre</c> name stands for, or null when a single regex (or the default) is enough.</summary>
+    internal static PreTokenizerPipeline? PreTokenizerPipelineFor(string pre) => pre == "flint" ? FlintPipeline.Value : null;
 
     /// <summary>The pre-tokenizer families that choose a split regex.</summary>
     internal enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2, Tekken }
@@ -233,7 +248,7 @@ public sealed class GgufLanguageModel : IDisposable
     }
 
     /// <summary>The shared load core: relabel GGUF dims → dequant unsupported formats → split fused tensors → infer config; everything up to (but excluding) transformer construction.</summary>
-    private static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
+    internal static (Dictionary<string, Tensor> Weights, TransformerConfig Config) PrepareWeights(
         GgufModelLoader.LoadedGgufModel handle, bool lowVramQuant, bool dequantizeToF32, IReadOnlySet<DType>? keepQuantized = null)
     {
         if (SsmArchitectures.Contains(handle.Architecture))

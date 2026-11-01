@@ -102,7 +102,7 @@ public static class GgufConfigFactory
         // period every other sliding-window architecture here uses — read it directly rather than guessing a
         // period from a single scalar (a bool array silently misread as a scalar UINT32 defaults to 0, which
         // made every layer read back as "global" and corrupted per-layer head-dim sizing).
-        bool[]? swaArray = isGemma4 || isKolibri1 || isMuseSpark
+        bool[]? swaArray = isGemma4 || isKolibri1 || isMuseSpark || arch == "flint"
             ? metadata.GetBoolArray($"{arch}.attention.sliding_window_pattern") : null;
         bool[]? globalLayers = swaArray is { Length: > 0 } ? new bool[decoderLayers] : null;
         if (globalLayers is not null)
@@ -360,14 +360,14 @@ public static class GgufConfigFactory
             AlibiSlopes = alibiMaxBias > 0f ? TransformerConfig.ComputeAlibiSlopes(heads, alibiMaxBias) : System.Array.Empty<float>(),
             ParallelResidual = isCohere || gptneoxParallel,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
-            NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1" or "muse-spark",
+            NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1" or "muse-spark" or "flint",
             RopeLocalTheta = localTheta,
             Architecture = arch,
             SlidingWindow = swWindow,
             SlidingWindowPattern = swPattern,
             AttnLogitSoftcap = attnCap,
             FinalLogitSoftcap = finalCap,
-            AttnSink = isGptOss,
+            AttnSink = isGptOss || arch == "flint",
             CrossAttnLayers = crossAttnLayers,
             Moe = moe,
             VNorm = isGemma4,

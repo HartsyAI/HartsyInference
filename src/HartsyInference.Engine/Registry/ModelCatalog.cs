@@ -130,6 +130,21 @@ public static class ModelCatalog
                         Sha256 = "f45005c50cd2a97329722bf3a2dee9f16c04cdf825a589b280fb7e99e6827818" },
                 },
             },
+            new CatalogEntry
+            {
+                // Recursive Flint (Apache-2.0): 39.8B-total / 2.5B-active MoE for coding agents. 49 layers (2 dense, 47 MoE: 256 routed experts with
+                // sigmoid routing and normalized top-6, plus an ungated shared expert), per-head QK RMSNorm, learned attention sinks, sliding-window (513)
+                // RoPE layers and full-attention layers without positional encoding. The official int4 GGUF (Q4_1, 26 GB) loads through the `flint`
+                // architecture. A tiny random Flint matches transformers through the real GGUF path, and the official GGUF's header, tokenizer and chat
+                // template match the checkpoint's. No full-model run: it does not fit the dev box (the CPU backend widens GGUF weights to F32), and no GPU run yet.
+                Id = "flint", Modality = txt, DisplayName = "Flint (40B-A2.5B, coding MoE)",
+                Architecture = "MoE 256 experts top-6 + shared expert, sinks, sliding/NoPE attention", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "RecursiveSI/flint-int4-gguf", RepoPath = "flint-int4-q4_1.gguf", TargetSubdir = "LLM/flint", Role = "transformer",
+                        Sha256 = "43c07baccdba42eb7528a9630ee15699b1942c297291dc1b39a061f508ee1a4b" },
+                },
+            },
             // Qwen3.5/3.6 Gated-DeltaNet hybrid (SSM path, Qwen35Model). `qwen35` = dense 0.8B, verified 2026-07-27
             // for BOTH text and vision (its mmproj sidecar downloads alongside → `hartsy text -m qwen35 -i img.png`
             // captions/OCRs correctly). See MODEL_STATUS_LLM.md + docs/Design/TRENDING_MODELS_PHASED_PLAN.md.
