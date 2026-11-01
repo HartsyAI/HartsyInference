@@ -28,6 +28,10 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
     private readonly JsonElement _config;
     private readonly JsonDocument _configDocument;
     private readonly CpuBackend _backend = new();
+    private readonly string _hfDirectory = Path.Combine(Path.GetTempPath(), $"minimax-m3-tiny-{Guid.NewGuid():N}");
+    private GenericTransformer? _hfTransformer;
+    private TransformerConfig? _hfConfig;
+    private MiniMaxM3HfLoader? _hfWeights;
 
     public MiniMaxM3TransformersParityTests()
     {
@@ -49,27 +53,33 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
 
     private int[] Ids { get; }
 
-    [Fact]
-    public void Prefill_LogitsMatchTransformers()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Prefill_LogitsMatchTransformers(bool fromHfDirectory)
     {
+        GenericTransformer transformer = fromHfDirectory ? HfDirectoryTransformer() : Transformer;
         using KvCache cache = NewCache();
-        using Tensor hidden = Transformer.Forward(_backend, Ids, 0, cache);
-        using Tensor logits = Transformer.ProjectLogits(_backend, hidden, Ids.Length);
+        using Tensor hidden = transformer.Forward(_backend, Ids, 0, cache);
+        using Tensor logits = transformer.ProjectLogits(_backend, hidden, Ids.Length);
         AssertRowsMatch(logits.AsReadOnlySpan<float>(), 0, Ids.Length);
     }
 
-    [Fact]
-    public void PrefillThenDecode_LogitsMatchTransformers()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrefillThenDecode_LogitsMatchTransformers(bool fromHfDirectory)
     {
+        GenericTransformer transformer = fromHfDirectory ? HfDirectoryTransformer() : Transformer;
         using KvCache cache = NewCache();
         const int prefill = 5;
-        using (Tensor hidden = Transformer.Forward(_backend, Ids.AsSpan(0, prefill), 0, cache))
-        using (Tensor logits = Transformer.ProjectLogits(_backend, hidden, prefill))
+        using (Tensor hidden = transformer.Forward(_backend, Ids.AsSpan(0, prefill), 0, cache))
+        using (Tensor logits = transformer.ProjectLogits(_backend, hidden, prefill))
             AssertRowsMatch(logits.AsReadOnlySpan<float>(), 0, prefill);
         for (int pos = prefill; pos < Ids.Length; pos++)
         {
-            using Tensor hidden = Transformer.Forward(_backend, Ids.AsSpan(pos, 1), pos, cache);
-            using Tensor logits = Transformer.ProjectLogits(_backend, hidden, 1);
+            using Tensor hidden = transformer.Forward(_backend, Ids.AsSpan(pos, 1), pos, cache);
+            using Tensor logits = transformer.ProjectLogits(_backend, hidden, 1);
             AssertRowsMatch(logits.AsReadOnlySpan<float>(), pos, 1);
         }
     }
@@ -87,8 +97,47 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
             moe.SharedExpertIntermediateSize, moe.Scoring, moe.NormTopKProb, moe.FirstDenseLayers, moe.RoutedScalingFactor));
     }
 
+    [Fact]
+    public void ReleaseConfig_ReadsTheRealMiniMaxM31FlashLayout()
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "minimax_m3_1_flash_config.json")));
+        TransformerConfig c = MiniMaxM3HfConfigReader.FromHuggingFace(document.RootElement);
+        Assert.Equal((60, 6144, 64, 4, 128, 64, 12288, 200064), (c.NumLayers, c.HiddenSize, c.NumHeads, c.NumKvHeads, c.HeadDim, c.RotaryDim, c.IntermediateSize, c.VocabSize));
+        Assert.Equal((4, 128, 128, 16, 1), (c.Indexer!.Heads, c.Indexer.KeyLength, c.Indexer.BlockSize, c.Indexer.TopKBlocks, c.Indexer.LocalBlocks));
+        MoeConfig moe = c.Moe!;
+        Assert.Equal((128, 4, 3072, 3072, 3, 2f), (moe.NumExperts, moe.NumExpertsPerTok, moe.MoeIntermediateSize, moe.SharedExpertIntermediateSize, moe.FirstDenseLayers, moe.RoutedScalingFactor));
+        Assert.Equal((1.702f, 7f, 1e7f), (c.SwigluAlpha, c.SwigluLimit, c.RopeTheta));
+        Assert.True(c.RmsNormAddOne);
+    }
+
+    [Theory]
+    [InlineData("\"model_type\":\"minimax_m3_vl\"", "\"model_type\":\"llama\"")]
+    [InlineData("\"sparse_score_type\":\"max\"", "\"sparse_score_type\":\"mean\"")]
+    [InlineData("\"qk_norm_type\":\"per_head\"", "\"qk_norm_type\":\"full\"")]
+    [InlineData("\"attention_output_gate\":false", "\"attention_output_gate\":true")]
+    [InlineData("\"moe_layer_freq\":[0,0,1,1,1,1]", "\"moe_layer_freq\":[0,1,0,1,1,1]")]
+    public void HfDirectoryConfig_RefusesLayoutsTheEngineDoesNotRun(string from, string to)
+    {
+        string json = ReleaseConfigJson();
+        Assert.Contains(from, json);
+        using JsonDocument document = JsonDocument.Parse(json.Replace(from, to));
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MiniMaxM3HfConfigReader.FromHuggingFace(document.RootElement));
+    }
+
+    [Fact]
+    public void HfDirectoryConfig_MatchesTheGgufConfig()
+    {
+        _ = HfDirectoryTransformer();
+        Assert.Equal(Config.Indexer, _hfConfig!.Indexer);
+        Assert.Equal((Config.NumLayers, Config.NumHeads, Config.NumKvHeads, Config.HeadDim, Config.RotaryDim, Config.IntermediateSize, Config.SwigluAlpha, Config.SwigluLimit),
+            (_hfConfig.NumLayers, _hfConfig.NumHeads, _hfConfig.NumKvHeads, _hfConfig.HeadDim, _hfConfig.RotaryDim, _hfConfig.IntermediateSize, _hfConfig.SwigluAlpha, _hfConfig.SwigluLimit));
+        Assert.Equal(Config.Moe, _hfConfig.Moe);
+    }
+
     public void Dispose()
     {
+        _hfTransformer?.Dispose();
+        _hfWeights?.Dispose();
         _handle.Dispose();
         foreach (Tensor t in _owned) t.Dispose();
         _hf.Dispose();
@@ -96,6 +145,7 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
         _configDocument.Dispose();
         _backend.Dispose();
         if (File.Exists(_gguf)) File.Delete(_gguf);
+        if (Directory.Exists(_hfDirectory)) Directory.Delete(_hfDirectory, recursive: true);
     }
 
     private KvCache NewCache() => new(Config.NumLayers, 1, Config.NumKvHeads, Config.HeadDim);
@@ -205,6 +255,106 @@ public sealed unsafe class MiniMaxM3TransformersParityTests : IDisposable
         matrix.AsReadOnlySpan<float>().Slice(start * cols, count * cols).CopyTo(result.AsSpan<float>());
         _owned.Add(result);
         return result;
+    }
+
+    /// <summary>The same tiny weights written as the release's directory (<c>language_model.</c> names, <c>w1/w2/w3</c> experts, separate dense gate/up, <c>index_*</c> projections, a
+    /// <c>text_config</c> config.json) and loaded by <see cref="MiniMaxM3HfLoader"/>; the checkpoint stores the centered norm weight, so no +1 is baked in.</summary>
+    private GenericTransformer HfDirectoryTransformer()
+    {
+        if (_hfTransformer is not null) return _hfTransformer;
+        Directory.CreateDirectory(_hfDirectory);
+        File.WriteAllText(Path.Combine(_hfDirectory, "config.json"), ReleaseConfigJson());
+        SafeTensorsWriter.Save(Path.Combine(_hfDirectory, "model.safetensors"), ReleaseLayoutTensors());
+        _hfWeights = MiniMaxM3HfLoader.Load(_hfDirectory, DType.F32);
+        _hfConfig = _hfWeights.Config;
+        _hfTransformer = new GenericTransformer(_hfConfig);
+        _hfTransformer.LoadWeights(_hfWeights.Weights, "model");
+        return _hfTransformer;
+    }
+
+    private string ReleaseConfigJson()
+    {
+        int layers = _config.GetProperty("num_hidden_layers").GetInt32();
+        int denseLayers = _config.GetProperty("mlp_layer_types").EnumerateArray().Count(e => e.GetString() == "dense");
+        int[] ones = [.. Enumerable.Repeat(1, layers)];
+        Dictionary<string, object> text = new()
+        {
+            ["hidden_size"] = _config.GetProperty("hidden_size").GetInt32(), ["intermediate_size"] = _config.GetProperty("intermediate_size").GetInt32(),
+            ["dense_intermediate_size"] = _config.GetProperty("dense_intermediate_size").GetInt32(), ["shared_intermediate_size"] = _config.GetProperty("shared_intermediate_size").GetInt32(),
+            ["num_hidden_layers"] = layers, ["num_attention_heads"] = _config.GetProperty("num_attention_heads").GetInt32(),
+            ["num_key_value_heads"] = _config.GetProperty("num_key_value_heads").GetInt32(), ["head_dim"] = _config.GetProperty("head_dim").GetInt32(),
+            ["vocab_size"] = _config.GetProperty("vocab_size").GetInt32(), ["max_position_embeddings"] = 4096, ["rms_norm_eps"] = _config.GetProperty("rms_norm_eps").GetDouble(),
+            ["use_gemma_norm"] = true, ["attention_output_gate"] = false, ["use_qk_norm"] = true, ["qk_norm_type"] = "per_head",
+            ["rope_theta"] = _config.GetProperty("rope_parameters").GetProperty("rope_theta").GetDouble(),
+            ["partial_rotary_factor"] = _config.GetProperty("rope_parameters").GetProperty("partial_rotary_factor").GetDouble(),
+            ["hidden_act"] = "swigluoai", ["tie_word_embeddings"] = false, ["num_local_experts"] = _config.GetProperty("num_local_experts").GetInt32(),
+            ["num_experts_per_tok"] = _config.GetProperty("num_experts_per_tok").GetInt32(), ["scoring_func"] = "sigmoid", ["use_routing_bias"] = true,
+            ["moe_layer_freq"] = Enumerable.Range(0, layers).Select(i => i < denseLayers ? 0 : 1).ToArray(),
+            ["swiglu_alpha"] = _config.GetProperty("swiglu_alpha").GetDouble(), ["swiglu_limit"] = _config.GetProperty("swiglu_limit").GetDouble(),
+            ["routed_scaling_factor"] = _config.GetProperty("routed_scaling_factor").GetDouble(),
+            ["sparse_attention_config"] = new Dictionary<string, object>
+            {
+                ["use_sparse_attention"] = true, ["sparse_index_dim"] = _config.GetProperty("index_head_dim").GetInt32(),
+                ["sparse_num_index_heads"] = _config.GetProperty("index_n_heads").GetInt32(), ["sparse_topk_blocks"] = _config.GetProperty("index_topk_blocks").GetInt32(),
+                ["sparse_block_size"] = _config.GetProperty("index_block_size").GetInt32(), ["sparse_score_type"] = "max", ["sparse_init_block"] = 0,
+                ["sparse_local_block"] = _config.GetProperty("index_local_blocks").GetInt32(), ["sparse_attention_freq"] = ones, ["sparse_disable_index_value"] = ones,
+            },
+        };
+        return JsonSerializer.Serialize(new Dictionary<string, object> { ["model_type"] = "minimax_m3_vl", ["text_config"] = text });
+    }
+
+    private Dictionary<string, Tensor> ReleaseLayoutTensors()
+    {
+        int layers = _config.GetProperty("num_hidden_layers").GetInt32();
+        int denseLayers = _config.GetProperty("mlp_layer_types").EnumerateArray().Count(e => e.GetString() == "dense");
+        int moeInter = _config.GetProperty("intermediate_size").GetInt32();
+        int denseInter = _config.GetProperty("dense_intermediate_size").GetInt32();
+        int sharedInter = _config.GetProperty("shared_intermediate_size").GetInt32();
+        Dictionary<string, Tensor> tensors = new()
+        {
+            ["language_model.model.embed_tokens.weight"] = _hf.GetTensor("model.embed_tokens.weight"),
+            ["language_model.model.norm.weight"] = _hf.GetTensor("model.norm.weight"),
+            ["language_model.lm_head.weight"] = _hf.GetTensor("lm_head.weight"),
+        };
+        for (int i = 0; i < layers; i++)
+        {
+            string hf = $"model.layers.{i}", rel = $"language_model.model.layers.{i}";
+            foreach (string norm in (string[])["input_layernorm", "post_attention_layernorm", "self_attn.q_norm", "self_attn.k_norm"])
+                tensors[$"{rel}.{norm}.weight"] = _hf.GetTensor($"{hf}.{norm}.weight");
+            foreach (string projection in (string[])["q_proj", "k_proj", "v_proj", "o_proj"])
+                tensors[$"{rel}.self_attn.{projection}.weight"] = _hf.GetTensor($"{hf}.self_attn.{projection}.weight");
+            foreach (string part in (string[])["q_proj", "k_proj", "q_norm", "k_norm"])
+                tensors[$"{rel}.self_attn.index_{part}.weight"] = _hf.GetTensor($"{hf}.self_attn.indexer.{part}.weight");
+            if (i < denseLayers)
+            {
+                SplitGateUp(tensors, $"{rel}.mlp", _hf.GetTensor($"{hf}.mlp.gate_up_proj.weight"), denseInter);
+                tensors[$"{rel}.mlp.down_proj.weight"] = _hf.GetTensor($"{hf}.mlp.down_proj.weight");
+                continue;
+            }
+            tensors[$"{rel}.block_sparse_moe.gate.weight"] = _hf.GetTensor($"{hf}.mlp.gate.weight");
+            tensors[$"{rel}.block_sparse_moe.e_score_correction_bias"] = _hf.GetTensor($"{hf}.mlp.gate.e_score_correction_bias");
+            SplitGateUp(tensors, $"{rel}.block_sparse_moe.shared_experts", _hf.GetTensor($"{hf}.mlp.shared_experts.gate_up_proj.weight"), sharedInter);
+            tensors[$"{rel}.block_sparse_moe.shared_experts.down_proj.weight"] = _hf.GetTensor($"{hf}.mlp.shared_experts.down_proj.weight");
+            Tensor gateUp = _hf.GetTensor($"{hf}.mlp.experts.gate_up_proj");
+            Tensor down = _hf.GetTensor($"{hf}.mlp.experts.down_proj");
+            int experts = (int)gateUp.Shape[0];
+            Tensor gateUpRows = gateUp.Reshape(new TensorShape(gateUp.Shape[0] * gateUp.Shape[1], gateUp.Shape[2]));
+            Tensor downRows = down.Reshape(new TensorShape(down.Shape[0] * down.Shape[1], down.Shape[2]));
+            for (int e = 0; e < experts; e++)
+            {
+                string expert = $"{rel}.block_sparse_moe.experts.{e}";
+                tensors[$"{expert}.w1.weight"] = gateUpRows.SliceRows(e * 2L * moeInter, moeInter);
+                tensors[$"{expert}.w3.weight"] = gateUpRows.SliceRows(e * 2L * moeInter + moeInter, moeInter);
+                tensors[$"{expert}.w2.weight"] = downRows.SliceRows(e * down.Shape[1], down.Shape[1]);
+            }
+        }
+        return tensors;
+    }
+
+    private static void SplitGateUp(Dictionary<string, Tensor> tensors, string prefix, Tensor fused, int inter)
+    {
+        tensors[$"{prefix}.gate_proj.weight"] = fused.SliceRows(0, inter);
+        tensors[$"{prefix}.up_proj.weight"] = fused.SliceRows(inter, inter);
     }
 
     private void Add(GgufWriter w, string ggufName, string hfName) => w.AddTensor(ggufName, _hf.GetTensor(hfName));

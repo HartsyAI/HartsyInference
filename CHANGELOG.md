@@ -10,7 +10,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.399
 
-- **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). A tiny random model matches transformers through the GGUF path. The release's MXFP8 and NVFP4-style weights, its vision tower and the real model are not covered, and the indexer selects on the host, so the model runs on the CPU backend only.
+- **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. The tokenizer, chat template, catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the indexer selects on the host, so the model runs on the CPU backend only.
 
 ## alpha.393
 
