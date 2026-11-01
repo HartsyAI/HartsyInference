@@ -58,8 +58,6 @@ public sealed class GgufLanguageModel : IDisposable
         int? eot = meta.ContainsKey("tokenizer.ggml.eot_token_id") ? (int)meta.GetUInt32("tokenizer.ggml.eot_token_id") : null;
         List<int> extraStops = [];
         if (eot is int e) extraStops.Add(e);
-        // llama.cpp's list of every end-of-generation id (Flint ends turns on several control tokens).
-        if (meta.GetIntArray("tokenizer.ggml.eog_token_ids") is { } eog) extraStops.AddRange(eog);
 
         // SentencePiece (tokenizer.ggml.model == "llama" for Gemma-1/2/3 and Llama-1/2; "gemma4" is the same
         // SPM/Unigram algorithm under a new model-field label). Score-driven merges + byte fallback, a different
@@ -81,6 +79,10 @@ public sealed class GgufLanguageModel : IDisposable
         {
             return new RwkvWorldTokenizer(tokens, tokenType, bos, eos, extraStops);
         }
+
+        // llama.cpp's list of every end-of-generation id (Flint ends turns on several control tokens). Only the byte-level BPE path reads it, so
+        // SentencePiece and RWKV GGUFs that carry the key keep their stops.
+        if (meta.GetIntArray("tokenizer.ggml.eog_token_ids") is { } eog) extraStops.AddRange(eog);
 
         // A wrong split gives wrong token ids, so the pre-tokenizer name fixes both the split and ignore_merges.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
