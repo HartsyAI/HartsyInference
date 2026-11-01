@@ -101,6 +101,13 @@ spelling, so merge them into one. Hand-placed audio checkpoints (RVC voices, YuE
 folders below `audio/` must keep the engine's spelling. Windows and macOS ignore case already, so nothing changes
 there.
 
+Each top-level folder has its own setting. `paths.folder.llm`, `paths.folder.audio`, `paths.folder.textEncoders` and
+the rest of the `paths.folder.*` family name the folder on disk for one model type. Unset, each uses the name SwarmUI
+uses by default (`llm`, `audio`, `Stable-Diffusion`, `VAE`, `text_encoders`, `clip_vision`, `controlnet`, `Lora`,
+`Embedding`, `ipadapter`, `Vision`, `Decision`, `Video`, `diffusion_models`, `grounding-dino`, `sam2`, `rtdetr`,
+`clipseg`). The catalog keeps its logical names (`LLM/…`, `Audio/…`): only the first path segment is mapped, so a
+model's own subfolder (`LLM/nanbeige43/`) sits under whichever folder the setting names.
+
 ## Scope: when a setting takes effect
 
 | scope | meaning |

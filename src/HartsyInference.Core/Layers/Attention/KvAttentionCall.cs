@@ -25,4 +25,7 @@ public readonly record struct KvAttentionCall
 
     /// <summary>Per-head ALiBi slopes.</summary>
     public Tensor? AlibiSlopes { get; init; }
+
+    /// <summary>Additive F32 bias broadcastable to <c>[1, heads, Sq, KvLength]</c>, where −∞ removes a key (MiniMax's block selection). The caller keeps ownership.</summary>
+    public Tensor? Bias { get; init; }
 }

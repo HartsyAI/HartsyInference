@@ -393,6 +393,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             // 3. Host experts, computed while the device runs, then combined one expert at a time.
             if (hostExperts > 0)
             {
+                if (_moe.Activation == ActivationKind.SwigluOai) throw new NotSupportedException("Expert offload does not run the clamped alpha-SwiGLU.");
                 ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
                 int[] hostPlan = _offHostPlan;
                 int[] hostOffset = _offHostOffset;
@@ -471,7 +472,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private bool DeviceRoutedShapeOk()
     {
         // Group-limited and logit-biased routing keep the host router.
-        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd) return false;
+        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd || _moe.Activation == ActivationKind.SwigluOai) return false;
         if (_moe.NumExperts > MoeRouteArgs.MaxExperts || _moe.NumExpertsPerTok > _moe.NumExperts) return false;
         if (_gateW.Length != _moe.NumExperts || _upW.Length != _moe.NumExperts || _downW.Length != _moe.NumExperts) return false;
         DType gateType = _gateW[0].DType, downType = _downW[0].DType;
@@ -602,15 +603,25 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         TensorShape ff = new(1, rows, inter);
         Tensor gate = new(ff, DType.F32);
         GenericTransformer.Project(backend, gate, x, gateW, null, _lowVram);
-        Tensor act = new(ff, DType.F32);
-        if (_moe.Activation == ActivationKind.GeluTanh) backend.Gelu(act, gate);
-        else backend.Silu(act, gate);
-        gate.Dispose();
-        Tensor up = new(ff, DType.F32);
-        GenericTransformer.Project(backend, up, x, upW, null, _lowVram);
-        Tensor comb = new(ff, DType.F32);
-        backend.Mul(comb, act, up);
-        act.Dispose(); up.Dispose();
+        Tensor comb;
+        if (_moe.Activation == ActivationKind.SwigluOai)
+        {
+            Tensor oaiUp = new(ff, DType.F32);
+            GenericTransformer.Project(backend, oaiUp, x, upW, null, _lowVram);
+            comb = GatedFfn.SwiGlu(backend, ActivationKind.SwigluOai, gate, oaiUp, _moe.SwigluLimit, _moe.SwigluAlpha);
+        }
+        else
+        {
+            Tensor act = new(ff, DType.F32);
+            if (_moe.Activation == ActivationKind.GeluTanh) backend.Gelu(act, gate);
+            else backend.Silu(act, gate);
+            gate.Dispose();
+            Tensor up = new(ff, DType.F32);
+            GenericTransformer.Project(backend, up, x, upW, null, _lowVram);
+            comb = new(ff, DType.F32);
+            backend.Mul(comb, act, up);
+            act.Dispose(); up.Dispose();
+        }
         Tensor outp = new(new TensorShape(1, rows, _hidden), DType.F32);
         GenericTransformer.Project(backend, outp, comb, downW, null, _lowVram);
         comb.Dispose();
@@ -720,6 +731,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
 
         float[] expertOut = new float[gathered.Length];
+        if (_moe.Activation == ActivationKind.SwigluOai) throw new NotSupportedException("The host expert runtime does not run the clamped alpha-SwiGLU.");
         ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
         HeterogeneousExpertExecutor.Execute(program, plan.AsSpan(0, distinct), gathered, h, expertOut, ResolveHostWeights, device: null);
 

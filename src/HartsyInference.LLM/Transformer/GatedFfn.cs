@@ -22,8 +22,9 @@ internal static class GatedFfn
     }
 
     /// <summary>Returns <c>act(gate) · up</c> and disposes <paramref name="gate"/> and <paramref name="up"/>; a positive <paramref name="clampLimit"/> first clamps gate to (-inf, limit] and up to [-limit, limit].</summary>
-    public static Tensor SwiGlu(IBackend backend, ActivationKind activation, Tensor gate, Tensor up, float clampLimit = 0f)
+    public static Tensor SwiGlu(IBackend backend, ActivationKind activation, Tensor gate, Tensor up, float clampLimit = 0f, float alpha = 0f)
     {
+        if (activation == ActivationKind.SwigluOai) return SwigluOai(backend, gate, up, alpha, clampLimit);
         Tensor gateAct = new(gate.Shape, DType.F32);
         if (clampLimit > 0f)
         {
@@ -45,6 +46,35 @@ internal static class GatedFfn
         backend.Mul(comb, gateAct, up);
         gateAct.Dispose();
         up.Dispose();
+        return comb;
+    }
+
+    /// <summary>MiniMax's clamped alpha-SwiGLU, <c>(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)</c> with <c>g = min(gate, limit)</c>, from backend ops so every backend runs it. Disposes <paramref name="gate"/> and <paramref name="up"/>.</summary>
+    private static Tensor SwigluOai(IBackend backend, Tensor gate, Tensor up, float alpha, float limit)
+    {
+        if (alpha <= 0f || limit <= 0f) throw new InvalidOperationException("The clamped alpha-SwiGLU needs a positive alpha and limit.");
+        Tensor g = new(gate.Shape, DType.F32);
+        backend.Clamp(g, gate, float.NegativeInfinity, limit);
+        gate.Dispose();
+        Tensor scaled = new(g.Shape, DType.F32);
+        backend.Scale(scaled, g, alpha);
+        Tensor sigmoid = new(g.Shape, DType.F32);
+        backend.Sigmoid(sigmoid, scaled);
+        scaled.Dispose();
+        Tensor glu = new(g.Shape, DType.F32);
+        backend.Mul(glu, g, sigmoid);
+        g.Dispose();
+        sigmoid.Dispose();
+        Tensor clamped = new(up.Shape, DType.F32);
+        backend.Clamp(clamped, up, -limit, limit);
+        up.Dispose();
+        Tensor shifted = new(clamped.Shape, DType.F32);
+        backend.AddScalar(shifted, clamped, 1f);
+        clamped.Dispose();
+        Tensor comb = new(glu.Shape, DType.F32);
+        backend.Mul(comb, shifted, glu);
+        glu.Dispose();
+        shifted.Dispose();
         return comb;
     }
 }

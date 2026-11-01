@@ -66,14 +66,12 @@ public sealed class SsmLanguageModel : IDisposable
         };
         try
         {
-            using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
-            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, [eosId], bos, eos);
+            (ILlmTokenizer tokenizer, IChatTemplate template) = HfChatAssets.Load(directory, [eosId], bos, eos);
             if (tokenizer.BosId != bosId || tokenizer.EosId != eosId)
             {
                 throw new InvalidDataException(
                     $"tokenizer.json maps {bos} to {tokenizer.BosId} and {eos} to {tokenizer.EosId}; config.json says {bosId} and {eosId}.");
             }
-            IChatTemplate template = new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja")));
             return new SsmLanguageModel(model, modelType, tokenizer, template);
         }
         catch

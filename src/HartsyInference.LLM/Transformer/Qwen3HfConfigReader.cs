@@ -17,7 +17,7 @@ public static class Qwen3HfConfigReader
     /// them; a MoE Qwen3 checkpoint needs its own reader.</summary>
     public static TransformerConfig FromHuggingFace(JsonElement config)
     {
-        Reader r = new(config, "config");
+        HfConfigFields r = new(config, "config", "Qwen3");
         string? modelType = r.OptionalString("model_type");
         if (modelType is not null && !string.Equals(modelType, "qwen3", StringComparison.OrdinalIgnoreCase))
             throw new HartsyInferenceException($"Qwen3HfConfigReader: config.model_type is '{modelType}', not 'qwen3'.");
@@ -46,33 +46,5 @@ public static class Qwen3HfConfigReader
             // are deliberately not read here — a MoE checkpoint needs its own reader.
             QkNorm = true,
         };
-    }
-
-    /// <summary>Typed reads of one JSON object, each failing with the field name so a bad config is fixed from
-    /// the message alone. Mirrors <c>DeepSeekV41ConfigReader</c>'s shape.</summary>
-    private readonly struct Reader(JsonElement element, string scope)
-    {
-        public int Int(string name) => Int(name, out int value) ? value : throw Missing(name, "an integer");
-        public int Int(string name, int fallback) => Int(name, out int value) ? value : fallback;
-
-        public double Double(string name, double fallback) =>
-            Find(name) is { ValueKind: JsonValueKind.Number } n ? n.GetDouble() : fallback;
-
-        public bool Bool(string name, bool fallback) =>
-            Find(name) is { ValueKind: JsonValueKind.True or JsonValueKind.False } b ? b.GetBoolean() : fallback;
-
-        public string? OptionalString(string name) => Find(name) is { ValueKind: JsonValueKind.String } s ? s.GetString() : null;
-
-        private bool Int(string name, out int value)
-        {
-            value = 0;
-            return Find(name) is { ValueKind: JsonValueKind.Number } n && n.TryGetInt32(out value);
-        }
-
-        private JsonElement? Find(string name) =>
-            element.TryGetProperty(name, out JsonElement value) && value.ValueKind != JsonValueKind.Null ? value : null;
-
-        private HartsyInferenceException Missing(string name, string expected) =>
-            new($"Qwen3 config: '{scope}.{name}' must be {expected}.");
     }
 }
