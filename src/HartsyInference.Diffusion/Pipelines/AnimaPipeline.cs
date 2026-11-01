@@ -61,7 +61,8 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         float cfgScale = 1.0f,
         Tensor? negativeTextEmbeddings = null,
         int[]? negativeT5TokenIds = null,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        AnimaReferenceJoin? reference = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -218,6 +219,11 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         }
         if (DiagnosticStats) LogStats("initial latent", latent);
 
+        // The reference's keys and values, built once while its LoRA is live and freed with the generation. Its RoPE placement is one target
+        // height down, so the cache is valid for this grid only.
+        using ReferenceKvCache? referenceCache = reference is null ? null : BuildReferenceCache(reference, latentH);
+        float shift = scheduler.Shift;
+
         // Sampler selection (2026-08-20). Anima is flow-matching, so it had no user-selectable sampler at all before
         // this. Comfy's `er_sde + simple` is now the recipe default for Anima Base: `ErSdeSampler` runs over this
         // family's own grid, which is what `simple` resamples to on it, so no named schedule is needed. The sampler owns the integrator and the
@@ -245,13 +251,22 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 PredictionType.FlowVelocity,
                 (x, s, stepIndex) =>
                 {
+                    bool logThisStep = DiagnosticStats
+                        && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1);
+                    if (reference is not null)
+                    {
+                        DenoisePrediction referenced = ReferenceGuidance.Predict(Backend, reference.Guidance, x, s, shift, cfgScale,
+                            branch => EvaluateReferenceBranch(branch, x, s, refinedText, refinedNegText, reference, referenceCache!));
+                        // The reference path hands back the combined velocity, the one the sampler steps with.
+                        if (logThisStep)
+                            LogStats($"velocity step={stepIndex} (t={s:F4}, sigma={sigma:F4}→{sigmaNext:F4}, combined)", referenced.Cond);
+                        return referenced;
+                    }
                     // Anima feeds `t = sigma` directly to the transformer (per anima-preview.py + anima_dit.py:
                     // `timestep = timestep / 1000` then the model receives the normalized t = sigma), so unlike the
                     // rest of the DiT fleet there is no x1000 round trip to preserve here — the sampler's sigma IS
                     // the conditioning value this loop passed before, on-schedule and at a sub-step alike.
                     Tensor cond = _transformer.Forward(Backend, x, s, refinedText);
-                    bool logThisStep = DiagnosticStats
-                        && (stepIndex == 0 || stepIndex == steps / 2 || stepIndex == steps - 1);
                     if (cfgScale <= 1.0f)
                     {
                         if (logThisStep)
@@ -361,6 +376,36 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         Logs.Info($"Anima t2i complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Encodes a reference already resized to its area and in [-1, 1] with the VAE encoder, the same latent space img2img reads.</summary>
+    /// <exception cref="NotSupportedException">The pipeline was built without a VAE encoder.</exception>
+    public Tensor EncodeReference(Tensor rgbMinusOneOne)
+    {
+        ThrowIfDisposed();
+        if (_vaeEncoder is null)
+            throw new NotSupportedException("A reference image needs the VAE encoder, which this Anima pipeline was built without.");
+        return _vaeEncoder.Encode(Backend, rgbMinusOneOne);
+    }
+
+    private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH)
+    {
+        using IDisposable scope = reference.Gate.Enable(reference.Strength);
+        // The cache holds the keys and values the adapter produced at this strength, so both the reference and the strength identify it.
+        long identity = HashCode.Combine(reference.Identity, BitConverter.SingleToInt32Bits(reference.Strength));
+        return _transformer.BuildReferenceCache(Backend, reference.Latent, latentH / _config.PatchSize.H, reference.Placement, identity);
+    }
+
+    /// <summary>One branch of a reference step. The branches with the reference run with its LoRA live; the others run on the base.</summary>
+    private Tensor EvaluateReferenceBranch(ReferenceBranch branch, Tensor x, float sigma, Tensor positive, Tensor? negative,
+        AnimaReferenceJoin reference, ReferenceKvCache cache)
+    {
+        bool positiveBranch = branch is ReferenceBranch.PositiveWithReference or ReferenceBranch.PositiveWithoutReference;
+        Tensor text = positiveBranch ? positive : negative!;
+        if (branch is ReferenceBranch.PositiveWithoutReference or ReferenceBranch.NegativeWithoutReference)
+            return _transformer.Forward(Backend, x, sigma, text);
+        using IDisposable scope = reference.Gate.Enable(reference.Strength);
+        return _transformer.Forward(Backend, x, sigma, text, null, cache);
     }
 
     /// <summary>Releases the negative-conditioning cache (pipeline-internal state; see DiffusionPipelineBase).</summary>

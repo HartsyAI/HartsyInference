@@ -21,6 +21,8 @@ public static partial class KnobProfiles
     private static readonly KnobProfile ReferenceProfile = KnobProfile.Create("reference")
         // Bypass skips the checkpoint's LlmAdapter and feeds raw Qwen-3 hiddens to DiT cross-attn; a diagnostic, not the model path.
         .With(EngineKnobs.AnimaBypassLlmAdapter, false)
+        // Pinned: the reference nn.GELU() is exact erf, and tanh drifts from it.
+        .With(EngineKnobs.AnimaExactGelu, true)
         // cuDNN 1D-as-2D audio convs compute F32 output via TF32 tensor cores, corr 0.9999 vs the direct kernel it replaces.
         .With(EngineKnobs.AudioConvCudnn, false)
         // AudioLmQuantPolicy maps "off" to AudioLmQuant.Off (no weight quant); unset applies Q4_K on a single device.

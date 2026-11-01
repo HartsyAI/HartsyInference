@@ -77,6 +77,32 @@ public static class RequestExtras
     /// <summary>The colorize layout's reference scale: the page's VAE copy is the target divided by this per side (default 2).</summary>
     public const string ReferenceScale = "reference.ref_scale";
 
+    /// <summary>The reference adapter a reference request uses: a catalog name or a file name in the LoRA folders. Empty or absent
+    /// means the released adapter.</summary>
+    public const string ReferenceAdapter = "reference.adapter";
+
+    /// <summary>The adapter's strength, the gate's scale on its LoRA. The reference's tokens still join at 0; only the LoRA drops out. To
+    /// leave the reference out, send no reference images.</summary>
+    public const string ReferenceStrength = "reference.strength";
+
+    /// <summary>The reference guidance scale (the adapter's <c>ref_guidance</c>): 1 costs no extra call.</summary>
+    public const string ReferenceGuidance = "reference.guidance";
+
+    /// <summary>The correction after the reference combine: <c>apg</c>, <c>rescale</c> or <c>none</c>.</summary>
+    public const string ReferenceCorrection = "reference.correction";
+
+    /// <summary>The blend for the rescale correction, in [0, 1].</summary>
+    public const string ReferenceRescalePhi = "reference.rescale_phi";
+
+    /// <summary>The first denoising fraction with extra reference guidance.</summary>
+    public const string ReferenceStart = "reference.start";
+
+    /// <summary>The last denoising fraction with extra reference guidance.</summary>
+    public const string ReferenceEnd = "reference.end";
+
+    /// <summary>What steps outside the window do: <c>keep</c> (the reference stays in both branches) or <c>drop</c> (plain CFG on the base).</summary>
+    public const string ReferenceOutside = "reference.outside";
+
     /// <summary>The boolean at <paramref name="key"/> (<c>true/false</c>, <c>on/off</c>, <c>1/0</c>, or a JSON boolean), or
     /// <paramref name="fallback"/> when absent or unparseable (logged).</summary>
     public static bool Bool(IReadOnlyDictionary<string, object>? extra, string key, bool fallback)
