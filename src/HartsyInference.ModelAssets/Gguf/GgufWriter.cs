@@ -46,7 +46,7 @@ public sealed class GgufWriter : IDisposable
         SetMetadata("general.alignment", (ulong)DefaultAlignment);
     }
 
-    /// <summary>Sets a metadata key. Value must be one of the supported GGUF types: bool / sbyte / byte / short / ushort / int / uint / long / ulong / float / double / string / string[].</summary>
+    /// <summary>Sets a metadata key. Value must be one of the supported GGUF types: bool / sbyte / byte / short / ushort / int / uint / long / ulong / float / double / string, or an array of string / bool / int / uint / float.</summary>
     public void SetMetadata(string key, object value)
     {
         ThrowIfDisposed();
@@ -187,12 +187,24 @@ public sealed class GgufWriter : IDisposable
                 w.Write((ulong)arr.Length);
                 foreach (string s in arr) WriteString(w, s);
                 break;
+            case bool[] flags: WriteArray(w, 7, flags.Length, () => { foreach (bool flag in flags) w.Write(flag ? (byte)1 : (byte)0); }); break;
+            case int[] ints: WriteArray(w, 5, ints.Length, () => { foreach (int v in ints) w.Write(v); }); break;
+            case uint[] uints: WriteArray(w, 4, uints.Length, () => { foreach (uint v in uints) w.Write(v); }); break;
+            case float[] floats: WriteArray(w, 6, floats.Length, () => { foreach (float v in floats) w.Write(v); }); break;
             case ulong ul: w.Write((uint)10); w.Write(ul); break;
             case long l: w.Write((uint)11); w.Write(l); break;
             case double d: w.Write((uint)12); w.Write(d); break;
             default:
                 throw new ArgumentException($"Unsupported metadata value type: {value.GetType()}");
         }
+    }
+
+    private static void WriteArray(BinaryWriter w, uint elementType, int count, Action writeElements)
+    {
+        w.Write((uint)9);
+        w.Write(elementType);
+        w.Write((ulong)count);
+        writeElements();
     }
 
     /// <summary>Writes one tensor's descriptor. Dimensions are emitted in ggml <c>ne</c> order — fastest-varying axis
