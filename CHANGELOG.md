@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.398
+
+- **Added: Recursive Flint (40B-A2.5B) as the `flint` GGUF architecture, with a `flint` catalog entry.** A sparse MoE (256 experts, top-6 sigmoid routing, an ungated shared expert) with learned attention sinks, 513-token sliding RoPE layers and full-attention layers without positional encoding, plus Flint's three-stage pre-tokenizer. A tiny random model matches transformers through the GGUF path; the real model has not been run.
+- **Added: `tokenizer.ggml.eog_token_ids` become stop ids** for byte-level BPE GGUF tokenizers, so every end-of-generation token a converter lists ends a turn.
+- **Added: `GgufWriter` writes `bool[]`, `int[]`, `uint[]` and `float[]` metadata arrays.**
+
 ## alpha.393
 
 - **Added: LiquidAI LFM3-1.7B text model.** Gated short-conv, full-attention and sliding-attention layers with sandwich norms, run from a Hugging Face directory (`config.json`, `model.safetensors`, `tokenizer.json`, `chat_template.jinja`) on the CPU backend; pass the directory as the model path. Logits and a 12-token greedy decode match transformers F32. CUDA, Vulkan, quantized weights and packed documents are not covered. The weights are under the LFM Open License v1.0, which allows commercial use only below USD 10M annual revenue.
