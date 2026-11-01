@@ -18,6 +18,15 @@ public sealed class LowRankAdjunctTerm
     /// <summary>User strength times the decomposition's own <c>alpha / rank</c>, folded in once by the applier.</summary>
     public required float Scale { get; init; }
 
+    /// <summary>The gate this term is switched by, shared with the other terms of the same LoRA; null for a term that is always applied.</summary>
+    public AdjunctGate? Gate { get; init; }
+
+    /// <summary>Whether a GEMM adds this term now: always, unless its gate is disabled.</summary>
+    public bool IsApplied => Gate is null || Gate.Enabled;
+
+    /// <summary><see cref="Scale"/> with the gate's multiplier folded in while the gate is enabled.</summary>
+    public float EffectiveScale => Gate is null ? Scale : Scale * Gate.Scale;
+
     /// <summary>Rows of the delta this term contributes — the target weight's output dimension.</summary>
     public long OutFeatures => Up is null ? Down.Shape[0] : Up.Shape[0];
 
@@ -31,9 +40,9 @@ public sealed class LowRankAdjunctTerm
     {
         if (Up is null)
         {
-            return new LowRankAdjunctTerm { Down = Down.SliceRows(rowOffset, rowCount), Scale = Scale };
+            return new LowRankAdjunctTerm { Down = Down.SliceRows(rowOffset, rowCount), Scale = Scale, Gate = Gate };
         }
-        return new LowRankAdjunctTerm { Down = Down, Up = Up.SliceRows(rowOffset, rowCount), Scale = Scale };
+        return new LowRankAdjunctTerm { Down = Down, Up = Up.SliceRows(rowOffset, rowCount), Scale = Scale, Gate = Gate };
     }
 
     /// <summary>Throws unless this term's shapes agree with a weight of <paramref name="outFeatures"/> × <paramref name="inFeatures"/>.</summary>
