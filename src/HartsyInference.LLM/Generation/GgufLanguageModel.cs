@@ -10,7 +10,8 @@ namespace HartsyInference.LLM.Generation;
 /// <remarks>Pipeline: <c>GgufModelLoader.Load</c> (parse + key-remap, still quantized) → <see cref="GgufConfigFactory.FromGguf"/> (architecture config) → <see cref="GenericTransformer.LoadWeights"/> (embed + norms to F32, projections kept quantized).</remarks>
 public sealed class GgufLanguageModel : IDisposable
 {
-    private readonly GgufModelLoader.LoadedGgufModel _handle;
+    private readonly GgufModelLoader.LoadedGgufModel? _handle;
+    private readonly IDisposable? _owner;
     private int _disposed;
 
     /// <summary>GGUF quant formats the CUDA path supports directly (dequant-to-F16 and the fused GEMV); other quant tensors are dequantized to F32 at load.</summary>
@@ -26,7 +27,7 @@ public sealed class GgufLanguageModel : IDisposable
     public GenericTransformer Transformer { get; }
 
     /// <summary>The GGUF <c>general.architecture</c> string (e.g. "qwen2", "qwen3", "llama").</summary>
-    public string Architecture => _handle.Architecture;
+    public string Architecture => _handle?.Architecture ?? Config.Architecture ?? string.Empty;
 
     /// <summary>The tokenizer built from the GGUF's embedded vocab/merges/special tokens.</summary>
     public ILlmTokenizer Tokenizer { get; }
@@ -34,15 +35,20 @@ public sealed class GgufLanguageModel : IDisposable
     /// <summary>The chat template — the model's own Jinja <c>chat_template</c> when present, else ChatML.</summary>
     public IChatTemplate Template { get; }
 
-    private GgufLanguageModel(GgufModelLoader.LoadedGgufModel handle, TransformerConfig config,
+    private GgufLanguageModel(GgufModelLoader.LoadedGgufModel? handle, IDisposable? owner, TransformerConfig config,
         GenericTransformer transformer, ILlmTokenizer tokenizer, IChatTemplate template)
     {
         _handle = handle;
+        _owner = owner;
         Config = config;
         Transformer = transformer;
         Tokenizer = tokenizer;
         Template = template;
     }
+
+    /// <summary>Wraps a transformer built from a Hugging Face directory (no GGUF) in the same model object the Text path serves, so placement, pipelines and disposal are one code path. <paramref name="owner"/> holds the weights' storage and is disposed with the model.</summary>
+    public static GgufLanguageModel FromWeights(TransformerConfig config, GenericTransformer transformer, ILlmTokenizer tokenizer, IChatTemplate template, IDisposable owner)
+        => new(null, owner, config, transformer, tokenizer, template);
 
     /// <summary>Architectures that are NOT <see cref="GenericTransformer"/> decoders — dense/MoE-transformer config inference (head_count etc.) is meaningless and throws for these (e.g. mamba2's <c>attention.head_count</c> is 0, so head_dim = hidden/heads divides by zero); route them through <see cref="Ssm.SsmLanguageModel"/> instead.</summary>
     internal static readonly HashSet<string> SsmArchitectures = ["mamba", "mamba2", "rwkv6", "rwkv", "rwkv7", "qwen35", "qwen35moe"];
@@ -242,7 +248,7 @@ public sealed class GgufLanguageModel : IDisposable
             ILlmTokenizer tokenizer = BuildTokenizer(handle.Metadata);
             IChatTemplate template = BuildTemplate(handle.Metadata, tokenizer);
 
-            return new GgufLanguageModel(handle, config, transformer, tokenizer, template);
+            return new GgufLanguageModel(handle, null, config, transformer, tokenizer, template);
         }
         catch
         {
@@ -426,6 +432,7 @@ public sealed class GgufLanguageModel : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         Transformer.Dispose();
-        _handle.Dispose();
+        _handle?.Dispose();
+        _owner?.Dispose();
     }
 }
