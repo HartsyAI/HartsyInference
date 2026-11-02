@@ -156,19 +156,37 @@ public sealed class RestoreService : IRestoreService
     private IBackend BackendFor(RestoreRequest request)
     {
         string? selector = request.Device?.Trim();
-        if (string.IsNullOrEmpty(selector) || selector.Equals(_engine.Backend.Device.ToString(), StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrEmpty(selector))
             return _engine.Backend;
+        // Compared by the concrete device, not the text: "cuda", "auto" and "cuda:0" all name the engine's card when it is GPU 0.
+        DeviceKind wanted = DeviceFor(selector);
+        if (wanted == _engine.Backend.Device)
+            return _engine.Backend;
+        string key = wanted.ToString();
         lock (_lock)
         {
-            if (_deviceBackends.TryGetValue(selector, out IBackend? existing))
+            if (_deviceBackends.TryGetValue(key, out IBackend? existing))
                 return existing;
-            IBackend created = BackendFactory.Create(selector);
+            IBackend created = BackendFactory.Create(key);
             // The posture comes from VramPolicyScope per request, not from the device's registry, so a later request's
             // overrides are not held back by this first one.
             Logs.Info($"SeedVR2 restore placed on {created.Device} (request Device '{selector}').");
-            _deviceBackends[selector] = created;
+            _deviceBackends[key] = created;
             return created;
         }
+    }
+
+    /// <summary>The concrete device a selector names: <c>auto</c> resolves the way the engine's own backend does, and a missing ordinal is 0.</summary>
+    private static DeviceKind DeviceFor(string selector)
+    {
+        string kind = BackendFactory.Resolve(selector);
+        int ordinal = BackendFactory.HasExplicitOrdinal(selector) ? BackendFactory.ParseOrdinal(selector) : 0;
+        return kind switch
+        {
+            "cuda" => DeviceKind.Cuda(ordinal),
+            "vulkan" => DeviceKind.Vulkan(ordinal),
+            _ => DeviceKind.Cpu,
+        };
     }
 
     private SeedVr2RestorePipeline GetOrLoadPipeline(ModelSpec spec, RestoreRequest request, IBackend backend)
