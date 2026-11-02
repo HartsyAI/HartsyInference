@@ -1,5 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Requests;
 
@@ -29,6 +30,9 @@ public sealed record RestoreRequest
 
     /// <summary>Wavelet transplant weight in [0,1]; 1.0 (default) = pure model output. Lower values pull the low-frequency band toward the resized input — the oversharpening guard.</summary>
     public float? Strength { get; init; }
+
+    /// <summary>Colour transfer back to the input (ComfyUI's lab / adain modes), applied before the <see cref="Strength"/> lerp. Null keeps the model's own colours.</summary>
+    public SeedVr2ColorTransfer? ColorTransfer { get; init; }
 
     /// <summary>Output frame rate for encoded results; null keeps the source rate.</summary>
     public double? Fps { get; init; }

@@ -55,6 +55,7 @@ public sealed class RestoreService : IRestoreService
             ClipFrames = request.ClipFrames ?? 25,
             Overlap = request.Overlap ?? 4,
             Strength = request.Strength ?? 1.0f,
+            ColorTransfer = request.ColorTransfer ?? SeedVr2ColorTransfer.None,
             Seed = request.Seed ?? 666,
         };
 
