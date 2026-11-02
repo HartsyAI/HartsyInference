@@ -32,6 +32,14 @@ public static partial class EngineKnobs
         Bool("numerics.vkFlashDecodeSplit", true, KnobScope.Construction, KnobDomain.Numerics,
             "Splits single-row (decode) attention across workgroups and merges the partial softmax states; off keeps decode on the scalar sdpa_flash path.");
 
+    /// <summary>Query-tiled F32 flash attention for dense F32 attention on Vulkan: <c>auto</c> takes it ahead of the scalar
+    /// <c>sdpa_flash</c> route, <c>off</c> keeps the scalar route.</summary>
+    /// <remarks>Default <c>off</c> until the regression A/B for the default flip is recorded. Any other value is rejected when the
+    /// Vulkan backend starts.</remarks>
+    public static readonly Knob<string?> VkTiledAttention =
+        Str("numerics.vkTiledAttention", "off", KnobScope.Construction, KnobDomain.Numerics,
+            "Query-tiled F32 flash attention for dense F32 attention on Vulkan: auto takes it ahead of the scalar sdpa_flash route, off keeps the scalar route.");
+
     /// <summary>Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.</summary>
     public static readonly Knob<bool> VkInt8 =
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,
