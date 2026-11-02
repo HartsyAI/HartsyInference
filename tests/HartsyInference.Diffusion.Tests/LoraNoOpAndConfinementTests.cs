@@ -38,6 +38,17 @@ public sealed class LoraNoOpAndConfinementTests
     }
 
     [Fact]
+    public void Resolve_RefusesANonFiniteStrengthByName()
+    {
+        LoraStack stack = new() { Entries = [new LoraEntry { Model = "broken-strength", Weight = double.NaN }] };
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => LoraResolver.Resolve(stack));
+
+        Assert.Contains("broken-strength", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("finite", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CacheKey_ZeroedLora_KeysLikeARequestWithNoLora()
     {
         ImageRequest plain = new() { Prompt = "p" };

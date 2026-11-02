@@ -82,19 +82,38 @@ public sealed class RecipeEvictionDisposeTests
     }
 
     [Fact]
-    public void FreeMemory_WhileAPipelineIsLeased_FailsByNameUntilTheLeaseIsReleased()
+    public void FreeMemory_WhileAPipelineIsLeased_SkipsTheFreeAndKeepsThePipeline()
     {
         FakeRecipe held = Register("test-lease-free", throwOnDispose: false);
         using InferenceEngine engine = new InferenceEngine("cpu");
-        engine.PipelineLeaseWait = TimeSpan.FromMilliseconds(200);
         LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
 
-        Assert.Throws<HartsyInferenceException>(engine.FreeMemory);
+        // Returns at once: a free between jobs never waits on a request, and never disposes a pipeline one holds.
+        engine.FreeMemory();
         Assert.Equal(0, held.Built[0].DisposeCalls);
 
         lease.Lease.Dispose();
         engine.FreeMemory();
         Assert.Equal(1, held.Built[0].DisposeCalls);
+    }
+
+    [Fact]
+    public void ModelSwitch_CancelledWhileWaitingForALease_StopsWaitingPromptly()
+    {
+        FakeRecipe held = Register("test-lease-cancel", throwOnDispose: false);
+        FakeRecipe next = Register("test-lease-cancel-next", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+        using CancellationTokenSource cancel = new(TimeSpan.FromMilliseconds(200));
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+
+        // The default lease wait is ten minutes. A cancelled request must not hold the switch behind that lease for the whole wait.
+        Assert.ThrowsAny<OperationCanceledException>(() => engine.GetOrConstructRecipeLeased(SpecFor(next.Name), cancel: cancel.Token));
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10));
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+        Assert.Empty(next.Built);
+        lease.Lease.Dispose();
     }
 
     private static FakeRecipe Register(string familyId, bool throwOnDispose)

@@ -15,7 +15,7 @@ public sealed class LoraStack : IDisposable
     private int _disposed;
 
     /// <summary>What every <see cref="ApplyTo"/> call on this stack did, summed over the calls. The counts measure different
-    /// units, so they are kept apart; see <see cref="ApplyReport"/>.</summary>
+    /// units, so they are kept apart; see <see cref="ApplyReport"/>. A stack applied to several components sums its counts across them.</summary>
     public ApplyReport Report { get; private set; }
 
     /// <summary>Counts from <see cref="ApplyTo"/>, each in the unit its name says. Source units are LoRA layers or full-weight

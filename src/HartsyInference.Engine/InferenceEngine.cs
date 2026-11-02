@@ -334,7 +334,7 @@ public sealed class InferenceEngine : IInferenceEngine
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
         // Victims leave the cache before the device gate is taken. A leased pipeline must never be disposed, and that
         // check runs outside ConstructWithVramCleanup, whose failure path frees every device buffer.
-        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath);
+        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath, cancel);
         bool victimsReleased = false;
         IRecipePipeline pipeline;
         try
@@ -532,7 +532,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>Like <see cref="GetOrConstructVideoRecipe"/>, but the pipeline stays leased until the caller disposes the lease.</summary>
     internal LeasedVideoRecipe GetOrConstructVideoRecipeLeased(ModelSpec spec, VideoRequest? request = null,
-        VideoPlan? plan = null)
+        VideoPlan? plan = null, CancellationToken cancel = default)
     {
         if (string.IsNullOrEmpty(spec.LocalPath))
         {
@@ -576,7 +576,7 @@ public sealed class InferenceEngine : IInferenceEngine
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath: null);
+        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath: null, cancel);
         bool victimsReleased = false;
         IVideoRecipePipeline pipeline;
         try
@@ -847,20 +847,27 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <param name="keepPath">The incoming checkpoint.</param>
     /// <param name="alsoKeepPath">Optional second survivor. The generic refiner sets this in both directions (base keeps
     /// refiner, refiner keeps base): without it every refined generation ping-pongs two full pipeline loads.</param>
-    private EvictedPipelines TakeEvictionVictims(string keepPath, string? alsoKeepPath)
+    private EvictedPipelines TakeEvictionVictims(string keepPath, string? alsoKeepPath, CancellationToken cancel)
     {
         string imageKeep = $"recipe:{keepPath}|";
         string videoKeep = $"video-recipe:{keepPath}|";
         string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
         string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
+        // The budget is read once, before the cache lock: it calls the driver, and every cache lookup and lease release waits on the lock.
+        bool sameCheckpointCached;
+        lock (_pipelineCacheLock)
+        {
+            sameCheckpointCached = _recipePipelines.Keys.Any(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
+                || _videoRecipePipelines.Keys.Any(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase));
+        }
+        bool evictSameCheckpoint = sameCheckpointCached && SameCheckpointBudgetTight(keepPath);
         DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
         lock (_pipelineCacheLock)
         {
             while (true)
             {
-                bool sameCheckpointCached = _recipePipelines.Keys.Any(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
-                    || _videoRecipePipelines.Keys.Any(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase));
-                bool evictSameCheckpoint = sameCheckpointCached && SameCheckpointBudgetTight(keepPath);
+                // A cancelled request stops waiting here, so it cannot hold the other requests behind it for the whole lease wait.
+                cancel.ThrowIfCancellationRequested();
                 List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
                 List<string> videoVictims = PipelineEvictionPolicy.SelectVictims(_videoRecipePipelines.Keys, videoKeep, videoAlso, evictSameCheckpoint);
                 string? busy = imageVictims.Concat(videoVictims).FirstOrDefault(IsLeasedUnderLock);
@@ -873,7 +880,8 @@ public sealed class InferenceEngine : IInferenceEngine
                 {
                     throw new HartsyInferenceException($"Pipeline '{busy}' is still serving a request, so this model switch cannot evict it. Retry when that request finishes.");
                 }
-                Monitor.Wait(_pipelineCacheLock, remaining);
+                // Wakes at least once a second, so a cancellation is seen even when no lease is released.
+                Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
             }
         }
     }
@@ -909,25 +917,6 @@ public sealed class InferenceEngine : IInferenceEngine
         return !fits;
     }
 
-    /// <summary>Removes every cached pipeline once no request holds one, and fails by name past <see cref="PipelineLeaseWait"/>.</summary>
-    private EvictedPipelines TakeAllPipelines()
-    {
-        DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
-        lock (_pipelineCacheLock)
-        {
-            while (_pipelineLeases.Count > 0)
-            {
-                TimeSpan remaining = deadline - DateTime.UtcNow;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    throw new HartsyInferenceException("A request is still using a loaded pipeline, so its memory cannot be freed yet. Retry when that request finishes.");
-                }
-                Monitor.Wait(_pipelineCacheLock, remaining);
-            }
-            return RemoveVictims(_recipePipelines.Keys.ToList(), _videoRecipePipelines.Keys.ToList());
-        }
-    }
-
     /// <summary>Takes a lease on a cached pipeline. Runs under <see cref="_pipelineCacheLock"/>.</summary>
     private IDisposable AcquireLeaseUnderLock(string key)
     {
@@ -957,7 +946,6 @@ public sealed class InferenceEngine : IInferenceEngine
 
     private bool IsLeasedUnderLock(string key) => _pipelineLeases.TryGetValue(key, out int held) && held > 0;
 
-    /// <summary>Disposes the pipelines a model switch removed from the cache, then returns their device memory to the driver.</summary>
     /// <summary>Disposes evicted pipelines. A victim that throws is still dropped: left cached half-disposed, every later switch would pick it again.</summary>
     private void DisposeVictims(EvictedPipelines victims, ref List<Exception>? failures)
     {
@@ -971,8 +959,8 @@ public sealed class InferenceEngine : IInferenceEngine
         }
     }
 
-    /// <summary>Releases an eviction's pipelines and the device memory they held. The caller holds the device gate: a model switch
-    /// runs inside its construction, so the device release needs no gate of its own.</summary>
+    /// <summary>Disposes the pipelines a model switch removed from the cache, then returns their device memory to the driver. The
+    /// caller holds the device gate: a model switch runs inside its construction, so the device release needs no gate of its own.</summary>
     private void ReleaseEvicted(EvictedPipelines victims)
     {
         if (victims.Count == 0)
@@ -1035,14 +1023,23 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public void FreeMemory()
     {
-        // The victims left the cache under the lock, so no request can reach them. They are disposed the way ReleaseLoaded
-        // disposes cached pipelines, and the device release below takes the same timed gate as every between-jobs free: a job
-        // that outlasts the wait keeps its device memory instead of having it freed under the job. An untimed gate here would
-        // block the free for as long as the job runs.
-        EvictedPipelines taken = TakeAllPipelines();
+        // A free between jobs never waits on a request and never disposes a pipeline one holds. While any pipeline is leased, the
+        // free is skipped and logged; the next free after that request finishes releases everything. The device release below
+        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory.
+        EvictedPipelines taken;
+        lock (_pipelineCacheLock)
+        {
+            if (_pipelineLeases.Count > 0)
+            {
+                Logs.Warning("[Engine] Free memory skipped: a request is still using a loaded pipeline. Retry when it finishes.");
+                return;
+            }
+            taken = RemoveVictims(_recipePipelines.Keys.ToList(), _videoRecipePipelines.Keys.ToList());
+        }
         List<Exception>? failures = null;
         DisposeVictims(taken, ref failures);
-        ReleaseLoaded(disposeBackend: false);
+        // The cache was emptied above, so ReleaseLoaded must not walk it again: a pipeline built after this point belongs to a request.
+        ReleaseLoaded(disposeBackend: false, disposePipelines: false);
     }
 
     private void DisposeLoaded() => ReleaseLoaded(disposeBackend: true);
@@ -1050,17 +1047,20 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>Drops every loaded model across all modalities. With <paramref name="disposeBackend"/> the device goes
     /// too (teardown / backend switch); without it the backend survives and just has its device memory released, which
     /// is the "free memory" a host asks for between jobs.</summary>
-    private void ReleaseLoaded(bool disposeBackend)
+    private void ReleaseLoaded(bool disposeBackend, bool disposePipelines = true)
     {
         // Every step runs even when an earlier one throws: a failed dispose must not strand the device memory, the
         // services or the backend behind it.
         List<Exception>? failures = null;
-        foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
-            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
-        _recipePipelines.Clear();
-        foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
-            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
-        _videoRecipePipelines.Clear();
+        if (disposePipelines)
+        {
+            foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
+                ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
+            _recipePipelines.Clear();
+            foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
+                ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
+            _videoRecipePipelines.Clear();
+        }
         // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
         if (_vision.IsValueCreated)
             ReleaseLogged("the vision service", _vision.Value.Dispose, ref failures);

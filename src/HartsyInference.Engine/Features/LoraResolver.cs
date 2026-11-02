@@ -40,6 +40,11 @@ public static class LoraResolver
         }
         foreach (LoraEntry entry in loras.Entries)
         {
+            // NaN and infinity pass every later check (they compare unequal to zero), and would merge straight into the weights.
+            if (!double.IsFinite(entry.Weight) || (entry.TextEncoderWeight is { } encoderWeight && !double.IsFinite(encoderWeight)))
+            {
+                throw new NotSupportedException($"LoRA '{entry.Model}' has a strength that is not a finite number. Set a finite weight.");
+            }
             if (IsNoOp(entry))
             {
                 Logs.Info($"[Features][LoRA] '{entry.Model}' has zero strength on both sides; not loaded.");
