@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: Lens never runs F16 attention.** Its V is not normalised and overflows F16 from about block 36, so F16 storage turns
+  the image to noise. Its joint attention now demands F32 or BF16 (`AttentionNumerics.WideRange`): F16, INT8 and FP8 are refused
+  on the call, so the global `numerics.sdpaF16`, a per-call F16 assertion and F16 operands cannot reach it. A direct F16 request
+  is refused with `AttentionUnsupportedException`; `numerics.sdpaF16` logs one warning and is ignored for Lens. The CUDA
+  `materialized` attention row is split so a refused F16 keeps its F32 fallback, and the Vulkan dense and token-major entries now
+  carry the call's numerics. Other models' attention routes are unchanged.
+
 ## alpha.396
 
 - **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. `HfChatAssets` loads a Hugging Face directory's byte-level BPE tokenizer and chat template (LFM3 uses it too); MiniMax's match transformers' ids. The catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the block selection runs on the host and CUDA and Vulkan refuse the attention call that carries its bias, so the model runs on the CPU backend only.

@@ -159,7 +159,7 @@ no bug, any more than one bad seed was proof there was one.
 - **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
   V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
   65504 → solid black. Fix: never let such V reach an F16 row. Lens's attention asserts no F16 bound and takes the
-  BF16 grant (F32's range); `numerics.sdpaF16`, which forces F16 for every caller, still clips it. A power-of-two
+  BF16 grant (F32's range); `numerics.sdpaF16`, which forces F16 for every caller, is refused there (`AttentionNumerics.WideRange`), so it no longer clips it. A power-of-two
   damp on V (scaled back out of the output) is exact on F32 rows if an F16 path must be used.
 - **F16 damp in front of a norm without a matched eps = washed-out image, never a NaN.** A damp `c` on a
   projection that feeds an RMSNorm is exact only as `RMSNorm(c·x, c²·eps)`; with the plain eps the norm sees
