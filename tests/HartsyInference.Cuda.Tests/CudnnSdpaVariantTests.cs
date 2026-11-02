@@ -347,7 +347,9 @@ public sealed unsafe class CudnnSdpaVariantTests
         Assert.Equal("cudnn.f16", backend.PlanAttention(in perHead).RowId);
 
         AttentionCall bf16 = HeadMajor(DType.BF16, 8, biasHeads: 0);
-        Assert.Equal("materialized", backend.PlanAttention(in bf16).RowId);
+        // allowF16 is true in HeadMajor, so this call carries the legacy F16 permission and narrows inside the materialized
+        // route, as it did before the split. The split names that row materialized.f16; the computation is the same.
+        Assert.Equal("materialized.f16", backend.PlanAttention(in bf16).RowId);
         AttentionCall bf16Granted = bf16 with { Numerics = GrantsBf16 };
         Assert.Equal("cudnn.f16", backend.PlanAttention(in bf16Granted).RowId);
     }
