@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Core.Backends;
 
 /// <summary>Formats narrower than F32 an attention kernel may store operands in and multiply with.</summary>
@@ -68,6 +70,19 @@ public readonly record struct AttentionNumerics
 
     /// <summary>The permissions a legacy entry point's <c>allowF16</c> carried.</summary>
     public static AttentionNumerics FromLegacy(bool allowF16) => new() { LegacyAssertedBounded = allowF16 };
+
+    /// <summary>The demand of a model whose values exceed F16's range: F32 storage always, BF16 when <paramref name="bf16Storage"/>
+    /// grants it, and F16, INT8 and FP8 refused outright, whatever the call asserts or a backend knob forces.</summary>
+    public static AttentionNumerics WideRange(bool bf16Storage) =>
+        (bf16Storage ? Bf16Storage : Exact) with { Refused = AttentionFormats.F16 | AttentionFormats.Int8 | AttentionFormats.Fp8 };
+
+    /// <summary>The narrow formats the call's operands and output are stored in. The planner refuses a call with one of them in a
+    /// refused format whichever row would serve it, since a row that widens an operand still reads it narrow.</summary>
+    internal static AttentionFormats OperandFormats(in AttentionCall call) =>
+        Format(call.Query.DType) | Format(call.Key.DType) | Format(call.Value.DType) | Format(call.Output.DType);
+
+    private static AttentionFormats Format(DType t) =>
+        t == DType.F16 ? AttentionFormats.F16 : t == DType.BF16 ? AttentionFormats.Bf16 : t.IsFp8 ? AttentionFormats.Fp8 : AttentionFormats.None;
 
     /// <summary>True when both multiplies may use the given formats.</summary>
     public bool Permits(AttentionFormats queryKey, AttentionFormats probValue) =>

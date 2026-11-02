@@ -156,6 +156,28 @@ public sealed class CudnnSdpaBackendRowsTests
         Assert.Contains(row, (string[])["materialized", "tiled.f32", "cudnn.f32.bf16"]);
     }
 
+    /// <summary>The demand refuses every row that declares F16, with numerics.sdpaF16 forced on as well, and an F32 row still serves the
+    /// call: the F16-narrowing materialized variant admits only a call that asserts F16.</summary>
+    [Theory]
+    [InlineData(false, 64UL << 30)]
+    [InlineData(false, 4096UL)]
+    [InlineData(true, 64UL << 30)]
+    [InlineData(true, 4096UL)]
+    public void LensDemand_RefusesEveryF16Row_EvenWithTheKnobForced(bool bf16Grant, ulong freeVram)
+    {
+        const int heads = 24, d = 64;
+        Tensor q = new(new TensorShape(1, heads, S, d), DType.F32), k = new(new TensorShape(1, heads, S, d), DType.F32);
+        Tensor v = new(new TensorShape(1, heads, S, d), DType.F32), o = new(new TensorShape(1, heads, S, d), DType.F32);
+        AttentionCall call = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.125f, allowF16: false)
+            with { Numerics = AttentionNumerics.WideRange(bf16Grant) };
+        CudaBackend backend = Backend(freeVram: freeVram);
+        Set(backend, "_sdpaF16ForceOn", true);
+
+        Assert.Contains(Plan(backend, "BuildDenseRows", in call), (string[])["materialized", "tiled.f32", "cudnn.f32.bf16"]);
+        Assert.All(Rows(backend, "BuildDenseRows").Where(r => ((r.Capability.UsesQueryKey | r.Capability.UsesProbValue) & AttentionFormats.F16) != 0),
+            r => Assert.NotEqual(AttentionExclusion.None, r.Capability.Excludes(in call)));
+    }
+
     /// <summary>Failure state is per signature: a BF16 cast signature given up leaves the F16 D=128 path and the saturating row
     /// eligible, and an F16 signature given up leaves the BF16 cast row eligible.</summary>
     [Fact]
@@ -184,7 +206,7 @@ public sealed class CudnnSdpaBackendRowsTests
 
         CudaBackend f16Refused = Backend(health: Refusing(DType.F16));
         Assert.Equal("cudnn.f32.bf16", Plan(f16Refused, "BuildDenseRows", in granted));
-        Assert.Equal("materialized", Plan(f16Refused, "BuildDenseRows", in legacy));
+        Assert.Equal("materialized.f16", Plan(f16Refused, "BuildDenseRows", in legacy));
     }
 
     // ── grouped token-major ───────────────────────────────────────────────────────────────────────────────────
@@ -253,7 +275,7 @@ public sealed class CudnnSdpaBackendRowsTests
         AttentionCall perHead = HeadMajor(DType.F16, 8, 8, biasHeads: 8);
         Assert.Equal("cudnn.f16", Plan(backend, "BuildDenseRows", in perHead));
         AttentionCall mismatch = HeadMajor(DType.F16, 8, 8, biasHeads: 4);
-        Assert.Equal("materialized", Plan(backend, "BuildDenseRows", in mismatch));
+        Assert.Equal("materialized.f16", Plan(backend, "BuildDenseRows", in mismatch));
         AttentionCall perHeadTokenMajor = TokenMajor(DType.F16, 4, 4);
         using Tensor mask = new(new TensorShape(1, 4, S, S), DType.F32);
         perHeadTokenMajor = perHeadTokenMajor with { Mask = AttentionMask.Additive(mask) };
@@ -265,9 +287,9 @@ public sealed class CudnnSdpaBackendRowsTests
     {
         CudaBackend backend = Backend();
         AttentionCall plain = HeadMajor(DType.BF16, 8, 8);
-        Assert.Equal("materialized", Plan(backend, "BuildDenseRows", in plain));
+        Assert.Equal("materialized.f16", Plan(backend, "BuildDenseRows", in plain));
         AttentionCall legacy = HeadMajor(DType.BF16, 8, 8, numerics: AttentionNumerics.FromLegacy(true));
-        Assert.Equal("materialized", Plan(backend, "BuildDenseRows", in legacy));
+        Assert.Equal("materialized.f16", Plan(backend, "BuildDenseRows", in legacy));
         AttentionCall granted = HeadMajor(DType.BF16, 8, 8, numerics: GrantsBf16);
         Assert.Equal("cudnn.f16", Plan(backend, "BuildDenseRows", in granted));
         AttentionCall tokenMajor = TokenMajor(DType.BF16, 8, 8, numerics: GrantsBf16);
