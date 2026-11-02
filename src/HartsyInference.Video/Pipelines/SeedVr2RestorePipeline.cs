@@ -111,9 +111,14 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
                 break;
         }
 
+        if (options.ColorTransfer != SeedVr2ColorTransfer.None)
+            for (int f = 0; f < pre.OriginalFrames; f++)
+                ColorFrame(output, pre.Data, pre.Frames, f, outH, outW,
+                    (model, input) => ApplyColorTransfer(options.ColorTransfer, model, input, outH, outW));
         if (options.Strength < 1f)
             for (int f = 0; f < pre.OriginalFrames; f++)
-                TransplantFrame(output, pre.Data, pre.Frames, f, outH, outW, options.Strength);
+                ColorFrame(output, pre.Data, pre.Frames, f, outH, outW,
+                    (model, input) => SeedVr2ColorFix.Transplant(model, input, 3, outH, outW, options.Strength));
 
         List<byte[]> result = ConvertFrames(output, pre.Frames, 0, pre.OriginalFrames, outH, outW)
             .Select(frame => frame.Rgb)
@@ -231,8 +236,28 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         return chunk;
     }
 
-    private static void TransplantFrame(float[] output, float[] reference, int totalFrames, int frame,
-        int h, int w, float strength)
+    /// <summary>One colour pass over a frame's planes: <c>model</c> is overwritten, <c>input</c> is the resized reference.</summary>
+    private delegate void ColorPass(Span<float> model, ReadOnlySpan<float> input);
+
+    private static void ApplyColorTransfer(SeedVr2ColorTransfer mode, Span<float> model, ReadOnlySpan<float> input, int h, int w)
+    {
+        switch (mode)
+        {
+            case SeedVr2ColorTransfer.Lab:
+                SeedVr2ColorFix.TransferLab(model, input, h, w);
+                break;
+            case SeedVr2ColorTransfer.AdaIn:
+                SeedVr2ColorFix.TransferAdaIn(model, input, 3, h, w);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "No colour transfer to apply.");
+        }
+    }
+
+    /// <summary>Runs one colour pass over a frame: copies its three planes out of the clip-major output, applies
+    /// <paramref name="transfer"/>, and writes them back.</summary>
+    private static void ColorFrame(float[] output, float[] reference, int totalFrames, int frame, int h, int w,
+        ColorPass transfer)
     {
         float[] model = new float[3 * h * w];
         float[] input = new float[3 * h * w];
@@ -242,7 +267,7 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
             Array.Copy(output, plane, model, c * h * w, h * w);
             Array.Copy(reference, plane, input, c * h * w, h * w);
         }
-        SeedVr2ColorFix.Transplant(model, input, 3, h, w, strength);
+        transfer(model, input);
         for (int c = 0; c < 3; c++)
             Array.Copy(model, c * h * w, output, ((long)c * totalFrames + frame) * h * w, h * w);
     }
