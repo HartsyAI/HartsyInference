@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Changed: Anima's attention runs in F16 by default (`numerics.animaF16`).** Anima now carries the same F16 permission as Ernie, Wan and LTX. At 1024, seed 42, F16 attention moves the output (SSIM 0.957 against F32 on CUDA, 0.979 on Vulkan) and cuts the Vulkan step from about 26 s to 0.53 s. The `reference` profile pins F32. The knob is read when the model is built.
+
 ## alpha.396
 
 - **Added: MiniMax-M3 text architecture as the `minimax-m3` GGUF architecture (no catalog entry yet).** Block-sparse attention selected by a per-layer indexer with its own key cache, the clamped alpha-SwiGLU (`ActivationKind.SwigluOai`) in dense, shared and routed FFNs, and an additive per-head bias on `KvAttentionCall` (verified on the CPU backend only). `MiniMaxM3HfLoader` reads the release directory's text decoder, including its MXFP8 attention weights and compressed-tensors NVFP4 experts (new `HfQuantCheckpoint` block-recipe storage on the existing block-scale codecs). A tiny random model matches transformers through the GGUF path and through the release directory layout, and real layer-3 weight rows dequantize to a Python reference. `HfChatAssets` loads a Hugging Face directory's byte-level BPE tokenizer and chat template (LFM3 uses it too); MiniMax's match transformers' ids. The catalog entry and `TextService` wiring, the vision tower and the real model are not covered, and the block selection runs on the host and CUDA and Vulkan refuse the attention call that carries its bias, so the model runs on the CPU backend only.

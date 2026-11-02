@@ -23,6 +23,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.AnimaBypassLlmAdapter, false)
         // Pinned: the reference nn.GELU() is exact erf, and tanh drifts from it.
         .With(EngineKnobs.AnimaExactGelu, true)
+        // Pinned: reference runs keep Anima's attention in F32, the exact route the parity runs were recorded on.
+        .With(EngineKnobs.AnimaF16, false)
         // cuDNN 1D-as-2D audio convs compute F32 output via TF32 tensor cores, corr 0.9999 vs the direct kernel it replaces.
         .With(EngineKnobs.AudioConvCudnn, false)
         // AudioLmQuantPolicy maps "off" to AudioLmQuant.Off (no weight quant); unset applies Q4_K on a single device.

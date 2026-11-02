@@ -22,6 +22,11 @@ public static partial class EngineKnobs
         Bool("numerics.animaExactGelu", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Anima FFN activations use the exact erf GELU instead of the tanh approximation.");
 
+    /// <summary>Anima's self and cross attention in F16 (tensor-core flash, F32 accumulate); off keeps the F32 attention route.</summary>
+    public static readonly Knob<bool> AnimaF16 =
+        Bool("numerics.animaF16", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Runs Anima's self and cross attention in F16 (tensor-core flash, F32 accumulate); off keeps the F32 attention route. Read when the model is built.");
+
     /// <summary>Seeds HiFTNet's noise source deterministically, which disables the NSF additive noise.</summary>
     public static readonly Knob<bool> HiftDeterministic =
         Bool("numerics.hiftDeterministic", false, KnobScope.Runtime, KnobDomain.Numerics,

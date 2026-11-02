@@ -18,7 +18,11 @@ public sealed class AttentionWaveBGoldenTests
     {
         Assert.True(Golden.Value.TryGetValue(name, out string? expected), $"Case '{name}' is missing from the fixture.");
         // The fixture was captured before the exact GELU default (#592), so pin the tanh approximation it was captured with.
-        using IDisposable tanh = KnobProfile.Create("wave-b-golden").With(EngineKnobs.AnimaExactGelu, false).Push();
+        // The fixture also predates Anima's F16 attention default, so pin the F32 attention route it was captured with.
+        using IDisposable tanh = KnobProfile.Create("wave-b-golden")
+            .With(EngineKnobs.AnimaExactGelu, false)
+            .With(EngineKnobs.AnimaF16, false)
+            .Push();
         Assert.Equal(expected, AttentionWaveBGoldenCases.Run(name));
     }
 
