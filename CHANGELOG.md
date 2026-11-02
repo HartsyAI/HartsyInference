@@ -10,14 +10,17 @@ stable release will require. Dates are UTC.
 
 - **Added: `TextService` hosts a MiniMax-M3 Hugging Face directory** on the CPU backend through the existing transformer model object (`GgufLanguageModel.FromWeights`), without a scheduler. The loader refuses a checkpoint larger than free host memory before reading a matrix. Attention now widens a per-head bias with −∞ columns to a fixed-capacity cache's buffer. The real model cannot run yet: the CPU backend keeps weights as F32 and the indexer has no device path.
 
-## alpha.398
+## alpha.399
 
-- **Added: SeedVR2 `lab` and `adain` colour transfers, the two ComfyUI modes the engine lacked.** `SeedVr2RestoreOptions.ColorTransfer` and `RestoreRequest.ColorTransfer` (`SeedVr2ColorTransfer`: `None`, `Lab`, `AdaIn`) run per frame before the `Strength` wavelet lerp, for stills and video alike. `Lab` is ComfyUI's default: the model's high frequencies recombined with the input's low frequencies, then CIELAB histogram matching of a/b and 80% of L. `AdaIn` matches each channel's mean and standard deviation. Both match `comfy/ldm/seedvr/color_fix.py` on deterministic planes (`SeedVr2ColorTransferTests`, fixture from `tests/python-reference/seedvr2_reference/dump_seedvr2_color_transfer.py`). The default stays `None`, so existing restores are unchanged.
-- **Changed: the wavelet low-frequency blur caps its dilation at `min(H,W)/8`,** as ComfyUI's `wavelet_blur` does. It moves output only on planes whose shorter side is under 128 pixels, where the uncapped dilation reached past the image.
 - **Added: SeedVR2 restore runs under the VRAM policy.** The DiT streams its blocks through the shared `BlockStreamingScope` (its blocks implement `IStreamingBlock`, the model `IStreamableDenoiser`), with the streaming window reserved in the headroom, so an 8 GB card restores a 3B-model clip it cannot hold resident. Measured on an RTX 2060 SUPER: fp16 streamed, 320×240 nine-frame clip in 19.8 s; 640×360 still runs.
 - **Added: SeedVR2 DiT packing to Q8_0** on the `QuantizedCompute` lever (the Maximum tier), or `numerics.seedvr2Packing=q8`. Only the 2-D projections pack; the timestep-embedding projections stay fp16 (packed, they produce noise). Q8_0 matches fp16 at 44.9 dB PSNR and 0.9999 SSIM on that clip, at 3.4 GB resident against 6.8 GB; it is slower per step than streaming fp16 on that card, so Auto keeps fp16.
 - **Added: `RestoreRequest.Device`** runs a SeedVR2 restore on another device (`cuda:N`), loading its weights there; `--restore-device` on the CLI. Naming the engine's own device is a no-op. Only a single-GPU box was available, so the cross-card path is unverified.
 - **Fixed: the memory report declares SeedVR's levers.** The SeedVR restore no longer reports block streaming and quantized compute as unimplemented, and `QuantizedCompute` is only reported pending for a recipe that does not declare it.
+
+## alpha.398
+
+- **Added: SeedVR2 `lab` and `adain` colour transfers, the two ComfyUI modes the engine lacked.** `SeedVr2RestoreOptions.ColorTransfer` and `RestoreRequest.ColorTransfer` (`SeedVr2ColorTransfer`: `None`, `Lab`, `AdaIn`) run per frame before the `Strength` wavelet lerp, for stills and video alike. `Lab` is ComfyUI's default: the model's high frequencies recombined with the input's low frequencies, then CIELAB histogram matching of a/b and 80% of L. `AdaIn` matches each channel's mean and standard deviation. Both match `comfy/ldm/seedvr/color_fix.py` on deterministic planes (`SeedVr2ColorTransferTests`, fixture from `tests/python-reference/seedvr2_reference/dump_seedvr2_color_transfer.py`). The default stays `None`, so existing restores are unchanged.
+- **Changed: the wavelet low-frequency blur caps its dilation at `min(H,W)/8`,** as ComfyUI's `wavelet_blur` does. It moves output only on planes whose shorter side is under 128 pixels, where the uncapped dilation reached past the image.
 
 ## alpha.396
 
