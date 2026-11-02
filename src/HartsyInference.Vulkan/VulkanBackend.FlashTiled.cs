@@ -75,7 +75,13 @@ public sealed partial class VulkanBackend
         bool f32 = c.Query.DType == DType.F32 && c.Key.DType == DType.F32 && c.Value.DType == DType.F32 && c.Output.DType == DType.F32;
         if (bucket < 0 || !f32 || c.KvHeads <= 0 || c.Heads % c.KvHeads != 0) return false;
         if (c.Mask.Bias is not null && c.Mask.Bias.DType != DType.F32) return false;
-        if (TiledSharedBytes(bucket) > Vk.MaxComputeSharedMemoryBytes || !TiledModulesShipped()) return false;
+        // The shader's offsets are 32-bit: every operand must be addressable in uint.
+        if (c.Query.Storage.ElementCount > uint.MaxValue || c.Key.Storage.ElementCount > uint.MaxValue
+            || c.Value.Storage.ElementCount > uint.MaxValue || c.Output.Storage.ElementCount > uint.MaxValue
+            || (c.Mask.Bias is not null && c.Mask.Bias.ElementCount > uint.MaxValue)) return false;
+        if (TiledSharedBytes(bucket) > Vk.MaxComputeSharedMemoryBytes
+            || TiledThreads(bucket) > Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX)
+            || !TiledModulesShipped()) return false;
         uint groupsX = ((uint)c.QueryTokens + (uint)TiledQueryRows(bucket) - 1) / (uint)TiledQueryRows(bucket);
         return groupsX <= Vk.MaxComputeWorkGroupCountX && (uint)c.Heads <= Vk.MaxComputeWorkGroupCountY
             && (uint)c.Batch <= Vk.MaxComputeWorkGroupCountZ;
@@ -88,6 +94,9 @@ public sealed partial class VulkanBackend
     private static int TiledQueryRows(int bucket) => bucket switch { 0 => 16, 1 => 32, _ => 8 };
 
     private static int TiledKeyRows(int bucket) => bucket == 0 ? 32 : 16;
+
+    /// <summary>Workgroup size each bucket's module is compiled for (NT in build.sh).</summary>
+    private static uint TiledThreads(int bucket) => bucket == 1 ? 256u : 64u;
 
     /// <summary>Shared memory one workgroup declares: the query tile, the key and value tiles, the score block and the two
     /// reduction rows, with the padded row stride the shader uses.</summary>

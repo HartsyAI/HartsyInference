@@ -42,17 +42,19 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
         return t;
     }
 
-    /// <summary>The largest absolute error, and the largest relative error against |b| with a 1e-6 floor.</summary>
-    private static (float Abs, float Rel) Errors(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
+    /// <summary>The largest absolute error; the largest relative error against |b| with a 1e-6 floor, which near-zero outputs
+    /// dominate; and the largest absolute error over the largest |b|, a scale that does not.</summary>
+    private static (float Abs, float Rel, float Scaled) Errors(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {
-        float abs = 0, rel = 0;
+        float abs = 0, rel = 0, peak = 0;
         for (int i = 0; i < a.Length; i++)
         {
             float e = MathF.Abs(a[i] - b[i]);
             abs = MathF.Max(abs, e);
             rel = MathF.Max(rel, e / MathF.Max(MathF.Abs(b[i]), 1e-6f));
+            peak = MathF.Max(peak, MathF.Abs(b[i]));
         }
-        return (abs, rel);
+        return (abs, rel, abs / MathF.Max(peak, 1e-30f));
     }
 
     public static IEnumerable<object[]> ParityCases()
@@ -61,16 +63,21 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
             foreach (int seq in new[] { 512, 4096 })
                 foreach (bool tokenMajor in new[] { false, true })
                     foreach (bool withBias in new[] { false, true })
-                        yield return new object[] { d, seq, tokenMajor, withBias };
+                        yield return new object[] { d, seq, 1, tokenMajor, withBias };
+        // Batch 2 at a ragged length: partial query and key tiles in both bucket geometries, and batch strides in every tensor.
+        foreach (int d in new[] { 40, 128 })
+            foreach (bool tokenMajor in new[] { false, true })
+                foreach (bool withBias in new[] { false, true })
+                    yield return new object[] { d, 300, 2, tokenMajor, withBias };
     }
 
     [Theory]
     [MemberData(nameof(ParityCases))]
-    public void Dense_TiledMatchesTheScalarRoute(int d, int seq, bool tokenMajor, bool withBias)
+    public void Dense_TiledMatchesTheScalarRoute(int d, int seq, int b, bool tokenMajor, bool withBias)
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
-        const int b = 1, hq = 4, hkv = 2;
+        const int hq = 4, hkv = 2;
         float scale = 1f / MathF.Sqrt(d);
         using Tensor q = Uniform(new TensorShape(b, hq, seq, d), 1);
         using Tensor k = Uniform(new TensorShape(b, hkv, seq, d), 2);
@@ -94,7 +101,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
         }
 
         backend.EnableTiledAttention = true;
-        float absErr, relErr;
+        float absErr, relErr, scaledErr;
         string tiledRoute;
         if (!tokenMajor)
         {
@@ -102,7 +109,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
             backend.ScaledDotProductAttention(actual, q, k, v, bias, scale);
             tiledRoute = VulkanBackend.LastAttentionRoute ?? "?";
             Assert.Equal("A.2t", tiledRoute);
-            (absErr, relErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
+            (absErr, relErr, scaledErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
         }
         else
         {
@@ -116,12 +123,47 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
                 Causal: false, QOffset: 0, Window: 0, VulkanBackend.TokenMajorStrides(hq, seq, d), VulkanBackend.TokenMajorStrides(hkv, seq, d),
                 VulkanBackend.TokenMajorStrides(hkv, seq, d), VulkanBackend.TokenMajorStrides(hq, seq, d)));
             tiledRoute = "direct token-major";
-            (absErr, relErr) = Errors(actualT.AsReadOnlySpan<float>(), expectedT.AsReadOnlySpan<float>());
+            (absErr, relErr, scaledErr) = Errors(actualT.AsReadOnlySpan<float>(), expectedT.AsReadOnlySpan<float>());
         }
 
-        output.WriteLine($"dense d={d} seq={seq} {(tokenMajor ? "token" : "head")}-major bias={withBias}: scalar {scalarRoute}, "
-            + $"tiled {tiledRoute}, max abs {absErr:E2}, max rel {relErr:E2}");
+        output.WriteLine($"[{backend.Vk.DeviceName}] dense b={b} d={d} seq={seq} {(tokenMajor ? "token" : "head")}-major bias={withBias}: "
+            + $"scalar {scalarRoute}, tiled {tiledRoute}, max abs {absErr:E2}, max rel {relErr:E2}, max abs / max |ref| {scaledErr:E2}");
         Assert.True(absErr < 1e-4f, $"d={d} seq={seq} tokenMajor={tokenMajor} bias={withBias}: max abs error {absErr}");
+    }
+
+    /// <summary>A head-shared bias [B,1,S,S] and a batch-shared bias [H,S,S] reach the tiled kernel through zero strides on the
+    /// broadcast axes. Head dims 64 and 128 cover both bucket geometries, and the bias must move the scalar output.</summary>
+    [Theory]
+    [InlineData(false, 64)]
+    [InlineData(true, 128)]
+    public void SharedBias_TiledMatchesTheScalarRoute(bool batchShared, int d)
+    {
+        if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        const int b = 2, hq = 4, hkv = 2, seq = 300;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor q = Uniform(new TensorShape(b, hq, seq, d), 41);
+        using Tensor k = Uniform(new TensorShape(b, hkv, seq, d), 42);
+        using Tensor v = Uniform(new TensorShape(b, hkv, seq, d), 43);
+        using Tensor bias = batchShared
+            ? Uniform(new TensorShape(hq, seq, seq), 44, 0.5f)
+            : Uniform(new TensorShape(b, 1, seq, seq), 44, 0.5f);
+        using Tensor expected = new(q.Shape, DType.F32);
+        using Tensor plain = new(q.Shape, DType.F32);
+        using Tensor actual = new(q.Shape, DType.F32);
+        backend.EnableTiledAttention = false;
+        backend.ScaledDotProductAttention(expected, q, k, v, bias, scale);
+        Assert.Equal("A.2", VulkanBackend.LastAttentionRoute);
+        backend.ScaledDotProductAttention(plain, q, k, v, null, scale);
+        float separation = Errors(expected.AsReadOnlySpan<float>(), plain.AsReadOnlySpan<float>()).Abs;
+        Assert.True(separation > 1e-4f, $"d={d}: the shared bias barely moves the scalar output ({separation})");
+        backend.EnableTiledAttention = true;
+        backend.ScaledDotProductAttention(actual, q, k, v, bias, scale);
+        Assert.Equal("A.2t", VulkanBackend.LastAttentionRoute);
+        (float absErr, float relErr, float scaledErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
+        output.WriteLine($"[{backend.Vk.DeviceName}] shared bias {(batchShared ? "[H,S,S] batch-shared" : "[B,1,S,S] head-shared")} d={d}: "
+            + $"max abs {absErr:E2}, max rel {relErr:E2}, max abs / max |ref| {scaledErr:E2}");
+        Assert.True(absErr < 1e-4f, $"d={d} batchShared={batchShared}: max abs error {absErr}");
     }
 
     /// <summary>(name, head dim, query heads, KV heads, query rows, key rows, query offset, causal, window). Query and key tile
@@ -159,9 +201,9 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
         backend.DispatchFlashTiled(actual, q, k, v, null, new VulkanBackend.TiledCall(1, hq, hkv, sq, skv, d, scale, causal, qOffset, window,
             VulkanBackend.HeadMajorStrides(hq, sq, d), VulkanBackend.HeadMajorStrides(hkv, skv, d),
             VulkanBackend.HeadMajorStrides(hkv, skv, d), VulkanBackend.HeadMajorStrides(hq, sq, d)));
-        (float absErr, float relErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
-        output.WriteLine($"{name}: d={d} hq={hq} hkv={hkv} sq={sq} skv={skv} qOffset={qOffset} causal={causal} window={window}, "
-            + $"max abs {absErr:E2}, max rel {relErr:E2}");
+        (float absErr, float relErr, float scaledErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
+        output.WriteLine($"[{backend.Vk.DeviceName}] {name}: d={d} hq={hq} hkv={hkv} sq={sq} skv={skv} qOffset={qOffset} causal={causal} "
+            + $"window={window}, max abs {absErr:E2}, max rel {relErr:E2}, max abs / max |ref| {scaledErr:E2}");
         Assert.True(absErr < 1e-4f, $"{name}: max abs error {absErr}");
     }
 }

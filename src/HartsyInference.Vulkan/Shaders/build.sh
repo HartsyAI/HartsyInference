@@ -266,7 +266,8 @@ compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
 
 # Query-tiled F32 flash attention (numerics.vkTiledAttention=auto): one module per head-dim bucket (MAX_D 64, 128, 256), and a
-# bias build of each. BR query rows and TK key rows per tile; VulkanBackend.FlashTiled.cs must use the same tile sizes.
+# bias build of each. BR query rows, TK key rows and NT threads per workgroup (NT defaults to 64); VulkanBackend.FlashTiled.cs
+# mirrors the tile sizes and thread counts.
 compile_one "sdpa_flash_tiled" -DMAX_D=64 -DBR=16 -DTK=32 -DHAS_MASK=0 -- "_d64"
 compile_one "sdpa_flash_tiled" -DMAX_D=64 -DBR=16 -DTK=32 -DHAS_MASK=1 -- "_d64_bias"
 compile_one "sdpa_flash_tiled" -DMAX_D=128 -DBR=32 -DTK=16 -DNT=256 -DHAS_MASK=0 -- "_d128"
