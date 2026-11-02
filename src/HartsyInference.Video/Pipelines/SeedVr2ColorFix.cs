@@ -141,15 +141,11 @@ public static class SeedVr2ColorFix
         float[] lab = new float[3 * n];
         for (int i = 0; i < n; i++)
         {
-            double[] lin = new double[3];
-            for (int c = 0; c < 3; c++)
-            {
-                double v = Math.Clamp((rgb[c * n + i] + 1.0) * 0.5, 0.0, 1.0);
-                lin[c] = v > 0.04045 ? Math.Pow((v + 0.055) / 1.055, 2.4) : v / 12.92;
-            }
-            double x = RgbToXyz[0, 0] * lin[0] + RgbToXyz[0, 1] * lin[1] + RgbToXyz[0, 2] * lin[2];
-            double y = RgbToXyz[1, 0] * lin[0] + RgbToXyz[1, 1] * lin[1] + RgbToXyz[1, 2] * lin[2];
-            double z = RgbToXyz[2, 0] * lin[0] + RgbToXyz[2, 1] * lin[1] + RgbToXyz[2, 2] * lin[2];
+            // Scalars, not a per-pixel array: this runs over every pixel of every frame, and the inference path allocates nothing.
+            double r = Linearize(rgb[i]), g = Linearize(rgb[n + i]), b = Linearize(rgb[2 * n + i]);
+            double x = RgbToXyz[0, 0] * r + RgbToXyz[0, 1] * g + RgbToXyz[0, 2] * b;
+            double y = RgbToXyz[1, 0] * r + RgbToXyz[1, 1] * g + RgbToXyz[1, 2] * b;
+            double z = RgbToXyz[2, 0] * r + RgbToXyz[2, 1] * g + RgbToXyz[2, 2] * b;
             x /= D65WhiteX;
             z /= D65WhiteZ;
             double fx = Cbrt(x), fy = Cbrt(y), fz = Cbrt(z);
@@ -181,6 +177,13 @@ public static class SeedVr2ColorFix
                 rgb[c * n + i] = (float)(Math.Clamp(g, 0.0, 1.0) * 2.0 - 1.0);
             }
         }
+    }
+
+    /// <summary>One sRGB channel in [-1,1] to linear light in [0,1].</summary>
+    private static double Linearize(float signed)
+    {
+        double v = Math.Clamp((signed + 1.0) * 0.5, 0.0, 1.0);
+        return v > 0.04045 ? Math.Pow((v + 0.055) / 1.055, 2.4) : v / 12.92;
     }
 
     private static double Cbrt(double t) => t > CielabDelta * CielabDelta * CielabDelta
