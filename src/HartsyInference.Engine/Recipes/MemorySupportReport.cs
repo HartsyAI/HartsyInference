@@ -114,7 +114,8 @@ public static class MemorySupportReport
             pending.Add("phase unload");
         if (policy.Caches == CachePrecision.Half) pending.Add("half-precision caches");
         if (policy.ActivationOffload == LeverState.On) pending.Add("activation offload");
-        if (policy.QuantizedCompute == LeverState.On) pending.Add("quantized compute");
+        if (policy.QuantizedCompute == LeverState.On && !declared.HasFlag(MemoryCapabilities.QuantizedCompute))
+            pending.Add("quantized compute");
         if (policy.FreeAfterGeneration == LeverState.On) pending.Add("free-after-generation");
         if (policy.MultiGpuSpill == LeverState.On) pending.Add("multi-GPU spill");
         if (policy.ChunkScale < 1.0f && !declared.HasFlag(MemoryCapabilities.Chunking))

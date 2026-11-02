@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -22,6 +23,10 @@ public sealed class RestoreService : IRestoreService
     private readonly InferenceEngine _engine;
     private readonly object _lock = new();
     private string? _loadedPath;
+    private DType? _loadedPacking;
+    private IBackend? _loadedBackend;
+    // Backends for restores placed on another device, created on first use and kept for the process: a device context is expensive to rebuild.
+    private readonly Dictionary<string, IBackend> _deviceBackends = new(StringComparer.OrdinalIgnoreCase);
     private SeedVr2RestorePipeline? _pipeline;
     private SeedVr2Dit? _dit;
     private readonly List<SafeTensorsLoader> _loaders = new();
@@ -41,11 +46,13 @@ public sealed class RestoreService : IRestoreService
         if (inputs != 1)
             throw new ArgumentException("Exactly one of Video, Frames, or Image must be set.", nameof(request));
 
-        // SeedVR2 wires no memory lever, so a posture reaching here cannot change what it does. Say so: `video
-        // --vram-mode ... --restore` carries the video phase's override into this one, and a restore that quietly
-        // ignored it would look like the tier had been applied to the whole command.
+        // The DiT streams its blocks through the shared scope and packs to Q8_0 on the policy's QuantizedCompute lever, so both
+        // levers are honoured here. Any other lever a posture asks for is still reported, so a tier never quietly does less than
+        // it says (`video --vram-mode ... --restore` carries the video phase's override into this one).
+        IBackend backend = BackendFor(request);
         MemorySupportReport.ReportService(
-            "seedvr2-restore", _engine.Backend, VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
+            "seedvr2-restore", backend, VramPolicyRegistry.Resolve(backend, request.Vram),
+            MemoryCapabilities.BlockStreaming | MemoryCapabilities.QuantizedCompute);
 
         (List<byte[]> frames, int width, int height) = await DecodeInputAsync(request, cancel).ConfigureAwait(false);
 
@@ -61,11 +68,11 @@ public sealed class RestoreService : IRestoreService
 
         (List<byte[]> restored, int outW, int outH) = await Task.Run(() =>
         {
-            FreeEngineBeforeLoad(spec);
+            FreeEngineBeforeLoad(spec, backend);
             // Under the device gate like every other job, so an engine-wide release waits for the restore instead of
             // emptying the device under it. Taken after the free above, which takes the gate itself.
-            using IDisposable gate = DeviceGate.AcquireAll([_engine.Backend], cancel);
-            SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec);
+            using IDisposable gate = DeviceGate.AcquireAll([backend], cancel);
+            SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec, request, backend);
             if (progress is null)
             {
                 return pipeline.Restore(frames, width, height, options);
@@ -115,28 +122,51 @@ public sealed class RestoreService : IRestoreService
     /// video DiT and SeedVR2's VAE peak cannot share 24 GB.</summary>
     /// <remarks>Outside the device gate and outside <c>_lock</c>: the free takes the gate, and it releases this
     /// service's pipeline under <c>_lock</c>.</remarks>
-    private void FreeEngineBeforeLoad(ModelSpec spec)
+    private void FreeEngineBeforeLoad(ModelSpec spec, IBackend backend)
     {
         bool loaded;
         lock (_lock)
         {
-            loaded = _pipeline is not null && _loadedPath == spec.LocalPath;
+            loaded = _pipeline is not null && _loadedPath == spec.LocalPath && ReferenceEquals(_loadedBackend, backend);
         }
-        if (!loaded)
+        // A restore on another device leaves the engine's own card alone: its resident model is not competing for that memory.
+        if (!loaded && ReferenceEquals(backend, _engine.Backend))
         {
             _engine.FreeMemory();
         }
     }
 
-    private SeedVr2RestorePipeline GetOrLoadPipeline(ModelSpec spec)
+    /// <summary>The backend this restore runs on: the engine's own, or the device the request names (created once, then reused).</summary>
+    private IBackend BackendFor(RestoreRequest request)
+    {
+        string? selector = request.Device?.Trim();
+        if (string.IsNullOrEmpty(selector) || selector.Equals(_engine.Backend.Device.ToString(), StringComparison.OrdinalIgnoreCase))
+            return _engine.Backend;
+        lock (_lock)
+        {
+            if (_deviceBackends.TryGetValue(selector, out IBackend? existing))
+                return existing;
+            IBackend created = BackendFactory.Create(selector);
+            // The restore follows the posture its request asked for, the way a restore on the engine's own card does.
+            VramPolicyRegistry.Set(created, VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
+            Logs.Info($"SeedVR2 restore placed on {created.Device} (request Device '{selector}').");
+            _deviceBackends[selector] = created;
+            return created;
+        }
+    }
+
+    private SeedVr2RestorePipeline GetOrLoadPipeline(ModelSpec spec, RestoreRequest request, IBackend backend)
     {
         string ditPath = spec.LocalPath
             ?? throw new FileNotFoundException(
                 $"No checkpoint found for model '{spec.Requested}'. Supply its local path, or select a SeedVR2 "
                 + "catalog id so its assets download first.");
+        // The packing is decided from the checkpoint's size and the free memory now, before any weight is read, so a
+        // cached pipeline is only reused when it was packed the same way.
+        DType? packing = ChoosePacking(request, backend);
         lock (_lock)
         {
-            if (_pipeline is not null && _loadedPath == ditPath)
+            if (_pipeline is not null && _loadedPath == ditPath && _loadedPacking == packing && ReferenceEquals(_loadedBackend, backend))
                 return _pipeline;
             ReleasePipeline();
 
@@ -155,11 +185,16 @@ public sealed class RestoreService : IRestoreService
             // bias, and the VAE's 3-D convs do not cast at all, so the fp16 checkpoints stop at the first GEMM. On CPU
             // the whole set becomes F32 once at load instead (about 13.5 GB for the 3B DiT); CUDA keeps the half
             // weights its kernels consume directly.
-            if (_engine.Backend.Device.IsCpu)
+            if (backend.Device.IsCpu)
             {
                 ditWeights = CastAllToF32(ditWeights, _castCopies);
                 vaeWeights = CastAllToF32(vaeWeights, _castCopies);
                 Logs.Info("SeedVR2 on the CPU backend: checkpoint tensors cast to F32 at load.");
+            }
+            if (packing is { } target)
+            {
+                SeedVr2WeightPacking.PackLinears(ditWeights, target, _castCopies);
+                Logs.Info($"SeedVR2 DiT packed to {target.Name} (VRAM policy).");
             }
             SeedVr2Config config = SeedVr2Config.Detect(ditWeights);
             SeedVr2Dit dit = new(config);
@@ -169,7 +204,7 @@ public sealed class RestoreService : IRestoreService
             // OOMs 24 GB at 720p-area. numerics.seedvr2VaeF32=true is the kill-switch back to full precision.
             // The question is whether the backend computes in BF16, which is what the capability says. Keying on
             // the device kind meant a backend that gained BF16 would keep paying the fp32 activation peak.
-            bool vaeBf16 = _engine.Backend.Capabilities.SupportsBF16
+            bool vaeBf16 = backend.Capabilities.SupportsBF16
                 && !EngineKnobs.Seedvr2VaeF32.Value;
             SeedVr2VaeConfig vaeConfig = SeedVr2VaeConfig.Default with
             {
@@ -182,8 +217,10 @@ public sealed class RestoreService : IRestoreService
             decoder.LoadWeights(vaeWeights);
             _posEmb = LoadPositiveEmbedding(embPath);
 
-            _pipeline = new SeedVr2RestorePipeline(_engine.Backend, dit, encoder, decoder, _posEmb);
+            _pipeline = new SeedVr2RestorePipeline(backend, dit, encoder, decoder, _posEmb);
             _loadedPath = ditPath;
+            _loadedPacking = packing;
+            _loadedBackend = backend;
             return _pipeline;
         }
     }
@@ -272,6 +309,20 @@ public sealed class RestoreService : IRestoreService
                 loader.Dispose();
             _loaders.Clear();
             _loadedPath = null;
+            _loadedPacking = null;
+            _loadedBackend = null;
         }
+    }
+
+    /// <summary>The DiT packing this request runs with: the knob if set, else the policy's <c>QuantizedCompute</c> lever.</summary>
+    private DType? ChoosePacking(RestoreRequest request, IBackend backend)
+    {
+        string? forced = EngineKnobs.Seedvr2Packing.Value?.Trim().ToLowerInvariant();
+        if (forced is "off")
+            return null;
+        if (forced is "q8")
+            return DType.Q8_0;
+        VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
+        return SeedVr2WeightPacking.Choose(policy.QuantizedCompute);
     }
 }
