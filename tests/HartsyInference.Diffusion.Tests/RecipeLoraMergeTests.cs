@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Features;
@@ -69,6 +70,28 @@ public sealed class RecipeLoraMergeTests : IDisposable
             "RecipeLoraMergeTests"));
         Assert.Contains("wrong-family", error.Message);
         transformer["some.other.module.weight"].Dispose();
+    }
+
+    [Fact]
+    public void RefuseKnob_RejectsALoraThatWouldOnlyBePartlyApplied()
+    {
+        string path = CreateSafeTensors("partial-knob", new()
+        {
+            ["transformer.blocks.0.to_q.lora_A.weight"] = (new long[] { Rank, Cols }, Filled(Rank * Cols, DownValue)),
+            ["transformer.blocks.0.to_q.lora_B.weight"] = (new long[] { Rows, Rank }, Filled(Rows * Rank, UpValue)),
+            ["transformer.blocks.9.to_q.lora_A.weight"] = (new long[] { Rank, Cols }, Filled(Rank * Cols, DownValue)),
+            ["transformer.blocks.9.to_q.lora_B.weight"] = (new long[] { Rows, Rank }, Filled(Rows * Rank, UpValue)),
+        });
+        Dictionary<string, Tensor> transformer = new() { ["blocks.0.to_q.weight"] = Zeros() };
+        using IDisposable knob = KnobProfile.Create("lora-partial").With(EngineKnobs.LoraPartialApplication, "refuse").Push();
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => RecipeLoraMerge.Apply(
+            [new LoraResolver.LoraSpec { FilePath = path, ModelStrength = 1.0f, TencStrength = 1.0f }],
+            new CpuBackend(),
+            new LoraMergeTargets { Transformer = transformer },
+            "RecipeLoraMergeTests"));
+
+        Assert.Contains("blocks.9", refused.Message, StringComparison.Ordinal);
     }
 
     private static Tensor Zeros()
