@@ -286,6 +286,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Seedvr2VaeF32 =
         Bool("numerics.seedvr2VaeF32", false, KnobScope.Construction, KnobDomain.Numerics, "Builds the SeedVR2 VAE with F32 activations instead of the default CUDA BF16 (which halves the peak).");
 
+    /// <summary>Overrides the SeedVR2 DiT packing the VRAM policy would choose: <c>q8</c> packs the linear weights to Q8_0, <c>off</c> keeps fp16. Unset follows the policy.</summary>
+    public static readonly Knob<string?> Seedvr2Packing =
+        Str("numerics.seedvr2Packing", null, KnobScope.Runtime, KnobDomain.Numerics, "Overrides the SeedVR2 DiT packing the VRAM policy would choose: 'q8' packs the linear weights to Q8_0, 'off' keeps fp16. Unset follows the policy.");
+
     /// <summary>Default for prompt-lookup speculative decoding when the request omits it; greedy non-JSON requests only.</summary>
     public static readonly Knob<bool> SpecDecode =
         Bool("numerics.specDecode", false, KnobScope.Runtime, KnobDomain.Numerics, "Default for prompt-lookup speculative decoding when the request omits it; greedy non-JSON requests only.");
