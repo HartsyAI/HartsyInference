@@ -1,11 +1,11 @@
-using System.Runtime.InteropServices;
+using HartsyInference.Core.Memory;
 
 namespace HartsyInference.Video.Pipelines;
 
 /// <summary>Native scratch for the SeedVR2 colour passes, sized once per restore so the frame loop allocates nothing.</summary>
 /// <remarks>Every pass works in planes of one frame, so the buffers are sized by pixel count and reused for each frame. Owned
 /// native memory (not managed arrays) follows the inference rule: no managed allocation on the hot path.</remarks>
-public sealed unsafe class SeedVr2ColorScratch : IDisposable
+public sealed class SeedVr2ColorScratch : IDisposable
 {
     /// <summary>Named regions of the scratch, in float planes of one frame each (a 3 means three planes).</summary>
     public enum Region
@@ -39,18 +39,19 @@ public sealed unsafe class SeedVr2ColorScratch : IDisposable
     private static readonly int PlanesTotal = PlanesPerRegion.Sum();
 
     private readonly int _pixels;
-    private float* _floats;
-    private int* _order;
-    private bool _disposed;
+    private readonly NativeBuffer _floats;
+    private readonly NativeBuffer _order;
 
     /// <summary>Allocates scratch for frames of <paramref name="pixels"/> pixels each.</summary>
+    /// <remarks>Both buffers are finalizer-backed <see cref="NativeBuffer"/>s, so a scratch that is never disposed, or whose
+    /// second allocation fails, still releases its memory.</remarks>
     public SeedVr2ColorScratch(int pixels)
     {
         if (pixels <= 0)
             throw new ArgumentOutOfRangeException(nameof(pixels));
         _pixels = pixels;
-        _floats = (float*)NativeMemory.AlignedAlloc((nuint)((long)PlanesTotal * pixels * sizeof(float)), 64);
-        _order = (int*)NativeMemory.AlignedAlloc((nuint)((long)pixels * sizeof(int)), 64);
+        _floats = new NativeBuffer((nuint)((long)PlanesTotal * pixels * sizeof(float)));
+        _order = new NativeBuffer((nuint)((long)pixels * sizeof(int)));
     }
 
     /// <summary>Pixels per frame this scratch was sized for.</summary>
@@ -59,31 +60,18 @@ public sealed unsafe class SeedVr2ColorScratch : IDisposable
     /// <summary>The region's planes: <c>3 × Pixels</c> floats for an RGB or LAB region, <c>Pixels</c> for a single plane.</summary>
     public Span<float> Get(Region region)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
         int offset = RegionOffsetPlanes[(int)region] * _pixels;
-        return new Span<float>(_floats + offset, PlanesPerRegion[(int)region] * _pixels);
+        return _floats.AsSpan<float>().Slice(offset, PlanesPerRegion[(int)region] * _pixels);
     }
 
     /// <summary>The sort order of one histogram match, one index per pixel.</summary>
-    public Span<int> Order
-    {
-        get
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            return new Span<int>(_order, _pixels);
-        }
-    }
+    public Span<int> Order => _order.AsSpan<int>().Slice(0, _pixels);
 
-    /// <summary>Frees the native buffers.</summary>
+    /// <summary>Frees the native buffers. Idempotent.</summary>
     public void Dispose()
     {
-        if (_disposed)
-            return;
-        _disposed = true;
-        NativeMemory.AlignedFree(_floats);
-        NativeMemory.AlignedFree(_order);
-        _floats = null;
-        _order = null;
+        _floats.Dispose();
+        _order.Dispose();
     }
 
     private static int[] ComputeOffsets()
