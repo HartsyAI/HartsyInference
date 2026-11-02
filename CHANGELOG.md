@@ -10,6 +10,7 @@ stable release will require. Dates are UTC.
 
 - **Fixed: a streamed denoiser sizes its resident prefix by each block's own footprint.** The prefix was sized from block 0, a double-stream block, so HunyuanVideo's fp8 DiT streamed blocks it had room to keep resident.
 - **Fixed: a HunyuanVideo generation that throws mid-denoise releases its streamed block window and step-graph hook.** Before, a failed generation left both attached for the next one.
+- **Added: `TextService` hosts a MiniMax-M3 Hugging Face directory** on the CPU backend through the existing transformer model object (`GgufLanguageModel.FromWeights`), without a scheduler. The loader refuses a checkpoint larger than free host memory before reading a matrix. Attention now widens a per-head bias with −∞ columns to a fixed-capacity cache's buffer. The real model cannot run yet: the CPU backend keeps weights as F32 and the indexer has no device path.
 
 ## alpha.396
 
