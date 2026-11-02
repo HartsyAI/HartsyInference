@@ -116,6 +116,45 @@ public sealed class RecipeEvictionDisposeTests
         lease.Lease.Dispose();
     }
 
+    [Fact]
+    public async Task ConcurrentMisses_BuildOneCheckpointAtATime_AndTheSecondEvictsTheFirstOnlyOnceItIsIdle()
+    {
+        FakeRecipe first = Register("test-turn-first", throwOnDispose: false);
+        FakeRecipe second = Register("test-turn-second", throwOnDispose: false);
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        first.Entered = entered;
+        first.BlockConstruct = release;
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+
+        Task<LeasedRecipe> firstMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(SpecFor(first.Name)));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+
+        // The second miss waits for the construction turn, so it cannot choose its victims while the first build is in flight.
+        Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(SpecFor(second.Name)));
+        Assert.False(await HasCompletedWithin(secondMiss, 300));
+        Assert.Empty(second.Built);
+
+        release.Set();
+        LeasedRecipe firstLease = await firstMiss;
+
+        // The first pipeline is published and leased by its caller. The second miss waits for that lease rather than loading beside it.
+        Assert.False(await HasCompletedWithin(secondMiss, 300));
+        Assert.Empty(second.Built);
+        Assert.Equal(0, first.Built[0].DisposeCalls);
+
+        firstLease.Lease.Dispose();
+        LeasedRecipe secondLease = await secondMiss;
+
+        Assert.Same(second.Built[0], secondLease.Pipeline);
+        Assert.Equal(1, first.Built[0].DisposeCalls);
+        secondLease.Lease.Dispose();
+    }
+
+    private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
+        await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
+
     private static FakeRecipe Register(string familyId, bool throwOnDispose)
     {
         FakeRecipe recipe = new FakeRecipe(familyId, throwOnDispose);
@@ -143,6 +182,12 @@ public sealed class RecipeEvictionDisposeTests
     {
         public string Name => familyId;
 
+        /// <summary>Set by a test that needs to know a construction has started.</summary>
+        public ManualResetEventSlim? Entered { get; set; }
+
+        /// <summary>Set by a test that holds a construction in flight until it releases it.</summary>
+        public ManualResetEventSlim? BlockConstruct { get; set; }
+
         public ImageDefaults Defaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 7.5f, Width = 1024, Height = 1024 };
 
         public List<FakeRecipePipeline> Built { get; } = new List<FakeRecipePipeline>();
@@ -151,6 +196,8 @@ public sealed class RecipeEvictionDisposeTests
 
         public IRecipePipeline Construct(RecipeContext context)
         {
+            Entered?.Set();
+            BlockConstruct?.Wait();
             FakeRecipePipeline pipeline = new FakeRecipePipeline(throwOnDispose && Built.Count == 0);
             Built.Add(pipeline);
             return pipeline;

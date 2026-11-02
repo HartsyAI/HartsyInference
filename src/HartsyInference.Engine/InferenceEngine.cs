@@ -39,6 +39,9 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Dictionary<string, IRecipePipeline> _recipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IVideoRecipePipeline> _videoRecipePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _pipelineCacheLock = new();
+    // One miss at a time chooses victims, builds and publishes, so no choice is made from a cache another miss is about to change.
+    private readonly SemaphoreSlim _constructionGate = new(1, 1);
+    private const string ConstructionTurnKey = "construction-turn";
     private readonly Dictionary<string, int> _pipelineLeases = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
@@ -334,7 +337,16 @@ public sealed class InferenceEngine : IInferenceEngine
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
         // Victims leave the cache before the device gate is taken. A leased pipeline must never be disposed, and that
         // check runs outside ConstructWithVramCleanup, whose failure path frees every device buffer.
-        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath, cancel);
+        using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath, cancel,
+            () => _recipePipelines.ContainsKey(key), out EvictedPipelines victims);
+        lock (_pipelineCacheLock)
+        {
+            // Another request may have built this key while this one waited for its turn.
+            if (_recipePipelines.TryGetValue(key, out IRecipePipeline? built))
+            {
+                return new LeasedRecipe(built, AcquireLeaseUnderLock(key));
+            }
+        }
         bool victimsReleased = false;
         IRecipePipeline pipeline;
         try
@@ -463,7 +475,15 @@ public sealed class InferenceEngine : IInferenceEngine
             Logs.Error($"[Engine] Recipe construction failed for '{spec.LocalPath}' — releasing device memory it had already allocated.", ex);
             try
             {
-                backend.FreeAllDeviceMemory();
+                // A cached pipeline keeps its weights on this device, and a full free would take them away: then only the pool is trimmed.
+                if (HasCachedPipelines())
+                {
+                    backend.TrimMemoryPool();
+                }
+                else
+                {
+                    backend.FreeAllDeviceMemory();
+                }
             }
             catch (Exception cleanupEx)
             {
@@ -576,7 +596,16 @@ public sealed class InferenceEngine : IInferenceEngine
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        EvictedPipelines victims = TakeEvictionVictims(spec.LocalPath, alsoKeepPath: null, cancel);
+        using IDisposable constructionTurn = TakeConstructionTurn(spec.LocalPath, alsoKeepPath: null, cancel,
+            () => _videoRecipePipelines.ContainsKey(key), out EvictedPipelines victims);
+        lock (_pipelineCacheLock)
+        {
+            // Another request may have built this key while this one waited for its turn.
+            if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? built))
+            {
+                return new LeasedVideoRecipe(built, AcquireLeaseUnderLock(key));
+            }
+        }
         bool victimsReleased = false;
         IVideoRecipePipeline pipeline;
         try
@@ -847,13 +876,14 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <param name="keepPath">The incoming checkpoint.</param>
     /// <param name="alsoKeepPath">Optional second survivor. The generic refiner sets this in both directions (base keeps
     /// refiner, refiner keeps base): without it every refined generation ping-pongs two full pipeline loads.</param>
-    private EvictedPipelines TakeEvictionVictims(string keepPath, string? alsoKeepPath, CancellationToken cancel)
+    private IDisposable TakeConstructionTurn(string keepPath, string? alsoKeepPath, CancellationToken cancel,
+        Func<bool> alreadyCached, out EvictedPipelines victims)
     {
         string imageKeep = $"recipe:{keepPath}|";
         string videoKeep = $"video-recipe:{keepPath}|";
         string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
         string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
-        // The budget is read once, before the cache lock: it calls the driver, and every cache lookup and lease release waits on the lock.
+        // The budget is read once, before the turn and the cache lock: it calls the driver, and every cache lookup and lease release waits on the lock.
         bool sameCheckpointCached;
         lock (_pipelineCacheLock)
         {
@@ -862,27 +892,55 @@ public sealed class InferenceEngine : IInferenceEngine
         }
         bool evictSameCheckpoint = sameCheckpointCached && SameCheckpointBudgetTight(keepPath);
         DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
-        lock (_pipelineCacheLock)
+        while (true)
         {
-            while (true)
+            // A cancelled request stops here, so it cannot hold the other requests behind it for the whole lease wait.
+            cancel.ThrowIfCancellationRequested();
+            IDisposable turn = AcquireConstructionTurn(cancel);
+            lock (_pipelineCacheLock)
             {
-                // A cancelled request stops waiting here, so it cannot hold the other requests behind it for the whole lease wait.
-                cancel.ThrowIfCancellationRequested();
+                if (alreadyCached())
+                {
+                    // Another request built this key while this one waited for its turn, so nothing is evicted for it.
+                    victims = new EvictedPipelines([], []);
+                    return turn;
+                }
                 List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
                 List<string> videoVictims = PipelineEvictionPolicy.SelectVictims(_videoRecipePipelines.Keys, videoKeep, videoAlso, evictSameCheckpoint);
                 string? busy = imageVictims.Concat(videoVictims).FirstOrDefault(IsLeasedUnderLock);
                 if (busy is null)
                 {
-                    return RemoveVictims(imageVictims, videoVictims);
+                    victims = RemoveVictims(imageVictims, videoVictims);
+                    return turn;
                 }
+                // The turn is given back before waiting. The request holding this pipeline may need the turn to build a model of its
+                // own, and holding it across the wait would stall both requests until the lease wait ran out.
+                turn.Dispose();
                 TimeSpan remaining = deadline - DateTime.UtcNow;
                 if (remaining <= TimeSpan.Zero)
                 {
                     throw new HartsyInferenceException($"Pipeline '{busy}' is still serving a request, so this model switch cannot evict it. Retry when that request finishes.");
                 }
-                // Wakes at least once a second, so a cancellation is seen even when no lease is released.
+                // Wakes at least once a second, so a cancellation is seen even when no lease is released. The lease check and the wait
+                // share one lock hold, so a release between them cannot be missed.
                 Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
             }
+        }
+    }
+
+    /// <summary>Takes the one construction turn every miss shares. Waiting for it ends when the request is cancelled.</summary>
+    private IDisposable AcquireConstructionTurn(CancellationToken cancel)
+    {
+        _constructionGate.Wait(cancel);
+        return new PipelineLease(ConstructionTurnKey, _ => _constructionGate.Release());
+    }
+
+    /// <summary>Whether any image or video pipeline is cached.</summary>
+    private bool HasCachedPipelines()
+    {
+        lock (_pipelineCacheLock)
+        {
+            return _recipePipelines.Count > 0 || _videoRecipePipelines.Count > 0;
         }
     }
 
@@ -1208,5 +1266,15 @@ public sealed class InferenceEngine : IInferenceEngine
     }
 
     /// <inheritdoc/>
-    public void Dispose() => DisposeLoaded();
+    public void Dispose()
+    {
+        try
+        {
+            DisposeLoaded();
+        }
+        finally
+        {
+            _constructionGate.Dispose();
+        }
+    }
 }
