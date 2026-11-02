@@ -159,6 +159,10 @@ public sealed record AttentionKernelCapability
     /// <summary>Formats the PV multiply runs in, beyond F32.</summary>
     public AttentionFormats UsesProbValue { get; init; }
 
+    /// <summary>The row multiplies in each operand's own storage format, so an operand in a refused format excludes it whatever
+    /// <see cref="UsesQueryKey"/> and <see cref="UsesProbValue"/> declare (an F16 operand runs F16 math).</summary>
+    public bool ComputesInOperandFormat { get; init; }
+
     /// <summary>Clips out-of-range values when narrowing.</summary>
     public bool Saturates { get; init; }
 
@@ -189,6 +193,8 @@ public sealed record AttentionKernelCapability
         if (call.Logits.Any && !LogitTerms) return AttentionExclusion.LogitTerms;
         if (call.Positions.OnDevice && !DevicePositions) return AttentionExclusion.DevicePositions;
         if (((UsesQueryKey | UsesProbValue) & call.Numerics.Refused) != 0) return AttentionExclusion.RefusedFormat;
+        if (ComputesInOperandFormat && (AttentionNumerics.OperandFormats(in call) & call.Numerics.Refused) != 0)
+            return AttentionExclusion.RefusedFormat;
         AttentionMask m = call.Mask;
         if (m.Causal && (Masks & AttentionMaskSupport.Causal) == 0) return AttentionExclusion.Causal;
         if ((m.WindowLeft is not null || m.WindowRight is not null) && (Masks & AttentionMaskSupport.Window) == 0) return AttentionExclusion.Window;
