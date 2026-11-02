@@ -382,9 +382,16 @@ public sealed class RestoreService : IRestoreService
         string? forced = EngineKnobs.Seedvr2Packing.Value?.Trim().ToLowerInvariant();
         if (forced is "off")
             return null;
-        if (forced is "q8")
-            return DType.Q8_0;
-        VramPolicy policy = VramPolicyRegistry.Resolve(_engine.Backend, request.Vram);
-        return SeedVr2WeightPacking.Choose(policy.QuantizedCompute);
+        DType? packing = forced is "q8"
+            ? DType.Q8_0
+            : SeedVr2WeightPacking.Choose(VramPolicyRegistry.Resolve(_engine.Backend, request.Vram).QuantizedCompute);
+        // A packed projection runs only where the backend's Linear reads the packed dtype. Elsewhere (the CPU backend today)
+        // the restore would fail at its first projection, so it keeps fp16 and says so.
+        if (packing is { } target && !backend.SupportsResidentQuant(target))
+        {
+            Logs.Warning($"SeedVR2 DiT packing to {target.Name} is not supported on {backend.Device}; keeping fp16.");
+            return null;
+        }
+        return packing;
     }
 }
