@@ -2383,14 +2383,20 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Max head dim <see cref="DispatchFlashAttention"/>'s shared-memory KV tile can hold (MAX_D in sdpa_flash.comp.glsl). Real model head dims (64-128) fit; the rare >128 case (some SDXL variants use 160) falls back to the materialized 3-pass path rather than corrupting memory.</summary>
     private const int FlashMaxHeadDim = 128;
 
-    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false)
+    public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) =>
+        ScaledDotProductAttention(output, query, key, value, mask, scale, AttentionNumerics.FromLegacy(allowF16));
+
+    // The call's numerics reach the rows whole, so a refusal survives the entry point.
+    private void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
+        AttentionNumerics numerics)
     {
         using OpScope _op = EnterOp();
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
         if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
 
-        RunAttentionRows(DenseAttentionRows, AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
+        RunAttentionRows(DenseAttentionRows,
+            AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16: false) with { Numerics = numerics });
     }
 
     /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>

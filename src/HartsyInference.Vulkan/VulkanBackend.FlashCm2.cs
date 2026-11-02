@@ -33,9 +33,17 @@ public sealed partial class VulkanBackend
         int heads, int headDim, float scale, bool allowF16 = false) =>
         ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16);
 
+    private void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int headDim, float scale, AttentionNumerics numerics) =>
+        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, numerics);
+
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false) =>
+        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+
+    private void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int kvHeads, int headDim, float scale, AttentionNumerics numerics)
     {
         using OpScope _op = EnterOp();
         long qWidth = (long)heads * headDim;
@@ -57,7 +65,7 @@ public sealed partial class VulkanBackend
             Key = new(key, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
             Value = new(value, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
             Output = new(output, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
-            Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
+            Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = numerics,
             Route = AttentionRoute.TokenMajor,
         };
         RunAttentionRows(TokenMajorAttentionRows, in call);
@@ -101,7 +109,7 @@ public sealed partial class VulkanBackend
 
     /// <summary>Shapes the cooperative-matrix-2 kernel does not serve: permute to [1,H,S,D], attend, permute back.</summary>
     private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int kvHeads, int headDim, int sq, int skv, float scale, bool allowF16)
+        int heads, int kvHeads, int headDim, int sq, int skv, float scale, AttentionNumerics numerics)
     {
         if (query.DType == DType.BF16 || key.DType == DType.BF16 || value.DType == DType.BF16 || output.DType == DType.BF16)
         {
@@ -110,7 +118,8 @@ public sealed partial class VulkanBackend
             Tensor o32 = output.DType == DType.F32 ? output : new Tensor(output.Shape, DType.F32);
             try
             {
-                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16: false);
+                AttendTokenMajorViaHeadMajor(o32, q32, k32, v32, mask, heads, kvHeads, headDim, sq, skv, scale,
+                    numerics with { LegacyAssertedBounded = false });
                 if (!ReferenceEquals(o32, output)) CastToBf16(output, o32);
             }
             finally
@@ -131,7 +140,7 @@ public sealed partial class VulkanBackend
         Permute0213(qMh, query, sq, heads, headDim);
         Permute0213(kMh, key, skv, kvHeads, headDim);
         Permute0213(vMh, value, skv, kvHeads, headDim);
-        ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16);
+        ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, numerics);
         Permute0213(output, attnMh, heads, sq, headDim);
     }
 
