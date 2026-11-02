@@ -85,9 +85,9 @@ public sealed partial class VulkanBackend
     internal static int TiledBucket(int headDim) =>
         headDim <= 0 || headDim > TiledMaxHeadDim ? -1 : headDim <= 64 ? 0 : headDim <= 128 ? 1 : 2;
 
-    private static int TiledQueryRows(int bucket) => bucket == 2 ? 8 : 16;
+    private static int TiledQueryRows(int bucket) => bucket switch { 0 => 16, 1 => 32, _ => 8 };
 
-    private static int TiledKeyRows(int bucket) => bucket == 2 ? 16 : 32;
+    private static int TiledKeyRows(int bucket) => bucket == 0 ? 32 : 16;
 
     /// <summary>Shared memory one workgroup declares: the query tile, the key and value tiles, the score block and the two
     /// reduction rows, with the padded row stride the shader uses.</summary>

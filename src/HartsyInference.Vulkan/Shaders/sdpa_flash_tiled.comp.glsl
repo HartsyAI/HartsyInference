@@ -25,7 +25,9 @@
 #define HAS_MASK 0
 #endif
 
+#ifndef NT
 #define NT 64
+#endif
 #define NG (NT / 8)
 #define RPT (BR / NG)
 #define KPT (TK / 8)
@@ -33,6 +35,10 @@
 #define SD (MAX_D + 1)
 #define NEG_INF (uintBitsToFloat(0xff800000u))
 #define SYNC() barrier(); memoryBarrierShared()
+#define LPT ((MAX_D + NT - 1) / NT)
+#ifndef LR
+#define LR 8
+#endif
 
 layout(local_size_x = NT, local_size_y = 1, local_size_z = 1) in;
 
@@ -99,41 +105,58 @@ void main() {
     float runMax[RPT];
     float runSum[RPT];
     float acc[RPT][DPT];
-    for (int i = 0; i < RPT; i++) {
+    [[unroll]] for (int i = 0; i < RPT; i++) {
         runMax[i] = NEG_INF;
         runSum[i] = 0.0;
-        for (int jj = 0; jj < DPT; jj++) acc[i][jj] = 0.0;
+        [[unroll]] for (int jj = 0; jj < DPT; jj++) acc[i][jj] = 0.0;
     }
 
     for (uint kStart = 0; kStart < pc.skv; kStart += uint(TK)) {
         uint tileLen = min(uint(TK), pc.skv - kStart);
-        for (uint r = 0; r < uint(TK); r++) {
-            bool valid = r < tileLen;
-            uint kt = kStart + r;
-            for (uint d = tid; d < D; d += uint(NT)) {
-                sK[r][d] = valid ? k_data[kBase + kt * pc.kRow + d] : 0.0;
-                sV[r][d] = valid ? v_data[vBase + kt * pc.vRow + d] : 0.0;
+        // LR rows at a time, every load of a batch issued before its first store: one memory stall per batch, not per element.
+        for (uint r0 = 0; r0 < uint(TK); r0 += uint(LR)) {
+            float kr[LR][LPT];
+            float vr[LR][LPT];
+            [[unroll]] for (int rr = 0; rr < LR; rr++) {
+                uint r = r0 + uint(rr);
+                uint kt = kStart + r;
+                bool valid = r < tileLen;
+                [[unroll]] for (int j = 0; j < LPT; j++) {
+                    uint d = tid + uint(j * NT);
+                    bool ok = valid && d < D;
+                    kr[rr][j] = ok ? k_data[kBase + kt * pc.kRow + d] : 0.0;
+                    vr[rr][j] = ok ? v_data[vBase + kt * pc.vRow + d] : 0.0;
+                }
+            }
+            [[unroll]] for (int rr = 0; rr < LR; rr++) {
+                [[unroll]] for (int j = 0; j < LPT; j++) {
+                    uint d = tid + uint(j * NT);
+                    if (d < uint(MAX_D)) {
+                        sK[r0 + uint(rr)][d] = kr[rr][j];
+                        sV[r0 + uint(rr)][d] = vr[rr][j];
+                    }
+                }
             }
         }
         SYNC();
 
         float s[RPT][KPT];
-        for (int i = 0; i < RPT; i++) {
-            for (int j = 0; j < KPT; j++) s[i][j] = 0.0;
+        [[unroll]] for (int i = 0; i < RPT; i++) {
+            [[unroll]] for (int j = 0; j < KPT; j++) s[i][j] = 0.0;
         }
         for (uint d = 0; d < D; d++) {
             float qv[RPT];
-            for (int i = 0; i < RPT; i++) qv[i] = sQ[rg * uint(RPT) + uint(i)][d];
-            for (int j = 0; j < KPT; j++) {
+            [[unroll]] for (int i = 0; i < RPT; i++) qv[i] = sQ[rg * uint(RPT) + uint(i)][d];
+            [[unroll]] for (int j = 0; j < KPT; j++) {
                 float kv = sK[cg * uint(KPT) + uint(j)][d];
-                for (int i = 0; i < RPT; i++) s[i][j] += qv[i] * kv;
+                [[unroll]] for (int i = 0; i < RPT; i++) s[i][j] += qv[i] * kv;
             }
         }
 
-        for (int i = 0; i < RPT; i++) {
+        [[unroll]] for (int i = 0; i < RPT; i++) {
             uint qi = q0 + rg * uint(RPT) + uint(i);
             uint absQ = pc.qOffset + qi;
-            for (int j = 0; j < KPT; j++) {
+            [[unroll]] for (int j = 0; j < KPT; j++) {
                 uint kLocal = cg * uint(KPT) + uint(j);
                 uint kt = kStart + kLocal;
                 bool masked = kLocal >= tileLen || qi >= pc.sq
@@ -149,61 +172,61 @@ void main() {
             }
         }
 
-        for (int i = 0; i < RPT; i++) {
+        [[unroll]] for (int i = 0; i < RPT; i++) {
             float m = NEG_INF;
-            for (int j = 0; j < KPT; j++) m = max(m, s[i][j]);
+            [[unroll]] for (int j = 0; j < KPT; j++) m = max(m, s[i][j]);
             sRedMax[rg * uint(RPT) + uint(i)][cg] = m;
         }
         SYNC();
 
         // Every thread of a row group reads the same eight partials, so each keeps its own running max and sum.
         float corr[RPT];
-        for (int i = 0; i < RPT; i++) {
+        [[unroll]] for (int i = 0; i < RPT; i++) {
             uint row = rg * uint(RPT) + uint(i);
             float tileMax = NEG_INF;
-            for (uint c = 0; c < 8u; c++) tileMax = max(tileMax, sRedMax[row][c]);
+            [[unroll]] for (uint c = 0; c < 8u; c++) tileMax = max(tileMax, sRedMax[row][c]);
             float newMax = max(runMax[i], tileMax);
             // A row with no valid key yet keeps P = 0 and its accumulator: exp(-inf - -inf) would be NaN.
             bool anyValid = newMax > NEG_INF;
             corr[i] = anyValid ? exp(runMax[i] - newMax) : 0.0;
             float ls = 0.0;
-            for (int j = 0; j < KPT; j++) {
+            [[unroll]] for (int j = 0; j < KPT; j++) {
                 float p = anyValid ? exp(s[i][j] - newMax) : 0.0;
                 s[i][j] = p;
                 ls += p;
             }
             runMax[i] = newMax;
             sRedSum[row][cg] = ls;
-            for (int j = 0; j < KPT; j++) sP[row][cg * uint(KPT) + uint(j)] = s[i][j];
+            [[unroll]] for (int j = 0; j < KPT; j++) sP[row][cg * uint(KPT) + uint(j)] = s[i][j];
         }
         SYNC();
 
-        for (int i = 0; i < RPT; i++) {
+        [[unroll]] for (int i = 0; i < RPT; i++) {
             uint row = rg * uint(RPT) + uint(i);
             float tileSum = 0.0;
-            for (uint c = 0; c < 8u; c++) tileSum += sRedSum[row][c];
+            [[unroll]] for (uint c = 0; c < 8u; c++) tileSum += sRedSum[row][c];
             runSum[i] = runSum[i] * corr[i] + tileSum;
-            for (int jj = 0; jj < DPT; jj++) acc[i][jj] *= corr[i];
+            [[unroll]] for (int jj = 0; jj < DPT; jj++) acc[i][jj] *= corr[i];
         }
         for (uint c = 0; c < tileLen; c++) {
             float pv[RPT];
-            for (int i = 0; i < RPT; i++) pv[i] = sP[rg * uint(RPT) + uint(i)][c];
-            for (int jj = 0; jj < DPT; jj++) {
+            [[unroll]] for (int i = 0; i < RPT; i++) pv[i] = sP[rg * uint(RPT) + uint(i)][c];
+            [[unroll]] for (int jj = 0; jj < DPT; jj++) {
                 uint d = cg + 8u * uint(jj);
                 if (d < D) {
                     float vv = sV[c][d];
-                    for (int i = 0; i < RPT; i++) acc[i][jj] += pv[i] * vv;
+                    [[unroll]] for (int i = 0; i < RPT; i++) acc[i][jj] += pv[i] * vv;
                 }
             }
         }
         SYNC();
     }
 
-    for (int i = 0; i < RPT; i++) {
+    [[unroll]] for (int i = 0; i < RPT; i++) {
         uint qi = q0 + rg * uint(RPT) + uint(i);
         if (qi < pc.sq) {
             float inv = runSum[i] > 0.0 ? 1.0 / runSum[i] : 0.0;
-            for (int jj = 0; jj < DPT; jj++) {
+            [[unroll]] for (int jj = 0; jj < DPT; jj++) {
                 uint d = cg + 8u * uint(jj);
                 if (d < D) o_data[oBase + qi * pc.oRow + d] = acc[i][jj] * inv;
             }

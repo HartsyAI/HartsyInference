@@ -40,6 +40,7 @@ public sealed class VulkanTiledAttentionBenchmark(ITestOutputHelper output)
             for (int i = 0; i < p.Length; i++) p[i] = (float)(rng.NextDouble() * 2 - 1);
         }
 
+        backend.PreloadWeights([q, k, v]);   // keep the inputs resident so the timed calls do not re-upload them
         backend.EnableTiledAttention = false;
         backend.ScaledDotProductAttention(o, q, k, v, null, scale);
         string scalarRoute = VulkanBackend.LastAttentionRoute ?? "?";
