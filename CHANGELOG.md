@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.400
+
+- **Fixed: a relative model name cannot reach past the models root.** `ModelFileLocator.Find` resolved a name containing a `..` segment against the models root and the working directory, so a request-supplied name such as a reference adapter could load a file outside the root. Such a name now resolves to nothing. Absolute paths are unchanged. A CLI user who passed a relative `../` path to a model must now pass the absolute path instead.
+
 ## alpha.398
 
 - **Fixed: a streamed denoiser sizes its resident prefix by each block's own footprint.** The prefix was sized from block 0, a double-stream block, so HunyuanVideo's fp8 DiT streamed blocks it had room to keep resident.
