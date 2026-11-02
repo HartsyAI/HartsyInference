@@ -32,8 +32,9 @@ public sealed class AttentionWideRangeTests
     public void TheDemand_RefusesAnF16RowThatAdmits_WhateverTheLegacyAssertion(bool legacy)
     {
         List<string> log = [];
-        AttentionKernelRow f16 = new DelegateAttentionRow(Cap("f16") with { UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16 },
-            "f16", static (in AttentionCall _) => true, (in AttentionCall _) => { log.Add("f16"); return true; });
+        AttentionKernelCapability f16Cap = Cap("f16") with { UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16 };
+        AttentionKernelRow f16 = new DelegateAttentionRow(f16Cap, "f16", static (in AttentionCall _) => true,
+            (in AttentionCall _) => { log.Add("f16"); return true; });
         AttentionKernelRow f32 = new DelegateAttentionRow(Cap("f32"), "f32", static (in AttentionCall _) => true,
             (in AttentionCall _) => { log.Add("f32"); return true; });
         AttentionCall call = Call(DType.F32, AttentionNumerics.WideRange(bf16Storage: true) with { LegacyAssertedBounded = legacy });

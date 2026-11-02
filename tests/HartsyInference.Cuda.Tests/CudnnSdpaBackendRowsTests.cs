@@ -178,6 +178,24 @@ public sealed class CudnnSdpaBackendRowsTests
             r => Assert.NotEqual(AttentionExclusion.None, r.Capability.Excludes(in call)));
     }
 
+    /// <summary>Without the demand, numerics.sdpaF16 alone takes a Lens-shaped F32 call to the saturating cuDNN F16 row, which sits ahead
+    /// of the BF16 row; the demand is what keeps that row off the call.</summary>
+    [Fact]
+    public void SdpaF16Forced_AloneRoutesALensShapedF32CallToTheF16Row()
+    {
+        const int heads = 24, d = 64;
+        Tensor q = new(new TensorShape(1, heads, S, d), DType.F32), k = new(new TensorShape(1, heads, S, d), DType.F32);
+        Tensor v = new(new TensorShape(1, heads, S, d), DType.F32), o = new(new TensorShape(1, heads, S, d), DType.F32);
+        AttentionCall granted = AttentionCall.FromScaledDotProductAttention(o, q, k, v, null, 0.125f, allowF16: false)
+            with { Numerics = AttentionNumerics.Bf16Storage };
+        CudaBackend backend = Backend();
+        Set(backend, "_sdpaF16ForceOn", true);
+
+        Assert.Equal("cudnn.f32.sat", Plan(backend, "BuildDenseRows", in granted));
+        AttentionCall demanded = granted with { Numerics = AttentionNumerics.WideRange(bf16Storage: true) };
+        Assert.Equal("cudnn.f32.bf16", Plan(backend, "BuildDenseRows", in demanded));
+    }
+
     /// <summary>Failure state is per signature: a BF16 cast signature given up leaves the F16 D=128 path and the saturating row
     /// eligible, and an F16 signature given up leaves the BF16 cast row eligible.</summary>
     [Fact]
