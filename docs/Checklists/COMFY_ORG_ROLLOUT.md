@@ -31,12 +31,18 @@ A refusal never counts as support.
 | 🟡 | Core path verified. Each named feature throws `NotSupportedException` and is listed in the status row |
 | ⛔ | Blocked or unverified (gated weights, VRAM, or no parity). The row names the blocker and what unblocks it |
 
+These three are the targets. The "Current / evidence" column records today's state with the
+[model status legend](MODEL_STATUS.md), where 🔧 means built with verification incomplete and ⚠️ means mixed coverage.
+Those are current states, not extra completion states.
+
 Gates for ✅:
 
 - **Hygiene.** Every GPU or Swarm batch runs under the device lock and `tests/swarm-quiet-window.sh`, with foreign-process
   sampling during the batch and `--verify-since` after it.
 - **Tests actually ran.** Mandatory tests run with `HARTSY_REQUIRE_REAL_WEIGHTS=1` against a nonempty expected-test
-  manifest. A `SKIPPED` line, an unavailable-backend guard, zero passed, or a missing manifest test fails the run.
+  manifest. A `SKIPPED` line, an unavailable-backend guard, zero passed, or a missing manifest test fails the run. The
+  check will live in `tests/require-executed.sh`, which does not exist yet (see roadmap §13). Until it lands, use the
+  `run_class` check in `tests/run-multigpu-campaign.sh`.
 - **CLI-vs-API identity**, compared per modality:
   - image: decoded pixels, including every layer;
   - video: decoded frames;
@@ -51,7 +57,7 @@ Gates for ✅:
 
 | Phase | Scope | Shared infrastructure first |
 |---|---|---|
-| P0 | Pins, this inventory, independent catalog fixes, extension mapping sweep, test-execution helper | `tests/require-executed.sh` |
+| P0 | Pins, this inventory, independent catalog fixes, extension mapping sweep, test-execution helper | `tests/require-executed.sh` (to be written) |
 | P1 | Quick wins: catalog assets, first real-weight runs, small fixes | — |
 | P2 | Additive request/output contracts | vision batch request, new `VisionMode` values, structured `VisionResult`, `ImageResult.Layers` |
 | P3 | Finish the partial models | ByT5 encoder, Stable Audio CFG + v-pred EDM |
@@ -134,7 +140,9 @@ Gates for ✅:
 
 ## Already supported (44): P0 catalog and Swarm-mapping sweep
 
-| Repo @rev | Repo @rev | Repo @rev | Repo @rev |
+Alphabetical, read row by row.
+
+| Repo @rev (1) | Repo @rev (2) | Repo @rev (3) | Repo @rev (4) |
 |---|---|---|---|
 | ACE-Step @ea4f3d349e | ACE-Step-1.5 @371bb1680f | Boogu-Image @8606e7df2f | Chroma1-HD @595f6c4194 |
 | Chroma1-Radiance @a94a9efb87 | CLIP-ViT-H-14-laion2B-s32B-b79K_repackaged @b1aee1a783 | ERNIE-Image @50509a88bc | Flux-1-Dev @10cf201a3d |
