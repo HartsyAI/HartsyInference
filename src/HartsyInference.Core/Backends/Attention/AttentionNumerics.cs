@@ -76,8 +76,8 @@ public readonly record struct AttentionNumerics
     public static AttentionNumerics WideRange(bool bf16Storage) =>
         (bf16Storage ? Bf16Storage : Exact) with { Refused = AttentionFormats.F16 | AttentionFormats.Int8 | AttentionFormats.Fp8 };
 
-    /// <summary>The narrow formats the call's operands and output are stored in; a row that multiplies in an operand's format is
-    /// refused by a refusal of that format.</summary>
+    /// <summary>The narrow formats the call's operands and output are stored in. The planner refuses a call with one of them in a
+    /// refused format whichever row would serve it, since a row that widens an operand still reads it narrow.</summary>
     internal static AttentionFormats OperandFormats(in AttentionCall call) =>
         Format(call.Query.DType) | Format(call.Key.DType) | Format(call.Value.DType) | Format(call.Output.DType);
 

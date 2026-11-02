@@ -45,16 +45,16 @@ public sealed class AttentionWideRangeTests
     }
 
     [Fact]
-    public void ARowThatMultipliesInItsOperandFormat_IsRefusedForAnF16Operand_AndOnlyUnderTheDemand()
+    public void AnyRow_IsRefusedForAnF16Operand_AndOnlyUnderTheDemand()
     {
-        AttentionKernelCapability operandRow = Cap("naive") with { ComputesInOperandFormat = true };
+        AttentionKernelCapability row = Cap("naive");
         AttentionCall f16 = Call(DType.F16, AttentionNumerics.WideRange(bf16Storage: true));
         AttentionCall f16Plain = Call(DType.F16, AttentionNumerics.Exact);
         AttentionCall f32 = Call(DType.F32, AttentionNumerics.WideRange(bf16Storage: true));
 
-        Assert.Equal(AttentionExclusion.RefusedFormat, operandRow.Excludes(in f16));
-        Assert.Equal(AttentionExclusion.None, operandRow.Excludes(in f16Plain));
-        Assert.Equal(AttentionExclusion.None, operandRow.Excludes(in f32));
+        Assert.Equal(AttentionExclusion.RefusedFormat, row.Excludes(in f16));
+        Assert.Equal(AttentionExclusion.None, row.Excludes(in f16Plain));
+        Assert.Equal(AttentionExclusion.None, row.Excludes(in f32));
     }
 
     [Fact]
