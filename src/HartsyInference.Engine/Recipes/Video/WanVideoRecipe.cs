@@ -117,8 +117,14 @@ public sealed class WanVideoRecipe : IVideoRecipe
         _ => SamplingCapabilities.ForVideo(_familyId),
     };
 
+    /// <summary>Catalog ids of the Wan 2.2 A14B entries. The generic <c>wan</c> recipe serves them, deriving the 14B config from
+    /// the weights, so their <see cref="Name"/> stays <c>wan</c>.</summary>
+    internal static readonly string[] A14BCatalogIds = ["wan-22-t2v-a14b", "wan-22-i2v-a14b"];
+
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase)
+        || (_familyId == "wan" && A14BCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>The defaults for this recipe's compat class: Wan 2.1 and Wan 2.2 5B take core's per-class values, the
     /// generic <c>"wan"</c> slug the values core gives every Wan.</summary>

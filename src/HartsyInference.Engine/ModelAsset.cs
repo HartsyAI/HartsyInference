@@ -15,8 +15,12 @@ public sealed record ModelAsset
     /// <summary>Destination folder relative to the models root, e.g. "Stable-Diffusion/Krea2" or "VAE/QwenImage".</summary>
     public required string TargetSubdir { get; init; }
 
-    /// <summary>Human label for what this file is: "transformer", "text encoder", or "vae".</summary>
+    /// <summary>Human label for what this file is: "transformer", "text encoder", "vae", or <see cref="LowNoiseExpertRole"/>.</summary>
     public required string Role { get; init; }
+
+    /// <summary>The <see cref="Role"/> of a mixture-of-experts entry's second transformer (Wan 2.2 A14B's low-noise expert). It
+    /// downloads with the set, and the engine passes it as the swap model when the caller names none.</summary>
+    public const string LowNoiseExpertRole = "low-noise expert";
 
     /// <summary>Canonical save name when it differs from the repo file name (a side model is often published under
     /// a different name, e.g. save "t5xxl_fp8_e4m3fn.safetensors" as "t5xxl_enconly.safetensors"). May contain a
