@@ -797,6 +797,7 @@ public static class GenerationDispatch
         RestoreRequest baseRequest = new RestoreRequest
         {
             Vram = ParseVramOverrides(parameters),
+            Device = parameters.GetStringOrNull("restore-device"),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
             ClipFrames = parameters.GetIntOrNull("clip-frames"),

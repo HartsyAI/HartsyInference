@@ -871,6 +871,7 @@ public sealed class InferenceEngine : IInferenceEngine
         // RestoreService caches the SeedVR2 pipeline + mmap-backed weight loaders bound to the backend.
         if (_restore.IsValueCreated)
             ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
+        // A restore placed on another device keeps its weights and its device context in that service; the teardown below disposes them.
         if (_mesh.IsValueCreated)
             ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
@@ -889,6 +890,10 @@ public sealed class InferenceEngine : IInferenceEngine
         // it was constructed against. Other engines' resident audio models are untouched.
         if (_audioRuntime is not null)
             ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
+        // Before the teardown gate: a restore holds its service's slot and then the device gate, so waiting on the slot while
+        // holding the gate would deadlock with it.
+        if (disposeBackend && _restore.IsValueCreated)
+            ReleaseLogged("the restore devices", _restore.Value.DisposeDeviceBackends, ref failures);
         if (disposeBackend)
         {
             using (IDisposable gate = AcquireForTeardown())
@@ -935,7 +940,11 @@ public sealed class InferenceEngine : IInferenceEngine
     }
 
     /// <summary>The primary and every placement backend this engine has already built, without building any.</summary>
-    private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values];
+    private IEnumerable<IBackend?> OwnedBackends() => [_backend, .. _placementBackends.Values, .. RestoreDeviceBackends()];
+
+    /// <summary>The backends SeedVR restores placed on other devices, when the restore service exists.</summary>
+    private IEnumerable<IBackend> RestoreDeviceBackends() =>
+        _restore.IsValueCreated ? _restore.Value.DeviceBackends : Array.Empty<IBackend>();
 
     /// <summary>Returns every owned backend's device memory, under the device gate every job holds.</summary>
     /// <remarks>Services and audio runners are released before this, and a request that arrives after them runs under
@@ -971,6 +980,18 @@ public sealed class InferenceEngine : IInferenceEngine
                 catch (Exception ex)
                 {
                     Logs.Warning($"[Engine] Releasing a placement backend's device memory failed: {ex.Message}");
+                }
+            }
+            foreach (IBackend restoreDevice in RestoreDeviceBackends())
+            {
+                try
+                {
+                    restoreDevice.FreeAllDeviceMemory();
+                    restoreDevice.TrimMemoryPool();
+                }
+                catch (Exception ex)
+                {
+                    Logs.Warning($"[Engine] Releasing a restore device's memory failed: {ex.Message}");
                 }
             }
         }
