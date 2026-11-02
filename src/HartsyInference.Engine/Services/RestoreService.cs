@@ -27,6 +27,9 @@ public sealed class RestoreService : IRestoreService
     private IBackend? _loadedBackend;
     // Backends for restores placed on another device, created on first use and kept for the process: a device context is expensive to rebuild.
     private readonly Dictionary<string, IBackend> _deviceBackends = new(StringComparer.OrdinalIgnoreCase);
+    // One restore runs at a time on this service. The pipeline is shared, so a restore on another device must not replace it
+    // (and dispose its weights) under a restore still running. Not reentrant: a path that holds it must not call a public release.
+    private readonly SemaphoreSlim _execution = new(1, 1);
     private SeedVr2RestorePipeline? _pipeline;
     private SeedVr2Dit? _dit;
     private readonly List<SafeTensorsLoader> _loaders = new();
@@ -51,10 +54,13 @@ public sealed class RestoreService : IRestoreService
         // it says (`video --vram-mode ... --restore` carries the video phase's override into this one).
         IBackend backend = BackendFor(request);
         MemorySupportReport.ReportService(
-            "seedvr2-restore", backend, VramPolicyRegistry.Resolve(backend, request.Vram),
+            "seedvr2-restore", backend, VramPolicyRegistry.Resolve(_engine.Backend, request.Vram),
             MemoryCapabilities.BlockStreaming | MemoryCapabilities.QuantizedCompute);
 
         (List<byte[]> frames, int width, int height) = await DecodeInputAsync(request, cancel).ConfigureAwait(false);
+        // The request's overrides, on top of the engine's posture. Pushed for the restore so the levers decided mid-restore
+        // (the streaming scope's) see this request, and not whatever the device's registry last held.
+        VramPolicy requestPolicy = VramPolicyRegistry.Resolve(_engine.Backend, request.Vram);
 
         SeedVr2RestoreOptions options = new()
         {
@@ -68,28 +74,38 @@ public sealed class RestoreService : IRestoreService
 
         (List<byte[]> restored, int outW, int outH) = await Task.Run(() =>
         {
+            // Before the service's own lock: this can release the engine's models, which waits on the same lock.
             FreeEngineBeforeLoad(spec, backend);
-            // Under the device gate like every other job, so an engine-wide release waits for the restore instead of
-            // emptying the device under it. Taken after the free above, which takes the gate itself.
-            using IDisposable gate = DeviceGate.AcquireAll([backend], cancel);
-            SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec, request, backend);
-            if (progress is null)
+            _execution.Wait(cancel);
+            try
             {
-                return pipeline.Restore(frames, width, height, options);
-            }
-            return pipeline.RestoreWithPreviews(frames, width, height, options, (p, previewFrames) =>
-            {
-                byte[][] rgbFrames = [.. previewFrames.Select(frame => frame.Rgb)];
-                progress.Report(new StepPreview
+                using IDisposable policyScope = VramPolicyScope.Push(requestPolicy);
+                // Under the device gate like every other job, so an engine-wide release waits for the restore instead of
+                // emptying the device under it. Taken after the free above, which takes the gate itself.
+                using IDisposable gate = DeviceGate.AcquireAll([backend], cancel);
+                SeedVr2RestorePipeline pipeline = GetOrLoadPipeline(spec, request, backend);
+                if (progress is null)
                 {
-                    Step = p.Step,
-                    TotalSteps = p.TotalSteps,
-                    PreviewRgb = rgbFrames.Length > 0 ? rgbFrames[rgbFrames.Length / 2] : null,
-                    PreviewFramesRgb = rgbFrames.Length > 1 ? rgbFrames : null,
-                    PreviewWidth = previewFrames.Count > 0 ? previewFrames[0].Width : 0,
-                    PreviewHeight = previewFrames.Count > 0 ? previewFrames[0].Height : 0,
+                    return pipeline.Restore(frames, width, height, options);
+                }
+                return pipeline.RestoreWithPreviews(frames, width, height, options, (p, previewFrames) =>
+                {
+                    byte[][] rgbFrames = [.. previewFrames.Select(frame => frame.Rgb)];
+                    progress.Report(new StepPreview
+                    {
+                        Step = p.Step,
+                        TotalSteps = p.TotalSteps,
+                        PreviewRgb = rgbFrames.Length > 0 ? rgbFrames[rgbFrames.Length / 2] : null,
+                        PreviewFramesRgb = rgbFrames.Length > 1 ? rgbFrames : null,
+                        PreviewWidth = previewFrames.Count > 0 ? previewFrames[0].Width : 0,
+                        PreviewHeight = previewFrames.Count > 0 ? previewFrames[0].Height : 0,
+                    });
                 });
-            });
+            }
+            finally
+            {
+                _execution.Release();
+            }
         }, cancel).ConfigureAwait(false);
 
         for (int i = 0; i < restored.Count; i++)
@@ -147,8 +163,8 @@ public sealed class RestoreService : IRestoreService
             if (_deviceBackends.TryGetValue(selector, out IBackend? existing))
                 return existing;
             IBackend created = BackendFactory.Create(selector);
-            // The restore follows the posture its request asked for, the way a restore on the engine's own card does.
-            VramPolicyRegistry.Set(created, VramPolicyRegistry.Resolve(_engine.Backend, request.Vram));
+            // The posture comes from VramPolicyScope per request, not from the device's registry, so a later request's
+            // overrides are not held back by this first one.
             Logs.Info($"SeedVR2 restore placed on {created.Device} (request Device '{selector}').");
             _deviceBackends[selector] = created;
             return created;
@@ -168,7 +184,7 @@ public sealed class RestoreService : IRestoreService
         {
             if (_pipeline is not null && _loadedPath == ditPath && _loadedPacking == packing && ReferenceEquals(_loadedBackend, backend))
                 return _pipeline;
-            ReleasePipeline();
+            ReleasePipelineCore();
 
             (string vaePath, string embPath) = ResolveSideAssets(spec, ditPath);
             Logs.Info($"Loading SeedVR2: dit={ditPath} vae={vaePath} emb={embPath}");
@@ -291,8 +307,54 @@ public sealed class RestoreService : IRestoreService
         return (vaeSibling, embSibling);
     }
 
-    /// <summary>Releases the cached pipeline and its mmap-backed weights (called from ReleaseLoaded).</summary>
+    /// <summary>Releases the cached pipeline and its mmap-backed weights (called from ReleaseLoaded). Waits for a running restore.</summary>
     internal void ReleasePipeline()
+    {
+        _execution.Wait();
+        try
+        {
+            ReleasePipelineCore();
+        }
+        finally
+        {
+            _execution.Release();
+        }
+    }
+
+    /// <summary>The restore backends this service has created, for the engine's device-memory sweep and teardown.</summary>
+    internal IReadOnlyList<IBackend> DeviceBackends
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return [.. _deviceBackends.Values];
+            }
+        }
+    }
+
+    /// <summary>Releases the pipeline, then disposes the restore backends (engine teardown). Waits for a running restore.</summary>
+    internal void DisposeDeviceBackends()
+    {
+        _execution.Wait();
+        try
+        {
+            ReleasePipelineCore();
+            lock (_lock)
+            {
+                foreach (IBackend backend in _deviceBackends.Values)
+                    backend.Dispose();
+                _deviceBackends.Clear();
+            }
+        }
+        finally
+        {
+            _execution.Release();
+        }
+    }
+
+    /// <summary>The pipeline release, for callers already holding the execution slot.</summary>
+    private void ReleasePipelineCore()
     {
         lock (_lock)
         {
@@ -322,7 +384,7 @@ public sealed class RestoreService : IRestoreService
             return null;
         if (forced is "q8")
             return DType.Q8_0;
-        VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
+        VramPolicy policy = VramPolicyRegistry.Resolve(_engine.Backend, request.Vram);
         return SeedVr2WeightPacking.Choose(policy.QuantizedCompute);
     }
 }
