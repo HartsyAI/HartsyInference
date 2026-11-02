@@ -3,19 +3,24 @@
 # ordinal 0 and Vulkan tests honour HARTSY_TEST_VULKAN_DEVICE, and on this box ordinal 0 of either is the 4090 that
 # SwarmUI lives on. Takes the card's lock so GPU suites never overlap, and writes a TRX so failures are kept by name.
 #
-#   tests/gpu-suite.sh --gpu-name "RTX 3060" --project Cuda [--filter "Category=GpuIntegration"] [--out DIR] [--no-build]
+#   tests/gpu-suite.sh --gpu-name "RTX 3060" --project Cuda [--filter "Category=GpuIntegration"] [--manifest FILE]
+#                      [--out DIR] [--no-build]
 #
-# --project is the middle of tests/HartsyInference.<Project>.Tests. The default filter is the GpuIntegration category.
+# --project is the middle of tests/HartsyInference.<Project>.Tests. The default filter is the GpuIntegration category,
+# or exactly the --manifest tests when one is given. The run goes through tests/require-executed.sh, so a SKIPPED line,
+# a backend guard, an empty run or a manifest test that did not execute fails it.
 # The 4090 lock is only the turn-taking lock: a 4090 suite still needs SwarmUI quiet (tests/swarm-quiet-window.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GPU_NAME="" PROJECT="" FILTER="Category=GpuIntegration" OUT="" BUILD=1
+GPU_NAME="" PROJECT="" FILTER="" MANIFEST="" OUT="" BUILD=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu-name) GPU_NAME="$2"; shift 2 ;;  --project) PROJECT="$2"; shift 2 ;;  --filter) FILTER="$2"; shift 2 ;;
-    --out) OUT="$2"; shift 2 ;;  --no-build) BUILD=0; shift ;;  *) echo "unknown argument $1" >&2; exit 2 ;;
+    --manifest) MANIFEST="$2"; shift 2 ;;  --out) OUT="$2"; shift 2 ;;  --no-build) BUILD=0; shift ;;
+    *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
+[ -n "$FILTER$MANIFEST" ] || FILTER="Category=GpuIntegration"
 [ -n "$GPU_NAME" ] && [ -n "$PROJECT" ] || { echo "--gpu-name and --project are required" >&2; exit 2; }
 PROJ="$ROOT/tests/HartsyInference.$PROJECT.Tests"
 [ -d "$PROJ" ] || { echo "no project $PROJ" >&2; exit 2; }
@@ -32,11 +37,9 @@ LOCK=/tmp/claude-1000/vk_3060.lock
 case "$GPU_NAME" in *4090*) LOCK=/tmp/claude-1000/gpu4090.lock ;; esac
 exec 9>"$LOCK"; flock 9
 set +e
-dotnet test "$PROJ" -c Release --no-build --filter "$FILTER" --logger "trx;LogFileName=$PROJECT.trx" \
-  --results-directory "$OUT" --blame-hang-timeout 15m > "$OUT/$PROJECT.log" 2>&1
+"$ROOT/tests/require-executed.sh" --project "$PROJ" ${FILTER:+--filter "$FILTER"} ${MANIFEST:+--manifest "$MANIFEST"} \
+  --out "$OUT" --name "$PROJECT" -- -c Release --no-build --blame-hang-timeout 15m
 rc=$?
 set -e
-grep -E 'Passed!|Failed!' "$OUT/$PROJECT.log" | tail -1
-grep -E '^\s+Failed [A-Za-z]' "$OUT/$PROJECT.log" | sed 's/^\s*Failed /FAILED /; s/ \[.*//' | sort -u || true
 echo "trx: $OUT/$PROJECT.trx"
 exit $rc

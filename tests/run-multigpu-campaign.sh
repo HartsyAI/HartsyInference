@@ -92,26 +92,13 @@ run_class() {
         PLAN+=("${project}|${cls}|$*")
         return 0
     fi
-    local logfile="${LOG_DIR}/${cls}.log"
     log "── ${cls} (${project}) $*"
-    ( cd "${REPO_ROOT}" && env "$@" dotnet test "tests/${project}/${project}.csproj" \
-        --filter "FullyQualifiedName~${cls}" --nologo -v minimal --logger "console;verbosity=detailed" \
-        > "${logfile}" 2>&1 )
-    local rc=$?
-    if [ ${rc} -ne 0 ]; then
-        log "   FAILED (exit ${rc}) — see ${logfile}"
+    # tests/require-executed.sh owns the checks: exit code, SKIPPED and backend-guard lines, nothing passed. It writes
+    # ${cls}.log, ${cls}.trx and ${cls}.executed.md into LOG_DIR.
+    if ! "${REPO_ROOT}/tests/require-executed.sh" --project "${REPO_ROOT}/tests/${project}/${project}.csproj" \
+        --filter "FullyQualifiedName~${cls}" --out "${LOG_DIR}" --name "${cls}" "$@" -- -v minimal \
+        | while IFS= read -r line; do log "   ${line}"; done; then
         FAILURES=$((FAILURES + 1))
-    elif grep -q "SKIPPED" "${logfile}"; then
-        log "   FAILED — test self-skipped despite HARTSY_REQUIRE_REAL_WEIGHTS=1 (non-checkpoint guard hit):"
-        grep "SKIPPED" "${logfile}" | head -5 | tee -a "${SUMMARY}"
-        FAILURES=$((FAILURES + 1))
-    elif ! grep -qE "Passed:\s+[1-9]" "${logfile}"; then
-        # Covers both vstest summary formats: the single-line "Passed!  - Failed: 0, Passed: N" (-v minimal
-        # alone) and the multi-line "Test Run Successful. / Total tests: N / Passed: N" (detailed console logger).
-        log "   FAILED — no tests matched/executed for filter ${cls}"
-        FAILURES=$((FAILURES + 1))
-    else
-        grep -E "Passed!|Test Run Successful|Total tests:|^ *Passed:" "${logfile}" | tail -2 | tee -a "${SUMMARY}"
     fi
     nvidia-smi --query-gpu=index,memory.free --format=csv,noheader >> "${SUMMARY}"
     # Driver VRAM teardown lags a heavy test process's exit by a few seconds; the NEXT process's backend
