@@ -14,6 +14,7 @@ stable release will require. Dates are UTC.
 - **Changed: a LoRA merge writes its weights only after every target validates,** so a refused LoRA leaves the weights it was given untouched.
 - **Changed: a LoRA file with a PEFT DoRA magnitude vector or a LoCon conv mid matrix is refused by name at load.** The Z-Image and Kohya loaders used to drop the magnitude silently, and applying the rest of such a file gives a wrong result.
 - **Changed: the LoRA apply log counts source units, destination tensors, fused slices and skipped units apart,** so a fused QKV no longer reads as a partial application. The line is now `Applied N of M LoRA units`.
+- **Added: the `lora.partialApplication` knob.** `allow` (the default) applies the units that fit and reports the rest. `refuse` rejects a request whose LoRA would apply only in part, and names the target it cannot apply to.
 
 ## alpha.398
 
