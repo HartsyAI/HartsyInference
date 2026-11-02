@@ -265,6 +265,15 @@ compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=1 -- "_dev"
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
 
+# Query-tiled F32 flash attention (numerics.vkTiledAttention=auto): one module per head-dim bucket (MAX_D 64, 128, 256), and a
+# bias build of each. BR query rows and TK key rows per tile; VulkanBackend.FlashTiled.cs must use the same tile sizes.
+compile_one "sdpa_flash_tiled" -DMAX_D=64 -DBR=16 -DTK=32 -DHAS_MASK=0 -- "_d64"
+compile_one "sdpa_flash_tiled" -DMAX_D=64 -DBR=16 -DTK=32 -DHAS_MASK=1 -- "_d64_bias"
+compile_one "sdpa_flash_tiled" -DMAX_D=128 -DBR=16 -DTK=32 -DHAS_MASK=0 -- "_d128"
+compile_one "sdpa_flash_tiled" -DMAX_D=128 -DBR=16 -DTK=32 -DHAS_MASK=1 -- "_d128_bias"
+compile_one "sdpa_flash_tiled" -DMAX_D=256 -DBR=8 -DTK=16 -DHAS_MASK=0 -- "_d256"
+compile_one "sdpa_flash_tiled" -DMAX_D=256 -DBR=8 -DTK=16 -DHAS_MASK=1 -- "_d256_bias"
+
 if [[ "${#FAILED[@]}" -gt 0 ]]; then
     echo >&2
     echo "error: ${#FAILED[@]} kernel(s) did not build with $GLSLANG:" >&2
