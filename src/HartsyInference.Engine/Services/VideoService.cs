@@ -305,8 +305,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
                 using IDisposable settingsScope = KnobProfileScope.Push(effectiveRequest.Settings?.Resolve());
                 VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
+                LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(
                     executionPlan.Model, effectiveRequest, executionPlan);
+                using IDisposable videoLease = leased.Lease;
+                IVideoRecipePipeline pipeline = leased.Pipeline;
                 VideoGenerationResult result = pipeline.Generate(effectiveRequest, executionPlan.EffectiveSettings, progress, cancel);
                 // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
                 // so motion speed matches the driving video); else the family default the resolver applied.
@@ -355,10 +357,13 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequest resolved = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
         VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-        IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
-            executionPlan.Model, resolved, executionPlan);
+        LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(executionPlan.Model, resolved, executionPlan);
+        // Released by the producer when it finishes, so eviction waits for the whole stream, not just this method.
+        IDisposable videoLease = leased.Lease;
+        IVideoRecipePipeline pipeline = leased.Pipeline;
         if (!pipeline.SupportsStreaming)
         {
+            videoLease.Dispose();
             throw new NotSupportedException(
                 $"Video model family '{InferenceEngine.FamilyIdFor(executionPlan.Model)}' does not support streaming generation.");
         }
@@ -382,6 +387,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             catch (Exception ex)
             {
                 channel.Writer.TryComplete(ex);
+            }
+            finally
+            {
+                videoLease.Dispose();
             }
         }, cancel);
 

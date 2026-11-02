@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: a LoRA variant beside a resident base no longer builds a second copy of the model.** The duplicate made the planner stream every block, which left a Krea 2 Turbo LoRA run about 9x slower than its control. Idle pipelines of the same checkpoint are evicted before planning when free memory cannot hold both copies. A pipeline a request still holds is never evicted, and a model switch that cannot wait for it fails by name.
+- **Changed: a zero-strength LoRA entry is a no-op.** It is dropped before its file is read and left out of the pipeline cache key, so zeroing a LoRA runs on the base pipeline and matches it exactly. A zero on one side only (diffusion or text encoder) is bypassed without a dequantize-merge-requantize round trip.
+- **Changed: a section-confined LoRA is refused by name.** Per-section LoRA scopes are not modeled, so the entry used to be skipped with a debug log only.
+- **Changed: a LoRA merge writes its weights only after every target validates,** so a refused LoRA leaves the weights it was given untouched.
+- **Changed: a LoRA file with a PEFT DoRA magnitude vector or a LoCon conv mid matrix is refused by name at load.** The Z-Image and Kohya loaders used to drop the magnitude silently, and applying the rest of such a file gives a wrong result.
+- **Changed: the LoRA apply log counts source units, destination tensors, fused slices and skipped units apart,** so a fused QKV no longer reads as a partial application. The line is now `Applied N of M LoRA units`.
+
 ## alpha.398
 
 - **Fixed: a streamed denoiser sizes its resident prefix by each block's own footprint.** The prefix was sized from block 0, a double-stream block, so HunyuanVideo's fp8 DiT streamed blocks it had room to keep resident.

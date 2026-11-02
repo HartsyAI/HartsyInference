@@ -405,6 +405,41 @@ public sealed class LoraFileTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Load_PeftDoraMagnitudeVector_RefusesTheFileByName()
+    {
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new(StringComparer.Ordinal)
+        {
+            ["diffusion_model.layers.0.attention.to_q.lora_A.weight"] = (DType.F32, new long[] { 1, 2 }, new float[] { 1f, 2f }),
+            ["diffusion_model.layers.0.attention.to_q.lora_B.weight"] = (DType.F32, new long[] { 2, 1 }, new float[] { 3f, 4f }),
+            ["diffusion_model.layers.0.attention.to_q.lora_magnitude_vector"] = (DType.F32, new long[] { 2 }, new float[] { 1f, 1f }),
+        };
+        string path = CreateSafeTensorsFile(_tempDir, "peft_dora", tensors);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => LoraFile.Load(path));
+
+        Assert.Contains(Path.GetFileName(path), refused.Message, StringComparison.Ordinal);
+        Assert.Contains("lora_magnitude_vector", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("PEFT DoRA", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Load_LoconConvMidMatrix_RefusesTheFileByName()
+    {
+        Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors = new(StringComparer.Ordinal)
+        {
+            ["lora_unet_down_blocks_0_resnets_0_conv1.lora_down.weight"] = (DType.F32, new long[] { 1, 2 }, new float[] { 1f, 2f }),
+            ["lora_unet_down_blocks_0_resnets_0_conv1.lora_mid.weight"] = (DType.F32, new long[] { 1, 1 }, new float[] { 1f }),
+            ["lora_unet_down_blocks_0_resnets_0_conv1.lora_up.weight"] = (DType.F32, new long[] { 2, 1 }, new float[] { 3f, 4f }),
+        };
+        string path = CreateSafeTensorsFile(_tempDir, "locon_mid", tensors);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => LoraFile.Load(path));
+
+        Assert.Contains("lora_mid", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("LoCon conv mid", refused.Message, StringComparison.Ordinal);
+    }
+
     private static string CreateSafeTensorsFile(string dir, string name,
         Dictionary<string, (DType dtype, long[] shape, float[] data)> tensors,
         IReadOnlyDictionary<string, string>? metadata = null)

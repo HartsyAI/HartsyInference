@@ -64,7 +64,8 @@ public static class RecipeLoraMerge
                 clipGWeights: targets.ClipG,
                 textEncoder2Weights: targets.TextEncoder2,
                 transformerNativeNames: targets.TransformerNativeNames);
-            if (merged == 0)
+            // A LoRA whose only matches are at zero strength did match: zero means no effect, so it is not refused for that.
+            if (merged == 0 && stack.Report.ZeroStrengthMatched == 0)
             {
                 // A zero-match LoRA used to warn and proceed — a generation that succeeds and looks unaffected,
                 // which is the worst failure mode there is: the user thinks the LoRA is weak, not broken. Refuse

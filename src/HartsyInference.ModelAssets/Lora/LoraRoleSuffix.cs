@@ -56,6 +56,34 @@ public static class LoraRoleSuffix
     public static bool IsPeftDoraMagnitude(string key) =>
         key.Contains(".lora_magnitude_vector", StringComparison.Ordinal);
 
+    /// <summary>Whether <paramref name="key"/> is a LoCon conv mid matrix (<c>.lora_mid.weight</c>). The mid sits between the
+    /// down and up convolutions of a LoCon conv layer, so applying the pair without it computes a different operator.</summary>
+    public static bool IsLoconMid(string key) =>
+        key.EndsWith(".lora_mid.weight", StringComparison.Ordinal);
+
+    /// <summary>Why <paramref name="key"/> names a LoRA form this engine cannot apply, or null when it names none. A file carrying
+    /// one is refused whole: its other tensors would apply without it, and the result would be wrong with no signal.</summary>
+    public static string? UnsupportedFormReason(string key)
+    {
+        if (IsPeftDoraMagnitude(key))
+        {
+            return "a PEFT DoRA magnitude vector, whose rescaling this engine does not apply";
+        }
+        if (IsLoconMid(key))
+        {
+            return "a LoCon conv mid matrix (lora_mid), which this engine does not apply";
+        }
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="key"/> looks like an adapter tensor under a suffix <see cref="TryStrip"/> does not recognize.
+    /// A consumer reports these once per file rather than refusing, because a file may carry non-adapter tensors beside its adapter.</summary>
+    public static bool IsUnrecognizedAdapterKey(string key) =>
+        !TryStrip(key, out _, out _)
+        && (key.Contains(".lora_", StringComparison.Ordinal)
+            || key.Contains(".hada_", StringComparison.Ordinal)
+            || key.Contains(".lokr_", StringComparison.Ordinal));
+
     /// <summary>Whether <paramref name="role"/> is a decomposition matrix rather than a scalar companion (<see cref="LoraRole.Alpha"/>, <see cref="LoraRole.DoraScale"/>) or a full-weight delta (<see cref="LoraRole.Diff"/>, <see cref="LoraRole.BiasDiff"/>). Format detection keys on this: a stray alpha or magnitude vector is not by itself evidence that a file is a LoRA for the root it sits on.</summary>
     public static bool IsDecompositionMatrix(LoraRole role) =>
         role is not (LoraRole.Alpha or LoraRole.DoraScale or LoraRole.Diff or LoraRole.BiasDiff);

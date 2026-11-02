@@ -41,7 +41,10 @@ public sealed class ImagesService : IImagesService
                 // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
                 using IDisposable settingsScope = KnobProfileScope.Push(request.Settings?.Resolve());
                 string? keepRefiner = request.Refiner?.Model;
-                IRecipePipeline pipeline = _engine.GetOrConstructRecipe(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
+                LeasedRecipe leased = _engine.GetOrConstructRecipeLeased(spec, request, alsoKeepPath: keepRefiner, cancel: cancel);
+                // Held to the end of this block, so the refiner and segment passes below run on a pipeline nothing evicts.
+                using IDisposable recipeLease = leased.Lease;
+                IRecipePipeline pipeline = leased.Pipeline;
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: _engine.Backend);
                 ImageDefaults defaults = _engine.DefaultsFor(spec);
                 ImageRequest resolved = defaults.Apply(request);

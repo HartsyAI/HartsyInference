@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 
@@ -59,6 +60,11 @@ public static class RecipeCacheKey
         {
             foreach (LoraEntry entry in loras.Entries)
             {
+                // A no-op entry changes nothing, so it must not split the cache: it keys like a request with no LoRA at all.
+                if (LoraResolver.IsNoOp(entry))
+                {
+                    continue;
+                }
                 builder.Append("lora:").Append(entry.Model).Append('@')
                     .Append(entry.Weight.ToString("R", CultureInfo.InvariantCulture)).Append('/')
                     .Append((entry.TextEncoderWeight ?? entry.Weight).ToString("R", CultureInfo.InvariantCulture)).Append('/')

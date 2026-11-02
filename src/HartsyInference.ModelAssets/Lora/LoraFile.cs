@@ -41,6 +41,7 @@ public sealed class LoraFile : IDisposable
         try
         {
             loader.Load(filePath);
+            RefuseUnsupportedForms(loader, filePath);
             LoraFormat format = LoraFormatDetector.Detect(loader.Descriptors);
             if (format == LoraFormat.Unknown)
             {
@@ -109,6 +110,43 @@ public sealed class LoraFile : IDisposable
             miniMaxH3Conversion?.Dispose();
             loader.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Refuses a file that carries a LoRA form this engine cannot apply, naming its first such key, and warns once about
+    /// adapter tensors under a suffix the engine does not recognize. Runs before format detection and before any mapper, so no
+    /// mapper can drop one of these forms silently.</summary>
+    private static void RefuseUnsupportedForms(SafeTensorsLoader loader, string filePath)
+    {
+        string fileName = Path.GetFileName(filePath);
+        int refused = 0, unrecognized = 0;
+        string? firstRefused = null, firstRefusedReason = null, firstUnrecognized = null;
+        foreach (string key in loader.Descriptors.Keys)
+        {
+            string? reason = LoraRoleSuffix.UnsupportedFormReason(key);
+            if (reason is not null)
+            {
+                refused++;
+                firstRefused ??= key;
+                firstRefusedReason ??= reason;
+            }
+            else if (LoraRoleSuffix.IsUnrecognizedAdapterKey(key))
+            {
+                unrecognized++;
+                firstUnrecognized ??= key;
+            }
+        }
+        if (refused > 0)
+        {
+            throw new NotSupportedException(
+                $"LoRA '{fileName}' carries {refused} tensor(s) in a form this engine does not apply; the first is "
+                + $"'{firstRefused}', which is {firstRefusedReason}. Applying the rest without it would give a wrong result, "
+                + "so the file is refused. Use a LoRA saved in a supported form.");
+        }
+        if (unrecognized > 0)
+        {
+            Logs.Warning($"LoRA '{fileName}' has {unrecognized} adapter tensor(s) with a suffix this engine does not recognize; "
+                + $"they are not applied (first: '{firstUnrecognized}').");
         }
     }
 

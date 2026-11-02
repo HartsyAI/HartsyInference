@@ -1,3 +1,4 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -55,6 +56,45 @@ public sealed class RecipeEvictionDisposeTests
 
         Assert.Equal(1, faulty.Built[0].DisposeCalls);
         Assert.Equal(1, healthy.Built[0].DisposeCalls);
+    }
+
+    [Fact]
+    public void ModelSwitch_WhileAnotherRequestHoldsThePipeline_FailsByNameAndDisposesNothing()
+    {
+        FakeRecipe held = Register("test-lease-held", throwOnDispose: false);
+        FakeRecipe next = Register("test-lease-next", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        engine.PipelineLeaseWait = TimeSpan.FromMilliseconds(200);
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+
+        HartsyInferenceException busy = Assert.Throws<HartsyInferenceException>(
+            () => engine.GetOrConstructRecipe(SpecFor(next.Name)));
+
+        Assert.Contains("still serving a request", busy.Message, StringComparison.Ordinal);
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+        Assert.Empty(next.Built);
+
+        lease.Lease.Dispose();
+        IRecipePipeline built = engine.GetOrConstructRecipe(SpecFor(next.Name));
+
+        Assert.Same(next.Built[0], built);
+        Assert.Equal(1, held.Built[0].DisposeCalls);
+    }
+
+    [Fact]
+    public void FreeMemory_WhileAPipelineIsLeased_FailsByNameUntilTheLeaseIsReleased()
+    {
+        FakeRecipe held = Register("test-lease-free", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        engine.PipelineLeaseWait = TimeSpan.FromMilliseconds(200);
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+
+        Assert.Throws<HartsyInferenceException>(engine.FreeMemory);
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+
+        lease.Lease.Dispose();
+        engine.FreeMemory();
+        Assert.Equal(1, held.Built[0].DisposeCalls);
     }
 
     private static FakeRecipe Register(string familyId, bool throwOnDispose)
