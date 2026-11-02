@@ -35,6 +35,21 @@ public sealed unsafe class Qwen35PrefillGpuParityTests(ITestOutputHelper output)
     [MemberData(nameof(Cases))]
     public void HiddenStates_MatchTransformers(string kind, int chunk, bool devicePrefill)
     {
+        // The reference is plain F32, and the tolerance below is an F32 one, so this pins plain F32 GEMMs. The engine's
+        // default is TF32 for F32 GEMMs on Ampere and newer. On an RTX 4090 that default moves this model's hidden states
+        // by a relative L2 of about 4.5e-3 against plain F32, so the default is not checked here.
+        // The pins are a profile rather than KnobStore.Set, which is process-wide: a CUDA backend built by another test
+        // class running in parallel would otherwise run F32 GEMMs for as long as this test does.
+        using IDisposable knobs = KnobProfile.Create("qwen35-f32-reference")
+            .With(EngineKnobs.NoTf32, true)
+            .With(EngineKnobs.SdpaNoTf32, true)
+            .With(EngineKnobs.SsmDevicePrefill, devicePrefill)
+            .Push();
+        CheckHiddenStates(kind, chunk, devicePrefill);
+    }
+
+    private void CheckHiddenStates(string kind, int chunk, bool devicePrefill)
+    {
         if (!BackendGate.TryOpen(kind, output.WriteLine, out IBackend? gpu)) return;
         using IBackend backend = gpu!;
         using SafeTensorsLoader loader = new();
@@ -49,16 +64,7 @@ public sealed unsafe class Qwen35PrefillGpuParityTests(ITestOutputHelper output)
         Qwen35HfConfig cfg = Qwen35HfConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "qwen35_tiny_config.json")));
 
         using Qwen35Model model = Qwen35Model.FromHuggingFace(weights, cfg, maxSequenceLength: 64);
-        KnobStore.Set(EngineKnobs.SsmDevicePrefill, devicePrefill);
-        float[] got;
-        try
-        {
-            got = chunk == 0 ? model.ForwardHiddenStates(backend, ids) : Chunked(model, backend, ids, chunk);
-        }
-        finally
-        {
-            KnobStore.Clear(EngineKnobs.SsmDevicePrefill);
-        }
+        float[] got = chunk == 0 ? model.ForwardHiddenStates(backend, ids) : Chunked(model, backend, ids, chunk);
 
         ReadOnlySpan<float> expected = new((void*)want.DataPointer, (int)want.ElementCount);
         Assert.Equal(expected.Length, got.Length);
