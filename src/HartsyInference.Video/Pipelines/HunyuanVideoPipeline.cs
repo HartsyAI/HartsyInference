@@ -106,25 +106,26 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             HeadroomBytes = ActivationHeadroomBytes,
         });
 
-        Tensor latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
-        float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
-
-        // Sampler selection (2026-08-20). HunyuanVideo had no user-selectable sampler: the loop below was a hardcoded
-        // flow-match Euler over `tsteps`. That array IS the family's sigma schedule — descending from 1.0 with an exact
-        // terminal zero — so it goes to the sampler verbatim rather than being rebuilt through a lookalike scheduler,
-        // which would differ by an ulp for general (i, N) and shift every default generation.
-        ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, tsteps, seed, "HunyuanVideo");
-
-        // Materialize the conditioning on the host so the per-step FreeActivations() below can't evict it (it is
-        // re-uploaded fresh each step). promptEmbeds is already host (CropSequence), but pooled may be a live
-        // GPU activation from the CLIP encoder — touching DataPointer forces the D2H sync + cache eviction.
-        _ = promptEmbeds.DataPointer;
-        _ = pooled.DataPointer;
-
-        DenoiserProbe.Condition("cond", promptEmbeds);
-        DenoiserProbe.Condition("cond_pooled", pooled);
+        Tensor latent;
         try
         {
+            latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
+            float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
+
+            // Sampler selection (2026-08-20). HunyuanVideo had no user-selectable sampler: the loop below was a hardcoded
+            // flow-match Euler over `tsteps`. That array IS the family's sigma schedule — descending from 1.0 with an exact
+            // terminal zero — so it goes to the sampler verbatim rather than being rebuilt through a lookalike scheduler,
+            // which would differ by an ulp for general (i, N) and shift every default generation.
+            ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, tsteps, seed, "HunyuanVideo");
+
+            // Materialize the conditioning on the host so the per-step FreeActivations() below can't evict it (it is
+            // re-uploaded fresh each step). promptEmbeds is already host (CropSequence), but pooled may be a live
+            // GPU activation from the CLIP encoder — touching DataPointer forces the D2H sync + cache eviction.
+            _ = promptEmbeds.DataPointer;
+            _ = pooled.DataPointer;
+
+            DenoiserProbe.Condition("cond", promptEmbeds);
+            DenoiserProbe.Condition("cond_pooled", pooled);
             for (int k = 0; k < steps; k++)
             {
                 Stopwatch sw = Stopwatch.StartNew();
@@ -184,8 +185,14 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
         {
             // The captured step graph bakes the DiT weight device pointers, and Dispose evicts the streamed window
             // they point into. Invalidate first, on the failure path too, so the next generation re-captures.
-            _dit.InvalidateStepGraph(Backend);
-            stream.Dispose();
+            try
+            {
+                _dit.InvalidateStepGraph(Backend);
+            }
+            finally
+            {
+                stream.Dispose();
+            }
         }
         // Every weight, not just the resident prefix: blocks the stream uploaded are registered in the backend weight
         // cache, and any still cached here would starve the VAE decode.
