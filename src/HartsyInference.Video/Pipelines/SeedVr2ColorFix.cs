@@ -33,19 +33,21 @@ public static class SeedVr2ColorFix
 
     /// <summary>Blends per-plane: <c>model + (1−strength)·(inputLow − modelLow)</c>. Both buffers are
     /// C×H×W planes in [-1,1]; <paramref name="model"/> is modified in place.</summary>
-    public static void Transplant(Span<float> model, ReadOnlySpan<float> input, int channels, int h, int w, float strength)
+    public static void Transplant(Span<float> model, ReadOnlySpan<float> input, int channels, int h, int w, float strength,
+        SeedVr2ColorScratch scratch)
     {
         if (strength >= 1f)
             return;
         float mix = 1f - strength;
-        float[] modelLow = new float[h * w];
-        float[] inputLow = new float[h * w];
-        float[] scratch = new float[h * w];
+        int n = h * w;
+        Span<float> modelLow = scratch.Get(SeedVr2ColorScratch.Region.ModelLow);
+        Span<float> inputLow = scratch.Get(SeedVr2ColorScratch.Region.InputLow);
+        Span<float> blur = scratch.Get(SeedVr2ColorScratch.Region.Blur);
         for (int c = 0; c < channels; c++)
         {
-            Span<float> plane = model.Slice(c * h * w, h * w);
-            LowFrequency(plane, modelLow, scratch, h, w);
-            LowFrequency(input.Slice(c * h * w, h * w), inputLow, scratch, h, w);
+            Span<float> plane = model.Slice(c * n, n);
+            LowFrequency(plane, modelLow, blur, h, w);
+            LowFrequency(input.Slice(c * n, n), inputLow, blur, h, w);
             for (int i = 0; i < plane.Length; i++)
                 plane[i] += mix * (inputLow[i] - modelLow[i]);
         }
@@ -54,37 +56,38 @@ public static class SeedVr2ColorFix
     /// <summary>ComfyUI <c>lab</c>: wavelet-recombine the model's high frequencies with the input's low frequencies,
     /// then histogram-match the CIELAB a/b channels to the input and blend L 80/20 toward its histogram. RGB in [-1,1]
     /// (3 planes); <paramref name="model"/> is overwritten with the result.</summary>
-    public static void TransferLab(Span<float> model, ReadOnlySpan<float> input, int h, int w)
+    public static void TransferLab(Span<float> model, ReadOnlySpan<float> input, int h, int w, SeedVr2ColorScratch scratch)
     {
         int n = h * w;
-        float[] content = new float[3 * n];
-        float[] scratch = new float[n];
-        float[] modelLow = new float[n];
-        float[] inputLow = new float[n];
+        Span<float> content = scratch.Get(SeedVr2ColorScratch.Region.Content);
+        Span<float> modelLow = scratch.Get(SeedVr2ColorScratch.Region.ModelLow);
+        Span<float> inputLow = scratch.Get(SeedVr2ColorScratch.Region.InputLow);
+        Span<float> blur = scratch.Get(SeedVr2ColorScratch.Region.Blur);
         for (int c = 0; c < 3; c++)
         {
             Span<float> plane = model.Slice(c * n, n);
-            LowFrequency(plane, modelLow, scratch, h, w);
-            LowFrequency(input.Slice(c * n, n), inputLow, scratch, h, w);
+            LowFrequency(plane, modelLow, blur, h, w);
+            LowFrequency(input.Slice(c * n, n), inputLow, blur, h, w);
             for (int i = 0; i < n; i++)
                 content[c * n + i] = Math.Clamp(plane[i] - modelLow[i] + inputLow[i], -1f, 1f);
         }
 
-        float[] contentLab = RgbToLab(content, n);
-        float[] referenceLab = RgbToLab(input, n);
-        float[] matchedL = new float[n];
-        float[] matchedA = new float[n];
-        float[] matchedB = new float[n];
-        MatchHistogram(contentLab.AsSpan(n, n), referenceLab.AsSpan(n, n), matchedA);
-        MatchHistogram(contentLab.AsSpan(2 * n, n), referenceLab.AsSpan(2 * n, n), matchedB);
-        MatchHistogram(contentLab.AsSpan(0, n), referenceLab.AsSpan(0, n), matchedL);
+        Span<float> contentLab = scratch.Get(SeedVr2ColorScratch.Region.ContentLab);
+        Span<float> referenceLab = scratch.Get(SeedVr2ColorScratch.Region.ReferenceLab);
+        RgbToLab(content, n, contentLab);
+        RgbToLab(input, n, referenceLab);
+
+        // The matched planes are written in L, a, b order, so the same buffer is the LAB-to-RGB source.
+        Span<float> matched = scratch.Get(SeedVr2ColorScratch.Region.Matched);
+        Span<float> keys = scratch.Get(SeedVr2ColorScratch.Region.SortKeys);
+        Span<float> sortedReference = scratch.Get(SeedVr2ColorScratch.Region.SortRef);
+        Span<int> order = scratch.Order;
+        MatchHistogram(contentLab.Slice(n, n), referenceLab.Slice(n, n), matched.Slice(n, n), keys, sortedReference, order);
+        MatchHistogram(contentLab.Slice(2 * n, n), referenceLab.Slice(2 * n, n), matched.Slice(2 * n, n), keys, sortedReference, order);
+        MatchHistogram(contentLab.Slice(0, n), referenceLab.Slice(0, n), matched.Slice(0, n), keys, sortedReference, order);
         for (int i = 0; i < n; i++)
-            matchedL[i] = contentLab[i] * LabLuminanceWeight + matchedL[i] * (1f - LabLuminanceWeight);
-        float[] resultLab = new float[3 * n];
-        matchedL.CopyTo(resultLab, 0);
-        matchedA.CopyTo(resultLab, n);
-        matchedB.CopyTo(resultLab, 2 * n);
-        LabToRgb(resultLab, n, model);
+            matched[i] = contentLab[i] * LabLuminanceWeight + matched[i] * (1f - LabLuminanceWeight);
+        LabToRgb(matched, n, model);
     }
 
     /// <summary>ComfyUI <c>adain</c>: per frame and channel, match the model's mean and standard deviation to the input's
@@ -117,28 +120,27 @@ public static class SeedVr2ColorFix
     }
 
     /// <summary>Histogram match with equal sizes: the k-th smallest source value takes the k-th smallest reference value.</summary>
-    private static void MatchHistogram(ReadOnlySpan<float> source, ReadOnlySpan<float> reference, Span<float> dst)
+    /// <remarks>Sorts in place in the caller's buffers, so a frame's match allocates nothing. Equal source values are not
+    /// tie-broken by position, so pixels that tie can swap their matched values; the match itself is unchanged.</remarks>
+    private static void MatchHistogram(ReadOnlySpan<float> source, ReadOnlySpan<float> reference, Span<float> dst,
+        Span<float> keys, Span<float> sortedReference, Span<int> order)
     {
         int n = source.Length;
-        int[] order = new int[n];
         for (int i = 0; i < n; i++)
-            order[i] = i;
-        float[] sourceCopy = source.ToArray();
-        Array.Sort(order, (a, b) =>
         {
-            int cmp = sourceCopy[a].CompareTo(sourceCopy[b]);
-            return cmp != 0 ? cmp : a.CompareTo(b);
-        });
-        float[] referenceSorted = reference.ToArray();
-        Array.Sort(referenceSorted);
+            keys[i] = source[i];
+            order[i] = i;
+        }
+        reference.CopyTo(sortedReference);
+        MemoryExtensions.Sort(keys.Slice(0, n), order.Slice(0, n));
+        MemoryExtensions.Sort(sortedReference.Slice(0, n));
         for (int k = 0; k < n; k++)
-            dst[order[k]] = referenceSorted[k];
+            dst[order[k]] = sortedReference[k];
     }
 
     /// <summary>Planar sRGB in [-1,1] to planar CIELAB, via [0,1] clamped as ComfyUI does before the transform.</summary>
-    private static float[] RgbToLab(ReadOnlySpan<float> rgb, int n)
+    private static void RgbToLab(ReadOnlySpan<float> rgb, int n, Span<float> lab)
     {
-        float[] lab = new float[3 * n];
         for (int i = 0; i < n; i++)
         {
             // Scalars, not a per-pixel array: this runs over every pixel of every frame, and the inference path allocates nothing.
@@ -153,7 +155,6 @@ public static class SeedVr2ColorFix
             lab[n + i] = (float)(500.0 * (fx - fy));
             lab[2 * n + i] = (float)(200.0 * (fy - fz));
         }
-        return lab;
     }
 
     /// <summary>Planar CIELAB to RGB in [-1,1], written to <paramref name="rgb"/>.</summary>
@@ -190,20 +191,20 @@ public static class SeedVr2ColorFix
         ? Math.Cbrt(t)
         : (CielabKappa * t + 16.0) / 116.0;
 
-    private static void LowFrequency(ReadOnlySpan<float> src, float[] dst, float[] scratch, int h, int w)
+    private static void LowFrequency(ReadOnlySpan<float> src, Span<float> dst, Span<float> blur, int h, int w)
     {
         src.CopyTo(dst);
         // ComfyUI caps the dilation at min(H,W)//8 (wavelet_blur's max_safe_radius), so small planes keep their detail.
         int maxSafeRadius = Math.Max(1, Math.Min(h, w) / 8);
         for (int level = 0; level < Levels; level++)
         {
-            WaveletBlur(dst, scratch, h, w, Math.Min(1 << level, maxSafeRadius));
-            scratch.CopyTo(dst, 0);
+            WaveletBlur(dst, blur, h, w, Math.Min(1 << level, maxSafeRadius));
+            blur.CopyTo(dst);
         }
     }
 
     /// <summary>3×3 [[1,2,1],[2,4,2],[1,2,1]]/16 blur at the given dilation, replicate-padded.</summary>
-    private static void WaveletBlur(ReadOnlySpan<float> src, float[] dst, int h, int w, int dilation)
+    private static void WaveletBlur(ReadOnlySpan<float> src, Span<float> dst, int h, int w, int dilation)
     {
         for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)

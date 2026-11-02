@@ -18,7 +18,8 @@ public sealed class SeedVr2ColorTransferTests
         foreach (Case c in LoadCases())
         {
             float[] model = [.. c.Model];
-            SeedVr2ColorFix.TransferLab(model, c.Reference, c.Height, c.Width);
+            using SeedVr2ColorScratch scratch = new(c.Height * c.Width);
+            SeedVr2ColorFix.TransferLab(model, c.Reference, c.Height, c.Width, scratch);
             AssertClose(c.Lab, model, $"lab {c.Height}x{c.Width}");
         }
     }
