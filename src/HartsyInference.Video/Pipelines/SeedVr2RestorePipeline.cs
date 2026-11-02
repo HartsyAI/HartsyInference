@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -156,6 +157,23 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         return result;
     }
 
+    /// <summary>Device bytes the DiT's forward needs beyond the weights it keeps resident: the streaming window (the block in
+    /// flight plus the prefetched ones), the vid stream and MLP temporaries per token in F32, and a margin for the window
+    /// attention's scratch. The window is reserved up front, since a resident prefix that takes all the free memory leaves the
+    /// streamed suffix no room to upload (the first upload then fails on a 33 MB allocation on an 8 GB card).</summary>
+    private long DitActivationReserveBytes(int lt, int lh, int lw)
+    {
+        SeedVr2Config config = _dit.Config;
+        (int pT, int pH, int pW) = config.PatchSize;
+        long tokens = (long)(lt / pT) * (lh / pH) * (lw / pW);
+        long perToken = 4L * (12L * config.VidDim + 2L * config.MlpDim);
+        long largestBlock = 0;
+        for (int i = 0; i < _dit.BlockCount; i++)
+            largestBlock = Math.Max(largestBlock, _dit.GetBlock(i).EstimatedWeightBytes);
+        long window = (BlockStreamingOptions.DefaultPrefetchAhead + 1) * largestBlock;
+        return tokens * perToken + window + 256L * 1024 * 1024;
+    }
+
     private float[] RestoreChunk(SeedVr2Preprocess.Result pre, int begin, int len,
         SeedVr2RestoreOptions options, int chunkIndex)
     {
@@ -211,9 +229,22 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         mean.Dispose(); logvar.Dispose(); noiseA.Dispose();
 
         long tDit = Environment.TickCount64;
-        Backend.PreloadWeights(_dit.EnumerateWeights());
-        Tensor v = _dit.Forward(Backend, ditIn, _posEmb, Timestep);
-        Backend.Sync();
+        // The DiT runs through the shared streaming scope: when the VRAM policy says it does not fit, each layer is made
+        // resident just before it runs and evicted after, so a card too small for the whole model still restores. When it
+        // fits, the scope preloads everything, which is the old full-residency path.
+        Tensor v;
+        using (BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = Backend,
+            Denoiser = _dit,
+            ModelName = "SeedVR2",
+            HeadroomBytes = DitActivationReserveBytes(lt, lh, lw),
+        }))
+        {
+            v = _dit.Forward(Backend, ditIn, _posEmb, Timestep);
+            Backend.Sync();
+            stream.EndStep();
+        }
         Backend.FreeWeights(_dit.EnumerateWeights());
         Backend.TrimMemoryPool();
         ditIn.Dispose();

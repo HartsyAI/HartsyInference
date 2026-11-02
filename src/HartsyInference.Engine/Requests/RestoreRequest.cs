@@ -34,6 +34,11 @@ public sealed record RestoreRequest
     /// <summary>Colour transfer back to the input (ComfyUI's lab / adain modes), applied before the <see cref="Strength"/> lerp. Null keeps the model's own colours.</summary>
     public SeedVr2ColorTransfer? ColorTransfer { get; init; }
 
+    /// <summary>Device selector the restore runs on (for example <c>cuda:1</c>), so the restore can sit on a different card from the
+    /// engine's own model. Null, or the engine's own device, runs it there. The weights load on that device and stay until a
+    /// restore on another device or model replaces them.</summary>
+    public string? Device { get; init; }
+
     /// <summary>Output frame rate for encoded results; null keeps the source rate.</summary>
     public double? Fps { get; init; }
 
