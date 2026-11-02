@@ -109,7 +109,6 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
         Tensor latent;
         try
         {
-            latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
             float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
             // Sampler selection (2026-08-20). HunyuanVideo had no user-selectable sampler: the loop below was a hardcoded
@@ -117,6 +116,7 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             // terminal zero — so it goes to the sampler verbatim rather than being rebuilt through a lookalike scheduler,
             // which would differ by an ulp for general (i, N) and shift every default generation.
             ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, tsteps, seed, "HunyuanVideo");
+            latent = SeedGenerator.CreateNoise(new TensorShape([1L, _config.OutChannels, tLat, hLat, wLat]), seed);
 
             // Materialize the conditioning on the host so the per-step FreeActivations() below can't evict it (it is
             // re-uploaded fresh each step). promptEmbeds is already host (CropSequence), but pooled may be a live
