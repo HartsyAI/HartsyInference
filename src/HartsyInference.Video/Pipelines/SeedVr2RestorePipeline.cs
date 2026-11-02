@@ -111,9 +111,23 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
                 break;
         }
 
-        if (options.Strength < 1f)
-            for (int f = 0; f < pre.OriginalFrames; f++)
-                TransplantFrame(output, pre.Data, pre.Frames, f, outH, outW, options.Strength);
+        // One scratch for the whole restore: the colour passes reuse its planes for every frame.
+        if (options.ColorTransfer != SeedVr2ColorTransfer.None || options.Strength < 1f)
+        {
+            using SeedVr2ColorScratch colorScratch = new(outH * outW);
+            if (options.ColorTransfer != SeedVr2ColorTransfer.None)
+            {
+                ColorPass transfer = (model, input) => ApplyColorTransfer(options.ColorTransfer, model, input, outH, outW, colorScratch);
+                for (int f = 0; f < pre.OriginalFrames; f++)
+                    ColorFrame(output, pre.Data, pre.Frames, f, outH, outW, colorScratch, transfer);
+            }
+            if (options.Strength < 1f)
+            {
+                ColorPass wavelet = (model, input) => SeedVr2ColorFix.Transplant(model, input, 3, outH, outW, options.Strength, colorScratch);
+                for (int f = 0; f < pre.OriginalFrames; f++)
+                    ColorFrame(output, pre.Data, pre.Frames, f, outH, outW, colorScratch, wavelet);
+            }
+        }
 
         List<byte[]> result = ConvertFrames(output, pre.Frames, 0, pre.OriginalFrames, outH, outW)
             .Select(frame => frame.Rgb)
@@ -231,19 +245,41 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         return chunk;
     }
 
-    private static void TransplantFrame(float[] output, float[] reference, int totalFrames, int frame,
-        int h, int w, float strength)
+    /// <summary>One colour pass over a frame's planes: <c>model</c> is overwritten, <c>input</c> is the resized reference.</summary>
+    private delegate void ColorPass(Span<float> model, ReadOnlySpan<float> input);
+
+    private static void ApplyColorTransfer(SeedVr2ColorTransfer mode, Span<float> model, ReadOnlySpan<float> input, int h, int w,
+        SeedVr2ColorScratch scratch)
     {
-        float[] model = new float[3 * h * w];
-        float[] input = new float[3 * h * w];
+        switch (mode)
+        {
+            case SeedVr2ColorTransfer.Lab:
+                SeedVr2ColorFix.TransferLab(model, input, h, w, scratch);
+                break;
+            case SeedVr2ColorTransfer.AdaIn:
+                SeedVr2ColorFix.TransferAdaIn(model, input, 3, h, w);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "No colour transfer to apply.");
+        }
+    }
+
+    /// <summary>Runs one colour pass over a frame: copies its three planes out of the clip-major output into the scratch, applies
+    /// <paramref name="transfer"/>, and writes them back.</summary>
+    private static void ColorFrame(float[] output, float[] reference, int totalFrames, int frame, int h, int w,
+        SeedVr2ColorScratch scratch, ColorPass transfer)
+    {
+        int n = h * w;
+        Span<float> model = scratch.Get(SeedVr2ColorScratch.Region.FrameModel);
+        Span<float> input = scratch.Get(SeedVr2ColorScratch.Region.FrameInput);
         for (int c = 0; c < 3; c++)
         {
-            long plane = ((long)c * totalFrames + frame) * h * w;
-            Array.Copy(output, plane, model, c * h * w, h * w);
-            Array.Copy(reference, plane, input, c * h * w, h * w);
+            long plane = ((long)c * totalFrames + frame) * n;
+            output.AsSpan((int)plane, n).CopyTo(model.Slice(c * n, n));
+            reference.AsSpan((int)plane, n).CopyTo(input.Slice(c * n, n));
         }
-        SeedVr2ColorFix.Transplant(model, input, 3, h, w, strength);
+        transfer(model, input);
         for (int c = 0; c < 3; c++)
-            Array.Copy(model, c * h * w, output, ((long)c * totalFrames + frame) * h * w, h * w);
+            model.Slice(c * n, n).CopyTo(output.AsSpan((int)(((long)c * totalFrames + frame) * n), n));
     }
 }
