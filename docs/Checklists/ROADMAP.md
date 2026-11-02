@@ -144,6 +144,9 @@ Model-specific SDXL refiner/segment gaps belong in [image status](MODEL_STATUS_I
   `IInferenceEngine.Recipes`, speech and transcription recipes.
 
 - [ ] 3D and world-model UI extensions, thin over Engine.
+- [ ] Swarm surfaces for vision outputs (metric depth, geometry, pose, matting, face, tracking) and frame
+  interpolation. These were deferred on 2026-11-01: the [Comfy-Org rollout](COMFY_ORG_ROLLOUT.md) ships them through
+  CLI and HTTP API first.
 - [ ] Validate package/extension compatibility for newly exposed features; H3 gates live in video status.
 
 ## 9. CLI / API
@@ -186,3 +189,49 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 - [ ] CLI repeated settings/runner helpers only where behavior actually matches.
 - [ ] VideoRequest.VideoModel/VideoFormat: check extension consumers before altering public DTOs.
 - [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across `AttentionReference.cs` and more). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
+
+## 13. Comfy-Org rollout shared infrastructure
+
+These are the shared blocks the [Comfy-Org rollout](COMFY_ORG_ROLLOUT.md) needs before its consumers. Each one lands
+with its first consumer and is removed here once it ships.
+
+- [ ] `tests/require-executed.sh`, hoisted from the `run_class` check in `run-multigpu-campaign.sh`.
+  - Takes a nonempty expected-test manifest.
+  - Fails on a self-skip, an unavailable-backend guard, zero passed, or a missing manifest test.
+- [ ] Vision contracts. All of these are additive:
+  - a `VisionBatchRequest` for multi-view input, and for frames with timestamps or fps;
+  - new `VisionMode` values with per-mode validation;
+  - structured `VisionResult` outputs: depth kind, point map, normals, camera, poses, faces, intrinsic maps, tracks;
+  - bounded per-frame streaming with cancellation and cleanup;
+  - the OpenCV camera convention;
+  - `.npy`/JSON for the CLI and base64 arrays for the API.
+- [ ] Layered image output: `ImageFeatures.LayeredOutput` plus a nullable `ImageResult.Layers`.
+  - Layers run back to front with straight alpha; `Rgb`/`Alpha` stay the composite.
+  - Resize and crop apply to every layer.
+  - Background removal, refiner, recomposite and crop-to-mask are refused.
+- [ ] A ByT5-small text preset and a byte tokenizer: Hunyuan-Image-2.1 glyphs and Hunyuan-Video-1.5.
+- [ ] A Stable Audio CFG path, a v-prediction EDM sampler and the `seconds_start` timing token: Open 1.0, then 3.
+- [ ] A generalized `ControlNetBaseModel`/`DetectMode` (the extension mirror included) and a ComfyUI `model_patches`
+  loader: SD3.5 ControlNet, DiffSynth, USO, T2I-Adapter, MiniMax-H3 Fun ControlNet.
+- [ ] An SD2 path: SD2.1, unCLIP, Lotus and SDPose.
+  - `UNetConfig` presets for 768-v, 512 and 512-inpaint.
+  - An OpenCLIP-H text preset.
+  - v-prediction in the SD pipelines.
+  - `.ckpt` loading through the safe-pickle parser.
+- [ ] Generalize `AnimaConfig`/`AnimaTransformer` into a Cosmos MiniTrainDIT with an optional `llm_adapter`, a T5-11B
+  path and 14B: Cosmos-Predict2 and Anima-LLLite.
+- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Also fix CUDA
+  `UpsampleBilinear2D`. Consumers: RIFE, FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
+- [ ] ViT 2D RoPE, QK-norm and view-grouped alternating attention, consumed by Depth-Anything-3 and DINOv3.
+  - "Local" means per view and "global" means across views; neither is spatial windowing.
+  - Tests: a reshape-equivalence test with identical positions, and a test of the real paths against the official code.
+- [ ] A causal frame KV cache for Causal-Forcing (MatrixGame2 after it). This starts as an investigation, because
+  `ReferenceKvCache` holds a fixed prepass reference.
+  - Settle append/eviction, positions across chunks, masks, timestep validity and request isolation.
+  - Gate it on cached-vs-uncached parity.
+- [ ] A Jina-CLIP-v2 tower (XLM-R with RoPE, 250k Unigram tokenizer) for NewBie.
+- [ ] DINOv3 on the ViT RoPE block: TRELLIS.2, Pixal3D, Idol and sam-3d-body.
+- [ ] Comfy `comfy_quant` w4a8/w6a8 as W4A16/W6A16 first, plus AWQ `pre_quant_scale` folding: Qwen3.8-27B, the
+  Ming-Image text encoder, MiniMax-H3.
+- [ ] A BailingMoeV2 safetensors config factory for `GenericTransformer` + `MoeFeedForward` (the Ming-Image text
+  encoder).
