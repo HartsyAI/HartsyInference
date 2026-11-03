@@ -917,47 +917,63 @@ public sealed class InferenceEngine : IInferenceEngine
         string videoKeep = $"video-recipe:{keepPath}|";
         string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
         string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
-        // The budget is read once, before the turn and the cache lock: it calls the driver, and every cache lookup and lease release waits on the lock.
-        bool sameCheckpointCached;
-        lock (_pipelineCacheLock)
-        {
-            sameCheckpointCached = _recipePipelines.Keys.Any(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
-                || _videoRecipePipelines.Keys.Any(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase));
-        }
-        bool evictSameCheckpoint = sameCheckpointCached && SameCheckpointBudgetTight(keepPath);
+        // The budget decision and the cached variants it was made for: a lease wait reuses it rather than reading the driver every wake.
+        bool evictSameCheckpoint = false;
+        List<string>? decidedFor = null;
         DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
         while (true)
         {
             // A cancelled request stops here, so it cannot hold the other requests behind it for the whole lease wait.
             cancel.ThrowIfCancellationRequested();
             IDisposable turn = AcquireConstructionTurn(cancel);
-            lock (_pipelineCacheLock)
+            try
             {
-                if (alreadyCached())
+                List<string> sameCheckpoint;
+                lock (_pipelineCacheLock)
                 {
-                    // Another request built this key while this one waited for its turn, so nothing is evicted for it.
-                    victims = new EvictedPipelines([], []);
-                    return turn;
+                    if (alreadyCached())
+                    {
+                        // Another request built this key while this one waited for its turn, so nothing is evicted for it.
+                        victims = new EvictedPipelines([], []);
+                        return turn;
+                    }
+                    sameCheckpoint = _recipePipelines.Keys.Where(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
+                        .Concat(_videoRecipePipelines.Keys.Where(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase)))
+                        .ToList();
                 }
-                List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
-                List<string> videoVictims = PipelineEvictionPolicy.SelectVictims(_videoRecipePipelines.Keys, videoKeep, videoAlso, evictSameCheckpoint);
-                string? busy = imageVictims.Concat(videoVictims).FirstOrDefault(IsLeasedUnderLock);
-                if (busy is null)
+                // Read under the turn, so a variant another miss published meanwhile is counted, but outside the cache lock: it calls the driver.
+                if (decidedFor is null || !decidedFor.SequenceEqual(sameCheckpoint, StringComparer.OrdinalIgnoreCase))
                 {
-                    victims = RemoveVictims(imageVictims, videoVictims);
-                    return turn;
+                    evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath);
+                    decidedFor = sameCheckpoint;
                 }
-                // The turn is given back before waiting. The request holding this pipeline may need the turn to build a model of its
-                // own, and holding it across the wait would stall both requests until the lease wait ran out.
+                lock (_pipelineCacheLock)
+                {
+                    List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
+                    List<string> videoVictims = PipelineEvictionPolicy.SelectVictims(_videoRecipePipelines.Keys, videoKeep, videoAlso, evictSameCheckpoint);
+                    string? busy = imageVictims.Concat(videoVictims).FirstOrDefault(IsLeasedUnderLock);
+                    if (busy is null)
+                    {
+                        victims = RemoveVictims(imageVictims, videoVictims);
+                        return turn;
+                    }
+                    // The turn is given back before waiting. The request holding this pipeline may need the turn to build a model of its
+                    // own, and holding it across the wait would stall both requests until the lease wait ran out.
+                    turn.Dispose();
+                    TimeSpan remaining = deadline - DateTime.UtcNow;
+                    if (remaining <= TimeSpan.Zero)
+                    {
+                        throw new HartsyInferenceException($"Pipeline '{busy}' is still serving a request, so this model switch cannot evict it. Retry when that request finishes.");
+                    }
+                    // Wakes at least once a second, so a cancellation is seen even when no lease is released. The lease check and the wait
+                    // share one lock hold, so a release between them cannot be missed.
+                    Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
+                }
+            }
+            catch
+            {
                 turn.Dispose();
-                TimeSpan remaining = deadline - DateTime.UtcNow;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    throw new HartsyInferenceException($"Pipeline '{busy}' is still serving a request, so this model switch cannot evict it. Retry when that request finishes.");
-                }
-                // Wakes at least once a second, so a cancellation is seen even when no lease is released. The lease check and the wait
-                // share one lock hold, so a release between them cannot be missed.
-                Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
+                throw;
             }
         }
     }

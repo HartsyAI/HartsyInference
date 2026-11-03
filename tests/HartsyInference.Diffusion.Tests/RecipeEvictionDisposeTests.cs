@@ -1,3 +1,5 @@
+using System.Reflection;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine;
@@ -152,8 +154,100 @@ public sealed class RecipeEvictionDisposeTests
         secondLease.Lease.Dispose();
     }
 
+    [Fact]
+    public async Task ConcurrentVariantMisses_ReadTheBudgetUnderTheTurn_AndTheSecondEvictsTheFirstOnceItIsIdle()
+    {
+        FakeRecipe recipe = Register("test-turn-variants", throwOnDispose: false);
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        recipe.Entered = entered;
+        recipe.BlockConstruct = release;
+        string checkpoint = Path.Combine(Path.GetTempPath(), $"{recipe.Name}-{Guid.NewGuid():N}.safetensors");
+        using (FileStream file = File.Create(checkpoint))
+        {
+            file.SetLength(Mb);
+        }
+        try
+        {
+            // 1 MB free cannot hold another variant of a 1 MB checkpoint, so the two variants never share the card.
+            IBackend backend = ScriptedFreeBackend.Create(9402, out ScriptedFreeBackend device);
+            device.Readings.Enqueue(Mb);
+            using InferenceEngine engine = new InferenceEngine(backend, "cuda:9402");
+            engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+            ModelSpec spec = SpecFor(recipe.Name, checkpoint);
+
+            Task<LeasedRecipe> firstMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("a")));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+
+            // Nothing of the checkpoint is cached when the second variant misses, so a budget read before its turn would keep the first.
+            Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("b")));
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            release.Set();
+            LeasedRecipe firstLease = await firstMiss;
+
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            Assert.Single(recipe.Built);
+
+            firstLease.Lease.Dispose();
+            LeasedRecipe secondLease = await secondMiss;
+
+            Assert.Same(recipe.Built[1], secondLease.Pipeline);
+            Assert.Equal(1, recipe.Built[0].DisposeCalls);
+            secondLease.Lease.Dispose();
+        }
+        finally
+        {
+            File.Delete(checkpoint);
+        }
+    }
+
     private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
         await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
+
+    private const long Mb = 1024L * 1024;
+
+    private static ImageRequest WithLora(string lora) => new ImageRequest
+    {
+        Prompt = "variant",
+        Loras = new LoraStack { Entries = [new LoraEntry { Model = lora, Weight = 1 }] },
+    };
+
+    /// <summary>A backend whose free-memory reading is scripted: each call takes the next queued value, then repeats the last one.</summary>
+    public class ScriptedFreeBackend : DispatchProxy
+    {
+        private long _last;
+
+        public Queue<long> Readings { get; } = new();
+
+        public int Ordinal { get; private set; }
+
+        public static IBackend Create(int ordinal, out ScriptedFreeBackend fake)
+        {
+            IBackend backend = Create<IBackend, ScriptedFreeBackend>();
+            fake = (ScriptedFreeBackend)backend;
+            fake.Ordinal = ordinal;
+            return backend;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            ArgumentNullException.ThrowIfNull(targetMethod);
+            switch (targetMethod.Name)
+            {
+                case "get_Device":
+                    return DeviceKind.Cuda(Ordinal);
+                case nameof(IBackend.FreeMemoryBytes):
+                    _last = Readings.Count > 0 ? Readings.Dequeue() : _last;
+                    return _last;
+                case nameof(IBackend.GetVramInfo):
+                    return (0L, 0L);
+                default:
+                    return targetMethod.ReturnType.IsValueType && targetMethod.ReturnType != typeof(void)
+                        ? Activator.CreateInstance(targetMethod.ReturnType)
+                        : null;
+            }
+        }
+    }
 
     private static FakeRecipe Register(string familyId, bool throwOnDispose)
     {
@@ -162,11 +256,11 @@ public sealed class RecipeEvictionDisposeTests
         return recipe;
     }
 
-    private static ModelSpec SpecFor(string familyId) => new ModelSpec
+    private static ModelSpec SpecFor(string familyId, string? localPath = null) => new ModelSpec
     {
         Requested = familyId,
         Modality = Modality.Image,
-        LocalPath = $"/nonexistent/{familyId}.safetensors",
+        LocalPath = localPath ?? $"/nonexistent/{familyId}.safetensors",
         Catalog = new CatalogEntry
         {
             Id = familyId,
