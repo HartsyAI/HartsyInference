@@ -21,6 +21,24 @@ public static class ModelCatalog
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
 
+    /// <summary>A Wan 2.2 A14B mixture-of-experts entry: Comfy-Org's fp8_scaled high-noise transformer as the primary asset and
+    /// its low-noise sibling as the <see cref="ModelAsset.LowNoiseExpertRole"/> asset. The engine pairs the two when the caller
+    /// names no swap model. The generic <c>wan</c> recipe serves both ids and derives the 14B config from the weights.
+    /// Licence: Apache-2.0. The native swap path has no real-weight A14B run through the catalog yet.</summary>
+    private static CatalogEntry WanA14B(string id, string name, string task, string highSha, string lowSha) => new CatalogEntry
+    {
+        Id = id, Modality = Modality.Video, DisplayName = name, Architecture = "DiT (high/low-noise experts) + Wan VAE",
+        Status = ModelStatus.ValidationPending,
+        CliDrivable = false,
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "Comfy-Org/Wan-2.2", RepoPath = $"split_files/diffusion_models/wan2.2_{task}_high_noise_14B_fp8_scaled.safetensors",
+                TargetSubdir = "Stable-Diffusion/Wan", Role = "transformer", Sha256 = highSha },
+            new() { Repo = "Comfy-Org/Wan-2.2", RepoPath = $"split_files/diffusion_models/wan2.2_{task}_low_noise_14B_fp8_scaled.safetensors",
+                TargetSubdir = "Stable-Diffusion/Wan", Role = ModelAsset.LowNoiseExpertRole, Sha256 = lowSha },
+        },
+    };
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -671,6 +689,24 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Flux.1 Fill (inpaint/outpaint): Comfy-Org's bf16 transformer-only file. FluxPipeline recognises Fill by its
+                // 384-wide x_embedder and requires an init image and a mask. Licence: FLUX.1 [dev] non-commercial. The Fill path
+                // is verified (MODEL_STATUS_IMAGE); this exact file has not been run through the catalog.
+                Id = "flux1-fill", Modality = img, DisplayName = "Flux.1 Fill [dev]", Architecture = "single-stream DiT, flow-matching, inpaint",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Flux-1-Dev", RepoPath = "split_files/diffusion_models/flux1-fill-dev.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Flux", Role = "transformer",
+                        Sha256 = "03e289f530df51d014f48e675a9ffa2141bc003259bf5f25d75b957e920a41ca" },
+                    SideModels.ClipL,
+                    SideModels.T5XxlEnconly,
+                    SideModels.FluxAe,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "flux2", Modality = img, DisplayName = "Flux.2", Architecture = "single-stream DiT, flow-matching", Status = ok,
                 CliDrivable = true, // `hartsy image -m flux2` (Dev, Q4_K_S GGUF) verified end-to-end 2026-07-21
                 // after adding GGUF support to Flux2Recipe/Flux2RecipePipeline (previously safetensors-only
@@ -682,6 +718,23 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/Flux2", Role = "transformer",
                         Sha256 = "b9c1c8295ed044f54c3a9894a800e003b4ecc94bfb0f63192b68bafc232c2b27" },
                     SideModels.MistralSmallFlux2,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Flux.2 Klein 4B (distilled): Comfy-Org's transformer-only file. Flux2Recipe reads hidden size 3072 and pairs it with
+                // the Qwen3-4B encoder. Licence: Apache-2.0. Klein 4B is verified (MODEL_STATUS_IMAGE); this exact file has not been
+                // run through the catalog.
+                Id = "flux2-klein-4b", Modality = img, DisplayName = "Flux.2 Klein 4B", Architecture = "single-stream DiT, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/Flux-2-Klein-4B", RepoPath = "split_files/diffusion_models/flux-2-klein-4b.safetensors",
+                        TargetSubdir = "Stable-Diffusion/Flux2", Role = "transformer",
+                        Sha256 = "ec3d4e733a771f61c052fb4856c48b336c55eaf2c65487c2a1faeb9bbda7a343" },
+                    SideModels.Qwen3_4B,
                     SideModels.Flux2Vae,
                 },
             },
@@ -2042,6 +2095,12 @@ public static class ModelCatalog
                         Sha256 = "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e" },
                 },
             },
+            WanA14B("wan-22-t2v-a14b", "Wan 2.2 T2V A14B", "t2v",
+                highSha: "cad711ae211c8b23455ec68cd6a190a33a3d874234a77eb57266d73f8f0e6c9f",
+                lowSha: "e71b96d7c82e638694c5e7fb98fac4bfb0e4ddc5fbbb4b1df40da8f0f1278a97"),
+            WanA14B("wan-22-i2v-a14b", "Wan 2.2 I2V A14B", "i2v",
+                highSha: "6122e79d55e0f235698d11d657f3b196c5273c830da00b2b013c5a048d5e6a42",
+                lowSha: "5471a457b6ac404202a5fbe6c11595a3d5641fc766b00f38763f72303fffc21e"),
             new CatalogEntry
             {
                 Id = "lance-video", Modality = vid, DisplayName = "Lance (Video, T2V)", Architecture = "unified multimodal DiT", Status = vp,
