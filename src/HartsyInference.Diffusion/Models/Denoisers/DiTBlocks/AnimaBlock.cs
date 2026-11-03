@@ -130,6 +130,7 @@ public sealed unsafe class AnimaBlock
         new AttentionLayerConfig
         {
             Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, QkNorm = AttentionQkNorm.PerHead, ComputeDType = DType.F32,
+            AllowF16 = EngineKnobs.AnimaF16.Value,
         },
         new AttentionLayerWeights
         {

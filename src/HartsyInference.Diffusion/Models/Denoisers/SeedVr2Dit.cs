@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -13,7 +14,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// Single-clip (B=1). Tokens are device-resident across all blocks (<see cref="SeedVr2DitBlock"/>); the
 /// only host work per forward is patchify/unpatchify and the scalar time-embed. Geometry constants live in
 /// a cached <see cref="SeedVr2DevicePlan"/> — chunks of one clip share it.</summary>
-public sealed class SeedVr2Dit : IDisposable
+public sealed class SeedVr2Dit : IDisposable, IStreamableDenoiser
 {
     private readonly SeedVr2Config _config;
     private readonly SeedVr2DitBlock[] _blocks;
@@ -45,6 +46,15 @@ public sealed class SeedVr2Dit : IDisposable
 
     /// <summary>Config this model was built for.</summary>
     public SeedVr2Config Config => _config;
+
+    /// <summary>Streamable blocks: the transformer layers, in forward order.</summary>
+    public int BlockCount => _blocks.Length;
+
+    /// <summary>The transformer layer at <paramref name="idx"/>; the same instance on every call, as the streaming controller tracks residency by reference.</summary>
+    public IStreamingBlock GetBlock(int idx) => _blocks[idx];
+
+    /// <summary>Invoked before each block's forward with its index, so a streamed block can be made resident first. Null = every block already resident.</summary>
+    public Action<int>? BeforeBlockForward { get; set; }
 
     /// <summary>Binds converter output (verbatim reference names, RoPE buffers already dropped).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
@@ -103,6 +113,7 @@ public sealed class SeedVr2Dit : IDisposable
 
         for (int i = 0; i < _blocks.Length; i++)
         {
+            BeforeBlockForward?.Invoke(i);
             (vid, txt) = _blocks[i].Forward(backend, vid, txt, _plan!, _ones!);
             OnBlockOutput?.Invoke(i, vid, txt);
         }
@@ -232,7 +243,8 @@ public sealed class SeedVr2Dit : IDisposable
     }
 
     /// <summary>GEMM weights for backend preload/free at pipeline phase transitions.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    /// <summary>Weights outside the transformer layers: the projections and the embedding MLP. They stay resident for the whole loop.</summary>
+    public IEnumerable<Tensor> EnumerateSharedWeights()
     {
         yield return _vidInW;
         yield return _vidInB;
@@ -246,6 +258,13 @@ public sealed class SeedVr2Dit : IDisposable
         yield return _embOutB;
         yield return _vidOutW;
         yield return _vidOutB;
+    }
+
+    /// <summary>Every weight the model owns: the shared weights, then each layer's.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in EnumerateSharedWeights())
+            yield return t;
         foreach (SeedVr2DitBlock block in _blocks)
             foreach (Tensor t in block.EnumerateWeights())
                 yield return t;
