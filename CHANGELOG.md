@@ -12,6 +12,24 @@ stable release will require. Dates are UTC.
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and
   `seconds_total` timing tokens, loaded from Comfy-Org's single-file repack. The DiT now takes unprojected condition tokens and
   runs without QK-norm, as Open 1.0 does; Open Small is unchanged. Not yet run on real weights.
+- **Fixed: a LoRA variant beside a resident base no longer builds a second copy of the model.** The duplicate made the planner stream every block, which left a Krea 2 Turbo LoRA run about 9x slower than its control. Idle pipelines of the same checkpoint are evicted before planning when free memory cannot hold both copies. A pipeline a request still holds is never evicted, and a model switch that cannot wait for it fails by name.
+- **Changed: a zero-strength LoRA entry is a no-op.** It is dropped before its file is read and left out of the pipeline cache key, so zeroing a LoRA runs on the base pipeline and matches it exactly. A zero on one side only (diffusion or text encoder) is bypassed without a dequantize-merge-requantize round trip.
+- **Changed: a section-confined LoRA is refused by name.** Per-section LoRA scopes are not modeled, so the entry used to be skipped with a debug log only.
+- **Changed: a LoRA merge writes its weights only after every target validates,** so a refused LoRA leaves the weights it was given untouched.
+- **Changed: a LoRA file with a PEFT DoRA magnitude vector or a LoCon conv mid matrix is refused by name at load.** The Z-Image and Kohya loaders used to drop the magnitude silently, and applying the rest of such a file gives a wrong result.
+- **Changed: the LoRA apply log counts source units, destination tensors, fused slices and skipped units apart,** so a fused QKV no longer reads as a partial application. The line is now `Applied N of M LoRA units`.
+- **Added: the `lora.partialApplication` knob.** `allow` (the default) applies the units that fit and reports the rest. `refuse` rejects a request whose LoRA would apply only in part, and names the target it cannot apply to.
+- **Added: the vision request and output contracts for multi-view, temporal and structured modes.** `VisionBatchRequest` takes
+  ordered views or timed frames (timestamps or fps, per-frame prompts, interpolation targets), and `VisionMode` gains
+  `MetricDepth`, `Geometry`, `Pose`, `Matting`, `Face`, `Intrinsic`, `Track` and `Interpolate`. `VisionResult` adds typed depth,
+  point-map, normal, camera, pose, face and track fields; a per-mode table validates inputs in the service, CLI and API. The CLI
+  writes `.npy` arrays with a JSON sidecar, `/v1/native/vision` returns base64 little-endian arrays, and
+  `/v1/native/vision/sequence` streams one result per frame. No model implements the new modes yet: each refuses by name before
+  anything loads, and the existing modes are unchanged.
+- **Added: Hunyuan-Image 2.1 renders quoted prompt text through its ByT5 glyph stream.** Quoted spans run through
+  Glyph-ByT5-small into the DiT's second text stream, as ComfyUI does, so text the prompt quotes is drawn legibly; a prompt
+  without quotes runs exactly as before. The encoder is a new side model fetched on first use. Also: the CLI no longer
+  downloads a catalog entry's transformer when `--model-path` names one.
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
@@ -35,6 +53,11 @@ stable release will require. Dates are UTC.
 - **Fixed: a streamed denoiser sizes its resident prefix by each block's own footprint.** The prefix was sized from block 0, a double-stream block, so HunyuanVideo's fp8 DiT streamed blocks it had room to keep resident.
 - **Fixed: a HunyuanVideo generation that throws mid-denoise releases its streamed block window and step-graph hook.** Before, a failed generation left both attached for the next one.
 - **Added: `TextService` hosts a MiniMax-M3 Hugging Face directory** on the CPU backend through the existing transformer model object (`GgufLanguageModel.FromWeights`), without a scheduler. The loader refuses a checkpoint larger than free host memory before reading a matrix. Attention now widens a per-head bias with −∞ columns to a fixed-capacity cache's buffer. The real model cannot run yet: the CPU backend keeps weights as F32 and the indexer has no device path.
+
+## alpha.400
+
+- **Changed: a SeedVR2 restore fits its target to the memory its VAE decode needs.** The decode runs untiled, so a large target (the 1280x720 default) needs several gigabytes for one chunk. The pipeline now checks the free memory after a pool trim and restores at the largest area that fits, logging a warning with the size used. On an RTX 2060 SUPER, 960x540 completes and 1024x576 does not, which the per-pixel figure is calibrated to.
+- **Changed: the streaming headroom reserves the VAE decode working set.** The DiT's resident prefix shrinks to leave room for the decode, so a restore no longer streams a prefix that the decode then pushes out of memory.
 
 ## alpha.399
 

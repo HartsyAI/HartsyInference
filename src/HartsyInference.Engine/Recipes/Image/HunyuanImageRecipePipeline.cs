@@ -17,10 +17,18 @@ using HartsyInference.Engine.Features;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed HunyuanImage 2.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="HunyuanImagePipeline"/> owns the Qwen2.5-VL-7B forward (including its own TE⇄DiT residency swap and embedding cache), so this only produces the padded chat-template token ids + attention masks and calls <see cref="HunyuanImagePipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>HunyuanImageLoader.Generate</c>. Wraps the constructed HunyuanImage pipeline plus its components, taking ownership of every disposable.</summary>
+/// <remarks>Quoted prompt text (<see cref="HunyuanImageGlyphText"/>) goes through the Glyph-ByT5-small encoder into the
+/// DiT's second text stream. <paramref name="glyphEncoderFactory"/> loads that encoder the first time a prompt quotes
+/// something, so prompts without quotes never fetch or hold it; null when the checkpoint has no ByT5 projection.</remarks>
 public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qwen2Tokenizer tokenizer, LlamaStyleEncoder llama,
     HunyuanImageQwenTextEncoder qwenEncoder, HunyuanImageTransformer transformer, HunyuanImageVaeDecoder vae,
-    List<IDisposable> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null) : IRecipePipeline
+    List<IDisposable> loaders, IDisposable? ggufHandle, MergedLoraStack? loraStack = null,
+    Func<CancellationToken, (T5TextEncoder Encoder, IDisposable Loader)>? glyphEncoderFactory = null) : IRecipePipeline
 {
+    private readonly Func<CancellationToken, (T5TextEncoder Encoder, IDisposable Loader)>? _glyphEncoderFactory = glyphEncoderFactory;
+    private readonly object _glyphLock = new object();
+    private T5TextEncoder? _glyphEncoder;
+    private IDisposable? _glyphLoader;
 
     private readonly HunyuanImagePipeline _pipeline = pipeline;
     private readonly Qwen2Tokenizer _tokenizer = tokenizer;
@@ -47,8 +55,7 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
         int width = (reqWidth / 32) * 32;
         int height = (reqHeight / 32) * 32;
 
-        // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, regional prompting and the ByT5 glyph branch are
-        // deferred — text-to-image only.
+        // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet and regional prompting are deferred — text-to-image only.
         (int[] ids, int[] mask, float[]? weights) = TokenizePadded(_tokenizer, prompt);
         bool useCfg = cfg > 1.0f;
         // An empty negative encodes to exactly the 34-token template, which the encoder's prefix-drop rejects —
@@ -88,9 +95,12 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
+        (int[]? glyphIds, int[]? negGlyphIds) = GlyphTokens(prompt, useCfg ? negative : null, cancel);
+
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
             ids, mask, negIds, negMask, inner, onProgress: bridge,
-            promptTokenWeights: weights, negativeTokenWeights: negWeights);
+            promptTokenWeights: weights, negativeTokenWeights: negWeights,
+            promptGlyphTokenIds: glyphIds, negativeGlyphTokenIds: negGlyphIds);
 
         return new ImageResult
         {
@@ -183,6 +193,30 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
             return;
         // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
         new CompositeDisposable([_pipeline, _qwenEncoder, _llama, _transformer,
-            _vae, .. _loaders, _ggufHandle, _loraStack]).Dispose();
+            _vae, _glyphEncoder, _glyphLoader, .. _loaders, _ggufHandle, _loraStack]).Dispose();
+    }
+
+    /// <summary>ByT5 token ids for each branch whose prompt quotes text, loading the glyph encoder on first need. Both
+    /// null when neither prompt quotes anything or the checkpoint cannot read glyph text. <paramref name="cancel"/> is the
+    /// generation's token, so cancelling interrupts a first-use download of the encoder.</summary>
+    private (int[]? Prompt, int[]? Negative) GlyphTokens(string prompt, string? negative, CancellationToken cancel)
+    {
+        if (_glyphEncoderFactory is null)
+            return (null, null);
+        string? text = HunyuanImageGlyphText.Extract(prompt);
+        string? negText = negative is null ? null : HunyuanImageGlyphText.Extract(negative);
+        if (text is null && negText is null)
+            return (null, null);
+        lock (_glyphLock)
+        {
+            if (_glyphEncoder is null)
+            {
+                (T5TextEncoder encoder, IDisposable loader) = _glyphEncoderFactory(cancel);
+                _glyphEncoder = encoder;
+                _glyphLoader = loader;
+                _pipeline.GlyphEncoder = encoder;
+            }
+        }
+        return (text is null ? null : ByT5Tokenizer.Encode(text), negText is null ? null : ByT5Tokenizer.Encode(negText));
     }
 }

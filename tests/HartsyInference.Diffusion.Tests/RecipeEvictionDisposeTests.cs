@@ -1,3 +1,6 @@
+using System.Reflection;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -57,6 +60,242 @@ public sealed class RecipeEvictionDisposeTests
         Assert.Equal(1, healthy.Built[0].DisposeCalls);
     }
 
+    [Fact]
+    public void ModelSwitch_WhileAnotherRequestHoldsThePipeline_FailsByNameAndDisposesNothing()
+    {
+        FakeRecipe held = Register("test-lease-held", throwOnDispose: false);
+        FakeRecipe next = Register("test-lease-next", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        engine.PipelineLeaseWait = TimeSpan.FromMilliseconds(200);
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+
+        HartsyInferenceException busy = Assert.Throws<HartsyInferenceException>(
+            () => engine.GetOrConstructRecipe(SpecFor(next.Name)));
+
+        Assert.Contains("still serving a request", busy.Message, StringComparison.Ordinal);
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+        Assert.Empty(next.Built);
+
+        lease.Lease.Dispose();
+        IRecipePipeline built = engine.GetOrConstructRecipe(SpecFor(next.Name));
+
+        Assert.Same(next.Built[0], built);
+        Assert.Equal(1, held.Built[0].DisposeCalls);
+    }
+
+    [Fact]
+    public void FreeMemory_WhileAPipelineIsLeased_SkipsTheFreeAndKeepsThePipeline()
+    {
+        FakeRecipe held = Register("test-lease-free", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+
+        // Returns at once: a free between jobs never waits on a request, and never disposes a pipeline one holds.
+        engine.FreeMemory();
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+
+        lease.Lease.Dispose();
+        engine.FreeMemory();
+        Assert.Equal(1, held.Built[0].DisposeCalls);
+    }
+
+    [Fact]
+    public void ModelSwitch_CancelledWhileWaitingForALease_StopsWaitingPromptly()
+    {
+        FakeRecipe held = Register("test-lease-cancel", throwOnDispose: false);
+        FakeRecipe next = Register("test-lease-cancel-next", throwOnDispose: false);
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        LeasedRecipe lease = engine.GetOrConstructRecipeLeased(SpecFor(held.Name));
+        using CancellationTokenSource cancel = new(TimeSpan.FromMilliseconds(200));
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+
+        // The default lease wait is ten minutes. A cancelled request must not hold the switch behind that lease for the whole wait.
+        Assert.ThrowsAny<OperationCanceledException>(() => engine.GetOrConstructRecipeLeased(SpecFor(next.Name), cancel: cancel.Token));
+
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10));
+        Assert.Equal(0, held.Built[0].DisposeCalls);
+        Assert.Empty(next.Built);
+        lease.Lease.Dispose();
+    }
+
+    [Fact]
+    public async Task ConcurrentMisses_BuildOneCheckpointAtATime_AndTheSecondEvictsTheFirstOnlyOnceItIsIdle()
+    {
+        FakeRecipe first = Register("test-turn-first", throwOnDispose: false);
+        FakeRecipe second = Register("test-turn-second", throwOnDispose: false);
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        first.Entered = entered;
+        first.BlockConstruct = release;
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+
+        Task<LeasedRecipe> firstMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(SpecFor(first.Name)));
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+
+        // The second miss waits for the construction turn, so it cannot choose its victims while the first build is in flight.
+        Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(SpecFor(second.Name)));
+        Assert.False(await HasCompletedWithin(secondMiss, 300));
+        Assert.Empty(second.Built);
+
+        release.Set();
+        LeasedRecipe firstLease = await firstMiss;
+
+        // The first pipeline is published and leased by its caller. The second miss waits for that lease rather than loading beside it.
+        Assert.False(await HasCompletedWithin(secondMiss, 300));
+        Assert.Empty(second.Built);
+        Assert.Equal(0, first.Built[0].DisposeCalls);
+
+        firstLease.Lease.Dispose();
+        LeasedRecipe secondLease = await secondMiss;
+
+        Assert.Same(second.Built[0], secondLease.Pipeline);
+        Assert.Equal(1, first.Built[0].DisposeCalls);
+        secondLease.Lease.Dispose();
+    }
+
+    [Fact]
+    public async Task ConcurrentVariantMisses_ReadTheBudgetUnderTheTurn_AndTheSecondEvictsTheFirstOnceItIsIdle()
+    {
+        FakeRecipe recipe = Register("test-turn-variants", throwOnDispose: false);
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        recipe.Entered = entered;
+        recipe.BlockConstruct = release;
+        string checkpoint = Path.Combine(Path.GetTempPath(), $"{recipe.Name}-{Guid.NewGuid():N}.safetensors");
+        using (FileStream file = File.Create(checkpoint))
+        {
+            file.SetLength(Mb);
+        }
+        try
+        {
+            // 1 MB free cannot hold another variant of a 1 MB checkpoint, so the two variants never share the card.
+            IBackend backend = ScriptedFreeBackend.Create(9402, out ScriptedFreeBackend device);
+            device.Readings.Enqueue(Mb);
+            using InferenceEngine engine = new InferenceEngine(backend, "cuda:9402");
+            engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+            ModelSpec spec = SpecFor(recipe.Name, checkpoint);
+
+            Task<LeasedRecipe> firstMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("a")));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+
+            // Nothing of the checkpoint is cached when the second variant misses, so a budget read before its turn would keep the first.
+            Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("b")));
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            release.Set();
+            LeasedRecipe firstLease = await firstMiss;
+
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            Assert.Single(recipe.Built);
+
+            firstLease.Lease.Dispose();
+            LeasedRecipe secondLease = await secondMiss;
+
+            Assert.Same(recipe.Built[1], secondLease.Pipeline);
+            Assert.Equal(1, recipe.Built[0].DisposeCalls);
+            secondLease.Lease.Dispose();
+        }
+        finally
+        {
+            File.Delete(checkpoint);
+        }
+    }
+
+    private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
+        await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
+
+    [Fact]
+    public void SecondVariant_KeepsTheCachedOne_WhenTheMeasuredResidentSizeLeavesRoom()
+    {
+        FakeRecipe recipe = Register("test-resident-keep", throwOnDispose: false);
+        IBackend backend = ScriptedFreeBackend.Create(9400, out ScriptedFreeBackend device);
+        // The first build reads 10,000 MB free before it and 8,400 MB after, so it holds 1,600 MB and needs 2,000 MB beside it.
+        device.Readings.Enqueue(10_000L * Mb);
+        device.Readings.Enqueue(8_400L * Mb);
+        using InferenceEngine engine = new InferenceEngine(backend, "cuda:9400");
+
+        LeasedRecipe first = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("a"));
+        first.Lease.Dispose();
+
+        // The budget reading (2,500 MB) leaves room for 2,000 MB, so the cached variant stays.
+        device.Readings.Enqueue(2_500L * Mb);
+        device.Readings.Enqueue(2_500L * Mb);
+        device.Readings.Enqueue(2_500L * Mb);
+        LeasedRecipe second = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("b"));
+        second.Lease.Dispose();
+
+        Assert.Equal(0, recipe.Built[0].DisposeCalls);
+        Assert.Equal(2, recipe.Built.Count);
+    }
+
+    [Fact]
+    public void SecondVariant_EvictsTheCachedOne_WhenTheMeasuredResidentSizeDoesNotFit()
+    {
+        FakeRecipe recipe = Register("test-resident-evict", throwOnDispose: false);
+        IBackend backend = ScriptedFreeBackend.Create(9401, out ScriptedFreeBackend device);
+        device.Readings.Enqueue(10_000L * Mb);
+        device.Readings.Enqueue(8_400L * Mb);
+        using InferenceEngine engine = new InferenceEngine(backend, "cuda:9401");
+
+        LeasedRecipe first = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("a"));
+        first.Lease.Dispose();
+
+        // 1,900 MB free is below the 2,000 MB the measured variant needs, so the cached one is evicted for the second.
+        device.Readings.Enqueue(1_900L * Mb);
+        device.Readings.Enqueue(1_900L * Mb);
+        device.Readings.Enqueue(1_900L * Mb);
+        LeasedRecipe second = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("b"));
+        second.Lease.Dispose();
+
+        Assert.Equal(1, recipe.Built[0].DisposeCalls);
+        Assert.Equal(2, recipe.Built.Count);
+    }
+
+    private const long Mb = 1024L * 1024;
+
+    private static ImageRequest WithLora(string lora) => new ImageRequest
+    {
+        Prompt = "variant",
+        Loras = new LoraStack { Entries = [new LoraEntry { Model = lora, Weight = 1 }] },
+    };
+
+    /// <summary>A backend whose free-memory reading is scripted: each call takes the next queued value, then repeats the last one.</summary>
+    public class ScriptedFreeBackend : DispatchProxy
+    {
+        private long _last;
+
+        public Queue<long> Readings { get; } = new();
+
+        public int Ordinal { get; private set; }
+
+        public static IBackend Create(int ordinal, out ScriptedFreeBackend fake)
+        {
+            IBackend backend = Create<IBackend, ScriptedFreeBackend>();
+            fake = (ScriptedFreeBackend)backend;
+            fake.Ordinal = ordinal;
+            return backend;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            ArgumentNullException.ThrowIfNull(targetMethod);
+            switch (targetMethod.Name)
+            {
+                case "get_Device":
+                    return DeviceKind.Cuda(Ordinal);
+                case nameof(IBackend.FreeMemoryBytes):
+                    _last = Readings.Count > 0 ? Readings.Dequeue() : _last;
+                    return _last;
+                case nameof(IBackend.GetVramInfo):
+                    return (0L, 0L);
+                default:
+                    return targetMethod.ReturnType.IsValueType && targetMethod.ReturnType != typeof(void)
+                        ? Activator.CreateInstance(targetMethod.ReturnType)
+                        : null;
+            }
+        }
+    }
+
     private static FakeRecipe Register(string familyId, bool throwOnDispose)
     {
         FakeRecipe recipe = new FakeRecipe(familyId, throwOnDispose);
@@ -64,11 +303,11 @@ public sealed class RecipeEvictionDisposeTests
         return recipe;
     }
 
-    private static ModelSpec SpecFor(string familyId) => new ModelSpec
+    private static ModelSpec SpecFor(string familyId, string? localPath = null) => new ModelSpec
     {
         Requested = familyId,
         Modality = Modality.Image,
-        LocalPath = $"/nonexistent/{familyId}.safetensors",
+        LocalPath = localPath ?? $"/nonexistent/{familyId}.safetensors",
         Catalog = new CatalogEntry
         {
             Id = familyId,
@@ -84,6 +323,12 @@ public sealed class RecipeEvictionDisposeTests
     {
         public string Name => familyId;
 
+        /// <summary>Set by a test that needs to know a construction has started.</summary>
+        public ManualResetEventSlim? Entered { get; set; }
+
+        /// <summary>Set by a test that holds a construction in flight until it releases it.</summary>
+        public ManualResetEventSlim? BlockConstruct { get; set; }
+
         public ImageDefaults Defaults { get; } = new ImageDefaults { Steps = 20, CfgScale = 7.5f, Width = 1024, Height = 1024 };
 
         public List<FakeRecipePipeline> Built { get; } = new List<FakeRecipePipeline>();
@@ -92,6 +337,8 @@ public sealed class RecipeEvictionDisposeTests
 
         public IRecipePipeline Construct(RecipeContext context)
         {
+            Entered?.Set();
+            BlockConstruct?.Wait();
             FakeRecipePipeline pipeline = new FakeRecipePipeline(throwOnDispose && Built.Count == 0);
             Built.Add(pipeline);
             return pipeline;

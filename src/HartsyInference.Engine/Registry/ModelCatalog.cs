@@ -41,6 +41,23 @@ public static class ModelCatalog
     /// its low-noise sibling as the <see cref="ModelAsset.LowNoiseExpertRole"/> asset. The engine pairs the two when the caller
     /// names no swap model. The generic <c>wan</c> recipe serves both ids and derives the 14B config from the weights.
     /// Licence: Apache-2.0. The native swap path has no real-weight A14B run through the catalog yet.</summary>
+    /// <summary>One OneReward build: a FLUX.1 Fill transformer with Fill's side models and the object-removal LoRA. Not
+    /// CLI-drivable for the same reason as <c>flux1-fill</c>: every request needs an init image and a mask.</summary>
+    private static CatalogEntry OneRewardFill(string id, string name, string file, string sha) => new CatalogEntry
+    {
+        Id = id, Modality = Modality.Image, DisplayName = name, Architecture = "single-stream DiT, flow-matching, inpaint",
+        Status = ModelStatus.ValidationPending, CliDrivable = false,
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "Comfy-Org/OneReward", RepoPath = $"split_files/diffusion_models/{file}",
+                TargetSubdir = "Stable-Diffusion/Flux", Role = "transformer", Sha256 = sha },
+            SideModels.ClipL,
+            SideModels.T5XxlEnconly,
+            SideModels.FluxAe,
+            SideModels.OneRewardObjectRemovalLora,
+        },
+    };
+
     private static CatalogEntry WanA14B(string id, string name, string task, string highSha, string lowSha) => new CatalogEntry
     {
         Id = id, Modality = Modality.Video, DisplayName = name, Architecture = "DiT (high/low-noise experts) + Wan VAE",
@@ -721,6 +738,14 @@ public static class ModelCatalog
                     SideModels.FluxAe,
                 },
             },
+            // OneReward: a FLUX.1 Fill [dev] fine-tune (inpaint, outpaint, object removal), so the same Fill path and the same
+            // side models, plus its object-removal LoRA, applied with --lora. ComfyUI's workflow runs the fp8 file at Flux
+            // guidance 30, 20 steps. Licence: CC-BY-NC-4.0 on top of FLUX.1 [dev] non-commercial. Hashes are the LFS object ids
+            // at Comfy-Org/OneReward @77a4042ca2. Not run on real weights.
+            OneRewardFill("onereward-fill", "OneReward Fill", "flux.1-fill-dev-OneReward-transformer_bf16.safetensors",
+                "1403db15d1d182776315922334b4412ca343a26c3c0d1c77793ceda4792b20e9"),
+            OneRewardFill("onereward-fill-fp8", "OneReward Fill (fp8)", "flux.1-fill-dev-OneReward-transformer_fp8.safetensors",
+                "dd5cc73df9d2fb1e5e9d8ec518bcb7ea1103f55f679ad58877aa192e00481d1a"),
             new CatalogEntry
             {
                 Id = "flux2", Modality = img, DisplayName = "Flux.2", Architecture = "single-stream DiT, flow-matching", Status = ok,
@@ -940,6 +965,8 @@ public static class ModelCatalog
                         Sha256 = "583800deb18fa90560d15b41ca0391e79c024784117b0b0263ace02e941237e1" },
                     SideModels.Qwen25Vl7BHunyuan,
                     SideModels.HunyuanImageVae,
+                    // Run only on quoted prompt text (the glyph stream); fetched on first use when not pulled here.
+                    SideModels.ByT5SmallGlyphXl,
                 },
             },
             new CatalogEntry
