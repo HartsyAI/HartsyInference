@@ -5,6 +5,7 @@ using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Schedulers;
+using HartsyInference.Engine.Audio;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -89,6 +90,20 @@ public sealed class StableAudioOpen1Tests
         {
             DisposeAll(w);
         }
+    }
+
+    [Fact]
+    public void Open1T5Weights_UsesComfyTextEncoderNamespace()
+    {
+        using Tensor shared = Fill(4, 0.5f);
+        Dictionary<string, Tensor> all = new(StringComparer.Ordinal)
+        {
+            ["text_encoders.t5base.transformer.shared.weight"] = shared,
+        };
+
+        Dictionary<string, Tensor> selected = StableAudioMusicModel.SelectOpen1T5Weights(all);
+
+        Assert.Same(shared, selected["shared.weight"]);
     }
 
     [Fact]
@@ -185,8 +200,8 @@ public sealed class StableAudioOpen1Tests
         void Mat(string k, params long[] dims) => w[k] = Rand(new TensorShape(dims), seed++, 0.2f);
         void Norm(string k, int n)
         {
-            w[k + ".weight"] = Fill(n, 1f);
-            w[k + ".bias"] = Fill(n, 0f);
+            w[k + ".gamma"] = Fill(n, 1f);
+            w[k + ".beta"] = Fill(n, 0f);
         }
         int dim = c.HiddenSize, io = c.IoChannels, kv = c.CrossKvHeads * c.HeadDim;
         Mat("preprocess_conv.weight", io, io, 1);
@@ -194,8 +209,10 @@ public sealed class StableAudioOpen1Tests
         Mat("timestep_features.weight", c.TimestepFeaturesDim / 2);
         Mat("to_timestep_embed.0.weight", dim, c.TimestepFeaturesDim);
         Mat("to_timestep_embed.2.weight", dim, dim);
-        Mat("to_global_embed.0.weight", dim, c.GlobalCondDim);
-        Mat("to_global_embed.2.weight", dim, dim);
+        Mat("to_global_embed.0.weight", 12, c.GlobalCondDim);
+        Mat("to_global_embed.2.weight", dim, 12);
+        Mat("to_cond_embed.0.weight", c.CondTokenDim, c.CondTokenDim);
+        Mat("to_cond_embed.2.weight", c.CondTokenDim, c.CondTokenDim);
         Mat("transformer.project_in.weight", dim, io);
         Mat("transformer.project_out.weight", io, dim);
         w["transformer.rotary_pos_emb.inv_freq"] = Fill(c.RopeDim / 2, 0.5f);
