@@ -121,7 +121,9 @@ allow, never add them:
 | `int8` | `f16`, plus INT8 Q/K with per-row or finer scales and K smoothing, plus the P/V format the model's gate selected |
 
 A call may also refuse a multiply format (`AttentionNumerics.Refused`, per layer `AttentionLayerConfig.RefusedFormats`): every
-row that declares that format is excluded, whatever the call grants or asserts.
+row that declares that format is excluded, whatever the call grants or asserts. An operand or the output in a refused format
+excludes every row, since a row that widens it still reads it narrow. `AttentionNumerics.WideRange` is the F32-or-BF16 demand
+of a model whose values overflow F16.
 
 K smoothing (subtracting one vector `μ` from every key) shifts each query row's scores by `cᵢ = α qᵢ · μ`. Plain
 softmax, additive bias and exclusions are invariant to that shift; a softcap is not (`tanh(x − c)` is not a shift of

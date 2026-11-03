@@ -14,6 +14,18 @@ stable release will require. Dates are UTC.
 - **Changed: a LoRA merge writes its weights only after every target validates,** so a refused LoRA leaves the weights it was given untouched.
 - **Changed: a LoRA file with a PEFT DoRA magnitude vector or a LoCon conv mid matrix is refused by name at load.** The Z-Image and Kohya loaders used to drop the magnitude silently, and applying the rest of such a file gives a wrong result.
 - **Changed: the LoRA apply log counts source units, destination tensors, fused slices and skipped units apart,** so a fused QKV no longer reads as a partial application. The line is now `Applied N of M LoRA units`.
+- **Fixed: Lens never runs F16 attention.** Its V is not normalised and overflows F16 from about block 36, so F16 storage turns
+  the image to noise. Its joint attention now demands F32 or BF16 (`AttentionNumerics.WideRange`): F16, INT8 and FP8 are refused
+  on the call, so the global `numerics.sdpaF16`, a per-call F16 assertion and F16 operands cannot reach it. A direct F16 request
+  is refused with `AttentionUnsupportedException`; `numerics.sdpaF16` logs one warning and is ignored for Lens. The CUDA
+  `materialized` attention row is split so a refused F16 keeps its F32 fallback, and the Vulkan dense and token-major entries now
+  carry the call's numerics. Other models' attention routes are unchanged.
+- **Added: `numerics.animaF16` opt-in knob runs Anima's attention in F16.** Anima's self and cross attention carry the same F16 permission as Ernie, Wan and LTX. It is off by default: at 1024, seed 42, F16 attention moves the output (SSIM 0.957 against F32 on CUDA, 0.979 on Vulkan) and the real-generation A/B and Anima's V-range check are still pending, so the default flips only after they pass. The `reference` profile pins F32. The knob is read when the model is built.
+- **Added: query-tiled F32 flash attention on Vulkan, behind `numerics.vkTiledAttention` (default `off`).** `sdpa_flash_tiled` stages a query tile and key/value tiles in shared memory with an online softmax, takes head dims up to 256 with an optional additive bias, and addresses head-major and token-major tensors by strides. With `auto`, dense F32 attention takes it ahead of the scalar `sdpa_flash` route, which stays the fallback; `off` changes nothing.
+
+## alpha.400
+
+- **Fixed: a relative model name cannot reach past the models root.** `ModelFileLocator.Find` resolved a name containing a `..` segment against the models root and the working directory, so a request-supplied name such as a reference adapter could load a file outside the root. Such a name now resolves to nothing. Absolute paths are unchanged. A CLI user who passed a relative `../` path to a model must now pass the absolute path instead.
 
 ## alpha.398
 

@@ -205,16 +205,29 @@ public sealed partial class CudaBackend
                 }, "S.11",
                 static (in AttentionCall c) => c.Mask.Bias is null && ScoresPastMaterialized(in c) && OneRowTiles(in c),
                 (in AttentionCall c) => { SdpaTiledCast(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Scale); return true; }),
-            new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
+            // The F16-narrowing variant and the F32 one split on the per-call assertion (legacy flag or numerics.sdpaF16). A refusal
+            // of F16 excludes the first by declaration and admits the second, so the knob cannot narrow a call that refuses it.
+            new DelegateAttentionRow(Cap("materialized.f16", E, AnyFloat, AnyFloat, HM) with
                 {
                     Masks = AnyBias, UsesQueryKey = SdpaF32Formats | AttentionFormats.F16, UsesProbValue = SdpaF32Formats | AttentionFormats.F16,
                     Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast | AttentionLowering.ExpandMask,
                 }, null,
-                static (in AttentionCall c) => !ScoresPastMaterialized(in c),
+                (in AttentionCall c) => !ScoresPastMaterialized(in c) && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn),
                 (in AttentionCall c) =>
                 {
-                    SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
-                        c.Numerics.LegacyAssertedBounded);
+                    SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, allowF16: true);
+                    return true;
+                }),
+            new DelegateAttentionRow(Cap("materialized", E, AnyFloat, AnyFloat, HM) with
+                {
+                    Masks = AnyBias, UsesQueryKey = SdpaF32Formats, UsesProbValue = SdpaF32Formats,
+                    Lowering = AttentionLowering.MaterializeScores | AttentionLowering.Cast | AttentionLowering.ExpandMask,
+                }, null,
+                (in AttentionCall c) => !ScoresPastMaterialized(in c)
+                    && (!(c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) || (c.Numerics.Refused & AttentionFormats.F16) != 0),
+                (in AttentionCall c) =>
+                {
+                    SdpaMaterialized(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale, allowF16: false);
                     return true;
                 }),
             new DelegateAttentionRow(Cap("refuse", E, AnyFloat, AnyFloat, HM) with { Masks = AnyBias }, null,

@@ -35,8 +35,8 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
     public (byte[] rgbData, int width, int height) Upscale(ReadOnlySpan<byte> rgbData, int width, int height)
     {
         int r = _net.Config.UnshuffleFactor;
-        // A 2× model consumes the image pixel-unshuffled by 2, so odd edges are replicated out to even first and the
-        // surplus is cropped off the output (Real-ESRGAN pads to a multiple of the factor the same way).
+        // A 2× model consumes the image pixel-unshuffled by 2, so odd edges are reflect-padded out to even first and the
+        // surplus is cropped off the output, as RealESRGANer.pre_process does (F.pad(..., 'reflect')).
         int padW = (r - width % r) % r, padH = (r - height % r) % r;
         Tensor input = r == 1
             ? ImageTensor.RgbToTensor01(rgbData, width, height)
@@ -138,8 +138,9 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
 
     /// <summary>RGB bytes → the 2× (or r×) pixel-unshuffled NCHW F32 tensor BasicSR's 2× RRDBNet expects:
     /// <c>out[c·r² + i·r + j, y, x] = in[c, y·r + i, x·r + j]</c> (torch <c>pixel_unshuffle</c> channel order), with
-    /// the right/bottom edge replicated by <paramref name="padW"/> / <paramref name="padH"/> pixels so the source
-    /// divides evenly.</summary>
+    /// the right/bottom edge reflect-padded by <paramref name="padW"/> / <paramref name="padH"/> pixels (torch
+    /// <c>'reflect'</c>: the edge pixel is not repeated) so the source divides evenly. A one-pixel side has nothing to
+    /// reflect, so it repeats.</summary>
     internal static unsafe Tensor UnshuffledInput(ReadOnlySpan<byte> rgb, int width, int height, int r, int padW, int padH)
     {
         int fullW = width + padW, fullH = height + padH;
@@ -150,10 +151,10 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
         long plane = (long)outW * outH;
         for (int y = 0; y < fullH; y++)
         {
-            int sy = Math.Min(y, height - 1);
+            int sy = Reflect(y, height);
             for (int x = 0; x < fullW; x++)
             {
-                int sx = Math.Min(x, width - 1);
+                int sx = Reflect(x, width);
                 int src = (sy * width + sx) * 3;
                 int oy = y / r, ox = x / r, i = y % r, j = x % r;
                 long dst = (long)oy * outW + ox;
@@ -166,6 +167,10 @@ public sealed class UpscalePipeline(IBackend backend, RrdbNet net, int inputTile
         }
         return t;
     }
+
+    /// <summary>Source index for padded position <paramref name="i"/> past the end of a side of <paramref name="size"/>:
+    /// torch's <c>'reflect'</c> (size + k → size − 2 − k), repeating the edge when the side is one pixel.</summary>
+    private static int Reflect(int i, int size) => i < size ? i : Math.Max(2 * (size - 1) - i, 0);
 
     /// <summary>NCHW F32 [1,3,H,W] in [0,1] → HWC bytes [0,255] (clamped), reading only the top-left
     /// <paramref name="cropW"/> × <paramref name="cropH"/> window (the rest is edge padding from an odd-sized source).</summary>

@@ -46,9 +46,10 @@ public sealed class UpscaleTests
     }
 
     [Fact]
-    public void UnshuffledInput_UsesTorchChannelOrderAndReplicatesEdges()
+    public void UnshuffledInput_UsesTorchChannelOrderAndReflectsEdges()
     {
-        // 3x1 image, r=2: padded to 4x2 by replicating the last column and the only row.
+        // 3x1 image, r=2: padded to 4x2. The column pad reflects (x=3 reads x=1, as torch's 'reflect' does); the only
+        // row has nothing to reflect, so it repeats.
         byte[] rgb = [10, 11, 12, 20, 21, 22, 30, 31, 32];
         using Tensor t = UpscalePipeline.UnshuffledInput(rgb, 3, 1, 2, padW: 1, padH: 1);
 
@@ -59,9 +60,9 @@ public sealed class UpscaleTests
         // channel = c*4 + i*2 + j; cell (0,0) covers source (0..1, 0..1) → i=0,j=0 is pixel (0,0), j=1 is (0,1).
         Assert.Equal(10 / 255f, s[0 * 2 + 0]);          // R, i=0,j=0, cell 0 → pixel x=0
         Assert.Equal(20 / 255f, s[1 * 2 + 0]);          // R, i=0,j=1, cell 0 → pixel x=1
-        Assert.Equal(10 / 255f, s[2 * 2 + 0]);          // R, i=1,j=0 → row replicated
+        Assert.Equal(10 / 255f, s[2 * 2 + 0]);          // R, i=1,j=0 → the one-pixel side repeats
         Assert.Equal(30 / 255f, s[0 * 2 + 1]);          // R, i=0,j=0, cell 1 → pixel x=2
-        Assert.Equal(30 / 255f, s[1 * 2 + 1]);          // R, i=0,j=1, cell 1 → column replicated
+        Assert.Equal(20 / 255f, s[1 * 2 + 1]);          // R, i=0,j=1, cell 1 → padded x=3 reflects to x=1
         Assert.Equal(11 / 255f, s[4 * 2 + 0]);          // G, i=0,j=0, cell 0
         Assert.Equal(32 / 255f, s[8 * 2 + 1]);          // B, i=0,j=0, cell 1
     }
