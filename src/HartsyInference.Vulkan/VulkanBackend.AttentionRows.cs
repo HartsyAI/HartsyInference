@@ -61,15 +61,14 @@ public sealed partial class VulkanBackend
         switch (call.Route)
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajor:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajorGqa:
                 ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                    call.Numerics);
                 break;
             case AttentionRoute.Flash:
                 FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
@@ -212,7 +211,7 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) =>
                 {
                     AttendTokenMajorViaHeadMajor(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Heads,
-                        c.KvHeads, c.QkHeadDim, c.QueryTokens, c.KeyTokens, c.Scale, c.Numerics.LegacyAssertedBounded);
+                        c.KvHeads, c.QkHeadDim, c.QueryTokens, c.KeyTokens, c.Scale, c.Numerics);
                     t_attentionRoute = AttentionRouteText.Nested("B.2/", t_attentionRoute);
                     return true;
                 }),
