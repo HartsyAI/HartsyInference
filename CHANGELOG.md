@@ -12,6 +12,9 @@ stable release will require. Dates are UTC.
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and
   `seconds_total` timing tokens, loaded from Comfy-Org's single-file repack. The DiT now takes unprojected condition tokens and
   runs without QK-norm, as Open 1.0 does; Open Small is unchanged. Not yet run on real weights.
+- **Added: ComfyUI `asym_w4a8_int8` weights load (4- and 6-bit, with ConvRot).** Each such layer decodes at load to a dense
+  BF16 weight (`W4A8ConvRotCodec`, transcribed from comfy-kitchen), so it runs as W4A16; the format's INT8 activation path is
+  not modelled. This unblocks Comfy-Org's w4a8 builds (MOSS-Image's Qwen3.5-9B encoder, Qwen3.8-27B, Ming's Ling-mini).
 - **Added: MOSS-Image takes Comfy-Org's int8 ConvRot Qwen3.5-9B encoder.** The Qwen3.5 text encoder reads an
   `int8_tensorwise` token embedding (decoding each gathered row with its scale and ConvRot) and, given the backend it runs
   on, widens the trunk linears that backend cannot multiply packed. `qwen3.5_9b_int8_convrot` (9.7 GB) now loads through
