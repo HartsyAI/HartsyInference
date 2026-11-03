@@ -88,6 +88,44 @@ public static class Resample
         }
     }
 
+    /// <summary>Separable radius-3 Lanczos resize for interleaved 8-bit pixels. The tap geometry follows PIL's
+    /// half-pixel-centred resize; border taps are clipped and renormalized.</summary>
+    public static void LanczosHwc8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels,
+        Span<float> dst, int dstW, int dstH)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels);
+        (int[] xStart, int[] xCount, float[] xWeights, int xTaps) = BuildLanczosWeights(srcW, dstW);
+        (int[] yStart, int[] yCount, float[] yWeights, int yTaps) = BuildLanczosWeights(srcH, dstH);
+        float[] tmp = new float[(long)srcH * dstW * channels];
+        for (int y = 0; y < srcH; y++)
+        {
+            ReadOnlySpan<byte> row = src.Slice(y * srcW * channels, srcW * channels);
+            for (int x = 0; x < dstW; x++)
+            {
+                int lo = xStart[x];
+                for (int c = 0; c < channels; c++)
+                {
+                    float acc = 0f;
+                    for (int t = 0; t < xCount[x]; t++)
+                        acc += xWeights[x * xTaps + t] * row[(lo + t) * channels + c];
+                    tmp[((long)y * dstW + x) * channels + c] = acc;
+                }
+            }
+        }
+        for (int y = 0; y < dstH; y++)
+        {
+            int lo = yStart[y];
+            for (int x = 0; x < dstW; x++)
+                for (int c = 0; c < channels; c++)
+                {
+                    float acc = 0f;
+                    for (int t = 0; t < yCount[y]; t++)
+                        acc += yWeights[y * yTaps + t] * tmp[((long)(lo + t) * dstW + x) * channels + c];
+                    dst[(y * dstW + x) * channels + c] = acc;
+                }
+        }
+    }
+
     /// <summary>Round-to-nearest onto the 0–255 grid (PIL's <c>clip8</c>).</summary>
     private static float QuantU8(float v) => Math.Clamp(MathF.Round(v), 0f, 255f);
 
@@ -126,6 +164,48 @@ public static class Resample
             }
         }
         return (starts, counts, weights, taps);
+    }
+
+    private static (int[] Starts, int[] Counts, float[] Weights, int Taps) BuildLanczosWeights(int srcLen, int dstLen)
+    {
+        double scale = (double)srcLen / dstLen;
+        double filterScale = Math.Max(scale, 1.0);
+        double support = 3.0 * filterScale;
+        int taps = (int)Math.Ceiling(support) * 2 + 1;
+        int[] starts = new int[dstLen];
+        int[] counts = new int[dstLen];
+        float[] weights = new float[(long)dstLen * taps];
+        for (int i = 0; i < dstLen; i++)
+        {
+            double center = (i + 0.5) * scale;
+            int lo = Math.Max((int)Math.Floor(center - support + 0.5), 0);
+            int hi = Math.Min((int)Math.Floor(center + support + 0.5), srcLen);
+            starts[i] = lo;
+            counts[i] = hi - lo;
+            double sum = 0.0;
+            for (int t = 0; t < hi - lo; t++)
+            {
+                double w = LanczosKernel((lo + t + 0.5 - center) / filterScale);
+                weights[i * taps + t] = (float)w;
+                sum += w;
+            }
+            if (sum != 0.0)
+            {
+                float inv = (float)(1.0 / sum);
+                for (int t = 0; t < hi - lo; t++) weights[i * taps + t] *= inv;
+            }
+        }
+        return (starts, counts, weights, taps);
+    }
+
+    private static double LanczosKernel(double x)
+    {
+        double ax = Math.Abs(x);
+        if (ax < 1e-12) return 1.0;
+        if (ax >= 3.0) return 0.0;
+        double pix = Math.PI * x;
+        double pixOver3 = pix / 3.0;
+        return (Math.Sin(pix) / pix) * (Math.Sin(pixOver3) / pixOver3);
     }
 
     /// <summary>Keys cubic kernel with sharpness parameter <paramref name="a"/> (zero outside |x| ≥ 2).</summary>

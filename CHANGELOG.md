@@ -8,6 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- Anima reference parity: preserve the asymmetric adapter's native reference latent grid and use the official ComfyUI Lanczos pixel resize during reference encoding.
 - **Added: Stable Audio Open 1.0** (`hartsy music -m stable-audio-open-1.0`). v-prediction EDM with classifier-free guidance over
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and
   `seconds_total` timing tokens, loaded from Comfy-Org's single-file repack. The DiT now takes unprojected condition tokens and

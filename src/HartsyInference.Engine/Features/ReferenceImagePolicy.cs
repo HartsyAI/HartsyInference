@@ -25,6 +25,10 @@ public sealed record ReferenceImagePolicy
     /// <see cref="LatentMultiple"/>) instead of an area budget.</summary>
     public int LatentSideDivisor { get; init; }
 
+    /// <summary>Interpolation used for the VAE copy. Most edit families use the engine's bicubic path;
+    /// Anima's official ComfyUI node uses PIL Lanczos.</summary>
+    public ReferenceResizeMethod LatentResize { get; init; } = ReferenceResizeMethod.Bicubic;
+
     /// <summary>Pixel budget of the vision-tower copy; 0 makes no vision copy.</summary>
     public int VisionTargetArea { get; init; }
 
@@ -33,4 +37,10 @@ public sealed record ReferenceImagePolicy
 
     /// <summary>What happens to images past <see cref="MaxReferences"/>.</summary>
     public ReferenceOverflow Overflow { get; init; } = ReferenceOverflow.Refuse;
+}
+
+public enum ReferenceResizeMethod
+{
+    Bicubic,
+    Lanczos,
 }

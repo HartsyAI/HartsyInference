@@ -162,21 +162,6 @@ public sealed class AnimaReferenceKvTests
         Assert.Throws<ArgumentException>(() => transformer.Forward(cpu, latent, 0.625f, text, null, cache));
     }
 
-    [Fact]
-    public void ReferenceLatentResize_MatchesComfyAreaAndBilinearModes()
-    {
-        using Tensor source = Values(new TensorShape(1, 1, 4, 4), 1f);
-        using Tensor area = AnimaPipeline.ResizeReferenceLatent(source, 2, 2);
-        Assert.Equal(new float[] { 3.5f, 5.5f, 11.5f, 13.5f }, area.AsReadOnlySpan<float>().ToArray());
-
-        using Tensor small = Values(new TensorShape(1, 1, 2, 2), 1f);
-        using Tensor bilinear = AnimaPipeline.ResizeReferenceLatent(small, 4, 4);
-        Assert.Equal(1f, bilinear.AsReadOnlySpan<float>()[0]);
-        Assert.Equal(1.25f, bilinear.AsReadOnlySpan<float>()[1]);
-        Assert.Equal(2.25f, bilinear.AsReadOnlySpan<float>()[6]);
-        Assert.Equal(4f, bilinear.AsReadOnlySpan<float>()[15]);
-    }
-
     private static float MaxAbsDifference(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();
