@@ -10,11 +10,11 @@ internal static class PipelineEvictionPolicy
     /// a fallback. A recipe that promotes its weights to a larger resident form than the file is measured instead.</summary>
     private const double FileSizeFactor = 1.5;
 
-    /// <summary>The device bytes another variant of a checkpoint needs beside a cached one. The measured resident size of a cached
-    /// variant is exact for the same weights; the checkpoint file is the fallback when nothing has been measured.</summary>
+    /// <summary>The device bytes another variant of a checkpoint needs beside a cached one. A measurement is taken around the
+    /// construction and can miss the weights the first preload places later, so the checkpoint file is its floor.</summary>
     public static long EstimateVariantBytes(long measuredResidentBytes, long checkpointBytes) =>
         measuredResidentBytes > 0
-            ? (long)(measuredResidentBytes * ActivationHeadroom)
+            ? (long)(Math.Max(measuredResidentBytes, checkpointBytes) * ActivationHeadroom)
             : (long)(checkpointBytes * FileSizeFactor);
 
     /// <summary>True when the free device memory leaves room for another variant at <paramref name="estimatedBytes"/>. An unknown

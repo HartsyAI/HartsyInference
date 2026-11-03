@@ -25,6 +25,12 @@ public sealed class PipelineEvictionPolicyTests
     }
 
     [Fact]
+    public void EstimateVariantBytes_RaisesAnIncompleteMeasurementToTheFile()
+    {
+        Assert.Equal(1250, PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 5, checkpointBytes: 1000));
+    }
+
+    [Fact]
     public void QuantizedCheckpoint_WhoseResidentFormIsLargerThanItsFile_IsSizedByTheMeasurement()
     {
         // A 1,000-byte file that holds 1,600 bytes on the device. The file rule needs 1,500, so 1,800 free would keep it;
