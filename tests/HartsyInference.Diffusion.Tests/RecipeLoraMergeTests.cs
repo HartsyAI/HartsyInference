@@ -113,6 +113,26 @@ public sealed class RecipeLoraMergeTests : IDisposable
         original.Dispose();
     }
 
+    [Fact]
+    public void RefuseKnob_AcceptsAnUnservedArmAtZeroStrength()
+    {
+        string path = TwoArmLora("unserved-zero-arm");
+        Dictionary<string, Tensor> transformer = new() { ["blocks.0.attn.to_q.weight"] = Zeros() };
+        Tensor original = transformer["blocks.0.attn.to_q.weight"];
+        using IDisposable knob = KnobProfile.Create("lora-unserved-zero").With(EngineKnobs.LoraPartialApplication, "refuse").Push();
+
+        // A zero text-encoder strength turns that arm off by choice, so the LoRA is not partly applied.
+        using MergedLoraStack? stack = RecipeLoraMerge.Apply(
+            [new LoraResolver.LoraSpec { FilePath = path, ModelStrength = 1.0f, TencStrength = 0f }],
+            new CpuBackend(),
+            new LoraMergeTargets { Transformer = transformer },
+            "RecipeLoraMergeTests");
+
+        Assert.NotNull(stack);
+        Assert.NotSame(original, transformer["blocks.0.attn.to_q.weight"]);
+        original.Dispose();
+    }
+
     private static Tensor Zeros()
     {
         Tensor t = new Tensor(new TensorShape(Rows, Cols), DType.F32);

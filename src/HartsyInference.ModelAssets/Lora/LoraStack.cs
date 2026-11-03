@@ -116,16 +116,18 @@ public sealed class LoraStack : IDisposable
         return total;
     }
 
-    /// <summary>Warns when the stack holds layers for a component the caller passed no dictionary for.</summary>
+    /// <summary>Warns, or under <see cref="LoraPartialPolicy.Refuse"/> throws, when the stack holds units at a non-zero strength
+    /// for a component the caller passed no dictionary for.</summary>
     /// <remarks>Silence here is the same failure the zero-match refusal exists for, one component down: the LoRA
     /// applies to the parts the recipe DID pass, the generation succeeds, and the missing arm reads as a weak LoRA.
-    /// It warns rather than throws because a LoRA legitimately carrying a text-encoder arm is not a reason to refuse
-    /// a pipeline that only exposes its transformer.</remarks>
+    /// By default it warns rather than throws, because a LoRA legitimately carrying a text-encoder arm is not a reason to
+    /// refuse a pipeline that only exposes its transformer. An arm at zero strength is not applied by choice, so it is skipped.</remarks>
     private void HandleUnservedTarget(LoraTarget target)
     {
         List<string> units = [];
         foreach (Entry entry in _entries)
         {
+            if (entry.StrengthFor(target) == 0f) continue;
             foreach (LoraLayer layer in entry.File.Layers)
             {
                 if (layer.Target == target) units.Add(layer.TargetKey);
