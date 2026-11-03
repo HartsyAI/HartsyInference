@@ -533,16 +533,30 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <see cref="ModelAsset.LowNoiseExpertRole"/> asset (Wan 2.2 A14B). Returned unchanged when the caller already names a
     /// swap model, when the entry has no expert asset, or when <paramref name="spec"/> runs a file other than the entry's
     /// own primary asset: an override says nothing about which expert pairs with it.</summary>
-    internal static VideoRequest? WithCatalogSwapExpert(ModelSpec spec, VideoRequest? request)
+    internal static VideoRequest? WithCatalogSwapExpert(ModelSpec spec, VideoRequest? request) =>
+        WithCatalogSwapExpert(spec, request, File.Exists);
+
+    /// <summary><see cref="WithCatalogSwapExpert(ModelSpec, VideoRequest?)"/> with the on-disk check injected. Throws when
+    /// the expert is missing, rather than letting the high-noise expert run every step.</summary>
+    internal static VideoRequest? WithCatalogSwapExpert(ModelSpec spec, VideoRequest? request, Func<string, bool> fileExists)
     {
         if (request is null || !string.IsNullOrWhiteSpace(request.VideoSwapModel) || spec.Catalog is null
-            || string.IsNullOrEmpty(spec.LocalPath))
+            || string.IsNullOrWhiteSpace(spec.LocalPath))
             return request;
         ModelAsset? expert = spec.Catalog.Assets.FirstOrDefault(a => a.Role == ModelAsset.LowNoiseExpertRole);
-        string? primary = ModelDownloader.PrimaryLocalPath(spec.Catalog);
-        if (expert is null || primary is null || !FileSystemPathIdentity.SamePath(primary, spec.LocalPath))
+        if (expert is null)
             return request;
-        return request with { VideoSwapModel = ModelDownloader.TargetPath(expert) };
+        string? primary = ModelDownloader.PrimaryLocalPath(spec.Catalog);
+        if (primary is null || !FileSystemPathIdentity.SamePath(primary, spec.LocalPath))
+            return request;
+        string expertPath = ModelDownloader.TargetPath(expert);
+        if (!fileExists(expertPath))
+        {
+            throw new FileNotFoundException(
+                $"{spec.Catalog.DisplayName} runs with its low-noise expert '{expertPath}', which is not on disk. Let the "
+                + "catalog fetch it first, or pass a swap model.", expertPath);
+        }
+        return request with { VideoSwapModel = expertPath };
     }
 
     /// <summary>Names the unresolved selection instead of letting a null path reach a loader that can only report

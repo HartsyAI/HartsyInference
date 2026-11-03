@@ -104,14 +104,51 @@ public sealed class ComfyOrgCatalogEntryTests
     }
 
     [Fact]
+    public void WanA14B_CatalogIdsAndTheRecipeListAgree()
+    {
+        // The recipe's id list is kept by hand; an entry with an expert that the generic Wan recipe doesn't claim would
+        // resolve to nothing, and a listed id with no expert entry would never be paired.
+        string[] withExpert = ModelCatalog.All
+            .Where(e => e.Assets.Any(a => a.Role == ModelAsset.LowNoiseExpertRole))
+            .Select(e => e.Id)
+            .ToArray();
+
+        Assert.Equal(WanVideoRecipe.A14BCatalogIds.Order(StringComparer.Ordinal), withExpert.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public void SwapExpert_IsPairedWhenTheEntryRunsItsOwnHighNoiseFile()
     {
         CatalogEntry entry = ModelCatalog.Find("wan-22-t2v-a14b")!;
         ModelAsset expert = Assert.Single(entry.Assets, a => a.Role == ModelAsset.LowNoiseExpertRole);
 
-        VideoRequest? paired = InferenceEngine.WithCatalogSwapExpert(Spec(entry, ModelDownloader.PrimaryLocalPath(entry)), Request());
+        VideoRequest? paired = InferenceEngine.WithCatalogSwapExpert(Spec(entry, ModelDownloader.PrimaryLocalPath(entry)), Request(),
+            fileExists: _ => true);
 
         Assert.Equal(ModelDownloader.TargetPath(expert), paired!.VideoSwapModel);
+    }
+
+    [Fact]
+    public void SwapExpert_ThrowsNamingTheExpertWhenItIsNotOnDisk()
+    {
+        CatalogEntry entry = ModelCatalog.Find("wan-22-i2v-a14b")!;
+        string expertPath = ModelDownloader.TargetPath(Assert.Single(entry.Assets, a => a.Role == ModelAsset.LowNoiseExpertRole));
+
+        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() =>
+            InferenceEngine.WithCatalogSwapExpert(Spec(entry, ModelDownloader.PrimaryLocalPath(entry)), Request(), fileExists: _ => false));
+
+        Assert.Equal(expertPath, ex.FileName);
+        Assert.Contains(expertPath, ex.Message);
+    }
+
+    [Fact]
+    public void SwapExpert_IsNotPairedForAWhitespaceLocalPath()
+    {
+        CatalogEntry entry = ModelCatalog.Find("wan-22-t2v-a14b")!;
+
+        VideoRequest? result = InferenceEngine.WithCatalogSwapExpert(Spec(entry, "   "), Request(), fileExists: _ => true);
+
+        Assert.Null(result!.VideoSwapModel);
     }
 
     [Fact]
