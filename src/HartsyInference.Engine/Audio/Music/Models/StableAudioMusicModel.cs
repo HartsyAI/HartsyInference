@@ -131,7 +131,7 @@ internal static class StableAudioMusicModel
         start.LoadWeights(all, "conditioner.conditioners.seconds_start");
 
         T5TextEncoder textEncoder = new(T5TextEncoderConfig.T5Base);
-        textEncoder.LoadWeights(Strip(all, "conditioner.conditioners.prompt.model."));
+        textEncoder.LoadWeights(SelectOpen1T5Weights(all));
         T5Tokenizer tokenizer = new(maxLength: Open1T5MaxTokens);
 
         StableAudioPipeline pipeline = new(context.Backend, dit, vae, total, config, start);
@@ -157,6 +157,14 @@ internal static class StableAudioMusicModel
         }
 
         return new MusicRunner(config.SampleRate, Synth, pipeline, dit, textEncoder, tokenizer, loader);
+    }
+
+    internal static Dictionary<string, Tensor> SelectOpen1T5Weights(IReadOnlyDictionary<string, Tensor> all)
+    {
+        Dictionary<string, Tensor> conditioner = Strip(all, "conditioner.conditioners.prompt.model.");
+        if (conditioner.ContainsKey("shared.weight") || conditioner.ContainsKey("encoder.embed_tokens.weight"))
+            return conditioner;
+        return Strip(all, "text_encoders.t5base.transformer.");
     }
 
     /// <summary>The prompt's T5 ids without padding: up to <paramref name="maxTokens"/> − 1 pieces, then EOS. The official

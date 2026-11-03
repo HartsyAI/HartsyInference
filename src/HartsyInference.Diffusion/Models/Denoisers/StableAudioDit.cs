@@ -97,8 +97,8 @@ public sealed unsafe class StableAudioDit : IDisposable
 
         int lc = (int)condTokens.Shape[1];
         bool projectCond = _condEmbed0W is not null;
-        Tensor cond = projectCond ? MlpProj(backend, condTokens, _condEmbed0W!, _condEmbed2W!, lc, dim) : condTokens;
-        Tensor globalProj = MlpProj(backend, globalCond, _globalEmbed0W!, _globalEmbed2W!, 1, dim);
+        Tensor cond = projectCond ? MlpProj(backend, condTokens, _condEmbed0W!, _condEmbed2W!, lc) : condTokens;
+        Tensor globalProj = MlpProj(backend, globalCond, _globalEmbed0W!, _globalEmbed2W!, 1);
         Tensor timeEmb = TimestepEmbed(backend, timestep, dim);
         backend.Add(globalProj, globalProj, timeEmb);
         timeEmb.Dispose();
@@ -145,13 +145,18 @@ public sealed unsafe class StableAudioDit : IDisposable
     }
 
     /// <summary>The <c>to_cond_embed</c> / <c>to_global_embed</c> conditioning MLP: Linear(no bias) → SiLU →
-    /// Linear(no bias), both stages projecting to <paramref name="dim"/>.</summary>
-    private static Tensor MlpProj(IBackend backend, Tensor input, Tensor w0, Tensor w2, int rows, int dim)
+    /// Linear(no bias). The intermediate and output widths come from the checkpoint; Open 1.0 keeps its conditioning
+    /// MLP at 768 wide even though the DiT itself is 1536 wide.</summary>
+    private static Tensor MlpProj(IBackend backend, Tensor input, Tensor w0, Tensor w2, int rows)
     {
-        Tensor h1 = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        if (w0.Shape.Rank != 2 || w2.Shape.Rank != 2 || w0.Shape[1] != input.Shape[2] || w2.Shape[1] != w0.Shape[0])
+            throw new InvalidDataException($"Stable Audio conditioning MLP shape mismatch: input {input.Shape}, first {w0.Shape}, second {w2.Shape}.");
+        int hidden = (int)w0.Shape[0];
+        int output = (int)w2.Shape[0];
+        Tensor h1 = new Tensor(new TensorShape(1, rows, hidden), DType.F32);
         backend.Linear(h1, input, w0, null);
         backend.Silu(h1, h1);
-        Tensor outp = new Tensor(new TensorShape(1, rows, dim), DType.F32);
+        Tensor outp = new Tensor(new TensorShape(1, rows, output), DType.F32);
         backend.Linear(outp, h1, w2, null);
         h1.Dispose();
         return outp;
@@ -196,6 +201,12 @@ public sealed unsafe class StableAudioDit : IDisposable
         return t.DType == DType.F32 ? t : t.CastTo(DType.F32);
     }
 
+    private static Tensor PickNormF32(IReadOnlyDictionary<string, Tensor> w, string prefix, string standard, string stableAudioTools)
+    {
+        string standardKey = $"{prefix}.{standard}";
+        return w.ContainsKey(standardKey) ? PickF32(w, standardKey) : PickF32(w, $"{prefix}.{stableAudioTools}");
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0) _blocks = [];
@@ -220,8 +231,8 @@ public sealed unsafe class StableAudioDit : IDisposable
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
         {
-            _preNormW = PickF32(w, $"{p}.pre_norm.weight");
-            _preNormB = PickF32(w, $"{p}.pre_norm.bias");
+            _preNormW = PickNormF32(w, $"{p}.pre_norm", "weight", "gamma");
+            _preNormB = PickNormF32(w, $"{p}.pre_norm", "bias", "beta");
             _selfQkvW = Pick(w, $"{p}.self_attn.to_qkv.weight");
             // Per-head QK-LayerNorm only where the config has it (Open Small); Open 1.0 has none.
             if (_c.QkNorm)
@@ -233,8 +244,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             }
             _selfOutW = Pick(w, $"{p}.self_attn.to_out.weight");
 
-            _crossNormW = PickF32(w, $"{p}.cross_attend_norm.weight");
-            _crossNormB = PickF32(w, $"{p}.cross_attend_norm.bias");
+            _crossNormW = PickNormF32(w, $"{p}.cross_attend_norm", "weight", "gamma");
+            _crossNormB = PickNormF32(w, $"{p}.cross_attend_norm", "bias", "beta");
             _crossQW = Pick(w, $"{p}.cross_attn.to_q.weight");
             _crossKvW = Pick(w, $"{p}.cross_attn.to_kv.weight");
             if (_c.QkNorm)
@@ -246,8 +257,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             }
             _crossOutW = Pick(w, $"{p}.cross_attn.to_out.weight");
 
-            _ffNormW = PickF32(w, $"{p}.ff_norm.weight");
-            _ffNormB = PickF32(w, $"{p}.ff_norm.bias");
+            _ffNormW = PickNormF32(w, $"{p}.ff_norm", "weight", "gamma");
+            _ffNormB = PickNormF32(w, $"{p}.ff_norm", "bias", "beta");
             _ff0W = Pick(w, $"{p}.ff.ff.0.proj.weight");
             _ff0B = PickOpt(w, $"{p}.ff.ff.0.proj.bias");
             _ff2W = Pick(w, $"{p}.ff.ff.2.weight");
