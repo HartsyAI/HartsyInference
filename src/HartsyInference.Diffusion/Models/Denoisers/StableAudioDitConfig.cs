@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Configuration for the Stable Audio Open DiT (Stability AI's timing-conditioned text-to-audio /
@@ -90,11 +92,51 @@ public sealed record StableAudioDitConfig
     /// <summary>Stable Audio Open Small — 341M DiT, rectified-flow + ARC, pingpong 8 steps, CFG off, ~11.89 s.</summary>
     public static StableAudioDitConfig OpenSmall => new();
 
-    /// <summary>Stable Audio Open 1.0 — 1.06B DiT, EDM v-prediction, dpmpp-3m-sde 100 steps, CFG 7, ~47.55 s.</summary>
+    /// <summary>Stable Audio Open 1.0 — 1.06B DiT, EDM v-prediction, dpmpp-3m-sde 100 steps, CFG 7, ~47.55 s. The
+    /// prompt tokens reach cross-attention unprojected (<c>project_cond_tokens: false</c>), so its keys and values come
+    /// from the 768-wide T5 states as 12 heads of 64, repeated to the 24 query heads. Matches ComfyUI's
+    /// <c>AudioDiffusionTransformer</c> defaults, which load the real checkpoint.</summary>
     public static StableAudioDitConfig Open1_0 => new()
     {
         HiddenSize = 1536, NumLayers = 24, NumHeads = 24, CrossKvHeads = 12, HeadDim = 64,
         FfInner = 6144, RopeDim = 32, QkNorm = false, GlobalCondDim = 1536,
         HasSecondsStart = true, MaxLatentTokens = 1024, TimingMaxSeconds = 512.0,
     };
+
+    /// <summary>The released variant a DiT state dict (keys without a wrapper prefix) belongs to. It reads the shapes:
+    /// width (<c>transformer.project_in</c>), depth, RoPE width (<c>inv_freq</c>), FFN width, cross-attention KV width,
+    /// global-conditioning width, and whether QK-norm exists. Throws when the shapes match neither Open Small nor Open 1.0,
+    /// rather than building a model the weights do not fit.</summary>
+    public static StableAudioDitConfig FromWeights(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        return FromShapes(weights.ToDictionary(kv => kv.Key, kv => kv.Value.Shape, StringComparer.Ordinal));
+    }
+
+    /// <summary><see cref="FromWeights"/> over tensor shapes alone (a checkpoint header).</summary>
+    internal static StableAudioDitConfig FromShapes(IReadOnlyDictionary<string, TensorShape> shapes)
+    {
+        int Dim(string key, int axis) =>
+            shapes.TryGetValue(key, out TensorShape s) && s.Rank > axis ? (int)s[axis] : -1;
+        int layers = 0;
+        while (shapes.ContainsKey($"transformer.layers.{layers}.self_attn.to_qkv.weight"))
+            layers++;
+        int width = Dim("transformer.project_in.weight", 0);
+        int rope = Dim("transformer.rotary_pos_emb.inv_freq", 0) * 2;
+        int ffInner = Dim("transformer.layers.0.ff.ff.0.proj.weight", 0) / 2;
+        int kvWidth = Dim("transformer.layers.0.cross_attn.to_kv.weight", 0) / 2;
+        int globalWidth = Dim("to_global_embed.0.weight", 1);
+        bool qkNorm = shapes.ContainsKey("transformer.layers.0.self_attn.q_norm.weight");
+        foreach (StableAudioDitConfig c in new[] { OpenSmall, Open1_0 })
+        {
+            if (c.HiddenSize == width && c.NumLayers == layers && c.RopeDim == rope && c.FfInner == ffInner
+                && c.CrossKvHeads * c.HeadDim == kvWidth && c.GlobalCondDim == globalWidth && c.QkNorm == qkNorm)
+            {
+                return c;
+            }
+        }
+        throw new NotSupportedException(
+            $"Stable Audio DiT with width {width}, {layers} layers, RoPE {rope}, FFN {ffInner}, cross-attention KV {kvWidth}, "
+            + $"global conditioning {globalWidth} and QK-norm {(qkNorm ? "on" : "off")} matches neither Open Small nor Open 1.0.");
+    }
 }

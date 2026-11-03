@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Stable Audio Open 1.0** (`hartsy music -m stable-audio-open-1.0`). v-prediction EDM with classifier-free guidance over
+  DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and
+  `seconds_total` timing tokens, loaded from Comfy-Org's single-file repack. The DiT now takes unprojected condition tokens and
+  runs without QK-norm, as Open 1.0 does; Open Small is unchanged. Not yet run on real weights.
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,

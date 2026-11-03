@@ -82,6 +82,7 @@ internal static class MusicCatalog
         ["minimaxmusic3"] = MiniMaxMusic3MusicModel.Descriptor,
             ["yue2"] = Yue2MusicModel.Descriptor,
         ["stableaudio"] = StableAudioMusicModel.Descriptor,
+        ["stable-audio-open-1.0"] = StableAudioMusicModel.Open1Descriptor,
         ["controlfoley"] = ControlFoleyMusicModel.Descriptor,
     };
 
