@@ -204,6 +204,53 @@ public sealed class RecipeEvictionDisposeTests
     private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
         await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
 
+    [Fact]
+    public void SecondVariant_KeepsTheCachedOne_WhenTheMeasuredResidentSizeLeavesRoom()
+    {
+        FakeRecipe recipe = Register("test-resident-keep", throwOnDispose: false);
+        IBackend backend = ScriptedFreeBackend.Create(9400, out ScriptedFreeBackend device);
+        // The first build reads 10,000 MB free before it and 8,400 MB after, so it holds 1,600 MB and needs 2,000 MB beside it.
+        device.Readings.Enqueue(10_000L * Mb);
+        device.Readings.Enqueue(8_400L * Mb);
+        using InferenceEngine engine = new InferenceEngine(backend, "cuda:9400");
+
+        LeasedRecipe first = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("a"));
+        first.Lease.Dispose();
+
+        // The budget reading (2,500 MB) leaves room for 2,000 MB, so the cached variant stays.
+        device.Readings.Enqueue(2_500L * Mb);
+        device.Readings.Enqueue(2_500L * Mb);
+        device.Readings.Enqueue(2_500L * Mb);
+        LeasedRecipe second = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("b"));
+        second.Lease.Dispose();
+
+        Assert.Equal(0, recipe.Built[0].DisposeCalls);
+        Assert.Equal(2, recipe.Built.Count);
+    }
+
+    [Fact]
+    public void SecondVariant_EvictsTheCachedOne_WhenTheMeasuredResidentSizeDoesNotFit()
+    {
+        FakeRecipe recipe = Register("test-resident-evict", throwOnDispose: false);
+        IBackend backend = ScriptedFreeBackend.Create(9401, out ScriptedFreeBackend device);
+        device.Readings.Enqueue(10_000L * Mb);
+        device.Readings.Enqueue(8_400L * Mb);
+        using InferenceEngine engine = new InferenceEngine(backend, "cuda:9401");
+
+        LeasedRecipe first = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("a"));
+        first.Lease.Dispose();
+
+        // 1,900 MB free is below the 2,000 MB the measured variant needs, so the cached one is evicted for the second.
+        device.Readings.Enqueue(1_900L * Mb);
+        device.Readings.Enqueue(1_900L * Mb);
+        device.Readings.Enqueue(1_900L * Mb);
+        LeasedRecipe second = engine.GetOrConstructRecipeLeased(SpecFor(recipe.Name), WithLora("b"));
+        second.Lease.Dispose();
+
+        Assert.Equal(1, recipe.Built[0].DisposeCalls);
+        Assert.Equal(2, recipe.Built.Count);
+    }
+
     private const long Mb = 1024L * 1024;
 
     private static ImageRequest WithLora(string lora) => new ImageRequest

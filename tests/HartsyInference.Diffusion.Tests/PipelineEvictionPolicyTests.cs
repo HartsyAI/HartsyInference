@@ -7,16 +7,39 @@ namespace HartsyInference.Diffusion.Tests;
 public sealed class PipelineEvictionPolicyTests
 {
     [Fact]
-    public void FitsBesideCached_WithoutAKnownCheckpointSize_AlwaysFits()
+    public void FitsBesideCached_WithoutAKnownEstimate_AlwaysFits()
     {
-        Assert.True(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 0, checkpointBytes: 0));
+        Assert.True(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 0, estimatedBytes: 0));
     }
 
     [Fact]
-    public void FitsBesideCached_NeedsTheResidentFactorOverTheCheckpointSize()
+    public void EstimateVariantBytes_FallsBackToTheFileWhenNothingIsMeasured()
     {
-        Assert.True(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 1500, checkpointBytes: 1000));
-        Assert.False(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 1499, checkpointBytes: 1000));
+        Assert.Equal(1500, PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 0, checkpointBytes: 1000));
+    }
+
+    [Fact]
+    public void EstimateVariantBytes_UsesTheMeasuredResidentSizeWithHeadroom()
+    {
+        Assert.Equal(2000, PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 1600, checkpointBytes: 1000));
+    }
+
+    [Fact]
+    public void EstimateVariantBytes_RaisesAnIncompleteMeasurementToTheFile()
+    {
+        Assert.Equal(1250, PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 5, checkpointBytes: 1000));
+    }
+
+    [Fact]
+    public void QuantizedCheckpoint_WhoseResidentFormIsLargerThanItsFile_IsSizedByTheMeasurement()
+    {
+        // A 1,000-byte file that holds 1,600 bytes on the device. The file rule needs 1,500, so 1,800 free would keep it;
+        // the measurement needs 2,000, so the same 1,800 evicts it.
+        long fromFile = PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 0, checkpointBytes: 1000);
+        long measured = PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes: 1600, checkpointBytes: 1000);
+
+        Assert.True(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 1800, estimatedBytes: fromFile));
+        Assert.False(PipelineEvictionPolicy.FitsBesideCached(freeBytes: 1800, estimatedBytes: measured));
     }
 
     [Fact]

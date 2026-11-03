@@ -358,73 +358,21 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
         VideoArtifactFileBinding.RequireUnchanged(executionPlan);
         LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(executionPlan.Model, resolved, executionPlan, cancel);
-        // The producer releases the lease when it finishes, so eviction waits for the whole stream, not just this method.
+        // The stream takes the lease: its producer releases it when it finishes, so eviction waits for the whole stream.
         IDisposable videoLease = leased.Lease;
         IVideoRecipePipeline pipeline = leased.Pipeline;
-        // Stops the producer when this iterator ends early, so a consumer that walks away cannot leave the producer blocked on a
-        // full channel with the lease held. The producer always runs (no token on Task.Run), so it always releases the lease.
-        CancellationTokenSource producerStop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        Channel<VideoFrame> channel;
-        Task producer;
-        try
-        {
-            if (!pipeline.SupportsStreaming)
-            {
-                throw new NotSupportedException(
-                    $"Video model family '{InferenceEngine.FamilyIdFor(executionPlan.Model)}' does not support streaming generation.");
-            }
-            // Bridges the pipeline's own IAsyncEnumerable (whose first MoveNextAsync blocks synchronously through the
-            // whole denoise loop — there's no await point until the VAE decode phase starts yielding groups) onto a
-            // background thread via a bounded channel, so the calling thread (an ASP.NET request handler when the
-            // extension awaits this) isn't pinned for the denoise duration. Mirrors GenerateAsync's Task.Run, but
-            // needs a channel instead of a single Task<T> because this method yields incrementally rather than once.
-            channel = Channel.CreateBounded<VideoFrame>(
-                new BoundedChannelOptions(4) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
-            producer = Task.Run(async () =>
-            {
-                try
-                {
-                    await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, executionPlan.EffectiveSettings, progress, producerStop.Token)
-                        .WithCancellation(producerStop.Token).ConfigureAwait(false))
-                    {
-                        await channel.Writer.WriteAsync(frame, producerStop.Token).ConfigureAwait(false);
-                    }
-                    channel.Writer.TryComplete();
-                }
-                catch (Exception ex)
-                {
-                    channel.Writer.TryComplete(ex);
-                }
-                finally
-                {
-                    videoLease.Dispose();
-                }
-            });
-        }
-        catch
+        if (!pipeline.SupportsStreaming)
         {
             videoLease.Dispose();
-            producerStop.Dispose();
-            throw;
+            throw new NotSupportedException(
+                $"Video model family '{InferenceEngine.FamilyIdFor(executionPlan.Model)}' does not support streaming generation.");
         }
-
-        try
+        // Frames come from a background producer that owns the lease; see VideoFrameStream.
+        await foreach (VideoFrame frame in VideoFrameStream.Produce(pipeline, resolved, executionPlan.EffectiveSettings, progress, videoLease, cancel)
+            .ConfigureAwait(false))
         {
-            await foreach (VideoFrame frame in channel.Reader.ReadAllAsync(cancel).ConfigureAwait(false))
-            {
-                yield return frame;
-            }
+            yield return frame;
         }
-        finally
-        {
-            // Ends the producer when this iterator stops early or is cancelled. After a normal finish the producer has already exited.
-            producerStop.Cancel();
-        }
-        // Observes the producer's result: rethrows whatever TryComplete(ex) captured (the channel reader itself
-        // already threw that same exception via ReadAllAsync above, but awaiting here also surfaces a producer-side
-        // failure that happened AFTER the channel completed successfully — there isn't one today, but this is the
-        // same "don't let a background Task's fault go unobserved" discipline as GenerateAsync's Task.Run).
-        await producer.ConfigureAwait(false);
     }
 
     /// <summary>Builds an exact H3 execution summary. Generic video families still perform family-specific

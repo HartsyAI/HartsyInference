@@ -44,6 +44,8 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly SemaphoreSlim _constructionGate = new(1, 1);
     private const string ConstructionTurnKey = "construction-turn";
     private readonly Dictionary<string, int> _pipelineLeases = new(StringComparer.OrdinalIgnoreCase);
+    // Device bytes each cached pipeline held once built, measured under the device gate. Guarded by _pipelineCacheLock.
+    private readonly Dictionary<string, long> _residentBytes = new(StringComparer.OrdinalIgnoreCase);
     private string _backendSelector;
     private IBackend? _backend;
     private readonly EngineOptions? _options;
@@ -349,6 +351,7 @@ public sealed class InferenceEngine : IInferenceEngine
             }
         }
         bool victimsReleased = false;
+        long residentBytes = 0;
         IRecipePipeline pipeline;
         try
         {
@@ -365,7 +368,10 @@ public sealed class InferenceEngine : IInferenceEngine
                         return raced;
                     }
                 }
-                return recipe.Construct(context);
+                long freeBeforeBuild = FreeAfterTrim(backend);
+                IRecipePipeline constructed = recipe.Construct(context);
+                residentBytes = Math.Max(0, freeBeforeBuild - FreeAfterTrim(backend));
+                return constructed;
             });
         }
         finally
@@ -379,6 +385,10 @@ public sealed class InferenceEngine : IInferenceEngine
         lock (_pipelineCacheLock)
         {
             _recipePipelines[key] = pipeline;
+            if (residentBytes > 0)
+            {
+                _residentBytes[key] = residentBytes;
+            }
             return new LeasedRecipe(pipeline, AcquireLeaseUnderLock(key));
         }
     }
@@ -611,6 +621,7 @@ public sealed class InferenceEngine : IInferenceEngine
             }
         }
         bool victimsReleased = false;
+        long residentBytes = 0;
         IVideoRecipePipeline pipeline;
         try
         {
@@ -625,7 +636,10 @@ public sealed class InferenceEngine : IInferenceEngine
                         return raced;
                     }
                 }
-                return recipe.Construct(context);
+                long freeBeforeBuild = FreeAfterTrim(backend);
+                IVideoRecipePipeline constructed = recipe.Construct(context);
+                residentBytes = Math.Max(0, freeBeforeBuild - FreeAfterTrim(backend));
+                return constructed;
             });
         }
         finally
@@ -638,6 +652,10 @@ public sealed class InferenceEngine : IInferenceEngine
         lock (_pipelineCacheLock)
         {
             _videoRecipePipelines[key] = pipeline;
+            if (residentBytes > 0)
+            {
+                _residentBytes[key] = residentBytes;
+            }
             return new LeasedVideoRecipe(pipeline, AcquireLeaseUnderLock(key));
         }
     }
@@ -926,6 +944,7 @@ public sealed class InferenceEngine : IInferenceEngine
             try
             {
                 List<string> sameCheckpoint;
+                long residentBytes = 0;
                 lock (_pipelineCacheLock)
                 {
                     if (alreadyCached())
@@ -937,10 +956,19 @@ public sealed class InferenceEngine : IInferenceEngine
                     sameCheckpoint = _recipePipelines.Keys.Where(k => k.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase))
                         .Concat(_videoRecipePipelines.Keys.Where(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase)))
                         .ToList();
+                    foreach ((string cachedKey, long measured) in _residentBytes)
+                    {
+                        if (cachedKey.StartsWith(imageKeep, StringComparison.OrdinalIgnoreCase)
+                            || cachedKey.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase))
+                        {
+                            residentBytes = Math.Max(residentBytes, measured);
+                        }
+                    }
                 }
                 // Read under the turn, so every retry accounts for variants published while a victim was leased. The
                 // free-memory reading must also be refreshed because the lease holder may have changed device usage.
-                bool evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath);
+                bool evictSameCheckpoint = sameCheckpoint.Count > 0
+                    && SameCheckpointBudgetTight(keepPath, residentBytes);
                 lock (_pipelineCacheLock)
                 {
                     List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
@@ -996,27 +1024,36 @@ public sealed class InferenceEngine : IInferenceEngine
         {
             images.Add(new KeyValuePair<string, IRecipePipeline>(victim, _recipePipelines[victim]));
             _recipePipelines.Remove(victim);
+            _residentBytes.Remove(victim);
         }
         List<KeyValuePair<string, IVideoRecipePipeline>> videos = new(videoVictims.Count);
         foreach (string victim in videoVictims)
         {
             videos.Add(new KeyValuePair<string, IVideoRecipePipeline>(victim, _videoRecipePipelines[victim]));
             _videoRecipePipelines.Remove(victim);
+            _residentBytes.Remove(victim);
         }
         return new EvictedPipelines(images, videos);
     }
 
     /// <summary>Whether the free device memory is too small to keep another variant of this checkpoint cached.</summary>
-    private bool SameCheckpointBudgetTight(string checkpointPath)
+    private bool SameCheckpointBudgetTight(string checkpointPath, long measuredResidentBytes)
     {
         long checkpointBytes = File.Exists(checkpointPath) ? new FileInfo(checkpointPath).Length : 0;
-        IBackend backend = EnsureBackend();
-        backend.TrimMemoryPool();
-        long freeBytes = backend.FreeMemoryBytes();
-        bool fits = PipelineEvictionPolicy.FitsBesideCached(freeBytes, checkpointBytes);
-        Logs.Info($"[Engine] Pipeline cache: {ByteFormat.Mb(freeBytes)} free, checkpoint {ByteFormat.Mb(checkpointBytes)} — "
+        long estimatedBytes = PipelineEvictionPolicy.EstimateVariantBytes(measuredResidentBytes, checkpointBytes);
+        long freeBytes = FreeAfterTrim(EnsureBackend());
+        bool fits = PipelineEvictionPolicy.FitsBesideCached(freeBytes, estimatedBytes);
+        string basis = measuredResidentBytes > 0 ? "measured" : "from the checkpoint file";
+        Logs.Info($"[Engine] Pipeline cache: {ByteFormat.Mb(freeBytes)} free, a variant needs about {ByteFormat.Mb(estimatedBytes)} ({basis}) — "
             + (fits ? "keeping cached variants of it." : "evicting idle variants of it."));
         return !fits;
+    }
+
+    /// <summary>Free device memory after the pool hands back its cached blocks, so a reading shows what is actually held.</summary>
+    private static long FreeAfterTrim(IBackend backend)
+    {
+        backend.TrimMemoryPool();
+        return backend.FreeMemoryBytes();
     }
 
     /// <summary>Takes a lease on a cached pipeline. Runs under <see cref="_pipelineCacheLock"/>.</summary>
@@ -1162,6 +1199,7 @@ public sealed class InferenceEngine : IInferenceEngine
             foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
                 ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
             _videoRecipePipelines.Clear();
+            _residentBytes.Clear();
         }
         // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
         if (_vision.IsValueCreated)

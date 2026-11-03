@@ -80,6 +80,39 @@ public sealed class LoraStackZeroStrengthTests : IDisposable
         Assert.Equal(new LoraStack.ApplyReport(1, 1, 1, 0, 0, 0), stack.Report);
     }
 
+    [Fact]
+    public void PartialApplication_Allow_AppliesWhatFitsAndCountsTheRest()
+    {
+        string loraPath = WriteLora("partial-allow", "blocks.0", "blocks.9");
+        Tensor baseTensor = Zeros(Rows, Cols);
+        Dictionary<string, Tensor> weights = new() { [BaseKey] = baseTensor };
+
+        using LoraStack stack = new LoraStack();
+        stack.AddFromPath(loraPath, strength: 1f);
+        int merged = stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend());
+
+        Assert.Equal(1, merged);
+        Assert.NotSame(baseTensor, weights[BaseKey]);
+        Assert.Equal(1, stack.Report.SkippedMissing);
+    }
+
+    [Fact]
+    public void PartialApplication_Refuse_RefusesBeforeAnyWriteAndNamesTheOmittedUnit()
+    {
+        string loraPath = WriteLora("partial-refuse", "blocks.0", "blocks.9");
+        Tensor baseTensor = Zeros(Rows, Cols);
+        Dictionary<string, Tensor> weights = new() { [BaseKey] = baseTensor };
+
+        using LoraStack stack = new LoraStack { PartialPolicy = LoraPartialPolicy.Refuse };
+        stack.AddFromPath(loraPath, strength: 1f);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(
+            () => stack.ApplyTo(weights, LoraTarget.Transformer, new CpuBackend()));
+        Assert.Contains("blocks.9", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("lora.partialApplication", refused.Message, StringComparison.Ordinal);
+        Assert.Same(baseTensor, weights[BaseKey]);
+    }
+
     /// <summary>A PEFT LoRA with a rank-2 pair for each named block's <c>to_q</c>, so every module carries a real delta.</summary>
     private string WriteLora(string name, params string[] blocks)
     {
