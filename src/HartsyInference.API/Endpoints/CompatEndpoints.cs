@@ -279,6 +279,7 @@ public static class CompatEndpoints
                 for (int i = 0; i < n; i++)
                 {
                     ImageResult result = await ImageEndpoints.GenerateAsync(engine, queue, spec, imageRequest, progress: null, ct);
+                    // OpenAI's shape has one image per entry, so a layered result sends its composite only; /v1/native/image carries the layers.
                     byte[] png = PngEncoder.Encode(result.Rgb, result.Width, result.Height);
                     ArtifactPersistence.Save(png, imageRequest.Prompt, "png");
                     images.Add(new ImageData { B64Json = Convert.ToBase64String(png) });
