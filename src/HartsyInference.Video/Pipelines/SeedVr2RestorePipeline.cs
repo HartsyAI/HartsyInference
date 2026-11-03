@@ -195,6 +195,11 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         long fixedBytes = 384L * 1024 * 1024;
 
         Backend.TrimMemoryPool();
+        long total = Backend.GetVramInfo().TotalBytes;
+        if (total <= 0)
+        {
+            return options.TargetArea;
+        }
         long free = Backend.FreeMemoryBytes();
         long usable = free - ReserveBytes - fixedBytes;
         long maxPixels = Math.Max(usable / perPixel, 256L * 256);
