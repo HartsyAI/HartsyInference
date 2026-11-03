@@ -82,6 +82,26 @@ Remaining:
 2. The catalog's default GGUF returned HTTP 401 (gated or moved); propose an ungated default.
 3. Swarm, once the engine version is published.
 
+### #638 Stable Audio Open 1.0 (P3)
+
+v-prediction EDM with CFG over DPM++ 3M SDE; Comfy-Org's all-in-one file (4.85 GB, sha256 `7b20458a…`).
+
+1. **Load.** `hartsy music -m stable-audio-open-1.0 "<prompt>"` must load every component from its stable-audio-tools prefix
+   with no missing key:
+   - the DiT (`model.model.`; `FromWeights` must pick Open 1.0);
+   - the VAE (`pretransform.model.`);
+   - T5 (`conditioner.conditioners.prompt.model.`);
+   - both timing conditioners.
+
+   On a missing key, fix the prefix map in `StableAudioMusicModel.LoadOpen1Async`.
+2. **Parity.** Against stable-audio-tools at the model card's settings: 100 steps, CFG 7, sigma 0.3 → 500, `dpmpp-3m-sde`,
+   30 s, a fixed seed.
+   - The sampler noise differs, so compare the stages: the DiT `v` output on a dumped `(x, σ, cond)`; the conditioning
+     tensors (cross tokens, global token); the decoded audio of a dumped latent.
+   - Record the DiT-step cosine and the VAE PCM error.
+3. **Listen.** A music prompt, an SFX prompt and a 45 s clip, each opened and listened to.
+4. **Swarm.** `Kind.Music`, once the engine version is published.
+
 ## Merged, with GPU items still open
 
 | PR | What | Still to run on GPU |
