@@ -46,7 +46,8 @@ done
 EXPECTED=()
 if [ -n "${MANIFEST}" ]; then
     [ -f "${MANIFEST}" ] || die "no manifest ${MANIFEST}"
-    while IFS= read -r line; do
+    # read fails on a last line with no newline but still sets it, and sed keeps that newline missing.
+    while IFS= read -r line || [ -n "${line}" ]; do
         EXPECTED+=("${line}")
     done < <(sed -e 's/\r$//' -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' "${MANIFEST}")
     [ ${#EXPECTED[@]} -gt 0 ] || die "manifest ${MANIFEST} lists no tests"

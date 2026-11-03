@@ -131,6 +131,15 @@ canned 0 "" "Passed|Ns.SuiteTests.PlainTwo" "NotExecuted|${THEORY_CUDA}"
 expect manifest-missing 1 "2 manifest test(s) did not execute" --filter "FullyQualifiedName~SuiteTests" \
     --manifest "${TMP}/manifest.txt"
 
+# A last line with no newline still names a test, alone or after others.
+printf 'Ns.SuiteTests.Plain' > "${TMP}/one-unterminated.txt"
+printf 'Ns.SuiteTests.Plain\r\nNs.SuiteTests.Last' > "${TMP}/last-unterminated.txt"
+canned 0 "Test Run Successful." "Passed|Ns.SuiteTests.Plain"
+expect manifest-one-unterminated 0 "1 passed, 0 failed, 0 not executed of 1" --manifest "${TMP}/one-unterminated.txt"
+expect manifest-last-unterminated 1 "1 manifest test(s) did not execute" --manifest "${TMP}/last-unterminated.txt"
+assert "manifest-last-unterminated-filter" \
+    grep -qxF 'FullyQualifiedName=Ns.SuiteTests.Plain|FullyQualifiedName=Ns.SuiteTests.Last' "${FAKE}/args"
+
 expect empty-manifest 2 "lists no tests" --manifest "${TMP}/empty.txt"
 expect no-filter 2 "--filter or --manifest is required"
 
