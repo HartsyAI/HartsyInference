@@ -1766,6 +1766,21 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Stable Audio Open 1.0 (Stability AI Community licence): v-prediction EDM DiT with CFG, dpmpp-3m-sde, up to
+                // ~47.55 s of 44.1 kHz stereo. Comfy-Org's all-in-one stable-audio-tools file (DiT, Oobleck VAE, T5-base, timing
+                // conditioners); the hash is its LFS object id at Comfy-Org/stable-audio-open-1.0 @3eb100708b. Not yet run on
+                // real weights. `hartsy music -m stable-audio-open-1.0`.
+                Id = "stable-audio-open-1.0", Modality = mus, DisplayName = "Stable Audio Open 1.0",
+                Architecture = "latent diffusion (Oobleck VAE), v-prediction EDM + CFG", Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/stable-audio-open-1.0", RepoPath = "stable-audio-open-1.0.safetensors",
+                        TargetSubdir = "music", AudioCategory = "music", Role = "transformer",
+                        Sha256 = "7b20458a071231aaf32613b6fbc7945f28f34dbba4f295bb49bad56f5f66b57e" },
+                },
+            },
+            new CatalogEntry
+            {
                 // ControlFoley (Xiaomi, CC-BY-NC-4.0) text-to-audio at 44.1 kHz: DFN5B CLIP text features -> flow-matching DiT ->
                 // VAE + BigVGAN v2. The 11 GB float32 network is preferred as controlfoley_bf16.safetensors when placed beside it.
                 // Video and reference-audio conditioning are not wired. `hartsy music -m controlfoley "rain on a tin roof"`.

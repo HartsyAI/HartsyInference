@@ -28,9 +28,10 @@ public sealed class MusicRecipeLedgerTests
     }
 
     [Fact]
-    public void MusicRegistry_ShipsTheNineFamiliesOfTheCatalog() =>
+    public void MusicRegistry_ShipsTheTenFamiliesOfTheCatalog() =>
         Assert.Equal(
-            ["musicgen", "audiogen", "acestep", "yue", "yue2", "heartmula", "minimaxmusic3", "stableaudio", "controlfoley"],
+            ["musicgen", "audiogen", "acestep", "yue", "yue2", "heartmula", "minimaxmusic3", "stableaudio", "stable-audio-open-1.0",
+                "controlfoley"],
             MusicRecipeRegistry.DefaultNames);
 
     [Theory]
@@ -184,6 +185,16 @@ public sealed class MusicRecipeLedgerTests
         // StableAudioPipeline.cs:44 (steps ?? 8); the trained window is 256 latent tokens x 2048 / 44100 Hz (StableAudioDitConfig.cs:85,88).
         Assert.Equal(new MusicDefaults { Duration = 10, Steps = 8 }, recipe.Defaults);
         Assert.InRange(recipe.Constraints.MaxDurationSeconds!.Value, 11.88, 11.89);
+    }
+
+    [Fact]
+    public void MusicRecipe_StableAudioOpen1DeclaresTheModelCardSettingsAndTrainedWindow()
+    {
+        IMusicRecipe recipe = MusicRecipeRegistry.Resolve("stable-audio-open-1.0")!;
+        // The stabilityai/stable-audio-open-1.0 model card's example: 100 steps, cfg_scale 7, a 30 s clip; the trained window
+        // is 1024 latent tokens x 2048 / 44100 Hz.
+        Assert.Equal(new MusicDefaults { Duration = 30, Steps = 100, CfgScale = 7 }, recipe.Defaults);
+        Assert.InRange(recipe.Constraints.MaxDurationSeconds!.Value, 47.55, 47.56);
     }
 
     [Fact]
