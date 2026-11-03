@@ -54,13 +54,6 @@ public sealed class Flux1Recipe : IArchitectureRecipe
     /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
 
-    /// <summary>The OneReward fine-tune's reference distilled guidance (ComfyUI's workflow), in place of Dev's 3.5.</summary>
-    internal const float OneRewardGuidance = 30f;
-
-    /// <summary>Whether a checkpoint file is the OneReward fine-tune, which runs at guidance 30.</summary>
-    internal static bool IsOneReward(string checkpointPath) =>
-        Path.GetFileName(checkpointPath).Contains("onereward", StringComparison.OrdinalIgnoreCase);
-
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
@@ -206,8 +199,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");
-            float devGuidance = IsOneReward(context.CheckpointPath) ? OneRewardGuidance : FamilyDefaults.CfgScale;
-            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend, devGuidance);
+            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend);
         }
         catch (Exception ex)
         {

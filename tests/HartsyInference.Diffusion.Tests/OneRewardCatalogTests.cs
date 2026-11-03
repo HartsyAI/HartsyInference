@@ -46,16 +46,6 @@ public sealed class OneRewardCatalogTests
         Assert.Equal("Lora", lora.TargetSubdir);
     }
 
-    [Theory]
-    [InlineData("flux.1-fill-dev-OneReward-transformer_fp8.safetensors", true)]
-    [InlineData("flux.1-fill-dev-OneReward-transformer_bf16.safetensors", true)]
-    [InlineData("flux1-dev-fp8.safetensors", false)]
-    public void IsOneReward_IdentifiesTheFineTuneByFileName(string file, bool expected)
-    {
-        Assert.Equal(expected, Flux1Recipe.IsOneReward(Path.Combine("models", file)));
-        Assert.Equal(30f, Flux1Recipe.OneRewardGuidance);
-    }
-
     [Fact]
     public void FillCatalogIds_AreCatalogEntriesThatResolveToTheFlux1Recipe()
     {
