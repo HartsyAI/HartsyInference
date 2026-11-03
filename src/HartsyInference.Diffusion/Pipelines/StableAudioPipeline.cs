@@ -186,6 +186,9 @@ public sealed unsafe class StableAudioPipeline : DiffusionPipelineBase
         }
         finally
         {
+            // Reset releases the sampler's history, which it pins on the backend, and its Brownian noise source; a
+            // sampler abandoned without it keeps those allocations until the backend is torn down.
+            sampler.Reset(z.Shape);
             condTokens.Dispose();
             globalCond.Dispose();
             nullTokens?.Dispose();
