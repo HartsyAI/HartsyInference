@@ -24,14 +24,16 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
 
     private readonly Qwen35Model _model;
     private readonly IDisposable _owner;
+    private readonly IDisposable? _widened;
     private Qwen35VisionTower? _vision;
     private VisionFeatures? _visionFeatures;
     private int _disposed;
 
-    private Qwen35TextEncoder(Qwen35Model model, IDisposable owner, ILlmTokenizer? tokenizer)
+    private Qwen35TextEncoder(Qwen35Model model, IDisposable owner, ILlmTokenizer? tokenizer, IDisposable? widened = null)
     {
         _model = model;
         _owner = owner;
+        _widened = widened;
         EmbeddedTokenizer = tokenizer;
     }
 
@@ -66,7 +68,12 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
 
     /// <summary>Loads the encoder at <paramref name="path"/>, sized for prompts of up to <paramref name="maxTokens"/>.</summary>
     /// <param name="family">Model family, for log lines and errors.</param>
-    public static Qwen35TextEncoder Load(string path, int maxTokens, string family)
+    /// <param name="backend">The backend that will run the trunk. A safetensors encoder's packed linears (ComfyUI's int8 and
+    /// w4a8 builds) that it cannot multiply packed are widened to BF16 here; null keeps every weight as stored.</param>
+    public static Qwen35TextEncoder Load(string path, int maxTokens, string family) =>
+        Load(path, maxTokens, family, backend: null);
+
+    public static Qwen35TextEncoder Load(string path, int maxTokens, string family, IBackend? backend)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         if (maxTokens < 1)
@@ -86,16 +93,20 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
         bool folder = Directory.Exists(path);
         IReadOnlyList<string> files = folder ? HfCheckpointDirectory.WeightFiles(path) : [path];
         CheckpointSource source = CheckpointSource.OpenShards(files);
+        QuantizedWeightPolicy.PreparedWeights? widened = null;
         try
         {
             IReadOnlyDictionary<string, Tensor> weights = source.Weights;
             string prefix = Qwen35HfConfig.LanguageModelPrefix(weights);
             Tensor embed = weights[$"{prefix}.embed_tokens.weight"];
-            if (embed.DType != DType.F32 && embed.DType != DType.BF16 && embed.DType != DType.F16)
+            bool int8Table = embed.DType == DType.I8 && embed.QuantInfo is { Format: "int8_tensorwise", RowScale: not null };
+            if (!int8Table && embed.DType != DType.F32 && embed.DType != DType.BF16 && embed.DType != DType.F16)
             {
                 throw new NotSupportedException(
-                    $"{family}: the Qwen3.5 token embedding in '{Path.GetFileName(path)}' is {embed.DType}; a safetensors encoder needs it in F32, BF16 or F16 (use a GGUF for a quantized table).");
+                    $"{family}: the Qwen3.5 token embedding in '{Path.GetFileName(path)}' is {embed.DType}; a safetensors encoder needs it in F32, BF16, F16 or ComfyUI int8_tensorwise (use a GGUF for another quantized table).");
             }
+            if (backend is not null)
+                widened = WidenTrunk(ref weights, prefix, backend);
             string? configPath = folder ? Path.Combine(path, HfCheckpointDirectory.ConfigFileName) : null;
             Qwen35HfConfig config = configPath is not null && File.Exists(configPath)
                 ? Qwen35HfConfig.FromJson(File.ReadAllText(configPath))
@@ -106,14 +117,43 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
             Qwen35Model model = Qwen35Model.FromHuggingFace(weights, config with { TieWordEmbeddings = false },
                 maxTokens + 8, prefix, lmHeadKey: null);
             Logs.Info($"[{family}] Qwen3.5 text encoder: {(folder ? path : Path.GetFileName(path))}, hidden {config.HiddenSize}, "
-                + $"{config.NumLayers} layers ({config.NumLayers / Math.Max(1, CountFull(config))}:1 linear:full), {embed.DType} weights.");
-            return new Qwen35TextEncoder(model, source, null);
+                + $"{config.NumLayers} layers ({config.NumLayers / Math.Max(1, CountFull(config))}:1 linear:full), {embed.DType} weights"
+                + (widened is null ? "." : $", {widened.WidenedCount} packed linears widened to BF16 for {backend!.Capabilities.Name}."));
+            return new Qwen35TextEncoder(model, source, null, widened);
         }
         catch
         {
+            widened?.Dispose();
             source.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Widens the trunk linears <paramref name="backend"/> cannot multiply packed and points <paramref name="weights"/>
+    /// at a dictionary holding the widened copies. Returns the handle that owns them, or null when every weight stays as
+    /// stored. Only <c>{prefix}.layers.*</c> is offered: the embedding is gathered row by row on the host, so an int8
+    /// table stays packed on every backend.</summary>
+    private static QuantizedWeightPolicy.PreparedWeights? WidenTrunk(ref IReadOnlyDictionary<string, Tensor> weights,
+        string prefix, IBackend backend)
+    {
+        string layers = prefix + ".layers.";
+        Dictionary<string, Tensor> trunk = new(StringComparer.Ordinal);
+        foreach ((string key, Tensor value) in weights)
+        {
+            if (key.StartsWith(layers, StringComparison.Ordinal))
+                trunk[key] = value;
+        }
+        QuantizedWeightPolicy.PreparedWeights prepared = QuantizedWeightPolicy.PrepareForBackend(trunk, backend, DType.BF16);
+        if (prepared.WidenedCount == 0)
+        {
+            prepared.Dispose();
+            return null;
+        }
+        Dictionary<string, Tensor> merged = new(weights, StringComparer.Ordinal);
+        foreach ((string key, Tensor value) in trunk)
+            merged[key] = value;
+        weights = merged;
+        return prepared;
     }
 
     /// <inheritdoc/>
@@ -305,6 +345,7 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
         _visionFeatures?.Dispose();
         _vision?.Dispose();
         _model.Dispose();
+        _widened?.Dispose();
         _owner.Dispose();
     }
 

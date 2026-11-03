@@ -592,6 +592,11 @@ with `--model-path`. The catalog entries `moss-image`, `moss-image-sft`, `moss-i
 download Comfy-Org's single-file export (Base and SFT, bf16 and int8 ConvRot) with the side models the recipe uses
 outside a full folder: the bf16 Qwen3.5-9B, its tokenizer and the small-decoder Flux.2 VAE. Only the Base bf16
 combination has run on real weights (below); the SFT and int8 entries are unverified.
+- **Smaller encoders.** `--text-encoder` also takes Comfy-Org's `qwen3.5_9b_int8_convrot` (9.7 GB) and, once the
+  w4a8 pass is in, `qwen3.5_9b_w4a8_gptq` (7.3 GB). Their token embedding is `int8_tensorwise` with ConvRot and is
+  gathered row by row from the packed table; their trunk linears stay int8 on CUDA and are widened to BF16 on backends
+  without an int8 path. A tiny int8 encoder on CPU matches its own weights widened to BF16 bit for bit; neither file
+  has run on real weights.
 Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_ARCHITECTURE.md).
 
 - **Defaults.** 50 steps, CFG 3, shift 5 on the training-grid schedule, block 22 skipped on the unconditional branch.
