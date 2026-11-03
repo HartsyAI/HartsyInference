@@ -35,6 +35,10 @@ public sealed class GeneratedArtifact
     /// <summary>Pixel height of <see cref="PreviewRgb"/>.</summary>
     public int PreviewHeight { get; init; }
 
+    /// <summary>Extra files written next to <see cref="FileBytes"/>, each named <c>&lt;stem&gt;.&lt;Suffix&gt;</c> after the
+    /// main file's stem (a layered image's <c>layer-00.png</c>, …); empty for single-file results.</summary>
+    public IReadOnlyList<(string Suffix, byte[] Bytes)> Companions { get; init; } = [];
+
     /// <summary>Free-form metadata surfaced to the user (seed, tok/s, dimensions, stop reason).</summary>
     public Dictionary<string, string> Meta { get; } = new(StringComparer.OrdinalIgnoreCase);
 }

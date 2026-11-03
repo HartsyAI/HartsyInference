@@ -94,6 +94,25 @@ public sealed class RecipeLoraMergeTests : IDisposable
         Assert.Contains("blocks.9", refused.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RefuseKnob_RejectsAnUnservedComponentBeforeWritingAServedOne()
+    {
+        string path = TwoArmLora("unserved-component");
+        Dictionary<string, Tensor> transformer = new() { ["blocks.0.attn.to_q.weight"] = Zeros() };
+        Tensor original = transformer["blocks.0.attn.to_q.weight"];
+        using IDisposable knob = KnobProfile.Create("lora-unserved").With(EngineKnobs.LoraPartialApplication, "refuse").Push();
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => RecipeLoraMerge.Apply(
+            [new LoraResolver.LoraSpec { FilePath = path, ModelStrength = 1.0f, TencStrength = 1.0f }],
+            new CpuBackend(),
+            new LoraMergeTargets { Transformer = transformer },
+            "RecipeLoraMergeTests"));
+
+        Assert.Contains("ClipL", refused.Message, StringComparison.Ordinal);
+        Assert.Same(original, transformer["blocks.0.attn.to_q.weight"]);
+        original.Dispose();
+    }
+
     private static Tensor Zeros()
     {
         Tensor t = new Tensor(new TensorShape(Rows, Cols), DType.F32);

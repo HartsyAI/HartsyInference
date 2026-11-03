@@ -173,10 +173,6 @@ public static class SideModels
         Sha256 = "4ba424cf62e51392e4d1a39933e803706f4e823c1065f36aaf149c6453f66bcd"
     };
 
-    /// <summary>Qwen3.5-9B at Q8_0 — MOSS-Image's frozen text encoder (the final normalized hidden state of every prompt
-    /// token), in unsloth's llama.cpp repack of <c>Qwen/Qwen3.5-9B</c>: half the size of the BF16 trunk OpenMOSS ships
-    /// under <c>text_encoder/</c>, and it carries its own tokenizer. A full MOSS-Image folder's BF16 encoder is used
-    /// instead when the checkpoint sits in one. Hash is pinned on the first real-weight run.</summary>
     /// <summary>Qwen3.5-9B in bf16 (the stock weights MOSS-Image was trained against; Comfy-Org's <c>MOSS-Image</c> repack
     /// ships the same file). Its hidden states match OpenMOSS's reference, where the Q8 GGUF's do not (see MossImageRecipe).</summary>
     public static readonly ModelAsset Qwen35_9BBf16 = new ModelAsset
@@ -202,7 +198,7 @@ public static class SideModels
     };
 
     /// <summary>The Qwen3.5 fast tokenizer (248k byte-level BPE vocabulary, chat special tokens), for a Qwen3.5 text
-    /// encoder loaded from safetensors, which carry no tokenizer. Hash is pinned on the first real-weight run.</summary>
+    /// encoder loaded from safetensors, which carry no tokenizer. Hash is the LFS object id at Qwen/Qwen3.5-9B @c202236235.</summary>
     public static readonly ModelAsset Qwen35Tokenizer = new ModelAsset
     {
         Repo = "Qwen/Qwen3.5-9B",
@@ -210,7 +206,7 @@ public static class SideModels
         TargetSubdir = "Tokenizers/Qwen35",
         TargetName = "qwen35_tokenizer.json",
         Role = "tokenizer",
-        Sha256 = null
+        Sha256 = "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
     };
 
     /// <summary>Qwen3-VL-4B (fp8_scaled) — Krea 2's, Mage-Flow's and FLUX.3 Klein's text encoder (rope θ=5e6); distinct from the base Qwen3-4B Z-Image / Flux.2 Klein 4B use. Flat filename matches SwarmUI's Comfy <c>RequireClipModel("qwen3vl_4b.safetensors")</c> for file reuse.</summary>
@@ -245,6 +241,17 @@ public static class SideModels
         TargetName = "qwen_2.5_vl_7b_fp8_scaled.safetensors",
         Role = "text encoder",
         Sha256 = "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4"
+    };
+
+    /// <summary>Glyph-ByT5-small (Glyph-SDXL-v2's byte-level T5 encoder, fp16): HunyuanImage 2.1's second text encoder,
+    /// run on quoted prompt text only. Hash is the LFS object id at Comfy-Org/Hunyuan-Image-2.1 @78cfe74376.</summary>
+    public static readonly ModelAsset ByT5SmallGlyphXl = new ModelAsset
+    {
+        Repo = "Comfy-Org/Hunyuan-Image-2.1",
+        RepoPath = "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        TargetSubdir = "text_encoders",
+        Role = "text encoder",
+        Sha256 = "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48"
     };
 
     /// <summary>HunyuanImage 2.1 VAE (32× downscale, 64-channel latent).</summary>

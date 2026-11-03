@@ -95,6 +95,9 @@ public static class AttentionHostReference
     /// <exception cref="ArgumentException">The operands disagree on geometry or address memory outside their tensors.</exception>
     internal static void Validate(in AttentionCall call)
     {
+        AttentionFormats refused = call.Numerics.Refused & AttentionNumerics.OperandFormats(in call);
+        if (refused != AttentionFormats.None)
+            throw new AttentionUnsupportedException($"The call refuses {refused}, and an operand or the output is stored in it.");
         AttentionOperand q = call.Query, k = call.Key, v = call.Value, o = call.Output;
         if (q.Batch <= 0 || q.Heads <= 0 || q.Tokens <= 0 || q.HeadDim <= 0 || k.Heads <= 0 || k.Tokens <= 0 || v.HeadDim <= 0)
             throw new ArgumentException($"Attention operands need positive extents; got Q={Describe(q)}, K={Describe(k)}, V={Describe(v)}.");

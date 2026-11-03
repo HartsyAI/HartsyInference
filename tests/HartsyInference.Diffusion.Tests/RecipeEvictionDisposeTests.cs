@@ -154,6 +154,53 @@ public sealed class RecipeEvictionDisposeTests
         secondLease.Lease.Dispose();
     }
 
+    [Fact]
+    public async Task ConcurrentVariantMisses_ReadTheBudgetUnderTheTurn_AndTheSecondEvictsTheFirstOnceItIsIdle()
+    {
+        FakeRecipe recipe = Register("test-turn-variants", throwOnDispose: false);
+        using ManualResetEventSlim entered = new();
+        using ManualResetEventSlim release = new();
+        recipe.Entered = entered;
+        recipe.BlockConstruct = release;
+        string checkpoint = Path.Combine(Path.GetTempPath(), $"{recipe.Name}-{Guid.NewGuid():N}.safetensors");
+        using (FileStream file = File.Create(checkpoint))
+        {
+            file.SetLength(Mb);
+        }
+        try
+        {
+            // 1 MB free cannot hold another variant of a 1 MB checkpoint, so the two variants never share the card.
+            IBackend backend = ScriptedFreeBackend.Create(9402, out ScriptedFreeBackend device);
+            device.Readings.Enqueue(Mb);
+            using InferenceEngine engine = new InferenceEngine(backend, "cuda:9402");
+            engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+            ModelSpec spec = SpecFor(recipe.Name, checkpoint);
+
+            Task<LeasedRecipe> firstMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("a")));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)));
+
+            // Nothing of the checkpoint is cached when the second variant misses, so a budget read before its turn would keep the first.
+            Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("b")));
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            release.Set();
+            LeasedRecipe firstLease = await firstMiss;
+
+            Assert.False(await HasCompletedWithin(secondMiss, 300));
+            Assert.Single(recipe.Built);
+
+            firstLease.Lease.Dispose();
+            LeasedRecipe secondLease = await secondMiss;
+
+            Assert.Same(recipe.Built[1], secondLease.Pipeline);
+            Assert.Equal(1, recipe.Built[0].DisposeCalls);
+            secondLease.Lease.Dispose();
+        }
+        finally
+        {
+            File.Delete(checkpoint);
+        }
+    }
+
     private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
         await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
 
@@ -256,11 +303,11 @@ public sealed class RecipeEvictionDisposeTests
         return recipe;
     }
 
-    private static ModelSpec SpecFor(string familyId) => new ModelSpec
+    private static ModelSpec SpecFor(string familyId, string? localPath = null) => new ModelSpec
     {
         Requested = familyId,
         Modality = Modality.Image,
-        LocalPath = $"/nonexistent/{familyId}.safetensors",
+        LocalPath = localPath ?? $"/nonexistent/{familyId}.safetensors",
         Catalog = new CatalogEntry
         {
             Id = familyId,

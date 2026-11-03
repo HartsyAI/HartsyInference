@@ -17,6 +17,12 @@ public static class ModelFileLocator
         {
             return null;
         }
+        // A relative name that climbs out of its folder is refused before the file-system probes below, which would
+        // otherwise resolve it against the working directory. Absolute paths are the operator's own and stay accepted.
+        if (!Path.IsPathRooted(nameOrPath) && Array.Exists(nameOrPath.Split('/', '\\'), part => part == ".."))
+        {
+            return null;
+        }
         if (File.Exists(nameOrPath))
         {
             return Path.GetFullPath(nameOrPath);

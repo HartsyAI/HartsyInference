@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
@@ -72,5 +73,28 @@ public sealed class LoraNoOpAndConfinementTests
         };
 
         Assert.NotEqual(RecipeCacheKey.Describe(plain), RecipeCacheKey.Describe(encoderOnly));
+    }
+
+    [Fact]
+    public void CacheKey_LoraPartialPolicy_SplitsCachedApplications()
+    {
+        ImageRequest request = new()
+        {
+            Prompt = "p",
+            Loras = new LoraStack { Entries = [new LoraEntry { Model = "x", Weight = 1 }] },
+        };
+
+        string allow;
+        using (KnobProfile.Create("lora-cache-allow").With(EngineKnobs.LoraPartialApplication, "allow").Push())
+        {
+            allow = RecipeCacheKey.Describe(request);
+        }
+        string refuse;
+        using (KnobProfile.Create("lora-cache-refuse").With(EngineKnobs.LoraPartialApplication, "refuse").Push())
+        {
+            refuse = RecipeCacheKey.Describe(request);
+        }
+
+        Assert.NotEqual(allow, refuse);
     }
 }
