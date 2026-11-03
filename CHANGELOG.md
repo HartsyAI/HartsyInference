@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: `numerics.animaF16` opt-in knob runs Anima's attention in F16.** Anima's self and cross attention carry the same F16 permission as Ernie, Wan and LTX. It is off by default: at 1024, seed 42, F16 attention moves the output (SSIM 0.957 against F32 on CUDA, 0.979 on Vulkan) and the real-generation A/B and Anima's V-range check are still pending, so the default flips only after they pass. The `reference` profile pins F32. The knob is read when the model is built.
+
 ## alpha.398
 
 - **Fixed: a streamed denoiser sizes its resident prefix by each block's own footprint.** The prefix was sized from block 0, a double-stream block, so HunyuanVideo's fp8 DiT streamed blocks it had room to keep resident.
