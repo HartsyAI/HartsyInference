@@ -17,7 +17,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// (<c>transformer/</c>, <c>text_encoder/</c>, <c>tokenizer/</c>, <c>vae/</c>; the folder or any file in it), its
 /// ComfyUI export's <c>diffusion_models</c> file, or a GGUF of either. The encoder, tokenizer and VAE come from the
 /// folder when the checkpoint sits in one, else from the caller's component overrides, else the side models
-/// (<see cref="SideModels.Qwen35_9B"/>, which carries its tokenizer, and <see cref="SideModels.Flux2Vae"/>). Base vs SFT
+/// (<see cref="SideModels.Qwen35_9BBf16"/>, <see cref="SideModels.Qwen35Tokenizer"/> and <see cref="SideModels.Flux2VaeSmall"/>). Base vs SFT
 /// is <see cref="MossImageVariants"/>. Drives through <see cref="MossImageRecipePipeline"/>.</summary>
 public sealed class MossImageRecipe : IArchitectureRecipe
 {
@@ -54,10 +54,14 @@ public sealed class MossImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public ModelVariantCatalog? Variants => MossImageVariants.Catalog;
 
+    /// <summary>The catalog ids of the Comfy-Org builds besides <see cref="Name"/>, which the registry resolves by id.</summary>
+    internal static readonly string[] BuildCatalogIds = ["moss-image-sft", "moss-image-int8", "moss-image-sft-int8"];
+
     /// <inheritdoc/>
     public bool Matches(string familyId) =>
         string.Equals(familyId, Name, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "moss_image", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(familyId, "moss_image", StringComparison.OrdinalIgnoreCase)
+        || BuildCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
 
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
