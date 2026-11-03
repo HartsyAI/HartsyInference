@@ -102,6 +102,18 @@ v-prediction EDM with CFG over DPM++ 3M SDE; Comfy-Org's all-in-one file (4.85 G
 3. **Listen.** A music prompt, an SFX prompt and a 45 s clip, each opened and listened to.
 4. **Swarm.** `Kind.Music`, once the engine version is published.
 
+### #639 ComfyUI `asym_w4a8_int8` loading (P11 infra, moved up)
+
+The decode runs on CPU and dense BF16 comes out.
+1. **Decode against comfy-kitchen.** On a real layer of Comfy-Org/MOSS-Image `text_encoders/qwen3.5_9b_w4a8_gptq.safetensors`
+   (`model.language_model.layers.0.mlp.down_proj`), compare `W4A8ConvRotCodec.DequantToBf16` with comfy-kitchen's
+   `dequantize_w4a8_int8_weight` (pip `comfy-kitchen`, eager backend).
+   - Pass: max |Δ| at the BF16 rounding floor.
+   - Also compare the same layer with the bf16 build (`qwen3.5_9b_bf16.safetensors`): relative L2 near comfy-kitchen's
+     documented ~0.07.
+2. **6-bit.** A w6a8 build (MiniMax-H3's `*_w6a8*` DiTs) through the same pass.
+3. **End to end.** Comes with the MOSS-Image w4a8 encoder PR (it also needs the Qwen3.5 int8 embedding dequant).
+
 ## Merged, with GPU items still open
 
 | PR | What | Still to run on GPU |
