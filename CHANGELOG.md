@@ -8,6 +8,9 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: ComfyUI `asym_w4a8_int8` weights load (4- and 6-bit, with ConvRot).** Each such layer decodes at load to a dense
+  BF16 weight (`W4A8ConvRotCodec`, transcribed from comfy-kitchen), so it runs as W4A16; the format's INT8 activation path is
+  not modelled. This unblocks Comfy-Org's w4a8 builds (MOSS-Image's Qwen3.5-9B encoder, Qwen3.8-27B, Ming's Ling-mini).
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
