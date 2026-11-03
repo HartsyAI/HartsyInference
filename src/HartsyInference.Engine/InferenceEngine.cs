@@ -917,9 +917,6 @@ public sealed class InferenceEngine : IInferenceEngine
         string videoKeep = $"video-recipe:{keepPath}|";
         string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
         string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
-        // The budget decision and the cached variants it was made for: a lease wait reuses it rather than reading the driver every wake.
-        bool evictSameCheckpoint = false;
-        List<string>? decidedFor = null;
         DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
         while (true)
         {
@@ -941,12 +938,9 @@ public sealed class InferenceEngine : IInferenceEngine
                         .Concat(_videoRecipePipelines.Keys.Where(k => k.StartsWith(videoKeep, StringComparison.OrdinalIgnoreCase)))
                         .ToList();
                 }
-                // Read under the turn, so a variant another miss published meanwhile is counted, but outside the cache lock: it calls the driver.
-                if (decidedFor is null || !decidedFor.SequenceEqual(sameCheckpoint, StringComparer.OrdinalIgnoreCase))
-                {
-                    evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath);
-                    decidedFor = sameCheckpoint;
-                }
+                // Read under the turn, so every retry accounts for variants published while a victim was leased. The
+                // free-memory reading must also be refreshed because the lease holder may have changed device usage.
+                bool evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath);
                 lock (_pipelineCacheLock)
                 {
                     List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
