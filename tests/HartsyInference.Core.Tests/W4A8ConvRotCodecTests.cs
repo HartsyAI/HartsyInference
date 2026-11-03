@@ -76,6 +76,28 @@ public sealed class W4A8ConvRotCodecTests
     }
 
     [Fact]
+    public void Int8Grid_WithTheChannelScale_IsTheSameWeightAsTheDenseDecode()
+    {
+        const int n = 3, k = 16, group = 4, rot = 16;
+        int[,] codes = Codes(n, k, 16, seed: 5);
+        float[] codebook = Enumerable.Range(0, 16).Select(i => (i - 7.5f) / 8f).ToArray();
+        float[] sRel = Enumerable.Range(0, n * k / group).Select(i => 90f + 3 * i).ToArray();
+        float[] sChannel = [0.01f, 0.03f, 0.002f];
+        using Tensor packed = new Tensor(new TensorShape(n, k / 2), DType.I8);
+        Pack(codes, 4).CopyTo(packed.AsSpan<byte>());
+        using Tensor rel = F32(sRel, n, k / group);
+        using Tensor chan = F32(sChannel, n);
+        using Tensor cb = F32(codebook, 16);
+
+        using Tensor grid = W4A8ConvRotCodec.DecodeToInt8(packed, rel, cb, group);
+        using Tensor viaInt8 = Int8ConvRotCodec.DequantToBf16(grid, chan, rot);
+        using Tensor dense = W4A8ConvRotCodec.DequantToBf16(packed, rel, chan, cb, null, group, rot);
+
+        Assert.Equal((DType.I8, new TensorShape(n, k)), (grid.DType, grid.Shape));
+        Assert.Equal(dense.AsReadOnlySpan<ushort>().ToArray(), viaInt8.AsReadOnlySpan<ushort>().ToArray());
+    }
+
+    [Fact]
     public void Width_DecidesTheBitDepth()
     {
         Assert.Equal(4, W4A8ConvRotCodec.BitsFor(64, 128));

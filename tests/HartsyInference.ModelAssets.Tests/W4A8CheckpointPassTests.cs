@@ -7,7 +7,8 @@ using Xunit;
 namespace HartsyInference.ModelAssets.Tests;
 
 /// <summary>The load-time pass for ComfyUI <c>asym_w4a8_int8</c> layers: it reads the descriptor's <c>group_size</c> and
-/// ConvRot group, decodes the weight to dense BF16, drops every companion, and leaves other layers alone. Layer naming
+/// ConvRot group, decodes the weight to its INT8 grid (or to dense BF16 when a correction term rules that out), drops every
+/// companion, and leaves other layers alone. Layer naming
 /// follows Comfy-Org's <c>qwen3.5_9b_w4a8_gptq.safetensors</c> header (<c>.weight</c>, <c>.weight_s_rel</c>,
 /// <c>.weight_s_channel</c>, <c>.weight_codebook</c>, <c>.comfy_quant</c>).</summary>
 public sealed class W4A8CheckpointPassTests
@@ -33,11 +34,32 @@ public sealed class W4A8CheckpointPassTests
 
         Assert.Equal(new[] { "mlp.down_proj.weight", "norm.weight" }, result.Keys.Order(StringComparer.Ordinal));
         Tensor weight = result["mlp.down_proj.weight"];
-        Assert.Equal(DType.BF16, weight.DType);
-        Assert.Equal(new TensorShape(1, 8), weight.Shape);
-        using Tensor f32 = weight.CastTo(DType.F32);
-        // codebook[code] = code - 8, s_rel 2 per group, s_channel 0.5: q = (code - 8)·2, w = q·0.5 = code - 8.
+        // No correction term: the layer stays on its INT8 grid, an int8_tensorwise weight scaled by s_channel.
+        Assert.Equal((DType.I8, new TensorShape(1, 8)), (weight.DType, weight.Shape));
+        Assert.Equal(("int8_tensorwise", 0), (weight.QuantInfo!.Format, weight.QuantInfo.ConvRotGroupSize));
+        Assert.Same(source["mlp.down_proj.weight_s_channel"], weight.QuantInfo.RowScale);
+        // codebook[code] = code - 8, s_rel 2 per group: q = (code - 8)·2; s_channel 0.5 makes w = code - 8.
+        Assert.Equal(new sbyte[] { -16, 14, -10, 0, -14, -12, 12, -2 }, weight.AsReadOnlySpan<sbyte>().ToArray());
+        using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(weight, weight.QuantInfo.RowScale!, 0);
+        using Tensor f32 = bf16.CastTo(DType.F32);
         Assert.Equal(new float[] { -8, 7, -5, 0, -7, -6, 6, -1 }, f32.AsReadOnlySpan<float>().ToArray());
+        weight.Dispose();
+        Dispose(source);
+    }
+
+    [Fact]
+    public void Pass_DecodesALayerWithACorrectionToBf16()
+    {
+        Dictionary<string, Tensor> source = Layer("mlp.down_proj", group: 4, codes: [[0, 15, 3, 8, 1, 2, 14, 7]]);
+        source["mlp.down_proj.weight_correction"] = F32([0.5f, -1f], 2, 1); // [groups, N]
+
+        Dictionary<string, Tensor> result = CheckpointConvertUtils.DequantW4A8(source);
+
+        Tensor weight = result["mlp.down_proj.weight"];
+        Assert.False(result.ContainsKey("mlp.down_proj.weight_correction"));
+        Assert.Equal((DType.BF16, (QuantWeightInfo?)null), (weight.DType, weight.QuantInfo));
+        using Tensor f32 = weight.CastTo(DType.F32);
+        Assert.Equal(new float[] { -7.5f, 7.5f, -4.5f, 0.5f, -8, -7, 5, -2 }, f32.AsReadOnlySpan<float>().ToArray());
         weight.Dispose();
         Dispose(source);
     }
@@ -77,7 +99,7 @@ public sealed class W4A8CheckpointPassTests
 
         // The caller owns what was decoded before the refusal, so it can free it.
         Tensor decoded = Assert.Single(allocated);
-        Assert.Equal((DType.BF16, new TensorShape(1, 8)), (decoded.DType, decoded.Shape));
+        Assert.Equal((DType.I8, new TensorShape(1, 8)), (decoded.DType, decoded.Shape));
         decoded.Dispose();
         Dispose(source);
     }

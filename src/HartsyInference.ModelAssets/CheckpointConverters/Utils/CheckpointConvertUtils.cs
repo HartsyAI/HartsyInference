@@ -701,10 +701,13 @@ public static unsafe class CheckpointConvertUtils
         return ComfyQuantDescriptor.TryParse(bytes[..end]);
     }
 
-    /// <summary>Decodes every ComfyUI <c>asym_w4a8_int8</c> layer (4- or 6-bit, <see cref="W4A8ConvRotCodec"/>) to a dense BF16
-    /// <c>.weight</c> and drops its companions (<c>.weight_s_rel</c>, <c>.weight_s_channel</c>, <c>.weight_codebook</c>,
-    /// <c>.weight_correction</c>, <c>.comfy_quant</c>). The layer then runs as W4A16: the format's INT8 activation path is
-    /// not modelled. A dictionary without such layers comes back unchanged.</summary>
+    /// <summary>Decodes every ComfyUI <c>asym_w4a8_int8</c> layer (4- or 6-bit, <see cref="W4A8ConvRotCodec"/>) and drops its
+    /// companions (<c>.weight_s_rel</c>, <c>.weight_s_channel</c>, <c>.weight_codebook</c>, <c>.weight_correction</c>,
+    /// <c>.comfy_quant</c>). A layer without a correction term becomes the INT8 grid it multiplies on, an I8 <c>.weight</c>
+    /// carrying <c>int8_tensorwise</c> <see cref="Tensor.QuantInfo"/> with <c>s_channel</c> as the row scale and the same
+    /// ConvRot group: that is the format's own weight at 1 byte per parameter, which a backend runs packed or widens like
+    /// any other int8 layer. A layer with a correction term has no int8 form and decodes to dense BF16. A dictionary
+    /// without such layers comes back unchanged.</summary>
     /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built before a
     /// later layer refused. Without it, this pass frees its own decodes when it throws.</param>
     public static Dictionary<string, Tensor> DequantW4A8(Dictionary<string, Tensor> source, List<Tensor>? allocated = null)
@@ -739,8 +742,10 @@ public static unsafe class CheckpointConvertUtils
                 result.TryGetValue(weightKey + "_codebook", out Tensor? codebook);
                 result.TryGetValue(weightKey + "_correction", out Tensor? correction);
                 int groupSize = descriptor.GroupSize > 0 ? descriptor.GroupSize : 16;
-                Tensor dense = W4A8ConvRotCodec.DequantToBf16(packed, sRel, sChannel, codebook, correction, groupSize,
-                    descriptor.ConvRotGroupSize);
+                Tensor dense = correction is null && sChannel.DType == DType.F32
+                    ? DecodeW4A8ToInt8(baseKey, packed, sRel, sChannel, codebook, groupSize, descriptor)
+                    : W4A8ConvRotCodec.DequantToBf16(packed, sRel, sChannel, codebook, correction, groupSize,
+                        descriptor.ConvRotGroupSize);
                 decoded.Add(dense);
                 allocated?.Add(dense);
                 result[weightKey] = dense;
@@ -761,6 +766,33 @@ public static unsafe class CheckpointConvertUtils
             throw;
         }
         return result;
+    }
+
+    /// <summary>One correction-free W4A8 layer as the I8 grid with <c>int8_tensorwise</c> metadata. The row scale borrows
+    /// <paramref name="sChannel"/>, which lives as long as the checkpoint it came from, as every int8 layer's scale does.</summary>
+    private static Tensor DecodeW4A8ToInt8(string baseKey, Tensor packed, Tensor sRel, Tensor sChannel, Tensor? codebook,
+        int groupSize, ComfyQuantDescriptor descriptor)
+    {
+        if (sChannel.ElementCount != packed.Shape[0])
+        {
+            throw new InvalidDataException(
+                $"'{baseKey}.weight_s_channel' holds {sChannel.ElementCount} scales for {packed.Shape[0]} rows.");
+        }
+        Tensor grid = W4A8ConvRotCodec.DecodeToInt8(packed, sRel, codebook, groupSize);
+        int rotation = descriptor.ConvRotGroupSize;
+        if (rotation > 0 && (!Int8ConvRotCodec.IsValidGroupSize(rotation) || grid.Shape[1] % rotation != 0))
+        {
+            grid.Dispose();
+            throw new InvalidDataException($"'{baseKey}' declares ConvRot group {rotation}, which does not fit {grid.Shape[1]} columns.");
+        }
+        grid.QuantInfo = new QuantWeightInfo
+        {
+            Format = "int8_tensorwise",
+            RowScale = sChannel,
+            ConvRotGroupSize = rotation,
+            FullPrecisionMatMul = descriptor.FullPrecisionMatMul,
+        };
+        return grid;
     }
 
     /// <summary>Moves ComfyUI's <c>int8_tensorwise</c> companions — the <c>.weight_scale</c> per-output-row scale and the <c>.comfy_quant</c> descriptor — onto <see cref="Tensor.QuantInfo"/> of the I8 weight they belong to, and returns a dictionary without those companion keys. The weight itself is left <b>packed</b>: dequantizing here would turn LTX 2.5's 21.5 GB int8 DiT back into 42 GB, which is the whole reason the format exists.</summary>

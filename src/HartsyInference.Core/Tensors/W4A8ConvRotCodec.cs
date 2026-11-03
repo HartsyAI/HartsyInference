@@ -35,9 +35,47 @@ public static class W4A8ConvRotCodec
     public static Tensor DequantToBf16(Tensor weight, Tensor sRel, Tensor sChannel, Tensor? codebook, Tensor? correction,
         int groupSize, int convRotGroupSize)
     {
+        ArgumentNullException.ThrowIfNull(sChannel);
+        using Tensor grid = DecodeToInt8(weight, sRel, codebook, groupSize);
+        int n = (int)grid.Shape[0], k = (int)grid.Shape[1];
+        int groups = (int)sRel.Shape[1];
+        if (sChannel.ElementCount != n)
+            throw new ArgumentException($"W4A8 s_channel must hold {n} row scales; got {sChannel.ElementCount}.", nameof(sChannel));
+        if (correction is not null && (correction.Shape.Rank != 2 || correction.Shape[0] != groups || correction.Shape[1] != n))
+            throw new ArgumentException($"W4A8 correction must be [{groups}, {n}]; got {correction.Shape}.", nameof(correction));
+        if (correction is not null && BitsFor(weight.Shape[1], k) == 6)
+            throw new ArgumentException("6-bit W4A8 storage is uniform and symmetric: it takes no codebook or correction.");
+        if (convRotGroupSize > 0 && (!Int8ConvRotCodec.IsValidGroupSize(convRotGroupSize) || k % convRotGroupSize != 0))
+            throw new ArgumentException($"ConvRot group {convRotGroupSize} does not fit {k} columns.");
+
+        float[] chan = Floats(sChannel);
+        float[]? corr = correction is null ? null : Floats(correction);
+        ReadOnlySpan<sbyte> codes = grid.AsReadOnlySpan<sbyte>();
+        using Tensor dense = new Tensor(new TensorShape(n, k), DType.F32);
+        Span<float> output = dense.AsSpan<float>();
+        for (int r = 0; r < n; r++)
+        {
+            Span<float> outRow = output.Slice(r * k, k);
+            for (int col = 0; col < k; col++)
+            {
+                float value = codes[r * k + col] * chan[r];
+                if (corr is not null)
+                    value += corr[(col / groupSize) * n + r];
+                outRow[col] = value;
+            }
+            if (convRotGroupSize > 0)
+                Int8ConvRotCodec.ApplyRotationInPlace(outRow, convRotGroupSize);
+        }
+        return dense.CastTo(DType.BF16);
+    }
+
+    /// <summary>Decodes the packed codes to the INT8 grid the format multiplies on, <c>q = clamp(round(level·s_rel), −127, 127)</c>,
+    /// as I8 <c>[N, K]</c>, still in the rotated basis. With no correction term, <c>q</c> times <c>s_channel</c> per row is
+    /// the weight, so <c>q</c> with <c>s_channel</c> as its row scale is an <c>int8_tensorwise</c> weight (ConvRot included).</summary>
+    public static Tensor DecodeToInt8(Tensor weight, Tensor sRel, Tensor? codebook, int groupSize)
+    {
         ArgumentNullException.ThrowIfNull(weight);
         ArgumentNullException.ThrowIfNull(sRel);
-        ArgumentNullException.ThrowIfNull(sChannel);
         if (weight.DType != DType.I8 || weight.Shape.Rank != 2)
             throw new ArgumentException($"W4A8 weight must be I8 rank-2; got {weight.DType} {weight.Shape}.", nameof(weight));
         if (sRel.Shape.Rank != 2 || groupSize < 1)
@@ -46,31 +84,25 @@ public static class W4A8ConvRotCodec
         int groups = (int)sRel.Shape[1];
         int k = groups * groupSize;
         int bits = BitsFor(weight.Shape[1], k);
-        if (sRel.Shape[0] != n || sChannel.ElementCount != n)
-            throw new ArgumentException($"W4A8 scales must cover {n} rows; s_rel is {sRel.Shape}, s_channel has {sChannel.ElementCount}.");
+        if (sRel.Shape[0] != n)
+            throw new ArgumentException($"W4A8 s_rel must cover {n} rows; got {sRel.Shape}.", nameof(sRel));
         if (bits == 4 && codebook is { ElementCount: not 16 })
             throw new ArgumentException($"A 4-bit codebook holds 16 levels; got {codebook.ElementCount}.", nameof(codebook));
-        if (bits == 6 && (codebook is not null || correction is not null))
+        if (bits == 6 && codebook is not null)
             throw new ArgumentException("6-bit W4A8 storage is uniform and symmetric: it takes no codebook or correction.");
-        if (correction is not null && (correction.Shape.Rank != 2 || correction.Shape[0] != groups || correction.Shape[1] != n))
-            throw new ArgumentException($"W4A8 correction must be [{groups}, {n}]; got {correction.Shape}.", nameof(correction));
-        if (convRotGroupSize > 0 && (!Int8ConvRotCodec.IsValidGroupSize(convRotGroupSize) || k % convRotGroupSize != 0))
-            throw new ArgumentException($"ConvRot group {convRotGroupSize} does not fit {k} columns.");
 
         float[] rel = Floats(sRel);
-        float[] chan = Floats(sChannel);
         float[]? levels = codebook is null ? null : Floats(codebook);
-        float[]? corr = correction is null ? null : Floats(correction);
         ReadOnlySpan<byte> packed = weight.AsReadOnlySpan<byte>();
         int width = (int)weight.Shape[1];
         float offset = 1 << (bits - 1);
 
-        using Tensor dense = new Tensor(new TensorShape(n, k), DType.F32);
-        Span<float> output = dense.AsSpan<float>();
+        Tensor grid = new Tensor(new TensorShape(n, k), DType.I8);
+        Span<sbyte> output = grid.AsSpan<sbyte>();
         for (int r = 0; r < n; r++)
         {
             ReadOnlySpan<byte> row = packed.Slice(r * width, width);
-            Span<float> outRow = output.Slice(r * k, k);
+            Span<sbyte> outRow = output.Slice(r * k, k);
             for (int col = 0; col < k; col++)
             {
                 byte b = row[col >> 1];
@@ -78,18 +110,11 @@ public static class W4A8ConvRotCodec
                 if (bits == 6)
                     code |= ((row[(k >> 1) + (col >> 2)] >> (2 * (col & 3))) & 0x3) << 4;
                 float level = levels is not null ? levels[code] : code - offset;
-                int g = col / groupSize;
                 // round half to even on the float32 product, as torch's round_() does.
-                float q = Math.Clamp(MathF.Round(level * rel[r * groups + g], MidpointRounding.ToEven), -127f, 127f);
-                float value = q * chan[r];
-                if (corr is not null)
-                    value += corr[g * n + r];
-                outRow[col] = value;
+                outRow[col] = (sbyte)Math.Clamp(MathF.Round(level * rel[r * groups + col / groupSize], MidpointRounding.ToEven), -127f, 127f);
             }
-            if (convRotGroupSize > 0)
-                Int8ConvRotCodec.ApplyRotationInPlace(outRow, convRotGroupSize);
         }
-        return dense.CastTo(DType.BF16);
+        return grid;
     }
 
     /// <summary>A copy of <paramref name="t"/>'s values as F32, converting (FP8, BF16, F16) through a temporary.</summary>
