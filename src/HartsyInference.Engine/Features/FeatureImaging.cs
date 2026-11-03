@@ -36,6 +36,31 @@ public static class FeatureImaging
         return dst;
     }
 
+    /// <summary>Resizes RGB24 with the PIL Lanczos filter used by ComfyUI's <c>common_upscale(..., "lanczos", "disabled")</c>.
+    /// This is intentionally separate from the engine-wide bicubic default because reference adapters can be trained against a
+    /// particular pixel preprocessing path.</summary>
+    public static byte[] ResizeRgb24Lanczos(ImageData image, int width, int height)
+    {
+        ArgumentNullException.ThrowIfNull(image);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"Target size must be positive; got {width}x{height}.");
+        long expected = (long)image.Width * image.Height * 3;
+        if (image.Rgb.LongLength < expected)
+            throw new InvalidOperationException($"Image has {image.Rgb.LongLength} bytes, expected {expected} for {image.Width}x{image.Height} RGB24.");
+        if (image.Width == width && image.Height == height)
+        {
+            byte[] copy = new byte[expected];
+            Array.Copy(image.Rgb, copy, expected);
+            return copy;
+        }
+        float[] resized = new float[(long)width * height * 3];
+        Resample.LanczosHwc8(image.Rgb, image.Width, image.Height, 3, resized, width, height);
+        byte[] dst = new byte[resized.Length];
+        for (int i = 0; i < resized.Length; i++)
+            dst[i] = (byte)Math.Clamp(MathF.Round(resized[i]), 0f, 255f);
+        return dst;
+    }
+
     /// <summary>Covers <paramref name="width"/>×<paramref name="height"/> at the image's own aspect (a bicubic scale, then the
     /// smaller overhang centred and cropped away); the same size as the image returns it unchanged.</summary>
     public static ImageData CoverCrop(ImageData image, int width, int height)

@@ -72,6 +72,22 @@ public sealed class ReferenceImageResolverTests
     }
 
     [Fact]
+    public void LanczosReferenceResize_PreservesDimensionsAndConstantPixels()
+    {
+        ReferenceImagePolicy anima = Moss with { LatentResize = ReferenceResizeMethod.Lanczos };
+        ImageData constant = new() { Rgb = Enumerable.Repeat((byte)127, 8 * 8 * 3).ToArray(), Width = 8, Height = 8 };
+        using ResolvedReferences? references = ReferenceImageResolver.Resolve([constant], anima with
+        {
+            LatentTargetArea = 16 * 16,
+            LatentMultiple = 8,
+            LatentUpscale = true,
+        });
+        Assert.NotNull(references);
+        Assert.Equal(new long[] { 1, 3, 16, 16 }, Dims(references!.Latent[0]));
+        Assert.All(references.Latent[0].AsReadOnlySpan<float>().ToArray(), value => Assert.InRange(value, -0.01f, 0.01f));
+    }
+
+    [Fact]
     public void LatentSideDivisor_RoundsEachSideToTheMultipleWithPythonsTiesToEven()
     {
         ReferenceImagePolicy half = Moss with { LatentSideDivisor = 2, LatentMultiple = 16, LatentTargetArea = 0 };
