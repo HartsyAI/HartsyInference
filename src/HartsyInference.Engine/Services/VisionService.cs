@@ -66,6 +66,7 @@ public sealed class VisionService : IVisionService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
+        VisionRequestValidator.Validate(request);
         return Task.Run(
             () =>
             {
@@ -82,11 +83,43 @@ public sealed class VisionService : IVisionService, IDisposable
                     VisionMode.SegMap => SegMap(spec, request),
                     VisionMode.BackgroundRemoval => BackgroundRemoval(spec, request),
                     VisionMode.Upscale => Upscale(spec, request, cancel),
-                    _ => throw new NotSupportedException($"Unknown vision mode '{request.Mode}'."),
+                    _ => throw NoModelFor(request.Mode, spec),
                 };
             },
             cancel);
     }
+
+    /// <inheritdoc/>
+    /// <remarks>No model in this build declares multi-view input, so a valid request is refused by name.</remarks>
+    public Task<VisionResult> RunViewsAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        CheckBatch(request, VisionSequenceKind.Views);
+        throw NoModelFor(request.Mode, spec, "multi-view ");
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>No tracking or interpolation model is in this build yet; a model's stream runs through
+    /// <see cref="VisionFrameStream"/> so its buffering, cancellation and cleanup follow one contract.</remarks>
+    public IAsyncEnumerable<VisionFrameResult> RunFramesAsync(ModelSpec spec, VisionBatchRequest request, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        CheckBatch(request, VisionSequenceKind.Frames);
+        throw NoModelFor(request.Mode, spec);
+    }
+
+    private static void CheckBatch(VisionBatchRequest request, VisionSequenceKind expected)
+    {
+        VisionRequestValidator.Validate(request);
+        if (request.Kind != expected)
+        {
+            throw new ArgumentException(
+                $"This call runs {expected.ToString().ToLowerInvariant()}; the request's Kind is {request.Kind}.");
+        }
+    }
+
+    private static NotSupportedException NoModelFor(VisionMode mode, ModelSpec spec, string qualifier = "") =>
+        new NotSupportedException($"No {qualifier}{mode} model is implemented for '{spec.Requested}' in this build.");
 
     /// <summary>Embed: routes to the standalone CLIP / SigLIP / DINOv2 tower matching the requested catalog id (default CLIP ViT-L/14, matching <c>openai/clip-vit-large-patch14</c> — the family with a real-weight parity test).</summary>
     private VisionResult Embed(ModelSpec spec, VisionRequest request)

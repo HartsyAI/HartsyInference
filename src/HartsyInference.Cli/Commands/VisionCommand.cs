@@ -12,9 +12,9 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
     /// <summary>Options for <c>hartsy vision</c>.</summary>
     public sealed class Settings : CommandSettings
     {
-        /// <summary>Path to the input PNG image.</summary>
+        /// <summary>Path to the input image, or a folder of images for frame and multi-view modes.</summary>
         [CommandArgument(0, "<image>")]
-        [Description("Path to the input PNG image.")]
+        [Description("Path to the input image, or a folder of images (sorted by name): the frames for track/interpolate, or the views for multi-view depth/metric-depth/geometry.")]
         public string Image { get; init; } = "";
 
         /// <summary>Model id: clip (embed) or yolo8 / yolo11 (detect).</summary>
@@ -39,8 +39,23 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
 
         /// <summary>Vision operation; inferred from the model id when omitted.</summary>
         [CommandOption("--mode")]
-        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, or upscale. Inferred from the model id when omitted.")]
+        [Description("Operation: embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, upscale, metric-depth, geometry, pose, matting, face, intrinsic, track, or interpolate. Inferred from the model id when omitted. Structured results write .npy arrays, PNG previews and a result.json.")]
         public string? Mode { get; init; }
+
+        /// <summary>Frame modes: the input folder's frame rate.</summary>
+        [CommandOption("--fps")]
+        [Description("track/interpolate: the input frames' rate (frame i is at i / fps seconds).")]
+        public double? Fps { get; init; }
+
+        /// <summary>Interpolate: output frames per input interval.</summary>
+        [CommandOption("--factor")]
+        [Description("interpolate: output frames per input interval (2 doubles the rate). Use this or --target-fps.")]
+        public int? Factor { get; init; }
+
+        /// <summary>Interpolate: the output frame rate.</summary>
+        [CommandOption("--target-fps")]
+        [Description("interpolate: the output frame rate, above the input rate. Use this or --factor.")]
+        public double? TargetFps { get; init; }
 
         /// <summary>Upscale only: fit the result to this width (see <see cref="Height"/>).</summary>
         [CommandOption("--width")]
@@ -91,6 +106,18 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
         if (settings.Height is int height)
         {
             parameters.Put("height", height.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Fps is double fps)
+        {
+            parameters.Put("fps", fps.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.Factor is int factor)
+        {
+            parameters.Put("factor", factor.ToString(CultureInfo.InvariantCulture));
+        }
+        if (settings.TargetFps is double targetFps)
+        {
+            parameters.Put("target-fps", targetFps.ToString(CultureInfo.InvariantCulture));
         }
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Vision);

@@ -463,32 +463,29 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> VisionAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
+        VisionMode visionMode = ParseVisionMode(parameters.Get("mode") ?? "embed");
+        string inputPath = prompt.Trim().Trim('"');
+        if (Directory.Exists(inputPath))
+        {
+            return await VisionBatchAsync(engine, spec, inputPath, visionMode, parameters, outputDir, cancel).ConfigureAwait(false);
+        }
         ImageData image = LoadImage(prompt);
-        string mode = parameters.Get("mode") ?? "embed";
         VisionRequest request = new VisionRequest
         {
             Image = image,
-            Mode = mode.ToLowerInvariant() switch
-            {
-                "detect" => VisionMode.Detect,
-                "segment" => VisionMode.Segment,
-                "embed" => VisionMode.Embed,
-                "depth" => VisionMode.Depth,
-                "edge" => VisionMode.Edge,
-                "lineart" => VisionMode.Lineart,
-                "normal" => VisionMode.Normal,
-                "segmap" => VisionMode.SegMap,
-                "removebg" => VisionMode.BackgroundRemoval,
-                "upscale" => VisionMode.Upscale,
-                _ => throw new ArgumentException(
-                    $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, or upscale."),
-            },
+            Mode = visionMode,
             Prompt = parameters.Get("query"),
             Threshold = parameters.GetFloat("confidence", 0.25f),
             TargetWidth = parameters.GetIntOrNull("width"),
             TargetHeight = parameters.GetIntOrNull("height"),
         };
+        VisionRequestValidator.Validate(request);
         VisionResult result = await engine.Vision.RunAsync(spec, request, cancel).ConfigureAwait(false);
+
+        if (VisionOutputWriter.HasStructured(result))
+        {
+            return StructuredVisionArtifact(result, outputDir, inputPath);
+        }
 
         if (result.Masks is { Count: > 0 } masks)
         {
@@ -543,6 +540,92 @@ public static class GenerationDispatch
         {
             artifact.Meta["detections"] = result.Detections.Count.ToString(CultureInfo.InvariantCulture);
         }
+        return artifact;
+    }
+
+    /// <summary>The CLI's <c>--mode</c> names for each <see cref="VisionMode"/>.</summary>
+    internal static VisionMode ParseVisionMode(string mode) => mode.ToLowerInvariant() switch
+    {
+        "detect" => VisionMode.Detect,
+        "segment" => VisionMode.Segment,
+        "embed" => VisionMode.Embed,
+        "depth" => VisionMode.Depth,
+        "edge" => VisionMode.Edge,
+        "lineart" => VisionMode.Lineart,
+        "normal" => VisionMode.Normal,
+        "segmap" => VisionMode.SegMap,
+        "removebg" => VisionMode.BackgroundRemoval,
+        "upscale" => VisionMode.Upscale,
+        "metric-depth" => VisionMode.MetricDepth,
+        "geometry" => VisionMode.Geometry,
+        "pose" => VisionMode.Pose,
+        "matting" => VisionMode.Matting,
+        "face" => VisionMode.Face,
+        "intrinsic" => VisionMode.Intrinsic,
+        "track" => VisionMode.Track,
+        "interpolate" => VisionMode.Interpolate,
+        _ => throw new ArgumentException(
+            $"Unknown vision mode '{mode}'. Use embed, detect, segment, depth, edge, lineart, normal, segmap, removebg, upscale, "
+            + "metric-depth, geometry, pose, matting, face, intrinsic, track, or interpolate."),
+    };
+
+    /// <summary>A folder input: its images (sorted by name) become the frames of a track or interpolate run, or the views
+    /// of a multi-view depth/geometry run. Frame runs need <c>--fps</c>; interpolation needs <c>--factor</c> or
+    /// <c>--target-fps</c>; tracking takes its text prompt from <c>--prompt</c> on the first frame.</summary>
+    private static async Task<GeneratedArtifact> VisionBatchAsync(IInferenceEngine engine, ModelSpec spec, string folder,
+        VisionMode mode, ParamState parameters, string? outputDir, CancellationToken cancel)
+    {
+        string[] paths = Directory.EnumerateFiles(folder)
+            .Where(p => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                || p.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (paths.Length == 0)
+        {
+            throw new ArgumentException($"No .png or .jpg images in '{folder}'.");
+        }
+        List<ImageData> images = paths.Select(LoadImage).ToList();
+        bool frames = VisionRequestValidator.IsSequenceOnly(mode);
+        string? query = parameters.Get("query");
+        VisionBatchRequest request = new VisionBatchRequest
+        {
+            Images = images,
+            Mode = mode,
+            Kind = frames ? VisionSequenceKind.Frames : VisionSequenceKind.Views,
+            Fps = frames ? parameters.GetDoubleOrNull("fps") : null,
+            InterpolationFactor = parameters.GetIntOrNull("factor"),
+            TargetFps = parameters.GetDoubleOrNull("target-fps"),
+            Prompts = mode == VisionMode.Track && !string.IsNullOrWhiteSpace(query)
+                ? [new VisionFramePrompt { FrameIndex = 0, ObjectId = 1, Text = query }]
+                : null,
+            Threshold = parameters.GetFloat("confidence", 0.25f),
+        };
+        VisionRequestValidator.Validate(request);
+        string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), folder);
+        if (!frames)
+        {
+            VisionResult result = await engine.Vision.RunViewsAsync(spec, request, cancel).ConfigureAwait(false);
+            IReadOnlyList<string> files = VisionOutputWriter.WriteResult(result, dir);
+            return SelfWrittenVisionArtifact($"{images.Count} views → {files.Count} file(s) in {dir}", files.Count);
+        }
+        int written = await VisionOutputWriter.WriteFramesAsync(engine.Vision.RunFramesAsync(spec, request, cancel), dir, cancel)
+            .ConfigureAwait(false);
+        return SelfWrittenVisionArtifact($"{images.Count} input frames → {written} output frame(s) in {dir}", written);
+    }
+
+    /// <summary>Writes a single-image structured result (depth, geometry, pose, faces, matting, intrinsics) to a fresh run
+    /// folder and reports it.</summary>
+    private static GeneratedArtifact StructuredVisionArtifact(VisionResult result, string? outputDir, string inputPath)
+    {
+        string dir = VisionOutputWriter.NewRunDirectory(outputDir ?? RepoPaths.OutputRoot(), inputPath);
+        IReadOnlyList<string> files = VisionOutputWriter.WriteResult(result, dir);
+        return SelfWrittenVisionArtifact($"{files.Count} file(s) in {dir}", files.Count);
+    }
+
+    private static GeneratedArtifact SelfWrittenVisionArtifact(string text, int count)
+    {
+        GeneratedArtifact artifact = new GeneratedArtifact { Kind = ArtifactKind.Data, Extension = "json", Text = text, SelfWritten = true };
+        artifact.Meta["files"] = count.ToString(CultureInfo.InvariantCulture);
         return artifact;
     }
 
