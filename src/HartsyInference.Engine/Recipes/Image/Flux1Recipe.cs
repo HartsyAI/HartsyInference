@@ -42,11 +42,14 @@ public sealed class Flux1Recipe : IArchitectureRecipe
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
     /// <inheritdoc/>
-    /// <remarks>Matches the catalog id <c>flux1-fill</c> as well: the registry resolves a catalog entry by its id, and the Fill
-    /// transformer runs through this recipe.</remarks>
+    /// <remarks>Matches the Fill catalog ids as well: the registry resolves a catalog entry by its id, and Fill transformers
+    /// (FLUX.1 Fill and its OneReward fine-tune) run through this recipe.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "flux1", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(familyId, "flux1-fill", StringComparison.OrdinalIgnoreCase);
+        || FillCatalogIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The catalog ids of the Fill transformers this recipe runs.</summary>
+    internal static readonly string[] FillCatalogIds = ["flux1-fill", "onereward-fill", "onereward-fill-fp8"];
 
     /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
