@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: the vision request and output contracts for multi-view, temporal and structured modes.** `VisionBatchRequest` takes
+  ordered views or timed frames (timestamps or fps, per-frame prompts, interpolation targets), and `VisionMode` gains
+  `MetricDepth`, `Geometry`, `Pose`, `Matting`, `Face`, `Intrinsic`, `Track` and `Interpolate`. `VisionResult` adds typed depth,
+  point-map, normal, camera, pose, face and track fields; a per-mode table validates inputs in the service, CLI and API. The CLI
+  writes `.npy` arrays with a JSON sidecar, `/v1/native/vision` returns base64 little-endian arrays, and
+  `/v1/native/vision/sequence` streams one result per frame. No model implements the new modes yet: each refuses by name before
+  anything loads, and the existing modes are unchanged.
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
