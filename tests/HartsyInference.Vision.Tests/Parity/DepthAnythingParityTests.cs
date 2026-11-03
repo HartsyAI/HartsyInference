@@ -89,6 +89,8 @@ public sealed unsafe class DepthAnythingParityTests
         loader.Load(checkpoint);
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
         _output.WriteLine($"[load] {sw.ElapsedMilliseconds} ms — {weights.Count} tensors");
+        // VisionService picks the preset from the weights; the real checkpoint must land on the one this case pins.
+        Assert.Equal(preset.Name, DepthAnythingPreset.FromWeights(weights).Name);
 
         DepthAnythingV2Model model = new(preset);
         model.LoadWeights(weights);

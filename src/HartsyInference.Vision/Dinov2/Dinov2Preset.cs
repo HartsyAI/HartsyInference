@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors;
+
 namespace HartsyInference.Vision.Dinov2;
 
 /// <summary>Configuration for a DINOv2 ViT backbone (Meta, Apache-2.0) — the standard image-conditioning
@@ -131,4 +133,43 @@ public sealed record Dinov2Preset
         HiddenSize = 1024, NumLayers = 24, NumHeads = 16, IntermediateSize = 4096,
         ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
     };
+
+    /// <summary>The DINOv2 variant an HF-layout checkpoint was trained as, read from its width
+    /// (<c>embeddings.cls_token</c>), layer count, register tokens and patch size. Throws for DINOv3 (16 px patches, RoPE
+    /// the encoder lacks) and for any shape no released DINOv2 variant has.</summary>
+    public static Dinov2Preset FromWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
+    {
+        string p = prefix.Length == 0 ? "" : prefix + ".";
+        if (!weights.TryGetValue($"{p}embeddings.cls_token", out Tensor? cls)
+            || !weights.TryGetValue($"{p}embeddings.patch_embeddings.projection.weight", out Tensor? patch))
+        {
+            throw new NotSupportedException(
+                $"Not an HF-layout DINOv2 checkpoint: '{p}embeddings.cls_token' or its patch projection is missing.");
+        }
+        int hidden = (int)cls.Shape[cls.Shape.Rank - 1];
+        int patchSize = (int)patch.Shape[patch.Shape.Rank - 1];
+        int registers = weights.TryGetValue($"{p}embeddings.register_tokens", out Tensor? reg) ? (int)reg.Shape[1] : 0;
+        int layers = 0;
+        while (weights.ContainsKey($"{p}encoder.layer.{layers}.norm1.weight"))
+            layers++;
+
+        if (patchSize != 14)
+        {
+            throw new NotSupportedException(
+                $"DINOv2 checkpoint with {patchSize} px patches looks like DINOv3, which needs rotary position embeddings "
+                + "the encoder does not implement yet.");
+        }
+        Dinov2Preset? preset = (hidden, layers, registers) switch
+        {
+            (384, 12, 0) => Small,
+            (768, 12, 0) => Base,
+            (1024, 24, 0) => Large,
+            (1024, 24, 4) => LargeReg,
+            (1536, 40, 0) => Giant,
+            _ => null,
+        };
+        return preset ?? throw new NotSupportedException(
+            $"DINOv2 checkpoint with width {hidden}, {layers} layers and {registers} register tokens matches no supported "
+            + "variant (Small 384×12, Base 768×12, Large 1024×24 with 0 or 4 registers, Giant 1536×40).");
+    }
 }
