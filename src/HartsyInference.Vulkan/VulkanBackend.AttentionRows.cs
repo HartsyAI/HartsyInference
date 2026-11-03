@@ -61,15 +61,14 @@ public sealed partial class VulkanBackend
         switch (call.Route)
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajor:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale, call.Numerics);
                 break;
             case AttentionRoute.TokenMajorGqa:
                 ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
-                    call.Numerics.LegacyAssertedBounded);
+                    call.Numerics);
                 break;
             case AttentionRoute.Flash:
                 FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
@@ -160,11 +159,26 @@ public sealed partial class VulkanBackend
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = AnyBias, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "A.2",
                 (in AttentionCall c) => c.QkHeadDim <= FlashMaxHeadDim && c.KvHeads > 0 && c.Heads % c.KvHeads == 0
-                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
+                    && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch) && !TiledF32Admits(in c),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Scale,
                         causal: false, qOffset: 0, slidingWindow: 0, skv: c.KeyTokens, kvGroup: c.Heads / c.KvHeads);
+                    return true;
+                }),
+            // Behind A.2, which steps aside for the calls this row admits (TiledF32Admits), so the knob decides those calls.
+            new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+                {
+                    MaxHeadDim = TiledMaxHeadDim, Gqa = true, Masks = AnyBias,
+                }, "A.2t",
+                (in AttentionCall c) => TiledF32Admits(in c),
+                (in AttentionCall c) =>
+                {
+                    DispatchFlashTiled(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias,
+                        new TiledCall(c.Batch, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens, c.QkHeadDim, c.Scale, Causal: false,
+                            QOffset: 0, Window: 0, HeadMajorStrides(c.Heads, c.QueryTokens, c.QkHeadDim),
+                            HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim), HeadMajorStrides(c.KvHeads, c.KeyTokens, c.QkHeadDim),
+                            HeadMajorStrides(c.Heads, c.QueryTokens, c.QkHeadDim)));
                     return true;
                 }),
             new DelegateAttentionRow(Cap("naive", E, AttentionDTypes.Any, AttentionDTypes.Any, HM) with
@@ -212,7 +226,7 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) =>
                 {
                     AttendTokenMajorViaHeadMajor(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Mask.Bias, c.Heads,
-                        c.KvHeads, c.QkHeadDim, c.QueryTokens, c.KeyTokens, c.Scale, c.Numerics.LegacyAssertedBounded);
+                        c.KvHeads, c.QkHeadDim, c.QueryTokens, c.KeyTokens, c.Scale, c.Numerics);
                     t_attentionRoute = AttentionRouteText.Nested("B.2/", t_attentionRoute);
                     return true;
                 }),

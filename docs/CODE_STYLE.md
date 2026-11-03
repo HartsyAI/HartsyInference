@@ -93,7 +93,9 @@ Parity tests live in tests/<Project>/Parity/ and end in *ParityTests, selected w
 FullyQualifiedName~Parity. Resource-dependent tests remain resource-dependent after numerical verification;
 only self-contained CPU tests can graduate to Unit. Never remove a resource trait just because parity passed.
 Missing checkpoints may skip normal integration runs; mandatory campaigns use HARTSY_REQUIRE_REAL_WEIGHTS=1
-where supported so missing weights fail rather than masquerade as validation.
+where supported so missing weights fail rather than masquerade as validation. Mandatory runs go through
+tests/require-executed.sh, which also fails on SKIPPED or backend-guard lines, zero passed, or a manifest test that
+did not execute.
 
 Most tests/python-reference binary dumps are gitignored. Commit small deterministic Unit fixtures under
 an explicit ignore exception; otherwise guard them and classify as Integration. Tests target net10.0;
