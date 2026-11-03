@@ -15,6 +15,7 @@ stable release will require. Dates are UTC.
   `materialized` attention row is split so a refused F16 keeps its F32 fallback, and the Vulkan dense and token-major entries now
   carry the call's numerics. Other models' attention routes are unchanged.
 - **Added: `numerics.animaF16` opt-in knob runs Anima's attention in F16.** Anima's self and cross attention carry the same F16 permission as Ernie, Wan and LTX. It is off by default: at 1024, seed 42, F16 attention moves the output (SSIM 0.957 against F32 on CUDA, 0.979 on Vulkan) and the real-generation A/B and Anima's V-range check are still pending, so the default flips only after they pass. The `reference` profile pins F32. The knob is read when the model is built.
+- **Added: query-tiled F32 flash attention on Vulkan, behind `numerics.vkTiledAttention` (default `off`).** `sdpa_flash_tiled` stages a query tile and key/value tiles in shared memory with an online softmax, takes head dims up to 256 with an optional additive bias, and addresses head-major and token-major tensors by strides. With `auto`, dense F32 attention takes it ahead of the scalar `sdpa_flash` route, which stays the fallback; `off` changes nothing.
 
 ## alpha.400
 
