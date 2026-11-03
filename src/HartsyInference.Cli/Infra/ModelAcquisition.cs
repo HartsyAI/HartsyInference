@@ -58,7 +58,10 @@ public static class ModelAcquisition
         // AudioWeightsCatalog data once the files are on disk.
         bool isFolderFamily = spec.Modality == Modality.Music && AudioWeightsCatalog.IsFolderCheckpoint(cat.Id);
 
-        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat);
+        // A checkpoint named with --model-path already is the transformer, so the catalog's copy is not fetched.
+        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat)
+            .Where(a => spec.LocalPath is null || a.Role != "transformer")
+            .ToList();
         if (missing.Count == 0)
         {
             string? present = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);

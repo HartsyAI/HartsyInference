@@ -15,6 +15,10 @@ stable release will require. Dates are UTC.
   writes `.npy` arrays with a JSON sidecar, `/v1/native/vision` returns base64 little-endian arrays, and
   `/v1/native/vision/sequence` streams one result per frame. No model implements the new modes yet: each refuses by name before
   anything loads, and the existing modes are unchanged.
+- **Added: Hunyuan-Image 2.1 renders quoted prompt text through its ByT5 glyph stream.** Quoted spans run through
+  Glyph-ByT5-small into the DiT's second text stream, as ComfyUI does, so text the prompt quotes is drawn legibly; a prompt
+  without quotes runs exactly as before. The encoder is a new side model fetched on first use. Also: the CLI no longer
+  downloads a catalog entry's transformer when `--model-path` names one.
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
