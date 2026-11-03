@@ -82,6 +82,7 @@ Desktop.ini
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Flux3/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Fibo2/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/MossImage/*.safetensors
+!/tests/HartsyInference.Vision.Tests/TestData/RealEsrgan/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/encoder/*.safetensors
 *.gguf

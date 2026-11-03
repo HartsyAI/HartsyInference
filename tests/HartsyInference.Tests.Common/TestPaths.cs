@@ -612,6 +612,13 @@ public static class TestPaths
         public static string VitL => Resolve("DEPTH_ANYTHING_V2_VITL_PATH", Path.Combine(ModelsDir, "Vision", "DepthAnything", "depth_anything_v2_vitl.pth"));
     }
 
+    /// <summary>Real-ESRGAN checkpoints.</summary>
+    public static class RealEsrgan
+    {
+        /// <summary>Comfy-Org/Real-ESRGAN's safetensors repack of RealESRGAN_x4plus (sha256 37f9a931…).</summary>
+        public static string X4PlusSafetensors => Resolve("REAL_ESRGAN_X4PLUS_PATH", Path.Combine(ModelsDir, "Vision", "Upscale", "RealESRGAN_x4plus.safetensors"));
+    }
+
     /// <summary>ControlNet annotator checkpoints (lllyasviel/Annotators, non-gated).</summary>
     public static class Annotators
     {
