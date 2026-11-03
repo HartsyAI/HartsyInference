@@ -19,6 +19,10 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
 {
     private const float Timestep = 1000f;
 
+    /// <summary>Working set per output pixel per frame for the untiled VAE encode and decode at F32 activations, calibrated on an
+    /// RTX 2060 SUPER (8 GB): a 960×540 still completes and 1024×576 does not, with the DiT streamed.</summary>
+    private const long BytesPerPixelFrameF32 = 9000;
+
     private readonly SeedVr2Dit _dit;
     private readonly SeedVr2VaeEncoder _encoder;
     private readonly SeedVr2VaeDecoder _decoder;
@@ -63,7 +67,8 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         ThrowIfDisposed();
         long startTicks = Environment.TickCount64;
 
-        SeedVr2Preprocess.Result pre = SeedVr2Preprocess.Run(frames, width, height, options.TargetArea);
+        long targetArea = FitTargetArea(options, frames.Count);
+        SeedVr2Preprocess.Result pre = SeedVr2Preprocess.Run(frames, width, height, targetArea);
         int outH = pre.Height, outW = pre.Width;
 
         int chunkLen = Math.Min(SeedVr2Preprocess.PaddedFrameCount(Math.Max(options.ClipFrames, 1)), pre.Frames);
@@ -171,7 +176,42 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         for (int i = 0; i < _dit.BlockCount; i++)
             largestBlock = Math.Max(largestBlock, _dit.GetBlock(i).EstimatedWeightBytes);
         long window = (BlockStreamingOptions.DefaultPrefetchAhead + 1) * largestBlock;
-        return tokens * perToken + window + 256L * 1024 * 1024;
+        return tokens * perToken + window + VaeDecodeReserveBytes(lt, lh, lw) + 256L * 1024 * 1024;
+    }
+
+    /// <summary>The target area this restore can decode on this device: the requested area, or the largest area whose VAE decode
+    /// fits the free memory after the DiT's streaming window and a fixed reserve.</summary>
+    /// <remarks>The decode runs untiled, so its working set grows with the area. A large default target on a small card would
+    /// otherwise fail partway through the restore. The fitted area is logged, and the returned frames carry the size used.</remarks>
+    private long FitTargetArea(SeedVr2RestoreOptions options, int frameCount)
+    {
+        const long ReserveBytes = 1536L * 1024 * 1024;
+        int chunk = Math.Min(SeedVr2Preprocess.PaddedFrameCount(Math.Max(options.ClipFrames, 1)), SeedVr2Preprocess.PaddedFrameCount(frameCount));
+        long pixelFrames = chunk;
+        long perPixel = pixelFrames * BytesPerPixelFrameF32;
+        long fixedBytes = 384L * 1024 * 1024;
+
+        Backend.TrimMemoryPool();
+        long free = Backend.FreeMemoryBytes();
+        long usable = free - ReserveBytes - fixedBytes;
+        long maxPixels = Math.Max(usable / perPixel, 256L * 256);
+        long requested = options.TargetArea;
+        if (requested <= maxPixels)
+            return requested;
+
+        Logs.Warning($"SeedVR2 restore target {requested} px needs ~{(requested * perPixel + fixedBytes) >> 20} MB to decode untiled, " +
+            $"and {free >> 20} MB is free; restoring at {maxPixels} px instead.");
+        return maxPixels;
+    }
+
+    /// <summary>Bytes the VAE decode of one chunk needs at the working precision: about 3150 bytes per output frame pixel (the
+    /// fit ComfyUI's SeedVR2 uses for its fp16 decode), doubled for the F32 activations this backend uses where BF16 is absent.
+    /// A still is one pixel frame; a clip's latent frame is four.</summary>
+    private static long VaeDecodeReserveBytes(int lt, int lh, int lw)
+    {
+        long pixelFrames = lt == 1 ? 1 : 4L * lt - 3;
+        long pixels = (long)lh * 8 * lw * 8;
+        return pixelFrames * pixels * BytesPerPixelFrameF32 + 384L * 1024 * 1024;
     }
 
     private float[] RestoreChunk(SeedVr2Preprocess.Result pre, int begin, int len,
