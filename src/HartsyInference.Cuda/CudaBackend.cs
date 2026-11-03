@@ -1230,7 +1230,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>numerics.ltx25Na3dTiled=false</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
     private static bool UseLtx25Na3dTiled => EngineKnobs.Ltx25Na3dTiled.Value;
 
-    /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>numerics.noTf32=true</c>.</summary>
+    /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0). Not PyTorch's default: PyTorch has kept matmul
+    /// TF32 off since 1.12 (its cuDNN convolutions keep it on). Opt out: <c>numerics.noTf32=true</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
     /// tensor-core throughput), leaving F32 pipelines compute-bound far below the hardware. TF32 keeps F32 range
     /// with a 10-bit mantissa.</remarks>
@@ -7457,10 +7458,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 opOut = pOutCast;
                 opDtype = DType.F32;
             }
-            else if (query.DType == DType.F32 && mask is null && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)
+            else if (query.DType == DType.F32 && mask is null && allowF16 && !_sdpaF16Disabled)
             {
-                // F16 speed path — enabled per-call via allowF16 (callers with bounded/normalized scores, e.g. Wan's
-                // RMS-normed Q/K) or globally via numerics.sdpaF16; disabled globally via numerics.sdpaNoF16. NOT safe
+                // F16 speed path — enabled per call by the materialized row from allowF16 (callers with bounded/normalized
+                // scores, e.g. Wan's RMS-normed Q/K, or numerics.sdpaF16); disabled globally via numerics.sdpaNoF16. NOT safe
                 // for unbounded-score archs (Z-Image fp8 → F16 overflow → black), which simply don't pass allowF16.
                 // The non-tiled SDPA cost is dominated by the
                 // [totalHeads, Sq, Skv] score matrix (Wan-1.3B self-attn: 12·4480²·4B ≈ 963 MB, written by QK then

@@ -79,6 +79,16 @@ public sealed class RestoreCommand : Command<RestoreCommand.Settings>
         [Description("Directory to save frames/MP4 (defaults to the output root).")]
         public string? Output { get; init; }
 
+        /// <summary>Per-run VRAM posture.</summary>
+        [CommandOption("--vram-mode")]
+        [Description("VRAM posture for THIS run: Performance (keep the DiT resident, fail rather than stream), Auto, Balanced, Aggressive (always stream) or Maximum (also packs the DiT to Q8_0). Unset follows the engine default.")]
+        public string? VramMode { get; init; }
+
+        /// <summary>Device the restore runs on, when it should not share the engine's card.</summary>
+        [CommandOption("--restore-device")]
+        [Description("Device for the SeedVR2 restore, such as cuda:1, to run it on a different card from the engine's own. Unset runs it on the engine's device.")]
+        public string? RestoreDevice { get; init; }
+
         /// <summary>Suppress progress output.</summary>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
@@ -107,6 +117,8 @@ public sealed class RestoreCommand : Command<RestoreCommand.Settings>
         parameters.PutIfSet("overlap", settings.Overlap);
         parameters.PutIfSet("strength", settings.Strength);
         parameters.PutIfSet("fps", settings.Fps);
+        parameters.PutIfSet("vram-mode", settings.VramMode);
+        parameters.PutIfSet("restore-device", settings.RestoreDevice);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Restore);

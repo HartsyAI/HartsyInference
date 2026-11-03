@@ -189,6 +189,8 @@ public sealed record AttentionKernelCapability
         if (call.Logits.Any && !LogitTerms) return AttentionExclusion.LogitTerms;
         if (call.Positions.OnDevice && !DevicePositions) return AttentionExclusion.DevicePositions;
         if (((UsesQueryKey | UsesProbValue) & call.Numerics.Refused) != 0) return AttentionExclusion.RefusedFormat;
+        // An operand in a refused format is refused whatever the row computes in: a row that widens it still stores it narrow.
+        if ((AttentionNumerics.OperandFormats(in call) & call.Numerics.Refused) != 0) return AttentionExclusion.RefusedFormat;
         AttentionMask m = call.Mask;
         if (m.Causal && (Masks & AttentionMaskSupport.Causal) == 0) return AttentionExclusion.Causal;
         if ((m.WindowLeft is not null || m.WindowRight is not null) && (Masks & AttentionMaskSupport.Window) == 0) return AttentionExclusion.Window;
@@ -270,7 +272,7 @@ public enum AttentionExclusion
     /// <summary>A per-head bias.</summary>
     PerHeadBias,
 
-    /// <summary>A multiply format the call refuses.</summary>
+    /// <summary>A format the call refuses, in a multiply or among its operands and output.</summary>
     RefusedFormat,
 
     /// <summary>A narrowing the call does not permit.</summary>
