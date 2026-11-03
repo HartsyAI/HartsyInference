@@ -29,6 +29,10 @@ public static class ArtifactWriter
         else
             File.WriteAllText(path, artifact.Text ?? "", new UTF8Encoding(false));
 
+        string stem = Path.Combine(dir, Path.GetFileNameWithoutExtension(path));
+        foreach ((string suffix, byte[] bytes) in artifact.Companions)
+            File.WriteAllBytes($"{stem}.{suffix}", bytes);
+
         return path;
     }
 

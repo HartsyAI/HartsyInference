@@ -1,3 +1,4 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov2;
 
 namespace HartsyInference.Vision.DepthAnything;
@@ -45,4 +46,35 @@ public sealed record DepthAnythingPreset
         Backbone = Dinov2Preset.Large,
         Features = 256, OutChannels = [256, 512, 1024, 1024], LayerIndices = [4, 11, 17, 23],
     };
+
+    /// <summary>The released variant an official checkpoint was trained as, read from its backbone width
+    /// (<c>pretrained.cls_token</c>) and block count. Throws for a shape no released variant has, rather than building
+    /// a model the weights don't fit.</summary>
+    public static DepthAnythingPreset FromWeights(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        if (!weights.TryGetValue("pretrained.cls_token", out Tensor? cls))
+        {
+            throw new NotSupportedException(
+                "Not a Depth-Anything-V2 checkpoint: 'pretrained.cls_token' is missing.");
+        }
+        int hidden = (int)cls.Shape[cls.Shape.Rank - 1];
+        int blocks = 0;
+        while (weights.ContainsKey($"pretrained.blocks.{blocks}.norm1.weight"))
+            blocks++;
+
+        DepthAnythingPreset? preset = hidden switch
+        {
+            384 => Small,
+            768 => Base,
+            1024 => Large,
+            _ => null,
+        };
+        if (preset is null || preset.Backbone.NumLayers != blocks)
+        {
+            throw new NotSupportedException(
+                $"Depth-Anything-V2 checkpoint with a {hidden}-wide, {blocks}-block backbone matches no released variant "
+                + "(Small 384×12, Base 768×12, Large 1024×24).");
+        }
+        return preset;
+    }
 }

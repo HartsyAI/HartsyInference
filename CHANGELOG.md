@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
+  `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
+  the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
+  segment refinement and background removal for such a family until each has a layered rule. The CLI writes
+  `<name>.layer-NN.png` next to the composite and the native image response adds `layers`. No family declares it yet.
 - **Fixed: Lens never runs F16 attention.** Its V is not normalised and overflows F16 from about block 36, so F16 storage turns
   the image to noise. Its joint attention now demands F32 or BF16 (`AttentionNumerics.WideRange`): F16, INT8 and FP8 are refused
   on the call, so the global `numerics.sdpaF16`, a per-call F16 assertion and F16 operands cannot reach it. A direct F16 request

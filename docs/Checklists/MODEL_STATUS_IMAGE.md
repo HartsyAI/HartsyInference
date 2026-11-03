@@ -588,8 +588,10 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
 
 **Built (2026-10-16); first real-weight run on CUDA (2026-10-20).** Family id `moss-image` (SwarmUI class `moss-image`). OpenMOSS ships
 Base and SFT as diffusers folders; pass the folder, any file in it, or the ComfyUI export's `diffusion_models` file
-with `--model-path`. The catalog entry downloads only the fallback side models (the Qwen3.5-9B Q8_0 GGUF and the
-Flux.2 VAE), used when the checkpoint is not inside a full folder.
+with `--model-path`. The catalog entries `moss-image`, `moss-image-sft`, `moss-image-int8` and `moss-image-sft-int8`
+download Comfy-Org's single-file export (Base and SFT, bf16 and int8 ConvRot) with the side models the recipe uses
+outside a full folder: the bf16 Qwen3.5-9B, its tokenizer and the small-decoder Flux.2 VAE. Only the Base bf16
+combination has run on real weights (below); the SFT and int8 entries are unverified.
 Architecture and sources: [MOSS_IMAGE_ARCHITECTURE.md](../Research/MOSS_IMAGE_ARCHITECTURE.md).
 
 - **Defaults.** 50 steps, CFG 3, shift 5 on the training-grid schedule, block 22 skipped on the unconditional branch.
