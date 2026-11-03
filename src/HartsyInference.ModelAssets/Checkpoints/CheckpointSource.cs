@@ -247,6 +247,8 @@ public sealed class CheckpointSource : IDisposable
             // The NF4 pass records each decoded weight as it goes rather than on return, because a malformed companion
             // set anywhere in the file aborts the pass with everything before it already allocated.
             Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights, owned);
+            // W4A8 layers decode here for the same reason; the pass inside ApplyFp8ScaledDequant then finds none left.
+            folded = CheckpointConvertUtils.DequantW4A8(folded, owned);
             // ModelOpt-layout NVFP4 groups become Comfy layout here, before the pass below reads every group as Comfy.
             List<Tensor> relaid = Nvfp4LayoutNormalizer.ConvertModelOptGroups(folded, metadata);
             owned.AddRange(relaid);

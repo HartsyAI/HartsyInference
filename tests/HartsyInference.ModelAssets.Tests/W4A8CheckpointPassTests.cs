@@ -63,6 +63,25 @@ public sealed class W4A8CheckpointPassTests
         Dispose(source);
     }
 
+    [Fact]
+    public void Pass_ReportsEarlierDecodesWhenALaterLayerRefuses()
+    {
+        Dictionary<string, Tensor> source = Layer("a_proj", group: 4, codes: [[1, 2, 3, 4, 5, 6, 7, 8]]);
+        foreach ((string key, Tensor tensor) in Layer("b_proj", group: 4, codes: [[1, 2, 3, 4, 5, 6, 7, 8]]))
+            source[key] = tensor;
+        source.Remove("b_proj.weight_s_channel", out Tensor? removed);
+        removed!.Dispose();
+        List<Tensor> allocated = [];
+
+        Assert.Throws<InvalidDataException>(() => CheckpointConvertUtils.DequantW4A8(source, allocated));
+
+        // The caller owns what was decoded before the refusal, so it can free it.
+        Tensor decoded = Assert.Single(allocated);
+        Assert.Equal((DType.BF16, new TensorShape(1, 8)), (decoded.DType, decoded.Shape));
+        decoded.Dispose();
+        Dispose(source);
+    }
+
     private static Dictionary<string, Tensor> Layer(string name, int group, int[][] codes)
     {
         int n = codes.Length, k = codes[0].Length;

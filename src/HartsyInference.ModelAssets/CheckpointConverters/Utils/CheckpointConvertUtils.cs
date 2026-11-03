@@ -705,7 +705,9 @@ public static unsafe class CheckpointConvertUtils
     /// <c>.weight</c> and drops its companions (<c>.weight_s_rel</c>, <c>.weight_s_channel</c>, <c>.weight_codebook</c>,
     /// <c>.weight_correction</c>, <c>.comfy_quant</c>). The layer then runs as W4A16: the format's INT8 activation path is
     /// not modelled. A dictionary without such layers comes back unchanged.</summary>
-    public static Dictionary<string, Tensor> DequantW4A8(Dictionary<string, Tensor> source)
+    /// <param name="allocated">Receives each decoded weight as it is created, so a caller can free what was built before a
+    /// later layer refused. Without it, this pass frees its own decodes when it throws.</param>
+    public static Dictionary<string, Tensor> DequantW4A8(Dictionary<string, Tensor> source, List<Tensor>? allocated = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         List<(string BaseKey, ComfyQuantDescriptor Descriptor)> layers = [];
@@ -721,24 +723,42 @@ public static unsafe class CheckpointConvertUtils
             return source;
 
         Dictionary<string, Tensor> result = new(source, StringComparer.Ordinal);
-        foreach ((string baseKey, ComfyQuantDescriptor descriptor) in layers)
+        List<Tensor> decoded = [];
+        try
         {
-            string weightKey = baseKey + ".weight";
-            if (!result.TryGetValue(weightKey, out Tensor? packed)
-                || !result.TryGetValue(weightKey + "_s_rel", out Tensor? sRel)
-                || !result.TryGetValue(weightKey + "_s_channel", out Tensor? sChannel))
+            foreach ((string baseKey, ComfyQuantDescriptor descriptor) in layers)
             {
-                throw new InvalidDataException(
-                    $"'{baseKey}' declares {W4A8ConvRotCodec.Format} but lacks its weight, weight_s_rel or weight_s_channel.");
+                string weightKey = baseKey + ".weight";
+                if (!result.TryGetValue(weightKey, out Tensor? packed)
+                    || !result.TryGetValue(weightKey + "_s_rel", out Tensor? sRel)
+                    || !result.TryGetValue(weightKey + "_s_channel", out Tensor? sChannel))
+                {
+                    throw new InvalidDataException(
+                        $"'{baseKey}' declares {W4A8ConvRotCodec.Format} but lacks its weight, weight_s_rel or weight_s_channel.");
+                }
+                result.TryGetValue(weightKey + "_codebook", out Tensor? codebook);
+                result.TryGetValue(weightKey + "_correction", out Tensor? correction);
+                int groupSize = descriptor.GroupSize > 0 ? descriptor.GroupSize : 16;
+                Tensor dense = W4A8ConvRotCodec.DequantToBf16(packed, sRel, sChannel, codebook, correction, groupSize,
+                    descriptor.ConvRotGroupSize);
+                decoded.Add(dense);
+                allocated?.Add(dense);
+                result[weightKey] = dense;
+                foreach (string suffix in (string[])["_s_rel", "_s_channel", "_codebook", "_correction"])
+                    result.Remove(weightKey + suffix);
+                result.Remove(baseKey + ComfyQuantDescriptor.Suffix);
             }
-            result.TryGetValue(weightKey + "_codebook", out Tensor? codebook);
-            result.TryGetValue(weightKey + "_correction", out Tensor? correction);
-            int groupSize = descriptor.GroupSize > 0 ? descriptor.GroupSize : 16;
-            result[weightKey] = W4A8ConvRotCodec.DequantToBf16(packed, sRel, sChannel, codebook, correction, groupSize,
-                descriptor.ConvRotGroupSize);
-            foreach (string suffix in (string[])["_s_rel", "_s_channel", "_codebook", "_correction"])
-                result.Remove(weightKey + suffix);
-            result.Remove(baseKey + ComfyQuantDescriptor.Suffix);
+        }
+        catch
+        {
+            // A malformed layer can follow gigabytes of decoded ones. A caller that passed `allocated` frees them with
+            // the rest of what it owns; otherwise nothing else holds them.
+            if (allocated is null)
+            {
+                foreach (Tensor tensor in decoded)
+                    tensor.Dispose();
+            }
+            throw;
         }
         return result;
     }
