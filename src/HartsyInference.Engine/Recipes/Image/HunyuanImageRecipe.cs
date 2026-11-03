@@ -157,9 +157,9 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
             // The glyph encoder loads on the first prompt that quotes text, and only for a checkpoint that has the ByT5
             // projection (context_embedder_2) to read it.
-            Func<(T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null ? null : () =>
+            Func<CancellationToken, (T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null ? null : cancel =>
             {
-                string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, CancellationToken.None)
+                string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, cancel)
                     .GetAwaiter().GetResult();
                 SafeTensorsLoader byt5Loader = new SafeTensorsLoader();
                 byt5Loader.Load(byt5Path);
