@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Tests.Common;
 using Xunit;
 
@@ -159,6 +160,21 @@ public sealed class AnimaReferenceKvTests
         using Tensor text = Ramp(new TensorShape(1, Text, TextWidth), 0.7f);
 
         Assert.Throws<ArgumentException>(() => transformer.Forward(cpu, latent, 0.625f, text, null, cache));
+    }
+
+    [Fact]
+    public void ReferenceLatentResize_MatchesComfyAreaAndBilinearModes()
+    {
+        using Tensor source = Values(new TensorShape(1, 1, 4, 4), 1f);
+        using Tensor area = AnimaPipeline.ResizeReferenceLatent(source, 2, 2);
+        Assert.Equal(new float[] { 3.5f, 5.5f, 11.5f, 13.5f }, area.AsReadOnlySpan<float>().ToArray());
+
+        using Tensor small = Values(new TensorShape(1, 1, 2, 2), 1f);
+        using Tensor bilinear = AnimaPipeline.ResizeReferenceLatent(small, 4, 4);
+        Assert.Equal(1f, bilinear.AsReadOnlySpan<float>()[0]);
+        Assert.Equal(1.25f, bilinear.AsReadOnlySpan<float>()[1]);
+        Assert.Equal(2.25f, bilinear.AsReadOnlySpan<float>()[6]);
+        Assert.Equal(4f, bilinear.AsReadOnlySpan<float>()[15]);
     }
 
     private static float MaxAbsDifference(Tensor a, Tensor b)

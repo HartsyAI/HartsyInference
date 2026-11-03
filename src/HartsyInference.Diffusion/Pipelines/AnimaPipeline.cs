@@ -221,7 +221,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 
         // The reference's keys and values, built once while its LoRA is live and freed with the generation. Its RoPE placement is one target
         // height down, so the cache is valid for this grid only.
-        using ReferenceKvCache? referenceCache = reference is null ? null : BuildReferenceCache(reference, latentH);
+        using ReferenceKvCache? referenceCache = reference is null ? null : BuildReferenceCache(reference, latentH, latentW);
         float shift = scheduler.Shift;
 
         // Sampler selection (2026-08-20). Anima is flow-matching, so it had no user-selectable sampler at all before
@@ -388,12 +388,112 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return _vaeEncoder.Encode(Backend, rgbMinusOneOne);
     }
 
-    private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH)
+    private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH, int latentW)
     {
         using IDisposable scope = reference.Gate.Enable(reference.Strength);
         // The cache holds the keys and values the adapter produced at this strength, so both the reference and the strength identify it.
         long identity = HashCode.Combine(reference.Identity, BitConverter.SingleToInt32Bits(reference.Strength));
-        return _transformer.BuildReferenceCache(Backend, reference.Latent, latentH / _config.PatchSize.H, reference.Placement, identity);
+        // ComfyUI's _pick_ref() resizes the VAE latent to the target latent grid before the asymmetric
+        // reference pass. Without this, a portrait whose aspect/size differs from the requested canvas
+        // contributes K/V at a different token grid than the target, weakening identity and changing the
+        // RoPE geometry. The reference is resized once per generation, before the cache is built.
+        Tensor? resized = null;
+        try
+        {
+            Tensor input = reference.Latent;
+            if (input.Shape[2] != latentH || input.Shape[3] != latentW)
+            {
+                resized = ResizeReferenceLatent(input, latentH, latentW);
+                input = resized;
+            }
+            return _transformer.BuildReferenceCache(Backend, input, latentH / _config.PatchSize.H, reference.Placement, identity);
+        }
+        finally
+        {
+            resized?.Dispose();
+        }
+    }
+
+    /// <summary>Matches ComfyUI's reference latent selection: area averaging when shrinking and
+    /// align-corners=false bilinear interpolation when enlarging. The resize is a one-time host operation
+    /// on the already VAE-encoded reference, so it does not add a denoise-step synchronization.</summary>
+    internal static Tensor ResizeReferenceLatent(Tensor reference, int targetH, int targetW)
+    {
+        if (reference.Shape.Rank != 4 || reference.Shape[0] != 1)
+            throw new ArgumentException($"Anima reference latent must be [1,C,H,W]; got {reference.Shape}.", nameof(reference));
+        int channels = (int)reference.Shape[1];
+        int sourceH = (int)reference.Shape[2];
+        int sourceW = (int)reference.Shape[3];
+        if (sourceH == targetH && sourceW == targetW)
+            throw new InvalidOperationException("ResizeReferenceLatent should only run when the target grid differs.");
+        if (reference.DType != DType.F32)
+            throw new NotSupportedException($"Anima reference latent resize requires F32; got {reference.DType}.");
+
+        Tensor resized = new(new TensorShape(1, channels, targetH, targetW), DType.F32);
+        ReadOnlySpan<float> src = reference.AsReadOnlySpan<float>();
+        Span<float> dst = resized.AsSpan<float>();
+        // The node chooses one interpolation mode from the height comparison and applies it to both axes.
+        bool area = sourceH > targetH;
+        for (int c = 0; c < channels; c++)
+        {
+            int srcPlane = c * sourceH * sourceW;
+            int dstPlane = c * targetH * targetW;
+            for (int oy = 0; oy < targetH; oy++)
+            {
+                if (area)
+                {
+                    double y0 = oy * (double)sourceH / targetH;
+                    double y1 = (oy + 1) * (double)sourceH / targetH;
+                    for (int ox = 0; ox < targetW; ox++)
+                    {
+                        double x0 = ox * (double)sourceW / targetW;
+                        double x1 = (ox + 1) * (double)sourceW / targetW;
+                        dst[dstPlane + oy * targetW + ox] = AreaSample(src, srcPlane, sourceH, sourceW, y0, y1, x0, x1);
+                    }
+                }
+                else
+                {
+                    for (int ox = 0; ox < targetW; ox++)
+                    {
+                        dst[dstPlane + oy * targetW + ox] = BilinearSample(src, srcPlane, sourceH, sourceW,
+                            (oy + 0.5) * sourceH / targetH - 0.5, (ox + 0.5) * sourceW / targetW - 0.5);
+                    }
+                }
+            }
+        }
+        return resized;
+    }
+
+    private static float BilinearSample(ReadOnlySpan<float> src, int plane, int h, int w, double y, double x)
+    {
+        int y0 = (int)Math.Floor(y), x0 = (int)Math.Floor(x);
+        double fy = y - y0, fx = x - x0;
+        int ya = Math.Clamp(y0, 0, h - 1), yb = Math.Clamp(y0 + 1, 0, h - 1);
+        int xa = Math.Clamp(x0, 0, w - 1), xb = Math.Clamp(x0 + 1, 0, w - 1);
+        float v0 = (float)(src[plane + ya * w + xa] * (1 - fx) + src[plane + ya * w + xb] * fx);
+        float v1 = (float)(src[plane + yb * w + xa] * (1 - fx) + src[plane + yb * w + xb] * fx);
+        return (float)(v0 * (1 - fy) + v1 * fy);
+    }
+
+    private static float AreaSample(ReadOnlySpan<float> src, int plane, int h, int w, double y0, double y1, double x0, double x1)
+    {
+        // torch.nn.functional.interpolate(mode="area") uses adaptive average pooling bins:
+        // floor(start) .. ceil(end), with uniform weights over the integer window.
+        int ix0 = Math.Clamp((int)Math.Floor(x0), 0, w);
+        int ix1 = Math.Clamp((int)Math.Ceiling(x1), 0, w);
+        double sum = 0;
+        int count = 0;
+        int yStart = Math.Clamp((int)Math.Floor(y0), 0, h);
+        int yEnd = Math.Clamp((int)Math.Ceiling(y1), 0, h);
+        for (int y = yStart; y < yEnd; y++)
+        {
+            for (int x = ix0; x < ix1; x++)
+            {
+                sum += src[plane + y * w + x];
+                count++;
+            }
+        }
+        return count > 0 ? (float)(sum / count) : 0f;
     }
 
     /// <summary>One branch of a reference step. The branches with the reference run with its LoRA live; the others run on the base.</summary>

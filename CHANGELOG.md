@@ -20,6 +20,10 @@ stable release will require. Dates are UTC.
   on, widens the trunk linears that backend cannot multiply packed. `qwen3.5_9b_int8_convrot` (9.7 GB) now loads through
   `--text-encoder`, where it was refused for its quantized embedding; the bf16 encoder is unchanged.
 
+- **Fixed: Anima reference latents now match ComfyUI's target-grid selection.** The reference VAE latent is resized to the target latent
+  grid before the asymmetric K/V prepass, using area averaging when shrinking and align-corners-off bilinear interpolation when enlarging.
+  This keeps reference RoPE/token geometry aligned for portrait references and non-matching output aspect ratios.
+
 - **Fixed: a LoRA variant beside a resident base no longer builds a second copy of the model.** The duplicate made the planner stream every block, which left a Krea 2 Turbo LoRA run about 9x slower than its control. Idle pipelines of the same checkpoint are evicted before planning when free memory cannot hold both copies. A pipeline a request still holds is never evicted, and a model switch that cannot wait for it fails by name.
 - **Changed: a zero-strength LoRA entry is a no-op.** It is dropped before its file is read and left out of the pipeline cache key, so zeroing a LoRA runs on the base pipeline and matches it exactly. A zero on one side only (diffusion or text encoder) is bypassed without a dequantize-merge-requantize round trip.
 - **Changed: a section-confined LoRA is refused by name.** Per-section LoRA scopes are not modeled, so the entry used to be skipped with a debug log only.
