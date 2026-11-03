@@ -75,6 +75,8 @@ public static class ImageEndpoints
         queue.EnqueueAsync(() => engine.Images.GenerateAsync(spec, request, progress, ct), ct);
 
     /// <summary>PNG-encodes the raw RGB result for HTTP transport (base64 JSON — the native contract carries no codec of its own), and reports where it was saved.</summary>
+    /// <remarks>A layered result also carries <c>layers</c>: <c>{ index, name, png }</c> per layer, bottom first, each an
+    /// RGBA PNG with straight alpha; <c>png</c> stays the composite. The OpenAI-compatible route returns the composite only.</remarks>
     internal static object ToResponse(ImageResult result, string? savedPath = null) => new
     {
         png = Convert.ToBase64String(EncodePng(result)),
@@ -83,6 +85,12 @@ public static class ImageEndpoints
         result.Seed,
         result.Meta,
         savedPath,
+        layers = result.Layers?.Select(l => new
+        {
+            index = l.Index,
+            name = l.Name,
+            png = Convert.ToBase64String(PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height)),
+        }).ToList(),
     };
 
     /// <summary>Persists the PNG unless the request opted out; null when nothing was written.</summary>

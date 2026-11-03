@@ -102,10 +102,12 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Image,
             FileBytes = PngEncoder.Encode(result.Rgb, result.HasAlpha ? result.Alpha : null, result.Width, result.Height),
             Extension = "png",
-            Text = $"{result.Width}x{result.Height} image (seed {result.Seed})",
+            Text = $"{result.Width}x{result.Height} image (seed {result.Seed})"
+                + (result.Layers is { Count: > 0 } layers ? $", {layers.Count} layers" : ""),
             PreviewRgb = result.Rgb,
             PreviewWidth = result.Width,
             PreviewHeight = result.Height,
+            Companions = LayerCompanions(result),
         };
         artifact.Meta["size"] = $"{result.Width}x{result.Height}";
         artifact.Meta["seed"] = result.Seed.ToString(CultureInfo.InvariantCulture);
@@ -114,6 +116,12 @@ public static class GenerationDispatch
         CopyMeta(result.Meta, artifact);
         return artifact;
     }
+
+    /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
+    /// composite; empty for a single-layer result.</summary>
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result) =>
+        result.Layers is not { Count: > 0 } layers ? []
+            : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();
 
     /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
     private static int[] ReadScoredTokenIds(string path)
