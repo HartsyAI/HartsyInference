@@ -86,11 +86,33 @@ canned 0 "  Passed Ns.SuiteTests.Plain [5 ms]
   Standard Output Messages:
  SKIPPED: cuda backend unavailable — no CUDA devices" "Passed|Ns.SuiteTests.Plain"
 expect self-skip 1 "a test self-skipped" --filter "FullyQualifiedName~SuiteTests"
+canned 0 " CUDA leg SKIPPED: CUDA unavailable" "Passed|Ns.SuiteTests.Plain"
+expect self-skip-mid-line 1 "a test self-skipped" --filter "FullyQualifiedName~SuiteTests"
 
-canned 0 " SKIP no PTX" "Passed|Ns.SuiteTests.Plain"
-expect guard-no-ptx 1 "a backend-unavailable guard fired" --filter "FullyQualifiedName~SuiteTests"
-canned 0 " nvidia-smi unavailable — VRAM pooling assertion skipped (parity check still ran)." "Passed|Ns.SuiteTests.Plain"
-expect guard-nvidia-smi 1 "a backend-unavailable guard fired" --filter "FullyQualifiedName~SuiteTests"
+# Every guard, as the line its test prints. Both nvidia-smi wordings hit the one shared prefix.
+GUARD_SAMPLES=(
+    " SKIP no PTX"
+    " Skipped: no usable CUDA device."
+    " skip (no CUDA)"
+    " factory duplicate-ordinal check skipped: CUDA unavailable"
+    " GPU dequant skipped (no PTX dir)"
+    " nvidia-smi unavailable — VRAM pooling assertion skipped (parity check still ran)."
+    " nvidia-smi unavailable or ambiguous — VRAM pooling assertion will be skipped."
+)
+for i in "${!GUARD_SAMPLES[@]}"; do
+    canned 0 "${GUARD_SAMPLES[i]}" "Passed|Ns.SuiteTests.Plain"
+    expect "guard-$((i + 1))" 1 "a backend-unavailable guard fired" --filter "FullyQualifiedName~SuiteTests"
+done
+
+# The helper matches guards as fixed strings, so a reworded test message would stop matching without a sound.
+guards=()
+while IFS= read -r guard; do
+    guards+=("${guard}")
+done < <(sed -n '/^GUARD_LINES=(/,/^)/s/^ *"\([^"]*\)".*/\1/p' "${HELPER}")
+assert "guard-lines-parsed (${#guards[@]})" [ "${#guards[@]}" -eq 6 ]
+for guard in ${guards[@]+"${guards[@]}"}; do
+    assert "guard-still-printed: ${guard}" grep -rqF --include=*.cs -- "${guard}" "${ROOT}/tests"
+done
 
 canned 0 "No test matches the given testcase filter \`FullyQualifiedName~Nothing\`"
 expect zero-passed 1 "zero tests passed" --filter "FullyQualifiedName~Nothing"

@@ -67,15 +67,18 @@ mkdir -p "${OUT}"
 LOG="${OUT}/${NAME}.log" TRX="${OUT}/${NAME}.trx" LIST="${OUT}/${NAME}.executed.md"
 rm -f "${TRX}" "${LIST}"   # a stale TRX from an earlier run must never stand in for this one
 
-env "${ENV_PAIRS[@]}" HARTSY_REQUIRE_REAL_WEIGHTS=1 dotnet test "${PROJECT}" --filter "${FILTER}" --nologo \
-    --logger "console;verbosity=detailed" --logger "trx;LogFileName=${NAME}.trx" --results-directory "${OUT}" \
-    "${DOTNET_ARGS[@]}" > "${LOG}" 2>&1
+# ${arr[@]+"${arr[@]}"}: bash before 4.4 treats an empty array as unset under set -u.
+env ${ENV_PAIRS[@]+"${ENV_PAIRS[@]}"} HARTSY_REQUIRE_REAL_WEIGHTS=1 dotnet test "${PROJECT}" --filter "${FILTER}" \
+    --nologo --logger "console;verbosity=detailed" --logger "trx;LogFileName=${NAME}.trx" --results-directory "${OUT}" \
+    ${DOTNET_ARGS[@]+"${DOTNET_ARGS[@]}"} > "${LOG}" 2>&1
 rc=$?
 
 FAILED=0
 fail() { echo "FAILED — $*"; FAILED=1; }
 
 [ "${rc}" -eq 0 ] || fail "dotnet test exit ${rc}; see ${LOG}"
+# Anywhere on a line, not only at its start: some self-skips print it mid-line ("CUDA leg SKIPPED: CUDA unavailable",
+# "`repo`: SKIPPED, weights not cached", benchmark table rows).
 if grep -q "SKIPPED" "${LOG}"; then
     fail "a test self-skipped despite HARTSY_REQUIRE_REAL_WEIGHTS=1:"
     grep "SKIPPED" "${LOG}" | head -5
@@ -109,7 +112,7 @@ total=$(printf '%s\n' "${RESULTS}" | grep -c .)
 
 # A manifest test executed when a result carries its name, alone or followed by a theory's "(args)", and ran.
 MISSING=()
-for test in "${EXPECTED[@]}"; do
+for test in ${EXPECTED[@]+"${EXPECTED[@]}"}; do
     hit=0
     while IFS=$'\t' read -r outcome name; do
         if [ "${outcome}" != NotExecuted ] && { [ "${name}" = "${test}" ] || [[ "${name}" == "${test}("* ]]; }; then

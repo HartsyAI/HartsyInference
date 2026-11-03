@@ -8,7 +8,9 @@
 #
 # --project is the middle of tests/HartsyInference.<Project>.Tests. The default filter is the GpuIntegration category,
 # or exactly the --manifest tests when one is given. The run goes through tests/require-executed.sh, so a SKIPPED line,
-# a backend guard, an empty run or a manifest test that did not execute fails it.
+# a backend guard, an empty run or a manifest test that did not execute fails it. That includes the RTX 4090 CUDA
+# known-issue skip (BackendGate.SkipKnownRtx4090CudaDivergence), so a 4090 LLM GpuIntegration run fails unless
+# HARTSY_RUN_KNOWN_DEVICE_ISSUES=1 is set.
 # The 4090 lock is only the turn-taking lock: a 4090 suite still needs SwarmUI quiet (tests/swarm-quiet-window.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

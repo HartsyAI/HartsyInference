@@ -19,6 +19,7 @@
 #            Q4_K_M and SD3.5 transformer-only files (per the comment on that line, not re-verified here).
 #            HARTSY_REQUIRE_REAL_WEIGHTS=1 is exported below and RealWeightGate THROWS on a missing file, so a
 #            blocked class fails loudly (no clean skip).
+# pipefail is load-bearing: run_class pipes the helper into a log loop, and its `if !` sees a failed class only through it.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
