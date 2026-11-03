@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="RecipeLoraMerge"/> can apply. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Section-confined LoRAs are skipped with a warning — per-segment LoRA scopes are not modeled yet.</summary>
+/// <summary>Turns the request's <see cref="LoraStack"/> into concrete file paths + per-component strengths that <see cref="RecipeLoraMerge"/> can apply. Mirrors ComfyUI's <c>LoadLorasForConfinement</c> resolution order (try the <c>.safetensors</c> suffix first, then the raw name) so a given selection lands on the same file across backends. Zero-strength entries are dropped, and section-confined LoRAs are refused by name, since per-segment LoRA scopes are not modeled yet.</summary>
 public static class LoraResolver
 {
     /// <summary>One resolved LoRA: the on-disk file plus its diffusion-side and text-encoder-side strengths.</summary>
@@ -25,7 +25,12 @@ public static class LoraResolver
     /// <summary>Models-root-relative folders searched for LoRA weights.</summary>
     private static readonly string[] _folders = ["Lora", "loras", "LoRA", "lora"];
 
-    /// <summary>Resolves every entry in <paramref name="loras"/>. Returns an empty list when the stack is null/empty or every entry is confined to a non-global section. Throws when a selected LoRA has no resolvable file.</summary>
+    /// <summary>Whether <paramref name="entry"/> changes nothing: zero on the diffusion side and on the text-encoder side. Resolution
+    /// drops such an entry and the cache key omits it, so zeroing a LoRA lands on the base pipeline instead of building a second copy.</summary>
+    public static bool IsNoOp(LoraEntry entry) => entry.Weight == 0 && (entry.TextEncoderWeight ?? entry.Weight) == 0;
+
+    /// <summary>Resolves every entry in <paramref name="loras"/>, dropping the no-op ones. Throws when an entry is confined to a section
+    /// or when a selected LoRA has no resolvable file.</summary>
     public static List<LoraSpec> Resolve(LoraStack? loras)
     {
         List<LoraSpec> result = [];
@@ -35,12 +40,24 @@ public static class LoraResolver
         }
         foreach (LoraEntry entry in loras.Entries)
         {
-            // Skip non-global confinement: per-segment LoRA scopes aren't modeled, so honoring the global slot only is safe.
+            // NaN and infinity pass every later check (they compare unequal to zero), and would merge straight into the weights.
+            if (!double.IsFinite(entry.Weight) || (entry.TextEncoderWeight is { } encoderWeight && !double.IsFinite(encoderWeight)))
+            {
+                throw new NotSupportedException($"LoRA '{entry.Model}' has a strength that is not a finite number. Set a finite weight.");
+            }
+            if (IsNoOp(entry))
+            {
+                Logs.Info($"[Features][LoRA] '{entry.Model}' has zero strength on both sides; not loaded.");
+                continue;
+            }
+            // Section confinement names a segment scope this engine does not model. Skipping it would generate an image that
+            // silently lacks the LoRA the request asked for, so the request is refused and the LoRA is named.
             if (!string.IsNullOrWhiteSpace(entry.SectionConfinement)
                 && int.TryParse(entry.SectionConfinement, out int confinementId) && confinementId > 0)
             {
-                Logs.Debug($"[Features][LoRA] '{entry.Model}' has section confinement={confinementId}; skipping (not yet supported).");
-                continue;
+                throw new NotSupportedException(
+                    $"LoRA '{entry.Model}' is confined to section {confinementId}. Per-section LoRA scopes are not modeled yet, "
+                    + "so this LoRA cannot be applied. Remove the section confinement to apply it to the whole image.");
             }
             string path = ModelFileLocator.Find(entry.Model, _folders)
                 ?? throw new InvalidOperationException($"LoRA model '{entry.Model}' was not found under '{RepoPaths.ModelsRoot()}'.");

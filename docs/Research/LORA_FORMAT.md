@@ -283,6 +283,8 @@ The `factor` parameter controls dimension splitting: `factor=-1` (default) finds
 
 LoCon is standard LoRA extended to Conv2d layers. It uses the same `lora_down.weight` / `lora_up.weight` keys but adds an optional `lora_mid.weight` for the spatial kernel dimensions.
 
+Engine status: a file that carries `lora_mid.weight` is refused by name at load (`LoraFile.Load`), because applying its down/up pair without the mid computes a different operator. LoCon files without a mid load as before.
+
 #### Variant Detection
 
 The safetensors `__metadata__` field `ss_network_module` identifies the variant:
