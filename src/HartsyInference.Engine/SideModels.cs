@@ -243,6 +243,17 @@ public static class SideModels
         Sha256 = "cb5636d852a0ea6a9075ab1bef496c0db7aef13c02350571e388aea959c5c0b4"
     };
 
+    /// <summary>Glyph-ByT5-small (Glyph-SDXL-v2's byte-level T5 encoder, fp16): HunyuanImage 2.1's second text encoder,
+    /// run on quoted prompt text only. Hash is the LFS object id at Comfy-Org/Hunyuan-Image-2.1 @78cfe74376.</summary>
+    public static readonly ModelAsset ByT5SmallGlyphXl = new ModelAsset
+    {
+        Repo = "Comfy-Org/Hunyuan-Image-2.1",
+        RepoPath = "split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors",
+        TargetSubdir = "text_encoders",
+        Role = "text encoder",
+        Sha256 = "516910bb4c9b225370290e40585d1b0e6c8cd3583690f7eec2f7fb593990fb48"
+    };
+
     /// <summary>HunyuanImage 2.1 VAE (32× downscale, 64-channel latent).</summary>
     public static readonly ModelAsset HunyuanImageVae = new ModelAsset
     {

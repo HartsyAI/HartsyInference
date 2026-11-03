@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Hunyuan-Image 2.1 renders quoted prompt text through its ByT5 glyph stream.** Quoted spans run through
+  Glyph-ByT5-small into the DiT's second text stream, as ComfyUI does, so text the prompt quotes is drawn legibly; a prompt
+  without quotes runs exactly as before. The encoder is a new side model fetched on first use. Also: the CLI no longer
+  downloads a catalog entry's transformer when `--model-path` names one.
 - **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
   `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
   the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
