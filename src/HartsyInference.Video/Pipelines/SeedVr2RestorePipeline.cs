@@ -23,6 +23,9 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
     /// RTX 2060 SUPER (8 GB): a 960×540 still completes and 1024×576 does not, with the DiT streamed.</summary>
     private const long BytesPerPixelFrameF32 = 9000;
 
+    /// <summary>The same working set at BF16 activations, which the VAE runs where the backend has BF16: half the bytes.</summary>
+    private const long BytesPerPixelFrameBf16 = 4500;
+
     private readonly SeedVr2Dit _dit;
     private readonly SeedVr2VaeEncoder _encoder;
     private readonly SeedVr2VaeDecoder _decoder;
@@ -188,7 +191,7 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         const long ReserveBytes = 1536L * 1024 * 1024;
         int chunk = Math.Min(SeedVr2Preprocess.PaddedFrameCount(Math.Max(options.ClipFrames, 1)), SeedVr2Preprocess.PaddedFrameCount(frameCount));
         long pixelFrames = chunk;
-        long perPixel = pixelFrames * BytesPerPixelFrameF32;
+        long perPixel = pixelFrames * BytesPerPixelFrame;
         long fixedBytes = 384L * 1024 * 1024;
 
         Backend.TrimMemoryPool();
@@ -204,14 +207,17 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         return maxPixels;
     }
 
-    /// <summary>Bytes the VAE decode of one chunk needs at the working precision: about 3150 bytes per output frame pixel (the
-    /// fit ComfyUI's SeedVR2 uses for its fp16 decode), doubled for the F32 activations this backend uses where BF16 is absent.
-    /// A still is one pixel frame; a clip's latent frame is four.</summary>
-    private static long VaeDecodeReserveBytes(int lt, int lh, int lw)
+    /// <summary>The per-pixel figure for the activation dtype the VAE actually runs at.</summary>
+    private long BytesPerPixelFrame =>
+        _decoder.Config.ActivationDType == DType.BF16 ? BytesPerPixelFrameBf16 : BytesPerPixelFrameF32;
+
+    /// <summary>Bytes the VAE decode of one chunk needs at the working precision. A still is one pixel frame; a clip's latent
+    /// frame is four.</summary>
+    private long VaeDecodeReserveBytes(int lt, int lh, int lw)
     {
         long pixelFrames = lt == 1 ? 1 : 4L * lt - 3;
         long pixels = (long)lh * 8 * lw * 8;
-        return pixelFrames * pixels * BytesPerPixelFrameF32 + 384L * 1024 * 1024;
+        return pixelFrames * pixels * BytesPerPixelFrame + 384L * 1024 * 1024;
     }
 
     private float[] RestoreChunk(SeedVr2Preprocess.Result pre, int begin, int len,
