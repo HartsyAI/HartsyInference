@@ -927,6 +927,8 @@ public static class ModelCatalog
                         Sha256 = "583800deb18fa90560d15b41ca0391e79c024784117b0b0263ace02e941237e1" },
                     SideModels.Qwen25Vl7BHunyuan,
                     SideModels.HunyuanImageVae,
+                    // Run only on quoted prompt text (the glyph stream); fetched on first use when not pulled here.
+                    SideModels.ByT5SmallGlyphXl,
                 },
             },
             new CatalogEntry

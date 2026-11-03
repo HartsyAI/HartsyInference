@@ -209,7 +209,8 @@ with its first consumer and is removed here once it ships.
   - Layers run back to front with straight alpha; `Rgb`/`Alpha` stay the composite.
   - Resize and crop apply to every layer.
   - Background removal, refiner, recomposite and crop-to-mask are refused.
-- [ ] A ByT5-small text preset and a byte tokenizer: Hunyuan-Image-2.1 glyphs and Hunyuan-Video-1.5.
+- [x] A ByT5-small text preset and a byte tokenizer: Hunyuan-Image-2.1 glyphs (`infra/byt5`; real-weight check
+  pending). Hunyuan-Video-1.5 reuses them in P8.
 - [ ] A Stable Audio CFG path, a v-prediction EDM sampler and the `seconds_start` timing token: Open 1.0, then 3.
 - [ ] A generalized `ControlNetBaseModel`/`DetectMode` (the extension mirror included) and a ComfyUI `model_patches`
   loader: SD3.5 ControlNet, DiffSynth, USO, T2I-Adapter, MiniMax-H3 Fun ControlNet.

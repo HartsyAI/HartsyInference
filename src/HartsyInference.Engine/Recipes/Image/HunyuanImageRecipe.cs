@@ -155,7 +155,21 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             };
             Qwen2Tokenizer tokenizer = new Qwen2Tokenizer();
             Logs.Info("[HunyuanImageRecipe] HunyuanImage 2.1 ready.");
-            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack);
+            // The glyph encoder loads on the first prompt that quotes text, and only for a checkpoint that has the ByT5
+            // projection (context_embedder_2) to read it.
+            Func<(T5TextEncoder, IDisposable)>? glyphFactory = config.TextEmbedDim2 is null ? null : () =>
+            {
+                string byt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.ByT5SmallGlyphXl, onProgress: null, CancellationToken.None)
+                    .GetAwaiter().GetResult();
+                SafeTensorsLoader byt5Loader = new SafeTensorsLoader();
+                byt5Loader.Load(byt5Path);
+                T5TextEncoder byt5 = new T5TextEncoder(T5TextEncoderConfig.ByT5SmallGlyph);
+                byt5.LoadWeights(byt5Loader.GetAllTensors());
+                Logs.Info("[HunyuanImageRecipe] Glyph-ByT5-small loaded for quoted prompt text.");
+                return (byt5, byt5Loader);
+            };
+            return new HunyuanImageRecipePipeline(pipeline, tokenizer, llama, qwenEncoder, transformer, vaeDecoder, loaders, checkpoint, loraStack,
+                glyphFactory);
         }
         catch (Exception ex)
         {
