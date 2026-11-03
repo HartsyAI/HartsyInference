@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: MOSS-Image takes Comfy-Org's int8 ConvRot Qwen3.5-9B encoder.** The Qwen3.5 text encoder reads an
+  `int8_tensorwise` token embedding (decoding each gathered row with its scale and ConvRot) and, given the backend it runs
+  on, widens the trunk linears that backend cannot multiply packed. `qwen3.5_9b_int8_convrot` (9.7 GB) now loads through
+  `--text-encoder`, where it was refused for its quantized embedding; the bf16 encoder is unchanged.
+
 - **Added: Hunyuan-Image 2.1 renders quoted prompt text through its ByT5 glyph stream.** Quoted spans run through
   Glyph-ByT5-small into the DiT's second text stream, as ComfyUI does, so text the prompt quotes is drawn legibly; a prompt
   without quotes runs exactly as before. The encoder is a new side model fetched on first use. Also: the CLI no longer
