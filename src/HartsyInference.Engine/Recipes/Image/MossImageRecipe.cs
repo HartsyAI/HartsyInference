@@ -90,7 +90,8 @@ public sealed class MossImageRecipe : IArchitectureRecipe
             transformer.LoadWeights(converted);
 
             string encoderPath = ResolveEncoderPath(context, root);
-            Qwen35TextEncoder encoder = Qwen35TextEncoder.Load(encoderPath, MossImageConfig.MaxTextTokens, "MOSS-Image");
+            Qwen35TextEncoder encoder = Qwen35TextEncoder.Load(encoderPath, MossImageConfig.MaxTextTokens, "MOSS-Image",
+                context.TextEncoderBackendOrDefault);
             owned.Add(encoder);
             ILlmTokenizer tokenizer = ResolveTokenizer(encoder, encoderPath, root, context.Cancel);
             VisionPlaceholderPrompt? placeholders = AttachVision(encoder, tokenizer, encoderPath, context.Components?.TextEncoderVision);
