@@ -50,6 +50,11 @@ stable release will require. Dates are UTC.
 - **Fixed: a HunyuanVideo generation that throws mid-denoise releases its streamed block window and step-graph hook.** Before, a failed generation left both attached for the next one.
 - **Added: `TextService` hosts a MiniMax-M3 Hugging Face directory** on the CPU backend through the existing transformer model object (`GgufLanguageModel.FromWeights`), without a scheduler. The loader refuses a checkpoint larger than free host memory before reading a matrix. Attention now widens a per-head bias with −∞ columns to a fixed-capacity cache's buffer. The real model cannot run yet: the CPU backend keeps weights as F32 and the indexer has no device path.
 
+## alpha.400
+
+- **Changed: a SeedVR2 restore fits its target to the memory its VAE decode needs.** The decode runs untiled, so a large target (the 1280x720 default) needs several gigabytes for one chunk. The pipeline now checks the free memory after a pool trim and restores at the largest area that fits, logging a warning with the size used. On an RTX 2060 SUPER, 960x540 completes and 1024x576 does not, which the per-pixel figure is calibrated to.
+- **Changed: the streaming headroom reserves the VAE decode working set.** The DiT's resident prefix shrinks to leave room for the decode, so a restore no longer streams a prefix that the decode then pushes out of memory.
+
 ## alpha.399
 
 - **Added: SeedVR2 restore runs under the VRAM policy.** The DiT streams its blocks through the shared `BlockStreamingScope` (its blocks implement `IStreamingBlock`, the model `IStreamableDenoiser`), with the streaming window reserved in the headroom, so an 8 GB card restores a 3B-model clip it cannot hold resident. Measured on an RTX 2060 SUPER: fp16 streamed, 320×240 nine-frame clip in 19.8 s; 640×360 still runs.
