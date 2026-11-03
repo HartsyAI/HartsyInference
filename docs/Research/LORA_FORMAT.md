@@ -283,6 +283,8 @@ The `factor` parameter controls dimension splitting: `factor=-1` (default) finds
 
 LoCon is standard LoRA extended to Conv2d layers. It uses the same `lora_down.weight` / `lora_up.weight` keys but adds an optional `lora_mid.weight` for the spatial kernel dimensions.
 
+Engine status: a file that carries `lora_mid.weight` is refused by name at load (`LoraFile.Load`), because applying its down/up pair without the mid computes a different operator. LoCon files without a mid load as before.
+
 #### Variant Detection
 
 The safetensors `__metadata__` field `ss_network_module` identifies the variant:
@@ -540,8 +542,8 @@ For single_blocks.{i}.linear1 (fused Q+K+V+proj_mlp):
 
 ## Open Questions
 
-- [ ] Exact handling of DoRA (Weight-Decomposed Low-Rank Adaptation) — ComfyUI recognizes `.dora_scale` suffix
-- [ ] Whether rsLoRA (sqrt(rank) scaling) should be supported as an option
+- [x] DoRA (Weight-Decomposed Low-Rank Adaptation). The LyCORIS `.dora_scale` form is applied by `LoraDoraDecompose`, which follows ComfyUI's `weight_decompose`. PEFT's `.lora_magnitude_vector` is refused by name at load, because its renormalization differs from `dora_scale`.
+- [ ] rsLoRA (`alpha / sqrt(rank)`) is an option of `LoraBaker` only. The engine's stack always applies `alpha / rank`, and a file's rsLoRA declaration is not read.
 - [ ] Performance benchmarks for in-place vs deferred patching in a .NET context
 
 ## Implementation Notes
@@ -552,7 +554,7 @@ For single_blocks.{i}.linear1 (fused Q+K+V+proj_mlp):
 
 2. **Internal representation**: Normalize all formats to an internal representation keyed by model weight path (e.g., `double_blocks.0.img_attn.to_q`). Store A, B, alpha, and variant type per layer.
 
-3. **Fused QKV handling**: For Kohya Flux format, implement the QKV split logic at load time. Pre-split into separate Q/K/V LoRA pairs to simplify the application code.
+3. **Fused QKV handling**: Kohya Flux splits its fused QKV and linear1 at load (`KohyaFluxMapper`). Every split shares the file's down matrix, and the up matrix is cut along its rows. Split-named LoRAs (Z-Image, and Diffusers' `to_q`/`to_k`/`to_v`) keep their names, and `FusedProjectionLayouts` maps each one to its row window of the fused weight at merge time.
 
 4. **Weight application**: Implement `ApplyLoRA(model, lora, strength)` that:
    - Clones the base weight (or stores a reference for undo)

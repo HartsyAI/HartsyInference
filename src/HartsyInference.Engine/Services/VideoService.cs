@@ -305,8 +305,10 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
                 // generation would otherwise answer from the machine's configuration, since the pipeline is cached.
                 using IDisposable settingsScope = KnobProfileScope.Push(effectiveRequest.Settings?.Resolve());
                 VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-                IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
-                    executionPlan.Model, effectiveRequest, executionPlan);
+                LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(
+                    executionPlan.Model, effectiveRequest, executionPlan, cancel);
+                using IDisposable videoLease = leased.Lease;
+                IVideoRecipePipeline pipeline = leased.Pipeline;
                 VideoGenerationResult result = pipeline.Generate(effectiveRequest, executionPlan.EffectiveSettings, progress, cancel);
                 // An explicit request fps always wins; else a pipeline-pinned rate (e.g. a decoded driving clip's,
                 // so motion speed matches the driving video); else the family default the resolver applied.
@@ -355,45 +357,22 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequest resolved = NormalizePromptTags(executionPlan.EffectiveSettings.Apply(executionRequest),
             InferenceEngine.VideoPromptWeightingFor(executionPlan.Model));
         VideoArtifactFileBinding.RequireUnchanged(executionPlan);
-        IVideoRecipePipeline pipeline = _engine.GetOrConstructVideoRecipe(
-            executionPlan.Model, resolved, executionPlan);
+        LeasedVideoRecipe leased = _engine.GetOrConstructVideoRecipeLeased(executionPlan.Model, resolved, executionPlan, cancel);
+        // The stream takes the lease: its producer releases it when it finishes, so eviction waits for the whole stream.
+        IDisposable videoLease = leased.Lease;
+        IVideoRecipePipeline pipeline = leased.Pipeline;
         if (!pipeline.SupportsStreaming)
         {
+            videoLease.Dispose();
             throw new NotSupportedException(
                 $"Video model family '{InferenceEngine.FamilyIdFor(executionPlan.Model)}' does not support streaming generation.");
         }
-        // Bridges the pipeline's own IAsyncEnumerable (whose first MoveNextAsync blocks synchronously through the
-        // whole denoise loop — there's no await point until the VAE decode phase starts yielding groups) onto a
-        // background thread via a bounded channel, so the calling thread (an ASP.NET request handler when the
-        // extension awaits this) isn't pinned for the denoise duration. Mirrors GenerateAsync's Task.Run, but
-        // needs a channel instead of a single Task<T> because this method yields incrementally rather than once.
-        Channel<VideoFrame> channel = Channel.CreateBounded<VideoFrame>(
-            new BoundedChannelOptions(4) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
-        Task producer = Task.Run(async () =>
-        {
-            try
-            {
-                await foreach (VideoFrame frame in pipeline.GenerateFramesAsync(resolved, executionPlan.EffectiveSettings, progress, cancel).WithCancellation(cancel).ConfigureAwait(false))
-                {
-                    await channel.Writer.WriteAsync(frame, cancel).ConfigureAwait(false);
-                }
-                channel.Writer.TryComplete();
-            }
-            catch (Exception ex)
-            {
-                channel.Writer.TryComplete(ex);
-            }
-        }, cancel);
-
-        await foreach (VideoFrame frame in channel.Reader.ReadAllAsync(cancel).ConfigureAwait(false))
+        // Frames come from a background producer that owns the lease; see VideoFrameStream.
+        await foreach (VideoFrame frame in VideoFrameStream.Produce(pipeline, resolved, executionPlan.EffectiveSettings, progress, videoLease, cancel)
+            .ConfigureAwait(false))
         {
             yield return frame;
         }
-        // Observes the producer's result: rethrows whatever TryComplete(ex) captured (the channel reader itself
-        // already threw that same exception via ReadAllAsync above, but awaiting here also surfaces a producer-side
-        // failure that happened AFTER the channel completed successfully — there isn't one today, but this is the
-        // same "don't let a background Task's fault go unobserved" discipline as GenerateAsync's Task.Run).
-        await producer.ConfigureAwait(false);
     }
 
     /// <summary>Builds an exact H3 execution summary. Generic video families still perform family-specific

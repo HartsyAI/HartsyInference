@@ -124,6 +124,37 @@ pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same
 A recipe reached by delegation calls `context.ResolveVariant(itsCatalog)`. A variant with its own registered contract
 sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a file-name guess must not impose.
 
+## Vision Contracts
+
+- **Requests.** A single image goes in a `VisionRequest`. Several images go in a `VisionBatchRequest`, either `Views`
+  (one scene, no time order) or `Frames` (time order, with `TimestampsSeconds` or `Fps`). `VisionRequestValidator`
+  holds the per-mode rules, and the service, CLI and API all call it before any model loads:
+  - `Track` and `Interpolate` take frames only.
+  - Only `Depth`, `MetricDepth` and `Geometry` take views.
+  - Each model then refuses what it cannot do itself, for example a single-view depth model given views.
+- **Results.** Structured fields on `VisionResult` are init-only and nullable; existing fields keep their meaning.
+  - **Depth:** a float map with a `VisionDepthKind` and an optional validity mask.
+  - **Point maps and normals:** H×W×3.
+  - **Matte:** H×W.
+  - **Camera:** intrinsics plus an optional world-to-camera 3×4.
+  - **Poses, faces and tracks:** one record each.
+  - **Multi-view:** one `VisionResult` per view in `Views`.
+- **Streams.** A frame model returns `IAsyncEnumerable<VisionFrameResult>` built with `VisionFrameStream.Run`. The
+  producer may run at most `capacity` frames ahead. Breaking out, cancelling or a producer error stops the producer,
+  awaits it, and disposes its state (tracker memory, frame buffers) before the enumerator ends. Interpolated frames
+  carry their exact output time.
+- **Conventions.** These apply to every structured field:
+  - The camera frame is OpenCV's: x right, y down, z forward.
+  - Pixel centres are at +0.5.
+  - Boxes, keypoints and intrinsics are in pixels; metric depth, points and camera translation are in metres.
+  - Arrays are float32, row-major, last dimension fastest.
+- **Formats.** One encoding (`VisionArrayCodec`) serves both outputs, so a CLI file and an API response decode to the
+  same array bytes.
+  - **CLI:** a `.npy` per array, a PNG preview per map, and a `result.json` sidecar. Frame runs also write `frames.json`
+    with each frame's time.
+  - **API:** each array as `{ dtype: "float32", shape, data: base64 little-endian }`, plus a `conventions` object.
+    `/v1/native/vision/sequence` answers views with one JSON result and frames with SSE `frame` events, then `complete`.
+
 ## GPU Activation Cache Rules
 - Every `CudaBackend` op calls `CacheActivation(output)` to keep results on GPU. No per-op
   `cuStreamSynchronize` — stream ordering guarantees correctness on a single blocking stream.

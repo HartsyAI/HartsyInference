@@ -6,6 +6,16 @@ using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.ModelAssets.Lora;
 
+/// <summary>What a stack does with a unit it cannot apply: skip it and report the omission, or refuse the whole stack.</summary>
+public enum LoraPartialPolicy
+{
+    /// <summary>Apply every unit that fits, skip the rest, and report exactly which were skipped. The default.</summary>
+    Allow,
+
+    /// <summary>Refuse the stack, naming the units it cannot apply, rather than produce a partly applied LoRA.</summary>
+    Refuse,
+}
+
 /// <summary>Composes one or more LoRAs into a single weight-space delta and applies it to a model's weight dictionary. Use one stack per model component (UNet / Transformer / ClipL / ClipG / TextEncoder2) — each ApplyTo call walks the stacked LoRAs and produces freshly-allocated owned tensors that replace the borrowed mmap entries in the dictionary. The stack owns those new tensors; dispose the stack only after the model is no longer used. An fp8 target is dequantized, merged in F32, and requantized back to fp8 with a recomputed scale (ComfyUI's approach) rather than rejected, so the weight stays on the native fp8 GEMM path; an int8_tensorwise (± ConvRot) target takes the same dequant-merge-requant round trip with a fresh per-row scale, so it stays packed on the resident IMMA path instead of doubling to BF16. A block-quantized target (GGUF, nvfp4) keeps its packed bytes and carries the delta as a <see cref="LowRankAdjunct"/> the GEMM adds at runtime — those codecs have no quantizer to write a merged result back with. Full-weight .diff/.diff_b deltas (Comfy-style Wan repacks) apply through the same passes as W' = W + strength·diff.</summary>
 public sealed class LoraStack : IDisposable
 {
@@ -13,6 +23,36 @@ public sealed class LoraStack : IDisposable
     private readonly List<Tensor> _ownedMerged = [];
     private readonly List<LoraFile> _ownedFiles = [];
     private int _disposed;
+
+    /// <summary>Whether a unit the stack cannot apply is skipped and reported, or refuses the stack. The engine takes it from the
+    /// <c>lora.partialApplication</c> knob.</summary>
+    public LoraPartialPolicy PartialPolicy { get; set; } = LoraPartialPolicy.Allow;
+
+    /// <summary>What every <see cref="ApplyTo"/> call on this stack did, summed over the calls. The counts measure different
+    /// units, so they are kept apart; see <see cref="ApplyReport"/>. A stack applied to several components sums its counts across them.</summary>
+    public ApplyReport Report { get; private set; }
+
+    /// <summary>Counts from <see cref="ApplyTo"/>, each in the unit its name says. Source units are LoRA layers or full-weight
+    /// diffs. Destination tensors are weights written into the dictionary, and a fused group shares one. Fused slices are source
+    /// units that landed as a row window of a fused weight.</summary>
+    /// <param name="Applied">Source units merged into a weight or attached to it as a runtime term.</param>
+    /// <param name="DestinationTensors">Weight tensors written into the dictionary.</param>
+    /// <param name="FusedSliceUnits">Of <paramref name="Applied"/>, the units that landed as a row slice of a fused weight.</param>
+    /// <param name="SkippedMissing">Source units whose target weight the dictionary does not hold.</param>
+    /// <param name="SkippedShape">Source units skipped because their shape does not match the checkpoint's weight.</param>
+    /// <param name="ZeroStrengthMatched">Source units at zero strength whose target exists. They are bypassed, never computed.</param>
+    public readonly record struct ApplyReport(int Applied, int DestinationTensors, int FusedSliceUnits,
+        int SkippedMissing, int SkippedShape, int ZeroStrengthMatched)
+    {
+        /// <summary>Adds another call's counts to these.</summary>
+        public ApplyReport Add(ApplyReport other) => new(
+            Applied + other.Applied,
+            DestinationTensors + other.DestinationTensors,
+            FusedSliceUnits + other.FusedSliceUnits,
+            SkippedMissing + other.SkippedMissing,
+            SkippedShape + other.SkippedShape,
+            ZeroStrengthMatched + other.ZeroStrengthMatched);
+    }
 
     /// <summary>Adds a LoRA to the stack. The LoraFile remains owned by the caller — keep it alive at least until ApplyTo has been called for every target component.</summary>
     /// <param name="tencStrength">Strength for text-encoder targets; defaults to <paramref name="strength"/>, matching SwarmUI's <c>strength_clip</c> falling back to <c>strength_model</c>.</param>
@@ -61,17 +101,18 @@ public sealed class LoraStack : IDisposable
         IDictionary<string, Tensor>? textEncoder2Weights = null,
         IReadOnlyDictionary<string, string>? transformerNativeNames = null)
     {
+        if (unetWeights is null) HandleUnservedTarget(LoraTarget.UNet);
+        if (transformerWeights is null) HandleUnservedTarget(LoraTarget.Transformer);
+        if (clipLWeights is null) HandleUnservedTarget(LoraTarget.ClipL);
+        if (clipGWeights is null) HandleUnservedTarget(LoraTarget.ClipG);
+        if (textEncoder2Weights is null) HandleUnservedTarget(LoraTarget.TextEncoder2);
+
         int total = 0;
         if (unetWeights is not null) total += ApplyTo(unetWeights, LoraTarget.UNet, backend);
-        else WarnUnservedTarget(LoraTarget.UNet);
         if (transformerWeights is not null) total += ApplyTo(transformerWeights, LoraTarget.Transformer, backend, transformerNativeNames);
-        else WarnUnservedTarget(LoraTarget.Transformer);
         if (clipLWeights is not null) total += ApplyTo(clipLWeights, LoraTarget.ClipL, backend);
-        else WarnUnservedTarget(LoraTarget.ClipL);
         if (clipGWeights is not null) total += ApplyTo(clipGWeights, LoraTarget.ClipG, backend);
-        else WarnUnservedTarget(LoraTarget.ClipG);
         if (textEncoder2Weights is not null) total += ApplyTo(textEncoder2Weights, LoraTarget.TextEncoder2, backend);
-        else WarnUnservedTarget(LoraTarget.TextEncoder2);
         return total;
     }
 
@@ -80,25 +121,33 @@ public sealed class LoraStack : IDisposable
     /// applies to the parts the recipe DID pass, the generation succeeds, and the missing arm reads as a weak LoRA.
     /// It warns rather than throws because a LoRA legitimately carrying a text-encoder arm is not a reason to refuse
     /// a pipeline that only exposes its transformer.</remarks>
-    private void WarnUnservedTarget(LoraTarget target)
+    private void HandleUnservedTarget(LoraTarget target)
     {
-        int layers = 0;
+        List<string> units = [];
         foreach (Entry entry in _entries)
         {
             foreach (LoraLayer layer in entry.File.Layers)
             {
-                if (layer.Target == target) layers++;
+                if (layer.Target == target) units.Add(layer.TargetKey);
             }
             foreach (LoraFullWeightDiff diff in entry.File.FullWeightDiffs)
             {
-                if (diff.Target == target) layers++;
+                if (diff.Target == target) units.Add(diff.TargetKey);
             }
         }
-        if (layers > 0)
+        if (units.Count == 0)
         {
-            Logs.Warning($"{layers} LoRA layer(s) target {target}, which this pipeline did not pass a weight "
-                + "dictionary for; that part of the LoRA is not applied.");
+            return;
         }
+        if (PartialPolicy == LoraPartialPolicy.Refuse)
+        {
+            throw new NotSupportedException(
+                $"LoRA units for {target} cannot all be applied: {units.Count} unit(s) target a component this pipeline "
+                + $"does not expose, the first is '{units[0]}'. lora.partialApplication=refuse rejects a partly applied "
+                + "LoRA; remove it, or use a LoRA trained for this model.");
+        }
+        Logs.Warning($"{units.Count} LoRA layer(s) target {target}, which this pipeline did not pass a weight "
+            + "dictionary for; that part of the LoRA is not applied.");
     }
 
     /// <summary>Merges every stacked LoRA layer matching the given target into the weight dictionary. Replaces affected entries with freshly-allocated owned tensors. Returns the number of weights modified.</summary>
@@ -110,9 +159,13 @@ public sealed class LoraStack : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(backend);
 
+        // Presence decides whether a zero-strength layer counts as matched, by the same rule the merge uses to find its target.
+        bool IsPresent(string key) =>
+            weights.ContainsKey(key) || FusedProjectionLayouts.TryResolve(key, weights.ContainsKey, out _, out _, out _);
         Dictionary<string, List<(LoraLayer layer, float strength)>> grouped = [];
         Dictionary<string, List<(LoraLayer layer, float strength, AdjunctGate gate)>> gated = [];
         KohyaUnderscoreIndex? kohyaIndex = null;
+        int zeroStrength = 0;
         foreach (Entry entry in _entries)
         {
             float strength = entry.StrengthFor(target);
@@ -130,6 +183,13 @@ public sealed class LoraStack : IDisposable
                     {
                         layer = source.WithResolvedTarget(resolvedKey);
                     }
+                }
+                // Zero strength is absent: nothing is computed, merged, or attached for it. It still counts as matched when
+                // its target exists, so a LoRA whose only matches are zero is not refused as matching nothing.
+                if (strength == 0f)
+                {
+                    if (IsPresent(layer.TargetKey)) zeroStrength++;
+                    continue;
                 }
                 if (entry.Gate is { } gate)
                 {
@@ -152,7 +212,17 @@ public sealed class LoraStack : IDisposable
 
         // Refused before any merge writes into the dictionary, so a refused adapter leaves the weights it was given untouched.
         RefuseUnmatchedGatedTargets(gated, weights, target);
-        int merged = 0, skippedShape = 0;
+        int skippedMissing = 0, skippedShape = 0, units = 0, fusedUnits = 0;
+        // Every target this call could not apply, by its canonical key, so a refusal can name it.
+        List<string> omitted = [];
+        // Each write lands in pending and reaches the dictionary only after every group has validated, so a refusal partway
+        // through leaves the caller's weights exactly as it found them. Current reads a pending write ahead of the dictionary.
+        Dictionary<string, Tensor> pending = [];
+        Tensor Current(string key)
+        {
+            if (pending.TryGetValue(key, out Tensor? written)) return written;
+            return weights[key];
+        }
         // Adjunct terms are collected per key and attached ONCE at the end: a key can take deltas from both the
         // direct pass and the fused-slice pass, and attaching twice would drop the first attachment's terms.
         Dictionary<string, List<LowRankAdjunctTerm>> adjuncts = [];
@@ -179,6 +249,8 @@ public sealed class LoraStack : IDisposable
                     continue;
                 }
                 Logs.Warning($"LoRA target '{canonicalKey}' not present in {target} weights; skipping.");
+                skippedMissing += deltas.Count;
+                omitted.Add(canonicalKey);
                 continue;
             }
             DType originalDtype = baseW.DType;
@@ -199,7 +271,8 @@ public sealed class LoraStack : IDisposable
                     + $"[{badLayer.Delta.OutFeatures}, {badLayer.Delta.InFeatures}] but the checkpoint's weight is "
                     + $"{baseW.Shape} — this LoRA was trained against a different build of this architecture; "
                     + "skipping this weight.");
-                skippedShape++;
+                skippedShape += deltas.Count;
+                omitted.Add(canonicalKey);
                 continue;
             }
 
@@ -210,6 +283,7 @@ public sealed class LoraStack : IDisposable
                 {
                     terms.Add(BuildAdjunctTerm(backend, layer.Delta, strength, canonicalKey, baseW, 0, baseW.Shape[0]));
                 }
+                units += deltas.Count;
                 continue;
             }
 
@@ -221,8 +295,8 @@ public sealed class LoraStack : IDisposable
                     AccumulateDelta(backend, accumF32, layer.Delta, strength);
                 }
 
-                weights[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
-                merged++;
+                pending[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
+                units += deltas.Count;
             }
             catch
             {
@@ -233,7 +307,7 @@ public sealed class LoraStack : IDisposable
 
         foreach ((string fusedKey, List<(int SliceIndex, int SliceCount, LoraLayer Layer, float Strength)> slices) in fusedPending)
         {
-            Tensor fusedBase = weights[fusedKey];
+            Tensor fusedBase = Current(fusedKey);
             long sliceRows = fusedBase.Shape[0] / slices[0].SliceCount;
             bool anyBad = slices.Exists(sl =>
                 fusedBase.Shape.Rank != 2 || fusedBase.Shape[0] % sl.SliceCount != 0
@@ -241,7 +315,8 @@ public sealed class LoraStack : IDisposable
             if (anyBad)
             {
                 Logs.Warning($"LoRA fused-slice merge into '{fusedKey}' skipped: delta shapes do not tile the fused weight {fusedBase.Shape}.");
-                skippedShape++;
+                skippedShape += slices.Count;
+                omitted.Add(fusedKey);
                 continue;
             }
             (int _, int _, LoraLayer doraLayer, float _) = slices.Find(sl => sl.Layer.Delta.DoraScale is not null);
@@ -263,6 +338,8 @@ public sealed class LoraStack : IDisposable
                     terms.Add(BuildAdjunctTerm(backend, layer.Delta, strength, fusedKey, fusedBase,
                         sliceIndex * sliceRows, sliceRows));
                 }
+                units += slices.Count;
+                fusedUnits += slices.Count;
                 continue;
             }
             Tensor accumF32 = DequantForMerge(fusedBase, fusedKey);
@@ -272,8 +349,9 @@ public sealed class LoraStack : IDisposable
                 {
                     AccumulateDeltaIntoRows(backend, accumF32, layer.Delta, strength, sliceIndex * sliceRows);
                 }
-                weights[fusedKey] = FinalizeMerged(accumF32, fusedBase, fusedKey);
-                merged++;
+                pending[fusedKey] = FinalizeMerged(accumF32, fusedBase, fusedKey);
+                units += slices.Count;
+                fusedUnits += slices.Count;
             }
             catch
             {
@@ -293,6 +371,11 @@ public sealed class LoraStack : IDisposable
             foreach (LoraFullWeightDiff diff in entry.File.FullWeightDiffs)
             {
                 if (diff.Target != target) continue;
+                if (strength == 0f)
+                {
+                    if (weights.ContainsKey(diff.TargetKey)) zeroStrength++;
+                    continue;
+                }
                 if (!diffGrouped.TryGetValue(diff.TargetKey, out List<(Tensor, float)>? list))
                 {
                     list = [];
@@ -303,11 +386,14 @@ public sealed class LoraStack : IDisposable
         }
         foreach ((string canonicalKey, List<(Tensor Diff, float Strength)> deltas) in diffGrouped)
         {
-            if (!weights.TryGetValue(canonicalKey, out Tensor? baseW))
+            if (!weights.ContainsKey(canonicalKey))
             {
                 Logs.Warning($"LoRA full-weight diff target '{canonicalKey}' not present in {target} weights; skipping.");
+                skippedMissing += deltas.Count;
+                omitted.Add(canonicalKey);
                 continue;
             }
+            Tensor baseW = Current(canonicalKey);
             DType originalDtype = baseW.DType;
             if (originalDtype.IsFp8 && baseW.Shape.Rank != 2)
             {
@@ -320,7 +406,8 @@ public sealed class LoraStack : IDisposable
                 Logs.Warning($"LoRA full-weight diff for '{canonicalKey}' does not match the checkpoint's weight shape "
                     + $"{baseW.Shape} — this LoRA was trained against a different build of this architecture; "
                     + "skipping this weight.");
-                skippedShape++;
+                skippedShape += deltas.Count;
+                omitted.Add(canonicalKey);
                 continue;
             }
             if (RequiresRuntimeAdjunct(baseW))
@@ -333,6 +420,7 @@ public sealed class LoraStack : IDisposable
                     Tensor diffF32 = OwnF32Copy(diff);
                     terms.Add(new LowRankAdjunctTerm { Down = diffF32, Scale = strength });
                 }
+                units += deltas.Count;
                 continue;
             }
             Tensor accumF32 = DequantForMerge(baseW, canonicalKey);
@@ -352,8 +440,8 @@ public sealed class LoraStack : IDisposable
                     }
                 }
 
-                weights[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
-                merged++;
+                pending[canonicalKey] = FinalizeMerged(accumF32, baseW, canonicalKey);
+                units += deltas.Count;
             }
             catch
             {
@@ -366,28 +454,46 @@ public sealed class LoraStack : IDisposable
         // ungated terms of the same key. Their targets were checked before any merge ran, so each one is present here.
         foreach ((string canonicalKey, List<(LoraLayer layer, float strength, AdjunctGate gate)> deltas) in gated)
         {
-            Tensor gatedBase = weights[canonicalKey];
+            Tensor gatedBase = Current(canonicalKey);
             List<LowRankAdjunctTerm> terms = AdjunctTermsFor(adjuncts, canonicalKey);
             foreach ((LoraLayer layer, float strength, AdjunctGate gate) in deltas)
             {
                 terms.Add(BuildAdjunctTerm(backend, layer.Delta, strength, canonicalKey, gatedBase, 0, gatedBase.Shape[0], gate));
             }
+            units += deltas.Count;
         }
 
         foreach ((string canonicalKey, List<LowRankAdjunctTerm> terms) in adjuncts)
         {
-            weights[canonicalKey] = AttachAdjunct(weights[canonicalKey], terms, canonicalKey);
-            merged++;
+            pending[canonicalKey] = AttachAdjunct(Current(canonicalKey), terms, canonicalKey);
         }
 
-        if (merged > 0 || skippedShape > 0)
+        // Refused before any write: a partly applied LoRA is a wrong result that looks right, so the policy can reject it outright.
+        if (PartialPolicy == LoraPartialPolicy.Refuse && omitted.Count > 0)
         {
-            // The skipped count is load-bearing, not decoration: a partially applied LoRA still generates, so a
-            // silent skip reads as success while the LoRA does only part of its job.
-            string skipped = skippedShape > 0 ? $" ({skippedShape} skipped on shape mismatch)" : "";
-            Logs.Info($"Applied {merged} of {grouped.Count + gated.Count + diffGrouped.Count} LoRA-targeted weights to {target}{skipped}.");
+            throw new NotSupportedException(
+                $"LoRA units for {target} cannot all be applied: {omitted.Count} unit(s) have no matching weight or a different "
+                + $"shape, the first is '{omitted[0]}'. lora.partialApplication=refuse rejects a partly applied LoRA; remove it, "
+                + "or use a LoRA trained for this model.");
         }
-        return merged;
+
+        // Every group has validated, so the writes commit together. Nothing above has touched the caller's dictionary.
+        foreach ((string canonicalKey, Tensor written) in pending)
+        {
+            weights[canonicalKey] = written;
+        }
+
+        int requested = units + skippedMissing + skippedShape;
+        Report = Report.Add(new ApplyReport(units, pending.Count, fusedUnits, skippedMissing, skippedShape, zeroStrength));
+        if (requested > 0 || zeroStrength > 0)
+        {
+            // The counts measure different things, so each is reported on its own. A partially applied LoRA still generates,
+            // so the skipped counts matter most: a silent skip reads as success while the LoRA does only part of its job.
+            string zero = zeroStrength > 0 ? $", {zeroStrength} at zero strength" : "";
+            Logs.Info($"Applied {units} of {requested} LoRA units to {target}: {pending.Count} weight tensors written, "
+                + $"{fusedUnits} units as fused slices, {skippedMissing} with no matching weight, {skippedShape} on shape mismatch{zero}.");
+        }
+        return pending.Count;
     }
 
     /// <summary>Whether this weight is a packed ComfyUI <c>int8_tensorwise</c> Linear (± ConvRot) that can take the dequant-merge-requant round trip.</summary>

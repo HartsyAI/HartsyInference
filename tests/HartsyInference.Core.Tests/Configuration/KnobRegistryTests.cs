@@ -136,6 +136,7 @@ public sealed class KnobRegistryTests
                 KnobDomain.Vram => "vram.",
                 KnobDomain.Diagnostics => "diagnostics.",
                 KnobDomain.Paths => "paths.",
+                KnobDomain.Lora => "lora.",
                 _ => "?",
             };
             if (!id.StartsWith(expected, StringComparison.Ordinal))

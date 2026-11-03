@@ -423,6 +423,18 @@ public static class SideModels
         Sha256 = "71dda6079e18d354e16e3347bc49a9b710afd9495c378efbb833d30cac9cb81b",
     };
 
+    /// <summary>OneReward's object-removal LoRA for the FLUX.1 Fill transformer, applied by name with <c>--lora</c> (ComfyUI's
+    /// OneReward workflow loads it model-only at strength 1 on the OneReward transformer). CC-BY-NC-4.0. Hash is the LFS object
+    /// id at Comfy-Org/OneReward @77a4042ca2.</summary>
+    public static readonly ModelAsset OneRewardObjectRemovalLora = new ModelAsset
+    {
+        Repo = "Comfy-Org/OneReward",
+        RepoPath = "split_files/loras/flux.1-fill-dev-object-removal-lora.safetensors",
+        TargetSubdir = "Lora",
+        Role = "lora",
+        Sha256 = "63b3f284682ffe65eff22473179b48db107b0d1ff8f2b0a03c6dd2c8f21e8451",
+    };
+
     /// <summary>Qwen-Image VAE — 16-channel autoencoder used by Anima, Krea 2 and Qwen Image; path and hash match SwarmUI's <c>qwen-image-vae</c> registration (<c>VAE/QwenImage/</c>) for file reuse.</summary>
     public static readonly ModelAsset QwenImageVae = new ModelAsset
     {

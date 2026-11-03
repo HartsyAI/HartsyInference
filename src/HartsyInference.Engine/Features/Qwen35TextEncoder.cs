@@ -70,7 +70,10 @@ public sealed class Qwen35TextEncoder : IMultimodalFinalHiddenStateEncoder, IDis
     /// <param name="family">Model family, for log lines and errors.</param>
     /// <param name="backend">The backend that will run the trunk. A safetensors encoder's packed linears (ComfyUI's int8 and
     /// w4a8 builds) that it cannot multiply packed are widened to BF16 here; null keeps every weight as stored.</param>
-    public static Qwen35TextEncoder Load(string path, int maxTokens, string family, IBackend? backend = null)
+    public static Qwen35TextEncoder Load(string path, int maxTokens, string family) =>
+        Load(path, maxTokens, family, backend: null);
+
+    public static Qwen35TextEncoder Load(string path, int maxTokens, string family, IBackend? backend)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         if (maxTokens < 1)
