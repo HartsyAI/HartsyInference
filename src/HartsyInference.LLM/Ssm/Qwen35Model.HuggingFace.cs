@@ -165,9 +165,30 @@ public sealed unsafe partial class Qwen35Model
         return result;
     }
 
-    /// <summary>Copies one row of a <c>[rows, cols]</c> F32/BF16/F16 matrix (an embedding or <c>lm_head</c> table) into F32.</summary>
+    /// <summary>Copies one row of a <c>[rows, cols]</c> F32/BF16/F16 matrix (an embedding or <c>lm_head</c> table) into F32, or
+    /// decodes one row of a ComfyUI <c>int8_tensorwise</c> table (scale and ConvRot on <see cref="Tensor.QuantInfo"/>).</summary>
     public static void CopyEmbeddingRow(Tensor table, int row, int cols, float* destination)
     {
+        if (table.DType == DType.I8 && table.QuantInfo is { Format: "int8_tensorwise", RowScale: { } scale } int8 && scale.DType == DType.F32)
+        {
+            // One row of Int8ConvRotCodec.DequantToBf16, so a gathered row equals that row of the widened table: scaled,
+            // un-rotated per ConvRot group, then rounded through BF16.
+            sbyte* src = (sbyte*)table.DataPointer + (long)row * cols;
+            float rowScale = ((float*)scale.DataPointer)[scale.ElementCount == 1 ? 0 : row];
+            for (int c = 0; c < cols; c++)
+            {
+                destination[c] = src[c] * rowScale;
+            }
+            if (int8.ConvRotGroupSize > 0)
+            {
+                Int8ConvRotCodec.ApplyRotationInPlace(new Span<float>(destination, cols), int8.ConvRotGroupSize);
+            }
+            for (int c = 0; c < cols; c++)
+            {
+                destination[c] = BitConverter.Int32BitsToSingle(TensorCasts.F32ToBf16Bits(destination[c]) << 16);
+            }
+            return;
+        }
         if (table.DType == DType.F32)
         {
             Buffer.MemoryCopy((float*)table.DataPointer + (long)row * cols, destination, (long)cols * 4, (long)cols * 4);
@@ -190,7 +211,7 @@ public sealed unsafe partial class Qwen35Model
         }
         else
         {
-            throw new NotSupportedException($"Embedding rows are read from F32, BF16 or F16 tables, not {table.DType}.");
+            throw new NotSupportedException($"Embedding rows are read from F32, BF16, F16 or int8_tensorwise tables, not {table.DType}.");
         }
     }
 
