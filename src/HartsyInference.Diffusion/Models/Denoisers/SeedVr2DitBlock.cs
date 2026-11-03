@@ -1,6 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Utilities;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -15,7 +17,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
 /// (fixed-order <c>MoeCombine</c> sum + 1/N scale). The emb+ada modulation vectors are additive constants per
 /// timestep, combined once and cached (<see cref="PrepareMod"/>).</para></summary>
-public sealed class SeedVr2DitBlock
+public sealed class SeedVr2DitBlock : IStreamingBlock
 {
     private readonly SeedVr2Config _config;
     private readonly bool _shared;
@@ -310,6 +312,10 @@ public sealed class SeedVr2DitBlock
 
     /// <summary>GEMM weights for backend preload/free (mod vectors and qk-norm affines are plan-lifetime
     /// weight-cache entries, not phase-staged — excluded here).</summary>
+    /// <summary>Device footprint of this block's weights, sized for the streaming window.</summary>
+    public long EstimatedWeightBytes => WeightBytes.Sum(EnumerateWeights());
+
+    /// <inheritdoc/>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         yield return _qkvVidW;

@@ -209,8 +209,7 @@ public sealed record LlamaStyleEncoderConfig
     /// <summary>Qwen3-8B preset (36 layers, hidden=4096, GQA 32:8, head_dim=128, intermediate=12288,
     /// vocab=151936). Same Qwen3 family as 4B — only hidden + intermediate change.
     /// Used by Flux.2 Klein 9B (`Comfy-Org/flux2-klein-9B/.../qwen_3_8b_*.safetensors`).
-    /// Note: Comfy distributes this as fp4-mixed; HartsyInference doesn't yet support FP4 GEMM,
-    /// so this preset is currently usable only with fp8 / fp16 Qwen3-8B variants.</summary>
+    /// Comfy's fp4-mixed build (SideModels.Qwen3_8B_Fp4Mixed) loads too: its nvfp4 groups dequantize at load.</summary>
     public static LlamaStyleEncoderConfig Qwen3_8B => new()
     {
         HiddenSize = 4096,

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -111,9 +112,23 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
                 break;
         }
 
-        if (options.Strength < 1f)
-            for (int f = 0; f < pre.OriginalFrames; f++)
-                TransplantFrame(output, pre.Data, pre.Frames, f, outH, outW, options.Strength);
+        // One scratch for the whole restore: the colour passes reuse its planes for every frame.
+        if (options.ColorTransfer != SeedVr2ColorTransfer.None || options.Strength < 1f)
+        {
+            using SeedVr2ColorScratch colorScratch = new(outH * outW);
+            if (options.ColorTransfer != SeedVr2ColorTransfer.None)
+            {
+                ColorPass transfer = (model, input) => ApplyColorTransfer(options.ColorTransfer, model, input, outH, outW, colorScratch);
+                for (int f = 0; f < pre.OriginalFrames; f++)
+                    ColorFrame(output, pre.Data, pre.Frames, f, outH, outW, colorScratch, transfer);
+            }
+            if (options.Strength < 1f)
+            {
+                ColorPass wavelet = (model, input) => SeedVr2ColorFix.Transplant(model, input, 3, outH, outW, options.Strength, colorScratch);
+                for (int f = 0; f < pre.OriginalFrames; f++)
+                    ColorFrame(output, pre.Data, pre.Frames, f, outH, outW, colorScratch, wavelet);
+            }
+        }
 
         List<byte[]> result = ConvertFrames(output, pre.Frames, 0, pre.OriginalFrames, outH, outW)
             .Select(frame => frame.Rgb)
@@ -140,6 +155,23 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
             result.Add(new VideoFrame(frame, width, height, rgb));
         }
         return result;
+    }
+
+    /// <summary>Device bytes the DiT's forward needs beyond the weights it keeps resident: the streaming window (the block in
+    /// flight plus the prefetched ones), the vid stream and MLP temporaries per token in F32, and a margin for the window
+    /// attention's scratch. The window is reserved up front, since a resident prefix that takes all the free memory leaves the
+    /// streamed suffix no room to upload (the first upload then fails on a 33 MB allocation on an 8 GB card).</summary>
+    private long DitActivationReserveBytes(int lt, int lh, int lw)
+    {
+        SeedVr2Config config = _dit.Config;
+        (int pT, int pH, int pW) = config.PatchSize;
+        long tokens = (long)(lt / pT) * (lh / pH) * (lw / pW);
+        long perToken = 4L * (12L * config.VidDim + 2L * config.MlpDim);
+        long largestBlock = 0;
+        for (int i = 0; i < _dit.BlockCount; i++)
+            largestBlock = Math.Max(largestBlock, _dit.GetBlock(i).EstimatedWeightBytes);
+        long window = (BlockStreamingOptions.DefaultPrefetchAhead + 1) * largestBlock;
+        return tokens * perToken + window + 256L * 1024 * 1024;
     }
 
     private float[] RestoreChunk(SeedVr2Preprocess.Result pre, int begin, int len,
@@ -197,9 +229,22 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         mean.Dispose(); logvar.Dispose(); noiseA.Dispose();
 
         long tDit = Environment.TickCount64;
-        Backend.PreloadWeights(_dit.EnumerateWeights());
-        Tensor v = _dit.Forward(Backend, ditIn, _posEmb, Timestep);
-        Backend.Sync();
+        // The DiT runs through the shared streaming scope: when the VRAM policy says it does not fit, each layer is made
+        // resident just before it runs and evicted after, so a card too small for the whole model still restores. When it
+        // fits, the scope preloads everything, which is the old full-residency path.
+        Tensor v;
+        using (BlockStreamingScope stream = BlockStreamingScope.Open(new BlockStreamingOptions
+        {
+            Backend = Backend,
+            Denoiser = _dit,
+            ModelName = "SeedVR2",
+            HeadroomBytes = DitActivationReserveBytes(lt, lh, lw),
+        }))
+        {
+            v = _dit.Forward(Backend, ditIn, _posEmb, Timestep);
+            Backend.Sync();
+            stream.EndStep();
+        }
         Backend.FreeWeights(_dit.EnumerateWeights());
         Backend.TrimMemoryPool();
         ditIn.Dispose();
@@ -231,19 +276,41 @@ public sealed class SeedVr2RestorePipeline : DiffusionPipelineBase
         return chunk;
     }
 
-    private static void TransplantFrame(float[] output, float[] reference, int totalFrames, int frame,
-        int h, int w, float strength)
+    /// <summary>One colour pass over a frame's planes: <c>model</c> is overwritten, <c>input</c> is the resized reference.</summary>
+    private delegate void ColorPass(Span<float> model, ReadOnlySpan<float> input);
+
+    private static void ApplyColorTransfer(SeedVr2ColorTransfer mode, Span<float> model, ReadOnlySpan<float> input, int h, int w,
+        SeedVr2ColorScratch scratch)
     {
-        float[] model = new float[3 * h * w];
-        float[] input = new float[3 * h * w];
+        switch (mode)
+        {
+            case SeedVr2ColorTransfer.Lab:
+                SeedVr2ColorFix.TransferLab(model, input, h, w, scratch);
+                break;
+            case SeedVr2ColorTransfer.AdaIn:
+                SeedVr2ColorFix.TransferAdaIn(model, input, 3, h, w);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "No colour transfer to apply.");
+        }
+    }
+
+    /// <summary>Runs one colour pass over a frame: copies its three planes out of the clip-major output into the scratch, applies
+    /// <paramref name="transfer"/>, and writes them back.</summary>
+    private static void ColorFrame(float[] output, float[] reference, int totalFrames, int frame, int h, int w,
+        SeedVr2ColorScratch scratch, ColorPass transfer)
+    {
+        int n = h * w;
+        Span<float> model = scratch.Get(SeedVr2ColorScratch.Region.FrameModel);
+        Span<float> input = scratch.Get(SeedVr2ColorScratch.Region.FrameInput);
         for (int c = 0; c < 3; c++)
         {
-            long plane = ((long)c * totalFrames + frame) * h * w;
-            Array.Copy(output, plane, model, c * h * w, h * w);
-            Array.Copy(reference, plane, input, c * h * w, h * w);
+            long plane = ((long)c * totalFrames + frame) * n;
+            output.AsSpan((int)plane, n).CopyTo(model.Slice(c * n, n));
+            reference.AsSpan((int)plane, n).CopyTo(input.Slice(c * n, n));
         }
-        SeedVr2ColorFix.Transplant(model, input, 3, h, w, strength);
+        transfer(model, input);
         for (int c = 0; c < 3; c++)
-            Array.Copy(model, c * h * w, output, ((long)c * totalFrames + frame) * h * w, h * w);
+            model.Slice(c * n, n).CopyTo(output.AsSpan((int)(((long)c * totalFrames + frame) * n), n));
     }
 }

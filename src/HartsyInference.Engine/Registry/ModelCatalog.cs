@@ -735,8 +735,8 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
-                // Fibo 2.0 edit-turbo as the int8_tensorwise + ConvRot 256 build (8.41 GB). Reference-image editing is not implemented, so this
-                // reaches text-to-image only (4 steps, guidance 1). The file name carries "edit", which the variant resolver reads.
+                // Fibo 2.0 edit-turbo as the int8_tensorwise + ConvRot 256 build (8.41 GB). The build is edit-only: Fibo2Recipe sends every request,
+                // a text-to-image one included, down the reference-edit path (4 steps, guidance 1). The file name carries "edit", which the variant resolver reads.
                 // Not real-weight verified. Licence: CC-BY-NC-4.0, non-commercial.
                 Id = "fibo2-edit-turbo-int8", Modality = img, DisplayName = "Fibo 2.0 Edit Turbo (int8 ConvRot)", Architecture = "Single-stream DiT (Qwen3-VL-4B), gist + injection, 4-step distilled",
                 Status = vp,

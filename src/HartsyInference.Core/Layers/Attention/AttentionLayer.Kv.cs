@@ -43,7 +43,8 @@ public sealed partial class AttentionLayer
             attn = new Tensor(new TensorShape(qMh.Shape[0], _config.Heads, qMh.Shape[2], _config.HeadDim), _config.ComputeDType ?? qMh.DType);
             AttentionCall flash = AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
                 call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes);
-            if (call.Bias is not null) flash = flash with { Mask = flash.Mask with { Bias = call.Bias } };
+            using Tensor? widened = call.Bias is null ? null : WidenToKeyRows(call.Bias, keys.Shape[2]);
+            if (call.Bias is not null) flash = flash with { Mask = flash.Mask with { Bias = widened ?? call.Bias } };
             backend.Attention(in flash);
             if (ownQ) qMh.Dispose();
             if (source is null)
@@ -61,6 +62,26 @@ public sealed partial class AttentionLayer
             if (ownV) vMh!.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The bias widened with −∞ columns to the key buffer's <paramref name="keyRows"/> (a fixed-capacity cache holds more rows than keys in use), or null when it already matches or is a single column.</summary>
+    private static Tensor? WidenToKeyRows(Tensor bias, long keyRows)
+    {
+        int rank = bias.Shape.Rank;
+        long width = bias.Shape[rank - 1];
+        if (width == keyRows || width == 1) return null;
+        if (width > keyRows || bias.DType != DType.F32)
+            throw new ArgumentException($"A {bias.DType.Name} bias {bias.Shape} cannot be widened to {keyRows} key rows.", nameof(bias));
+        long[] dims = new long[rank];
+        for (int i = 0; i < rank; i++) dims[i] = bias.Shape[i];
+        dims[rank - 1] = keyRows;
+        Tensor widened = new(new TensorShape(dims), DType.F32);
+        Span<float> to = widened.AsSpan<float>();
+        ReadOnlySpan<float> from = bias.AsReadOnlySpan<float>();
+        to.Fill(float.NegativeInfinity);
+        long rowCount = from.Length / width;
+        for (long r = 0; r < rowCount; r++) from.Slice((int)(r * width), (int)width).CopyTo(to.Slice((int)(r * keyRows), (int)width));
+        return widened;
     }
 
     /// <summary><see cref="AttendOverKvHeadMajor"/> over token-major post-rotation <paramref name="q"/> <c>[1, t, heads, D]</c> and
