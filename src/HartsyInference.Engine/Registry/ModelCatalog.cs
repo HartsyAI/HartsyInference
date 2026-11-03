@@ -21,6 +21,22 @@ public static class ModelCatalog
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
 
+    /// <summary>One MOSS-Image build from Comfy-Org's export, with the side models <see cref="Recipes.Image.MossImageRecipe"/>
+    /// falls back to outside an OpenMOSS folder.</summary>
+    private static CatalogEntry MossImage(string id, string name, string file, string sha) => new CatalogEntry
+    {
+        Id = id, Modality = Modality.Image, DisplayName = name, Architecture = "single-stream DiT, flow-matching",
+        Status = ModelStatus.ValidationPending, CliDrivable = true,
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "Comfy-Org/MOSS-Image", RepoPath = $"diffusion_models/{file}", TargetSubdir = "diffusion_models",
+                Role = "transformer", Sha256 = sha },
+            SideModels.Qwen35_9BBf16,
+            SideModels.Qwen35Tokenizer,
+            SideModels.Flux2VaeSmall,
+        },
+    };
+
     /// <summary>A Wan 2.2 A14B mixture-of-experts entry: Comfy-Org's fp8_scaled high-noise transformer as the primary asset and
     /// its low-noise sibling as the <see cref="ModelAsset.LowNoiseExpertRole"/> asset. The engine pairs the two when the caller
     /// names no swap model. The generic <c>wan</c> recipe serves both ids and derives the 14B config from the weights.
@@ -803,21 +819,18 @@ public static class ModelCatalog
                     SideModels.Fibo2Vae,
                 },
             },
-            new CatalogEntry
-            {
-                Id = "moss-image", Modality = img, DisplayName = "MOSS-Image", Architecture = "single-stream DiT, flow-matching",
-                Status = vp,
-                // Not CliDrivable yet: OpenMOSS ships Base and SFT as diffusers folders (transformer/, text_encoder/,
-                // tokenizer/, vae/) whose shard names are pinned once a real-weight run reads them. Pass the folder, any
-                // file inside it, or the ComfyUI export's diffusion_models file with --model-path until then; the
-                // encoder and VAE below are the fallbacks when the checkpoint is not inside a full folder.
-                CliDrivable = false,
-                Assets = new ModelAsset[]
-                {
-                    SideModels.Qwen35_9B,
-                    SideModels.Flux2Vae,
-                },
-            },
+            // MOSS-Image (Apache-2.0) as Comfy-Org's single-file export: Base and SFT, each in bf16 and int8 ConvRot. The
+            // side models are the ones MossImageRecipe falls back to when the checkpoint is not inside an OpenMOSS diffusers
+            // folder: the bf16 Qwen3.5-9B (the Q8 GGUF's hidden states diverge), its tokenizer and the small-decoder VAE.
+            // The file name's "sft" token picks the variant. Hashes are the LFS object ids at Comfy-Org/MOSS-Image @530a4c94f9.
+            MossImage("moss-image", "MOSS-Image", "moss_image_base_bf16.safetensors",
+                "cacd158728a1fb9e57c408a922b54752ec71fceb566b3821269927964e62b41f"),
+            MossImage("moss-image-sft", "MOSS-Image SFT", "moss_image_sft_bf16.safetensors",
+                "f96738d8116d78b7316b57c663d8c98591ddafab7488f48e3099b7655e34ab6f"),
+            MossImage("moss-image-int8", "MOSS-Image (int8 ConvRot)", "moss_image_base_int8_convrot.safetensors",
+                "f601c1e1161915fb3fea003da0c1782e374dd960fbb3978bc0e4e3fa1f2d8e6f"),
+            MossImage("moss-image-sft-int8", "MOSS-Image SFT (int8 ConvRot)", "moss_image_sft_int8_convrot.safetensors",
+                "b4d1475bc7eeffd7b809e82ea13a1fba1fb85c4e18365af3813722faa5c0fe4f"),
             new CatalogEntry
             {
                 Id = "chroma", Modality = img, DisplayName = "Chroma", Architecture = "Flux-derivative DiT", Status = ok,
@@ -927,6 +940,8 @@ public static class ModelCatalog
                         Sha256 = "583800deb18fa90560d15b41ca0391e79c024784117b0b0263ace02e941237e1" },
                     SideModels.Qwen25Vl7BHunyuan,
                     SideModels.HunyuanImageVae,
+                    // Run only on quoted prompt text (the glyph stream); fetched on first use when not pulled here.
+                    SideModels.ByT5SmallGlyphXl,
                 },
             },
             new CatalogEntry

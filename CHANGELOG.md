@@ -14,6 +14,22 @@ stable release will require. Dates are UTC.
 - **Changed: a LoRA merge writes its weights only after every target validates,** so a refused LoRA leaves the weights it was given untouched.
 - **Changed: a LoRA file with a PEFT DoRA magnitude vector or a LoCon conv mid matrix is refused by name at load.** The Z-Image and Kohya loaders used to drop the magnitude silently, and applying the rest of such a file gives a wrong result.
 - **Changed: the LoRA apply log counts source units, destination tensors, fused slices and skipped units apart,** so a fused QKV no longer reads as a partial application. The line is now `Applied N of M LoRA units`.
+- **Added: the vision request and output contracts for multi-view, temporal and structured modes.** `VisionBatchRequest` takes
+  ordered views or timed frames (timestamps or fps, per-frame prompts, interpolation targets), and `VisionMode` gains
+  `MetricDepth`, `Geometry`, `Pose`, `Matting`, `Face`, `Intrinsic`, `Track` and `Interpolate`. `VisionResult` adds typed depth,
+  point-map, normal, camera, pose, face and track fields; a per-mode table validates inputs in the service, CLI and API. The CLI
+  writes `.npy` arrays with a JSON sidecar, `/v1/native/vision` returns base64 little-endian arrays, and
+  `/v1/native/vision/sequence` streams one result per frame. No model implements the new modes yet: each refuses by name before
+  anything loads, and the existing modes are unchanged.
+- **Added: Hunyuan-Image 2.1 renders quoted prompt text through its ByT5 glyph stream.** Quoted spans run through
+  Glyph-ByT5-small into the DiT's second text stream, as ComfyUI does, so text the prompt quotes is drawn legibly; a prompt
+  without quotes runs exactly as before. The encoder is a new side model fetched on first use. Also: the CLI no longer
+  downloads a catalog entry's transformer when `--model-path` names one.
+- **Added: the layered image output contract.** A family that returns RGBA layers declares `ImageFeatures.LayeredOutput` and fills
+  `ImageResult.Layers` (back to front, straight alpha); `Rgb`/`Alpha` stay the composite, which the image service recomputes from
+  the layers. `LayeredImage` resizes (premultiplied) and crops every layer alike, and the service refuses inpaint, refiner,
+  segment refinement and background removal for such a family until each has a layered rule. The CLI writes
+  `<name>.layer-NN.png` next to the composite and the native image response adds `layers`. No family declares it yet.
 - **Fixed: Lens never runs F16 attention.** Its V is not normalised and overflows F16 from about block 36, so F16 storage turns
   the image to noise. Its joint attention now demands F32 or BF16 (`AttentionNumerics.WideRange`): F16, INT8 and FP8 are refused
   on the call, so the global `numerics.sdpaF16`, a per-call F16 assertion and F16 operands cannot reach it. A direct F16 request

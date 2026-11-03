@@ -81,6 +81,16 @@ public sealed class ImagesService : IImagesService
                 ImageRequest cropped = cropPlan is null ? fullCanvas : InpaintOnlyMasked.Apply(basePass, cropPlan);
                 ImageResult generated = _engine.GenerateWithVramCleanup(
                     () => pipeline.Generate(cropped, ImageEffectiveSettings.Of(cropped), progress, cancel));
+                if (generated.Layers is not null)
+                {
+                    if ((promptFeatures & ImageFeatures.LayeredOutput) == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Family '{InferenceEngine.FamilyIdFor(spec)}' returned layers without declaring LayeredOutput.");
+                    }
+                    // The composite is defined by the layers, whatever the pipeline put in Rgb/Alpha.
+                    generated = LayeredImage.WithComposite(generated);
+                }
                 ImageResult result = cropPlan is null
                     ? MaskRecomposite.Apply(fullCanvas, generated)
                     : InpaintOnlyMasked.Composite(generated, cropPlan);
@@ -178,6 +188,10 @@ public sealed class ImagesService : IImagesService
     private void RejectUnsupported(ModelSpec spec, ImageRequest request)
     {
         ImageFeatures supported = _engine.SupportedFeatures(spec);
+        if ((supported & ImageFeatures.LayeredOutput) != 0 && LayeredImage.Violation(request) is { } layered)
+        {
+            throw new NotSupportedException($"Model family '{InferenceEngine.FamilyIdFor(spec)}' returns layers. {layered}");
+        }
         ImageFeatures requested = RequestedFeatures(request, supported);
         if (requested == ImageFeatures.None)
         {
