@@ -77,6 +77,8 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
+        bool fits = backend.TiledBucketRunsOnDevice(d);
+        if (tokenMajor && !fits) { output.WriteLine($"SKIPPED: this device lacks the d={d} tiled bucket's shared memory"); return; }
         const int hq = 4, hkv = 2;
         float scale = 1f / MathF.Sqrt(d);
         using Tensor q = Uniform(new TensorShape(b, hq, seq, d), 1);
@@ -108,7 +110,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
             using Tensor actual = new(q.Shape, DType.F32);
             backend.ScaledDotProductAttention(actual, q, k, v, bias, scale);
             tiledRoute = VulkanBackend.LastAttentionRoute ?? "?";
-            Assert.Equal("A.2t", tiledRoute);
+            Assert.Equal(fits ? "A.2t" : scalarRoute, tiledRoute);
             (absErr, relErr, scaledErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
         }
         else
@@ -140,6 +142,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
+        bool fits = backend.TiledBucketRunsOnDevice(d);
         const int b = 2, hq = 4, hkv = 2, seq = 300;
         float scale = 1f / MathF.Sqrt(d);
         using Tensor q = Uniform(new TensorShape(b, hq, seq, d), 41);
@@ -159,7 +162,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
         Assert.True(separation > 1e-4f, $"d={d}: the shared bias barely moves the scalar output ({separation})");
         backend.EnableTiledAttention = true;
         backend.ScaledDotProductAttention(actual, q, k, v, bias, scale);
-        Assert.Equal("A.2t", VulkanBackend.LastAttentionRoute);
+        Assert.Equal(fits ? "A.2t" : "A.2", VulkanBackend.LastAttentionRoute);
         (float absErr, float relErr, float scaledErr) = Errors(actual.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
         output.WriteLine($"[{backend.Vk.DeviceName}] shared bias {(batchShared ? "[H,S,S] batch-shared" : "[B,1,S,S] head-shared")} d={d}: "
             + $"max abs {absErr:E2}, max rel {relErr:E2}, max abs / max |ref| {scaledErr:E2}");
@@ -182,6 +185,7 @@ public sealed class VulkanTiledAttentionTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) { output.WriteLine("SKIPPED: no Vulkan device"); return; }
         using VulkanBackend backend = VulkanTestDevice.Create();
+        if (!backend.TiledBucketRunsOnDevice(d)) { output.WriteLine($"SKIPPED: this device lacks the d={d} tiled bucket's shared memory"); return; }
         float scale = 1f / MathF.Sqrt(d);
         using Tensor q = Uniform(new TensorShape(1, hq, sq, d), 5);
         using Tensor k = Uniform(new TensorShape(1, hkv, skv, d), 6);

@@ -79,12 +79,20 @@ public sealed partial class VulkanBackend
         if (c.Query.Storage.ElementCount > uint.MaxValue || c.Key.Storage.ElementCount > uint.MaxValue
             || c.Value.Storage.ElementCount > uint.MaxValue || c.Output.Storage.ElementCount > uint.MaxValue
             || (c.Mask.Bias is not null && c.Mask.Bias.ElementCount > uint.MaxValue)) return false;
-        if (TiledSharedBytes(bucket) > Vk.MaxComputeSharedMemoryBytes
-            || TiledThreads(bucket) > Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX)
-            || !TiledModulesShipped()) return false;
+        if (!TiledBucketRunsOnDevice(c.QkHeadDim)) return false;
         uint groupsX = ((uint)c.QueryTokens + (uint)TiledQueryRows(bucket) - 1) / (uint)TiledQueryRows(bucket);
         return groupsX <= Vk.MaxComputeWorkGroupCountX && (uint)c.Heads <= Vk.MaxComputeWorkGroupCountY
             && (uint)c.Batch <= Vk.MaxComputeWorkGroupCountZ;
+    }
+
+    /// <summary>Whether this device runs the head dim's tiled kernel: its declared shared memory and workgroup size fit the device, and
+    /// the modules are shipped. Admission uses it, and the parity tests use it to expect the scalar fallback on a smaller device.</summary>
+    internal bool TiledBucketRunsOnDevice(int headDim)
+    {
+        int bucket = TiledBucket(headDim);
+        return bucket >= 0 && TiledSharedBytes(bucket) <= Vk.MaxComputeSharedMemoryBytes
+            && TiledThreads(bucket) <= Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX)
+            && TiledModulesShipped();
     }
 
     /// <summary>Head-dim bucket: 0 serves 1..64, 1 serves 65..128, 2 serves 129..256; -1 is outside the kernel.</summary>
