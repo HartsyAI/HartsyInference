@@ -8,8 +8,9 @@ Swarm, and what passing looks like.
   1. Run the steps.
   2. Fix what breaks: commit to the PR's branch as kalebbroo, with no trailers, and push.
   3. Post one verification comment.
-- **Merging:** the dev-box session merges a PR once your comment says it is complete, Codex is clean at the head, CI is
-  green and no thread is open.
+- **Merging:** the dev-box session merges a PR once your comment says it is complete, CI is green, no thread is open,
+  and Codex was clean at the last code change. Codex's review quota ran out on 2026-11-03; until it resets, PRs merge
+  on the other three.
 - **Keep this file current:** add new rollout PRs here as they open, and delete it when every row is final (the same rule
   as [COMFY_ORG_ROLLOUT.md](COMFY_ORG_ROLLOUT.md)).
 
@@ -61,27 +62,6 @@ After that:
 - Pass: the masked area shows street, not people.
 - Record bf16 and fp8.
 
-### #634 Vision contracts (P2)
-
-- No model implements the new modes yet; P5 and P7 add them. On the GPU box:
-  - Run the CPU contract suites (`VisionContractTests`, `VisionContractEndpointsTests`, `VisionOutputWriterTests`).
-  - Smoke `/v1/native/vision/sequence` against the live API: views → 501 naming multi-view; frames with a bad timestamp
-    order → 400.
-- Confirm that an existing mode (`depth`, `embed`) gives byte-identical output against `main` through the CLI and the API.
-- Needs a `## Unreleased` changelog entry before merging.
-
-### #636 ByT5 glyph stream for Hunyuan-Image 2.1 (P3)
-
-Verified on the 4090 with the fp8 checkpoint: quoted text is legible and the unquoted run is garbled. Since then:
-- The catalog download is skipped when `--model-path` names the transformer.
-- The first-use glyph download now honours cancellation (`948c16ca9`).
-
-Remaining:
-1. Whether the catalog's QuantStack GGUF carries `byt5_in` / `context_embedder_2`. A header read is enough. Without it the
-   recipe warns and skips glyph text, so record which.
-2. The catalog's default GGUF returned HTTP 401 (gated or moved); propose an ungated default.
-3. Swarm, once the engine version is published.
-
 ### #638 Stable Audio Open 1.0 (P3)
 
 v-prediction EDM with CFG over DPM++ 3M SDE; Comfy-Org's all-in-one file (4.85 GB, sha256 `7b20458a…`).
@@ -104,15 +84,32 @@ v-prediction EDM with CFG over DPM++ 3M SDE; Comfy-Org's all-in-one file (4.85 G
 
 ### #639 ComfyUI `asym_w4a8_int8` loading (P11 infra, moved up)
 
-The decode runs on CPU and dense BF16 comes out.
+The decode runs on CPU at load. A layer without a correction term (every layer of the MOSS Qwen3.5 w4a8 file) comes out
+as I8 with `int8_tensorwise` metadata, `s_channel` as its row scale: CUDA runs it on the resident int8 chain and other
+backends widen it. A layer with a correction term comes out as dense BF16.
 1. **Decode against comfy-kitchen.** On a real layer of Comfy-Org/MOSS-Image `text_encoders/qwen3.5_9b_w4a8_gptq.safetensors`
-   (`model.language_model.layers.0.mlp.down_proj`), compare `W4A8ConvRotCodec.DequantToBf16` with comfy-kitchen's
-   `dequantize_w4a8_int8_weight` (pip `comfy-kitchen`, eager backend).
-   - Pass: max |Δ| at the BF16 rounding floor.
+   (`model.language_model.layers.0.mlp.down_proj`), compare `W4A8ConvRotCodec.DecodeToInt8` with the int8 tensor
+   comfy-kitchen's `_dequant_int4_grouped_to_int8` gives (pip `comfy-kitchen`, eager backend), and `DequantToBf16` with
+   `dequantize_w4a8_int8_weight`.
+   - Pass: the int8 grids are equal, and the BF16 max |Δ| is at the rounding floor.
    - Also compare the same layer with the bf16 build (`qwen3.5_9b_bf16.safetensors`): relative L2 near comfy-kitchen's
      documented ~0.07.
 2. **6-bit.** A w6a8 build (MiniMax-H3's `*_w6a8*` DiTs) through the same pass.
-3. **End to end.** Comes with the MOSS-Image w4a8 encoder PR (it also needs the Qwen3.5 int8 embedding dequant).
+3. **End to end:** with #640, below.
+
+### #640 MOSS-Image int8 ConvRot Qwen3.5 encoder (P3)
+
+The Qwen3.5 encoder gathers rows from an `int8_tensorwise` embedding and widens the trunk linears its backend cannot run
+packed. Comfy-Org/MOSS-Image `text_encoders/qwen3.5_9b_int8_convrot.safetensors` (9.7 GB) needs a download; ask first.
+1. **Encoder parity.** On one prompt, dump the encoder's hidden states with `--text-encoder` set to the int8 file and to
+   `qwen3.5_9b_bf16.safetensors`. Record the cosine and relative L2 per token on CUDA (int8 stays packed) and on Vulkan or
+   CPU (widened); the log line says how many linears were widened.
+2. **Image.** `hartsy image -m moss-image --text-encoder <int8 file>` against the bf16 encoder at the same seed. Open both
+   images and record peak VRAM for each.
+3. **Edit.** One reference-image edit with the int8 encoder. Its vision tower is int8 as well, and that path has not been
+   checked. Fix it or refuse it by name.
+4. **w4a8.** Once #639 is merged into this branch or main, repeat steps 1–2 with `qwen3.5_9b_w4a8_gptq.safetensors`
+   (7.3 GB). Ask before downloading.
 
 ## Merged, with GPU items still open
 
@@ -125,6 +122,8 @@ The decode runs on CPU and dense BF16 comes out.
 | #632 | Qwen inpainting ControlNet refusal | None. Implementing InstantX Inpainting is its own task |
 | #633 | Real-ESRGAN parity | x2plus and anime-6B on real weights; a CUDA upscale against CPU |
 | #635 | Layered image output | Waits for Qwen-Image-Layered (P6): engine → service → CLI files → API JSON → Swarm outputs |
+| #634 | Vision contracts | Smoke `/v1/native/vision/sequence` on the live API (views → 501 naming multi-view; unordered timestamps → 400). The real modes arrive with P5/P7 |
+| #636 | ByT5 glyph stream (Hunyuan-Image 2.1) | Whether the catalog's QuantStack GGUF carries `byt5_in` / `context_embedder_2` (a header read); an ungated default GGUF, since the current one returns HTTP 401; Swarm once published |
 
 ## Blocked
 
