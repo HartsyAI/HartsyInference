@@ -575,16 +575,7 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> VisionBatchAsync(IInferenceEngine engine, ModelSpec spec, string folder,
         VisionMode mode, ParamState parameters, string? outputDir, CancellationToken cancel)
     {
-        string[] paths = Directory.EnumerateFiles(folder)
-            .Where(p => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                || p.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase))
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        if (paths.Length == 0)
-        {
-            throw new ArgumentException($"No .png or .jpg images in '{folder}'.");
-        }
-        List<ImageData> images = paths.Select(LoadImage).ToList();
+        List<ImageData> images = VisionBatchInputs(folder).Select(LoadImage).ToList();
         bool frames = VisionRequestValidator.IsSequenceOnly(mode);
         string? query = parameters.Get("query");
         VisionBatchRequest request = new VisionBatchRequest
@@ -611,6 +602,17 @@ public static class GenerationDispatch
         int written = await VisionOutputWriter.WriteFramesAsync(engine.Vision.RunFramesAsync(spec, request, cancel), dir, cancel)
             .ConfigureAwait(false);
         return SelfWrittenVisionArtifact($"{images.Count} input frames → {written} output frame(s) in {dir}", written);
+    }
+
+    /// <summary>The images a folder input contributes, sorted by name: the formats <see cref="ImageIo.DecodeFile"/> reads
+    /// (.png, .bmp). Other files are skipped rather than failing the batch.</summary>
+    internal static string[] VisionBatchInputs(string folder)
+    {
+        string[] paths = Directory.EnumerateFiles(folder)
+            .Where(p => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".bmp", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        return paths.Length > 0 ? paths : throw new ArgumentException($"No .png or .bmp images in '{folder}'.");
     }
 
     /// <summary>Writes a single-image structured result (depth, geometry, pose, faces, matting, intrinsics) to a fresh run

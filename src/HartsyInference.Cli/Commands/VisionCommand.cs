@@ -14,7 +14,7 @@ public sealed class VisionCommand : Command<VisionCommand.Settings>
     {
         /// <summary>Path to the input image, or a folder of images for frame and multi-view modes.</summary>
         [CommandArgument(0, "<image>")]
-        [Description("Path to the input image, or a folder of images (sorted by name): the frames for track/interpolate, or the views for multi-view depth/metric-depth/geometry.")]
+        [Description("Path to the input image, or a folder of .png/.bmp images (sorted by name): the frames for track/interpolate, or the views for multi-view depth/metric-depth/geometry.")]
         public string Image { get; init; } = "";
 
         /// <summary>Model id: clip (embed) or yolo8 / yolo11 (detect).</summary>

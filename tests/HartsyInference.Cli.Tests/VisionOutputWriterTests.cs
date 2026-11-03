@@ -93,6 +93,26 @@ public sealed class VisionOutputWriterTests : IDisposable
         Assert.Equal(mode, GenerationDispatch.ParseVisionMode(name));
     }
 
+    [Fact]
+    public void BatchFolder_TakesOnlyTheFormatsTheDecoderReads()
+    {
+        foreach (string name in new[] { "b.png", "a.bmp", "c.jpg", "d.jpeg", "notes.txt", "e.PNG" })
+            File.WriteAllBytes(Path.Combine(_dir, name), [0]);
+
+        string[] inputs = GenerationDispatch.VisionBatchInputs(_dir).Select(Path.GetFileName).ToArray()!;
+
+        Assert.Equal(["a.bmp", "b.png", "e.PNG"], inputs);
+    }
+
+    [Fact]
+    public void BatchFolder_WithNoReadableImagesIsRefused()
+    {
+        File.WriteAllBytes(Path.Combine(_dir, "only.jpg"), [0]);
+
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => GenerationDispatch.VisionBatchInputs(_dir));
+        Assert.Contains(".png or .bmp", ex.Message);
+    }
+
     private static VisionResult Depth(float value) =>
         new VisionResult { DepthMap = new VisionDepthMap { Values = new VisionArray([value], 1, 1), Kind = VisionDepthKind.Relative } };
 
