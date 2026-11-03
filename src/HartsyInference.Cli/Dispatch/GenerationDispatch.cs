@@ -995,6 +995,11 @@ public static class GenerationDispatch
         {
             img2img = img2img with { Creativity = creativity.Value };
         }
+        else if (parameters.GetStringOrNull("mask") is not null)
+        {
+            // A mask regenerates its area; the 0.6 default would keep the masked content.
+            img2img = img2img with { Creativity = 1.0 };
+        }
         return parameters.GetStringOrNull("init-image-mode") switch
         {
             "denoise" => img2img with { Mode = Img2ImgMode.Denoise },

@@ -16,13 +16,15 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
 /// <param name="isDev">Whether the embedded distilled guidance is applied (Dev) or the guidance is dropped (Schnell).</param>
 /// <param name="loaders">Whatever keeps the weights alive: the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file.</param>
+/// <param name="devGuidance">The distilled guidance a Dev checkpoint runs at: 3.5, or 30 for the OneReward fine-tune.</param>
 public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
-    List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
+    List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend, float devGuidance = 3.5f) : IRecipePipeline
 {
     private readonly FluxPipeline _pipeline = pipeline;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
     private readonly bool _isDev = isDev;
+    private readonly float _devGuidance = devGuidance;
     private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
     private readonly IBackend _backend = backend;
@@ -36,10 +38,10 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         int steps = settings.Steps;
         (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
 
-        // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
-        // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
-        // NegativePrompt is not mapped for the base path; CfgScale is set but unread by FluxPipeline.
-        float guidance = _isDev ? 3.5f : 0f;
+        // Guidance is the recipe's, not the request's (TODO(E-IMG-4/5): the FluxGuidanceScale T2IParam is not wired).
+        // True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so NegativePrompt is not mapped for
+        // the base path; CfgScale is set but unread by FluxPipeline.
+        float guidance = _isDev ? _devGuidance : 0f;
 
         // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
         // prompt images with NEITHER selected must refuse rather than silently drop.
