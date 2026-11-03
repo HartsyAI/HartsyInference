@@ -935,6 +935,9 @@ public sealed class InferenceEngine : IInferenceEngine
         string videoKeep = $"video-recipe:{keepPath}|";
         string? imageAlso = alsoKeepPath is null ? null : $"recipe:{alsoKeepPath}|";
         string? videoAlso = alsoKeepPath is null ? null : $"video-recipe:{alsoKeepPath}|";
+        // The budget decision, the cached variants it was made for, and whether the last wait ended on a lease release.
+        bool evictSameCheckpoint = false, leaseReleased = false;
+        List<string>? decidedFor = null;
         DateTime deadline = DateTime.UtcNow + PipelineLeaseWait;
         while (true)
         {
@@ -965,10 +968,13 @@ public sealed class InferenceEngine : IInferenceEngine
                         }
                     }
                 }
-                // Read under the turn, so every retry accounts for variants published while a victim was leased. The
-                // free-memory reading must also be refreshed because the lease holder may have changed device usage.
-                bool evictSameCheckpoint = sameCheckpoint.Count > 0
-                    && SameCheckpointBudgetTight(keepPath, residentBytes);
+                // Read under the turn, and again once a lease is released or the cached variants change. Not on each one-second
+                // cancellation poll: every read trims the pool while the lease holder is still generating.
+                if (decidedFor is null || leaseReleased || !decidedFor.SequenceEqual(sameCheckpoint, StringComparer.OrdinalIgnoreCase))
+                {
+                    evictSameCheckpoint = sameCheckpoint.Count > 0 && SameCheckpointBudgetTight(keepPath, residentBytes);
+                    decidedFor = sameCheckpoint;
+                }
                 lock (_pipelineCacheLock)
                 {
                     List<string> imageVictims = PipelineEvictionPolicy.SelectVictims(_recipePipelines.Keys, imageKeep, imageAlso, evictSameCheckpoint);
@@ -989,7 +995,7 @@ public sealed class InferenceEngine : IInferenceEngine
                     }
                     // Wakes at least once a second, so a cancellation is seen even when no lease is released. The lease check and the wait
                     // share one lock hold, so a release between them cannot be missed.
-                    Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
+                    leaseReleased = Monitor.Wait(_pipelineCacheLock, TimeSpan.FromSeconds(Math.Min(1.0, remaining.TotalSeconds)));
                 }
             }
             catch

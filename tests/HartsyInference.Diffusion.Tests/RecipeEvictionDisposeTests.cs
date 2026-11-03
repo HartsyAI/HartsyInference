@@ -162,11 +162,7 @@ public sealed class RecipeEvictionDisposeTests
         using ManualResetEventSlim release = new();
         recipe.Entered = entered;
         recipe.BlockConstruct = release;
-        string checkpoint = Path.Combine(Path.GetTempPath(), $"{recipe.Name}-{Guid.NewGuid():N}.safetensors");
-        using (FileStream file = File.Create(checkpoint))
-        {
-            file.SetLength(Mb);
-        }
+        string checkpoint = OneMbCheckpoint(recipe.Name);
         try
         {
             // 1 MB free cannot hold another variant of a 1 MB checkpoint, so the two variants never share the card.
@@ -201,8 +197,50 @@ public sealed class RecipeEvictionDisposeTests
         }
     }
 
+    [Fact]
+    public async Task LeaseWait_ReadsTheBudgetAgainOnlyOnceALeaseIsReleased()
+    {
+        FakeRecipe recipe = Register("test-turn-budget-reads", throwOnDispose: false);
+        string checkpoint = OneMbCheckpoint(recipe.Name);
+        try
+        {
+            IBackend backend = ScriptedFreeBackend.Create(9403, out ScriptedFreeBackend device);
+            device.Readings.Enqueue(Mb);
+            using InferenceEngine engine = new InferenceEngine(backend, "cuda:9403");
+            engine.PipelineLeaseWait = TimeSpan.FromSeconds(30);
+            ModelSpec spec = SpecFor(recipe.Name, checkpoint);
+            LeasedRecipe firstLease = engine.GetOrConstructRecipeLeased(spec, WithLora("a"));
+            int readsBefore = device.Reads;
+
+            // The wait wakes once a second to check for cancellation. Those wakes must not read the driver, which trims the pool
+            // under the request still generating; only the first decision does.
+            Task<LeasedRecipe> secondMiss = Task.Run(() => engine.GetOrConstructRecipeLeased(spec, WithLora("b")));
+            Assert.False(await HasCompletedWithin(secondMiss, 2200));
+            Assert.Equal(readsBefore + 1, device.Reads);
+
+            firstLease.Lease.Dispose();
+            LeasedRecipe secondLease = await secondMiss;
+
+            Assert.Equal(1, recipe.Built[0].DisposeCalls);
+            secondLease.Lease.Dispose();
+        }
+        finally
+        {
+            File.Delete(checkpoint);
+        }
+    }
+
     private static async Task<bool> HasCompletedWithin(Task task, int milliseconds) =>
         await Task.WhenAny(task, Task.Delay(milliseconds)) == task;
+
+    /// <summary>A 1 MB file standing in for a checkpoint, so the file-size budget has a size to compare free memory against.</summary>
+    private static string OneMbCheckpoint(string name)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"{name}-{Guid.NewGuid():N}.safetensors");
+        using FileStream file = File.Create(path);
+        file.SetLength(Mb);
+        return path;
+    }
 
     [Fact]
     public void SecondVariant_KeepsTheCachedOne_WhenTheMeasuredResidentSizeLeavesRoom()
@@ -263,8 +301,12 @@ public sealed class RecipeEvictionDisposeTests
     public class ScriptedFreeBackend : DispatchProxy
     {
         private long _last;
+        private int _reads;
 
         public Queue<long> Readings { get; } = new();
+
+        /// <summary>How many times free memory has been read.</summary>
+        public int Reads => Volatile.Read(ref _reads);
 
         public int Ordinal { get; private set; }
 
@@ -284,6 +326,7 @@ public sealed class RecipeEvictionDisposeTests
                 case "get_Device":
                     return DeviceKind.Cuda(Ordinal);
                 case nameof(IBackend.FreeMemoryBytes):
+                    Interlocked.Increment(ref _reads);
                     _last = Readings.Count > 0 ? Readings.Dequeue() : _last;
                     return _last;
                 case nameof(IBackend.GetVramInfo):

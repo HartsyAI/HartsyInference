@@ -40,7 +40,8 @@ directory a process was started from.
 
 `lora.partialApplication` decides what a LoRA does with a unit it cannot apply, such as a weight the checkpoint lacks
 or a shape from another build. `allow` (the default) applies what fits, skips the rest, and reports each omission.
-`refuse` rejects the request by name, so a partly applied LoRA is never generated.
+`refuse` rejects the request by name, so a partly applied LoRA is never generated. A side set to strength 0 is off
+by choice, so `refuse` does not count its units as omitted.
 
 `profile` is optional and applied first; `settings` is applied on top. A malformed file **throws** rather than
 being skipped — a settings file that is silently ignored is how someone benchmarks a configuration they never
