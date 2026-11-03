@@ -198,6 +198,14 @@ internal static class HunyuanImageWeightBuilder
         Lin("context_embedder.time_text_embed.text_embedder.linear_1.weight", H, c.TextEmbedDim); Vec("context_embedder.time_text_embed.text_embedder.linear_1.bias", H, 0f);
         Lin("context_embedder.time_text_embed.text_embedder.linear_2.weight", H, H); Vec("context_embedder.time_text_embed.text_embedder.linear_2.bias", H, 0f);
         Lin("context_embedder.proj_in.weight", H, c.TextEmbedDim); Vec("context_embedder.proj_in.bias", H, 0f);
+        if (c.TextEmbedDim2 is int d2)
+        {
+            // The ByT5 projection's 2048 hidden width is fixed in HunyuanImageTransformer.
+            Vec("context_embedder_2.norm.weight", d2, 1f); Vec("context_embedder_2.norm.bias", d2, 0f);
+            Lin("context_embedder_2.linear_1.weight", 2048, d2); Vec("context_embedder_2.linear_1.bias", 2048, 0f);
+            Lin("context_embedder_2.linear_2.weight", 2048, 2048); Vec("context_embedder_2.linear_2.bias", 2048, 0f);
+            Lin("context_embedder_2.linear_3.weight", H, 2048); Vec("context_embedder_2.linear_3.bias", H, 0f);
+        }
         for (int i = 0; i < c.NumRefinerLayers; i++)
         {
             string p = $"context_embedder.token_refiner.refiner_blocks.{i}";

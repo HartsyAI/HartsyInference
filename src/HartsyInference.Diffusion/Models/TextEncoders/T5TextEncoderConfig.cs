@@ -49,6 +49,20 @@ public sealed record T5TextEncoderConfig
     /// with semantically-wrong conditioning — image quality high, prompt ignored.</summary>
     public bool UsePerLayerPositionBias { get; init; } = false;
 
+    /// <summary>Glyph-ByT5-small encoder preset (Glyph-SDXL-v2's <c>byt5_model</c>, ComfyUI
+    /// <c>byt5_config_small_glyph.json</c>): the byte-level T5 Hunyuan-Image 2.1 runs on quoted prompt text. GEGLU with
+    /// the tanh GELU, shared relative-position bias, 1510 rows (259 byte ids, 125 sentinels, Glyph-SDXL's colour and font
+    /// tokens). Tokenize with <see cref="ModelAssets.Tokenizers.ByT5Tokenizer"/>.</summary>
+    public static T5TextEncoderConfig ByT5SmallGlyph => new()
+    {
+        DModel = 1472,
+        DFf = 3584,
+        DKv = 64,
+        NumHeads = 6,
+        NumLayers = 12,
+        VocabSize = 1510,
+    };
+
     /// <summary>T5 v1.1 XXL encoder preset for SD3/Flux/LTX text encoding.</summary>
     public static T5TextEncoderConfig Xxl => new()
     {

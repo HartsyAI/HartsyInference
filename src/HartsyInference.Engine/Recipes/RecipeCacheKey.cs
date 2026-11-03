@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Text;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 
@@ -12,8 +14,17 @@ public static class RecipeCacheKey
 {
     /// <summary>A stable, order-sensitive description of the construction-affecting parts of <paramref name="request"/>;
     /// the empty string for a null request or one that changes nothing about construction.</summary>
-    public static string Describe(ImageRequest? request) =>
-        request is null ? "" : Describe(request.Loras, request.Components);
+    public static string Describe(ImageRequest? request)
+    {
+        if (request is null)
+        {
+            return "";
+        }
+        string key = Describe(request.Loras, request.Components);
+        return key.Contains("lora:", StringComparison.Ordinal)
+            ? key + PartialPolicyKey()
+            : key;
+    }
 
     /// <summary>The video counterpart — video recipes bake LoRAs into the loaded weights exactly as image ones do, so
     /// their cached pipelines must be keyed by the stack too. The Wan 2.2 expert pair is construction-affecting the
@@ -26,6 +37,10 @@ public static class RecipeCacheKey
             return "";
         }
         string key = Describe(request.Loras, request.Components);
+        if (key.Contains("lora:", StringComparison.Ordinal))
+        {
+            key += PartialPolicyKey();
+        }
         if (!string.IsNullOrWhiteSpace(request.VideoModel))
         {
             key += $"video-model:{request.VideoModel};";
@@ -59,6 +74,11 @@ public static class RecipeCacheKey
         {
             foreach (LoraEntry entry in loras.Entries)
             {
+                // A no-op entry changes nothing, so it must not split the cache: it keys like a request with no LoRA at all.
+                if (LoraResolver.IsNoOp(entry))
+                {
+                    continue;
+                }
                 builder.Append("lora:").Append(entry.Model).Append('@')
                     .Append(entry.Weight.ToString("R", CultureInfo.InvariantCulture)).Append('/')
                     .Append((entry.TextEncoderWeight ?? entry.Weight).ToString("R", CultureInfo.InvariantCulture)).Append('/')
@@ -77,4 +97,7 @@ public static class RecipeCacheKey
         }
         return builder.ToString();
     }
+
+    private static string PartialPolicyKey() =>
+        $"lora-partial:{EngineKnobs.LoraPartialApplication.Value ?? "allow"};";
 }
