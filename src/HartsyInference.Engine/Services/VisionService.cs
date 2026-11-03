@@ -199,8 +199,9 @@ public sealed class VisionService : IVisionService, IDisposable
             SafeTensorsLoader loader = new SafeTensorsLoader();
             loader.Load(path);
             _embedLoaders.Add(loader);
-            Dinov2VisionEncoder e = new Dinov2VisionEncoder(Dinov2Preset.Small);
-            e.LoadWeights(loader.GetAllTensors());
+            IReadOnlyDictionary<string, Tensor> weights = loader.GetAllTensors();
+            Dinov2VisionEncoder e = new Dinov2VisionEncoder(Dinov2Preset.FromWeights(weights));
+            e.LoadWeights(weights);
             return e;
         });
         Dinov2ImagePreprocessor preprocessor = new Dinov2ImagePreprocessor(encoder.Preset.ImageSize);
@@ -229,8 +230,9 @@ public sealed class VisionService : IVisionService, IDisposable
         string path = RequirePath(spec, "depth-anything");
         DepthAnythingV2Model model = GetOrLoad(_depthCache, path, () =>
         {
-            DepthAnythingV2Model m = new DepthAnythingV2Model(DepthAnythingPreset.Small);
-            m.LoadWeights(LoadPickle(path));
+            Dictionary<string, Tensor> weights = LoadPickle(path);
+            DepthAnythingV2Model m = new DepthAnythingV2Model(DepthAnythingPreset.FromWeights(weights));
+            m.LoadWeights(weights);
             return m;
         });
         DepthAnythingPreprocessor preprocessor = new DepthAnythingPreprocessor();

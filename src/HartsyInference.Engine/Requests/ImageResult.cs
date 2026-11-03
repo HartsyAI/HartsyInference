@@ -23,6 +23,11 @@ public sealed record ImageResult
     [JsonIgnore]
     public bool HasAlpha => Alpha is not null && Alpha.Length == (long)Width * Height;
 
+    /// <summary>The image's layers, back to front, from a family that declares
+    /// <see cref="Recipes.ImageFeatures.LayeredOutput"/>; null otherwise. <see cref="Rgb"/> and <see cref="Alpha"/> then
+    /// hold their composite (straight-alpha "over", bottom first), recomputed by the service from these layers.</summary>
+    public IReadOnlyList<ImageLayer>? Layers { get; init; }
+
     /// <summary>The seed actually used (resolved from a random seed when the request asked for -1).</summary>
     public long Seed { get; init; }
 
