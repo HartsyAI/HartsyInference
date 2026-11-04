@@ -47,7 +47,7 @@ The full text is in the [add-model skill](../Agents/skills/add-model/SKILL.md) a
 
 ## Open PRs
 
-### #631 OneReward (FLUX.1 Fill fine-tune) — removal works for some seeds, not reliably
+### #631 OneReward (FLUX.1 Fill fine-tune) — removal of people works with a people-class negative prompt on this scene
 
 Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Both review design points
 are addressed on `fix/gpu-check-followups`, and the removal recipe from the OneReward README is reachable from the CLI:
@@ -59,7 +59,7 @@ are addressed on `fix/gpu-check-followups`, and the removal recipe from the OneR
 3. True CFG: `--true-cfg` runs the negative prompt as the unconditional pass. The pipeline already had the path; the recipe
    never passed the negative prompt through.
 
-Recipe (the README's removal example): `--negative nsfw --true-cfg 4 --flux-guidance 1 --steps 50`, prompt `remove`, removal
+Recipe (the README's removal example, `--negative nsfw`; the people-class negative is in the section below): `--true-cfg 4 --flux-guidance 1 --steps 50`, prompt `remove`, removal
 LoRA `flux.1-fill-dev-object-removal-lora` at 1.0. Scene: `bus.png` (768×1024), a tight silhouette mask (15 px dilation) on
 the two front people, seed 42 unless noted. Pass: the masked area shows street, not people.
 
@@ -120,29 +120,22 @@ Findings from this round:
 - Object-class negative prompt: not monotonic (seed 42 passes; seeds 1 and 2 fail).
 - Not run: true-CFG scale 7 with extra negative terms. It was queued, then stopped during its first run, so there is no result.
 
-Best-of-N with a person gate (in this PR): `tests/onereward-removal-retry.sh` runs the recipe on consecutive seeds and keeps
-the first output where `tests/person_check.py` finds no person inside the mask. The gate runs YOLOv8n-seg's COCO person class
-from the RAID's BN-folded `yolov8n-seg-folded.safetensors`, loaded with `strict=True`. A person counts when at least 0.6 of
-its box lies under the mask. Across 43 labeled outputs of this scene, every visual failure scores 0.80 or more and every
-visual pass scores 0.45 or less. The passes' highest values come from a person at the left edge whose box touches the mask.
-OpenCV's HOG people detector was tried first and dropped: of the 7 candidates it accepted in seeds 1–16, 5 had a person in
-the mask.
+People-class negative prompt (the fix on this scene). With `--negative "person, people, human, man, woman, pedestrian"`
+and the unmasked T5 from #646, the recipe removes both men with no person left in the mask:
+- Unmasked T5, people negative: 24 of 24 clean on seeds 1–24, each checked by eye (seeds 1–12, 13–18, 19–22 and 23–24).
+- Unmasked T5, README negative (`nsfw`): 3 of 12 clean on seeds 1–12 (seeds 1, 3 and 12).
+- Masked T5 (the #645 build alone), people negative: 2 of 9 clean (seeds 1–8 and 42). Seeds 1, 2 and 4–8 generate a person;
+  seeds 3 and 42 are clean. The unmasked T5 from #646 is therefore needed for the people negative to work.
+- 25 px mask with `nsfw`: 0 of 12 clean on seeds 1–12. A bigger mask makes it worse.
+Leftover street objects (bollards, a bench block, bins, a dark post, a red bin on seed 11) remain in some outputs. They pass
+the criterion (no person in the mask), but the masked area is not clean street.
+Cost on the README example (bf16, seed 0, unmasked build): the people-class negative still removes the leaf sprig, but it
+leaves a faint lighter patch where the sprig was. The `nsfw` result fills the wall more cleanly, so the people negative
+trades a little fill quality for removing people. Use it for people removal, not for other objects.
 
-Retry results (fp8, 15 px mask, the #645 build with the unmasked T5 call-site change from #646; the first gate pass is the
-chosen output):
-- Seeds 1–8: the gate passes seeds 1 and 3. Chosen seed 1 (no person; a dark post on the sidewalk). Seed 6 has a leg and a
-  sneaker in the mask, which HOG passed and the gate fails (cover 0.80).
-- Seeds 9–16: the gate passes seeds 12 and 13. Chosen seed 12 (no person; a dark bin on the sidewalk).
-- Seeds 17–24 (fresh range): the gate passes seeds 17 and 18. Chosen seed 17 (no person; a grey-blue bag on the sidewalk).
-  Seeds 19–24 each have a person in the mask and fail the gate.
-- Per-seed clean removal over these 24 seeds: 6 of 24 (25%). Each range returned a clean output after 1, 4 and 1
-  generations.
-
-Limits: the gate checks for people, so a leftover object can stay in the mask (the post, bin and bag above). The retry is a
-selection, not a model fix: the recipe still puts a person in the mask on about 75% of seeds. Only this scene was tested.
-Decision: the retry stays a script under `tests/`, not part of the CLI. The gate needs torch and ultralytics, which the engine
-does not link, and porting YOLO into the C# engine would be a separate project. `NEGATIVE` (default `nsfw`) and the mask
-argument are the levers the script exposes.
+The retry loop and its person gate were a selection workaround. They are not the fix, so they are removed from this branch.
+Open decision for the user: whether removal should get a named CLI preset, since the flags above are long. The flags alone
+work today, so no preset is needed for the fix.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
