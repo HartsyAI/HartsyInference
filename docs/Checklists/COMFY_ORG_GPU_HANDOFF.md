@@ -120,8 +120,26 @@ Findings from this round:
 - Object-class negative prompt: not monotonic (seed 42 passes; seeds 1 and 2 fail).
 - Not run: true-CFG scale 7 with extra negative terms. It was queued, then stopped during its first run, so there is no result.
 
-Open: a removal method that is reliable on this scene. Candidates: best-of-N seeds with a person detector on each output
-(YOLO and RT-DETR weights are on the RAID), or a different mask strategy. Neither is implemented.
+Best-of-N with a person gate (in this PR): `tests/onereward-removal-retry.sh` runs the recipe on consecutive seeds and keeps
+the first output where `tests/person_check.py` finds no person inside the mask. The gate runs YOLOv8n-seg's COCO person class
+from the RAID's BN-folded `yolov8n-seg-folded.safetensors`, loaded with `strict=True`. A person counts when at least 0.6 of
+its box lies under the mask. Across 43 labeled outputs of this scene, every visual failure scores 0.80 or more and every
+visual pass scores 0.45 or less. The passes' highest values come from a person at the left edge whose box touches the mask.
+OpenCV's HOG people detector was tried first and dropped: of the 7 candidates it accepted in seeds 1–16, 5 had a person in
+the mask.
+
+Retry results (fp8, 15 px mask, the #645 build with the unmasked T5 call-site change from #646; the first gate pass is the
+chosen output):
+- Seeds 1–8: the gate passes seeds 1 and 3. Chosen seed 1 (no person; a dark post on the sidewalk). Seed 6 has a leg and a
+  sneaker in the mask, which HOG passed and the gate fails (cover 0.80).
+- Seeds 9–16: the gate passes seeds 12 and 13. Chosen seed 12 (no person; a dark bin on the sidewalk).
+- Seeds 17–24 (fresh range): the gate passes seeds 17 and 18. Chosen seed 17 (no person; a grey-blue bag on the sidewalk).
+  Seeds 19–24 each have a person in the mask and fail the gate.
+- Per-seed clean removal over these 24 seeds: 6 of 24 (25%). Each range returned a clean output after 1, 4 and 1
+  generations.
+
+Limits: the gate checks for people, so a leftover object can stay in the mask (the post, bin and bag above). The retry is a
+selection, not a model fix: the recipe still puts a person in the mask on about 75% of seeds. Only this scene was tested.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
