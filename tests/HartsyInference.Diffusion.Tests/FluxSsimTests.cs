@@ -125,7 +125,6 @@ public sealed class FluxSsimTests
             int[] clipIds = clipTok.Encode(prompt.Prompt);
             int eosL = ClipTokenizer.FindEosPosition(clipIds);
             int[] t5Ids = t5Tok.Encode(prompt.Prompt);
-            int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Ids);
 
             string noisePath = Path.Combine(ReferenceDir, $"init_noise_seed{meta.Seed}.bin");
             Tensor? injectedNoise = TryLoadFluxNoise(noisePath, meta.Width, meta.Height);
@@ -149,7 +148,7 @@ public sealed class FluxSsimTests
 
             sw.Restart();
             (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromTokens(
-                clipIds, eosL, t5Ids, t5Mask, req, guidanceScale: cfg,
+                clipIds, eosL, t5Ids, null, req, guidanceScale: cfg,
                 onProgress: p => _output.WriteLine($"  {variantTag} step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
             sw.Stop();
             _output.WriteLine($"Flux {variantTag} generated in {sw.ElapsedMilliseconds}ms (seed={seed}).");
