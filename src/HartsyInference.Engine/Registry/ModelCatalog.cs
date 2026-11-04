@@ -1989,10 +1989,10 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", Role = "transformer",
                         Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae",
+                        TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
                         Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
                     new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
                         TargetSubdir = "Video/SeedVr2", Role = "embeddings",
@@ -2007,11 +2007,10 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
-                        LegacyTargetNames = ["seedvr2_7b_dit_f16.safetensors"],
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", TargetName = "seedvr2_7b_dit_f16.safetensors", Role = "transformer",
                         Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae",
+                        TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
                         Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
                     new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
                         TargetSubdir = "Video/SeedVr2", Role = "embeddings",
