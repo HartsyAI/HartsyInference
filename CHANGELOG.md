@@ -8,6 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: people removal as one call.** `hartsy remove-people <photo> --mask <mask>` and `POST /v1/native/images/remove-people` (a photo and a mask in, the image out) run OneReward's Fill fine-tune with its object-removal LoRA and the people-class negative prompt, with true CFG 4, guidance 1, 50 steps and Fill creativity 1.0. `--precision bf16` picks the bf16 checkpoint. The engine does not detect people, so the mask is required. Known limit: on a second test scene, two pedestrians walking away along a sidewalk, every fp8 run (24) and bf16 run (2) left people in the mask. A canonical ComfyUI Fill reference, run once outside SwarmUI, left people in the mask too, so the failure is attributed to the checkpoint rather than the engine. The OneRewardDynamic checkpoint without the removal LoRA also left people in the mask on this scene, and with the LoRA it fills the mask with static. Verified on the bus scene only; check the result.
 - Anima reference parity: preserve the asymmetric adapter's native reference latent grid and use the official ComfyUI Lanczos pixel resize during reference encoding.
 - **Added: Stable Audio Open 1.0** (`hartsy music -m stable-audio-open-1.0`). v-prediction EDM with classifier-free guidance over
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and
@@ -56,6 +57,12 @@ stable release will require. Dates are UTC.
   carry the call's numerics. Other models' attention routes are unchanged.
 - **Added: `numerics.animaF16` opt-in knob runs Anima's attention in F16.** Anima's self and cross attention carry the same F16 permission as Ernie, Wan and LTX. It is off by default: at 1024, seed 42, F16 attention moves the output (SSIM 0.957 against F32 on CUDA, 0.979 on Vulkan) and the real-generation A/B and Anima's V-range check are still pending, so the default flips only after they pass. The `reference` profile pins F32. The knob is read when the model is built.
 - **Added: query-tiled F32 flash attention on Vulkan, behind `numerics.vkTiledAttention` (default `off`).** `sdpa_flash_tiled` stages a query tile and key/value tiles in shared memory with an online softmax, takes head dims up to 256 with an optional additive bias, and addresses head-major and token-major tensors by strides. With `auto`, dense F32 attention takes it ahead of the scalar `sdpa_flash` route, which stays the fallback; `off` changes nothing.
+- **Fixed: Hunyuan Image 2.1's catalog default downloads.** Its GGUF source, `QuantStack/HunyuanImage-2.1-GGUF`, answers 401 without a token, so the default now pulls `calcuis/hunyuanimage-gguf`'s `hunyuanimage2.1-q4_k_m.gguf`: the same Q4_K_M quant of `tencent/HunyuanImage-2.1`, pinned by its SHA-256.
+- **Fixed: `--model-path` skips the catalog's transformer download.** A checkpoint named on the command line no longer fetches the catalog's copy of the transformer.
+- **Fixed: OneReward runs at its reference distilled guidance, 30.** The fine-tune is a Flux variant selected by its catalog id, not its file name. `ImageRequest.FluxGuidance` sets a Flux checkpoint's distilled guidance explicitly; `CfgScale` is still unread for Flux.
+- **Changed: a Fill model with `--mask` and no `--creativity` starts at full denoise.** Only the Fill transformers (`flux1-fill`, `onereward-fill`, `onereward-fill-fp8`) take the 1.0 default; other masked models keep 0.6.
+- **Added: `--flux-guidance` sets a FLUX.1 Dev-family checkpoint's distilled guidance.** It is separate from `--cfg`, which Flux does not read. The default is 3.5, or 30 for the OneReward fine-tune.
+- **Added: `--true-cfg` runs FLUX.1's true CFG from the `--negative` prompt.** This is diffusers' `true_cfg_scale`: with a negative prompt and a scale above 1, each step runs a second unconditional pass at the same distilled guidance and combines the two. The engine had the path but the recipe never passed the negative prompt through. It doubles the transformer passes per step.
 
 ## alpha.400
 

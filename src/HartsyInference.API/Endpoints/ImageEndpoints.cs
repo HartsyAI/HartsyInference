@@ -1,6 +1,7 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -40,6 +41,28 @@ public static class ImageEndpoints
                 ImageResult result = await engine.Images.GenerateAsync(spec, ApplyImageComposition(req), progress, ct);
                 writer.TryWrite(SseHelpers.Event("complete", ToResponse(result, Persist(req, result, req.Request.Prompt)), jsonOptions));
             }, ct);
+        });
+
+        // The people-removal recipe (PeopleRemoval): the caller sends a photo and a mask, and nothing else.
+        app.MapPost("/v1/native/images/remove-people", async (RemovePeopleRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(PeopleRemoval.ModelId(req.Precision), null, Modality.Image);
+                HartsyInference.Engine.Requests.ImageData image = ImageDataCodec.DecodeBase64(req.InitImageBase64);
+                HartsyInference.Engine.Requests.ImageData mask = ImageDataCodec.DecodeBase64(req.MaskBase64);
+                if (mask.Width != image.Width || mask.Height != image.Height)
+                {
+                    return Results.BadRequest(new { error = $"The mask is {mask.Width}x{mask.Height} but the photo is {image.Width}x{image.Height}. They must match." });
+                }
+                ImageRequest request = PeopleRemoval.Build(image, mask, req.Seed ?? -1);
+                ImageResult result = await GenerateAsync(engine, queue, spec, request, progress: null, ct);
+                return Results.Ok(ToResponse(result, Persist(req, result, PeopleRemoval.Prompt)));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
         });
     }
 

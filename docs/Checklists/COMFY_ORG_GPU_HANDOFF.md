@@ -47,20 +47,115 @@ The full text is in the [add-model skill](../Agents/skills/add-model/SKILL.md) a
 
 ## Open PRs
 
-### #631 OneReward (FLUX.1 Fill fine-tune) — held
+### #631 OneReward (FLUX.1 Fill fine-tune) — removal of people works with a people-class negative prompt on this scene
 
-Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Two design points from
-the review are open before it can merge:
-1. Guidance 30 is chosen by sniffing the file name in `Flux1Recipe`, which ENGINE_PATTERNS forbids. Wire distilled
-   guidance as its own request field (not CfgScale: Swarm sends CFG 1 for Flux), or add hint-refined variants to the
-   resolver in a separate PR.
-2. The CLI's mask creativity default of 1.0 applies to every family. Scope it to Fill.
+Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Both review design points
+are addressed on `fix/gpu-check-followups`, and the removal recipe from the OneReward README is reachable from the CLI:
 
-After that:
-- Re-run object removal (`bus.png`, 768×1024, the two front people masked, guidance 30, full denoise, with and without
-  `--lora flux.1-fill-dev-object-removal-lora`).
-- Pass: the masked area shows street, not people.
-- Record bf16 and fp8.
+1. Guidance: the fine-tune is a Flux variant (`Flux1Variants.OneReward`) selected by its catalog-id hint. `FineTuneOf`
+   lets the hint win over its base's structural match. `--flux-guidance` sets the distilled guidance; CfgScale is not read
+   for Flux.
+2. The mask default (creativity 1.0) applies only to the Fill catalog ids.
+3. True CFG: `--true-cfg` runs the negative prompt as the unconditional pass. The pipeline already had the path; the recipe
+   never passed the negative prompt through.
+
+Recipe (the README's removal example, `--negative nsfw`; the people-class negative is in the section below): `--true-cfg 4 --flux-guidance 1 --steps 50`, prompt `remove`, removal
+LoRA `flux.1-fill-dev-object-removal-lora` at 1.0. Scene: `bus.png` (768×1024), a tight silhouette mask (15 px dilation) on
+the two front people, seed 42 unless noted. Pass: the masked area shows street, not people.
+
+| Precision | Seed | Settings | Result |
+|---|---|---|---|
+| fp8 | 1 | removal LoRA | pass: both removed, no person generated; a repeat is byte-identical |
+| fp8 | 2 | removal LoRA | fail: a man generated |
+| fp8 | 3 | removal LoRA | pass |
+| fp8 | 4 | removal LoRA | pass |
+| fp8 | 42 | removal LoRA | fail: a man generated |
+| fp8 | 42 | no LoRA | fail: a man generated |
+| fp8 | 42 | ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: a man generated |
+| bf16 | 1 | removal LoRA | fail: a man in a navy suit generated |
+| bf16 | 3 | removal LoRA | pass |
+| bf16 | 42 | removal LoRA | fail: a man generated |
+| fp8 | 42 | removal LoRA, 5 px mask | pass for people: both removed, two bags left on the sidewalk, no person |
+| fp8 | 2 | removal LoRA, 5 px mask | fail: both removed, but part of a leg and a shoe remain in the masked area |
+| fp8 | 2 | removal LoRA, 0 px mask | fail: both men regenerated |
+| fp8 | 42 | removal LoRA, 0 px mask | fail: both men regenerated |
+| fp8 | 2 | removal LoRA, negative = people classes | fail: a man generated |
+| fp8 | 42 | removal LoRA, negative = people classes | pass: both removed, no person |
+| fp8 | 1 | removal LoRA, negative = people classes | fail: a man generated (passed with `nsfw`) |
+| fp8 | 2 | removal LoRA, T5 pad mask removed (experiment, reverted) | fail: a child generated |
+| fp8 | 42 | removal LoRA, T5 pad mask removed (experiment, reverted) | fail: a man generated |
+| fp8 | 1 | removal LoRA, T5 pad mask removed (experiment, reverted) | pass: both removed, a dark post on the sidewalk |
+| bf16 | 0 | README example (`assets/image.png`, 1024×1024), T5 pad mask removed (experiment, reverted) | pass: the leaf sprig is removed and the wall and table edge are filled (visual check) |
+| bf16 | 0 | README example, shipped build (T5 pad mask applied) | fail (visual): the leaf sprig is removed, but the area is a flat grey-blue smudge, not the wall |
+
+Single-person runs (fp8, removal LoRA, seed 42): the left man alone is removed cleanly, and so is the center man alone.
+Two passes (left, then center with the first output as its init image): the first pass is clean, and the second generates
+a man in the center area.
+
+Earlier runs without true CFG (20 steps, prompt `Remove the people`, guidance 30 or 1, rectangle or tight masks, fp8 and
+bf16, several LoRA settings) all generated a person in the masked area.
+
+Conclusion: on the bus scene, the recipe removes both people with nothing generated in 4 of 8 removal-LoRA runs (fp8 seeds
+1, 3 and 4; bf16 seed 3), and in neither LoRA-free nor template-LoRA run. The result depends on the seed and the precision,
+so it is not a reliable fix. The engine does reproduce a clean removal on the README's own example (see the table), so the
+failures are specific to this scene: the people stand in a crowd, and the model paints a person into the masked area.
+
+Findings from this round:
+- Matches the reference: Fill conditioning (`[noise 64 | masked latent 64 | mask 256]`, `c = sy·8+sx`), the true-CFG combine
+  (`uncond + scale·(cond − uncond)`), the LoRA (427 A/B pairs, no alpha keys, scale 1.0), and the settings (guidance 1,
+  true CFG 4, 50 steps). The per-step masked-inpaint blend does not run on Fill models (`FluxPipeline.cs`: `isMaskedInpaint`
+  excludes them).
+- Divergence, fixed in a separate draft PR: the engine passes a pad mask to the T5 encoder for every FLUX.1 generation
+  (`Flux1RecipePipeline.cs:76/148/160/164` → `FluxPipeline.cs:288/310`), so pad positions are masked in self-attention.
+  diffusers (`pipeline_flux.py:254`) and ComfyUI's default Flux T5 (`sd3_clip.py`, `attention_mask=False`) run the encoder
+  unmasked. Removing the mask did not change the bus-scene outcome on seeds 1, 2 and 42, so it is not the cause of the
+  people. It does change the reference example: with the mask, the README's removal leaves a flat grey-blue smudge where the
+  sprig was; without it, the wall fills cleanly. The unmasked T5 is therefore the fix for the FLUX.1 path, in its own draft PR,
+  https://github.com/HartsyAI/HartsyInference/pull/646. FLUX.1-Dev text-to-image on seed 7 renders the requested sign text
+  ("OPEN 24 HOURS") unmasked and garbles it masked (one prompt, so directional only). It changes every FLUX.1 generation. The numeric check against ComfyUI's T5 hidden states, and the FLUX.1 SSIM gate
+  (`FluxSsimTests`, which needs `dump_flux_reference_image.py` output; that script sets `max_sequence_length=256`, so check the
+  Dev window too), are not run here.
+- Mask margin: 0 px fails on both seeds; 5 px removes both people on seed 42 but leaves a leg fragment on seed 2. The 15 px
+  mask stays the recipe mask.
+- Object-class negative prompt: not monotonic (seed 42 passes; seeds 1 and 2 fail).
+- Not run: true-CFG scale 7 with extra negative terms. It was queued, then stopped during its first run, so there is no result.
+
+People-class negative prompt (the fix on this scene). With `--negative "person, people, human, man, woman, pedestrian"`
+and the unmasked T5 from #646, the recipe removes both men with no person left in the mask:
+- Unmasked T5, people negative: 24 of 24 clean on seeds 1–24, each checked by eye (seeds 1–12, 13–18, 19–22 and 23–24).
+- Unmasked T5, README negative (`nsfw`): 3 of 12 clean on seeds 1–12 (seeds 1, 3 and 12).
+- Masked T5 (the #645 build alone), people negative: 2 of 9 clean (seeds 1–8 and 42). Seeds 1, 2 and 4–8 generate a person;
+  seeds 3 and 42 are clean. The unmasked T5 from #646 is therefore needed for the people negative to work.
+- 25 px mask with `nsfw`: 0 of 12 clean on seeds 1–12. A bigger mask makes it worse.
+Leftover street objects (bollards, a bench block, bins, a dark post, a red bin on seed 11) remain in some outputs. They pass
+the criterion (no person in the mask), but the masked area is not clean street.
+Cost on the README example (bf16, seed 0, unmasked build): the people-class negative still removes the leaf sprig, but it
+leaves a faint lighter patch where the sprig was. The `nsfw` result fills the wall more cleanly, so the people negative
+trades a little fill quality for removing people. Use it for people removal, not for other objects.
+
+The retry loop and its person gate were a selection workaround. They are not the fix, so they are removed from this branch.
+People removal is one call (requested by the user). CLI: `hartsy remove-people <photo> --mask <mask> [--precision bf16] [--seed N] -o <dir>`. API: `POST /v1/native/images/remove-people` with JSON `initImageBase64`, `maskBase64`, `precision`, `seed`, and `save`. Both build the request in `PeopleRemoval`, so the recipe lives in one place. The mask must match the photo's size; both refuse a mismatch. The engine does not detect people, so the mask is required.
+
+Verification on the combined build (#645 with #646, commit a12cb3fda), bus scene only:
+- Recipe through the engine, fp8, seeds 1–6: 6 of 6 clean by eye. The automated count finds no person inside the mask (the only detections are the two people outside it, at most 0.29 of their box under the mask).
+- CLI `remove-people`, fp8, seed 2: clean, 768×1024.
+- CLI `remove-people`, bf16, seeds 1–3: clean, 768×1024, each checked by eye and by the automated count.
+- API `POST /v1/native/images/remove-people`, fp8, seed 2: clean, 768×1024. The server log shows the recipe settings (true CFG 4, guidance 1, 50 steps, removal LoRA).
+
+Second scene: a generated street photo with two people walking away along a sidewalk toward a bus shelter (768×1024; a 15 px mask from YOLOv8n-seg instance masks). The people-class recipe did not remove them:
+- fp8, people negative, true CFG 4, 15 px mask: seeds 1, 2 and 3 keep two people in the mask.
+- fp8, true CFG 6 (seeds 1, 2), true CFG 8 (seeds 1, 2), a 25 px mask (seeds 1, 2), the positive prompt `empty sidewalk, no people` (seeds 1, 2), and removal LoRA weight 1.5 and 2.0 (seed 1): people again in every run.
+- fp8, README `nsfw` negative (seed 1): people again.
+- bf16, people negative, true CFG 4 (seeds 1, 2): people again.
+So 0 of 24 fp8 runs and 0 of 2 bf16 runs are clean on this scene. More levers, all failing on seeds 1 and 2: a 16 px blur on the 15 px mask, a 40 px grow, a bounding-box rectangle mask (one run still kept a woman inside it), an extended negative prompt (garment and body terms added to the people list), and the OneReward checkpoint without the removal LoRA. The mask shape and the negative prompt do not change the result on this scene. The bus scene is the only one where the recipe is verified.
+
+Reference check, 2026-11-04. The canonical ComfyUI Fill graph ran once on the ComfyUI backend's own API, outside SwarmUI (approved as a one-off). It is a reconstruction of ComfyUI's Fill workflow, not an official workflow file. It used the same fp8 checkpoint, removal LoRA at 1.0, the people-class negative, positive `remove`, FluxGuidance 1 on both branches, true CFG 4, 50 steps, euler with the simple scheduler, denoise 1.0 and the 15 px masks, on ComfyUI 0.44.0 on the 3060. Bus, seed 1: clean (both people removed, bus front intact, no new person). Scene 2, seeds 1–3: people in the mask on every seed (four counted on seed 1, two each on seeds 2 and 3). The failure reproduces on a second route that clears the bus scene. That attributes it to the checkpoint's output on this composition, with reference evidence. It is not a fix.
+
+Through SwarmUI, 2026-11-04. Neither SwarmUI route is a valid reference for this recipe. The ComfyUI route classifies this checkpoint as Flux.1 Dev, so its graph has no Fill conditioning (its bus control shows a gray hole). The engine route ignores `fluxguidancescale` and runs guidance 3.5, not 1. On that route, scene 2 seeds 1–3 keep two people in the mask each seed, and bus seed 1 generates a new person in the mask.
+
+OneRewardDynamic (`befox/OneReward-GGUF`, Q8_0, 12.7 GB, ungated): downloaded through the SwarmUI model browser to `Models/diffusion_models/flux1-fill-dev-OneRewardDynamic-Q8_0.gguf` (12,716,418,336 bytes, complete). The header has 780 tensors in the BFL layout (`double_blocks`, no diffusers `transformer_blocks`), and `img_in` takes 384 input channels, the Fill layout. It was run through the CLI on the combined build, because SwarmUI cannot set the recipe's FluxGuidance for this file. With the removal LoRA, the bus scene (seed 1) gets a colored static fill in the mask, so that LoRA does not transfer to this checkpoint. Without the LoRA, the bus scene (seed 1) is clean: both people removed, the bus front intact, and one edge figure partly in the mask, as in the reference. Scene 2 without the LoRA, seeds 1–3: two people stay in the mask on every seed. The scene-2 failure reproduces on this checkpoint too, so the recipe stays verified on the bus scene only.
+
+Numeric parity of the unmasked T5 is checked (HartsyAI/HartsyInference#646, commit 3d5fcfa71). The engine's T5-XXL encoder, loaded from the standalone T5 file, matches a diffusers-style reference (no attention mask, 512 tokens) to an average absolute error of 1.2e-6 for `remove` and 5.9e-7 for the people negative, against a 1e-4 tolerance. The pad-masked call site that #646 removes differs from the same reference by 0.12 and 0.10. The reference generator is tests/python-reference/dump_t5_xxl_unmasked_reference.py, and the test is T5StandaloneParityTests.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
