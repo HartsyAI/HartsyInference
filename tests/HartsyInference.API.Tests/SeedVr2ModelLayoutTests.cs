@@ -5,10 +5,11 @@ using Xunit;
 
 namespace HartsyInference.API.Tests;
 
-/// <summary>Pins where the SeedVR2 files are saved. Swarm core lists a SeedVR2 transformer from the Stable-Diffusion
-/// folder and loads the VAE from VAE/SeedVR2 under the name core registers, so the engine saves into those same places
-/// and the ComfyUI backend finds the same files without a second copy. Points <c>RepoPaths.ModelsRoot()</c> at a
-/// hermetic fixture; the override is process-global, so it is cleared after each test.</summary>
+/// <summary>Pins where the SeedVR2 files are saved. Swarm core loads the VAE from VAE/SeedVR2 under the name core
+/// registers, so the engine saves the VAE there. The transformers stay in Video/SeedVr2: core lists a SeedVR2
+/// checkpoint from the model folders, and numz's transformers have no conditioning tensors, so core cannot run them
+/// from there. Points <c>RepoPaths.ModelsRoot()</c> at a hermetic fixture; the override is process-global, so it is
+/// cleared after each test.</summary>
 [Collection("ModelsRootKnob")]
 public sealed class SeedVr2ModelLayoutTests : IDisposable
 {
@@ -37,16 +38,16 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
     }
 
     [Fact]
-    public void Transformer3B_SavesToTheStableDiffusionFolderCoreLists()
+    public void Transformer3B_SavesToTheVideoFolderTheEngineReads()
     {
-        string expected = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "SeedVR2", "seedvr2_ema_3b_fp16.safetensors");
+        string expected = Path.Combine(_tempModelsRoot, "Video", "SeedVr2", "seedvr2_ema_3b_fp16.safetensors");
         Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-3b", "transformer")));
     }
 
     [Fact]
     public void Transformer7B_UsesTheInstalledFile_SoNothingIsRedownloaded()
     {
-        string installed = Place("Stable-Diffusion/SeedVR2", "seedvr2_7b_dit_f16.safetensors");
+        string installed = Place("Video/SeedVr2", "seedvr2_7b_dit_f16.safetensors");
         Assert.Equal(installed, ModelDownloader.TargetPath(Asset("seedvr2-7b", "transformer")));
         Assert.DoesNotContain(ModelDownloader.MissingAssets(ModelCatalog.Find("seedvr2-7b")!), asset => asset.Role == "transformer");
     }
@@ -54,7 +55,7 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
     [Fact]
     public void Transformer7B_FreshInstallSavesUnderTheKeptName()
     {
-        string expected = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "SeedVR2", "seedvr2_7b_dit_f16.safetensors");
+        string expected = Path.Combine(_tempModelsRoot, "Video", "SeedVr2", "seedvr2_7b_dit_f16.safetensors");
         Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-7b", "transformer")));
     }
 

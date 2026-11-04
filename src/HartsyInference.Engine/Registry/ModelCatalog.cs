@@ -1981,6 +1981,8 @@ public static class ModelCatalog
             // the converter loads its fp16 files directly. The frozen positive embedding is the upstream
             // ByteDance-Seed/SeedVR2-3B pos_emb.pt (a bare BF16 [58,5120] tensor, public, shared by 3B and 7B);
             // RestoreService reads that pickle directly, so no converted copy needs hosting.
+            // The transformers stay in Video/SeedVr2. Swarm core lists a SeedVR2 checkpoint from the model folders, but
+            // numz's 3B file has no positive/negative_conditioning tensors, so core cannot run it from there.
             new CatalogEntry
             {
                 Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
@@ -1989,7 +1991,7 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
-                        TargetSubdir = "Stable-Diffusion/SeedVR2", Role = "transformer",
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
                         Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
                         TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
@@ -2007,7 +2009,7 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Stable-Diffusion/SeedVR2", TargetName = "seedvr2_7b_dit_f16.safetensors", Role = "transformer",
+                        TargetSubdir = "Video/SeedVr2", TargetName = "seedvr2_7b_dit_f16.safetensors", Role = "transformer",
                         Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
                         TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
