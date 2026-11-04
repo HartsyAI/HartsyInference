@@ -15,14 +15,16 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.1 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="FluxPipeline"/> owns the CLIP-L + T5-XXL encoders, so this tokenizes the prompt with both (CLIP-L for the pooled EOS vector, T5-XXL per-token plus its attention mask) and calls <see cref="FluxPipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>FluxLoader.Generate</c> vanilla text-to-image drive path. Wraps the constructed Flux.1 pipeline plus its tokenizers and merged LoRA stack, taking ownership of every disposable.</summary>
 /// <param name="isDev">Whether the embedded distilled guidance is applied (Dev) or the guidance is dropped (Schnell).</param>
+/// <param name="devGuidance">The distilled guidance when the request names none: 3.5, or 30 for the OneReward fine-tune.</param>
 /// <param name="loaders">Whatever keeps the weights alive: the open checkpoint — either container, plus any copies the backend needed widened — and one loader per component resolved as a separate file.</param>
 public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer clipTokenizer, T5Tokenizer t5Tokenizer, bool isDev,
-    List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend) : IRecipePipeline
+    List<IDisposable> loaders, MergedLoraStack? loraStack, IBackend backend, float devGuidance = 3.5f) : IRecipePipeline
 {
     private readonly FluxPipeline _pipeline = pipeline;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly T5Tokenizer _t5Tokenizer = t5Tokenizer;
     private readonly bool _isDev = isDev;
+    private readonly float _devGuidance = devGuidance;
     private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
     private readonly IBackend _backend = backend;
@@ -36,10 +38,9 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         int steps = settings.Steps;
         (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
 
-        // TODO(E-IMG-4/5): Flux guidance came from the FluxGuidanceScale T2IParam (default 3.5 for Dev, ignored by
-        // Schnell) — defaulted here. True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so
-        // NegativePrompt is not mapped for the base path; CfgScale is set but unread by FluxPipeline.
-        float guidance = _isDev ? 3.5f : 0f;
+        // Distilled guidance travels as FluxGuidance: CfgScale is unread, since Swarm sends CFG 1 for Flux.
+        // True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so NegativePrompt is not mapped.
+        float guidance = GuidanceFor(_isDev, request.FluxGuidance, _devGuidance);
 
         // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
         // prompt images with NEITHER selected must refuse rather than silently drop.
@@ -165,6 +166,10 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
             controlImage?.Dispose();
         }
     }
+
+    /// <summary>The distilled guidance a generation runs at: the request's FluxGuidance when set, else the variant default.
+    /// Schnell is guidance-free, so it is always 0.</summary>
+    internal static float GuidanceFor(bool isDev, float? requested, float devDefault) => isDev ? requested ?? devDefault : 0f;
 
     /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> parts, null otherwise. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature but is never read by <see cref="FluxPipeline.GenerateFromTokens"/>'s regional path (confirmed by inspection: the pipeline builds its actual background stream from its own internally-computed T5 embeddings, not this field) — a throwaway placeholder, disposed immediately rather than kept alive for the plan's lifetime.</summary>
     private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)

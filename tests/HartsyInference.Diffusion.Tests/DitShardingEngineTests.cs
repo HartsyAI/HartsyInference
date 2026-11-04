@@ -68,7 +68,7 @@ public sealed class DitShardingEngineTests
     }
 
     private static readonly string HunyuanImageCheckpoint =
-        Path.Combine(TestPaths.ModelsDir, "Stable-Diffusion", "HunyuanImage", "HunyuanImage2.1-Q4_K_M.gguf");
+        Path.Combine(TestPaths.ModelsDir, "Stable-Diffusion", "HunyuanImage", "hunyuanimage2.1-q4_k_m.gguf");
 
     [Theory]
     [MemberData(nameof(CoherentCases))]

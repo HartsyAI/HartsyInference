@@ -24,6 +24,11 @@ public sealed record ImageRequest
     /// <summary>Classifier-free guidance scale; null uses the family's officially recommended scale (1.0 for distilled models).</summary>
     public float? CfgScale { get; init; }
 
+    /// <summary>Distilled guidance for a FLUX.1 Dev-family checkpoint, the FluxGuidance node's value. It is separate from
+    /// <see cref="CfgScale"/> because Swarm sends CFG 1 for Flux; null uses the variant's default (3.5, or 30 for the OneReward
+    /// fine-tune). Schnell has no guidance, so the value is ignored there.</summary>
+    public float? FluxGuidance { get; init; }
+
     /// <summary>CFG-Rescale strength, 0..1; null/0 = off. Pulls a high-CFG guided prediction back toward the conditional's magnitude to reduce oversaturation/burnt highlights. Only consumed by recipes that wire it in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
 

@@ -1,7 +1,10 @@
+using System.Buffers.Binary;
+using System.Text;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Registry;
+using HartsyInference.Engine.Variants;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -54,5 +57,64 @@ public sealed class OneRewardCatalogTests
             Assert.NotNull(ModelCatalog.Find(id));
             Assert.IsType<Flux1Recipe>(RecipeRegistry.Resolve(id));
         });
+    }
+
+    [Theory]
+    [InlineData("onereward-fill", true)]
+    [InlineData("onereward-fill-fp8", true)]
+    [InlineData("flux1-fill", true)]
+    [InlineData("flux1-dev", false)]
+    [InlineData(null, false)]
+    public void IsFillCatalogId_ScopesTheMaskDefaultToFillTransformers(string? id, bool expected) =>
+        Assert.Equal(expected, Flux1Recipe.IsFillCatalogId(id));
+
+    [Fact]
+    public void DistilledGuidance_IsThirtyForOneRewardAndDevsDefaultOtherwise()
+    {
+        Assert.Equal(30f, Flux1Recipe.DistilledGuidanceFor(Flux1Variants.OneReward));
+        Assert.Equal(3.5f, Flux1Recipe.DistilledGuidanceFor(Flux1Variants.Dev));
+        Assert.Equal(3.5f, Flux1Recipe.DistilledGuidanceFor(null));
+    }
+
+    [Theory]
+    [InlineData(true, 12f, 30f, 12f)]
+    [InlineData(true, null, 30f, 30f)]
+    [InlineData(false, 12f, 30f, 0f)]
+    public void Guidance_TakesTheRequestOverTheVariantDefaultAndSchnellHasNone(bool isDev, float? requested, float devDefault, float expected) =>
+        Assert.Equal(expected, Flux1RecipePipeline.GuidanceFor(isDev, requested, devDefault));
+
+    [Fact]
+    public void OneRewardVariant_IsSelectedByItsCatalogHintOverTheDevStructure()
+    {
+        string path = WriteDevStructuredCheckpoint();
+        try
+        {
+            ResolvedModelVariant byHint = ModelVariantResolver.Resolve(Flux1Variants.Catalog,
+                new ModelVariantEvidence(path, ["onereward-fill-fp8"]));
+            ResolvedModelVariant byName = ModelVariantResolver.Resolve(Flux1Variants.Catalog, new ModelVariantEvidence(path, []));
+
+            Assert.Equal("onereward", byHint.Variant.Id);
+            Assert.Equal(ModelVariantSource.CallerHint, byHint.Source);
+            Assert.Equal("dev", byName.Variant.Id);
+            Assert.Equal(ModelVariantSource.Structure, byName.Source);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A header-only safetensors file with Dev's weight structure: a double-stream block and a guidance embedder.</summary>
+    private static string WriteDevStructuredCheckpoint()
+    {
+        byte[] json = Encoding.UTF8.GetBytes("{\"double_blocks.0.img_attn.qkv.weight\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,0]},"
+            + "\"guidance_in.in_layer.weight\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,0]}}");
+        string path = Path.Combine(Path.GetTempPath(), $"flux.1-fill-dev-OneReward-transformer-{Guid.NewGuid():N}.safetensors");
+        using FileStream file = File.Create(path);
+        Span<byte> length = stackalloc byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(length, json.Length);
+        file.Write(length);
+        file.Write(json);
+        return path;
     }
 }
