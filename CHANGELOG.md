@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-- **Added: people removal as one call.** `hartsy remove-people <photo> --mask <mask>` and `POST /v1/native/images/remove-people` (a photo and a mask in, the image out) run OneReward's Fill fine-tune with its object-removal LoRA and the people-class negative prompt, with true CFG 4, guidance 1, 50 steps and Fill creativity 1.0. `--precision bf16` picks the bf16 checkpoint. The engine does not detect people, so the mask is required.
+- **Added: people removal as one call.** `hartsy remove-people <photo> --mask <mask>` and `POST /v1/native/images/remove-people` (a photo and a mask in, the image out) run OneReward's Fill fine-tune with its object-removal LoRA and the people-class negative prompt, with true CFG 4, guidance 1, 50 steps and Fill creativity 1.0. `--precision bf16` picks the bf16 checkpoint. The engine does not detect people, so the mask is required. Known limit: on a second test scene, two pedestrians walking away along a sidewalk, every fp8 run (11, across CFG 4/6/8, a 25 px mask and two prompts) left people in the mask, so check the result.
 - Anima reference parity: preserve the asymmetric adapter's native reference latent grid and use the official ComfyUI Lanczos pixel resize during reference encoding.
 - **Added: Stable Audio Open 1.0** (`hartsy music -m stable-audio-open-1.0`). v-prediction EDM with classifier-free guidance over
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and

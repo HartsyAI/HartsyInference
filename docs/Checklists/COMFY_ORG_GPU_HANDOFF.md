@@ -136,12 +136,20 @@ trades a little fill quality for removing people. Use it for people removal, not
 The retry loop and its person gate were a selection workaround. They are not the fix, so they are removed from this branch.
 People removal is one call (requested by the user). CLI: `hartsy remove-people <photo> --mask <mask> [--precision bf16] [--seed N] -o <dir>`. API: `POST /v1/native/images/remove-people` with JSON `initImageBase64`, `maskBase64`, `precision`, `seed`, and `save`. Both build the request in `PeopleRemoval`, so the recipe lives in one place. The mask must match the photo's size; both refuse a mismatch. The engine does not detect people, so the mask is required.
 
-Verification on the combined build (#645 with #646, commit a12cb3fda):
+Verification on the combined build (#645 with #646, commit a12cb3fda), bus scene only:
 - Recipe through the engine, fp8, seeds 1–6: 6 of 6 clean by eye. The automated count finds no person inside the mask (the only detections are the two people outside it, at most 0.29 of their box under the mask).
 - CLI `remove-people`, fp8, seed 2: clean, 768×1024.
 - CLI `remove-people`, bf16, seeds 1–3: clean, 768×1024, each checked by eye and by the automated count.
 - API `POST /v1/native/images/remove-people`, fp8, seed 2: clean, 768×1024. The server log shows the recipe settings (true CFG 4, guidance 1, 50 steps, removal LoRA).
-Not checked: numeric parity of the unmasked T5 against diffusers or ComfyUI, because the RAID has no HF-format T5 directory or tokenizer. #646 rests on the reference code and the visual checks.
+
+Second scene: a generated street photo with two people walking away along a sidewalk toward a bus shelter (768×1024; a 15 px mask from YOLOv8n-seg instance masks). The people-class recipe did not remove them:
+- fp8, people negative, true CFG 4, 15 px mask: seeds 1, 2 and 3 keep two people in the mask.
+- fp8, true CFG 6 (seeds 1, 2), true CFG 8 (seeds 1, 2), a 25 px mask (seeds 1, 2), the positive prompt `empty sidewalk, no people` (seeds 1, 2), and removal LoRA weight 1.5 and 2.0 (seed 1): people again in every run.
+- fp8, README `nsfw` negative (seed 1): people again.
+- bf16, people negative, true CFG 4 (seeds 1, 2): people again.
+So 0 of 14 fp8 runs and 0 of 2 bf16 runs are clean on this scene. The bus scene is the only one where the recipe is verified.
+
+Numeric parity of the unmasked T5 is checked (HartsyAI/HartsyInference#646, commit 3d5fcfa71). The engine's T5-XXL encoder, loaded from the standalone T5 file, matches a diffusers-style reference (no attention mask, 512 tokens) to an average absolute error of 1.2e-6 for `remove` and 5.9e-7 for the people negative, against a 1e-4 tolerance. The pad-masked call site that #646 removes differs from the same reference by 0.12 and 0.10. The reference generator is tests/python-reference/dump_t5_xxl_unmasked_reference.py, and the test is T5StandaloneParityTests.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
