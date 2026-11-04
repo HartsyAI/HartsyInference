@@ -2007,7 +2007,9 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer" },
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
+                        LegacyTargetNames = ["seedvr2_7b_dit_f16.safetensors"],
+                        Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
                         TargetSubdir = "Video/SeedVr2", Role = "vae",
                         Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
