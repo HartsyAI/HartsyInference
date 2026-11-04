@@ -12,6 +12,7 @@
 #   PERSON_CHECK_PYTHON  Python with torch, ultralytics, safetensors, cv2 and numpy (default: python3)
 #   PERSON_CHECK_WEIGHTS yolov8n-seg-folded.safetensors (required by person_check.py)
 #   PERSON_MIN_COVER     coverage at which a person counts as inside the mask (default: 0.6)
+#   NEGATIVE             negative prompt (default: nsfw, the README's recipe)
 #   KEEP_GOING=1         run every seed instead of stopping at the first pass
 set -uo pipefail
 
@@ -36,7 +37,7 @@ chosen=""
 for seed in $(seq "$FIRST" "$LAST"); do
     (cd "$CLI_CWD" && dotnet "$CLI" image "remove" -m "$MODEL" -b cuda:0 \
         --init-image "$INIT" --mask "$MASK" --width 768 --height 1024 --seed "$seed" --steps 50 \
-        --negative nsfw --true-cfg 4 --flux-guidance 1 \
+        --negative "${NEGATIVE:-nsfw}" --true-cfg 4 --flux-guidance 1 \
         --lora flux.1-fill-dev-object-removal-lora --lora-weight 1.0 > "$OUT/seed-$seed.log" 2>&1)
     rc=$?
     latest=$(ls -t "$CLI_CWD"/Output/*.png 2>/dev/null | head -1)

@@ -140,6 +140,9 @@ chosen output):
 
 Limits: the gate checks for people, so a leftover object can stay in the mask (the post, bin and bag above). The retry is a
 selection, not a model fix: the recipe still puts a person in the mask on about 75% of seeds. Only this scene was tested.
+Decision: the retry stays a script under `tests/`, not part of the CLI. The gate needs torch and ultralytics, which the engine
+does not link, and porting YOLO into the C# engine would be a separate project. `NEGATIVE` (default `nsfw`) and the mask
+argument are the levers the script exposes.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
