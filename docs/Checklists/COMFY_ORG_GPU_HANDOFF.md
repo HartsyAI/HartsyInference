@@ -47,20 +47,31 @@ The full text is in the [add-model skill](../Agents/skills/add-model/SKILL.md) a
 
 ## Open PRs
 
-### #631 OneReward (FLUX.1 Fill fine-tune) — held
+### #631 OneReward (FLUX.1 Fill fine-tune) — removal not passing
 
-Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Two design points from
-the review are open before it can merge:
-1. Guidance 30 is chosen by sniffing the file name in `Flux1Recipe`, which ENGINE_PATTERNS forbids. Wire distilled
-   guidance as its own request field (not CfgScale: Swarm sends CFG 1 for Flux), or add hint-refined variants to the
-   resolver in a separate PR.
-2. The CLI's mask creativity default of 1.0 applies to every family. Scope it to Fill.
+Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Both design points from the
+review are addressed in the follow-up branch `fix/gpu-check-followups`:
+1. Guidance: the fine-tune is a Flux variant (`Flux1Variants.OneReward`) selected by its catalog-id hint. `FineTuneOf`
+   lets a hinted fine-tune win over its base's structural match, so no file name is read. `ImageRequest.FluxGuidance`
+   (CLI `--flux-guidance`) sets distilled guidance; CfgScale is not read for Flux.
+2. The CLI's mask creativity default of 1.0 applies only to the Fill catalog ids.
 
-After that:
-- Re-run object removal (`bus.png`, 768×1024, the two front people masked, guidance 30, full denoise, with and without
-  `--lora flux.1-fill-dev-object-removal-lora`).
-- Pass: the masked area shows street, not people.
-- Record bf16 and fp8.
+Object removal, `bus.png` (768×1024), the two front people under a tight silhouette mask (15 px dilation), prompt
+`Remove the people`, 20 steps, seed 42, full denoise. Pass: the masked area shows street, not people.
+
+| Precision | Settings | Result |
+|---|---|---|
+| fp8 | guidance 30, bytedance removal LoRA | fail: two men generated in the masked area |
+| fp8 | guidance 30, no LoRA | fail: a woman and a man generated |
+| fp8 | guidance 30, ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: one man generated |
+| fp8 | guidance 1, bytedance removal LoRA | fail: two men generated |
+| bf16 | guidance 30, bytedance removal LoRA | fail: two men generated in the masked area |
+| bf16 | guidance 30, no LoRA | fail: a woman and a man generated |
+| bf16 | guidance 30, ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: one man generated |
+
+The original two people are removed in every run, but the masked area is repainted with new pedestrians. Next steps,
+outside this PR: a removal prompt or mask strategy the fine-tune accepts, and true CFG for the paper's removal recipe,
+which Flux1RecipePipeline defers by design.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
