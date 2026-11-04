@@ -69,7 +69,7 @@ public sealed class FluxSsimTests
             return;
         }
 
-        ReferenceMeta meta = JsonSerializer.Deserialize<ReferenceMeta>(File.ReadAllText(metaPath))
+        ReferenceMeta meta = JsonSerializer.Deserialize<ReferenceMeta>(File.ReadAllText(metaPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
             ?? throw new InvalidDataException("Reference meta.json is empty or malformed.");
         ReferencePrompt? prompt = meta.Prompts?.FirstOrDefault(p => p.Variant == variantTag);
         if (prompt is null)
@@ -91,7 +91,7 @@ public sealed class FluxSsimTests
             return;
         }
 
-        string ptxDir = Path.Combine(RepoRoot.Path, "native", "cuda", "build");
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found at {ptxDir}.");
