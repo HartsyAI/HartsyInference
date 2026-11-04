@@ -39,7 +39,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         (int reqWidth, int reqHeight) = (settings.Width, settings.Height);
 
         // Distilled guidance travels as FluxGuidance: CfgScale is unread, since Swarm sends CFG 1 for Flux.
-        // True-CFG (trueCfgScale + negative prompt) and Tools/Kontext are deferred, so NegativePrompt is not mapped.
+        // Tools/Kontext are deferred. The negative prompt drives true CFG only when TrueCfgScale is above 1.
         float guidance = GuidanceFor(_isDev, request.FluxGuidance, _devGuidance);
 
         // Prompt images on Flux mean Redux (redux.stylemodel); a real IP-Adapter checkpoint is SD15/SDXL-only, and
@@ -75,6 +75,19 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         (int[] t5Tokens, float[]? t5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, baseText);
         int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
         int[] emptyT5 = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
+
+        // True CFG needs a negative prompt and a scale above 1; otherwise the single-pass loop runs.
+        float trueCfgScale = TrueCfgFor(request.NegativePrompt, request.TrueCfgScale);
+        int[]? negClipTokens = null;
+        int negEos = 0;
+        int[]? negT5Tokens = null;
+        float[]? negT5Weights = null;
+        if (trueCfgScale > 1f)
+        {
+            negClipTokens = _clipTokenizer.Encode(PromptWeighting.Join(PromptWeighting.Parse(request.NegativePrompt!)));
+            negEos = ClipTokenizer.FindEosPosition(negClipTokens);
+            (negT5Tokens, negT5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, request.NegativePrompt!);
+        }
 
         // FLUX.1 Canny/Depth: the host already ran the edge/depth annotator (it needs host-app image types this
         // package can't reference) and handed back the finished map under this key. Absent on a genuine Tools
@@ -141,6 +154,12 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 reduxImageEmbeds: redux?.Embeds,
                 reduxApplyStartFraction: redux?.ApplyStart ?? 0f,
                 promptWeights: t5Weights,
+                negPromptTokenIdsL: negClipTokens,
+                negPromptEosPositionL: negEos,
+                negPromptTokenIdsT5: negT5Tokens,
+                negPromptAttentionMaskT5: negT5Tokens is null ? null : T5Tokenizer.CreateAttentionMask(negT5Tokens),
+                trueCfgScale: trueCfgScale,
+                negativeWeights: negT5Weights,
                 emptyTokenIdsT5: emptyT5,
                 emptyAttentionMaskT5: T5Tokenizer.CreateAttentionMask(emptyT5));
 
@@ -170,6 +189,11 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
     /// <summary>The distilled guidance a generation runs at: the request's FluxGuidance when set, else the variant default.
     /// Schnell is guidance-free, so it is always 0.</summary>
     internal static float GuidanceFor(bool isDev, float? requested, float devDefault) => isDev ? requested ?? devDefault : 0f;
+
+    /// <summary>The true-CFG scale a generation runs at: the request's TrueCfgScale when a negative prompt is present and the scale
+    /// is above 1, else 1 (off).</summary>
+    internal static float TrueCfgFor(string? negativePrompt, float? requested) =>
+        !string.IsNullOrWhiteSpace(negativePrompt) && requested > 1f ? requested.Value : 1f;
 
     /// <summary>Builds a regional-conditioning plan when the prompt carries <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> parts, null otherwise. <see cref="RegionalPlan.BaseCond"/> is a required field on the resolver's signature but is never read by <see cref="FluxPipeline.GenerateFromTokens"/>'s regional path (confirmed by inspection: the pipeline builds its actual background stream from its own internally-computed T5 embeddings, not this field) — a throwaway placeholder, disposed immediately rather than kept alive for the plan's lifetime.</summary>
     private RegionalPlan? BuildRegionalPlan(string prompt, int width, int height, int steps)

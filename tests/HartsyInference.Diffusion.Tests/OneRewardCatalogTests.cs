@@ -104,6 +104,15 @@ public sealed class OneRewardCatalogTests
         }
     }
 
+    [Theory]
+    [InlineData("nsfw", 4f, 4f)]
+    [InlineData(null, 4f, 1f)]
+    [InlineData("  ", 4f, 1f)]
+    [InlineData("nsfw", 1f, 1f)]
+    [InlineData("nsfw", null, 1f)]
+    public void TrueCfg_RunsOnlyWithANegativePromptAndAScaleAboveOne(string? negative, float? requested, float expected) =>
+        Assert.Equal(expected, Flux1RecipePipeline.TrueCfgFor(negative, requested));
+
     /// <summary>A header-only safetensors file with Dev's weight structure: a double-stream block and a guidance embedder.</summary>
     private static string WriteDevStructuredCheckpoint()
     {

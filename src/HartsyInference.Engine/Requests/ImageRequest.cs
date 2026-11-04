@@ -29,6 +29,10 @@ public sealed record ImageRequest
     /// fine-tune). Schnell has no guidance, so the value is ignored there.</summary>
     public float? FluxGuidance { get; init; }
 
+    /// <summary>Diffusers-style true CFG for a FLUX.1 checkpoint: with a negative prompt, a second unconditional pass each step is
+    /// combined at this scale. Null or at most 1 turns it off; it applies on top of <see cref="FluxGuidance"/>.</summary>
+    public float? TrueCfgScale { get; init; }
+
     /// <summary>CFG-Rescale strength, 0..1; null/0 = off. Pulls a high-CFG guided prediction back toward the conditional's magnitude to reduce oversaturation/burnt highlights. Only consumed by recipes that wire it in (SDXL as of 2026-08-10); ignored elsewhere.</summary>
     public float? CfgRescale { get; init; }
 

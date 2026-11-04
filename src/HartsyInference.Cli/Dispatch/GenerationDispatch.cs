@@ -66,6 +66,7 @@ public static class GenerationDispatch
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
             FluxGuidance = parameters.GetFloatOrNull("flux-guidance"),
+            TrueCfgScale = parameters.GetFloatOrNull("true-cfg"),
             Sampler = parameters.GetStringOrNull("sampler"),
             Loras = BuildLoraStack(parameters),
             Scheduler = parameters.GetStringOrNull("scheduler"),

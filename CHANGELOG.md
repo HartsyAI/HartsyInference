@@ -61,6 +61,7 @@ stable release will require. Dates are UTC.
 - **Fixed: OneReward runs at its reference distilled guidance, 30.** The fine-tune is a Flux variant selected by its catalog id, not its file name. `ImageRequest.FluxGuidance` sets a Flux checkpoint's distilled guidance explicitly; `CfgScale` is still unread for Flux.
 - **Changed: a Fill model with `--mask` and no `--creativity` starts at full denoise.** Only the Fill transformers (`flux1-fill`, `onereward-fill`, `onereward-fill-fp8`) take the 1.0 default; other masked models keep 0.6.
 - **Added: `--flux-guidance` sets a FLUX.1 Dev-family checkpoint's distilled guidance.** It is separate from `--cfg`, which Flux does not read. The default is 3.5, or 30 for the OneReward fine-tune.
+- **Added: `--true-cfg` runs FLUX.1's true CFG from the `--negative` prompt.** This is diffusers' `true_cfg_scale`: with a negative prompt and a scale above 1, each step runs a second unconditional pass at the same distilled guidance and combines the two. The engine had the path but the recipe never passed the negative prompt through. It doubles the transformer passes per step.
 
 ## alpha.400
 
