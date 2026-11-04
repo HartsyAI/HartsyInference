@@ -134,8 +134,14 @@ leaves a faint lighter patch where the sprig was. The `nsfw` result fills the wa
 trades a little fill quality for removing people. Use it for people removal, not for other objects.
 
 The retry loop and its person gate were a selection workaround. They are not the fix, so they are removed from this branch.
-Open decision for the user: whether removal should get a named CLI preset, since the flags above are long. The flags alone
-work today, so no preset is needed for the fix.
+People removal is one call (requested by the user). CLI: `hartsy remove-people <photo> --mask <mask> [--precision bf16] [--seed N] -o <dir>`. API: `POST /v1/native/images/remove-people` with JSON `initImageBase64`, `maskBase64`, `precision`, `seed`, and `save`. Both build the request in `PeopleRemoval`, so the recipe lives in one place. The mask must match the photo's size; both refuse a mismatch. The engine does not detect people, so the mask is required.
+
+Verification on the combined build (#645 with #646, commit a12cb3fda):
+- Recipe through the engine, fp8, seeds 1–6: 6 of 6 clean by eye. The automated count finds no person inside the mask (the only detections are the two people outside it, at most 0.29 of their box under the mask).
+- CLI `remove-people`, fp8, seed 2: clean, 768×1024.
+- CLI `remove-people`, bf16, seeds 1–3: clean, 768×1024, each checked by eye and by the automated count.
+- API `POST /v1/native/images/remove-people`, fp8, seed 2: clean, 768×1024. The server log shows the recipe settings (true CFG 4, guidance 1, 50 steps, removal LoRA).
+Not checked: numeric parity of the unmasked T5 against diffusers or ComfyUI, because the RAID has no HF-format T5 directory or tokenizer. #646 rests on the reference code and the visual checks.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
