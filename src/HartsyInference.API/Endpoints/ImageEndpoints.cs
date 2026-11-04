@@ -49,8 +49,13 @@ public static class ImageEndpoints
             try
             {
                 ModelSpec spec = ModelResolver.Resolve(PeopleRemoval.ModelId(req.Precision), null, Modality.Image);
-                ImageRequest request = PeopleRemoval.Build(
-                    ImageDataCodec.DecodeBase64(req.InitImageBase64), ImageDataCodec.DecodeBase64(req.MaskBase64), req.Seed ?? -1);
+                HartsyInference.Engine.Requests.ImageData image = ImageDataCodec.DecodeBase64(req.InitImageBase64);
+                HartsyInference.Engine.Requests.ImageData mask = ImageDataCodec.DecodeBase64(req.MaskBase64);
+                if (mask.Width != image.Width || mask.Height != image.Height)
+                {
+                    return Results.BadRequest(new { error = $"The mask is {mask.Width}x{mask.Height} but the photo is {image.Width}x{image.Height}. They must match." });
+                }
+                ImageRequest request = PeopleRemoval.Build(image, mask, req.Seed ?? -1);
                 ImageResult result = await GenerateAsync(engine, queue, spec, request, progress: null, ct);
                 return Results.Ok(ToResponse(result, Persist(req, result, PeopleRemoval.Prompt)));
             }

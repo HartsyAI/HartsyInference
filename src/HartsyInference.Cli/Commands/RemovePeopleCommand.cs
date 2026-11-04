@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using HartsyInference.Cli.Infra;
 using HartsyInference.Engine.Recipes.Image;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -59,11 +60,20 @@ public sealed class RemovePeopleCommand : Command<RemovePeopleCommand.Settings>
             AnsiConsole.MarkupLine($"[red]{Markup.Escape(ex.Message)}[/]");
             return 2;
         }
-        return new ImageCommand().Execute(context, ToImageSettings(settings));
+
+        // The request runs at the photo's size: the recipe default (1024²) would stretch a 768×1024 photo.
+        (_, int width, int height) = ImageIo.DecodeFile(settings.Image);
+        (_, int maskWidth, int maskHeight) = ImageIo.DecodeFile(settings.Mask);
+        if (maskWidth != width || maskHeight != height)
+        {
+            AnsiConsole.MarkupLine($"[red]The mask is {maskWidth}×{maskHeight} but the photo is {width}×{height}. They must match.[/]");
+            return 2;
+        }
+        return new ImageCommand().Execute(context, ToImageSettings(settings, width, height));
     }
 
-    /// <summary>The <c>image</c> settings this command runs: the recipe's flags, plus the caller's photo, mask, seed and output.</summary>
-    internal static ImageCommand.Settings ToImageSettings(Settings settings) => new()
+    /// <summary>The <c>image</c> settings this command runs: the recipe's flags, the photo's size, and the caller's photo, mask, seed and output.</summary>
+    internal static ImageCommand.Settings ToImageSettings(Settings settings, int width, int height) => new()
     {
         Prompt = PeopleRemoval.Prompt,
         Model = PeopleRemoval.ModelId(settings.Precision),
@@ -74,6 +84,8 @@ public sealed class RemovePeopleCommand : Command<RemovePeopleCommand.Settings>
         Creativity = PeopleRemoval.FillCreativity,
         Loras = [PeopleRemoval.LoraId],
         LoraWeights = [PeopleRemoval.LoraWeight],
+        Width = width,
+        Height = height,
         InitImage = settings.Image,
         Mask = settings.Mask,
         Seed = settings.Seed,

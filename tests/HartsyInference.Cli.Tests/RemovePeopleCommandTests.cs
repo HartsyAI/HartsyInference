@@ -19,9 +19,11 @@ public sealed class RemovePeopleCommandTests
             Output = "out",
         };
 
-        ImageCommand.Settings image = RemovePeopleCommand.ToImageSettings(settings);
+        ImageCommand.Settings image = RemovePeopleCommand.ToImageSettings(settings, 768, 1024);
 
         Assert.Equal("onereward-fill", image.Model);
+        Assert.Equal(768, image.Width);
+        Assert.Equal(1024, image.Height);
         Assert.Equal("remove", image.Prompt);
         Assert.Equal(PeopleRemoval.NegativePrompt, image.Negative);
         Assert.Equal(PeopleRemoval.TrueCfgScale, image.TrueCfg);
@@ -41,6 +43,6 @@ public sealed class RemovePeopleCommandTests
     {
         RemovePeopleCommand.Settings settings = new() { Image = "photo.jpg", Mask = "people.png" };
 
-        Assert.Equal("onereward-fill-fp8", RemovePeopleCommand.ToImageSettings(settings).Model);
+        Assert.Equal("onereward-fill-fp8", RemovePeopleCommand.ToImageSettings(settings, 768, 1024).Model);
     }
 }
