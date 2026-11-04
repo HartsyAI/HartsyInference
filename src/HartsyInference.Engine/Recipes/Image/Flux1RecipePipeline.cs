@@ -157,7 +157,8 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 negPromptTokenIdsL: negClipTokens,
                 negPromptEosPositionL: negEos,
                 negPromptTokenIdsT5: negT5Tokens,
-                negPromptAttentionMaskT5: negT5Tokens is null ? null : T5Tokenizer.CreateAttentionMask(negT5Tokens),
+                // Unmasked, like the positive stream: diffusers and ComfyUI encode the negative prompt without a pad mask too.
+                negPromptAttentionMaskT5: null,
                 trueCfgScale: trueCfgScale,
                 negativeWeights: negT5Weights,
                 emptyTokenIdsT5: emptyT5,
