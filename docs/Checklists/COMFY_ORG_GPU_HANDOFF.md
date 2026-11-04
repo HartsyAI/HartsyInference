@@ -47,31 +47,45 @@ The full text is in the [add-model skill](../Agents/skills/add-model/SKILL.md) a
 
 ## Open PRs
 
-### #631 OneReward (FLUX.1 Fill fine-tune) — removal not passing
+### #631 OneReward (FLUX.1 Fill fine-tune) — removal works for some seeds, not reliably
 
-Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Both design points from the
-review are addressed in the follow-up branch `fix/gpu-check-followups`:
+Download, pins, LoRA load (427 of 427 weights) and Fill conditioning are verified on the 4090. Both review design points
+are addressed on `fix/gpu-check-followups`, and the removal recipe from the OneReward README is reachable from the CLI:
+
 1. Guidance: the fine-tune is a Flux variant (`Flux1Variants.OneReward`) selected by its catalog-id hint. `FineTuneOf`
-   lets a hinted fine-tune win over its base's structural match, so no file name is read. `ImageRequest.FluxGuidance`
-   (CLI `--flux-guidance`) sets distilled guidance; CfgScale is not read for Flux.
-2. The CLI's mask creativity default of 1.0 applies only to the Fill catalog ids.
+   lets the hint win over its base's structural match. `--flux-guidance` sets the distilled guidance; CfgScale is not read
+   for Flux.
+2. The mask default (creativity 1.0) applies only to the Fill catalog ids.
+3. True CFG: `--true-cfg` runs the negative prompt as the unconditional pass. The pipeline already had the path; the recipe
+   never passed the negative prompt through.
 
-Object removal, `bus.png` (768×1024), the two front people under a tight silhouette mask (15 px dilation), prompt
-`Remove the people`, 20 steps, seed 42, full denoise. Pass: the masked area shows street, not people.
+Recipe (the README's removal example): `--negative nsfw --true-cfg 4 --flux-guidance 1 --steps 50`, prompt `remove`, removal
+LoRA `flux.1-fill-dev-object-removal-lora` at 1.0. Scene: `bus.png` (768×1024), a tight silhouette mask (15 px dilation) on
+the two front people, seed 42 unless noted. Pass: the masked area shows street, not people.
 
-| Precision | Settings | Result |
-|---|---|---|
-| fp8 | guidance 30, bytedance removal LoRA | fail: two men generated in the masked area |
-| fp8 | guidance 30, no LoRA | fail: a woman and a man generated |
-| fp8 | guidance 30, ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: one man generated |
-| fp8 | guidance 1, bytedance removal LoRA | fail: two men generated |
-| bf16 | guidance 30, bytedance removal LoRA | fail: two men generated in the masked area |
-| bf16 | guidance 30, no LoRA | fail: a woman and a man generated |
-| bf16 | guidance 30, ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: one man generated |
+| Precision | Seed | Settings | Result |
+|---|---|---|---|
+| fp8 | 1 | removal LoRA | pass: both removed, no person generated; a repeat is byte-identical |
+| fp8 | 2 | removal LoRA | fail: a man generated |
+| fp8 | 3 | removal LoRA | pass |
+| fp8 | 4 | removal LoRA | pass |
+| fp8 | 42 | removal LoRA | fail: a man generated |
+| fp8 | 42 | no LoRA | fail: a man generated |
+| fp8 | 42 | ComfyUI template LoRA (`removal_timestep_alpha-2-1740`) | fail: a man generated |
+| bf16 | 1 | removal LoRA | fail: a man in a navy suit generated |
+| bf16 | 3 | removal LoRA | pass |
+| bf16 | 42 | removal LoRA | fail: a man generated |
 
-The original two people are removed in every run, but the masked area is repainted with new pedestrians. Next steps,
-outside this PR: a removal prompt or mask strategy the fine-tune accepts, and true CFG for the paper's removal recipe,
-which Flux1RecipePipeline defers by design.
+Single-person runs (fp8, removal LoRA, seed 42): the left man alone is removed cleanly, and so is the center man alone.
+Two passes (left, then center with the first output as its init image): the first pass is clean, and the second generates
+a man in the center area.
+
+Earlier runs without true CFG (20 steps, prompt `Remove the people`, guidance 30 or 1, rectangle or tight masks, fp8 and
+bf16, several LoRA settings) all generated a person in the masked area.
+
+Conclusion: the recipe removes both people with nothing generated in 4 of 10 runs. The result depends on the seed and the
+precision, so it is not a reliable fix. Open: why a different sample under the same settings paints a person into the
+masked area. A removal method that is reliable on this scene is still needed before OneReward removal can be called working.
 
 ### #638 Stable Audio Open 1.0 (P3)
 
