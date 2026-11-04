@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -98,6 +99,10 @@ public sealed class FluxSsimTests
             return;
         }
 
+        // Gate at the engine's reference precision: the references run fp32 DiT and VAE with no activation quantization.
+        // KnobProfiles.Reference pins the DiT and VAE but not numerics.fp8Native, the Ada default that quantizes each fp8
+        // Linear's input to e4m3, so that one knob is pinned off here. The default path is measured apart from this gate.
+        using IDisposable precision = KnobProfiles.Reference.With(EngineKnobs.Fp8Native, (bool?)false).Push();
         Stopwatch sw = Stopwatch.StartNew();
         CheckpointSource loader = CheckpointSource.Open(checkpointPath);
         FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
