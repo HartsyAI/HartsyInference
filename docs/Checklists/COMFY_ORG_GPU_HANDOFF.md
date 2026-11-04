@@ -147,7 +147,7 @@ Second scene: a generated street photo with two people walking away along a side
 - fp8, true CFG 6 (seeds 1, 2), true CFG 8 (seeds 1, 2), a 25 px mask (seeds 1, 2), the positive prompt `empty sidewalk, no people` (seeds 1, 2), and removal LoRA weight 1.5 and 2.0 (seed 1): people again in every run.
 - fp8, README `nsfw` negative (seed 1): people again.
 - bf16, people negative, true CFG 4 (seeds 1, 2): people again.
-So 0 of 14 fp8 runs and 0 of 2 bf16 runs are clean on this scene. The bus scene is the only one where the recipe is verified.
+So 0 of 24 fp8 runs and 0 of 2 bf16 runs are clean on this scene. More levers, all failing on seeds 1 and 2: a 16 px blur on the 15 px mask, a 40 px grow, a bounding-box rectangle mask (one run still kept a woman inside it), an extended negative prompt (garment and body terms added to the people list), and the OneReward checkpoint without the removal LoRA. The mask shape and the negative prompt do not change the result on this scene. The bus scene is the only one where the recipe is verified.
 
 Numeric parity of the unmasked T5 is checked (HartsyAI/HartsyInference#646, commit 3d5fcfa71). The engine's T5-XXL encoder, loaded from the standalone T5 file, matches a diffusers-style reference (no attention mask, 512 tokens) to an average absolute error of 1.2e-6 for `remove` and 5.9e-7 for the people negative, against a 1e-4 tolerance. The pad-masked call site that #646 removes differs from the same reference by 0.12 and 0.10. The reference generator is tests/python-reference/dump_t5_xxl_unmasked_reference.py, and the test is T5StandaloneParityTests.
 
