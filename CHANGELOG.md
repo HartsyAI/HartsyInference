@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **`HartsyInference.Gpu` is folded into `HartsyInference.Core`.** The shared GPU layer (`GpuBackendBase`,
+  `GpuResidencyCache<TBuffer>`, `IGpuResidency`, `OpProfile`, `ResidencyLock`) now lives in `Core/Backends/Gpu` under
+  `HartsyInference.Core.Backends.Gpu`. The separate package existed so each backend could be migrated onto the shared
+  cache one at a time; both are migrated, it has no interop of its own, and Core already held the vendor-neutral GPU
+  types around it (`GpuVramClass`, `GpuBindingKeys`, `ResidencyLedger`). The package stops publishing and the
+  publish guard no longer expects it; CUDA and Vulkan depend on Core alone. Its unit tests move to `Core.Tests`;
+  `Gpu.Tests` remains the cross-backend `GpuIntegration` suite.
 - Anima reference parity: preserve the asymmetric adapter's native reference latent grid and use the official ComfyUI Lanczos pixel resize during reference encoding.
 - **Added: Stable Audio Open 1.0** (`hartsy music -m stable-audio-open-1.0`). v-prediction EDM with classifier-free guidance over
   DPM++ 3M SDE at the model card's settings (exponential sigmas 500 → 0.3, 100 steps, CFG 7), with the `seconds_start` and

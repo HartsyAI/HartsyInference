@@ -1,5 +1,5 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.Tests.Common;

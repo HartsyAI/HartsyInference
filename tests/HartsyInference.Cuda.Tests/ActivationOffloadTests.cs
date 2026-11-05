@@ -1,6 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Utilities;
 using Xunit;

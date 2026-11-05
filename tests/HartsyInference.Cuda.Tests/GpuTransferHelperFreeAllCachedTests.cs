@@ -1,5 +1,5 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using Xunit;
 
 namespace HartsyInference.Cuda.Tests;

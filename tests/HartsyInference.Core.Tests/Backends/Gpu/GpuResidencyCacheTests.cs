@@ -1,8 +1,8 @@
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
 using Xunit;
 
-namespace HartsyInference.Gpu.Tests;
+namespace HartsyInference.Core.Tests.Backends.Gpu;
 
 /// <summary>The residency cache's own behaviour, on a fake device.
 ///

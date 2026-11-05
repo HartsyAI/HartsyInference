@@ -3,7 +3,7 @@ using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Keeps tensors resident on a device and hands out their buffers, so an op chain runs without host
 /// round-trips. Generic over the buffer handle, because none of this logic depends on what a buffer is.

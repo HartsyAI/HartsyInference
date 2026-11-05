@@ -1,10 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>What every GPU backend does the same way, once.
 ///

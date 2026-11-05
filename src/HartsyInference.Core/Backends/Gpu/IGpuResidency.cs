@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>What a backend's device-residency cache can be asked to do without naming the type of its buffers.
 ///

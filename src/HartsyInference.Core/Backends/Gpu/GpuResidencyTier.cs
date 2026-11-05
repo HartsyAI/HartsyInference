@@ -1,4 +1,4 @@
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Which cache holds a tensor's device copy, if either.</summary>
 /// <remarks>One value rather than two independent flags, because the tiers are mutually exclusive by construction:
