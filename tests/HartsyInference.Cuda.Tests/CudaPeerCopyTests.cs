@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using Xunit;
 using Xunit.Abstractions;
 

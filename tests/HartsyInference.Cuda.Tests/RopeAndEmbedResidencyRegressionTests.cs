@@ -8,7 +8,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Regression coverage for the per-decode-step residency bug fixed alongside the 3060 TTFT work: the
 /// RoPE cos/sin table and the layer-0 embedding input are built fresh on the host once per forward call and
-/// read by EVERY layer, but <see cref="HartsyInference.Gpu.GpuResidencyCache{TBuffer}.CopyToDevice"/> only
+/// read by EVERY layer, but <see cref="HartsyInference.Core.Backends.Gpu.GpuResidencyCache{TBuffer}.CopyToDevice"/> only
 /// persists a tensor that became some op's OUTPUT — a plain input that misses is uploaded, used, and freed in
 /// that call's own <c>finally</c>, every single read. Before the fix this cost ~4 PCIe re-uploads per layer per
 /// forward call (prefill and decode alike) for a tensor that never changed within the call. The fix

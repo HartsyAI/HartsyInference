@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 
 namespace HartsyInference.Cuda;
 

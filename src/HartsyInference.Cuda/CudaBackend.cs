@@ -6,7 +6,7 @@ using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;

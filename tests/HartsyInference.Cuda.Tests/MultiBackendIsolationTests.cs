@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Cuda;
 using Xunit;
 using Xunit.Abstractions;

@@ -14,7 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HartsyInference.Gpu\HartsyInference.Gpu.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 

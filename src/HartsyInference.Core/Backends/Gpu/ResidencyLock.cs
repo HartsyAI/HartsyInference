@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>The reentrant lock that makes one residency cache single-threaded, with deadlock detection across caches.
 ///

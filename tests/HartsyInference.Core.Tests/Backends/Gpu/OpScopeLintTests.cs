@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 using HartsyInference.Tests.Common;
 using Xunit;
 
-namespace HartsyInference.Gpu.Tests;
+namespace HartsyInference.Core.Tests.Backends.Gpu;
 
 /// <summary>A source rule for every backend on the shared base, checked without a GPU.</summary>
 public sealed class OpScopeLintTests

@@ -2,7 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
 using Xunit;
 using Xunit.Abstractions;
 

@@ -1,4 +1,4 @@
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Thrown instead of deadlocking when two threads each hold a residency cache the other needs.</summary>
 public sealed class ResidencyLockCycleException()

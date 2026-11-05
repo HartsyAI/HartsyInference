@@ -1,8 +1,9 @@
 using System.Reflection;
+using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
-namespace HartsyInference.Gpu.Tests;
+namespace HartsyInference.Core.Tests.Backends.Gpu;
 
 /// <summary>A whole-cache release on one thread against ops on another, on a fake device.
 ///
