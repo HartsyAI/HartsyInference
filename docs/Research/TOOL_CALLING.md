@@ -1,4 +1,4 @@
-# LLM tool calling (`HartsyInference.Tools`)
+# LLM tool calling (`HartsyInference.Engine.ToolCalling`)
 
 Source snapshot 2026-09-30: formats read from the local GGUF checkpoints' own `tokenizer.chat_template` and vocab
 (Qwen3-4B, Llama-3.2-1B-Instruct, Mistral-7B-Instruct-v0.3, gemma-4-E2B-it). Engine verification status lives in
@@ -9,16 +9,16 @@ Source snapshot 2026-09-30: formats read from the local GGUF checkpoints' own `t
 | Layer | Holds |
 |---|---|
 | Engine (`HartsyInference.Engine`) | `TextRequest.Tools` → chat template (`tools` in Jinja, Qwen2.5-shaped block in the ChatML fallback) and the `<tool_call>` sentinel grammar; `ITextStreamFilter` seam (`OnDelta`/`OnEnd` → `TextFilterResult{ForwardText, ToolCall, Stop}`) created per request by `EngineOptions.TextStreamFilterFactory`; `TextChunkKind.NativeToolCall` emission, `StopReason.ToolCall`, `TextResult.ToolCall`; OpenAI-compat mapping. No format knowledge. |
-| Tools (`HartsyInference.Tools`, opt-in, references Engine only, not in the meta package) | `ToolCallFormat` rules, `ToolCallParser`, `ToolCallStreamFilter`, `ToolCalling.Install`, `ToolRegistry`/`IToolHandler`, `ToolSchema.FromDelegate`, `ToolLoop`. |
+| Tool calling (`HartsyInference.Engine.ToolCalling` namespace, opt-in: nothing parses until it is installed) | `ToolCallFormat` rules, `ToolCallParser`, `ToolCallStreamFilter`, `ToolCallParsing.Install`, `ToolRegistry`/`IToolHandler`, `ToolSchema.FromDelegate`, `ToolLoop`. |
 
-Without the package installed a request with `Tools` still renders them into the prompt and arms the grammar, but no
+Without `ToolCallParsing.Install` a request with `Tools` still renders them into the prompt and arms the grammar, but no
 call is parsed: the model's call text streams as plain content.
 
 ## Install
 
 ```csharp
 EngineOptions options = new();
-ToolCalling.Install(options, ToolCallFormats.Detect("Qwen3-4B-Q4_K_M.gguf"));   // format is per engine; null = Hermes
+ToolCallParsing.Install(options, ToolCallFormats.Detect("Qwen3-4B-Q4_K_M.gguf"));   // format is per engine; null = Hermes
 using InferenceEngine engine = new("cuda", options);
 
 ToolRegistry tools = new ToolRegistry()
@@ -55,7 +55,7 @@ Rules that hold for every format:
   whitespace around the span, are consumed. Multiple spans per turn are allowed and numbered `call_0`, `call_1`, …
 - The bare forms are *strict*: a bare JSON span is released at its first key unless that key is `"name"` (a code
   block or a JSON answer with tools on streams normally instead of stalling until its braces balance), and when the
-  parser knows the offered tool names (`ToolCalling.Install` passes `request.Tools`; `ToolCallParser`/
+  parser knows the offered tool names (`ToolCallParsing.Install` passes `request.Tools`; `ToolCallParser`/
   `ToolCallStreamFilter` take `knownTools`) a bare span naming anything else is text; the bare `name{` forms
   (Mistral at line start, Gemma after `call:`) are released at the brace unless the name is a complete offered one,
   so a word that only prefixes a tool name does not hold the text after it. The tagged forms
@@ -138,7 +138,7 @@ for the model and the host; a host relaying tool results to a remote end user sh
 
 ## Status (alpha.345 to alpha.347)
 
-- Per-request format: `ToolCalling.Install` resolves the format from the model's chat template first, then its
+- Per-request format: `ToolCallParsing.Install` resolves the format from the model's chat template first, then its
   architecture or path, then Hermes. A structured parser (DeepSeek-V4.1) gets no text filter.
 - Control-token markers reach the parser: a filter lists its markers (`ITextStreamFilter.MarkerLiterals`) and the engine
   decodes them as text. Message content is escaped against the control literals, so user or tool text cannot open a turn

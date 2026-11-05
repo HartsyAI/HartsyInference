@@ -1,7 +1,7 @@
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Tests.Fakes;
 using HartsyInference.Voice.Turns;

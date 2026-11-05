@@ -19,7 +19,7 @@ namespace HartsyInference.LLM.Tests;
 /// <list type="bullet">
 /// <item>fresh vs. second (same process, right after) vs. long (128 tokens) generation — the per-generation-cost
 /// axis;</item>
-/// <item>tools on (sentinel grammar matching <c>ToolCalling</c>'s "&lt;tool_call&gt;" sentinel) vs. tools off;</item>
+/// <item>tools on (sentinel grammar matching <c>ToolCallParsing</c>'s "&lt;tool_call&gt;" sentinel) vs. tools off;</item>
 /// <item>greedy (<see cref="SamplingOptions.GreedyPreset"/> — what the Phase-1 voice-turn probe measured) vs. the
 /// voice session's ACTUAL default sampling. <c>VoiceAgentSession.Turns.cs</c>'s <c>BuildRequest</c> (PR #202,
 /// <c>feat/voice-package</c>) never sets <c>Greedy</c>/<c>Temperature</c>/<c>TopP</c> on its <c>TextRequest</c>, so
@@ -155,7 +155,7 @@ public sealed class ShortReplyDecodeStepBenchTests
             EnableThinking = false,
             MaxTokens = maxTokens,
             Sampling = sampling,
-            // Matches ToolCalling's production gate: graph decode bypasses the CPU sampler chain (incl. grammar),
+            // Matches ToolCallParsing's production gate: graph decode bypasses the CPU sampler chain (incl. grammar),
             // so it is structurally excluded whenever JSON masking is live, regardless of this knob. Forcing it
             // off for the tools-on rows keeps the request explicit, like the Phase-1 probe did.
             GraphDecode = tools ? false : null,
