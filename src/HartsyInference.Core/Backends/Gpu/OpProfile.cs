@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Logging;
 
-namespace HartsyInference.Gpu;
+namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Per-op host-side timing for a GPU backend: how long each <see cref="IBackend"/> op took from entry to
 /// exit, how many dispatches it issued, and where the time went.

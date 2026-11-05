@@ -9,8 +9,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Video", "sr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Cpu", "src\HartsyInference.Cpu\HartsyInference.Cpu.csproj", "{56742822-F1F6-FF87-7A91-418108FF6631}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.Gpu", "src\HartsyInference.Gpu\HartsyInference.Gpu.csproj", "{9F3C7A21-5E4B-4C8D-9A17-2B6E0D4F8C31}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.ModelAssets", "src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj", "{10FFB865-C42E-1E7F-5858-B658C530ABBD}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HartsyInference.API", "src\HartsyInference.API\HartsyInference.API.csproj", "{25F3485B-A8E5-2DC0-C3B4-528004166D84}"
