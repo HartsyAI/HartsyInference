@@ -32,13 +32,6 @@ public partial interface IBackend
     void MoeCombine(Tensor output, Tensor expertOut, Tensor pairSlot, Tensor topkWeight, int k, bool accumulate) =>
         throw NotSupportedPrimitive(nameof(MoeCombine));
 
-    /// <summary>Top-k over the last dimension; see <see cref="TopKReference.Apply"/> for the exact ordering and padding rules.</summary>
-    /// <param name="validLengths">Optional I32 per-row count of leading entries that may be chosen.</param>
-    /// <param name="sortByIndex">Order the result by ascending index instead of descending value.</param>
-    void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false) =>
-        throw NotSupportedPrimitive(nameof(TopKLastDim));
-
     /// <summary>True when <see cref="MoeExpertGateUp"/> and <see cref="MoeExpertDown"/> run experts stored as <paramref name="expertType"/>,
     /// so a routed-expert stage can stay on the device from the router to the combine.</summary>
     bool SupportsMoeExpertIndexed(DType expertType) => false;
@@ -111,4 +104,52 @@ public partial interface IBackend
 
     private NotSupportedException NotSupportedPrimitive(string name) =>
         new NotSupportedException($"{name} is not implemented on the {Device} backend.");
+
+    /// <summary>MoE top-k gate weights (HiDream <c>MoEGate</c>): softmax, top-k, renormalize to sum 1, write a dense <c>[B,S,E]</c> table.</summary>
+    unsafe void MoeTopKGate(Tensor weights, Tensor logits, int topK)
+    {
+        if (logits.DType != DType.F32 || weights.DType != DType.F32)
+            throw new NotSupportedException("MoeTopKGate default fallback only supports F32.");
+        int numExperts = (int)logits.Shape[logits.Shape.Rank - 1];
+        long tokens = logits.ElementCount / numExperts;
+        float* lp = (float*)logits.DataPointer;
+        float* wp = (float*)weights.DataPointer;
+        Span<float> probs = stackalloc float[numExperts];
+        int k = Math.Min(topK, numExperts);
+        for (long t = 0; t < tokens; t++)
+        {
+            long off = t * numExperts;
+            float maxLogit = lp[off];
+            for (int e = 1; e < numExperts; e++)
+                if (lp[off + e] > maxLogit) maxLogit = lp[off + e];
+            float sum = 0f;
+            for (int e = 0; e < numExperts; e++)
+            {
+                float ex = MathF.Exp(lp[off + e] - maxLogit);
+                probs[e] = ex;
+                sum += ex;
+            }
+            for (int e = 0; e < numExperts; e++)
+            {
+                probs[e] /= sum;
+                wp[off + e] = 0f;
+            }
+            float denom = 0f;
+            for (int kk = 0; kk < k; kk++)
+            {
+                int best = -1;
+                float bestVal = float.NegativeInfinity;
+                for (int e = 0; e < numExperts; e++)
+                {
+                    if (wp[off + e] != 0f) continue;
+                    if (probs[e] > bestVal) { bestVal = probs[e]; best = e; }
+                }
+                wp[off + best] = bestVal;
+                denom += bestVal;
+            }
+            denom += 1e-20f;
+            for (int e = 0; e < numExperts; e++)
+                if (wp[off + e] != 0f) wp[off + e] /= denom;
+        }
+    }
 }
