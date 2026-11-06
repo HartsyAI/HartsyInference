@@ -40,7 +40,7 @@ public static class LowVramPolicy
         VramPolicyRegistry.Set(backend, VramPolicyResolver.FromLegacyMode(mode));
     }
 
-    /// <summary>Removes <paramref name="backend"/>'s override so it falls back to the process-wide setting.</summary>
+    /// <summary>Removes <paramref name="backend"/>'s override so it falls back to the process-wide setting. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static void ClearOverride(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);

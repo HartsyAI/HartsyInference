@@ -9575,54 +9575,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Implements CastF8E4M3ToF16 using the PTX cast kernel on GPU.</summary>
-    public void CastF8E4M3ToF16(Tensor output, Tensor input)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("CastF8E4M3ToF16");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pIn = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchCastF8E4M3ToF16(pOut, pIn, (int)input.ElementCount, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pIn);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
-    /// <summary>Implements CastF16ToF8E4M3 using the PTX cast kernel on GPU.</summary>
-    public void CastF16ToF8E4M3(Tensor output, Tensor input)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("CastF16ToF8E4M3");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pIn = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchCastF16ToF8E4M3(pOut, pIn, (int)input.ElementCount, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pIn);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
     private void EnsureKernels()
     {
         if (_kernels == null)
@@ -9842,8 +9794,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         RunAttentionRows(FlashAttentionRows,
-            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes),
-            kvGroup);
+            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes));
     }
 
     /// <summary>The decode-shaped kernels (F.4-F.7): grouped decode, split-K, or the per-row kernel. Takes every
@@ -10146,8 +10097,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
             sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
         RunAttentionRows(FlashAttentionDeviceRows,
-            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow),
-            kvGroup);
+            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow));
     }
 
     /// <summary>The device-position kernels (V.2-V.5) for an F32-query call with a device position buffer.</summary>
@@ -10596,35 +10546,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             return false;
         GatherRows(output, input, rowIndices);
         return true;
-    }
-
-    /// <summary>Per-row argmax over the last dim: indices[r] = argmax_c input[r,c]. On-device; only indices sync back, not full logit rows.</summary>
-    public unsafe void ArgMaxLastDim(Tensor indices, Tensor input)
-    {
-        if (input.DType != DType.F32 || indices.DType != DType.I32)
-        {
-            throw new NotSupportedException(
-                $"CUDA ArgMaxLastDim requires F32 input and I32 indices; got input={input.DType}, indices={indices.DType}.");
-        }
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int c = (int)input.Shape[input.Shape.Rank - 1];
-        int rows = (int)(input.ElementCount / c);
-        ulong pIn = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = (nuint)((long)rows * sizeof(int));
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchArgMaxLastDim(pOut, pIn, rows, c, _stream.Handle, _argmaxScratch);
-            GpuTransferHelper.CacheActivation(indices, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-        }
     }
 
     /// <summary>Validates FlashAttention geometry before either the CUDA kernel or CPU reference can index it.</summary>
@@ -11088,12 +11009,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("UpsampleBilinear2D");
-        throw new NotImplementedException("CUDA UpsampleBilinear2D not yet implemented");
-    }
-
     #endregion
 
     #region Data Movement
@@ -11140,12 +11055,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         return _transferState.TryGetCached(tensor, out ulong cached) ? cached : 0;
     }
-
-    /// <summary>Count of copies that took the direct peer path.</summary>
-    private long _peerCopies;
-
-    /// <inheritdoc/>
-    public long GetPeerCopyCount() => Interlocked.Read(ref _peerCopies);
 
     /// <summary>Cross-backend boundary copy. When the source lives on another CUDA device and P2P is available, the device copy moves directly (event-ordered against the source's stream, no host round-trip and no eviction of the source backend's resident copy). Otherwise the source's device data is staged into the DESTINATION's host buffer — deliberately not the default interface path, which would fire the source tensor's demote hooks and evict it from the source backend.</summary>
     public unsafe void CopyFromPeer(Tensor destination, Tensor source, IBackend sourceBackend)
@@ -11211,7 +11120,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 // Register as OUR activation shadow so downstream ops consume it device-resident and its lifecycle
                 // (dispose/lazy-sync) is managed like any other op output.
                 GpuTransferHelper.CacheActivation(destination, dstPtr, byteSize);
-                Interlocked.Increment(ref _peerCopies);
             }
             finally
             {
@@ -11271,19 +11179,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     #region Audio
 
-    public void Fft(Tensor output, Tensor input)
-    {
-        throw new NotSupportedException("CUDA FFT not supported - use CPU backend for audio");
-    }
-
     public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window)
     {
         throw new NotSupportedException("CUDA STFT not supported - use CPU backend for audio");
-    }
-
-    public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-    {
-        throw new NotSupportedException("CUDA MelFilterbank not supported - use CPU backend for audio");
     }
 
     #endregion
