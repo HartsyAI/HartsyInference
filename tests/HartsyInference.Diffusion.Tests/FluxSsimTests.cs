@@ -42,9 +42,14 @@ public sealed class FluxSsimTests
     /// <summary>Reference precision with fp8 GEMMs in true F32 (numerics.fp8F32).</summary>
     private static readonly KnobProfile SchnellF32Gemm = ReferencePrecision.With(EngineKnobs.Fp8F32, true);
 
-    /// <summary>The shipping defaults (F16 DiT, native fp8 GEMM), which is what users get.</summary>
+    /// <summary>The engine defaults: FLUX.1's fp8 Linears on the F16 cast path (numerics.fp8Native unset), weight-cast cache on.</summary>
     [Fact]
     public void FluxDev_Generates_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f);
+
+    /// <summary>The shipped CLI and API path. Flux1Recipe turns the weight-cast cache off where the DiT casts its fp8
+    /// Linears, which is the default, so this gate checks that configuration against the reference.</summary>
+    [Fact]
+    public void FluxDev_CastCacheOff_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f, cacheWeightCasts: false);
 
     [Fact]
     public void FluxDev_ReferencePrecision_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f, ReferencePrecision);
@@ -55,7 +60,7 @@ public sealed class FluxSsimTests
     [Fact]
     public void FluxSchnell_F32Gemm_WithinSsimThreshold_FourStep() => RunVariant("schnell", TestPaths.Flux.Schnell, FluxConfig.Schnell, numSteps: 4, cfg: 0.0f, SchnellF32Gemm);
 
-    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg, KnobProfile? profile = null)
+    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg, KnobProfile? profile = null, bool cacheWeightCasts = true)
     {
         string metaPath = Path.Combine(ReferenceDir, "meta.json");
         if (!File.Exists(metaPath))
@@ -125,6 +130,8 @@ public sealed class FluxSsimTests
         using (loader)
         using (CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir))
         {
+            backend.CacheWeightCasts = cacheWeightCasts;
+            _output.WriteLine($"Weight-cast cache {(cacheWeightCasts ? "on" : "off")}.");
             FluxTransformer transformer = new FluxTransformer(config);
             transformer.LoadWeights(converted.Transformer);
 
