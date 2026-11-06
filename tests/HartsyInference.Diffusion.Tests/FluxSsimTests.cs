@@ -34,13 +34,28 @@ public sealed class FluxSsimTests
     private readonly ITestOutputHelper _output;
     public FluxSsimTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>The engine's reference precision: the fp32 references run the DiT and VAE in fp32 with no activation
+    /// quantization. KnobProfiles.Reference pins those but not numerics.fp8Native (the Ada default, which quantizes each
+    /// fp8 Linear's input to e4m3), so that knob is pinned off here.</summary>
+    private static readonly KnobProfile ReferencePrecision = KnobProfiles.Reference.With(EngineKnobs.Fp8Native, (bool?)false);
+
+    /// <summary>Reference precision with fp8 GEMMs in true F32 (numerics.fp8F32).</summary>
+    private static readonly KnobProfile SchnellF32Gemm = ReferencePrecision.With(EngineKnobs.Fp8F32, true);
+
+    /// <summary>The shipping defaults (F16 DiT, native fp8 GEMM), which is what users get.</summary>
     [Fact]
     public void FluxDev_Generates_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f);
 
     [Fact]
+    public void FluxDev_ReferencePrecision_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f, ReferencePrecision);
+
+    [Fact]
     public void FluxSchnell_Generates_WithinSsimThreshold_FourStep() => RunVariant("schnell", TestPaths.Flux.Schnell, FluxConfig.Schnell, numSteps: 4, cfg: 0.0f);
 
-    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg)
+    [Fact]
+    public void FluxSchnell_F32Gemm_WithinSsimThreshold_FourStep() => RunVariant("schnell", TestPaths.Flux.Schnell, FluxConfig.Schnell, numSteps: 4, cfg: 0.0f, SchnellF32Gemm);
+
+    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg, KnobProfile? profile = null)
     {
         string metaPath = Path.Combine(ReferenceDir, "meta.json");
         if (!File.Exists(metaPath))
@@ -99,10 +114,8 @@ public sealed class FluxSsimTests
             return;
         }
 
-        // Gate at the engine's reference precision: the references run fp32 DiT and VAE with no activation quantization.
-        // KnobProfiles.Reference pins the DiT and VAE but not numerics.fp8Native, the Ada default that quantizes each fp8
-        // Linear's input to e4m3, so that one knob is pinned off here. The default path is measured apart from this gate.
-        using IDisposable precision = KnobProfiles.Reference.With(EngineKnobs.Fp8Native, (bool?)false).Push();
+        // A null profile pushes nothing, so the default run uses the shipping defaults.
+        using IDisposable precision = KnobProfileScope.Push(profile);
         Stopwatch sw = Stopwatch.StartNew();
         CheckpointSource loader = CheckpointSource.Open(checkpointPath);
         FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
