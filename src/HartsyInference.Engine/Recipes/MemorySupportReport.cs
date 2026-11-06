@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Recipes;
 

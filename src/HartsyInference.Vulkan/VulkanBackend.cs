@@ -5,6 +5,9 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Backends.Gpu;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Contracts;
 
 namespace HartsyInference.Vulkan;
 

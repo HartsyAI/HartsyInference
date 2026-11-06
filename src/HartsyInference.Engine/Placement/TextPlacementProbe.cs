@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Transformer;

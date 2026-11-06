@@ -2,6 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
 using HartsyInference.Core.Backends.Gpu;
+using HartsyInference.Core.Backends.Routing;
+using HartsyInference.Core.Backends.Host;
 
 namespace HartsyInference.Cuda;
 

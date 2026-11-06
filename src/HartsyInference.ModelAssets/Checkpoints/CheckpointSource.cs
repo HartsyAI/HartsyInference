@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Memory;
 using HartsyInference.Core.Models;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.Gguf;

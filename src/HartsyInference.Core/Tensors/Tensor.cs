@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Core.Tensors;

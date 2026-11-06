@@ -1,4 +1,5 @@
 using System.Linq;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 

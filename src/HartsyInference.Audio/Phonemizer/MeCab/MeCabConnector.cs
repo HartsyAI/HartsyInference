@@ -1,5 +1,5 @@
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.Audio.Phonemizer.MeCab;
 

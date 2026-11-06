@@ -5,7 +5,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;

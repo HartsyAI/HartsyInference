@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>A row predicate or launch over one call.</summary>
 public delegate bool AttentionRowFunc(in AttentionCall call);

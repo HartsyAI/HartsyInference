@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>The legacy entry point a call came through. A pinned call is planned over that entry's rows only, so a
 /// migrated call keeps the kernel it had until its own bounded A/B moves it.</summary>

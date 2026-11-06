@@ -14,6 +14,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.MiniMaxH3;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Contracts;
 
 namespace HartsyInference.Video.Pipelines;
 

@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>How INT8 attention v2 groups its K scales.</summary>
 public enum Int8KeyScaleGrouping

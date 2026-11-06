@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
 

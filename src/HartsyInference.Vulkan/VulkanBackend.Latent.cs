@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 

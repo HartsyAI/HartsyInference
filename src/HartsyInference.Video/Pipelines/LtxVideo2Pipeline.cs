@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -14,6 +14,7 @@ using HartsyInference.Diffusion.Models.Music;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Core.Memory.Vram.Streaming;
 
 namespace HartsyInference.Video.Pipelines;
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 

@@ -7,7 +7,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Services;
 
