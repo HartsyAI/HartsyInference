@@ -15,6 +15,9 @@ stable release will require. Dates are UTC.
   entry point `ToolCalling.Install` becomes `ToolCallParsing.Install`, because a type cannot share its namespace's
   name without shadowing it. The package stops publishing; Voice depends on Engine alone. `Tools.Tests` becomes
   `Engine.Tests`, with the tool-calling suites under `ToolCalling/`.
+- `HartsyInference.Vulkan` no longer references `HartsyInference.Cpu`: nothing in the backend used it, only two comments
+  named it, so the Vulkan package drops a dependency it never needed. CUDA keeps its reference, which the MoE expert
+  offload path does use.
 - **`HartsyInference.Gpu` is folded into `HartsyInference.Core`.** The shared GPU layer (`GpuBackendBase`,
   `GpuResidencyCache<TBuffer>`, `IGpuResidency`, `OpProfile`, `ResidencyLock`) now lives in `Core/Backends/Gpu` under
   `HartsyInference.Core.Backends.Gpu`. The separate package existed so each backend could be migrated onto the shared
