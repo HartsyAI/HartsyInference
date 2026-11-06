@@ -2598,7 +2598,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // HighPrecisionGemm upcasts a bf16 weight to F32 for the GEMM. Caching that cast would keep a full
             // F32 copy of every weight resident (≈2× the bf16 footprint — 14 GB for a 3.5B DiT, OOM on a 12 GB
             // 3060). Force the transient path so only one weight is F32 at a time, freed each call.
-            bool hipUpcast = HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32;
+            // ForceF32Gemm weights (T5, schnell DiT) take the same transient path: a persistent F32 copy of every fp8 weight
+            // adds roughly 40% peak VRAM on Flux (the T5 encoder alone is 4.7B parameters).
+            bool hipUpcast = forceF32 || (HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32);
             ulong weightPtr;
             if (weight.DType == gemmDtype)
             {
