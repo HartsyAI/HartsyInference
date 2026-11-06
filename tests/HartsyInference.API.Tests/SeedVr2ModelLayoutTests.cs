@@ -37,11 +37,19 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
     }
 
     [Fact]
-    public void Transformer3B_DefaultIsTheComfyOrgRepackInDiffusionModels()
+    public void Transformer3B_DefaultIsTheOfficialCheckpointInDiffusionModels()
+    {
+        string expected = Path.Combine(_tempModelsRoot, "diffusion_models", "seedvr2_ema_3b.pth");
+        Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-3b", "transformer")));
+        Assert.Equal("ByteDance-Seed/SeedVR2-3B", Asset("seedvr2-3b", "transformer").Repo);
+    }
+
+    [Fact]
+    public void Transformer3BComfy_IsTheRepackInDiffusionModels()
     {
         string expected = Path.Combine(_tempModelsRoot, "diffusion_models", "seedvr2_3b_fp16.safetensors");
-        Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-3b", "transformer")));
-        Assert.Equal("Comfy-Org/SeedVR2", Asset("seedvr2-3b", "transformer").Repo);
+        Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-3b-comfy", "transformer")));
+        Assert.Equal("Comfy-Org/SeedVR2", Asset("seedvr2-3b-comfy", "transformer").Repo);
     }
 
     [Fact]

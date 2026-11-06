@@ -1,6 +1,8 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
+using System.Threading;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
@@ -74,6 +76,59 @@ public static class SeedVr2CheckpointConverter
         {
             loader.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>Loads ByteDance's official <c>.pth</c> state dict (fp32, the original key names) and returns it in fp16.</summary>
+    /// <remarks>The Comfy-Org repack is fp16 too, but its values are not ByteDance's: its tensors sit a median 3.5e-3 relL2
+    /// from the official ones, and the restore gate scores it 0.746 against the reference. The fp16 cast of the official
+    /// checkpoint scores 0.9995. Each fp32 tensor is released as soon as it is cast, so the caller holds the fp16 set only.</remarks>
+    public static (Dictionary<string, Tensor> Weights, IDisposable Owner) LoadOfficialPthAndConvert(string checkpointPath)
+    {
+        Dictionary<string, Tensor> half = new();
+        try
+        {
+            using (PytorchPickleLoader loader = new())
+            {
+                loader.Load(checkpointPath);
+                foreach (KeyValuePair<string, Tensor> pair in loader.GetAllTensors())
+                {
+                    if (pair.Value.DType != DType.F32)
+                    {
+                        throw new InvalidDataException(
+                            $"SeedVR2 official checkpoint tensor '{pair.Key}' is {pair.Value.DType}; expected F32.");
+                    }
+                    half[pair.Key] = pair.Value.CastTo(DType.F16);
+                }
+            }
+            Dictionary<string, Tensor> converted = Convert(half);
+            return (converted, new OwnedTensors(converted));
+        }
+        catch
+        {
+            foreach (Tensor tensor in half.Values)
+            {
+                tensor.Dispose();
+            }
+            throw;
+        }
+    }
+
+    /// <summary>Frees the fp16 tensors a <see cref="LoadOfficialPthAndConvert"/> call returned, once.</summary>
+    private sealed class OwnedTensors(Dictionary<string, Tensor> tensors) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+            foreach (Tensor tensor in tensors.Values)
+            {
+                tensor.Dispose();
+            }
         }
     }
 

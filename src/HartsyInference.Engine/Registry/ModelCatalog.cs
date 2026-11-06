@@ -1981,9 +1981,25 @@ public static class ModelCatalog
             // Comfy-Org's repacks are the defaults: ComfyUI's own files, with the numz keys plus two conditioning tensors
             // the converter drops. numz's original fp16 files stay selectable. mxfp8, nvfp4 and int8 are not listed until
             // the converter reads their companion scales. Every variant reads the shared VAE and embedding.
+            // The default is ByteDance's official checkpoint: the Comfy-Org repack below is fp16 but not the same weights, and
+            // scores 0.746 on the reference gate, against 0.9995 for this file. The engine casts it to fp16 on load.
             new CatalogEntry
             {
-                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp16)",
+                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (ByteDance official)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets =
+                [
+                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "seedvr2_ema_3b.pth",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "6bcc5ac59447e97b100477480aebb01be2ec724c8340bb83faae21f64848604b" },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-comfy", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp16 repack)",
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
                 Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp16.safetensors", "98669fd2c06df5eca88baf68cd5c478775c8e61fc110e598c52b350145ea2660"),
