@@ -2003,7 +2003,7 @@ public static class ModelCatalog
                 Assets =
                 [
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", Role = "transformer",
                         Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
                     SeedVr2Variants.Vae(),
                     SeedVr2Variants.Embeddings(),
@@ -2046,7 +2046,7 @@ public static class ModelCatalog
                 [
                     // Installs from the previous catalog saved this file under its numz name.
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", TargetName = "seedvr2_7b_dit_f16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", TargetName = "seedvr2_7b_dit_f16.safetensors",
                         LegacyTargetNames = ["seedvr2_ema_7b_fp16.safetensors"], Role = "transformer",
                         Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
                     SeedVr2Variants.Vae(),

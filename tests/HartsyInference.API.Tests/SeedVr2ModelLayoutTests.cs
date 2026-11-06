@@ -63,9 +63,34 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
     public void Transformer7BNumz_OldInstallNameIsStillFound_SoNothingIsRedownloaded()
     {
         // Installs from the previous catalog saved the numz 7B transformer under its numz name.
-        string installed = Place("Video/SeedVr2", "seedvr2_ema_7b_fp16.safetensors");
+        string installed = Place("Stable-Diffusion/SeedVR2", "seedvr2_ema_7b_fp16.safetensors");
         Assert.Equal(installed, ModelDownloader.TargetPath(Asset("seedvr2-7b-numz", "transformer")));
         Assert.DoesNotContain(ModelDownloader.MissingAssets(ModelCatalog.Find("seedvr2-7b-numz")!), asset => asset.Role == "transformer");
+    }
+
+    [Fact]
+    public void Transformer3BNumz_LivesInTheStableDiffusionFolderSwarmListsIt()
+    {
+        string expected = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "SeedVR2", "seedvr2_ema_3b_fp16.safetensors");
+        Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-3b-numz", "transformer")));
+    }
+
+    [Fact]
+    public void Transformer7BNumz_FreshInstallLandsInTheStableDiffusionFolder()
+    {
+        string expected = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "SeedVR2", "seedvr2_7b_dit_f16.safetensors");
+        Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-7b-numz", "transformer")));
+    }
+
+    [Fact]
+    public void NoVariantTransformerTargetsTheVideoFolder()
+    {
+        // Swarm has no Video model root for SeedVR. The engine's own embedding is the only SeedVR file left in Video.
+        foreach (CatalogEntry entry in ModelCatalog.ForModality(Modality.Restore).Where(e => e.Id.StartsWith("seedvr2-", StringComparison.Ordinal)))
+        {
+            string subdir = entry.Assets.Single(asset => asset.Role == "transformer").TargetSubdir;
+            Assert.DoesNotContain("Video", subdir, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
