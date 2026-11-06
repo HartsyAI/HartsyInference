@@ -1,8 +1,8 @@
 using System.Collections.Concurrent;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Logging;
-using HartsyInference.Cpu;
 
 namespace HartsyInference.Engine.Audio.Wake;
 

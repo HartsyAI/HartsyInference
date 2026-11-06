@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides 2D convolution CPU compute kernels using the im2col + GEMM approach. Input format is NCHW, weight format is [Cout, Cin, KH, KW].</summary>
 public static class Conv2DKernels

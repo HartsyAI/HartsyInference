@@ -1,7 +1,6 @@
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu;
+namespace HartsyInference.Core.Backends.Cpu;
 
 public sealed partial class CpuBackend
 {

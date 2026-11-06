@@ -1,7 +1,6 @@
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides element-wise CPU compute kernels with SIMD acceleration for F32 tensors.</summary>
 public static class ElementWiseKernels
