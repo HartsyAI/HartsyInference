@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
@@ -137,9 +138,12 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             // through Flux text encoding. Keep the weights fp8-resident with a transient per-GEMM dequant instead.
             // Applied to EVERY placement backend: with the T5 on its own device, that device's backend needs the
             // same flag or it re-inflates the fp8 encoder there.
+            // The DiT casts its fp8 weights unless numerics.fp8Native is pinned on, so the cast cache is off for it too.
+            bool ditCastsFp8 = EngineKnobs.Fp8Native.Value != true;
             if (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights))
             {
-                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: true);
+                RecipeBackendFlags.DisableCacheWeightCasts(
+                    context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: !ditCastsFp8);
             }
 
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the
