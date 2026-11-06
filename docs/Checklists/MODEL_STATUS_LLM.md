@@ -151,7 +151,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   and an `ITextStreamFilter` installed through `EngineOptions.TextStreamFilterFactory` can emit `NativeToolCall`
   chunks and stop generation as `StopReason.ToolCall`. The engine itself parses nothing; `ForceToolId` is not
   implemented.
-- Parsing lives in the opt-in `HartsyInference.Tools` package (alpha.222): `ToolCalling.Install(EngineOptions)` plugs a
+- Parsing lives in Engine's opt-in `ToolCalling` namespace (a separate package until alpha.402): `ToolCallParsing.Install(EngineOptions)` plugs a
   per-format parser (Hermes/Qwen, Llama-3, Gemma 4, Mistral) into the seam, `ToolRegistry`/`ToolSchema.FromDelegate`
   describe tools, `ToolLoop` runs dispatch → `TextRole.Tool` → re-run. See [TOOL_CALLING.md](../Research/TOOL_CALLING.md).
   Trap: in every local GGUF the markers (`<tool_call>`, `<|python_tag|>`, `[TOOL_CALLS]`, Gemma's `<|tool_call>` and

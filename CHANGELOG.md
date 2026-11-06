@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **`HartsyInference.Tools` is folded into `HartsyInference.Engine` as the `HartsyInference.Engine.ToolCalling`
+  namespace.** The package held LLM tool calling (per-format call parsers, the stream filter, the tool registry and the
+  agent loop), not developer tooling, and its one reason to be separate was keeping parsing opt-in; that is already
+  guaranteed by the engine's nullable filter factory, so a namespace gives the same opt-in with one fewer package. The
+  entry point `ToolCalling.Install` becomes `ToolCallParsing.Install`, because a type cannot share its namespace's
+  name without shadowing it. The package stops publishing; Voice depends on Engine alone. `Tools.Tests` becomes
+  `Engine.Tests`, with the tool-calling suites under `ToolCalling/`.
 - `HartsyInference.Vulkan` no longer references `HartsyInference.Cpu`: nothing in the backend used it, only two comments
   named it, so the Vulkan package drops a dependency it never needed. CUDA keeps its reference, which the MoE expert
   offload path does use.

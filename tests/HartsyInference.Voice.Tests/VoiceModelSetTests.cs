@@ -5,7 +5,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Tests.Fakes;
 using Xunit;
 

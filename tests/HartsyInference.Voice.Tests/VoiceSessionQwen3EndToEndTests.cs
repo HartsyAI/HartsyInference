@@ -6,7 +6,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.Tests.Common;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Gpu;
 using HartsyInference.Voice.Tests.Fakes;
 using Xunit;
@@ -96,7 +96,7 @@ public sealed class VoiceSessionQwen3EndToEndTests
         ToolRegistry tools = BuildRealToolSet();
         RecordingDiagnostics diagnostics = new();
         EngineOptions engineOptions = new() { Diagnostics = diagnostics };
-        ToolCalling.Install(engineOptions);
+        ToolCallParsing.Install(engineOptions);
         using InferenceEngine? engine = GpuVoiceRig.OpenAudioEngine(_output.WriteLine, ordinal: 1, engineOptions);
         if (engine is null)
         {

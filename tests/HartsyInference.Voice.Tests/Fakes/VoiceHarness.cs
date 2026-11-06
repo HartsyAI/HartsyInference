@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 
 namespace HartsyInference.Voice.Tests.Fakes;

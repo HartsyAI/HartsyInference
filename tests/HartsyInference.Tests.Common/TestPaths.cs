@@ -510,7 +510,7 @@ public static class TestPaths
             Path.Combine(ModelsDir, "llm", "qwen25-vl", "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"));
 
         /// <summary>Qwen3.5-0.8B, Q4_K_M GGUF — the tool-call template-detection fixtures' real-template source
-        /// for the Qwen3-Coder-style XML-argument dialect (<c>HartsyInference.Tools.Tests</c>).</summary>
+        /// for the Qwen3-Coder-style XML-argument dialect (<c>HartsyInference.Engine.Tests</c>).</summary>
         public static string Qwen35_08BQ4KM => Resolve("QWEN35_08B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen35", "Qwen3.5-0.8B-Q4_K_M.gguf"));
 
         /// <summary>LiquidAI/LFM3-1.7B Hugging Face directory (<c>config.json</c> and <c>model.safetensors</c>).</summary>
