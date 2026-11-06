@@ -8,8 +8,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.Gpu\HartsyInference.Gpu.csproj" />
-    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
   </ItemGroup>
 
   <ItemGroup>

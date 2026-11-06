@@ -18,9 +18,8 @@ namespace HartsyInference.Diffusion.Pipelines;
 /// <para>Two text-encode paths: the primary <see cref="HunyuanImageQwenTextEncoder"/> path matching the
 /// upstream model (template → pad 1034 → <c>hidden_states[-3]</c> → drop the 34-token prefix), and a
 /// legacy CLIP-L + T5-XXL constructor kept for repackaged checkpoints that bundle those encoders.
-/// The ByT5 glyph branch (1472-dim secondary stream for quoted text) is not implemented yet — the
-/// transformer receives <c>encoderHidden2 = null</c>, equivalent to diffusers' zero-tensor fallback for
-/// prompts without quoted text. TODO (validation-gated): add a ByT5-small encoder for glyph prompts.</para></summary>
+/// Quoted prompt text also runs through the Glyph-ByT5-small <see cref="GlyphEncoder"/> into the 1472-dim
+/// secondary stream (<c>encoderHidden2</c>); a prompt without quotes leaves it null, as ComfyUI does.</para></summary>
 public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 {
     private readonly ClipTextEncoder? _clipEncoder;
@@ -41,14 +40,19 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
-    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the Qwen token ids — the
-    // FLite/QwenImage pattern. A hit skips the whole TE phase (DiT evict + TE preload + encode + free).
-    // NOTE: when the ByT5 glyph stream gets wired (encoderHidden2), its embedding must join this cache
-    // under the same key — both streams derive from the same prompt.
+    // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the Qwen token ids plus the glyph token ids —
+    // the FLite/QwenImage pattern. A hit skips the whole TE phase (DiT evict + TE preload + encode + free). The ByT5 glyph
+    // embeddings ride in the same entry: both streams derive from the same prompt.
     private int[]? _cachedCondKey;
     private Tensor? _cachedCond;
+    private Tensor? _cachedCondGlyph;
     private int[]? _cachedUncondKey;
     private Tensor? _cachedUncond;
+    private Tensor? _cachedUncondGlyph;
+
+    /// <summary>The Glyph-ByT5-small encoder (<see cref="T5TextEncoderConfig.ByT5SmallGlyph"/>) for the second text
+    /// stream. Needed only when a generation passes glyph token ids; the recipe attaches it on first use. Not owned.</summary>
+    public T5TextEncoder? GlyphEncoder { get; set; }
 
     /// <summary>Creates a Hunyuan Image pipeline with the primary Qwen2.5-VL-7B text encoder (matches <c>tencent/HunyuanImage-2.1</c>).</summary>
     public HunyuanImagePipeline(IBackend backend, HunyuanImageQwenTextEncoder qwenEncoder,
@@ -115,7 +119,9 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         TextToImageRequest request,
         Action<GenerationProgress>? onProgress = null,
         float[]? promptTokenWeights = null,
-        float[]? negativeTokenWeights = null)
+        float[]? negativeTokenWeights = null,
+        int[]? promptGlyphTokenIds = null,
+        int[]? negativeGlyphTokenIds = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -127,21 +133,41 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         bool useCfg = request.CfgScale > 1.0f;
         if (useCfg && (negativePromptTokenIdsQwen is null || negativeAttentionMaskQwen is null))
             throw new ArgumentException("Negative prompt tokens + mask are required when CfgScale > 1.", nameof(negativePromptTokenIdsQwen));
+        // The glyph stream needs the DiT's ByT5 projection (context_embedder_2). A checkpoint without it cannot read
+        // glyph text, so the prompt runs on the Qwen stream alone.
+        if ((promptGlyphTokenIds is not null || negativeGlyphTokenIds is not null) && _config.TextEmbedDim2 is null)
+        {
+            Logs.Warning("[HunyuanImage] the prompt quotes glyph text, but this checkpoint has no ByT5 projection (context_embedder_2); glyph text is ignored.");
+            promptGlyphTokenIds = null;
+            negativeGlyphTokenIds = null;
+        }
+        if (!useCfg)
+            negativeGlyphTokenIds = null;
+        if ((promptGlyphTokenIds is not null || negativeGlyphTokenIds is not null) && GlyphEncoder is null)
+            throw new InvalidOperationException("Glyph token ids were passed but no GlyphEncoder is attached.");
 
         int seed = request.Seed ?? SeedGenerator.RandomSeed();
 
         // Prompt-embedding cache: a hit skips the whole 7B TE phase, which also avoids the TE⇄DiT VRAM swap.
         // The conditioning is per-token only (no resolution-dependent component), so token ids fully key it.
-        bool condHit = _cachedCond is not null && _cachedCondKey is not null
-            && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsQwen);
+        int[] condKey = CacheKey(promptTokenIdsQwen, promptGlyphTokenIds);
+        int[]? uncondKey = useCfg ? CacheKey(negativePromptTokenIdsQwen!, negativeGlyphTokenIds) : null;
+        bool condHit = _cachedCond is not null && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(condKey);
         bool uncondHit = !useCfg || (_cachedUncond is not null && _cachedUncondKey is not null
-            && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsQwen!));
+            && _cachedUncondKey.AsSpan().SequenceEqual(uncondKey!));
         Tensor cond;
         Tensor? uncond = null;
+        Tensor? condGlyph;
+        Tensor? uncondGlyph = null;
         if (condHit && uncondHit)
         {
             cond = _cachedCond!;
-            if (useCfg) uncond = _cachedUncond;
+            condGlyph = _cachedCondGlyph;
+            if (useCfg)
+            {
+                uncond = _cachedUncond;
+                uncondGlyph = _cachedUncondGlyph;
+            }
             Logs.Info("[HunyuanImage] prompt-embedding cache HIT — TE phase skipped.");
         }
         else
@@ -169,27 +195,54 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             TextEncoderBackend.Sync();
             TextEncoderBackend.FreeWeights(_qwenEncoder.EnumerateWeights());
 
+            (condGlyph, uncondGlyph) = EncodeGlyph(promptGlyphTokenIds, negativeGlyphTokenIds);
+
             // Host-materialize so the cached embeddings survive the activation sweep, then reclaim the
             // encoder's device intermediates before the DiT preload.
             // LOAD-BEARING for TextEncoderDevice placement: these host reads ARE the cross-device boundary —
             // the denoiser's backend re-uploads the conditioning from the host copies.
             _ = cond.DataPointer;
             if (uncond is not null) _ = uncond.DataPointer;
+            if (condGlyph is not null) _ = condGlyph.DataPointer;
+            if (uncondGlyph is not null) _ = uncondGlyph.DataPointer;
             TextEncoderBackend.FreeActivations();
             TextEncoderBackend.TrimMemoryPool();
 
             _cachedCond?.Dispose();
+            _cachedCondGlyph?.Dispose();
             _cachedCond = cond;
-            _cachedCondKey = (int[])promptTokenIdsQwen.Clone();
+            _cachedCondGlyph = condGlyph;
+            _cachedCondKey = condKey;
             if (useCfg)
             {
                 _cachedUncond?.Dispose();
+                _cachedUncondGlyph?.Dispose();
                 _cachedUncond = uncond;
-                _cachedUncondKey = (int[])negativePromptTokenIdsQwen!.Clone();
+                _cachedUncondGlyph = uncondGlyph;
+                _cachedUncondKey = uncondKey;
             }
         }
 
-        return Denoise(cond, uncond, request, seed, textOwned: false, onProgress);
+        return Denoise(cond, uncond, condGlyph, uncondGlyph, request, seed, textOwned: false, onProgress);
+    }
+
+    /// <summary>The cache key for one branch: the Qwen ids, then a -1 separator and the glyph ids when there are any.</summary>
+    private static int[] CacheKey(int[] qwenIds, int[]? glyphIds) => glyphIds is null ? (int[])qwenIds.Clone() : [.. qwenIds, -1, .. glyphIds];
+
+    /// <summary>Runs the ByT5 glyph encoder on each branch that has glyph text: the final hidden state of every byte token
+    /// (<c>[1, L, 1472]</c>), no padding, as ComfyUI's <c>ByT5SmallModel</c> returns it.</summary>
+    private (Tensor? Cond, Tensor? Uncond) EncodeGlyph(int[]? condIds, int[]? uncondIds)
+    {
+        if (condIds is null && uncondIds is null)
+            return (null, null);
+        T5TextEncoder encoder = GlyphEncoder!;
+        Logs.Info("Encoding glyph text with ByT5-small (secondary 1472-dim stream)...");
+        TextEncoderBackend.PreloadWeights(encoder.EnumerateWeights());
+        Tensor? cond = condIds is null ? null : encoder.Encode(TextEncoderBackend, [condIds]);
+        Tensor? uncond = uncondIds is null ? null : encoder.Encode(TextEncoderBackend, [uncondIds]);
+        TextEncoderBackend.Sync();
+        TextEncoderBackend.FreeWeights(encoder.EnumerateWeights());
+        return (cond, uncond);
     }
 
     /// <summary>Generates an image from pre-tokenized input via the legacy CLIP+T5 path. CLIP token args are unused (kept for signature stability); the T5 encoder produces per-token context fed to the transformer.</summary>
@@ -238,12 +291,13 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             TextEncoderBackend.FreeActivations();
         }
 
-        return Denoise(cond, uncond, request, seed, textOwned: true, onProgress);
+        return Denoise(cond, uncond, condGlyph: null, uncondGlyph: null, request, seed, textOwned: true, onProgress);
     }
 
     /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop (patchify once, in-place device <c>CfgEulerStep</c> per step, one unpatchify at the end via the device <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip — token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
     private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
-        TextToImageRequest request, int seed, bool textOwned, Action<GenerationProgress>? onProgress)
+        Tensor? condGlyph, Tensor? uncondGlyph, TextToImageRequest request, int seed, bool textOwned,
+        Action<GenerationProgress>? onProgress)
     {
         int steps = request.Steps;
         float cfgScale = request.CfgScale;
@@ -353,7 +407,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             IStreamingBlock[] blocks = new IStreamingBlock[_transformer.BlockCount];
             for (int b = 0; b < blocks.Length; b++) blocks[b] = _transformer.GetBlock(b);
 
-            int txtSeqLen = (int)Math.Max(condText.Shape[1], uncondText?.Shape[1] ?? 0);
+            int txtSeqLen = (int)Math.Max(condText.Shape[1] + (condGlyph?.Shape[1] ?? 0),
+                (uncondText?.Shape[1] ?? 0) + (uncondGlyph?.Shape[1] ?? 0));
             int imgSeqLen = hPacked * wPacked;
             long activationReserve = EstimateActivationReserveBytes(
                 txtSeqLen, imgSeqLen, _config.HiddenSize, (int)(_config.HiddenSize * _config.MlpRatio))
@@ -437,7 +492,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
                     // which is right: there is no precomputed timestep for it.
                     float stepT = stepIndex < steps && s == scheduler.SigmaAt(stepIndex) ? timestepTable[stepIndex]
                         : s * 1000.0f;
-                    Tensor cond = RunForward(x, condText, stepT, distilledGuidance, hPacked, wPacked);
+                    Tensor cond = RunForward(x, condText, condGlyph, stepT, distilledGuidance, hPacked, wPacked);
                     if (!useCfg || _config.GuidanceEmbed)
                     {
                         // Distilled guidance rides in the embedding, so there is no unconditional branch and the
@@ -446,7 +501,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
                     }
                     // Standard CFG path (un-distilled variant): hand back the raw pair and let the fused device op
                     // do the uncond-anchored combine, exactly as the direct call did.
-                    Tensor uncond = RunForward(x, uncondText!, stepT, 1.0f, hPacked, wPacked);
+                    Tensor uncond = RunForward(x, uncondText!, uncondGlyph, stepT, 1.0f, hPacked, wPacked);
                     return new DenoisePrediction(cond, uncond, cfgScale);
                 });
             if (i == startStep)
@@ -499,6 +554,8 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         {
             condText.Dispose();
             uncondText?.Dispose();
+            condGlyph?.Dispose();
+            uncondGlyph?.Dispose();
         }
 
         Backend.Sync();
@@ -563,12 +620,12 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return (rgb, width, height, seed);
     }
 
-    /// <summary>Routes the per-step forward to <see cref="HunyuanImageTransformer.ForwardSharded"/> when DiT sharding is configured and the plain <see cref="HunyuanImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way. The ByT5 glyph stream is not wired yet, so both paths pass a null <c>encoderHidden2</c>.</summary>
-    private Tensor RunForward(Tensor latentTokens, Tensor text, float t, float guidance, int hPacked, int wPacked) =>
+    /// <summary>Routes the per-step forward to <see cref="HunyuanImageTransformer.ForwardSharded"/> when DiT sharding is configured and the plain <see cref="HunyuanImageTransformer.Forward"/> otherwise, keeping the denoise-loop body identical either way. <paramref name="glyph"/> is the branch's ByT5 stream, null when its prompt quotes nothing.</summary>
+    private Tensor RunForward(Tensor latentTokens, Tensor text, Tensor? glyph, float t, float guidance, int hPacked, int wPacked) =>
         DitShardBackend is not null
-            ? _transformer.ForwardSharded(Backend, DitShardBackend, latentTokens, text, encoderHidden2: null,
+            ? _transformer.ForwardSharded(Backend, DitShardBackend, latentTokens, text, encoderHidden2: glyph,
                 t, guidance, hPacked, wPacked, DitShardSplitBlock)
-            : _transformer.Forward(Backend, latentTokens, text, encoderHidden2: null, t, guidance, hPacked, wPacked);
+            : _transformer.Forward(Backend, latentTokens, text, encoderHidden2: glyph, t, guidance, hPacked, wPacked);
 
     /// <summary>Frees the DiT weights on whichever backend(s) hold them — the mirror of the sharded asymmetric preload. The unsharded <c>FreeWeights(EnumerateWeights())</c> would silently no-op on the shard backend's block range (frees are per-backend) and leak it every non-resident generation.</summary>
     private void FreeTransformerWeights()

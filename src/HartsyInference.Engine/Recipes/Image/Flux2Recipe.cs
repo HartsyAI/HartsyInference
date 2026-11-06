@@ -48,7 +48,11 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase);
+    /// <remarks>Matches the catalog id <c>flux2-klein-4b</c> as well: the registry resolves a catalog entry by its id, and the
+    /// variant still comes from the transformer's hidden size.</remarks>
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, "flux2", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "flux2-klein-4b", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Flux.2 Dev's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (SwarmUI <c>Model Support.md</c>, Flux.2: Flux Guidance defaults to 3.5, 4 is the optional tweak); the distilled Klein variants narrow this via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Revision = 2, Steps = 50, CfgScale = 3.5f, Width = 1024, Height = 1024 };

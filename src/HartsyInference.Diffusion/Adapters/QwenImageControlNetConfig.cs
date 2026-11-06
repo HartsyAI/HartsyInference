@@ -50,6 +50,17 @@ public sealed record QwenImageControlNetConfig
             throw new HartsyInferenceException(
                 $"Qwen-Image ControlNet controlnet_x_embedder rows ({cnxEmbed.Shape[0]}) != img_in rows ({hidden}).");
         }
+        // diffusers' extra_condition_channels widen the control input past the packed latent: InstantX's Inpainting ControlNet
+        // takes the masked image's latent plus the packed mask. Only the plain control-image path is implemented, so refuse
+        // here rather than fail on a shape mismatch inside the first projection.
+        int controlInDim = (int)cnxEmbed.Shape[1];
+        if (controlInDim != inDim)
+        {
+            throw new NotSupportedException(
+                $"This Qwen-Image ControlNet takes {controlInDim} control channels per token, {controlInDim - inDim} more than the "
+                + $"packed latent's {inDim}: it is an inpainting ControlNet (such as InstantX's Inpainting), whose masked-image and "
+                + "mask conditioning is not implemented. Use a control-image ControlNet such as InstantX's Union, or Qwen-Image's own inpaint.");
+        }
 
         int depth = 0;
         foreach (string key in descriptors.Keys)

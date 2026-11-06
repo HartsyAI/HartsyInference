@@ -221,7 +221,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 
         // The reference's keys and values, built once while its LoRA is live and freed with the generation. Its RoPE placement is one target
         // height down, so the cache is valid for this grid only.
-        using ReferenceKvCache? referenceCache = reference is null ? null : BuildReferenceCache(reference, latentH);
+        using ReferenceKvCache? referenceCache = reference is null ? null : BuildReferenceCache(reference, latentH, latentW);
         float shift = scheduler.Shift;
 
         // Sampler selection (2026-08-20). Anima is flow-matching, so it had no user-selectable sampler at all before
@@ -388,11 +388,14 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
         return _vaeEncoder.Encode(Backend, rgbMinusOneOne);
     }
 
-    private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH)
+    private ReferenceKvCache BuildReferenceCache(AnimaReferenceJoin reference, int latentH, int latentW)
     {
         using IDisposable scope = reference.Gate.Enable(reference.Strength);
         // The cache holds the keys and values the adapter produced at this strength, so both the reference and the strength identify it.
         long identity = HashCode.Combine(reference.Identity, BitConverter.SingleToInt32Bits(reference.Strength));
+        // The released v2 adapter is asymmetric: ComfyUI deliberately keeps the reference's own
+        // aspect ratio and latent grid, then shifts its RoPE rows by one *target* height. Resizing
+        // the encoded latent to the target grid changes the trained token geometry and is not parity.
         return _transformer.BuildReferenceCache(Backend, reference.Latent, latentH / _config.PatchSize.H, reference.Placement, identity);
     }
 

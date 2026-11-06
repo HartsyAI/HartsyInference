@@ -5,7 +5,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Engine.Requests;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Gpu;
 using HartsyInference.Voice.Turns;
