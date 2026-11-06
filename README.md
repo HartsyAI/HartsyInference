@@ -111,8 +111,9 @@ checked-in dataset snapshot; it is replaced by the live explorer once Pages is a
   [troubleshooting](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/TROUBLESHOOTING.md).
 - [Historical performance scoreboards](https://github.com/HartsyAI/HartsyInference/tree/main/benchmarks/scoreboards)
   — hardware, settings, dates, and external baselines.
-- [Multi-GPU configuration](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md) and
-  [settings](https://github.com/HartsyAI/HartsyInference/blob/main/docs/SETTINGS.md).
+- [Multi-GPU configuration](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md),
+  [settings](https://github.com/HartsyAI/HartsyInference/blob/main/docs/SETTINGS.md) and
+  [embedding the engine in a host application](https://github.com/HartsyAI/HartsyInference/blob/main/docs/HOST_INTEGRATION.md).
 
 Code and packages are [MIT licensed](https://github.com/HartsyAI/HartsyInference/blob/main/LICENSE).
 Model weights retain their publishers' licenses; consult the checkpoint's license, including the

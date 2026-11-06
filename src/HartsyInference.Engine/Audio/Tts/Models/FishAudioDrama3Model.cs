@@ -3,7 +3,6 @@ using HartsyInference.Audio.Models.FishAudio;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Collections;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Host;

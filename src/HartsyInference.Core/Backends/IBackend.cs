@@ -2384,34 +2384,6 @@ public partial interface IBackend : IDisposable
         }
     }
 
-    /// <summary>Per-row argmax over the last dim: <c>indices[r] = argmax_c input[r,c]</c> (first max wins) — keeps sampling GPU-resident.</summary>
-    unsafe void ArgMaxLastDim(Tensor indices, Tensor input) => ArgMaxLastDimReference(indices, input);
-
-    /// <summary>The host implementation of <see cref="ArgMaxLastDim"/>, for a backend that overrides it and needs
-    /// to bail on a dtype its kernel does not cover.</summary>
-    /// <remarks>Static because an override cannot reach its own interface default — the call binds back to the
-    /// class and recurses until the stack ends.</remarks>
-    static unsafe void ArgMaxLastDimReference(Tensor indices, Tensor input)
-    {
-        if (input.DType != DType.F32)
-            throw new NotSupportedException("ArgMaxLastDim default fallback only supports F32.");
-        if (indices.DType != DType.I32)
-            throw new NotSupportedException("ArgMaxLastDim requires I32 indices.");
-        int c = (int)input.Shape[input.Shape.Rank - 1];
-        long rows = input.ElementCount / c;
-        if (indices.ElementCount < rows)
-            throw new ArgumentException($"ArgMaxLastDim indices length {indices.ElementCount} < rows {rows}.");
-        float* pIn = (float*)input.DataPointer;
-        int* pIdx = (int*)indices.DataPointer;
-        for (long r = 0; r < rows; r++)
-        {
-            float* row = pIn + r * c;
-            int best = 0; float bv = row[0];
-            for (int i = 1; i < c; i++) if (row[i] > bv) { bv = row[i]; best = i; }
-            pIdx[r] = best;
-        }
-    }
-
     /// <summary>Scatter rows after a zeroed head block: <c>output = [zeros(headRows), input]</c> — builds the conditional latent.</summary>
     unsafe void ScatterRowsAfter(Tensor output, Tensor input, int headRows)
     {
@@ -3033,9 +3005,6 @@ public partial interface IBackend : IDisposable
         SliceLastDim(output, narrow, 0);
     }
 
-    /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
-    void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
-
     /// <summary>Bilinear 2D resize of an NCHW tensor to output's size, matching PyTorch <c>F.interpolate(mode="bilinear")</c> mapping.</summary>
     /// <param name="alignCorners">True: <c>src=dst·(in−1)/(out−1)</c>; false: <c>src=(dst+0.5)·in/out−0.5</c> (DPT fusion: true).</param>
     unsafe void InterpolateBilinear2D(Tensor output, Tensor input, bool alignCorners)
@@ -3553,10 +3522,6 @@ public partial interface IBackend : IDisposable
         CopyTo(destination, source);
     }
 
-    /// <summary>Count of cross-device copies that took a DIRECT peer path (P2P/NVLink), for placement diagnostics;
-    /// 0 on backends without one. Host-staged fallbacks show up in <see cref="GetD2hSyncCount"/> instead.</summary>
-    long GetPeerCopyCount() => 0;
-
     /// <summary>Fill a tensor with a constant value.</summary>
     void Fill(Tensor tensor, float value);
 
@@ -3564,14 +3529,8 @@ public partial interface IBackend : IDisposable
 
     #region Audio (optional — backends may throw NotSupportedException)
 
-    /// <summary>Radix-2 FFT for audio processing.</summary>
-    void Fft(Tensor output, Tensor input);
-
     /// <summary>Short-time Fourier transform.</summary>
     void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window);
-
-    /// <summary>Apply mel filterbank to FFT magnitude spectrogram.</summary>
-    void MelFilterbank(Tensor output, Tensor input, Tensor filters);
 
     #endregion
 
@@ -3627,26 +3586,6 @@ public partial interface IBackend : IDisposable
             }
         }
         finally { casted.Dispose(); }
-    }
-
-    /// <summary>Cast tensor from FP8 E4M3 to FP16. Default: CPU via F32 intermediate.</summary>
-    void CastF8E4M3ToF16(Tensor output, Tensor input)
-    {
-        Tensor f32 = input.CastTo(DType.F32);
-        CastToF16(output, f32);
-        f32.Dispose();
-    }
-
-    /// <summary>Cast tensor from FP16 to FP8 E4M3. Default: CPU via Tensor.CastTo.</summary>
-    void CastF16ToF8E4M3(Tensor output, Tensor input)
-    {
-        Tensor f8 = input.CastTo(DType.F8E4M3);
-        unsafe
-        {
-            long byteCount = output.Shape.ElementCount; // 1 byte per F8 element
-            Buffer.MemoryCopy(f8.DataPointer, output.DataPointer, byteCount, byteCount);
-        }
-        f8.Dispose();
     }
 
     #endregion

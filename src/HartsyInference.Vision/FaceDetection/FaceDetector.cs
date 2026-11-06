@@ -1,9 +1,9 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Detection;
 using HartsyInference.Vision.Face;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Vision.FaceDetection;
 

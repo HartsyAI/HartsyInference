@@ -47,13 +47,6 @@ public sealed record ExpertGroupDescriptor
     /// <summary>Kept for call-site symmetry; validation happens in the constructor.</summary>
     public ExpertGroupDescriptor Validated() => this;
 
-    /// <summary>The shape of expert <paramref name="index"/>.</summary>
-    public ExpertDescriptor ExpertAt(int index)
-    {
-        if ((uint)index >= (uint)Count) throw new ArgumentOutOfRangeException(nameof(index), index, $"Group has {Count} experts.");
-        return Overrides is not null && Overrides.TryGetValue(index, out ExpertDescriptor? shape) ? shape : Shape;
-    }
-
     /// <summary>Total payload bytes across the group.</summary>
     public long PayloadBytes
     {

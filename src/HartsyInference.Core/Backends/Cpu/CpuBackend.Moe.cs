@@ -36,11 +36,4 @@ public sealed partial class CpuBackend
         MoeReference.Combine(output, expertOut, pairSlot, topkWeight, k, accumulate);
     }
 
-    /// <inheritdoc />
-    public void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false)
-    {
-        ThrowIfDisposed();
-        TopKReference.Apply(values, indices, input, k, validLengths, sortByIndex);
-    }
 }
