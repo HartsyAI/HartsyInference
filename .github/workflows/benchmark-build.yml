@@ -24,6 +24,7 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: node --test benchmarks/automation/policy.test.mjs
+      - run: dotnet build benchmarks/HartsyInference.BenchmarkRunner -c Release
       - run: dotnet benchmarks/HartsyInference.BenchmarkRunner/bin/Release/net10.0/hartsy-bench.dll schema --output benchmarks/schemas
       - run: git diff --exit-code -- benchmarks/schemas
       - run: dotnet publish benchmarks/HartsyInference.BenchmarkRunner -c Release -r ${{ matrix.rid }} --self-contained true -p:BenchmarkRevision=${{ github.event.pull_request.head.sha || github.sha }} -o artifacts/${{ matrix.rid }}
