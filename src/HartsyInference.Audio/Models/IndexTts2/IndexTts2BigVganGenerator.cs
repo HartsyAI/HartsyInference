@@ -48,12 +48,12 @@ internal sealed unsafe class IndexTts2BigVganGenerator : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
         _convPreW = Own(WeightNormFusion.Compose(w, $"{prefix}.conv_pre"));
-        _convPreB = EnsureF32(w[$"{prefix}.conv_pre.bias"]);
+        _convPreB = TensorCasts.EnsureF32(w[$"{prefix}.conv_pre.bias"]);
 
         for (int i = 0; i < _numStages; i++)
         {
             _upsW[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.ups.{i}.0"));
-            _upsB[i] = EnsureF32(w[$"{prefix}.ups.{i}.0.bias"]);
+            _upsB[i] = TensorCasts.EnsureF32(w[$"{prefix}.ups.{i}.0.bias"]);
             for (int j = 0; j < _resblocks[i].Length; j++)
                 _resblocks[i][j].LoadWeights(w, $"{prefix}.resblocks.{i * _resblocks[i].Length + j}");
         }
@@ -111,8 +111,6 @@ internal sealed unsafe class IndexTts2BigVganGenerator : IDisposable
         // No tanh — real config.json: use_tanh_at_final: false (unlike IndexTTS-1.5's own BigVGAN).
         return outWave;
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private Tensor Own(Tensor t)
     {

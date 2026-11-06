@@ -42,13 +42,13 @@ public sealed unsafe class CosmosArTransformer : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         ThrowIfDisposed();
-        _embed = EnsureF32(w["tok_embeddings.weight"]);
-        _finalNorm = EnsureF32(w["norm.weight"]);
+        _embed = TensorCasts.EnsureF32(w["tok_embeddings.weight"]);
+        _finalNorm = TensorCasts.EnsureF32(w["norm.weight"]);
         _output = w["output.weight"];
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"layers.{i}");
         if (_cfg.ApplyAbsPosEmb && w.TryGetValue("pos_emb.weight", out Tensor? posTable)
             && posTable.Shape.Rank == 2 && (int)posTable.Shape[1] == _cfg.Dim)
-            _absPos.LoadLearnedTable(EnsureF32(posTable));
+            _absPos.LoadLearnedTable(TensorCasts.EnsureF32(posTable));
     }
 
     /// <summary>All weight tensors (stable references) for <see cref="IBackend.PreloadWeights"/> /
@@ -148,8 +148,6 @@ public sealed unsafe class CosmosArTransformer : IDisposable
             Buffer.MemoryCopy(ep + (long)id * dim, op + (long)s * dim, (long)dim * 4, (long)dim * 4);
         }
     }
-
-    private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
     private void ThrowIfDisposed()
     {
