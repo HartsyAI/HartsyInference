@@ -6,7 +6,7 @@ using HartsyInference.Core.Tensors;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Checkpoints;

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>The packed format of each of an expert's three projections. A GGUF K-quant mix can store them differently: Q4_K_M
 /// keeps gate and up in Q4_K and some layers' down projection in Q6_K.</summary>

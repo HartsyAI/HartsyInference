@@ -1,4 +1,4 @@
-namespace HartsyInference.Cpu;
+namespace HartsyInference.Core.Backends.Cpu;
 
 /// <summary>Provides runtime detection of SIMD instruction set support (AVX2, AVX-512, ARM NEON) and reports the best available vector width for dispatching kernel implementations.</summary>
 public static class SimdDispatch

@@ -3,7 +3,7 @@ using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>
 /// AVX2 row dot products: one weight row against one quantized activation row, accumulated in float VECTORS with a single

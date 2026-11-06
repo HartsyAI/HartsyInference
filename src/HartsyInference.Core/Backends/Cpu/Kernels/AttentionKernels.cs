@@ -1,8 +1,7 @@
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides scaled dot-product attention CPU compute kernels. Supports multi-head attention with optional masking for F32 tensors.</summary>
 public static class AttentionKernels

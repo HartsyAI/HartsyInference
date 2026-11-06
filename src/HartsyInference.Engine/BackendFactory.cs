@@ -1,7 +1,7 @@
 using System.Globalization;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Vulkan;
 

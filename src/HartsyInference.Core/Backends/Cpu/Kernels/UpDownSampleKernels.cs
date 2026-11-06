@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides upsampling and downsampling CPU compute kernels for NCHW format F32 tensors. Supports nearest-neighbor and bilinear interpolation modes.</summary>
 public static class UpDownSampleKernels
