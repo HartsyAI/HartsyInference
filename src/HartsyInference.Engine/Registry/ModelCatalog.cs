@@ -1977,49 +1977,81 @@ public static class ModelCatalog
                 },
             },
 
-            // Restoration (SeedVR2). numz/SeedVR2_comfyUI ships the original state-dict keys verbatim, so
-            // the converter loads its fp16 files directly. The frozen positive embedding is the upstream
-            // ByteDance-Seed/SeedVR2-3B pos_emb.pt (a bare BF16 [58,5120] tensor, public, shared by 3B and 7B);
-            // RestoreService reads that pickle directly, so no converted copy needs hosting.
-            // The transformers stay in Video/SeedVr2. Swarm core lists a SeedVR2 checkpoint from the model folders, but
-            // numz's 3B file has no positive/negative_conditioning tensors, so core cannot run it from there.
+            // Restoration (SeedVR2). Every variant that loads is listed, and the Restore Model choice runs the one picked.
+            // Comfy-Org's repacks are the defaults: ComfyUI's own files, with the numz keys plus two conditioning tensors
+            // the converter drops. numz's original fp16 files stay selectable. mxfp8, nvfp4 and int8 are not listed until
+            // the converter reads their companion scales. Every variant reads the shared VAE and embedding.
             new CatalogEntry
             {
-                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
+                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp16)",
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
-                Assets = new ModelAsset[]
-                {
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
-                        Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
-                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
-                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
-                },
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp16.safetensors", "98669fd2c06df5eca88baf68cd5c478775c8e61fc110e598c52b350145ea2660"),
             },
             new CatalogEntry
             {
-                Id = "seedvr2-7b", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (video/image restoration)",
+                Id = "seedvr2-3b-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp8)",
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
-                Assets = new ModelAsset[]
-                {
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp8_e4m3fn.safetensors", "a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-numz", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (numz original fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets =
+                [
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
+                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
+                        Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_fp16.safetensors", "2742ca6fee63bc5cc1773f426dd4b07b78cad27f51c9ea5cd42b035e6b592252"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org fp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_fp8_e4m3fn.safetensors", "5065e77d647dd553d9090a81e20d6de590d931a61df79d785e008433926ee418"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_fp16.safetensors", "70823bca54b9c24eeb56e1c452697c7c2a430867e58db0e376c6e260f3a4489d"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org fp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_fp8_e4m3fn.safetensors", "7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-numz", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (numz original fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets =
+                [
+                    // Installs from the previous catalog saved this file under its numz name.
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", TargetName = "seedvr2_7b_dit_f16.safetensors", Role = "transformer",
-                        // Installs from the previous catalog saved this file under its numz name.
-                        LegacyTargetNames = ["seedvr2_ema_7b_fp16.safetensors"],
+                        TargetSubdir = "Video/SeedVr2", TargetName = "seedvr2_7b_dit_f16.safetensors",
+                        LegacyTargetNames = ["seedvr2_ema_7b_fp16.safetensors"], Role = "transformer",
                         Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "VAE/SeedVR2", TargetName = "seedvr2_ema_vae_fp16.safetensors", Role = "vae",
-                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
-                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
-                },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
             },
 
             // Video

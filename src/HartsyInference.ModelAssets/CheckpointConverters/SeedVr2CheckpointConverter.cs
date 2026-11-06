@@ -49,6 +49,10 @@ public static class SeedVr2CheckpointConverter
         {
             if (key.EndsWith(".rope.rope.freqs", StringComparison.Ordinal))
                 continue;
+            // Comfy-Org's repacks carry these two for ComfyUI's SeedVR2 class; the engine takes its positive embedding
+            // from pos_emb.pt, so they are dropped here.
+            if (key is "positive_conditioning" or "negative_conditioning")
+                continue;
             result[key] = value;
         }
 
