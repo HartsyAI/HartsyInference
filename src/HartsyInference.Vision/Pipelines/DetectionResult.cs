@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Pipelines;
+namespace HartsyInference.Vision.Pipelines;
 
 /// <summary>A single detected object with bounding box and classification.</summary>
 public sealed record DetectionResult

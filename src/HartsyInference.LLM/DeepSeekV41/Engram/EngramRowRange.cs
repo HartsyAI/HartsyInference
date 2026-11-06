@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>A half-open range of table rows, <c>[Start, Start + Count)</c>.</summary>
 public readonly record struct EngramRowRange(long Start, long Count)

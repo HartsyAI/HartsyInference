@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Pipelines;
+namespace HartsyInference.Vision.Pipelines;
 
 /// <summary>Interface for vision pipelines (CLIP embeddings, YOLO detection, SAM segmentation).</summary>
 public interface IVisionPipeline : IDisposable

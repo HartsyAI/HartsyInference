@@ -1,7 +1,6 @@
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Latent;
 
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>Decodes an fp8 e4m3 row with one e8m0 scale per 32 columns, as the official checkpoint and the GGUF conversion store it.</summary>
 internal static class Fp8E8M0RowDecoder

@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>One contiguous, row-major byte plane of an Engram table: row <c>r</c> occupies <c>BaseOffset + r * BytesPerRow</c> in its source.</summary>
 /// <param name="BaseOffset">Absolute file offset of row 0 of this plane.</param>

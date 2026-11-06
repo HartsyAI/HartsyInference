@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Pipelines;
+namespace HartsyInference.Audio.Pipelines;
 
 /// <summary>Interface for audio pipelines (Whisper STT, Kokoro TTS, voice conversion).</summary>
 public interface IAudioPipeline : IDisposable

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Codecs;
+namespace HartsyInference.Core.Numerics;
 
 /// <summary>Finite Scalar Quantization primitives (Mentzer et al. 2023), matching <c>lucidrains/vector-quantize-pytorch::FSQ</c> exactly.</summary>
 /// <remarks>

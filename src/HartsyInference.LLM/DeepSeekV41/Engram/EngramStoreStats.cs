@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>Counters of an <see cref="EngramTableStore"/> since it was created.</summary>
 /// <param name="PrefetchCalls">Calls to <c>PrefetchAsync</c>.</param>

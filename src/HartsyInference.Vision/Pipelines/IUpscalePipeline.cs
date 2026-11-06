@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Pipelines;
+namespace HartsyInference.Vision.Pipelines;
 
 /// <summary>Image super-resolution pipeline (ESRGAN / Real-ESRGAN family). Takes an RGB image and returns a higher-resolution RGB image enlarged by the model's scale factor.</summary>
 public interface IUpscalePipeline : IVisionPipeline

@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Pipelines;
+namespace HartsyInference.Vision.Pipelines;
 
 /// <summary>Object detection pipeline interface.</summary>
 public interface IDetectionPipeline : IVisionPipeline

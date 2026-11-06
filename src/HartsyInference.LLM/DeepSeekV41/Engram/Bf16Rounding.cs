@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>Float32 to bf16 with round-to-nearest-even, which is what a torch <c>.to(torch.bfloat16)</c> does.</summary>
 internal static class Bf16Rounding

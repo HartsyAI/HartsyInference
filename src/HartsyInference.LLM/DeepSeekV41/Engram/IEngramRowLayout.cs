@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>How one checkpoint format stores an Engram table row and how to turn it into bf16.</summary>
 /// <remarks>A row is read as the concatenation of its planes ("packed row"), in <see cref="GetSlice"/> order, and decoded from that.</remarks>
