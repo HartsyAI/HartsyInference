@@ -1,4 +1,4 @@
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>What follows a <see cref="ToolCallMarker"/>: the grammar the parser reads the call span with.</summary>
 public enum ToolCallPayload

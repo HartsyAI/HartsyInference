@@ -1,4 +1,4 @@
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>What <see cref="ToolLoopOptions.OnBeforeToolCall"/> decided: run the call, or refuse it and feed
 /// <see cref="DenialResult"/> back as its result.</summary>

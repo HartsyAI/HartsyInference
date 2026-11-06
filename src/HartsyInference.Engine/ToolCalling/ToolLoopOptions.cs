@@ -1,6 +1,6 @@
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>Settings for one <see cref="ToolLoopRun"/>: how many model rounds, a gate in front of each call, and the
 /// prefix for ids the loop has to invent.</summary>

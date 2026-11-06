@@ -1,13 +1,12 @@
 using System.Globalization;
-using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tools.Parsing;
+using HartsyInference.Engine.ToolCalling.Parsing;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>Installs tool-call parsing into an engine: sets <see cref="EngineOptions.TextStreamFilterFactory"/> to create a <see cref="ToolCallStreamFilter"/> for every request that offers <see cref="TextRequest.Tools"/>, and nothing for any other request, so plain generation keeps its untouched code path.</summary>
-public static class ToolCalling
+public static class ToolCallParsing
 {
     /// <summary>Sets the filter factory on <paramref name="options"/> (replacing any earlier factory). A null <paramref name="format"/> resolves per request from the model's own template and identity (<see cref="ResolveFormat"/>); a non-null one applies to every request.</summary>
     public static void Install(EngineOptions options, ToolCallFormat? format = null, bool stopAfterFirstCall = true)

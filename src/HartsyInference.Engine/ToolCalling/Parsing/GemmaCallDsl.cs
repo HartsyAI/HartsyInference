@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>Converts Gemma 4's argument block (<c>{city:&lt;|"|&gt;Paris&lt;|"|&gt;,days:3,opts:{a:true}}</c>: unquoted keys, <c>&lt;|"|&gt;</c> string delimiters, JSON literals otherwise) into a JSON object. When the delimiter token was dropped by the detokenizer a bare word up to the next <c>,</c> / <c>}</c> / <c>]</c> reads as a string, so strings containing those characters cannot be recovered in that case.</summary>
 internal static class GemmaCallDsl

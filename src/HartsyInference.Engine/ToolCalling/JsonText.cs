@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>JSON text helpers for prompt-bound output: the writer keeps <c>'</c>, <c>+</c> and non-ASCII characters literal (the default encoder's <c>'</c>-style escapes are HTML hardening a model does not need to read through).</summary>
 internal static class JsonText

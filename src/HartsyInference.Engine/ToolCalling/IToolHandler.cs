@@ -1,4 +1,4 @@
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>A callable tool: the definition the model sees (name, description, JSON schema of the arguments object) and the code that runs when the model calls it.</summary>
 public interface IToolHandler

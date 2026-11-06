@@ -1,4 +1,4 @@
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>The wire format a model family uses to emit a tool call in its decoded text. <see cref="ToolCallFormats.RulesFor"/> maps each value to its markers and payload grammar; <see cref="ToolCallFormats.Detect"/> picks one from a model id or template hint.</summary>
 public enum ToolCallFormat

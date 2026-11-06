@@ -4,7 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>Converters for the markup dialects: Qwen3.5 and Qwen3-Coder's <c>&lt;function=…&gt;&lt;parameter=…&gt;</c>, GLM-4.5's <c>&lt;arg_key&gt;/&lt;arg_value&gt;</c> pairs and DeepSeek-R1's fenced JSON blocks. Each takes the span the parser read up to its closing marker and returns the calls it holds; values are typed by the offered tool's JSON schema.</summary>
 internal static partial class ToolCallXml

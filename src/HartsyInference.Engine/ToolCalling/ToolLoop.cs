@@ -2,7 +2,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>The agent loop: streams a model turn, dispatches the calls it ends on through an <see cref="IToolDispatcher"/>,
 /// appends the assistant turn and one <see cref="TextRole.Tool"/> message per result, and asks the model again, up to

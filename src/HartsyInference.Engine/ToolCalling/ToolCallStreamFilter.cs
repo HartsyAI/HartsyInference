@@ -1,10 +1,10 @@
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tools.Parsing;
+using HartsyInference.Engine.ToolCalling.Parsing;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
-/// <summary>The <see cref="ITextStreamFilter"/> that wraps a <see cref="ToolCallParser"/>: plain text is forwarded, each completed call is emitted as a <see cref="NativeToolCall"/>, and by default generation stops after the first one (<see cref="StopAfterFirstCall"/>). One instance per request; install through <see cref="ToolCalling.Install"/>.</summary>
+/// <summary>The <see cref="ITextStreamFilter"/> that wraps a <see cref="ToolCallParser"/>: plain text is forwarded, each completed call is emitted as a <see cref="NativeToolCall"/>, and by default generation stops after the first one (<see cref="StopAfterFirstCall"/>). One instance per request; install through <see cref="ToolCallParsing.Install"/>.</summary>
 /// <remarks>The seam carries one call per delta. When a single delta closes several (a Mistral array), the extra calls are emitted one per following delta and at <see cref="OnEnd"/>, and the stop is requested only once the queue has drained, so no completed call is lost to the stop; all of them are listed in <see cref="Calls"/>.</remarks>
 public sealed class ToolCallStreamFilter : ITextStreamFilter
 {

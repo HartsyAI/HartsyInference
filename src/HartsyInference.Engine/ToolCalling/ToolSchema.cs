@@ -3,7 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>Builds a <see cref="ToolDefinition"/> from a C# delegate: each parameter becomes a schema property (string, integer, number, boolean, or a string enum listing the enum names), a <see cref="DescriptionAttribute"/> on a parameter or on the method supplies the description, and a parameter with a default value or a nullable type is optional. <see cref="CancellationToken"/> parameters are omitted. Unsupported parameter types fail here, at registration, rather than at call time.</summary>
 public static class ToolSchema

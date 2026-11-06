@@ -1,7 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>Turns a completed JSON call span into <see cref="NativeToolCall"/>s: one object, an array of objects, or (for the <c>name{…}</c> forms) a bare arguments object under a name the parser already read. OpenAI's <c>{"function": {…}}</c> nesting is unwrapped.</summary>
 internal static class ToolCallJson

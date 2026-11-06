@@ -1,6 +1,6 @@
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>What a tool loop needs from its host: the definitions to offer the model and the code that runs a call. <see cref="ToolRegistry"/> is one implementation; a host with its own executor (permissions, rate limits, audit) implements this and keeps the loop.</summary>
 public interface IToolDispatcher

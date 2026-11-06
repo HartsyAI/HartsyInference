@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>The per-format rule tables, the model-id / template-text heuristic (<see cref="Detect"/>) and the
 /// template-content detector (<see cref="TryDetectFromTemplate"/>) that pick a <see cref="ToolCallFormat"/>.

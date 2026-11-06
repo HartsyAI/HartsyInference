@@ -5,7 +5,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using HartsyInference.Engine.Requests;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>An <see cref="IToolHandler"/> over a C# delegate: binds the model's JSON arguments to the delegate's parameters by name (exact, then case-insensitive), converts scalars and enums, fills optional parameters from their defaults, invokes, and renders the return value (a string, a Task or ValueTask of any result, or any convertible value) as the tool result.</summary>
 /// <remarks>A non-string <c>Task&lt;T&gt;</c> or <c>ValueTask&lt;T&gt;</c> result is read through reflection that is looked up once per runtime result type and cached; each call then makes one reflective invoke.</remarks>

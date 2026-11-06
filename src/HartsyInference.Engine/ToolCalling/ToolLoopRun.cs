@@ -4,7 +4,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 
-namespace HartsyInference.Tools;
+namespace HartsyInference.Engine.ToolCalling;
 
 /// <summary>One run of the agent loop: streams each model round, dispatches the calls it ends on, and feeds the results
 /// back. A call the round's stream already resolved, by relaying its <see cref="TextChunkKind.ToolResult"/>, is

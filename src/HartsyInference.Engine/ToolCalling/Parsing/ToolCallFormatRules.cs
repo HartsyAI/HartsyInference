@@ -1,4 +1,4 @@
-namespace HartsyInference.Tools.Parsing;
+namespace HartsyInference.Engine.ToolCalling.Parsing;
 
 /// <summary>Everything the parser needs to read one <see cref="ToolCallFormat"/>: the markers that open a span, the optional closing marker consumed after a completed call, whether an identifier followed by <c>{</c> at the start of a line opens a call (Mistral's <c>name{…}</c>), and which JSON keys carry the arguments, in preference order.</summary>
 public sealed record ToolCallFormatRules
