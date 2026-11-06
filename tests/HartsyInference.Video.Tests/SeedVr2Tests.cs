@@ -1,5 +1,6 @@
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -506,6 +507,9 @@ public sealed class SeedVr2Tests
             return;
         }
 
+        // The reference runs the DiT and VAE in F32 end to end (NaDiT and the VAE are .float()), so the engine runs at the
+        // reference precision here. The shipping default runs the DiT on F16 activations, which this gate is not about.
+        using IDisposable precision = KnobProfileScope.Push(KnobProfiles.Reference);
         (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) =
             SeedVr2CheckpointConverter.LoadAndConvert(dit);
         using SafeTensorsLoader _ = ditLoader;
@@ -557,7 +561,7 @@ public sealed class SeedVr2Tests
         };
 
         // f32 whole-clip VAE at 720p-area exceeds 24 GB; the parity gate runs reduced.
-        long area = long.TryParse(Env("SEEDVR2_AREA"), out long a) ? a : 1280L * 720L;
+        long area = long.TryParse(Env("SEEDVR2_AREA"), out long a) ? a : 240000L;
         long t0 = Environment.TickCount64;
         (List<byte[]> restored, int outW, int outH) = pipeline.Restore(
             frames, w, h, new SeedVr2RestoreOptions { ClipFrames = frames.Count, TargetArea = area });
@@ -595,7 +599,8 @@ public sealed class SeedVr2Tests
         }
         double meanSsim = ssimSum / refF;
         _output.WriteLine($"MEAN: SSIM {meanSsim:f5}  PSNR {10 * Math.Log10(255.0 * 255.0 / Math.Max(mseSum / refF, 1e-9)):f2} dB");
-        Assert.True(meanSsim >= 0.995, $"mean SSIM {meanSsim:f5} below 0.995 gate");
+        Assert.True(meanSsim >= 0.995, $"mean SSIM {meanSsim:f5} below 0.995 gate. This gate needs ByteDance's official "
+            + "SeedVR2 3B weights; the Comfy-Org fp16 repack is not the same weights and scores about 0.75.");
     }
 
     #endregion

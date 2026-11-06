@@ -99,7 +99,7 @@ DEV = sys.argv[5] if len(sys.argv) > 5 else "cuda"
 SCALE = 0.9152
 # f32 whole-clip VAE at 720p-area needs ~18+ GB of activations (upstream runs bf16 + causal slicing).
 # The parity gate runs f32 both sides at a reduced area — identical code paths, fits the 24 GB card.
-AREA = float(os.environ.get("SEEDVR2_AREA", str(1280 * 720)))
+AREA = float(os.environ.get("SEEDVR2_AREA", str(240000)))  # reduced parity area; the C# gate reads the same variable
 
 DIT_ARGS = dict(
     vid_in_channels=33, vid_out_channels=16, vid_dim=2560, txt_in_dim=5120, txt_dim=2560,
