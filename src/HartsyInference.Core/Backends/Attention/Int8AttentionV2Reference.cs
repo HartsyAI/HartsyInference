@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>The executable specification of INT8 attention v2 (docs/ATTENTION_CONTRACT.md §5): the kernel's stats pass,
 /// quant launch and online recurrence on the CPU. A kernel reproduces its bytes, scales, means and INT32 QK products bit for

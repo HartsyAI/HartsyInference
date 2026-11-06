@@ -1,5 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Backends.Cpu.Kernels;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Attention;
 
 namespace HartsyInference.Core.Backends.Cpu;
 

@@ -8,6 +8,10 @@ using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Cuda.Profiling;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.Cuda;
 

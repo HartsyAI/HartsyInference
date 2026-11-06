@@ -9,6 +9,7 @@ using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Runtime;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.API.Endpoints;
 

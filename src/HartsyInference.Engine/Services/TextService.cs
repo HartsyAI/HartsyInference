@@ -6,7 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -27,6 +27,8 @@ using HartsyInference.LLM.Ssm;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Core.Memory.Host;
+using HartsyInference.Core.Backends.Experts;
 
 namespace HartsyInference.Engine.Services;
 

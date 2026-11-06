@@ -4,13 +4,13 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Core.Runtime;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Zeta-Chroma recipe (<c>lodestones/Zeta-Chroma</c>) — the pixel-space, VAE-free Chroma variant that swaps T5 for Qwen3-4B caption conditioning (<see cref="SideModels.Qwen3_4B"/>, the same encoder path as <see cref="ZImageRecipe"/>) and predicts x0 directly in pixel space. No CLIP, no VAE. Lifted from the SwarmUI backend's <c>ZetaChromaLoader</c> and driven through <see cref="ZetaChromaRecipePipeline"/>.</summary>

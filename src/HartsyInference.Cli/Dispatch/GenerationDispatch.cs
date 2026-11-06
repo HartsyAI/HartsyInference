@@ -8,7 +8,7 @@ using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.Vision.Codec;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Cli.Dispatch;
 

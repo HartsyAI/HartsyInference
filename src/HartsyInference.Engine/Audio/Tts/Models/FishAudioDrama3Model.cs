@@ -6,6 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Collections;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;

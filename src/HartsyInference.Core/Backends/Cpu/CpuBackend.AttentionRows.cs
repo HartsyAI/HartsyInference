@@ -1,4 +1,6 @@
 
+using HartsyInference.Core.Backends.Attention;
+
 namespace HartsyInference.Core.Backends.Cpu;
 
 // The CPU's attention: the SIMD kernel for plain head-major calls, the FlashAttention reference for the LLM entry, and

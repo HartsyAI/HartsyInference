@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 
 namespace HartsyInference.Core.Moe;
 

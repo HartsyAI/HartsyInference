@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;

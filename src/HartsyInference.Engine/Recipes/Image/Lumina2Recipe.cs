@@ -1,7 +1,6 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -15,6 +14,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Core.Runtime;
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Lumina-Image-2.0 recipe (Alpha-VLLM 2B NextDiT, Apache-2.0). Lifted from the SwarmUI backend's <c>Lumina2Loader</c>: the checkpoint is the diffusers-format transformer; the Gemma-2-2B text encoder (<see cref="SideModels.Gemma2_2B"/>) and the FLUX.1 16-channel VAE (<see cref="SideModels.FluxAe"/>) resolve as side models. Conditioning is a LIVE Gemma-2 encode (system-prompt-prefixed, <c>hidden_states[-2]</c>) driven inside <see cref="Lumina2RecipePipeline"/>; the pipeline itself owns the timestep inversion and velocity negation. Constructs and drives through <see cref="Lumina2RecipePipeline"/>.</summary>

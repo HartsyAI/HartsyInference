@@ -1,6 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
 
 namespace HartsyInference.Cuda;
 

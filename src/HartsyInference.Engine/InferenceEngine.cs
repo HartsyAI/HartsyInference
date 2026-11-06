@@ -2,8 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Features;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.Catalog;
@@ -15,6 +14,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Registry;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.Engine;
 
