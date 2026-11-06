@@ -2403,7 +2403,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // the GEMM as a device-side B_SCALE_POINTER so the whole chain stays async. Alignment: cuBLASLt fp8
             // needs 16-byte leading dims (lda/ldb = k fp8 bytes; ldc = n · output element bytes); non-conforming
             // shapes fall through to the cast-to-F16 path below.
-            if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
+            if (EnableNativeFp8Gemm && !weight.SkipNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
                 && weight.QuantInfo?.BlockScale is null   // an MXFP8 weight is not per-tensor fp8
                 && !(weight.DType == DType.F8E5M2 && input.DType == DType.F8E5M2)   // no E5M2 × E5M2 kernel exists
                 && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)

@@ -48,6 +48,14 @@ public sealed unsafe class T5TextEncoder : IDisposable
     /// <summary>Loads all encoder weights from a tensor dictionary (HuggingFace safetensors format).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        // T5-XXL's activations include values in the thousands on some tokens, and the whole row shares one per-tensor e4m3
+        // scale on the native fp8 GEMM. Measured on the Flux gate prompt against an fp32 run: 40% relL2 on the native path,
+        // 1.4% on the 16-bit path. Keep the encoder off the native path; it runs once per prompt.
+        foreach (Tensor weight in weights.Values)
+        {
+            weight.SkipNativeFp8Gemm = true;
+        }
+
         // Token embeddings — may be under "shared.weight" or "encoder.embed_tokens.weight"
         // Auto-cast to F32 if needed (EmbeddingLookup uses float* directly)
         Tensor? rawEmbed = null;

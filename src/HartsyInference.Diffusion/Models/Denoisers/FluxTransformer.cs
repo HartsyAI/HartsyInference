@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.MemoryManagement;
@@ -79,6 +80,15 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     {
         _f16Mode = DitDtype.Act == DType.F16;
         float branchDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
+
+        // Per-tensor e4m3 input scaling is too coarse for the DiT, so the cast path is the default.
+        if (EngineKnobs.Fp8Native.Value != true)
+        {
+            foreach (Tensor weight in weights.Values)
+            {
+                weight.SkipNativeFp8Gemm = true;
+            }
+        }
 
         // Image input projection (x_embedder in diffusers)
         _xEmbedWeight = weights["x_embedder.weight"];
