@@ -178,7 +178,6 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 
 ## 12. Cleanup follow-ups
 
-- [ ] TensorPool: adopt on a demonstrated hot path or retire (no established production usage).
 - [ ] Re-run analyzer diagnostics before acting on the historical snapshot; judge config/API mirrors individually.
 - [ ] LtGemmExecutor consolidation only after Fp4 block-scale attributes are supported.
 - [ ] Vulkan spec/push-constant builders only if parameterization improves the actual differing contracts.
