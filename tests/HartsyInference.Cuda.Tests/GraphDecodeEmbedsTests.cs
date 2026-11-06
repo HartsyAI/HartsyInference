@@ -5,6 +5,8 @@ using HartsyInference.LLM.Transformer;
 using Xunit;
 using Xunit.Abstractions;
 
+using static HartsyInference.Tests.Common.TensorTestFactory;
+
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Validates <see cref="GenericTransformer.ForwardGraphDecodeStepEmbeds"/> — the embedding-driven,
@@ -24,7 +26,6 @@ public sealed unsafe class GraphDecodeEmbedsTests
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
-    private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
     private static Tensor Embeds(int t, int h) => Fill(new Tensor(new TensorShape(1, t, h), DType.F32));
 
     private static TensorShape LastShape(int h) => new(1, 1, h);

@@ -5,6 +5,8 @@ using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 using Xunit.Abstractions;
 
+using static HartsyInference.Tests.Common.TensorTestFactory;
+
 namespace HartsyInference.Vulkan.Tests;
 
 /// <summary>End-to-end decode-loop parity for the Vulkan LLM step graph: a small synthetic dense transformer decoded greedily
@@ -40,7 +42,6 @@ public sealed unsafe class VulkanLlmGraphDecodeTests
     private Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     /// <summary>Q8_0 expert matrix: the device-routed MoE stage runs only quantized experts (F32 experts fall back to host routing).</summary>
     private Tensor Q8(int a, int b) { using Tensor f = F2(a, b); return GgufQuantizer.Quantize(f, DType.Q8_0); }
-    private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
     [Theory]
     [InlineData(false, false, false)]   // Llama-shaped: no bias, no QK-norm

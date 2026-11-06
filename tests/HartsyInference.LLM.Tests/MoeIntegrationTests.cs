@@ -3,6 +3,8 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using Xunit;
 
+using static HartsyInference.Tests.Common.TensorTestFactory;
+
 namespace HartsyInference.LLM.Tests;
 
 /// <summary>End-to-end MoE wiring through <see cref="GenericTransformer"/>: a full stack with MoE FFN layers
@@ -14,7 +16,6 @@ public sealed unsafe class MoeIntegrationTests
     private static float Rand() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return ((_rng & 0xFFFF) / 65535f - 0.5f) * 0.2f; }
     private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
-    private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
     [Fact]
     public void MoeTransformer_BatchedDecode_MatchesPerSequence()
