@@ -216,8 +216,8 @@ public sealed class RestoreService : IRestoreService
             }
             else
             {
-                (ditWeights, SafeTensorsLoader ditLoader) = SeedVr2CheckpointConverter.LoadAndConvert(ditPath);
-                _loaders.Add(ditLoader);
+                (ditWeights, IDisposable ditOwner) = SeedVr2CheckpointConverter.LoadAndConvert(ditPath);
+                _loaders.Add(ditOwner);
             }
             SafeTensorsLoader vaeLoader = new();
             vaeLoader.Load(vaePath);

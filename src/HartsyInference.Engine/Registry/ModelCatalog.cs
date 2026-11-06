@@ -2087,8 +2087,9 @@ public static class ModelCatalog
 
             // Restoration (SeedVR2). Every variant that loads is listed, and the Restore Model choice runs the one picked.
             // Comfy-Org's repacks are the defaults: ComfyUI's own files, with the numz keys plus two conditioning tensors
-            // the converter drops. numz's original fp16 files stay selectable. mxfp8, nvfp4 and int8 are not listed until
-            // the converter reads their companion scales. Every variant reads the shared VAE and embedding.
+            // the converter drops. numz's original fp16 files stay selectable. mxfp8 and nvfp4 widen to F16 at load, so they
+            // run as the fp16 file does. int8 is not listed: the converter does not read its ConvRot layout yet.
+            // Every variant reads the shared VAE and embedding.
             // The default is ByteDance's official checkpoint: the Comfy-Org repack below is fp16 but not the same weights, and
             // scores 0.746 on the reference gate, against 0.9995 for this file. The engine casts it to fp16 on load.
             new CatalogEntry
@@ -2118,6 +2119,20 @@ public static class ModelCatalog
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
                 Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp8_e4m3fn.safetensors", "a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_mxfp8.safetensors", "768623e3bfb1752b4d0668782751b5fead58b1bcb153f0b5e03a423095630297"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_nvfp4.safetensors", "c8dea38b04d43295621726e2cd371c0d2d001006169c113aea17950f2cb2e295"),
             },
             new CatalogEntry
             {
