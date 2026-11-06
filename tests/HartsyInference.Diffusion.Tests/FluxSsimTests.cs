@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -33,13 +34,33 @@ public sealed class FluxSsimTests
     private readonly ITestOutputHelper _output;
     public FluxSsimTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>The engine's reference precision: the fp32 references run the DiT and VAE in fp32 with no activation
+    /// quantization. KnobProfiles.Reference pins those but not numerics.fp8Native (the Ada default, which quantizes each
+    /// fp8 Linear's input to e4m3), so that knob is pinned off here.</summary>
+    private static readonly KnobProfile ReferencePrecision = KnobProfiles.Reference.With(EngineKnobs.Fp8Native, (bool?)false);
+
+    /// <summary>Reference precision with fp8 GEMMs in true F32 (numerics.fp8F32).</summary>
+    private static readonly KnobProfile SchnellF32Gemm = ReferencePrecision.With(EngineKnobs.Fp8F32, true);
+
+    /// <summary>The engine defaults: FLUX.1's fp8 Linears on the F16 cast path (numerics.fp8Native unset), weight-cast cache on.</summary>
     [Fact]
     public void FluxDev_Generates_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f);
+
+    /// <summary>The shipped CLI and API path. Flux1Recipe turns the weight-cast cache off where the DiT casts its fp8
+    /// Linears, which is the default, so this gate checks that configuration against the reference.</summary>
+    [Fact]
+    public void FluxDev_CastCacheOff_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f, cacheWeightCasts: false);
+
+    [Fact]
+    public void FluxDev_ReferencePrecision_WithinSsimThreshold() => RunVariant("dev", TestPaths.Flux.Dev, FluxConfig.Dev, numSteps: 10, cfg: 3.5f, ReferencePrecision);
 
     [Fact]
     public void FluxSchnell_Generates_WithinSsimThreshold_FourStep() => RunVariant("schnell", TestPaths.Flux.Schnell, FluxConfig.Schnell, numSteps: 4, cfg: 0.0f);
 
-    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg)
+    [Fact]
+    public void FluxSchnell_F32Gemm_WithinSsimThreshold_FourStep() => RunVariant("schnell", TestPaths.Flux.Schnell, FluxConfig.Schnell, numSteps: 4, cfg: 0.0f, SchnellF32Gemm);
+
+    private void RunVariant(string variantTag, string checkpointPath, FluxConfig config, int numSteps, float cfg, KnobProfile? profile = null, bool cacheWeightCasts = true)
     {
         string metaPath = Path.Combine(ReferenceDir, "meta.json");
         if (!File.Exists(metaPath))
@@ -69,7 +90,7 @@ public sealed class FluxSsimTests
             return;
         }
 
-        ReferenceMeta meta = JsonSerializer.Deserialize<ReferenceMeta>(File.ReadAllText(metaPath))
+        ReferenceMeta meta = JsonSerializer.Deserialize<ReferenceMeta>(File.ReadAllText(metaPath), new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
             ?? throw new InvalidDataException("Reference meta.json is empty or malformed.");
         ReferencePrompt? prompt = meta.Prompts?.FirstOrDefault(p => p.Variant == variantTag);
         if (prompt is null)
@@ -91,13 +112,15 @@ public sealed class FluxSsimTests
             return;
         }
 
-        string ptxDir = Path.Combine(RepoRoot.Path, "native", "cuda", "build");
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (!Directory.Exists(ptxDir))
         {
             _output.WriteLine($"SKIPPED: PTX directory not found at {ptxDir}.");
             return;
         }
 
+        // A null profile pushes nothing, so the default run uses the shipping defaults.
+        using IDisposable precision = KnobProfileScope.Push(profile);
         Stopwatch sw = Stopwatch.StartNew();
         CheckpointSource loader = CheckpointSource.Open(checkpointPath);
         FluxCheckpointConverter.ConvertedWeights converted = FluxCheckpointConverter.Convert(loader.Weights);
@@ -107,6 +130,8 @@ public sealed class FluxSsimTests
         using (loader)
         using (CudaBackend backend = new CudaBackend(deviceOrdinal: 0, ptxDir: ptxDir))
         {
+            backend.CacheWeightCasts = cacheWeightCasts;
+            _output.WriteLine($"Weight-cast cache {(cacheWeightCasts ? "on" : "off")}.");
             FluxTransformer transformer = new FluxTransformer(config);
             transformer.LoadWeights(converted.Transformer);
 
@@ -125,7 +150,6 @@ public sealed class FluxSsimTests
             int[] clipIds = clipTok.Encode(prompt.Prompt);
             int eosL = ClipTokenizer.FindEosPosition(clipIds);
             int[] t5Ids = t5Tok.Encode(prompt.Prompt);
-            int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Ids);
 
             string noisePath = Path.Combine(ReferenceDir, $"init_noise_seed{meta.Seed}.bin");
             Tensor? injectedNoise = TryLoadFluxNoise(noisePath, meta.Width, meta.Height);
@@ -149,7 +173,7 @@ public sealed class FluxSsimTests
 
             sw.Restart();
             (byte[] rgbData, int width, int height, int seed) = pipeline.GenerateFromTokens(
-                clipIds, eosL, t5Ids, t5Mask, req, guidanceScale: cfg,
+                clipIds, eosL, t5Ids, null, req, guidanceScale: cfg,
                 onProgress: p => _output.WriteLine($"  {variantTag} step {p.Step}/{p.TotalSteps} ({p.ElapsedMs:F0}ms)"));
             sw.Stop();
             _output.WriteLine($"Flux {variantTag} generated in {sw.ElapsedMilliseconds}ms (seed={seed}).");

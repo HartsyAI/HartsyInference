@@ -37,6 +37,10 @@ stable release will require. Dates are UTC.
   `int8_tensorwise` token embedding (decoding each gathered row with its scale and ConvRot) and, given the backend it runs
   on, widens the trunk linears that backend cannot multiply packed. `qwen3.5_9b_int8_convrot` (9.7 GB) now loads through
   `--text-encoder`, where it was refused for its quantized embedding; the bf16 encoder is unchanged.
+- **Fixed: FLUX.1 encodes its T5 prompt unmasked, as diffusers and ComfyUI do.** The engine masked the pad positions of the
+  512-row T5 stream in the encoder's self-attention, so every FLUX.1 generation was conditioned on a T5 stream that diffusers
+  and ComfyUI do not produce. On the OneReward README's removal example, the masked stream left a flat smudge where the object
+  was; unmasked, the wall fills cleanly. Output changes for every FLUX.1 generation.
 
 - **Fixed: Anima reference latents now match ComfyUI's target-grid selection.** The reference VAE latent is resized to the target latent
   grid before the asymmetric K/V prepass, using area averaging when shrinking and align-corners-off bilinear interpolation when enlarging.

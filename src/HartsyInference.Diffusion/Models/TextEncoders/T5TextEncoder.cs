@@ -48,6 +48,13 @@ public sealed unsafe class T5TextEncoder : IDisposable
     /// <summary>Loads all encoder weights from a tensor dictionary (HuggingFace safetensors format).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        // The encoder's large activations lose too much on the native and 16-bit fp8 GEMMs; it runs once per prompt, so F32 is cheap.
+        foreach (Tensor weight in weights.Values)
+        {
+            weight.SkipNativeFp8Gemm = true;
+            weight.ForceF32Gemm = true;
+        }
+
         // Token embeddings — may be under "shared.weight" or "encoder.embed_tokens.weight"
         // Auto-cast to F32 if needed (EmbeddingLookup uses float* directly)
         Tensor? rawEmbed = null;
