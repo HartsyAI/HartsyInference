@@ -1,7 +1,6 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>CPU audio processing kernels: FFT, STFT, and mel filterbank application.</summary>
 public static class AudioKernels

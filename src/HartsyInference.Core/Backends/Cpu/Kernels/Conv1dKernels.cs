@@ -1,7 +1,7 @@
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>CPU compute kernels for 1D convolution and transposed convolution over channels-first <c>[B, C, T]</c> tensors.</summary>
 /// <remarks>These are the whole of Piper's forward pass — its projections and feed-forwards are all expressed as

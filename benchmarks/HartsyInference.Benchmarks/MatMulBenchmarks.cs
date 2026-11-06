@@ -1,6 +1,6 @@
 using BenchmarkDotNet.Attributes;
+using HartsyInference.Core.Backends.Cpu.Kernels;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu.Kernels;
 
 namespace HartsyInference.Benchmarks;
 

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides activation function CPU compute kernels for F32 tensors. Uses scalar loops since GELU and SiLU involve transcendental functions that do not benefit significantly from SIMD vectorization.</summary>
 public static class ActivationKernels

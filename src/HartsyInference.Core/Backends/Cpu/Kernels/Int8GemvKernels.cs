@@ -1,7 +1,7 @@
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>int8-weight, uint8-activation matrix-vector products (<see cref="Core.Backends.IBackend.LinearI8U8"/>)
 /// and the activation codes that feed them (<see cref="Core.Backends.IBackend.QuantizeActivationsU8"/>).

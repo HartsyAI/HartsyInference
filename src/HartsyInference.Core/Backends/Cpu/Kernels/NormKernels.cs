@@ -1,7 +1,6 @@
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides normalization CPU compute kernels (GroupNorm, LayerNorm, RmsNorm) with SIMD-accelerated sum and sum-of-squares reductions.</summary>
 public static class NormKernels

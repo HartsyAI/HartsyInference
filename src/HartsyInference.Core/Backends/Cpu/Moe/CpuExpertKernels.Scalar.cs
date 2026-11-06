@@ -1,4 +1,4 @@
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>Scalar integer block dot products and the packed block sizes of the Q8_0, Q4_0, Q4_K, Q5_K and Q6_K formats.</summary>
 public static unsafe partial class CpuExpertKernels

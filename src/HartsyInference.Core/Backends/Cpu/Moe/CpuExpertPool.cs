@@ -1,7 +1,7 @@
 using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Numerics;
 
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>
 /// A persistent pool of CPU workers that runs a batch of independent expert jobs, with the calling thread taking part.

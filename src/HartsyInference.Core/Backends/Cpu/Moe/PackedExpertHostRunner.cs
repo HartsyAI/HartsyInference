@@ -1,9 +1,8 @@
 using System.Linq;
-using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>
 /// The CPU share of a planned layer on packed weights: each expert's Q8_0, Q4_0, Q4_K, Q5_K or Q6_K projections are read in

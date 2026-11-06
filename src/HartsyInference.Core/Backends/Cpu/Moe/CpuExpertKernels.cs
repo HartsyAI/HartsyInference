@@ -4,7 +4,7 @@ using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Moe;
+namespace HartsyInference.Core.Backends.Cpu.Moe;
 
 /// <summary>
 /// Quantized expert kernels for the CPU: one MoE expert <c>down( act(clampGate(Gate·x)) * clampUp(Up·x) )</c> computed

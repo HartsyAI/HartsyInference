@@ -16,7 +16,6 @@
       <group targetFramework="net8.0">
         <dependency id="HartsyInference.Audio" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Core" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />
@@ -31,7 +30,6 @@
       <group targetFramework="net10.0">
         <dependency id="HartsyInference.Audio" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Core" version="$version$" exclude="Build,Analyzers" />
-        <dependency id="HartsyInference.Cpu" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Cuda" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Diffusion" version="$version$" exclude="Build,Analyzers" />
         <dependency id="HartsyInference.Engine" version="$version$" exclude="Build,Analyzers" />

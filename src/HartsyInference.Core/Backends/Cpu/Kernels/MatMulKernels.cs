@@ -1,7 +1,7 @@
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Cpu.Kernels;
+namespace HartsyInference.Core.Backends.Cpu.Kernels;
 
 /// <summary>Provides matrix multiplication CPU compute kernels with SIMD-accelerated inner loops. Supports 2D GEMM and 3D batched matrix multiplication for F32 tensors.</summary>
 public static class MatMulKernels
