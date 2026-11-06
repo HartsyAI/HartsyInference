@@ -2089,6 +2089,7 @@ public static class ModelCatalog
             // Comfy-Org's repacks are the defaults: ComfyUI's own files, with the numz keys plus two conditioning tensors
             // the converter drops. numz's original fp16 files stay selectable. mxfp8 and nvfp4 widen to F16 at load, so they
             // run as the fp16 file does. int8 is not listed: the converter does not read its ConvRot layout yet.
+            // The 7B mxfp8 and nvfp4 entries are not file-verified: they take the converter path the 3B files verified.
             // Every variant reads the shared VAE and embedding.
             // The default is ByteDance's official checkpoint: the Comfy-Org repack below is fp16 but not the same weights, and
             // scores 0.746 on the reference gate, against 0.9995 for this file. The engine casts it to fp16 on load.
@@ -2175,6 +2176,34 @@ public static class ModelCatalog
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
                 Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_fp8_e4m3fn.safetensors", "7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_mxfp8.safetensors", "b40804f47910d96c5089c728cc7ec8b57b956750eabb6397dc4e6e697477263d"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_nvfp4.safetensors", "cc4af1a7bd5377066496f393555478323e806fa21163bdbe3409451aface9b93"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_mxfp8.safetensors", "0d621ec1561a11ca9b5f432ec6d4e09b263b61f4b83b0280552c8b4add030ec3"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_nvfp4.safetensors", "80d57af7722f5a5bd4c01d2ab2688f2bf05e552e59d3d3287257de709db10397"),
             },
             new CatalogEntry
             {
