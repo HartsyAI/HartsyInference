@@ -45,7 +45,7 @@ Captures are produced by the CLI; the tool records what produced them and compar
 # Baseline on main, candidate on the PR head, same commands, same seeds, into two directories.
 hartsy text -m <model> --seed 1 --scores-out cap/llama.tsv "<prompt>"                        # per-token log-probabilities
 hartsy text -m <model> --seed 1 --scores-out cap/llama-forced.tsv --teacher-force base/llama.tsv "<prompt>"   # teacher-forced on the baseline's tokens
-hartsy image -m <model> --seed 1 -o cap/flux.png --set dump.fluxDebugDir=cap/flux "<prompt>"  # PNG plus the model's raw F32 layer dumps
+hartsy image -m <model> --seed 1 -o cap/chroma.png --set diagnostics.chromaDebugDir=cap/chroma "<prompt>"  # PNG plus the model's raw F32 layer dumps
 hartsy speech -m <model> --seed 1 -o cap/dia.wav "<text>"                                     # waveform
 hartsy-gencapture manifest --dir cap --backend cuda                                           # commit, device, kernel hashes, file hashes
 
@@ -61,7 +61,7 @@ hartsy-gencapture compare --baseline base --candidate cap --max-abs 1e-4 --max-r
 - Tolerances are per PR and stated in it: bit-identical where arithmetic is unchanged, otherwise the tolerance and why.
   A known semantic correction (an order of operations the old code had wrong) is listed with its expected delta and
   checked against the host reference with `hartsy-opparity`, not against the old generation.
-- Models whose dump sink exists (the `dump.*DebugDir` settings in `EngineKnobs.DumpDirs`) give per-layer raw tensors;
+- Models whose dump sink exists (the `diagnostics.*DebugDir` settings in `EngineKnobs.DumpDirs`) give per-layer raw tensors;
   for the others the decoded output is the capture.
 
 ## What a PR pastes
