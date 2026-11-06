@@ -58,6 +58,8 @@ public sealed class OpTensors : IDisposable
 /// <param name="SupportedOn">True when the backend serves this case on the baseline; false records it as unsupported.</param>
 /// <param name="RequiredBackends">Backend kinds (<c>cpu</c>, <c>cuda</c>, <c>vulkan</c>) a <c>check</c> must cover; a skip fails the run.</param>
 /// <param name="Acceptance">How the re-run is judged.</param>
+/// <param name="Oracle">Computes the expected outputs on the host from the contract reference, for a case judged
+/// <see cref="AcceptanceKind.HostReference"/> or newly supported; null uses the CPU backend as the oracle.</param>
 public sealed record OpCase(
     string Family,
     string Name,
@@ -65,4 +67,5 @@ public sealed record OpCase(
     Action<IBackend, OpTensors> Run,
     Func<IBackend, bool> SupportedOn,
     IReadOnlyList<string> RequiredBackends,
-    Acceptance Acceptance);
+    Acceptance Acceptance,
+    Action<OpTensors>? Oracle = null);

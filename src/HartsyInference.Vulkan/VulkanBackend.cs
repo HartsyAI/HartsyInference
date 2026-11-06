@@ -2546,7 +2546,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         if (kvLen < 0 || kvLen > key.Shape[2])
             throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
@@ -2555,11 +2555,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
         if (!FlashOnDevice(in call))
         {
-            RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionRows, in call);
     }
 
     /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
@@ -4680,17 +4680,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
         if (!DeviceKernelEligible(in call))
         {
-            RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionDeviceRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionDeviceRows, in call);
     }
 
     private void DispatchFlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, float scale, bool causal, int kvGroup, ulong devicePos)

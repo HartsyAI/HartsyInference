@@ -9794,8 +9794,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         RunAttentionRows(FlashAttentionRows,
-            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes),
-            kvGroup);
+            AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes));
     }
 
     /// <summary>The decode-shaped kernels (F.4-F.7): grouped decode, split-K, or the per-row kernel. Takes every
@@ -10098,8 +10097,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap,
             sink: null, slidingWindow, alibiSlopes: null, positionOnDevice: true);
         RunAttentionRows(FlashAttentionDeviceRows,
-            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow),
-            kvGroup);
+            AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap, slidingWindow));
     }
 
     /// <summary>The device-position kernels (V.2-V.5) for an F32-query call with a device position buffer.</summary>

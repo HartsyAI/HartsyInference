@@ -89,16 +89,24 @@ try
         if (recorded is null || recorded.Status != "recorded" || c.Acceptance.Kind == AcceptanceKind.HostReference)
         {
             // Newly supported, or judged against the host by rule: the CPU backend is the independent oracle.
-            host ??= BackendFactory.Create("cpu");
             using OpTensors mine = c.Build(seed);
             using OpTensors theirs = c.Build(seed);
             c.Run(backend, mine);
             backend.Sync();
-            c.Run(host, theirs);
-            host.Sync();
-            Acceptance rule = c.Acceptance.Kind == AcceptanceKind.HostReference ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, "newly supported path, judged against the CPU backend");
+            if (c.Oracle is { } oracle)
+            {
+                oracle(theirs);
+            }
+            else
+            {
+                host ??= BackendFactory.Create("cpu");
+                c.Run(host, theirs);
+                host.Sync();
+            }
+            string oracleName = c.Oracle is null ? "CPU backend" : "contract reference";
+            Acceptance rule = c.Acceptance.Kind == AcceptanceKind.HostReference ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, $"newly supported path, judged against the {oracleName}");
             string why = recorded is null ? "no fixture" : recorded.Status == "unsupported" ? "unsupported on the baseline" : "host-reference rule";
-            failures += Report(c, mine, theirs.Outputs, rule, $"vs CPU ({why})");
+            failures += Report(c, mine, theirs.Outputs, rule, $"vs {oracleName} ({why})");
             continue;
         }
         if (recorded.KernelHashes.Count > 0)
