@@ -231,6 +231,16 @@ public sealed class SeedVr2Tests
         using SafeTensorsLoader weightsLoader = new();
         weightsLoader.Load(vaePath);
         Dictionary<string, Tensor> weights = weightsLoader.GetAllTensors();
+        // The CPU backend is F32-only, and the fp16 repack stores some biases as F16. Widen them exactly before loading,
+        // as the other CPU comparisons in this file do.
+        foreach (string key in new List<string>(weights.Keys))
+        {
+            Tensor w = weights[key];
+            if (w.DType != DType.F32)
+            {
+                weights[key] = w.CastTo(DType.F32);
+            }
+        }
         using SafeTensorsLoader refLoader = new();
         refLoader.Load(refPath);
 
