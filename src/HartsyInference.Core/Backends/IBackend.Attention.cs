@@ -64,11 +64,6 @@ public partial interface IBackend
     void HcPostMix(Tensor output, Tensor x, Tensor residual, Tensor post, Tensor comb) =>
         throw NotSupportedPrimitive(nameof(HcPostMix));
 
-    /// <summary>Quantizes F32 <paramref name="rows"/> <c>[n,dim]</c> into <paramref name="dest"/> row <c>physicalRows[i]</c>
-    /// (I32 <c>[n]</c>; negative skips); see <see cref="LatentQuantReference.QuantizeRows"/>.</summary>
-    void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows) =>
-        throw NotSupportedPrimitive(nameof(QuantizeLatentRows));
-
     /// <summary>Replaces F32 values with their quantize-dequantize round trip in <paramref name="encoding"/>,
     /// per group along the last dimension.</summary>
     void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding) =>

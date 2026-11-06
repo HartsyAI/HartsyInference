@@ -89,7 +89,6 @@ DTYPE_KERNELS=(
     im2col
     col2bias_add
     upsample_nearest2d
-    upsample_bilinear2d
     matmul_tiled
     mask_add
     maxpool2d
@@ -156,7 +155,6 @@ SINGLE_KERNELS=(
     repetition_penalty
     kv_cache_append_dev
     softplus
-    topk_lastdim
     moe_route
     moe_build_dispatch
     moe_combine
@@ -169,7 +167,6 @@ SINGLE_KERNELS=(
     hc_post_mix
     sparse_latent_attention
     indexer_scores
-    quantize_latent_rows
     act_quant_dequant
     build_window_indices
     rope_interleaved_offset

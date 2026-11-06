@@ -32,13 +32,6 @@ public partial interface IBackend
     void MoeCombine(Tensor output, Tensor expertOut, Tensor pairSlot, Tensor topkWeight, int k, bool accumulate) =>
         throw NotSupportedPrimitive(nameof(MoeCombine));
 
-    /// <summary>Top-k over the last dimension; see <see cref="TopKReference.Apply"/> for the exact ordering and padding rules.</summary>
-    /// <param name="validLengths">Optional I32 per-row count of leading entries that may be chosen.</param>
-    /// <param name="sortByIndex">Order the result by ascending index instead of descending value.</param>
-    void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false) =>
-        throw NotSupportedPrimitive(nameof(TopKLastDim));
-
     /// <summary>True when <see cref="MoeExpertGateUp"/> and <see cref="MoeExpertDown"/> run experts stored as <paramref name="expertType"/>,
     /// so a routed-expert stage can stay on the device from the router to the combine.</summary>
     bool SupportsMoeExpertIndexed(DType expertType) => false;

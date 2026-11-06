@@ -26,22 +26,27 @@ public sealed record RequestSettings
     /// <summary>True when this carries nothing, so a request without settings costs no scope push.</summary>
     public bool IsEmpty => string.IsNullOrWhiteSpace(Profile) && Set is not { Count: > 0 };
 
-    /// <summary>Ids in <paramref name="profile"/> that bind before a request exists, so setting them per-request cannot take effect.</summary>
-    /// <remarks>Two kinds, and the second is why this check exists at all. Knobs declared
-    /// <see cref="KnobScope.Construction"/> enter a model at load, and the pipeline is cached. But several knobs
-    /// declared <see cref="KnobScope.Runtime"/> are also unreachable per-request because their consumer assigns
-    /// them once — a <c>static readonly</c> field bound at type-init, or a backend field assigned in the
-    /// constructor. <c>_allowTf32</c>, <c>_gemmFast16</c> and <c>EnableNativeFp8Gemm</c> are all set in
-    /// <c>CudaBackend</c>'s constructor, so on a long-lived server they are fixed before the first request.
-    /// <para>Measured, not theorised: an API generation with <c>profile: reference</c> returned a byte-identical
-    /// image to one without it. The CLI does not have this problem because it pushes the profile in <c>Main</c>,
-    /// before the engine is constructed.</para></remarks>
+    /// <summary>Ids in <paramref name="profile"/> that bind before a request exists and whose pinned value differs from
+    /// the value the engine is running with, so setting them per request cannot take effect.</summary>
+    /// <remarks>Only <see cref="KnobScope.Construction"/> knobs qualify: they enter a backend or a model when it is built,
+    /// and the pipeline is cached. A pin equal to the current value is honored by construction already (a server started
+    /// with <c>--profile reference</c> runs every construction pin of that profile), so it is not reported; only a pin
+    /// that would need a rebuild is.
+    /// <para>Measured, not theorised: an API generation with <c>profile: reference</c> returned a byte-identical image to
+    /// one without it, because the GEMM knobs it pins are read once in <c>CudaBackend</c>'s constructor. Those knobs are
+    /// declared <see cref="KnobScope.Construction"/> for that reason. The CLI does not have this problem because it
+    /// pushes the profile in <c>Main</c>, before the engine is constructed.</para></remarks>
     public static IReadOnlyList<string> UnreachablePerRequest(KnobProfile profile)
     {
         List<string> unreachable = [];
-        foreach (string id in profile.Values.Keys)
+        foreach ((string id, object? pinned) in profile.Values)
         {
-            if (KnobRegistry.Find(id) is { } knob && KnobRegistry.Describe(knob).Scope == KnobScope.Construction)
+            if (KnobRegistry.Find(id) is not { } knob || KnobRegistry.Describe(knob).Scope != KnobScope.Construction)
+            {
+                continue;
+            }
+            object? current = knob.GetType().GetProperty("Value")!.GetValue(knob);
+            if (!Equals(pinned, current))
             {
                 unreachable.Add(id);
             }
@@ -64,30 +69,26 @@ public sealed record RequestSettings
                 ?? throw new ArgumentException(
                     $"Unknown settings profile '{Profile}'. Known profiles: {string.Join(", ", KnobProfiles.Names)}.");
         }
-        if (Set is not { Count: > 0 })
+        if (Set is { Count: > 0 })
         {
-            return profile;
-        }
-        List<string> unreachable = [];
-        foreach ((string id, string value) in Set)
-        {
-            if (!profile.TrySet(id, value, out KnobProfile updated, out string? error))
+            foreach ((string id, string value) in Set)
             {
-                throw new ArgumentException(error);
+                if (!profile.TrySet(id, value, out KnobProfile updated, out string? error))
+                {
+                    throw new ArgumentException(error);
+                }
+                profile = updated;
             }
-            if (KnobRegistry.Find(KnobDeprecations.Resolve(id)) is { } k && KnobRegistry.Describe(k).Scope == KnobScope.Construction)
-            {
-                unreachable.Add(id);
-            }
-            profile = updated;
         }
         // Rejected rather than ignored: these bind while the engine and pipeline are built, so on a long-lived
         // server they are already fixed when the request arrives. Accepting them would report success and change
-        // nothing, which is the failure mode this whole surface exists to remove.
+        // nothing, which is the failure mode this whole surface exists to remove. The named profile is checked
+        // too, not only the explicit entries: a profile that pins a construction knob is just as unreachable.
+        IReadOnlyList<string> unreachable = UnreachablePerRequest(profile);
         if (unreachable.Count > 0)
         {
             throw new ArgumentException(
-                $"These settings bind when a model is loaded and cannot be changed per request: "
+                $"These settings bind when the engine or a model is built and cannot be changed per request: "
                 + $"{string.Join(", ", unreachable)}. Configure them where the server starts, or use the CLI's "
                 + "--set, which applies before the engine is constructed.");
         }

@@ -32,7 +32,7 @@ public static class VramGraphGuard
         backend.StepGraphOwner = null;
     }
 
-    /// <summary>True when no captured graph is holding pointers into device memory, so an optional lever may move it. Never gate a required free on this.</summary>
+    /// <summary>True when no captured graph is holding pointers into device memory, so an optional lever may move it. Never gate a required free on this. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static bool CanMoveMemoryFreely(IBackend? backend)
         => backend is null || (!backend.StepGraphReady && backend.StepGraphOwner is null);
 }
