@@ -59,6 +59,25 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
         Assert.Equal(expected, ModelDownloader.TargetPath(Asset("seedvr2-7b", "transformer")));
     }
 
+    [Fact]
+    public void Transformer7B_OldInstallNameIsStillFound_SoNothingIsRedownloaded()
+    {
+        // Installs from the previous catalog saved the transformer under its numz name.
+        string installed = Place("Video/SeedVr2", "seedvr2_ema_7b_fp16.safetensors");
+        Assert.Equal(installed, ModelDownloader.TargetPath(Asset("seedvr2-7b", "transformer")));
+        Assert.DoesNotContain(ModelDownloader.MissingAssets(ModelCatalog.Find("seedvr2-7b")!), asset => asset.Role == "transformer");
+    }
+
+    [Fact]
+    public void Vae_IsTheSameFileInBothEntries()
+    {
+        ModelAsset vae3B = Asset("seedvr2-3b", "vae");
+        ModelAsset vae7B = Asset("seedvr2-7b", "vae");
+        Assert.Equal(vae3B.FileName, vae7B.FileName);
+        Assert.Equal(vae3B.TargetSubdir, vae7B.TargetSubdir);
+        Assert.Equal(vae3B.Sha256, vae7B.Sha256);
+    }
+
     private static ModelAsset Asset(string catalogId, string role) =>
         ModelCatalog.Find(catalogId)!.Assets.Single(asset => asset.Role == role);
 
