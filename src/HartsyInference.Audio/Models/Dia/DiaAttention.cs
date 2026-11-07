@@ -2,7 +2,9 @@ using HartsyInference.Audio.Models.Moonshine;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -106,9 +108,9 @@ public sealed unsafe class DiaAttention
     /// and no O(n²) K/V re-upload. Dispatches on the same <c>interleavedRope</c> flag the host
     /// <see cref="SelfForward"/> path uses, so a caller built with either RoPE convention gets correct rotation:
     /// <paramref name="cosGpu"/>/<paramref name="sinGpu"/> are <c>[1, t, headDim]</c>, shaped per that convention
-    /// — interleaved (Zonos): first headDim/2 lanes populated, matching <see cref="IBackend.ApplyRopeInterleaved"/>;
+    /// — interleaved (Zonos): first headDim/2 lanes populated, matching <c>RotaryCall.TokenMajor</c> (interleaved);
     /// split-half (Dia): the half-width table duplicated into both halves, matching
-    /// <see cref="IBackend.ApplyRopeSingle"/>'s <c>cos[i] == cos[i+half]</c> contract (applied to q and k
+    /// <c>RotaryCall.TokenMajor</c>'s <c>cos[i] == cos[i+half]</c> contract (applied to q and k
     /// separately — Dia's self-attention is GQA, q and k don't share a head count) — both for absolute positions
     /// [posStart, posStart+t). The caller advances the cache length once after all layers.</summary>
     public Tensor SelfForwardFlash(IBackend backend, Tensor x, int t, int posStart, IKvCache cache, int layerIndex,
@@ -126,12 +128,12 @@ public sealed unsafe class DiaAttention
             }
             else
             {
-                // Per-tensor, not the combined backend.ApplyRope(q, k, ...): Dia's self-attention is GQA
+                // Per-tensor rotations, not one call over q and k: Dia's self-attention is GQA
                 // (_qHeads=16, _kvHeads=4), and the combined overload derived K's kernel-launch shape from Q,
                 // silently rotating only 1/4 of K's real buffer and leaving the rest as whatever device memory
                 // happened to be there (deterministic garbage, not a crash — this is how the resident path was
                 // caught producing "[Music]" instead of speech while matching baseline's digest-per-rep
-                // determinism). ApplyRopeSingle derives numHeads/totalVecs from whichever tensor it's given, so
+                // determinism). the rotate-half rotary (RotaryCall.TokenMajor) derives numHeads/totalVecs from whichever tensor it's given, so
                 // q and k each get their own correct shape.
                 QkRotation rope = new(QkRotationKind.RotateHalf, cosGpu, sinGpu);
                 _attn.RotateQk(backend, q, k, new AttentionCallContext { QueryRotation = rope, KeyRotation = rope });
@@ -213,8 +215,8 @@ public sealed unsafe class DiaAttention
     {
         public void RotateTokenMajor(IBackend backend, Tensor q, Tensor k, int heads, int kvHeads)
         {
-            backend.ApplyRopeInterleaved(q, cos, sin);
-            backend.ApplyRopeInterleaved(k, cos, sin);
+            backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
+            backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
         }
     }
 }

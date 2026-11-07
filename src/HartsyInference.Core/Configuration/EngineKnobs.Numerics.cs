@@ -105,7 +105,7 @@ public static partial class EngineKnobs
 
     /// <summary>Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.</summary>
     public static readonly Knob<bool> EpilogueFusion =
-        Bool("numerics.epilogueFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.");
+        Bool("numerics.epilogueFusion", true, KnobScope.Construction, KnobDomain.Numerics, "Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.");
 
     /// <summary>Enables the experimental F5-TTS DiT CUDA-graph capture; replay currently throws ILLEGAL_ADDRESS, keep off.</summary>
     public static readonly Knob<bool> F5Graph =
@@ -113,7 +113,7 @@ public static partial class EngineKnobs
 
     /// <summary>Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.</summary>
     public static readonly Knob<bool> Fp8StaticInputScale =
-        Bool("numerics.fp8StaticInputScale", true, KnobScope.Runtime, KnobDomain.Numerics, "Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.");
+        Bool("numerics.fp8StaticInputScale", true, KnobScope.Construction, KnobDomain.Numerics, "Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.");
 
     /// <summary>At Ideogram-4 checkpoint conversion, fuses each block's SwiGLU w1/w3 into one w13 weight (fp8 pairs requantized).</summary>
     public static readonly Knob<bool> FusedFfn =
@@ -203,10 +203,6 @@ public static partial class EngineKnobs
     /// <summary>Requantizes Chroma Radiance DiT blocks to fp8 during checkpoint conversion; 0 keeps the wide BF16 weights.</summary>
     public static readonly Knob<bool> RadianceFp8 =
         Bool("numerics.radianceFp8", true, KnobScope.Construction, KnobDomain.Numerics, "Requantizes Chroma Radiance DiT blocks to fp8 during checkpoint conversion; 0 keeps the wide BF16 weights.");
-
-    /// <summary>Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.</summary>
-    public static readonly Knob<bool> RopeV2 =
-        Bool("numerics.ropeV2", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.");
 
     /// <summary>Feeds the conditional audio to Wan-S2V's uncond branch so CFG steers text adherence only; changes output.</summary>
     public static readonly Knob<bool> S2vTextCfg =

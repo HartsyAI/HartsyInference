@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -17,7 +18,8 @@ public static class DupUp3D
             throw new ArgumentException($"outChannels·factor ({outChannels}·{factor}) not divisible by inC ({inC}).");
         int dropT = firstChunk ? factorT - 1 : 0;
         Tensor output = new Tensor(new TensorShape([(long)b, outChannels, t * factorT - dropT, h * factorS, w * factorS]), x.DType);
-        backend.DupUp3dVae(output, x, factorT, factorS, dropT);
+        PixelShuffles.DepthToSpace(backend, output, x, new ShuffleSpec(ShuffleLayout.ChannelsFirst, ShuffleLayout.ChannelsFirst, b, t, h, w, outChannels,
+            factorT, factorS, factorS, ChannelOrder.CTHW, ChannelRepeat: outChannels * factor / inC, DropLeadingFrames: dropT));
         return output;
     }
 }

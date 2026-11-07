@@ -1,8 +1,10 @@
 using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -238,8 +240,8 @@ public sealed unsafe class LensTransformerBlock
         {
             (Tensor ropeCos, Tensor ropeSin) = rope.GetOrBuildJointTables(
                 imgPackedH, imgPackedW, txtSeqLen, txtPositionStart);
-            backend.WanRopeInterleaved(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
-            backend.WanRopeInterleaved(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim);
+            backend.Rotary(RotaryCall.Rows(jointQf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+            backend.Rotary(RotaryCall.Rows(jointKf, ropeCos, ropeSin, totalSeqLen, _numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         }
 
         // ── 6. Permute [B, S, H, D] → [B, H, S, D] for SDPA ──

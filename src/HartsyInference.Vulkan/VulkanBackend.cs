@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
@@ -83,10 +84,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         && (dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
             || dtype == DType.Q2_K || dtype == DType.Q3_K || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
             || dtype == DType.IQ4_XS);
-
-
-
-
 
     /// <summary>Weight/activation transfer-cache hit and miss counts since backend construction (a miss is a fresh H2D upload — the other half of a residency break that <see cref="GetD2hSyncCount"/> alone doesn't show, since a CPU-loop-default <c>IBackend</c> member that reads a GPU-resident tensor pays a D2H sync going in AND forces an H2D re-upload the next time a GPU op needs that tensor back). Cumulative since construction, not reset by <see cref="ResetD2hSyncCount"/> — diff two calls around the region you're measuring.</summary>
     public (long hits, long misses) GetTransferCacheStats()
@@ -232,8 +229,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         };
     }
 
-
-
     /// <inheritdoc/>
     public bool CacheQuantizedWeightCasts { get; set; } = true;
 
@@ -279,8 +274,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _stream.WaitIdleHost();
         _dispatchesSinceSubmit = 0;
     }
-
-
 
     /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
     public unsafe void OffloadActivation(Tensor tensor)
@@ -1620,62 +1613,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
-    /// <summary>DiT token sequence back to an image plane: <c>tokens [B, seq, patchVolume]</c> to
-    /// <c>[B, C, H, W]</c>.</summary>
-    /// <remarks>Driven from the OUTPUT — one invocation per output element, each computing the single source it
-    /// reads. Driving it from the input would have each invocation write patch*patch*C scattered locations: the
-    /// same work with none of the coalescing.</remarks>
-    public void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked, int patch,
-        bool innerChannelFastest)
-    {
-        using OpScope _op = EnterOp();
-        // The same validator CUDA and the host default use, so the geometry is agreed in one place rather than
-        // re-derived per backend — getting it wrong here produces a plausible image with the patches transposed.
-        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
-            output, tokens, channels, hPacked, wPacked, patch);
-        if (output.DType != tokens.DType || (output.DType != DType.F32 && output.DType != DType.F16))
-        {
-            PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
-            return;
-        }
-
-        VulkanBuffer inBuf = GetBuffer(tokens);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, innerChannelFastest),
-            };
-            VulkanKernel kernel = GetKernel("unpatchify_tokens" + DtypeSuffix(output.DType), storageBufferCount: 2, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)geometry.Batch);
-            pc.U32((uint)geometry.Channels);
-            pc.U32((uint)geometry.Height);
-            pc.U32((uint)geometry.Width);
-            pc.U32((uint)patch);
-            pc.U32((uint)geometry.WPacked);
-            pc.U32((uint)geometry.SequenceLength);
-            pc.U32((uint)geometry.PatchVolume);
-
-            long total = output.ElementCount;
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan UnpatchifyTokens dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>AdaLN modulation split: <c>proj [B,4D]</c> into four <c>[B,D]</c>, <c>1+x</c> for scales and
     /// <c>tanh(x)</c> for gates.</summary>
     public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
@@ -1822,137 +1759,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             Logs.Error("Vulkan GatedResidualRowIndexed dispatch failed", ex);
             outBuf.Dispose();
             throw;
-        }
-    }
-
-    /// <summary>In-place rotary position embedding on one tensor <c>x [B, L, H, D]</c>.</summary>
-    /// <remarks>Partial rotary rotates only the first <paramref name="rotaryDim"/> dims and leaves the rest
-    /// untouched; cos/sin keep the full headDim stride either way, so one kernel serves partial and full.</remarks>
-    public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
-    {
-        using OpScope _op = EnterOp();
-        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16))
-        {
-            IBackend.ApplyRopeSingleReference(x, cos, sin, rotaryDim);
-            return;
-        }
-        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: false);
-    }
-
-    /// <summary>The GPT-J pairing of the same rotation: pairs <c>(2i, 2i+1)</c>, one frequency serving both.</summary>
-    /// <remarks>A real dispatch rather than the interface default, which reads <c>x.DataPointer</c> on a tensor the
-    /// caller just produced on the device — a sync, a host loop over every head and position, and a re-upload for
-    /// the next op. Twelve call sites across the audio and LLM stacks reach it.
-    ///
-    /// <para>Non-F32 and non-rank-4 go to the shared reference, matching what the split-half form does: this
-    /// kernel's F16 variant exists, but the reference is the contract both are checked against.</para></remarks>
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
-    {
-        using OpScope _op = EnterOp();
-        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16)
-            || cos.DType != DType.F32 || sin.DType != DType.F32)
-        {
-            IBackend.ApplyRopeInterleavedReference(x, cos, sin, rotaryDim);
-            return;
-        }
-        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: true);
-    }
-
-    /// <summary>The same split-half rotation on a head-major <c>x [B, heads, seq, headDim]</c>, cos/sin still
-    /// <c>[B, seq, headDim]</c>.</summary>
-    /// <remarks>Its own entry point because the two layouts are indistinguishable from the tensor alone — same
-    /// element count with heads and seq swapped — and only the cos/sin row count catches a caller that picked the
-    /// wrong one. Non-F32/F16 and non-rank-4 take the shared reference.</remarks>
-    public void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
-    {
-        using OpScope _op = EnterOp();
-        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16)
-            || cos.DType != DType.F32 || sin.DType != DType.F32)
-        {
-            IBackend.ApplyRopeSingleHeadMajorReference(x, cos, sin, rotaryDim);
-            return;
-        }
-        long tableElements = x.Shape[0] * x.Shape[2] * x.Shape[3];
-        if (cos.ElementCount != tableElements || sin.ElementCount != tableElements)
-        {
-            // The one check that separates the two layouts. Let the reference raise it so the message, and which
-            // argument it names, are the same wherever the op runs.
-            IBackend.ApplyRopeSingleHeadMajorReference(x, cos, sin, rotaryDim);
-            return;
-        }
-        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: false, headMajor: true);
-    }
-
-    /// <summary>Spec-constant id selecting GPT-J interleaved pairing in <c>apply_rope_single</c>.</summary>
-    private const uint InterleavedRopePairsSpecId = 10;
-
-    /// <summary>Spec-constant id selecting the head-major cos/sin row in <c>apply_rope_single</c>.</summary>
-    private const uint HeadMajorRopeSpecId = 11;
-
-    private void DispatchApplyRope(Tensor x, Tensor cos, Tensor sin, int rotaryDim, bool interleaved,
-        bool headMajor = false)
-    {
-        int batch = (int)x.Shape[0];
-        // Head-major swaps the middle two axes; headDim stays innermost, which is why the vector's own offset is
-        // its index times headDim in either layout and only the cos/sin row has to be recovered differently.
-        int seqLen = (int)x.Shape[headMajor ? 2 : 1];
-        int numHeads = (int)x.Shape[headMajor ? 1 : 2];
-        int headDim = (int)x.Shape[3];
-        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        // Split-half rotates rdim/2 pairs and dispatches exactly those. Interleaved dispatches every pair in the
-        // head and drops the ones past the window inside the shader, which is what both the CPU reference and the
-        // CUDA kernel do — and for an odd rotaryDim the two rules genuinely differ, so this is not a free choice.
-        int half = interleaved ? headDim / 2 : rdim / 2;
-        if (half == 0)
-        {
-            return;
-        }
-
-        VulkanBuffer xBuf = GetBuffer(x);
-        VulkanBuffer cosBuf = GetBuffer(cos);
-        VulkanBuffer sinBuf = GetBuffer(sin);
-        VulkanBuffer? cosOwned = null, sinOwned = null;
-        VulkanBuffer cosEff = cosBuf, sinEff = sinBuf;
-        if (cos.DType != DType.F32) (cosEff, cosOwned) = CastIfNeeded(cos, cosBuf, DType.F32);
-        if (sin.DType != DType.F32) (sinEff, sinOwned) = CastIfNeeded(sin, sinBuf, DType.F32);
-
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(InterleavedRopePairsSpecId, interleaved),
-                SpecConstant.Bool(HeadMajorRopeSpecId, headMajor),
-            };
-            VulkanKernel kernel = GetKernel("apply_rope_single" + DtypeSuffix(x.DType), storageBufferCount: 3, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)batch);
-            pc.U32((uint)seqLen);
-            pc.U32((uint)numHeads);
-            pc.U32((uint)headDim);
-            pc.U32((uint)half);
-            pc.U32((uint)rdim);
-
-            long total = (long)batch * seqLen * numHeads * half;
-            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosEff.Handle, sinEff.Handle };
-            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
-            // In place, and re-caching the SAME buffer is still required: the rebind is what tells the tensor its
-            // device copy is now authoritative, so a later host read syncs it back instead of returning the stale
-            // host buffer. Without this the op appears to do nothing at all from the host's point of view.
-            CacheOutput(x, xBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"Vulkan {(interleaved ? "ApplyRopeInterleaved" : headMajor ? "ApplyRopeSingleHeadMajor" : "ApplyRopeSingle")} dispatch failed", ex);
-            throw;
-        }
-        finally
-        {
-            if (cosOwned is not null) _xfer.FreeDevice(cosOwned);
-            if (sinOwned is not null) _xfer.FreeDevice(sinOwned);
         }
     }
 
@@ -2546,7 +2352,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         if (kvLen < 0 || kvLen > key.Shape[2])
             throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
@@ -2555,11 +2361,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
         if (!FlashOnDevice(in call))
         {
-            RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionRows, in call);
     }
 
     /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
@@ -2821,50 +2627,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Sets every output element to its channel's bias, or to zero when there is none.</summary>
-    public void FillBias(Tensor output, Tensor? bias)
-    {
-        using OpScope _op = EnterOp();
-        if (output.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
-        {
-            IBackend.FillBiasReference(output, bias);
-            return;
-        }
-        int cOut = (int)output.Shape[1];
-        int tOut = (int)output.Shape[2];
-        long hw = output.ElementCount / ((long)cOut * tOut);
-        long total = output.ElementCount;
-
-        // The shader binds two buffers either way; an absent bias binds the output and the spec constant turns
-        // the read off, since a null binding is not legal and an unbound slot reads whatever bound it last.
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        VulkanBuffer biasBuf = bias is null ? outBuf : GetBuffer(bias);
-        try
-        {
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, bias is not null),
-            };
-            VulkanKernel kernel = GetKernel("fill_bias", storageBufferCount: 2, spec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)cOut);
-            pc.U32((uint)tOut);
-            pc.U32((uint)hw);
-            pc.U32((uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { biasBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan FillBias dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>The VAE's <c>[B,3,H,W]</c> F32 output in <c>[-1,1]</c> to <c>[H,W,3]</c> u8, on the device.</summary>
     /// <remarks>The last step of every image generation, and an interface default here until now — a host loop over
     /// every pixel, preceded by a device sync of the whole F32 image. The pixels have to reach the host either way
@@ -2906,56 +2668,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan ChwF32ToHwcU8 dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
-    public void PixelShuffle2d(Tensor output, Tensor input, int ratio)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != DType.F32 || output.DType != DType.F32 || input.Shape.Rank != 5)
-        {
-            IBackend.PixelShuffle2dReference(output, input, ratio);
-            return;
-        }
-        int batch = (int)input.Shape[0];
-        int cIn = (int)input.Shape[1];
-        int depth = (int)input.Shape[2];
-        int inH = (int)input.Shape[3];
-        int inW = (int)input.Shape[4];
-        int r2 = ratio * ratio;
-        int cOut = cIn / r2;
-        if ((long)cOut * r2 != cIn || output.Shape[1] != cOut
-            || output.Shape[3] != inH * ratio || output.Shape[4] != inW * ratio)
-        {
-            throw new ArgumentException(
-                $"PixelShuffle2d ratio {ratio}: input {input.Shape} does not shuffle into {output.Shape}.");
-        }
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        long total = output.ElementCount;
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        try
-        {
-            VulkanKernel kernel = GetKernel("pixel_shuffle2d", storageBufferCount: 2, _default1DSpec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)batch);
-            pc.U32((uint)cOut);
-            pc.U32((uint)depth);
-            pc.U32((uint)inH);
-            pc.U32((uint)inW);
-            pc.U32((uint)ratio);
-            pc.U32((uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan PixelShuffle2d dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -3549,12 +3261,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DispatchUpsample("upsample_nearest2d", output, input, scaleH, scaleW);
     }
 
-    public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-    {
-        using OpScope _op = EnterOp();
-        DispatchUpsample("upsample_bilinear2d", output, input, scaleH, scaleW);
-    }
-
     private void DispatchUpsample(string baseName, Tensor output, Tensor input, int scaleH, int scaleW)
     {
         int N = (int)input.Shape[0], C = (int)input.Shape[1], H = (int)input.Shape[2], W = (int)input.Shape[3];
@@ -3741,151 +3447,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>In-place rotary on q/k, tolerating GQA (q and k may have different head counts — only batch,
-    /// seqLen and headDim must agree). Was one dispatch sized from Q's <c>numHeads</c> covering both q's AND
-    /// k's buffer: harmless for MHA callers (same shape either way), but whenever K had fewer heads than Q this
-    /// dispatched over only a fraction of K's real element count — an out-of-bounds device read/write, not just
-    /// a wrong answer (same bug CUDA's combined overload had; caught via Dia's GQA decoder, 16 Q heads : 4 KV
-    /// heads). Delegates to <see cref="ApplyRopeSingle"/> per tensor instead, which already derives its shape
-    /// from whichever tensor it's given.</summary>
-    public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
-    {
-        using OpScope _op = EnterOp();
-        if (q.Shape.Rank != 4 || k.Shape.Rank != 4)
-            throw new NotSupportedException($"Vulkan ApplyRope expects token-major [B, L, heads, headDim] for q and k; got ranks {q.Shape.Rank}/{k.Shape.Rank}.");
-        if (q.Shape[0] != k.Shape[0] || q.Shape[1] != k.Shape[1] || q.Shape[3] != k.Shape[3])
-        {
-            throw new NotSupportedException(
-                $"Vulkan ApplyRope requires q and k to share batch, seqLen and headDim (head COUNT may differ — GQA); got q={q.Shape}, k={k.Shape}.");
-        }
-        int headDim = (int)q.Shape[3];
-        if (cos.Shape[cos.Shape.Rank - 1] != headDim || sin.Shape[sin.Shape.Rank - 1] != headDim)
-        {
-            throw new NotSupportedException(
-                $"Vulkan ApplyRope expects cos/sin's last dim to equal headDim ({headDim}); got cos={cos.Shape}, sin={sin.Shape}.");
-        }
-        ApplyRopeSingle(q, cos, sin);
-        ApplyRopeSingle(k, cos, sin);
-    }
-
     // Real GPU dispatch, NOT the IBackend CPU-loop default: x here is GPU-resident (FluxRope/Krea2's
     // pre-permute Q/K), so falling through to the default's raw x.DataPointer loop either reads stale
     // zeroed host memory or, worse, AccessViolationExceptions when the tensor's host mirror was never
     // synced/allocated the way the default assumes. Same category as apply_rope/kv_cache_append above.
-    public void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
-    {
-        using OpScope _op = EnterOp();
-        DispatchWanRopeInterleaved(x, cos, sin, seqLen, heads, headDim, perHead: false);
-    }
-
-    /// <summary>The same rotation with a cos/sin table per head, <c>[heads, S, headDim]</c>.</summary>
-    /// <remarks>Real dispatch rather than the interface default for the same reason the shared-table version is:
-    /// the default reads <c>x.DataPointer</c>, which on a GPU-resident tensor is a device sync, a host loop and a
-    /// re-upload on the next op. MG3's sigma_theta is the caller — its RoPE tables vary per head, and nothing else
-    /// about the rotation does, so the two share a shader and differ by one spec constant.</remarks>
-    public void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
-    {
-        using OpScope _op = EnterOp();
-        DispatchWanRopeInterleaved(x, cos, sin, seqLen, heads, headDim, perHead: true);
-    }
-
-    /// <summary>Spec-constant id selecting per-head RoPE tables in <c>wan_rope_interleaved</c>.</summary>
-    /// <remarks>Ten and up, because 0-2 are the workgroup dimensions every kernel here declares.</remarks>
-    private const uint PerHeadRopeTablesSpecId = 10;
-
-    private void DispatchWanRopeInterleaved(
-        Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim, bool perHead)
-    {
-        VulkanBuffer xBuf = GetBuffer(x);
-        VulkanBuffer cosBuf = GetBuffer(cos);
-        VulkanBuffer sinBuf = GetBuffer(sin);
-        try
-        {
-            string shader = "wan_rope_interleaved" + DtypeSuffix(x.DType);
-            VulkanKernel kernel = GetKernel(shader, 3,
-            [
-                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(PerHeadRopeTablesSpecId, perHead),
-            ]);
-            Span<byte> pc = stackalloc byte[3 * 4];
-            BinaryWriteUInt(pc, 0, (uint)seqLen);
-            BinaryWriteUInt(pc, 4, (uint)heads);
-            BinaryWriteUInt(pc, 8, (uint)headDim);
-            long total = (long)seqLen * heads * (headDim / 2);
-            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
-            // In-place on x's EXISTING buffer — re-cache so a later reader doesn't see the pre-rope
-            // values via a stale activation-cache entry.
-            CacheOutput(x, xBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan WanRopeInterleaved dispatch failed", ex);
-            throw;
-        }
-    }
-
-    /// <summary>LTX-2's split rotary on the device; the interface default is a host loop over <c>x.DataPointer</c>, which
-    /// round-trips Q and K through host memory on every attention call.</summary>
-    public void Ltx2SplitRope(Tensor x, Tensor cos, Tensor sin, int seqLen, int numHeads, int headDim)
-    {
-        using OpScope _op = EnterOp();
-        if ((x.DType != DType.F32 && x.DType != DType.F16) || cos.DType != DType.F32 || sin.DType != DType.F32)
-            throw new NotSupportedException($"Ltx2SplitRope takes F32 or F16 x with F32 tables; got {x.DType}, {cos.DType}, {sin.DType}.");
-        VulkanBuffer xBuf = GetBuffer(x);
-        VulkanBuffer cosBuf = GetBuffer(cos);
-        VulkanBuffer sinBuf = GetBuffer(sin);
-        try
-        {
-            VulkanKernel kernel = GetKernel("ltx2_split_rope" + DtypeSuffix(x.DType), 3,
-                [SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)]);
-            Span<byte> pc = stackalloc byte[3 * 4];
-            BinaryWriteUInt(pc, 0, (uint)seqLen);
-            BinaryWriteUInt(pc, 4, (uint)numHeads);
-            BinaryWriteUInt(pc, 8, (uint)headDim);
-            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount((long)seqLen * numHeads * (headDim / 2), LocalX1D));
-            CacheOutput(x, xBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan Ltx2SplitRope dispatch failed", ex);
-            throw;
-        }
-    }
-
     // Real GPU dispatch, NOT the IBackend CPU-loop default: the default throws on non-F32 (Krea2's
     // GQA K/V is F16), and even for F32 it would force a D2H/H2D round trip on a GPU-resident tensor.
-    public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
-    {
-        using OpScope _op = EnterOp();
-        int batch = (int)input.Shape[0], seqLen = (int)input.Shape[2], headDim = (int)input.Shape[3];
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            string shader = "repeat_kv_heads" + DtypeSuffix(input.DType);
-            VulkanKernel kernel = GetKernel(shader, 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[5 * 4];
-            BinaryWriteUInt(pc, 0, (uint)kvHeads);
-            BinaryWriteUInt(pc, 4, (uint)groupSize);
-            BinaryWriteUInt(pc, 8, (uint)seqLen);
-            BinaryWriteUInt(pc, 12, (uint)headDim);
-            long total = (long)batch * kvHeads * groupSize * seqLen * headDim;
-            BinaryWriteUInt(pc, 16, (uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RepeatKvHeads dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
     {
         using OpScope _op = EnterOp();
@@ -4059,14 +3626,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     #region Audio (not supported on this backend)
 
-    public void Fft(Tensor output, Tensor input)
-        => throw new NotSupportedException("VulkanBackend does not support FFT — use the CPU backend for audio preprocessing.");
-
     public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window)
         => throw new NotSupportedException("VulkanBackend does not support STFT — use the CPU backend.");
-
-    public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-        => throw new NotSupportedException("VulkanBackend does not support MelFilterbank — use the CPU backend.");
 
     #endregion
 
@@ -4242,8 +3803,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             SliceLastDim(qH, qN, 0);
             SliceLastDim(kH, kN, 0);
             // The interface's RopeScatterKvDecodeStep, spelled out (an override cannot call the default it replaces).
-            RopeApplyDecodeStep(qH, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-            RopeApplyDecodeStep(kH, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            Rotary(RotaryCall.DecodeStep(qH, cosTable, sinTable, rotaryDim, interleaved, devicePos));
+            Rotary(RotaryCall.DecodeStep(kH, cosTable, sinTable, rotaryDim, interleaved, devicePos));
             KvCacheAppendDev(kCache, kH, 0, devicePos);
             KvCacheAppendDev(vCache, v ?? vOwn!, 0, devicePos);
             CopyTo(qOut, qH);
@@ -4428,45 +3989,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return (cos, sin);
     }
 
-    public void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        using OpScope _op = EnterOp();
-        if (devicePos == 0 || !_scalarBuffers.TryGetValue(devicePos, out VulkanBuffer? posBuf)
-            || x.DType != DType.F32 || cosTable.DType != DType.F32 || sinTable.DType != DType.F32)
-        {
-            // Matches EmbedGatherDecodeStep/ArgMaxInto/ApplyRepetitionPenaltyStep: a device-position op with no
-            // valid device position has nothing to fall back TO. The interface default is an empty body — the
-            // contract for a backend that cannot decode on-device at all — so reaching it here would silently skip
-            // the rotary embedding and return a plausible, wrong logit instead of failing.
-            throw new NotSupportedException(
-                "RopeApplyDecodeStep requires F32 x/cos/sin and a valid device-position buffer.");
-        }
-        int headDim = (int)x.Shape[x.Shape.Rank - 1];
-        int numHeads = (int)(x.ElementCount / headDim);
-        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
-        VulkanBuffer xBuf = GetBuffer(x);
-        VulkanBuffer cosBuf = GetBuffer(cosTable);
-        VulkanBuffer sinBuf = GetBuffer(sinTable);
-        try
-        {
-            string shader = interleaved ? "rope_decode_step_interleaved_f32" : "rope_decode_step_splithalf_f32";
-            VulkanKernel k = GetKernel(shader, 4, _default1DSpec);
-            Span<byte> pc = stackalloc byte[3 * 4];
-            BinaryWriteUInt(pc, 0, (uint)numHeads);
-            BinaryWriteUInt(pc, 4, (uint)headDim);
-            BinaryWriteUInt(pc, 8, (uint)rdim);
-            long total = (long)numHeads * (rdim / 2);
-            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle, posBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
-            CacheOutput(x, xBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RopeApplyDecodeStep dispatch failed", ex);
-            throw;
-        }
-    }
-
     // ── Embed gather + argmax ───────────────────────────────────────────────────────────────────────────
 
     /// <summary>Gathers one row of an F32, F16 or BF16 embed table, selected by the device token id, widened to F32.</summary>
@@ -4542,45 +4064,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan EmbedGatherQuantDecodeStep dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Per-row argmax over the last dimension, one workgroup per row.</summary>
-    /// <remarks>The batched form of <see cref="ArgMaxInto"/>, off the same kernel. Ties go to the lower index,
-    /// matching the reference. F32 logits into I32 indices; anything else takes the host reference, which is also
-    /// where the shape and dtype errors are raised.</remarks>
-    public void ArgMaxLastDim(Tensor indices, Tensor input)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != DType.F32 || indices.DType != DType.I32)
-        {
-            IBackend.ArgMaxLastDimReference(indices, input);
-            return;
-        }
-        int c = (int)input.Shape[input.Shape.Rank - 1];
-        long rows = input.ElementCount / c;
-        if (indices.ElementCount < rows)
-        {
-            throw new ArgumentException($"ArgMaxLastDim indices length {indices.ElementCount} < rows {rows}.");
-        }
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(rows * sizeof(int)));
-        try
-        {
-            VulkanKernel k = GetKernel("argmax_lastdim", storageBufferCount: 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[4];
-            BinaryWriteUInt(pc, 0, (uint)c);
-            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, inBuf.Handle };
-            // One workgroup per row; the reduction inside each spans that row on its own.
-            Dispatch(k, bufs, pc, (uint)rows);
-            CacheOutput(indices, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan ArgMaxLastDim dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -4731,17 +4214,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
         if (!DeviceKernelEligible(in call))
         {
-            RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionDeviceRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionDeviceRows, in call);
     }
 
     private void DispatchFlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, float scale, bool causal, int kvGroup, ulong devicePos)
