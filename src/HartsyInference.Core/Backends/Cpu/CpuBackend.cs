@@ -266,28 +266,6 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public unsafe void GeGlu(Tensor output, Tensor input)
-    {
-        ThrowIfDisposed();
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int outputElements = (int)output.ElementCount;
-        int innerDim = (int)output.Shape[output.Shape.Rank - 1];
-
-        for (int i = 0; i < outputElements; i++)
-        {
-            int outerIdx = i / innerDim;
-            int d = i % innerDim;
-            int inputIdx = outerIdx * (innerDim * 2) + d;
-            float x = inPtr[inputIdx];
-            float gate = inPtr[inputIdx + innerDim];
-            float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(
-                ActivationKernels.Sqrt2OverPi * (gate + ActivationKernels.GeluCoeff * gate * gate * gate)));
-            outPtr[i] = x * geluGate;
-        }
-    }
-
-    /// <inheritdoc />
     public unsafe void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
     {
         ThrowIfDisposed();
@@ -332,13 +310,6 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-    {
-        ThrowIfDisposed();
-        UpDownSampleKernels.UpsampleBilinear2D(output, input, scaleH, scaleW);
-    }
-
-    /// <inheritdoc />
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
         ThrowIfDisposed();
@@ -355,24 +326,10 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public void Fft(Tensor output, Tensor input)
-    {
-        ThrowIfDisposed();
-        AudioKernels.Fft(output, input);
-    }
-
-    /// <inheritdoc />
     public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window)
     {
         ThrowIfDisposed();
         AudioKernels.Stft(output, input, fftSize, hopLength, window);
-    }
-
-    /// <inheritdoc />
-    public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-    {
-        ThrowIfDisposed();
-        AudioKernels.MelFilterbank(output, input, filters);
     }
 
     private void ThrowIfDisposed()

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Prompting;
@@ -79,7 +80,7 @@ public static class CondTokenWeights
         Tensor result = new Tensor(cond.Shape, DType.F32);
         try
         {
-            backend.MaskRows(result, cond, mask);
+            backend.GroupScale(result, cond, mask, GroupScaleSpec.PerRow());
             // The CUDA path leaves the output as a device activation; the text-encoder stage frees those before the
             // denoise loop runs, so pull it back to the host now rather than handing the caller a reclaimable buffer.
             result.AsReadOnlySpan<float>();

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
@@ -166,14 +167,14 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
 
         // ── Image embedding: input_proj over the image rows only, scattered after a zeroed text head. ──
         // Bit-identical to the old full-sequence masked path: text rows there were Linear-bias rows zeroed by
-        // the post-projection MaskRows; here they are never computed.
+        // the post-projection row gate; here they are never computed.
         Tensor xProjImg = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
         backend.Linear(xProjImg, imageTokens, _inputProjW!, _inputProjB);
         Tensor h;
         if (numText > 0)
         {
             h = new Tensor(hidShape, DType.F32);
-            backend.ScatterRowsAfter(h, xProjImg, numText);
+            backend.Pad(h, xProjImg, PadSpec.Axis(PadMode.Zero, 3, 1, numText, 0));
             xProjImg.Dispose();
         }
         else

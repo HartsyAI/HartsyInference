@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -45,7 +47,7 @@ public sealed class SparseStructureDecoder
             h.Dispose(); h = nh;
         }
         int c = (int)h.Shape[1];
-        Tensor normed = new(h.Shape, DType.F32); backend.ChannelLayerNorm3d(normed, h, _outNormW!, _outNormB!, NormEps); h.Dispose();
+        Tensor normed = new(h.Shape, DType.F32); backend.NormModulate(NormModulateCall.Channel(normed, h, NormKind.LayerNorm, NormEps).WithAffine(_outNormW!, _outNormB!)); h.Dispose();
         Tensor act = new(normed.Shape, DType.F32); backend.Silu(act, normed); normed.Dispose();
         Tensor occ = Conv3d(backend, act, _outConvW!, _outConvB!, 1); act.Dispose();
         return occ;
@@ -84,10 +86,10 @@ internal sealed class ResBlock3d
 
     public Tensor Forward(IBackend backend, Tensor x)
     {
-        Tensor n1 = new(x.Shape, DType.F32); backend.ChannelLayerNorm3d(n1, x, _n1W, _n1B, 1e-5f);
+        Tensor n1 = new(x.Shape, DType.F32); backend.NormModulate(NormModulateCall.Channel(n1, x, NormKind.LayerNorm, 1e-5f).WithAffine(_n1W, _n1B));
         Tensor a1 = new(x.Shape, DType.F32); backend.Silu(a1, n1); n1.Dispose();
         Tensor c1 = SparseStructureDecoder.Conv3d(backend, a1, _c1W, _c1B, _channels); a1.Dispose();
-        Tensor n2 = new(c1.Shape, DType.F32); backend.ChannelLayerNorm3d(n2, c1, _n2W, _n2B, 1e-5f); c1.Dispose();
+        Tensor n2 = new(c1.Shape, DType.F32); backend.NormModulate(NormModulateCall.Channel(n2, c1, NormKind.LayerNorm, 1e-5f).WithAffine(_n2W, _n2B)); c1.Dispose();
         Tensor a2 = new(n2.Shape, DType.F32); backend.Silu(a2, n2); n2.Dispose();
         Tensor c2 = SparseStructureDecoder.Conv3d(backend, a2, _c2W, _c2B, _channels); a2.Dispose();
         Tensor outp = new(x.Shape, DType.F32); backend.Add(outp, c2, x); c2.Dispose();
@@ -116,7 +118,8 @@ internal sealed class UpsampleBlock3d
         Tensor conv = SparseStructureDecoder.Conv3d(backend, x, _convW, _convB, _cOut8);
         int cOut = _cOut8 / 8, d = (int)x.Shape[2], hh = (int)x.Shape[3], ww = (int)x.Shape[4];
         Tensor o = new(new TensorShape(new long[] { x.Shape[0], cOut, d * 2, hh * 2, ww * 2 }), DType.F32);
-        backend.PixelShuffle3d(o, conv, 2); conv.Dispose();
+        PixelShuffles.DepthToSpace(backend, o, conv, ShuffleSpec.ChannelsFirst((int)x.Shape[0], d, hh, ww, cOut, 2, 2, 2, ChannelOrder.CTHW));
+        conv.Dispose();
         return o;
     }
 }

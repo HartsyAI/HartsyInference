@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -189,7 +190,7 @@ public sealed unsafe class Hunyuan3DDit
 
         // final_layer (LastLayer): shift,scale = chunk(adaLN(vec)) — SHIFT FIRST; x=(1+scale)·norm(x)+shift; linear→C.
         Tensor[] fm = Hunyuan3DGpuOps.ModParams(backend, vec, _finalNormW!, _finalNormB!, 2, width);   // fm[0]=shift, fm[1]=scale
-        Tensor modOut = new(latentOut.Shape, DType.F32); backend.LayerNormModulate(modOut, latentOut, fm[1], fm[0], 1e-6f);
+        Tensor modOut = new(latentOut.Shape, DType.F32); backend.NormModulate(NormModulateCall.Rows(modOut, latentOut, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(latentOut, fm[1], fm[0], ScaleMode.OnePlus)));
         latentOut.Dispose(); fm[0].Dispose(); fm[1].Dispose();
         Tensor velocity = new(new TensorShape(b, n, _cfg.LatentChannels), DType.F32);
         backend.Linear(velocity, modOut, _finalLinW!, _finalLinB!);

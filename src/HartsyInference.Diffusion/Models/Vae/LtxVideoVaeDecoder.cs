@@ -1,5 +1,7 @@
 using System.Linq;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -211,7 +213,7 @@ public sealed unsafe class LtxVideoVaeDecoder
         if (_normOutTimeEmbedder is null)
         {
             normed = new Tensor(h.Shape, h.DType);
-            backend.WanRmsNormChannel(normed, h, null, 1e-8f);
+            backend.NormModulate(NormModulateCall.Channel(normed, h, NormKind.L2Norm, 1e-8f));
         }
         else
         {
@@ -230,13 +232,13 @@ public sealed unsafe class LtxVideoVaeDecoder
         Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
 
-        // UnpatchifyVae's channel unpack (ci·p² + r·p + q, r→W q→H) is exactly this decoder's
+        // the CWHT depth-to-space's channel unpack (ci·p² + r·p + q, r→W q→H) is exactly this decoder's
         // (c·p + pa)·p + pb layout — the same op the LTX-2 decoder already decodes through.
         int srcC = (int)patched.Shape[1];
         int f2 = (int)patched.Shape[2], h2 = (int)patched.Shape[3], w2 = (int)patched.Shape[4];
         int ocOut = srcC / (_patch * _patch);
         Tensor rgb = new Tensor(new TensorShape([1L, ocOut, f2, (long)h2 * _patch, (long)w2 * _patch]), DType.F32);
-        backend.UnpatchifyVae(rgb, patched, _patch);
+        PixelShuffles.DepthToSpace(backend, rgb, patched, ShuffleSpec.ChannelsFirst((int)patched.Shape[0], (int)patched.Shape[2], (int)patched.Shape[3], (int)patched.Shape[4], (int)rgb.Shape[1], 1, _patch, _patch, ChannelOrder.CWHT));
         patched.Dispose();
         return rgb;
     }

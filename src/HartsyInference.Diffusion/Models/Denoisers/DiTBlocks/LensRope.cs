@@ -23,7 +23,7 @@ public sealed unsafe class LensRope : IDisposable
     private readonly int _headDim;
     private readonly RopeFrequencyPlan _plan;
 
-    // Cached joint cos/sin tables in the [S, headDim] layout IBackend.WanRopeInterleaved reads (the angle for
+    // Cached joint cos/sin tables in the [S, headDim] layout RotaryCall.Rows reads (the angle for
     // pair i duplicated at indices 2i and 2i+1). Position-only, so one host build serves every block of every
     // step — replacing the per-block host ApplyRotationBatched, which was a D2H+H2D round trip of Q AND K per
     // stream per block (the dominant Lens step cost). Keyed on the full sequence layout; a resolution or
@@ -75,7 +75,7 @@ public sealed unsafe class LensRope : IDisposable
     }
 
     /// <summary>Builds (or returns the cached) joint <c>[img, txt]</c> cos/sin tables for the device rope path,
-    /// <c>[S, headDim]</c> F32 in the <see cref="Core.Backends.IBackend.WanRopeInterleaved"/> convention (pair i's
+    /// <c>[S, headDim]</c> F32 in the <c>RotaryCall.Rows</c> convention (pair i's
     /// angle duplicated at indices 2i and 2i+1). Same position math as <see cref="ApplyImage"/> +
     /// <see cref="ApplyText"/> — RoPE is per-row independent, so rotating the GPU-concatenated joint sequence once
     /// is bit-identical to the two per-stream host passes it replaces. Mirrors QwenImageRope.GetOrBuildJointTables.</summary>

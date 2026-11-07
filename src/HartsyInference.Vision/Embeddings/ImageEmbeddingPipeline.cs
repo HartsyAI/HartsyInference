@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Clip;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Vision.Embeddings;
 

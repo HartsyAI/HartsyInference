@@ -130,7 +130,7 @@ public sealed unsafe class HeartCodecEstimator
     }
 
     // Interleaved (GPT-J) RoPE tables [b*t, headDim]: freq_i (angle ti·10000^(-2i/hd), ti = pos % t) at
-    // index 2i (and 2i+1) so the on-device WanRopeInterleaved kernel reads its angle at 2i. Matches the host
+    // index 2i (and 2i+1) so the on-device the interleaved rotary (RotaryCall.Rows) kernel reads its angle at 2i. Matches the host
     // RopeInterleaved math exactly (float cos/sin), tiled over the batch so seqLen = b*t is a flat pass.
     private static (Tensor Cos, Tensor Sin) BuildRope(int b, int t, int hd)
     {

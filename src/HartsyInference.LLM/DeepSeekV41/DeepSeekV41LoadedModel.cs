@@ -1,4 +1,5 @@
-using HartsyInference.Core.Engram;
+
+using HartsyInference.LLM.DeepSeekV41.Engram;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 

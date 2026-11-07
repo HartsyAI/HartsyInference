@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -41,8 +42,8 @@ internal sealed class Yue2AcousticPrefix : IDisposable
                 // KvCacheAppend narrows F32 to an F16 destination on write, so the widened staging stays F32.
                 using Tensor wideKey = new(new TensorShape(1, heads, arLength, headDim), DType.F32);
                 using Tensor wideValue = new(new TensorShape(1, heads, arLength, headDim), DType.F32);
-                backend.RepeatKvHeads(wideKey, arPrefix[i].Key, kvHeads, groupSize);
-                backend.RepeatKvHeads(wideValue, arPrefix[i].Value, kvHeads, groupSize);
+                StridedCopies.RepeatInterleave(backend, wideKey, arPrefix[i].Key, 1, groupSize);
+                StridedCopies.RepeatInterleave(backend, wideValue, arPrefix[i].Value, 1, groupSize);
                 backend.KvCacheAppend(_keys[i], wideKey, 0);
                 backend.KvCacheAppend(_values[i], wideValue, 0);
             }

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -55,7 +56,7 @@ internal sealed unsafe class SsFlowBlock
         mod.Dispose();   // m: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
         // ── self-attention ──
-        Tensor h = new(flat, DType.F32); backend.LayerNormModulate(h, x, m[1], m[0], 1e-6f);
+        Tensor h = new(flat, DType.F32); backend.NormModulate(NormModulateCall.Rows(h, x, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(x, m[1], m[0], ScaleMode.OnePlus)));
         Tensor qkv = new(new TensorShape(1, n, 3 * W), DType.F32); backend.Linear(qkv, h, _qkvW, _qkvB); h.Dispose();
         Tensor q = Head(backend, qkv, 0, n), k = Head(backend, qkv, W, n), v = Head(backend, qkv, 2 * W, n); qkv.Dispose();
         Tensor qP = PermQkNorm(backend, q, n, _qGamma, ones64), kP = PermQkNorm(backend, k, n, _kGamma, ones64);
@@ -83,7 +84,7 @@ internal sealed unsafe class SsFlowBlock
         Tensor x2 = new(flat, DType.F32); backend.Add(x2, x1, cOut); x1.Dispose(); cOut.Dispose();
 
         // ── MLP ──
-        Tensor hm = new(flat, DType.F32); backend.LayerNormModulate(hm, x2, m[4], m[3], 1e-6f);
+        Tensor hm = new(flat, DType.F32); backend.NormModulate(NormModulateCall.Rows(hm, x2, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(x2, m[4], m[3], ScaleMode.OnePlus)));
         Tensor f1 = new(new TensorShape(1, n, Mlp), DType.F32); backend.Linear(f1, hm, _m0W, _m0B); hm.Dispose();
         Tensor act = new(f1.Shape, DType.F32); backend.Gelu(act, f1); f1.Dispose();
         Tensor f2 = new(flat, DType.F32); backend.Linear(f2, act, _m2W, _m2B); act.Dispose();

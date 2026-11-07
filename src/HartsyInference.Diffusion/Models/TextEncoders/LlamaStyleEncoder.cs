@@ -1,6 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.TextEncoders;
 
@@ -912,8 +915,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             }
 
             // 5. Apply RoPE in-place to Q and K (split-half rotation, Llama convention).
-            backend.ApplyRopeSingleHeadMajor(qMh, ropeCos, ropeSin, D);
-            backend.ApplyRopeSingleHeadMajor(kMh, ropeCos, ropeSin, D);
+            backend.Rotary(RotaryCall.HeadMajor(qMh, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, D));
+            backend.Rotary(RotaryCall.HeadMajor(kMh, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, D));
 
             // 6. GQA: repeat KV from Hkv heads to Hq heads (KvGroupSize copies of each head).
             Tensor kRepeated = kMh;
@@ -922,8 +925,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             {
                 kRepeated = new Tensor(qMhShape, DType.F32);
                 vRepeated = new Tensor(qMhShape, DType.F32);
-                backend.RepeatKvHeads(kRepeated, kMh, Hkv, _config.KvGroupSize);
-                backend.RepeatKvHeads(vRepeated, vMh, Hkv, _config.KvGroupSize);
+                StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
+                StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
                 kMh.Dispose();
                 vMh.Dispose();
             }
