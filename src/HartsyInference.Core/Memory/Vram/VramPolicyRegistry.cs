@@ -47,6 +47,4 @@ public static class VramPolicyRegistry
     public static VramPolicy Resolve(IBackend? backend, VramOverrides? overrides)
         => VramPolicyResolver.Apply(Resolve(backend), overrides);
 
-    /// <summary>True when <paramref name="backend"/> has an explicit policy rather than inheriting the environment's.</summary>
-    public static bool HasPolicy(IBackend? backend) => backend is not null && _policies.TryGetValue(backend, out _);
 }

@@ -6,9 +6,6 @@ namespace HartsyInference.Cuda;
 // Mixture-of-experts routing, dispatch, combine and top-k kernels (Kernels/moe, Kernels/lm/lm_topk_f32.cu).
 public sealed partial class CudaKernels
 {
-    /// <summary>Widest row the radix top-k can order: its sort buffer is 2048 packed (key, index) entries in shared memory.</summary>
-    public const int TopKMaxK = 2048;
-
     private CudaModule? _moeRouteModule;
     private nint _moeRouteF32;
     private nint _softplusF32;
