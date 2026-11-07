@@ -135,20 +135,30 @@ public static class LayoutCases
         StridedView slot = StridedView.Of(output.Shape).Slice(2, to, 1);
         be.CopyStrided(output, acc, StridedCopySpec.Scatter(slot));
         if (bias is null) return;
-        using Tensor biasStored = bias.DType == output.DType ? bias.To(bias.Device) : bias.CastTo(output.DType);
         Span<long> slotDims = stackalloc long[5];
         slot.CopyDimsTo(slotDims);
-        be.AccumulateStrided(output, biasStored, new StridedCopySpec(slot, StridedView.VectorAlong(slotDims, 1)));
+        be.AccumulateStrided(output, bias, new StridedCopySpec(slot, StridedView.VectorAlong(slotDims, 1)));
     }
 
-    /// <summary>CausalConv3d's output start: the per-channel bias, or zero, broadcast over every position.</summary>
+    /// <summary>CausalConv3d's output start: the per-channel bias, or zero, broadcast over every position. A BF16 output
+    /// starts from zero and adds the F32 bias, so the bias is rounded once.</summary>
     private static void FillBias(IBackend be, Tensor output, Tensor? bias)
     {
         Span<long> dims = stackalloc long[5];
         output.Shape.CopyDimsTo(dims);
-        using Tensor source = bias is null ? Seeded.Zeros(new TensorShape(1), output.DType) : bias.DType == output.DType ? bias.To(bias.Device) : bias.CastTo(output.DType);
-        StridedView view = bias is null ? new StridedView(dims, stackalloc long[5]) : StridedView.VectorAlong(dims, 1);
-        be.CopyStrided(output, source, StridedCopySpec.Gather(view));
+        using Tensor zero = Seeded.Zeros(new TensorShape(1), output.DType);
+        if (bias is null)
+        {
+            be.CopyStrided(output, zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+            return;
+        }
+        if (output.DType == DType.F32)
+        {
+            be.CopyStrided(output, bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
+            return;
+        }
+        be.CopyStrided(output, zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+        be.AccumulateStrided(output, bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
     }
 
     /// <summary>CausalConv3d's tap accumulate: <c>out[co, to] += conv[to·strideT + dt, co]</c>.</summary>

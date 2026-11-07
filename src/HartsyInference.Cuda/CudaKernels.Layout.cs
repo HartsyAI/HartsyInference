@@ -14,7 +14,7 @@ public sealed partial class CudaKernels
 
     private CudaModule? _layoutModule;
     private nint _copyStridedU8, _copyStridedU16, _copyStridedU32, _copyStridedU64;
-    private nint _accumulateStridedF32, _accumulateStridedF16, _accumulateStridedBf16;
+    private nint _accumulateStridedF32, _accumulateStridedF16, _accumulateStridedBf16, _accumulateStridedBf16F32In;
     private nint _padU8, _padU16, _padU32, _padU64;
 
     /// <summary>Kernel parameter of the strided kernels; mirrors <c>StridedGeom</c> in <c>layout_copy.cu</c> field for field.</summary>
@@ -52,6 +52,7 @@ public sealed partial class CudaKernels
         _accumulateStridedF32 = _layoutModule.GetFunction("accumulate_strided_f32");
         _accumulateStridedF16 = _layoutModule.GetFunction("accumulate_strided_f16");
         _accumulateStridedBf16 = _layoutModule.GetFunction("accumulate_strided_bf16");
+        _accumulateStridedBf16F32In = _layoutModule.GetFunction("accumulate_strided_bf16_f32in");
         _padU8 = _layoutModule.GetFunction("pad_u8");
         _padU16 = _layoutModule.GetFunction("pad_u16");
         _padU32 = _layoutModule.GetFunction("pad_u32");
@@ -72,10 +73,13 @@ public sealed partial class CudaKernels
         LaunchLayout(func, output, input, &args, g.ElementCount, stream);
     }
 
-    /// <summary>Launches the strided accumulate for <paramref name="dtype"/> storage: <c>output[dst(i)] += input[src(i)]</c> in F32.</summary>
-    public unsafe void LaunchAccumulateStrided(ulong output, ulong input, in StridedCopyGeometry g, DType dtype, nint stream)
+    /// <summary>Launches the strided accumulate <c>output[dst(i)] += input[src(i)]</c> in F32; an F32 input may add into BF16 output.</summary>
+    public unsafe void LaunchAccumulateStrided(ulong output, ulong input, in StridedCopyGeometry g, DType outputDtype, DType inputDtype, nint stream)
     {
-        nint func = dtype == DType.F32 ? _accumulateStridedF32 : dtype == DType.F16 ? _accumulateStridedF16 : _accumulateStridedBf16;
+        nint func;
+        if (outputDtype == DType.F32) func = _accumulateStridedF32;
+        else if (outputDtype == DType.F16) func = _accumulateStridedF16;
+        else func = inputDtype == DType.F32 ? _accumulateStridedBf16F32In : _accumulateStridedBf16;
         StridedGeomArgs args = StridedArgs(g);
         LaunchLayout(func, output, input, &args, g.ElementCount, stream);
     }

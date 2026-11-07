@@ -22,13 +22,15 @@ public static class StridedCopyContract
         return Validate(output, input, spec, "CopyStrided");
     }
 
-    /// <summary>Validates an accumulation of F32, F16 or BF16 elements between tensors of one dtype.</summary>
+    /// <summary>Validates an accumulation of F32, F16 or BF16 elements between tensors of one dtype, or of an F32 input
+    /// into a BF16 output (the sum is formed in F32 and rounded once, so an F32 bias keeps its precision).</summary>
     public static StridedCopyGeometry ValidateAccumulate(Tensor output, Tensor input, in StridedCopySpec spec)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(input);
-        if (input.DType != output.DType)
-            throw new ArgumentException($"AccumulateStrided adds tensors of one dtype; got output {output.DType}, input {input.DType}.", nameof(input));
+        bool mixed = input.DType == DType.F32 && output.DType == DType.BF16;
+        if (input.DType != output.DType && !mixed)
+            throw new ArgumentException($"AccumulateStrided adds tensors of one dtype, or an F32 input into a BF16 output; got output {output.DType}, input {input.DType}.", nameof(input));
         if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
             throw new NotSupportedException($"AccumulateStrided adds F32, F16 or BF16 elements; got {input.DType}.");
         return Validate(output, input, spec, "AccumulateStrided");
