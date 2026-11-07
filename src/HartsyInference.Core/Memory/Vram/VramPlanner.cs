@@ -152,21 +152,6 @@ public sealed class VramPlanner
         return true;
     }
 
-    /// <summary>Throws a diagnosable <see cref="OutOfVramException"/> for a phase that cannot fit even streamed.</summary>
-    /// <remarks>The streamed working set is roughly the activation reserve plus the resident block window, so when
-    /// <paramref name="minimumWorkingSetBytes"/> alone exceeds what the card has, no amount of weight streaming helps —
-    /// the phase needs a smaller working set. Saying that explicitly is the difference between an actionable failure and
-    /// the bare <c>CUDA_ERROR_OUT_OF_MEMORY</c> this replaces.</remarks>
-    public void ThrowInfeasible(string phase, long minimumWorkingSetBytes)
-    {
-        ArgumentNullException.ThrowIfNull(phase);
-        long available = _cache?.QueryAvailableWeightCacheBytes(0) ?? 0;
-        throw new OutOfVramException(
-            $"{_modelName}/{phase} cannot run on this device: it needs at least {ByteFormat.Mb(minimumWorkingSetBytes)} of " +
-            $"activations and workspace before any weights, but only {ByteFormat.Mb(available)} is free. Weight streaming cannot " +
-            "reduce this — lower the resolution, or use a device with more VRAM.");
-    }
-
     /// <summary>Splits the phase's footprint into the part streaming can move (weights) and the part it cannot (activations plus workspace), so a log line distinguishes "needs a sliding window" from "needs a smaller tile".</summary>
     private static string Describe(long weightBytes, long activationReserveBytes)
         => $"weights {ByteFormat.Mb(weightBytes)} + activations/workspace {ByteFormat.Mb(activationReserveBytes)} = {ByteFormat.Mb(weightBytes + activationReserveBytes)}";

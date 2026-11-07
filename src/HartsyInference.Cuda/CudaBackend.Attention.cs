@@ -182,36 +182,6 @@ public sealed partial class CudaBackend
     }
 
     /// <inheritdoc />
-    /// <remarks>A destination row past the last row is skipped on the device; the CPU reference throws.</remarks>
-    public void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("QuantizeLatentRows");
-        LatentQuantReference.ValidateQuantize(dest, rows, physicalRows);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        RequireAttentionKernels();
-        int count = (int)physicalRows.ElementCount;
-        ulong pRows = 0, pPhys = 0, pWinner = 0, pCodes = 0, pScales = 0;
-        try
-        {
-            pRows = GpuTransferHelper.CopyToDevice(rows);
-            pPhys = GpuTransferHelper.CopyToDevice(physicalRows);
-            pWinner = GpuTransferHelper.AllocateDevice((nuint)((long)dest.Rows * sizeof(int)));
-            // The destination keeps its untouched rows, so its current contents go up and are updated in place.
-            pCodes = GpuTransferHelper.CopyToDevice(dest.Codes!);
-            if (dest.Scales is not null) pScales = GpuTransferHelper.CopyToDevice(dest.Scales);
-            _kernels!.LaunchQuantizeLatentRows(pCodes, pScales, pRows, pPhys, pWinner, count, dest.Dim, dest.Rows,
-                dest.Encoding, _stream.Handle);
-            RecacheInPlace(dest.Codes!, pCodes);
-            if (dest.Scales is not null) RecacheInPlace(dest.Scales, pScales);
-        }
-        finally
-        {
-            FreeAll(pRows, pPhys, pWinner, pCodes, pScales);
-        }
-    }
-
-    /// <inheritdoc />
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         using NvtxRange _nvtx = NvtxRange.Push("ActQuantDequantInPlace");

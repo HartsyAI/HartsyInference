@@ -32,9 +32,6 @@ public sealed class ResidencyLock
     private int _owner;
     private int _depth;
 
-    /// <summary>Whether the calling thread holds this lock.</summary>
-    public bool IsHeldByCurrentThread => Monitor.IsEntered(_sync);
-
     /// <summary>Takes the lock, waiting for its holder. Throws <see cref="ResidencyLockCycleException"/> instead of
     /// waiting forever when the holder is itself waiting, directly or through others, on a lock this thread holds.</summary>
     public void Enter()

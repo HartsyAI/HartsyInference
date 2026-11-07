@@ -112,9 +112,6 @@ public sealed class JointAttention
     /// <summary>The joint attention's configuration.</summary>
     public JointAttentionConfig Config => _config;
 
-    /// <summary>Number of streams.</summary>
-    public int StreamCount => _streams.Length;
-
     /// <summary>Runs the projections, norms, concatenation, attention and split. <paramref name="inputs"/> are the streams'
     /// <c>[B, S_i, C_i]</c> inputs in stream index order; <paramref name="attended"/>[i] receives stream i's rows of the
     /// attention output, <c>[B, S_i, heads·D]</c>, unprojected and owned by the caller.</summary>
