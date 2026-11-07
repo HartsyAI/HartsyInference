@@ -5,7 +5,7 @@ namespace HartsyInference.OpParity.Cases;
 
 /// <summary>The per-element and per-point embeddings with one caller each: DIAMOND's 256-level pixel quantization over
 /// <c>[-1, 1]</c> and Hunyuan3D's Fourier embedding of query coordinates. The fixtures were recorded against
-/// <c>PixelQuantize</c> and <c>FourierEmbed</c>. F32 everywhere.</summary>
+/// the entry points <see cref="IBackend.FakeQuantizeUniform"/> and <see cref="IBackend.FourierEmbed"/> replaced. F32 everywhere.</summary>
 public static class PointCases
 {
     public const string Family = "point";
@@ -23,10 +23,10 @@ public static class PointCases
         List<OpCase> cases = [];
         // Values beyond ±1 exercise the clamp; the rest land on one of 256 levels.
         cases.Add(new(Family, "fake_quantize_f32", seed => new Operands(seed).In("x", new TensorShape(2, 3, 8), 1.5f).Out("out", new TensorShape(2, 3, 8)).Tensors,
-            (be, t) => be.PixelQuantize(t.Outputs["out"], t.Inputs["x"]), _ => true, All, Exact));
+            (be, t) => be.FakeQuantizeUniform(t.Outputs["out"], t.Inputs["x"], -1f, 1f, 256), _ => true, All, Exact));
         // Eight octave bands over [count, 3] coordinates: x, then sin and cos per coordinate and band → 3·(2·8+1) = 51 wide.
         cases.Add(new(Family, "fourier_embed_f32", seed => new Operands(seed).In("coords", new TensorShape(5, 3), 2f).Out("out", new TensorShape(5, 51)).Tensors,
-            (be, t) => be.FourierEmbed(t.Outputs["out"], t.Inputs["coords"], 5, 8), _ => true, All, Transcendental));
+            (be, t) => be.FourierEmbed(t.Outputs["out"], t.Inputs["coords"], new FourierEmbedSpec(3, 8, IncludeInput: true)), _ => true, All, Transcendental));
         return cases;
     }
 

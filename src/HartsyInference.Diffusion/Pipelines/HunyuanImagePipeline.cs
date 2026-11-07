@@ -296,7 +296,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         return Denoise(cond, uncond, condGlyph: null, uncondGlyph: null, request, seed, textOwned: true, onProgress);
     }
 
-    /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop (patchify once, in-place device <c>CfgEulerStep</c> per step, one unpatchify at the end via the device <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip — token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
+    /// <summary>Shared denoise + VAE-decode body. The latent stays in patch-token space for the entire loop (patchify once, in-place device <c>GuidedEulerStep</c> per step, one unpatchify at the end via the device <see cref="IBackend.UnpatchifyTokens"/> op) so the pipeline glue never forces a per-step D2H round trip — token layout is identical on both sides of the transformer ((py, px, c) inner order), making token-space Euler a pure permutation of the old image-space step. When <paramref name="textOwned"/> is true the conditioning tensors are disposed at the end; the Qwen path passes false (they live in the prompt cache).</summary>
     private (byte[] rgbData, int width, int height, int seed) Denoise(Tensor condText, Tensor? uncondText,
         Tensor? condGlyph, Tensor? uncondGlyph, TextToImageRequest request, int seed, bool textOwned,
         Action<GenerationProgress>? onProgress)
@@ -346,7 +346,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // mask, blend after every step so the unmasked region stays on the source's flow trajectory, and
         // recomposite in pixel space at the end. The blend utilities are host ops — touching the latent's
         // DataPointer syncs the device copy down and demotes it, and the next forward re-uploads, so this works
-        // against the in-place device CfgEulerStep at a per-step D2H/H2D cost only masked requests pay.
+        // against the in-place device GuidedEulerStep at a per-step D2H/H2D cost only masked requests pay.
         Tensor? maskPixel = plan.MaskPixel;
         bool isMaskedInpaint = maskPixel is not null;
         Tensor? sourceTokens = null;
@@ -479,7 +479,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         {
             Stopwatch stepSw = Stopwatch.StartNew();
 
-            // CFG combine + Euler stay ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt — for
+            // CFG combine + Euler stay ONE in-place device op (GuidedEulerStep: z += (neg + gw·(pos−neg))·dt — for
             // gw=cfgScale this IS uncond + cfg·(cond−uncond); gw=1 degenerates to the plain Euler step), keeping the
             // latent tokens device-resident across the whole loop: EulerSampler.Step IS that same fused call.
             DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(

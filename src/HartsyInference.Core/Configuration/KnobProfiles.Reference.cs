@@ -63,7 +63,7 @@ public static partial class KnobProfiles
         .With(EngineKnobs.HighPrecisionGemm, true)
         .With(EngineKnobs.Krea2FullPrecision, true)
         // Backend doc says it changes numerics: the tiled kernel is an online softmax over the tile's union window, not one dense pass.
-        .With(EngineKnobs.Ltx25Na3dTiled, false)
+        .With(EngineKnobs.NeighborhoodAttentionTiled, false)
         // F16 rope tables cost a measured real output change (SSIM 0.9956 across the clip); F32 tables are the faithful arm.
         .With(EngineKnobs.Ltx2Ropef16, false)
         // Detours a token-major SDPA call through a permute pair into the INT8 SageAttention kernel.

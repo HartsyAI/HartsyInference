@@ -16,7 +16,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <para>Device-resident: tokens stay <c>[L, C]</c> backend tensors end-to-end — RMS/modulate/gate via the
 /// DiT glue kernels, fused QKV split + per-head RMS qk-norm, window-local rope via
 /// <c>the interleaved rotary (RotaryCall.Rows)</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
-/// gather/scatter via <c>RowGather</c>/<c>RowScatterAdd</c> index tensors, same-shape windows batched into
+/// gather/scatter via <c>GatherRows</c>/<c>ScatterAddRows</c> index tensors, same-shape windows batched into
 /// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
 /// (fixed-order <c>MoeCombine</c> sum + 1/N scale). The emb+ada modulation vectors are additive constants per
 /// timestep, combined once and cached (<see cref="PrepareMod"/>).</para></summary>
@@ -404,7 +404,7 @@ public sealed class SeedVr2DitBlock : IStreamingBlock
             backend.Split([vidRows, txtRows], back, dim: 1);
             back.Dispose();
 
-            backend.RowScatterAdd(vidOut, vidRows, group.VidIndices, g * wt, c);
+            backend.ScatterAddRows(vidOut, vidRows, group.VidIndices);
             // Every window repeats the text rows: sum them in window order, never by scatter (it is not atomic).
             backend.MoeCombine(txtOut, txtRows, group.TxtSlots, group.TxtWeights, g, accumulate: true);
             vidRows.Dispose();
@@ -421,11 +421,11 @@ public sealed class SeedVr2DitBlock : IStreamingBlock
         return output;
     }
 
-    // [g, s, c] groups: RowGather and RowScatterAdd read only m and channels, never the tensor shape.
+    // [g, s, c] groups: the gather sees groups · windowRows rows of channels elements.
     private static Tensor Gather(IBackend backend, Tensor src, Tensor indices, int groups, int windowRows, int channels)
     {
         Tensor output = new Tensor(new TensorShape(groups, windowRows, channels), DType.F32);
-        backend.RowGather(output, src, indices, (int)((long)groups * windowRows), channels);
+        backend.GatherRows(output, src, indices);
         return output;
     }
 }

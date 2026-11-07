@@ -26,14 +26,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _stepCacheRelL1F32;
     private readonly nint _stepCacheRelL1F16;
 
-    // Optional: LTX-2.5 NA diffusion-decoder kernels (ltx25_na_decoder.ptx, src/HartsyInference.Cuda/Kernels/ltx25vae) —
-    // 3D neighborhood attention + its 3-axis interleaved rope. Null when the PTX has not been deployed; the
-    // backend then falls through to the managed reference rather than failing.
-    private readonly CudaModule? _ltx25NaModule;
-    private readonly nint _ltx25Na3dF32;
-    private readonly nint _ltx25Na3dTiled8x8F32;
-    private readonly nint _ltx25Na3dTiled4x8F32;
-
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
     private readonly CudaModule? _w8a8Module;
@@ -133,12 +125,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _lmF32Module;
     private readonly CudaModule _lmHistoryModule;
     private readonly CudaModule _lmEmbedGatherModule;
-    private readonly CudaModule _lmCfgTopKModule;
-    private readonly nint _lmCfgTopKGuided;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
-    private readonly nint _lmGatherRowsF32;
-    private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
     private readonly nint _lmArgMaxStage1F32;
     private readonly nint _lmArgMaxStage2F32;
@@ -260,11 +248,6 @@ public sealed partial class CudaKernels : IDisposable
     // ── DiT glue function handles (F32) ──────────────────────────────────
     private readonly nint _ditRmsNormF32;
     private readonly nint _ditGatedResidualF32;
-    private readonly nint _ditCfgEulerF32;
-    private readonly nint _ditCfgRenormReduceF32;
-    private readonly nint _ditCfgRenormFinalizeF32;
-    private readonly nint _ditCfgRenormEulerF32;
-    private readonly nint _ditCfgNormalizedEulerF32;
     private readonly nint _ditAffineMixF32;
     private readonly nint _ditMaskedAffineMixDenseF32;
     private readonly nint _ditMaskedAffineMixPackedOuterF32;
@@ -281,9 +264,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ltx2QkNormRopeTokenMajorF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditAddScalarF32;
-    private readonly nint _ditIndexAddF32;
     private readonly nint _ditSliceRowsF32;
-    private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
     private readonly nint _geluErfF32;
     private readonly nint _convTranspose2dF32;
@@ -291,12 +272,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _ditQkvSplitNormHeadMajorF32;
     private readonly nint _ditQkvSplitNormHeadMajorSubsetF32;
-    private readonly nint _fourierEmbedF32;
     private readonly nint _conv3dF32;
-    private readonly nint _sparseScatterToGridF32;
-    private readonly nint _sparseGatherFromGridF32;
-    private readonly nint _rowGatherF32;
-    private readonly nint _rowScatterAddF32;
     private readonly nint _ditGatedResidualRowIndexedF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
@@ -695,27 +671,6 @@ public sealed partial class CudaKernels : IDisposable
             _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
         }
 
-        // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
-        // Absence is not an error — the decoder falls back to the managed reference.
-        string ltx25NaPath = Ptx("ltx25_na_decoder");
-        if (CanLoad(ltx25NaPath))
-        {
-            _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
-            _ltx25Na3dF32 = _ltx25NaModule.GetFunction("ltx25_na3d_f32");
-            // A PTX predating the query-tiled rewrite still serves the two above, so missing tiled entries
-            // demote to the untiled kernel rather than failing the whole module.
-            try
-            {
-                _ltx25Na3dTiled8x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled8x8_f32");
-                _ltx25Na3dTiled4x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled4x8_f32");
-            }
-            catch (CudaException)
-            {
-                _ltx25Na3dTiled8x8F32 = 0;
-                _ltx25Na3dTiled4x8F32 = 0;
-            }
-        }
-
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
         string w8a8Path = Ptx("w8a8");
         if (CanLoad(w8a8Path))
@@ -908,11 +863,6 @@ public sealed partial class CudaKernels : IDisposable
         _ditF32Module = LoadOwnedModule(Ptx("dit_f32"));
         _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
-        _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
-        _ditCfgRenormReduceF32 = _ditF32Module.GetFunction("dit_cfg_renorm_reduce_f32");
-        _ditCfgRenormFinalizeF32 = _ditF32Module.GetFunction("dit_cfg_renorm_finalize_f32");
-        _ditCfgRenormEulerF32 = _ditF32Module.GetFunction("dit_cfg_renorm_euler_f32");
-        _ditCfgNormalizedEulerF32 = _ditF32Module.GetFunction("dit_cfg_normalized_euler_f32");
         _ditAffineMixF32 = _ditF32Module.GetFunction("dit_affine_mix_f32");
         _ditMaskedAffineMixDenseF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_dense_f32");
         _ditMaskedAffineMixPackedOuterF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_outer_f32");
@@ -932,9 +882,7 @@ public sealed partial class CudaKernels : IDisposable
         _ltx2QkNormRopeTokenMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
-        _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
-        _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
         _geluErfF32 = _ditF32Module.GetFunction("gelu_erf_f32");
         _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
@@ -942,12 +890,7 @@ public sealed partial class CudaKernels : IDisposable
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _ditQkvSplitNormHeadMajorF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_f32");
         _ditQkvSplitNormHeadMajorSubsetF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_subset_f32");
-        _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
         _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
-        _sparseScatterToGridF32 = _ditF32Module.GetFunction("sparse_scatter_to_grid_f32");
-        _sparseGatherFromGridF32 = _ditF32Module.GetFunction("sparse_gather_from_grid_f32");
-        _rowGatherF32 = _ditF32Module.GetFunction("row_gather_f32");
-        _rowScatterAddF32 = _ditF32Module.GetFunction("row_scatter_add_f32");
         _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
@@ -997,8 +940,6 @@ public sealed partial class CudaKernels : IDisposable
         _lmF32Module = LoadOwnedModule(Ptx("lm_f32"));
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
         _lmKvAppendF16 = _lmF32Module.GetFunction("lm_kv_append_f16");
-        _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
-        _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
         _lmArgMaxStage1F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage1_f32");
         _lmArgMaxStage2F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage2_f32");
@@ -1023,8 +964,6 @@ public sealed partial class CudaKernels : IDisposable
         _lmEmbedGatherModule = LoadOwnedModule(Ptx("lm_embed_gather"));
         _lmEmbedGatherDecodeF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_f16");
         _lmEmbedGatherDecodeBF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_bf16");
-        _lmCfgTopKModule = LoadOwnedModule(Ptx("lm_cfg_topk_guided"));
-        _lmCfgTopKGuided = _lmCfgTopKModule.GetFunction("lm_cfg_topk_guided_f32");
         // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
         _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
         _lmHistoryAppendDistinct = _lmHistoryModule.GetFunction("lm_history_append_distinct");
@@ -1155,6 +1094,9 @@ public sealed partial class CudaKernels : IDisposable
         LoadRotaryKernels();
         LoadNormModulateKernels();
         LoadGatingKernels();
+        LoadGuidanceKernels();
+        LoadRowIndexKernels();
+        LoadNeighborhoodAttentionKernels();
         LoadInt8AttentionV2Kernels();
         if (_skippedModules.Count > 0)
             ReportSkippedModules();
@@ -1512,47 +1454,6 @@ public sealed partial class CudaKernels : IDisposable
         args[4] = &seqArg;
         args[5] = &dimArg;
         args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchCfgEulerImpl(nint func, ulong z, ulong pos, ulong neg,
-        float guidance, float delta, int count, nint stream)
-    {
-        ulong zArg = z, posArg = pos, negArg = neg;
-        float gArg = guidance, dArg = delta;
-        uint countArg = (uint)count;
-
-        void** args = stackalloc void*[6];
-        args[0] = &zArg;
-        args[1] = &posArg;
-        args[2] = &negArg;
-        args[3] = &gArg;
-        args[4] = &dArg;
-        args[5] = &countArg;
-
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchIndexAddImpl(nint func, ulong h, ulong table, ulong indices,
-        int dim, long total, nint stream)
-    {
-        ulong hArg = h, tableArg = table, idxArg = indices;
-        uint dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[5];
-        args[0] = &hArg;
-        args[1] = &tableArg;
-        args[2] = &idxArg;
-        args[3] = &dimArg;
-        args[4] = &totalArg;
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
@@ -1939,78 +1840,6 @@ public sealed partial class CudaKernels : IDisposable
         nint func = isF16 ? _stepCacheRelL1F16 : _stepCacheRelL1F32;
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Whether the optional ltx25_na_decoder.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).</summary>
-    public bool HasLtx25NaKernels => _ltx25NaModule is not null;
-
-    /// <summary>Shared-memory bytes <see cref="LaunchLtx25Na3d"/> needs: the q row plus one score per window position.</summary>
-    public static int Ltx25Na3dSharedBytes(int headDim, int kt, int kh, int kw) => (headDim + kt * kh * kw) * sizeof(float);
-
-    /// <summary>3D neighborhood attention over [batch,T,H,W,heads,headDim]; one block per (batch,t,h,w,head) query. Kernel extents must already be clamped to their axis length, as the managed reference does.</summary>
-    public unsafe void LaunchLtx25Na3d(ulong output, ulong q, ulong k, ulong v,
-        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
-        int kt, int kh, int kw, float scale, nint stream)
-    {
-        if (_ltx25NaModule is null)
-            throw new InvalidOperationException("ltx25_na_decoder.ptx is not loaded; gate on HasLtx25NaKernels first.");
-
-        ulong outArg = output, qArg = q, kArg = k, vArg = v;
-        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
-        uint headsArg = (uint)heads, hdArg = (uint)headDim;
-        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
-        float scaleArg = scale;
-
-        void** args = stackalloc void*[14];
-        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
-        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
-        args[8] = &headsArg; args[9] = &hdArg;
-        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
-
-        // One block per query·head. Threads split the window in the score pass and head_dim in the value pass,
-        // so a block wider than either is wasted; 256 covers head_dim 64 and keeps 8 warps on the window.
-        uint blockDim = 256;
-        uint gridDim = (uint)((long)batch * dimT * dimH * dimW * heads);
-        uint sharedBytes = (uint)Ltx25Na3dSharedBytes(headDim, kt, kh, kw);
-        CudaDriverApi.cuLaunchKernel(_ltx25Na3dF32, gridDim, 1, 1, blockDim, 1, 1,
-            sharedBytes, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Query-tile height/width the tiled na3d kernels stage a shared window for, or (0, 0) when the shape is not one they cover — head_dim must be 64, and a tile only pays for itself once it holds real queries.</summary>
-    public (int H, int W) Ltx25Na3dTile(int dimH, int dimW, int headDim)
-    {
-        if (_ltx25Na3dTiled8x8F32 == 0 || headDim != 64) return (0, 0);
-        // A tile wider than the volume is all padding, and the union it stages is then the whole volume anyway.
-        if (dimH >= 8 && dimW >= 8) return (8, 8);
-        if (dimH >= 4 && dimW >= 8) return (4, 8);
-        return (0, 0);
-    }
-
-    /// <summary>Query-tiled 3D neighborhood attention: one block per (batch, t, h-tile, w-tile, head), streaming the tile's union window through shared memory. Same contract as <see cref="LaunchLtx25Na3d"/>; the tile must come from <see cref="Ltx25Na3dTile"/>.</summary>
-    public unsafe void LaunchLtx25Na3dTiled(ulong output, ulong q, ulong k, ulong v,
-        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
-        int kt, int kh, int kw, float scale, int tileH, int tileW, nint stream)
-    {
-        nint func = tileH == 8 ? _ltx25Na3dTiled8x8F32 : _ltx25Na3dTiled4x8F32;
-        if (func == 0)
-            throw new InvalidOperationException("ltx25_na3d_tiled*_f32 is not loaded; gate on Ltx25Na3dTile first.");
-
-        ulong outArg = output, qArg = q, kArg = k, vArg = v;
-        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
-        uint headsArg = (uint)heads, hdArg = (uint)headDim;
-        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
-        float scaleArg = scale;
-
-        void** args = stackalloc void*[14];
-        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
-        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
-        args[8] = &headsArg; args[9] = &hdArg;
-        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
-
-        long hTiles = (dimH + tileH - 1) / tileH, wTiles = (dimW + tileW - 1) / tileW;
-        uint gridDim = (uint)((long)batch * dimT * hTiles * wTiles * heads);
-        CudaDriverApi.cuLaunchKernel(func, gridDim, 1, 1, 256, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -2733,30 +2562,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_kvAppendF16Sat != 0 ? _kvAppendF16Sat : _lmKvAppendF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches MoE row-gather: output[m,j] = input[rowIndices[m], j]. total = M·K.</summary>
-    public unsafe void LaunchGatherRows(ulong outPtr, ulong inPtr, ulong idxPtr, int k, ulong total, nint stream)
-    {
-        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr;
-        uint kArg = (uint)k;
-        ulong totalArg = total;
-        void** args = stackalloc void*[5];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &kArg; args[4] = &totalArg;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmGatherRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches MoE weighted scatter-add: output[rowIndices[m], j] += scales[m]·input[m,j]. total = M·K.</summary>
-    public unsafe void LaunchScatterAddWeightedRows(ulong outPtr, ulong inPtr, ulong idxPtr, ulong scalePtr, int k, ulong total, nint stream)
-    {
-        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr, scaleArg = scalePtr;
-        uint kArg = (uint)k;
-        ulong totalArg = total;
-        void** args = stackalloc void*[6];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &scaleArg; args[4] = &kArg; args[5] = &totalArg;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmScatterAddWeightedRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Fused graph-decode QKV epilogue: ropes q/k and scatters q,k,v into their caches at pos.</summary>
     public unsafe void LaunchQkvRopeScatter(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
         ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
@@ -3075,10 +2880,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_ditSigmoidF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches CFG combine + Euler step in-place on z: z[i] += delta*(guidance*pos[i] + (1-guidance)*neg[i]).</summary>
-    public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
-        => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
-
     /// <summary>Elementwise affine mix: output = xScale*x + yScale*y.</summary>
     public unsafe void LaunchAffineMix(
         ulong output, ulong x, ulong y, float xScale, float yScale, long count, nint stream)
@@ -3148,82 +2949,6 @@ public sealed partial class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Global-renormalized CFG plus Euler update. Scratch layout is two double partial arrays followed by one float scale; all three stages are ordered on <paramref name="stream"/> and inputs remain unchanged.</summary>
-    public unsafe void LaunchCfgRenormEuler(
-        ulong z, ulong cond, ulong uncond, ulong scratch, int partialCount,
-        float guidance, float delta, float renormMin, long count, nint stream)
-    {
-        ulong condPartials = scratch;
-        ulong guidedPartials = scratch + (ulong)partialCount * sizeof(double);
-        ulong scale = guidedPartials + (ulong)partialCount * sizeof(double);
-
-        ulong condArg = cond, uncondArg = uncond, condPartialsArg = condPartials;
-        ulong guidedPartialsArg = guidedPartials, countArg = (ulong)count;
-        float guidanceArg = guidance;
-        void** reduceArgs = stackalloc void*[6];
-        reduceArgs[0] = &condArg;
-        reduceArgs[1] = &uncondArg;
-        reduceArgs[2] = &condPartialsArg;
-        reduceArgs[3] = &guidedPartialsArg;
-        reduceArgs[4] = &guidanceArg;
-        reduceArgs[5] = &countArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormReduceF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
-            2 * BlockSize * sizeof(double), stream, (nint)reduceArgs, 0).ThrowOnError();
-
-        ulong scaleArg = scale;
-        uint partialCountArg = (uint)partialCount;
-        float renormMinArg = renormMin;
-        void** finalizeArgs = stackalloc void*[5];
-        finalizeArgs[0] = &scaleArg;
-        finalizeArgs[1] = &condPartialsArg;
-        finalizeArgs[2] = &guidedPartialsArg;
-        finalizeArgs[3] = &partialCountArg;
-        finalizeArgs[4] = &renormMinArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormFinalizeF32, 1, 1, 1, BlockSize, 1, 1,
-            2 * BlockSize * sizeof(double), stream, (nint)finalizeArgs, 0).ThrowOnError();
-
-        ulong zArg = z;
-        float deltaArg = delta;
-        void** updateArgs = stackalloc void*[7];
-        updateArgs[0] = &zArg;
-        updateArgs[1] = &condArg;
-        updateArgs[2] = &uncondArg;
-        updateArgs[3] = &scaleArg;
-        updateArgs[4] = &guidanceArg;
-        updateArgs[5] = &deltaArg;
-        updateArgs[6] = &countArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormEulerF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)updateArgs, 0).ThrowOnError();
-    }
-
-    /// <summary>Last-dimension-normalized CFG plus Euler update. Each block cooperatively reduces one logical row and applies its broadcast norm ratio to the in-place latent update.</summary>
-    public unsafe void LaunchCfgNormalizedEuler(
-        ulong z, ulong cond, ulong uncond, float guidance, float delta, float eps,
-        long rows, long lastDim, nint stream)
-    {
-        ulong zArg = z, condArg = cond, uncondArg = uncond;
-        float guidanceArg = guidance, deltaArg = delta, epsArg = eps;
-        ulong rowsArg = (ulong)rows, lastDimArg = (ulong)lastDim;
-        void** args = stackalloc void*[8];
-        args[0] = &zArg;
-        args[1] = &condArg;
-        args[2] = &uncondArg;
-        args[3] = &guidanceArg;
-        args[4] = &deltaArg;
-        args[5] = &epsArg;
-        args[6] = &rowsArg;
-        args[7] = &lastDimArg;
-        uint threads = 32;
-        while (threads < (ulong)lastDim && threads < BlockSize) threads <<= 1;
-        uint gridDim = (uint)Math.Min(rows, 65_535L);
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgNormalizedEulerF32, gridDim, 1, 1, threads, 1, 1,
-            2 * threads * sizeof(double), stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Copies one split chunk from logical <c>[outer,inputDimension,inner]</c> storage; the 16-bit variant is shared by F16 and BF16, treating every element as an opaque payload word.</summary>
     public unsafe void LaunchSplitSlice(
         bool sixteenBit,
@@ -3272,21 +2997,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>MiniMax guided semantic logits: the conditional top-K candidates get <c>u + (c - u)·g</c>, all other entries -inf
-    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel mask of 16448 entries.</summary>
-    public unsafe void LaunchCfgTopKGuided(ulong output, ulong cond, ulong uncond, int count, int topK, float guidance, nint stream)
-    {
-        if (_lmCfgTopKGuided == 0) throw new InvalidOperationException("lm_cfg_topk_guided.ptx not present in the Ptx folder.");
-        if (count < 1 || count > 16448 || topK < 1 || topK > count)
-            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16448; got count={count} topK={topK}; the mask holds up to 16448 entries.");
-        ulong outArg = output, condArg = cond, uncondArg = uncond;
-        int countArg = count, topKArg = topK;
-        float guidanceArg = guidance;
-        void** args = stackalloc void*[6];
-        args[0] = &outArg; args[1] = &condArg; args[2] = &uncondArg; args[3] = &countArg; args[4] = &topKArg; args[5] = &guidanceArg;
-        CudaDriverApi.cuLaunchKernel(_lmCfgTopKGuided, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Device-indexed gather from a half- or bfloat16-stored table into an F32 row (lm_embed_gather.cu).</summary>
     public unsafe void LaunchEmbedGatherDecodeTable(ulong output, ulong embedTable, ulong tokenId, int hidden, bool bf16, nint stream)
     {
@@ -3331,10 +3041,6 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Launches add-scalar: out[i] = in[i] + c (F32).</summary>
     public void LaunchAddScalar(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF32, output, input, c, count, stream);
-
-    /// <summary>Pixel-quantize to 256 levels (DIAMOND EDM output; enables a drain-free graph-capturable step).</summary>
-    public void LaunchPixelQuantize(ulong output, ulong input, int count, nint stream)
-        => LaunchScaleImpl(_ditPixelQuantizeF32, output, input, 0f, count, stream);
 
     /// <summary>TripoSR triplane grid-sample: writes <paramref name="count"/>×[3·C] features to <paramref name="outF"/>. <paramref name="coords"/> may be 0 when <paramref name="gridRes"/>&gt;0 (coords generated in-kernel).</summary>
     public unsafe void LaunchTriplaneGridSample(ulong outF, ulong planes, ulong coords, ulong chunkStart,
@@ -3440,39 +3146,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (one thread per point·coord).</summary>
-    public unsafe void LaunchFourierEmbed(ulong dst, ulong coords, int count, int bands, int dim, nint stream)
-    {
-        ulong dArg = dst, cArg = coords; uint countArg = (uint)count, bArg = (uint)bands, dimArg = (uint)dim;
-        void** args = stackalloc void*[5];
-        args[0] = &dArg; args[1] = &cArg; args[2] = &countArg; args[3] = &bArg; args[4] = &dimArg;
-        uint grid = (uint)(((long)count * 3 + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Sparse submanifold-conv scatter/gather (one thread per voxel·channel). <paramref name="scatter"/> selects scatter (feats→grid) vs gather (grid→feats).</summary>
-    public unsafe void LaunchSparseGridScatterGather(bool scatter, ulong grid, ulong feats, ulong coords, int n, int c, int r, nint stream)
-    {
-        ulong gArg = grid, fArg = feats, cArg = coords; int nA = n, cA = c, rA = r;
-        void** args = stackalloc void*[6];
-        // kernel signature: (grid/feats first arg, feats/grid second, coords, n, c, r)
-        args[0] = scatter ? &gArg : &fArg; args[1] = scatter ? &fArg : &gArg; args[2] = &cArg;
-        args[3] = &nA; args[4] = &cA; args[5] = &rA;
-        uint grid1 = (uint)(((long)n * c + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(scatter ? _sparseScatterToGridF32 : _sparseGatherFromGridF32,
-            grid1, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Row gather (<paramref name="gather"/>=true: out[j]=in[idx[j]]) or scatter-add (out[idx[j]]+=in[j]).</summary>
-    public unsafe void LaunchRowGatherScatter(bool gather, ulong outp, ulong input, ulong indices, int m, int c, nint stream)
-    {
-        ulong oArg = outp, iArg = input, idxArg = indices; int mA = m, cA = c;
-        void** args = stackalloc void*[5];
-        args[0] = &oArg; args[1] = &iArg; args[2] = &idxArg; args[3] = &mA; args[4] = &cA;
-        uint grid = (uint)(((long)m * c + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(gather ? _rowGatherF32 : _rowScatterAddF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Dense 3D convolution (gather form, one thread per output element). Weight [Cout,Cin,kD,kH,kW].</summary>
     public unsafe void LaunchConv3d(ulong outp, ulong input, ulong weight, ulong bias,
         int n, int cin, int cout, int iD, int iH, int iW, int oD, int oH, int oW,
@@ -3494,10 +3167,6 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
     public void LaunchAddScalarF16(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF16, output, input, c, count, stream);
-
-    /// <summary>Launches index-add of embedding rows in-place: h[row,d] += table[indices[row], d].</summary>
-    public void LaunchIndexAdd(ulong h, ulong table, ulong indices, int dim, long total, nint stream)
-        => LaunchIndexAddImpl(_ditIndexAddF32, h, table, indices, dim, total, stream);
 
     /// <summary>Launches contiguous row-block slice: output[i] = input[elemOffset + i].</summary>
     public void LaunchSliceRows(ulong output, ulong input, long elemOffset, long total, nint stream)

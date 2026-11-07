@@ -1,12 +1,14 @@
-// Kernels of the LTX-2.5 NADiffusionDecoder's neighborhood-attention block: the 3-axis interleaved RoPE and
-// the 3D neighborhood attention itself. Both mirror the managed reference in IBackend/
-// LtxVideo25NeighborhoodAttention3d exactly — including NATTEN's slide-inward window rule — so the CUDA path
-// can be diffed against it. F32 only; every tensor in this decoder is F32.
+// 3D neighborhood attention (IBackend.NeighborhoodAttention) over [batch, T, H, W, heads, headDim] F32 grids: every query
+// attends a fixed kT×kH×kW window that slides inward at the borders (NATTEN's rule), the per-query kernel for any head width
+// and the query-tiled kernels for head width 64. Mirrors NeighborhoodAttentionReference, so the CUDA path can be diffed
+// against it. Contract: NeighborhoodAttentionContract.
+//
+// Build: ./build.sh (nvrtc through ../build_common.sh).
 
 // Start of the attended window along one axis. The window is always exactly `kernel` wide and slides inward
 // at the borders rather than truncating, so every query attends the same number of keys. `kernel` is
 // pre-clamped to `length` by the caller.
-__device__ __forceinline__ int na3d_window_start(int index, int length, int kernel)
+__device__ __forceinline__ int na_window_start(int index, int length, int kernel)
 {
     int start = index - kernel / 2;
     int last = length - kernel;
@@ -19,7 +21,7 @@ __device__ __forceinline__ int na3d_window_start(int index, int length, int kern
 // One block per (batch, t, h, w, head) query; threads split the window for the score pass and the head_dim
 // for the value pass, which keeps both passes coalesced. Dynamic shared memory holds the q row followed by
 // the window's scores: (headDim + kt*kh*kw) floats.
-extern "C" __global__ void ltx25_na3d_f32(
+extern "C" __global__ void neighborhood_attention_f32(
     float* __restrict__ out,
     const float* __restrict__ q,
     const float* __restrict__ k,
@@ -59,9 +61,9 @@ extern "C" __global__ void ltx25_na3d_f32(
     for (unsigned int d = tid; d < headDim; d += nthreads) sq[d] = q[qOff + d];
     __syncthreads();
 
-    int t0 = na3d_window_start((int)it, (int)dimT, (int)kt);
-    int h0 = na3d_window_start((int)ih, (int)dimH, (int)kh);
-    int w0 = na3d_window_start((int)iw, (int)dimW, (int)kw);
+    int t0 = na_window_start((int)it, (int)dimT, (int)kt);
+    int h0 = na_window_start((int)ih, (int)dimH, (int)kh);
+    int w0 = na_window_start((int)iw, (int)dimW, (int)kw);
     unsigned long long winBase = (unsigned long long)b * bStride + (unsigned long long)t0 * tStride
         + (unsigned long long)h0 * hStride + (unsigned long long)w0 * wStride
         + (unsigned long long)head * headStride;
@@ -161,13 +163,13 @@ extern "C" __global__ void ltx25_na3d_f32(
 //
 // head_dim is fixed at 64 (the only value the shipped decoder uses) so the register tile is compile-time.
 
-#define NA3D_HD 64
-#define NA3D_CHUNK 32
-#define NA3D_THREADS 256
-#define NA3D_NEG_INF (-3.402823466e+38f)
+#define NA_HD 64
+#define NA_CHUNK 32
+#define NA_THREADS 256
+#define NA_NEG_INF (-3.402823466e+38f)
 
 template<int TH, int TW>
-__device__ __forceinline__ void ltx25_na3d_tiled_impl(
+__device__ __forceinline__ void neighborhood_attention_tiled_impl(
     float* __restrict__ out,
     const float* __restrict__ q,
     const float* __restrict__ k,
@@ -177,9 +179,9 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
     unsigned int kt, unsigned int kh, unsigned int kw,
     float scale)
 {
-    const int HD = NA3D_HD;
-    const int CHUNK = NA3D_CHUNK;
-    const int NT = NA3D_THREADS;
+    const int HD = NA_HD;
+    const int CHUNK = NA_CHUNK;
+    const int NT = NA_THREADS;
     const int TQ = TH * TW;
     const int QPT = 4;                 // queries each thread accumulates
     const int QG = TQ / QPT;           // query groups per block
@@ -212,7 +214,7 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
     unsigned long long baseOff = (unsigned long long)b * bStride + (unsigned long long)head * HD;
 
     int h0 = (int)hTile * TH, w0 = (int)wTile * TW;
-    int tStart = na3d_window_start((int)it, (int)dimT, (int)kt);
+    int tStart = na_window_start((int)it, (int)dimT, (int)kt);
     int tid = (int)threadIdx.x;
 
     for (int qi = tid; qi < TQ; qi += NT)
@@ -220,8 +222,8 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
         int hh = h0 + qi / TW, ww = w0 + qi % TW;
         bool ok = hh < (int)dimH && ww < (int)dimW;
         qOk[qi] = ok ? 1 : 0;
-        qHs[qi] = ok ? na3d_window_start(hh, (int)dimH, (int)kh) : 0;
-        qWs[qi] = ok ? na3d_window_start(ww, (int)dimW, (int)kw) : 0;
+        qHs[qi] = ok ? na_window_start(hh, (int)dimH, (int)kh) : 0;
+        qWs[qi] = ok ? na_window_start(ww, (int)dimW, (int)kw) : 0;
     }
     for (int idx = tid; idx < TQ * HD; idx += NT)
     {
@@ -240,10 +242,10 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
     // in-range query of the tile bracket every window the tile can produce.
     int hLast = h0 + TH - 1; if (hLast > (int)dimH - 1) hLast = (int)dimH - 1;
     int wLast = w0 + TW - 1; if (wLast > (int)dimW - 1) wLast = (int)dimW - 1;
-    int uh0 = na3d_window_start(h0, (int)dimH, (int)kh);
-    int uw0 = na3d_window_start(w0, (int)dimW, (int)kw);
-    int uhN = na3d_window_start(hLast, (int)dimH, (int)kh) + (int)kh - uh0;
-    int uwN = na3d_window_start(wLast, (int)dimW, (int)kw) + (int)kw - uw0;
+    int uh0 = na_window_start(h0, (int)dimH, (int)kh);
+    int uw0 = na_window_start(w0, (int)dimW, (int)kw);
+    int uhN = na_window_start(hLast, (int)dimH, (int)kh) + (int)kh - uh0;
+    int uwN = na_window_start(wLast, (int)dimW, (int)kw) + (int)kw - uw0;
     int total = (int)kt * uhN * uwN;
 
     int qg = tid / LANES, lane = tid % LANES;
@@ -257,7 +259,7 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
 #pragma unroll
     for (int i = 0; i < QPT; i++)
     {
-        runMax[i] = NA3D_NEG_INF;
+        runMax[i] = NA_NEG_INF;
         runSum[i] = 0.0f;
 #pragma unroll
         for (int jj = 0; jj < DPT; jj++) acc[i][jj] = 0.0f;
@@ -312,12 +314,12 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
         for (int i = 0; i < QPT; i++)
         {
             int qi = qBase + i;
-            float mx = NA3D_NEG_INF;
+            float mx = NA_NEG_INF;
 #pragma unroll
             for (int j = 0; j < PPT; j++)
             {
                 int p = pBase + j;
-                float val = NA3D_NEG_INF;
+                float val = NA_NEG_INF;
                 if (qOk[qi] && pH[p] >= 0)
                 {
                     int dh = pH[p] - qHs[qi], dw = pW[p] - qWs[qi];
@@ -333,7 +335,7 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
             }
             float newMax = runMax[i] > mx ? runMax[i] : mx;
             // Nothing valid has been seen yet — exp(-FLT_MAX + FLT_MAX) would be 1, not 0, so skip the chunk.
-            bool dead = newMax == NA3D_NEG_INF;
+            bool dead = newMax == NA_NEG_INF;
             float rescale = dead ? 1.0f : expf(runMax[i] - newMax);
             float sum = 0.0f;
 #pragma unroll
@@ -379,7 +381,7 @@ __device__ __forceinline__ void ltx25_na3d_tiled_impl(
     }
 }
 
-extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled8x8_f32(
+extern "C" __global__ __launch_bounds__(NA_THREADS) void neighborhood_attention_tiled8x8_f32(
     float* __restrict__ out,
     const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
     unsigned int batch, unsigned int dimT, unsigned int dimH, unsigned int dimW,
@@ -387,10 +389,10 @@ extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled8x8_f
     unsigned int kt, unsigned int kh, unsigned int kw,
     float scale)
 {
-    ltx25_na3d_tiled_impl<8, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
+    neighborhood_attention_tiled_impl<8, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
 }
 
-extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled4x8_f32(
+extern "C" __global__ __launch_bounds__(NA_THREADS) void neighborhood_attention_tiled4x8_f32(
     float* __restrict__ out,
     const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v,
     unsigned int batch, unsigned int dimT, unsigned int dimH, unsigned int dimW,
@@ -398,5 +400,5 @@ extern "C" __global__ __launch_bounds__(NA3D_THREADS) void ltx25_na3d_tiled4x8_f
     unsigned int kt, unsigned int kh, unsigned int kw,
     float scale)
 {
-    ltx25_na3d_tiled_impl<4, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
+    neighborhood_attention_tiled_impl<4, 8>(out, q, k, v, batch, dimT, dimH, dimW, heads, kt, kh, kw, scale);
 }

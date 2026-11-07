@@ -3187,32 +3187,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, hostByteCount, hostByteCount);
     }
 
-    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos + (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan generation (not just step-graph mode — this call happens once per denoise step regardless), and the exact bug that broke step-graph capture (found via a genuine `numerics.ditGraph=true` Krea2 run: capture failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it uncached by the time the next capture attempt read it).</summary>
-    public unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
-    {
-        using OpScope _op = EnterOp();
-        VulkanBuffer zBuf = GetBuffer(z);
-        VulkanBuffer posBuf = GetBuffer(pos);
-        VulkanBuffer negBuf = GetBuffer(neg);
-
-        VulkanKernel k = GetKernel("cfg_euler", 3, _default1DSpec);
-        Span<byte> pc = stackalloc byte[3 * 4];
-        BinaryWriteUInt(pc, 0, (uint)z.ElementCount);
-        BinaryWriteFloat(pc, 4, guidance);
-        BinaryWriteFloat(pc, 8, delta);
-        Span<ulong> bufs = stackalloc ulong[] { zBuf.Handle, posBuf.Handle, negBuf.Handle };
-        Dispatch(k, bufs, pc, GroupCount(z.ElementCount, LocalX1D));
-
-        // In-place re-assert (the CopyInto/CudaBackend.CfgEulerStep pattern): z keeps this buffer. Clear stale
-        // callbacks BEFORE re-caching so the old sync callback can't free the buffer we're keeping resident.
-        z._gpuSyncCallback = null;
-        z._gpuDisposeCallback = null;
-        CacheOutput(z, zBuf);
-
-        _xfer.FreeDevice(posBuf);
-        _xfer.FreeDevice(negBuf);
-    }
-
     /// <summary>Device copy into <paramref name="dst"/>'s EXISTING buffer (address-preserving — the captured-graph boundary refresh; mirrors <c>CudaBackend.CopyInto</c>). First call materializes a device buffer for dst; subsequent calls reuse it. Host src is uploaded; device src is device-to-device copied. Capture-aware: <c>Krea2Transformer.ForwardPatched</c> issues this as the graph's LAST captured op (the velocity-output boundary write), so it must record onto the capture buffer exactly like a kernel dispatch when capturing.</summary>
     public unsafe void CopyInto(Tensor dst, Tensor src)
     {
@@ -3244,7 +3218,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
         if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
-        // In-place re-assert (the CfgEulerStep pattern): dst keeps this buffer across the copy. Clear stale
+        // In-place re-assert (the GuidedEulerStep pattern): dst keeps this buffer across the copy. Clear stale
         // callbacks BEFORE re-caching — skipping this reproduces a stale-callback bug on the next dispose/sync.
         dst._gpuSyncCallback = null;
         dst._gpuDisposeCallback = null;

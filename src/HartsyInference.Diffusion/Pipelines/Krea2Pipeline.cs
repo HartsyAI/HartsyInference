@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -474,7 +475,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
                     // second-order methods) extra forward would invalidate the capture. The gate above already
                     // excludes every sampler but Euler from reaching here.
                     Tensor graphV = RunForwardPatched(patchLatent!, t, condHidden, hPacked, wPacked, stepCondCache);
-                    Backend.CfgEulerStep(patchLatent!, graphV, graphV, 1.0f, scheduler.Dt(i));
+                    Backend.GuidedEulerStep(patchLatent!, graphV, graphV, GuidedEulerSpec.Lerp(1.0f, scheduler.Dt(i)));
                 }
                 else
                 {

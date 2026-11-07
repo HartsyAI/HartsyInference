@@ -4,23 +4,14 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Activations, the gated linear unit, the group gate and the fused linear prologue and epilogue.
+// Activations, the uniform fake quantize, the gated linear unit, the group gate and the fused linear prologue and epilogue.
 public partial interface IBackend
 {
-    /// <summary>DIAMOND pixel quantize to 256 levels: <c>floor((clamp(v,−1,1)+1)·127.5)/127.5 − 1</c>.</summary>
-    unsafe void PixelQuantize(Tensor output, Tensor input)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32) throw new NotSupportedException("PixelQuantize default fallback only supports F32.");
-        long n = input.ElementCount;
-        float* ip = (float*)input.DataPointer, op = (float*)output.DataPointer;
-        for (long i = 0; i < n; i++)
-        {
-            float v = ip[i];
-            if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
-            int b = (int)((v + 1f) * 0.5f * 255f);
-            op[i] = b / 255f * 2f - 1f;
-        }
-    }
+    /// <summary>Uniform fake quantization: every value clamped to <c>[low, high]</c>, truncated to one of <paramref name="levels"/>
+    /// evenly spaced steps and mapped back into the range (DIAMOND's 256-level pixel quantization over <c>[−1, 1]</c>). F32.
+    /// Contract: <see cref="Contracts.FakeQuantizeContract"/>; reference: <see cref="FakeQuantizeReference"/>.</summary>
+    void FakeQuantizeUniform(Tensor output, Tensor input, float low, float high, int levels)
+        => FakeQuantizeReference.Apply(output, input, low, high, levels);
 
     /// <summary>Exact (erf) GELU: <c>out = 0.5·x·(1+erf(x/√2))</c>, PyTorch's <c>nn.GELU()</c>; <see cref="Gelu"/> is the tanh approx.</summary>
     unsafe void GeluErf(Tensor output, Tensor input)

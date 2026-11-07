@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The LTX-2.5 NA diffusion-decoder kernels. Kernel lists only — the build itself is ../build_common.sh.
+# The row-index and dense-grid kernels. Kernel lists only — the build itself is ../build_common.sh.
 set -euo pipefail
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
-    "ltx25_na_decoder"
+    "row_index"
 )
 
 # shellcheck source=../build_common.sh

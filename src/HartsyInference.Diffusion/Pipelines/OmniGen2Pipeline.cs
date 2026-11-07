@@ -106,7 +106,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
         // Drain-free denoise loop (the Boogu/Z-Image pattern): patchify the seeded noise to token space ONCE and
         // keep the latent GPU-resident in [1, imgSeqLen, p²·C] across the whole loop. ForwardPacked skips the
         // per-forward host patchify/unpatchify D2H drains (also the cpu-glue-async-race crash source) and returns
-        // the negated packed velocity; CfgEulerStep does the CFG combine + flow-match Euler step in one in-place
+        // the negated packed velocity; GuidedEulerStep does the CFG combine + flow-match Euler step in one in-place
         // device op (x += (g·cond + (1-g)·uncond)·dt, dt = σ_next − σ). One device unpatchify feeds the VAE.
         Tensor noiseNchw = TakeOrCreateNoise(request, latentShape, seed);
         Tensor latent = DiTUtils.PatchifyNCHW(noiseNchw, _config.PatchSize);

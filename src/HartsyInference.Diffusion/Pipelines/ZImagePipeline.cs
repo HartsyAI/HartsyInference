@@ -349,7 +349,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                             Tensor uncond = _transformer.ForwardPacked(Backend, x, negativeCaptionEmbeddings!, inverted, fpH, fpW);
                             if (PredictionStatsEnabled)
                                 ValidatePredictionFinite(uncond, $"unconditional step {stepIndex + 1}", logStats: true);
-                            // CfgEulerStep computes g·cond + (1−g)·uncond. Z-Image requires
+                            // GuidedEulerStep computes g·cond + (1−g)·uncond. Z-Image requires
                             // cond + cfg·(cond − uncond) = (1+cfg)·cond − cfg·uncond, hence g = cfg + 1.
                             return new DenoisePrediction(cond, uncond, cfgScale + 1.0f);
                         });
@@ -560,7 +560,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Backend.FreeActivations();
 
             // FreeActivations just freed the step graph's fixed boundary buffers (they live in the ACTIVATION
-            // cache — CopyInto/CfgEulerStep re-cache them there), so a cross-gen replay would launch against freed
+            // cache — CopyInto/GuidedEulerStep re-cache them there), so a cross-gen replay would launch against freed
             // addresses: CUDA 700 that poisons the context (hit live on the first warm gen). The graph is therefore
             // per-generation here: invalidate now, re-warm + re-capture next gen at the fresh buffer addresses.
             if (graphMode)

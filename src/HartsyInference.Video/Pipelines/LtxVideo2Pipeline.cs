@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using System.Globalization;
@@ -118,7 +119,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         float[]? promptTokenWeights = null, float[]? negativeTokenWeights = null)
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit): its denoise step is a host-side
-        // Euler in a different algebraic form than IBackend.CfgEulerStep, its schedule is a raw float[] rather
+        // Euler in a different algebraic form than IBackend.GuidedEulerStep, its schedule is a raw float[] rather
         // than a FlowMatchEulerDiscreteScheduler, and one model evaluation drives TWO latents (video + audio) with separate guidance scales, which ISampler.Step cannot express. Converting it would change
         // default-Euler output, so it was deliberately skipped. Refuse a named sampler rather than accepting the
         // request and silently sampling with something else.
@@ -544,8 +545,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             // Device CFG+Euler, in-place on the resident latents: z += (g·cond + (1−g)·uncond)·(−dt) ≡ z −= v·dt.
             // The latents stay GPU-resident across the whole loop; the final host read (UnpackVideoLatents) syncs.
             // With guidance 1 the cond tensor is passed for both operands, which the op collapses to plain Euler.
-            Backend.CfgEulerStep(videoLat, vCondV, vUncondV, guidance, -dt);
-            AudioCfgEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
+            Backend.GuidedEulerStep(videoLat, vCondV, vUncondV, GuidedEulerSpec.Lerp(guidance, -dt));
+            AudioGuidedEulerStep(audioLat, vCondA, vUncondA, audioGuidance, audioRescale, -dt);
             // On the step-graph path the four velocities are transformer-owned fixed buffers (rewritten next step) —
             // don't dispose them; on the eager path they're fresh and must be freed. The unguided path aliases the
             // cond tensors into the uncond slots, so it must not double-free them.
@@ -742,11 +743,11 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// injects a DC offset into the latent. The blend is affine in the guided velocity, so only the scalars come to
     /// the host and the step stays on device (the latent is never written host-side, which would go stale against
     /// its GPU cache).</summary>
-    private void AudioCfgEulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float rescale, float delta)
+    private void AudioGuidedEulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float rescale, float delta)
     {
         if (rescale <= 0f)
         {
-            Backend.CfgEulerStep(z, cond, uncond, guidance, delta);
+            Backend.GuidedEulerStep(z, cond, uncond, GuidedEulerSpec.Lerp(guidance, delta));
             return;
         }
         Backend.Sync();
@@ -770,7 +771,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         }
         double factor = Math.Sqrt(varC / n) / Math.Max(Math.Sqrt(varG / n), 1e-8);
         double a = rescale * factor + (1f - rescale);
-        Backend.CfgEulerStep(z, cond, uncond, guidance, (float)(a * delta));
+        Backend.GuidedEulerStep(z, cond, uncond, GuidedEulerSpec.Lerp(guidance, (float)(a * delta)));
     }
 
     /// <summary>Token count the shift formula is evaluated at: the real count, unless <see

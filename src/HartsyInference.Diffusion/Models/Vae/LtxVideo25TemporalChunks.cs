@@ -9,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 /// neighborhood-attention pass may not: NATTEN keeps every window exactly <c>kernel</c> wide by sliding it inward at a
 /// border, so rows near a naive cut attend a different set of keys than they would untiled and a seam appears at every
 /// chunk boundary. <see cref="Window"/> therefore pads each chunk with a <c>kernel/2</c> halo on both sides and never
-/// lets the padded window fall below the kernel — <c>IBackend.Na3d</c> collapses to <c>min(kernel, frames)</c>, so a
+/// lets the padded window fall below the kernel — <c>IBackend.NeighborhoodAttention</c> collapses to <c>min(kernel, frames)</c>, so a
 /// short first or last window would silently change every window inside it, not just the halo. With that padding the
 /// kept rows' window starts are identical to the untiled ones, and since RoPE here is a per-token rotation (the
 /// score depends only on the position difference) the halo is the only thing needed for exactness — provided the rope

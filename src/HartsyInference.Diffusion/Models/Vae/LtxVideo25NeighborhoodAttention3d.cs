@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
@@ -8,7 +9,7 @@ namespace HartsyInference.Diffusion.Models.Vae;
 
 /// <summary>3D neighborhood attention with per-axis absolute RoPE, the attention primitive of both the deterministic
 /// and the diffusion blocks of the LTX-2.5 video decoder. Fused <c>qkv</c> → per-head RMSNorm on q/k → RoPE on q/k →
-/// <see cref="IBackend.Na3d"/> → output projection, over a channels-last <c>[T·H·W, dim]</c> token grid.</summary>
+/// <see cref="IBackend.NeighborhoodAttention"/> → output projection, over a channels-last <c>[T·H·W, dim]</c> token grid.</summary>
 internal sealed class LtxVideo25NeighborhoodAttention3d
 {
     /// <summary>Set by the ComfyUI layer-diff harness to tap this module's internals; null in production.</summary>
@@ -42,7 +43,7 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
     }
 
     /// <summary>Loads <c>{prefix}.qkv|proj|q_norm|k_norm</c>. The <c>1/√head_dim</c> attention scale is folded into the
-    /// q-norm weight — it commutes with the RoPE rotation that follows, so <see cref="IBackend.Na3d"/> runs unscaled.</summary>
+    /// q-norm weight — it commutes with the RoPE rotation that follows, so <see cref="IBackend.NeighborhoodAttention"/> runs unscaled.</summary>
     public void LoadWeights(LtxVideo25WeightScope scope, string prefix)
     {
         _qkvWeight = scope.Raw($"{prefix}.qkv.weight");
@@ -113,7 +114,7 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         // Reshape reads DataPointer, which drags a device-resident result back to the host and forces the
         // projection below to re-upload it.
         using Tensor attended = new Tensor(new TensorShape(tokens, _dim), DType.F32);
-        backend.Na3d(attended, q, k, v, _kernel.T, _kernel.H, _kernel.W, scale: 1f);
+        backend.NeighborhoodAttention(attended, q, k, v, new NeighborhoodWindow(_kernel.T, _kernel.H, _kernel.W), scale: 1f);
 
         Tap?.Invoke("attn_na3d", attended);
         Tensor result = new Tensor(new TensorShape(tokens, _dim), DType.F32);

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -102,7 +103,7 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
 
         // Sampler selection is NOT wired on this family (2026-08-20 audit). Unlike LanceVideoPipeline — which keeps a
         // HOST renorm combine followed by a plain Euler, and therefore converted — the image path fuses the guidance
-        // renorm INTO the device step via Backend.CfgRenormEulerStep: guided = uncond + g*(cond-uncond), then a
+        // renorm INTO the device step via Backend.GuidedEulerStep: guided = uncond + g*(cond-uncond), then a
         // clamped global rescale by ||cond||/||guided||, then the Euler update, all in one kernel. The sampler's pair
         // contract expresses only a linear combine, and reimplementing the renorm host-side would change the default
         // path. Refuse rather than accept a selection and sample with something else.
@@ -133,11 +134,11 @@ public sealed unsafe class LanceImagePipeline : DiffusionPipelineBase
                 {
                     using Tensor vUncond = _transformer.Forward(Backend, uncond.TextTokenIds, latents, latentPosIds, t,
                         uncond.PositionIds, uncond.UndIdx, uncond.GenIdx, uncond.AttentionMask);
-                    Backend.CfgRenormEulerStep(latents, vCond, vUncond, cfg, -dt, _config.CfgRenormMin);
+                    Backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.GlobalNorm(cfg, -dt, _config.CfgRenormMin));
                 }
                 else
                 {
-                    Backend.CfgEulerStep(latents, vCond, vCond, 1f, -dt);
+                    Backend.GuidedEulerStep(latents, vCond, vCond, GuidedEulerSpec.Lerp(1f, -dt));
                 }
             }
 

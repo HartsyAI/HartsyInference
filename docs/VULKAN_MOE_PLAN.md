@@ -40,7 +40,7 @@ passed as `--set` on the CLI.
 4. **MoE adds host round trips and per-expert launches.** Vulkan implements `MoeRoute`, `MoeBuildDispatch` and `MoeCombine`,
    but nothing in the layer calls them: with no `SupportsMoeExpertIndexed`, `MoeFeedForward.Forward`
    takes the host-routed path. On granite that is 85,308 `Linear` calls (about 670 a token, one per active expert
-   projection) and 22,397 host waits in `ScatterAddWeightedRows` (about 175 a token) on top of the router read per layer.
+   projection) and 22,397 host waits in `ScatterAddRows` (about 175 a token) on top of the router read per layer.
    GPU time was 8.0 s of a 17.3 s wall, so more than half the MoE run is host stall.
 
 ## What exists on Vulkan and what does not

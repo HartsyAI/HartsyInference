@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -261,7 +262,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         //
         // Lens applies its OWN CFG (ApplyNormRescaledCfg, which is not the linear uncond-anchored combine), so the
         // already-combined velocity goes back as BOTH halves of the pair at guidance 1.0: the sampler's fused combine
-        // degenerates to identity, exactly as the direct CfgEulerStep(z, v, v, 1.0f, dt) call did. No step graph, no
+        // degenerates to identity, exactly as the direct GuidedEulerStep(z, v, v, GuidedEulerSpec.Lerp(1.0f, dt)) call did. No step graph, no
         // step cache and no host/reference loop here, so there is nothing else to narrow for a non-default sampler.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Lens",
             startsFromNoisedInit: startStep > 0);
@@ -306,7 +307,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
                     return new DenoisePrediction(combined, combined);
                 });
             // Flow-match Euler stays ONE in-place device op (`v == pos == neg`, guidance 1 ⇒ z += v·dt), so the
-            // latent never leaves the GPU between steps — EulerSampler.Step IS that same fused CfgEulerStep call.
+            // latent never leaves the GPU between steps — EulerSampler.Step IS that same fused GuidedEulerStep call.
             if (i == startStep)
             {
                 sampler.Reset(packedLatent.Shape);
@@ -439,11 +440,11 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Backend.Linear(condRms, condScaledSq, _rescaleChannelMean!, null);
         condScaledSq.Dispose();
 
-        // comb = (1 - cfg)·uncond + cfg·cond. CfgEulerStep with pos == neg is `z += pos·delta`, which supplies
+        // comb = (1 - cfg)·uncond + cfg·cond. GuidedEulerStep with pos == neg is `z += pos·delta`, which supplies
         // the second term in place on top of the scaled uncond.
         Tensor comb = new Tensor(cond.Shape, DType.F32);
         Backend.Scale(comb, uncond, 1.0f - cfgScale);
-        Backend.CfgEulerStep(comb, cond, cond, 1.0f, cfgScale);
+        Backend.GuidedEulerStep(comb, cond, cond, GuidedEulerSpec.Lerp(1.0f, cfgScale));
 
         Tensor combUnit = new Tensor(cond.Shape, DType.F32);
         Backend.RmsNorm(combUnit, comb, _rescaleOnes!, eps);

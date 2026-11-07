@@ -250,7 +250,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // Drain-free packed path (plain t2i/img2img): the latent lives in patch-token space on the
         // device for the whole loop — patchify once, dual-pass ForwardTokens per step, in-place
-        // device CfgEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
+        // device GuidedEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
         // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
         // numerics.auraflowPacked=false is the kill-switch (A/B against the reference loop).
         bool fusedLoop = !isMaskedInpaint && EngineKnobs.AuraflowPacked.Value;

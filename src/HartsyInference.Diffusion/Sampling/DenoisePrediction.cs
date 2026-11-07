@@ -4,7 +4,7 @@ namespace HartsyInference.Diffusion.Sampling;
 
 /// <summary>One model evaluation's raw output, kept as the conditional/unconditional PAIR rather than pre-combined.
 ///
-/// <para>The pair is load-bearing, not a convenience. <see cref="Core.Backends.IBackend.CfgEulerStep"/> fuses the CFG
+/// <para>The pair is load-bearing, not a convenience. <see cref="Core.Backends.IBackend.GuidedEulerStep"/> fuses the CFG
 /// combine and the Euler update into a single in-place device op, and every pipeline in the engine is built around it —
 /// keeping the latent GPU-resident with zero host round-trips per step. Handing samplers a pre-combined tensor would
 /// force that fusion apart and cost every default generation a separate combine pass, so <see cref="EulerSampler"/>

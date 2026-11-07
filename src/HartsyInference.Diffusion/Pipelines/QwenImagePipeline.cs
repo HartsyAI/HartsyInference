@@ -790,7 +790,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         ReadOnlySpan<float> timesteps = scheduler.Timesteps;
 
         // Drain-free fast path (t2i / img2img / EDIT): the latent stays device-resident across the whole
-        // loop, CFG combine + Euler run as ONE in-place device op (CfgEulerStep: z += (neg + gw·(pos−neg))·dt —
+        // loop, CFG combine + Euler run as ONE in-place device op (GuidedEulerStep: z += (neg + gw·(pos−neg))·dt —
         // for gw=cfgScale this IS uncond + cfg·(cond−uncond), and gw=1 degenerates to the plain Euler step),
         // and FreeActivations never runs mid-loop. Edit joins the fast path via a per-step DEVICE row-concat
         // of [noise ; pinned ref tokens] (the old host ConcatPackedSeqDim forced a full D2H/H2D round trip +
@@ -1009,7 +1009,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             // Reclaim GPU-resident activation buffers between steps ONLY on the host paths (their
             // scheduler.Step/blends leave the latent host-resident, so nothing device-only is lost). The
             // drain-free path skips this: every intermediate is explicitly disposed, and the latent — kept
-            // device-resident by the in-place CfgEulerStep — would be silently reverted to a stale host copy.
+            // device-resident by the in-place GuidedEulerStep — would be silently reverted to a stale host copy.
             if (!drainFree)
             {
                 Backend.FreeActivations();

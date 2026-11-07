@@ -34,7 +34,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
 
     // ── Step-graph state (numerics.ditGraph; the Krea2Transformer recipe — see ForwardPacked) ──────────────
     // Every per-step-varying boundary lives in a FIXED device buffer the captured graph reads: the packed
-    // latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep), the timestep embedding
+    // latent (_latentFixed, updated in-place by the pipeline's GuidedEulerStep), the timestep embedding
     // (_tEmbFixed, refreshed per step via CopyInto), and the velocity output (_graphVelocity, a pre-capture
     // NORMAL buffer written by a captured CopyInto as the graph's last op).
     private Tensor? _latentFixed;
@@ -278,7 +278,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// <summary>Denoise-step core in packed token space (the Krea2 <c>ForwardPatched</c> pattern): consumes the
     /// <c>[1, imgRealLen, C·p²]</c> token grid (patchify once before the loop) and returns the flow-match velocity
     /// in the SAME packed space — no per-step patchify/unpatchify, no host excursions, so the pipeline's Euler
-    /// update can run on-device (<c>CfgEulerStep</c> with <c>delta = −dt</c>, folding Z-Image's velocity negation
+    /// update can run on-device (<c>GuidedEulerStep</c> with <c>delta = −dt</c>, folding Z-Image's velocity negation
     /// into the sign) and the loop never drains the pipeline. Used by unmasked t2i/img2img without regional prompts.
     /// <para>With <c>numerics.ditGraph=true</c> and the latent routed through <see cref="PrepareGraphLatent"/>, the
     /// fixed per-step region (<see cref="PackedCore"/>) is CUDA-graph-captured once and replayed per step —
