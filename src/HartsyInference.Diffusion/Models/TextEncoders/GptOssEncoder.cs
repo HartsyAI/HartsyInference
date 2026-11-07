@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -400,8 +401,8 @@ public sealed unsafe class GptOssEncoder : IDisposable
             {
                 kRepeated = new Tensor(qMhShape, DType.F32);
                 vRepeated = new Tensor(qMhShape, DType.F32);
-                RepeatKvHeads(kRepeated, kMh, batch, Hkv, _config.KvGroupSize, seqLen, D);
-                RepeatKvHeads(vRepeated, vMh, batch, Hkv, _config.KvGroupSize, seqLen, D);
+                StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
+                StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
                 kMh.Dispose();
                 vMh.Dispose();
             }
@@ -543,27 +544,6 @@ public sealed unsafe class GptOssEncoder : IDisposable
                         long outOff = ((long)b * seqLen + s) * heads * headDim + (long)h * headDim;
                         Buffer.MemoryCopy(inPtr + inOff, outPtr + outOff, headDim * sizeof(float), headDim * sizeof(float));
                     }
-        }
-
-        // GQA: replicate each KV head `groupSize` times.
-        private static void RepeatKvHeads(Tensor output, Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
-        {
-            float* inPtr = (float*)input.DataPointer;
-            float* outPtr = (float*)output.DataPointer;
-            long perHead = (long)seqLen * headDim;
-            for (int b = 0; b < batch; b++)
-            {
-                for (int h = 0; h < kvHeads; h++)
-                {
-                    long srcOff = ((long)b * kvHeads + h) * perHead;
-                    for (int g = 0; g < groupSize; g++)
-                    {
-                        int qHead = h * groupSize + g;
-                        long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
-                        Buffer.MemoryCopy(inPtr + srcOff, outPtr + dstOff, perHead * sizeof(float), perHead * sizeof(float));
-                    }
-                }
-            }
         }
 
         // Llama-style split-half RoPE (GPT-OSS matches Llama here).

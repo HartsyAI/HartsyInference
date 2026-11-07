@@ -290,33 +290,6 @@ __global__ void dit_slice_rows_f16(
     output[i] = input[elemOffset + i];
 }
 
-// ── GQA K/V head repeat (F16, pure copy) ────────────────────────────────────
-// out head qh = h*group + g maps to input head qh/group. One thread per output element. No math.
-__global__ void dit_repeat_kv_f16(
-    __half* __restrict__ output,
-    const __half* __restrict__ input,
-    unsigned int kvHeads,
-    unsigned int group,
-    unsigned int seqLen,
-    unsigned int headDim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % headDim);
-    unsigned long long rem = i / headDim;
-    unsigned int l = (unsigned int)(rem % seqLen);
-    rem /= seqLen;
-    unsigned int qHeads = kvHeads * group;
-    unsigned int qh = (unsigned int)(rem % qHeads);
-    unsigned long long b = rem / qHeads;
-
-    unsigned int inH = qh / group;
-    unsigned long long inIdx = (((b * kvHeads + inH) * seqLen) + l) * (unsigned long long)headDim + d;
-    output[i] = input[inIdx];
-}
-
 // ── Non-affine LayerNorm (F16 I/O, F32 accumulate) ──────────────────────────
 // F16 twin of dit_layernorm_noaffine_f32: per row, normalize to zero mean / unit variance
 // (biased var, /dim), no scale/bias. One block per row; shared-mem reduction.

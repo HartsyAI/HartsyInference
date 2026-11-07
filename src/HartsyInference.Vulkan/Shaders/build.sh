@@ -82,14 +82,12 @@ DTYPE_KERNELS=(
     qkv_split_norm_head_major
     layernorm_modulate
     apply_rope_single
-    unpatchify_tokens
     prelu
     rmsnorm
     softmax
     im2col
     col2bias_add
     upsample_nearest2d
-    upsample_bilinear2d
     matmul_tiled
     mask_add
     maxpool2d
@@ -104,9 +102,9 @@ DTYPE_KERNELS=(
     affine_broadcast_last_dim
     wan_rope_interleaved
     ltx2_split_rope
-    repeat_kv_heads
     gated_residual_last_dim
     situ_glu
+    accumulate_strided
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -115,10 +113,8 @@ DTYPE_KERNELS=(
 SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
-    fill_bias
     quant_int8_rowwise
     dequant_recipe_bf16
-    pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
     gated_residual_row_indexed
@@ -156,7 +152,6 @@ SINGLE_KERNELS=(
     repetition_penalty
     kv_cache_append_dev
     softplus
-    topk_lastdim
     moe_route
     moe_build_dispatch
     moe_combine
@@ -169,7 +164,6 @@ SINGLE_KERNELS=(
     hc_post_mix
     sparse_latent_attention
     indexer_scores
-    quantize_latent_rows
     act_quant_dequant
     build_window_indices
     rope_interleaved_offset
@@ -187,6 +181,13 @@ done
 
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
+done
+
+# Generic strided copy and pad: one module per word width (IBackend.CopyStrided / Pad; docs/BACKEND_OPS.md).
+for k in copy_strided pad_strided; do
+    compile_one "$k" -DWIDTH=2 -- "_u16"
+    compile_one "$k" -DWIDTH=4 -- "_u32"
+    compile_one "$k" -DWIDTH=8 -- "_u64"
 done
 
 # gemv_quant: the fused dequantizing decode GEMV, one module per GGUF block format (QTYPE selects the block decoder).

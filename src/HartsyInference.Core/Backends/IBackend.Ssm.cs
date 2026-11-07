@@ -35,4 +35,16 @@ public partial interface IBackend
     void SsmDeltaPrefill(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z, Tensor alphaRaw,
         Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW, int hv, int sv, int sk, int repeat, float eps) =>
         GatedDeltaNetReference.DeltaScan(output, state, q, k, v, z, alphaRaw, betaRaw, dtBias, ssmA, normW, hv, sv, sk, repeat, eps);
+
+    /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split + per-head L2 norms.</summary>
+    /// <remarks><paramref name="history"/> is the device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</remarks>
+    void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
+        int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
+        => throw new NotSupportedException("SsmConvSplitStep requires a CUDA backend.");
+
+    /// <summary>Qwen3.5 SSM decode step (seq=1), part 2: delta-rule recurrence + gated RMSNorm.</summary>
+    /// <remarks><paramref name="state"/> is the device-persistent [hv, sv, sk] recurrent state. CUDA-only.</remarks>
+    void SsmDeltaStep(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor z, Tensor alphaRaw,
+        Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW, int hv, int sv, int sk, int repeat, float eps)
+        => throw new NotSupportedException("SsmDeltaStep requires a CUDA backend.");
 }

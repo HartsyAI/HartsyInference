@@ -32,7 +32,7 @@ public static partial class MonotonicClock
         return (long)(Stopwatch.GetTimestamp() * _stopwatchNsPerTick);
     }
 
-    /// <summary>Blocks the calling thread until <see cref="NowNs"/> reaches <paramref name="deadlineNs"/>; returns at once if it already has.</summary>
+    /// <summary>Blocks the calling thread until <see cref="NowNs"/> reaches <paramref name="deadlineNs"/>; returns at once if it already has. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static void SleepUntil(long deadlineNs)
     {
         if (OperatingSystem.IsLinux())

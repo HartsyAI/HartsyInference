@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -334,7 +335,7 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         else { xnFinalF32 = new Tensor(tokenShape, DType.F32); backend.CastToF32(xnFinalF32, xnFinal); xnFinal.Dispose(); }
 
         Tensor features = new Tensor(new TensorShape(batch, nh, height, width), DType.F32);
-        backend.UnpatchifyTokens(features, xnFinalF32, nh, hPacked, wPacked, p, innerChannelFastest: true);
+        PixelShuffles.UnpatchifyTokens(backend, features, xnFinalF32, nh, hPacked, wPacked, p, innerChannelFastest: true);
         xnFinalF32.Dispose();
 
         int outChannels = (int)_finalConvWeight.Shape[0];

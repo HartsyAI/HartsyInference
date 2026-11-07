@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -89,7 +90,7 @@ public sealed unsafe class SparkModel : ISsmModel
         Tensor logits = new(new TensorShape(1, 1, vocab), DType.F32);
         try
         {
-            backend.SliceTimeRange(last, normed.Reshape(new TensorShape(1, 1, seq, d)), seq - 1, 1);
+            StridedCopies.SliceAxis(backend, last, normed.Reshape(new TensorShape(1, 1, seq, d)), 2, seq - 1, 1);
             Tensor head = Config.TieWordEmbeddings ? W($"{Prefix}.embedding.weight") : W("lm_head.weight");
             backend.Linear(logits, last, head, null);
             backend.Sync();

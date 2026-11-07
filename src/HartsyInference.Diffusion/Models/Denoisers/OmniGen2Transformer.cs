@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -262,7 +263,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         Tensor velPacked = ForwardPacked(backend, packed, timestep, textEmbeds, textSeqLen, hPacked, wPacked);
         packed.Dispose();
         Tensor velocity = new(new TensorShape(1, outChannels, latentH, latentW), DType.F32);
-        backend.UnpatchifyTokens(velocity, velPacked, outChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        PixelShuffles.UnpatchifyTokens(backend, velocity, velPacked, outChannels, hPacked, wPacked, patch, innerChannelFastest: true);
         velPacked.Dispose();
         OmniGen2DebugDump.Dump("output_velocity", velocity);
         return velocity;
