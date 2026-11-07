@@ -14,30 +14,6 @@ namespace HartsyInference.Core.Tensors;
 /// <c>O(G²)</c> — the difference between a 4 GFLOP and a 0.07 GFLOP pass over one 4096×4096 LTX 2.5 layer.</para></remarks>
 public static unsafe class Int8ConvRotCodec
 {
-    private static readonly ConcurrentDictionary<int, float[]> _hadamardCache = new();
-
-    /// <summary>The normalized regular Hadamard <c>H[size, size]</c>, row-major, cached per size.</summary>
-    /// <param name="size">Must be a power of four — comfy-kitchen builds <c>H</c> by Kronecker powers of a 4×4 seed.</param>
-    public static float[] BuildHadamard(int size)
-    {
-        ValidateGroupSize(size);
-        return _hadamardCache.GetOrAdd(size, static s =>
-        {
-            float[] h = new float[(long)s * s];
-            for (int row = 0; row < s; row++)
-            {
-                h[(long)row * s + row] = 1.0f;
-            }
-            fixed (float* p = h)
-            {
-                for (int row = 0; row < s; row++)
-                {
-                    ApplyRotation(p + (long)row * s, s, s);
-                }
-            }
-            return h;
-        });
-    }
 
     /// <summary>Whether <paramref name="size"/> is a usable ConvRot group size (a power of four, at least 4).</summary>
     public static bool IsValidGroupSize(int size) => size >= 4 && (size & (size - 1)) == 0 && (size & 0x55555554) != 0;

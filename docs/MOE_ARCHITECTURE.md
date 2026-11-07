@@ -96,7 +96,7 @@ QK-norm, RoPE and KV scatter are one kernel, and the attention combine writes th
 bit-identical to the launches they replace. On an RTX 3060 OLMoE-1B-7B Q4_K_M runs 205 kernels per token instead of 326.
 
 Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`,
-`numerics.lmNormFast`, `numerics.lmNormWide`, `numerics.decodeResidualFold`, `numerics.qknormFullScatter`,
+`numerics.lmNormFast`, `numerics.lmNormWide`, `numerics.decodeResidualFold`, `numerics.qkvDecodeFused`,
 `numerics.attnCombineQ8`. `vram.kvF16` works with graph decode and is F16 by default for text models on CUDA (`vram.textKvF16`, unset = automatic; `false` keeps F32); cache writes saturate at the F16 maximum.
 
 ## Capabilities

@@ -1,5 +1,7 @@
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
 
@@ -145,7 +147,7 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         Tensor h = ReorderRows(embed, mergeOrder, hidden); embed.Dispose();
         float[] cosW = ReorderVec(cos, mergeOrder, hd), sinW = ReorderVec(sin, mergeOrder, hd);
         // Upload once for the whole tower (same table every layer) instead of re-deriving on the host per Block —
-        // IBackend.ApplyRopeSingle already runs this exact rotate-half math as a GPU kernel (GenericTransformer's
+        // IBackend.the rotate-half rotary (RotaryCall.TokenMajor) already runs this exact rotate-half math as a GPU kernel (GenericTransformer's
         // own RoPE uses it identically); the host loop + backend.Sync() this replaced ran twice per layer.
         using Tensor cosT = new(new TensorShape(1, np, hd), DType.F32);
         using Tensor sinT = new(new TensorShape(1, np, hd), DType.F32);
@@ -211,8 +213,8 @@ public sealed unsafe class Qwen25VlEncoder : IVlmImageEncoder
         backend.Linear(k, ln1, W($"{p}.attn_k.weight"), W($"{p}.attn_k.bias"));
         backend.Linear(v, ln1, W($"{p}.attn_v.weight"), W($"{p}.attn_v.bias"));
         ln1.Dispose();
-        backend.ApplyRopeSingle(q, cosT, sinT);
-        backend.ApplyRopeSingle(k, cosT, sinT);
+        backend.Rotary(RotaryCall.TokenMajor(q, cosT, sinT, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        backend.Rotary(RotaryCall.TokenMajor(k, cosT, sinT, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
         Tensor qM = new(new TensorShape(1, heads, np, hd), DType.F32);
         Tensor kM = new(new TensorShape(1, heads, np, hd), DType.F32);

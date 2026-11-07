@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -174,7 +175,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
             if (onProgress is not null)
             {
                 Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                Backend.UnpatchifyTokens(previewLatent, latent, _config.InChannels, hPacked, wPacked,
+                PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latent, _config.InChannels, hPacked, wPacked,
                     _config.PatchSize, innerChannelFastest: true);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
@@ -190,7 +191,7 @@ public sealed class OmniGen2Pipeline : DiffusionPipelineBase
 
         // One device unpatchify back to NCHW for the VAE (the latent never left the GPU during the loop).
         Tensor latentNchw = new(latentShape, DType.F32);
-        Backend.UnpatchifyTokens(latentNchw, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
+        PixelShuffles.UnpatchifyTokens(Backend, latentNchw, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
             innerChannelFastest: true);
         latent.Dispose();
 

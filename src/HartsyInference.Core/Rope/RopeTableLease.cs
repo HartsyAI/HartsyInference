@@ -27,12 +27,6 @@ public readonly struct RopeTableLease : IDisposable
     /// <summary>Tokens in the signature this lease covers.</summary>
     public int Tokens => _host?.Tokens ?? 0;
 
-    /// <summary>Host cos rows, compact to the rotated pairs of each token.</summary>
-    public ReadOnlySpan<float> HostCos => _host is null ? ReadOnlySpan<float>.Empty : _host.Cos;
-
-    /// <summary>Host sin rows, compact to the rotated pairs of each token.</summary>
-    public ReadOnlySpan<float> HostSin => _host is null ? ReadOnlySpan<float>.Empty : _host.Sin;
-
     /// <summary>Device cos rows for the backend the lease was acquired on, or null when the cache does not preload.</summary>
     public Tensor? DeviceCos => _device is { Backend: not null } ? _device.Cos : null;
 

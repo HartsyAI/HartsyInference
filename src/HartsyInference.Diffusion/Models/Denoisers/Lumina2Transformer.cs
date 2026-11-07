@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -306,7 +307,7 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         if (batch == 1)
         {
             velocity = new Tensor(new TensorShape(1, inChannels, latentH, latentW), DType.F32);
-            backend.UnpatchifyTokens(velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+            PixelShuffles.UnpatchifyTokens(backend, velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
         }
         else
         {
@@ -457,7 +458,7 @@ public sealed unsafe class Lumina2Transformer : IDisposable
         if (batch == 1)
         {
             velocity = new Tensor(new TensorShape(1, inChannels, latentH, latentW), DType.F32);
-            backendA.UnpatchifyTokens(velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+            PixelShuffles.UnpatchifyTokens(backendA, velocity, finalProj, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
         }
         else
         {

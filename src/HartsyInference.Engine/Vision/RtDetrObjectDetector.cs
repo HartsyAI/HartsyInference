@@ -1,8 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Vision.Detection;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Engine.Vision;
 

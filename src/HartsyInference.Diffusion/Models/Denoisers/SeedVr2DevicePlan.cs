@@ -7,7 +7,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// window-gather index tensors (I32, grouped by identical window shape for batched SDPA) and interleaved
 /// rope cos/sin tables in GLOBAL token order (each token's angles are its position INSIDE its window; the
 /// unrotated head dims beyond <see cref="SeedVr2Rope.RotDim"/> carry cos=1/sin=0 so one
-/// <c>WanRopeInterleaved</c> pass covers the full 128-dim head). Preloaded to the GPU weight cache — every
+/// <c>the interleaved rotary (RotaryCall.Rows)</c> pass covers the full 128-dim head). Preloaded to the GPU weight cache — every
 /// chunk of a clip shares the geometry, so the build amortizes across the whole restore.</summary>
 public sealed class SeedVr2DevicePlan : IDisposable
 {

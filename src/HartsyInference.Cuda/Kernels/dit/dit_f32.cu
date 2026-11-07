@@ -502,72 +502,6 @@ __global__ void dit_tanh_f32(
     output[i] = tanhf(input[i]);
 }
 
-// ── Rotary position embedding (in-place, rotate_half convention) ────────────
-// x is [B, L, numHeads, headDim] flattened to [totalVecs, headDim] (totalVecs = B*L*numHeads).
-// cos/sin are [B, L, headDim] broadcast over heads (cos row = vec / numHeads).
-// out[i]      = lower*cos[i]      - upper*sin[i]        (i in [0, half))
-// out[i+half] = upper*cos[i+half] + lower*sin[i+half]
-// where lower = x[i], upper = x[i+half] (originals). Each thread owns one i and writes both
-// halves from originals — race-free, no snapshot needed. Matches Ideogram4Mrope.ApplyOne.
-// rotaryDim: number of leading dims of each head to rotate (NEOX pairing (i, i+rotaryDim/2)); the rest pass
-// through. 0 (or >= headDim) means full rotary — the default, identical to the original kernel (DiT path).
-__global__ void dit_rope_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;   // rotate pairs (i, i+half) for i < half; cos/sin stride stays headDim
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = vec / numHeads;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = x[baseX + i];
-    float upper = x[baseX + i + half];
-    x[baseX + i] = lower * cos[baseCs + i] - upper * sin[baseCs + i];
-    x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
-}
-
-// Head-major twin of dit_rope_f32: x is [B, heads, seq, headDim], so the cos/sin row is (vec / (heads*seq))*seq
-// + vec % seq instead of vec / numHeads. Identical rotation math — only the vec→row map differs.
-__global__ void dit_rope_head_major_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int heads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim,
-    unsigned int seq)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = (vec / ((unsigned long long)heads * seq)) * seq + vec % seq;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = x[baseX + i];
-    float upper = x[baseX + i + half];
-    x[baseX + i] = lower * cos[baseCs + i] - upper * sin[baseCs + i];
-    x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
-}
-
 // ── Per-row scalar multiply (token masking) ────────────────────────────────
 // out[row, c] = in[row, c] * rowScale[row]. rowScale has one value per row (rows = total/channels).
 // Used to zero non-role token positions in Ideogram 4's masked text/image embedding.
@@ -661,25 +595,6 @@ __global__ void dit_index_add_f32(
     h[i] += table[(size_t)indices[row] * dim + d];
 }
 
-// ── Scatter rows after a zeroed head block ──────────────────────────────────
-// output = [ zeros(headRows), input ] along the row axis. out[row,d] = row < headRows ? 0
-// : input[(row-headRows)*dim + d]. Builds Ideogram 4's conditional latent (text rows zeroed,
-// image rows = current latent z).
-__global__ void dit_scatter_rows_after_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    unsigned int headRows,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned long long row = i / dim;
-    if (row < headRows) { output[i] = 0.0f; return; }
-    unsigned int d = (unsigned int)(i % dim);
-    output[i] = input[(size_t)(row - headRows) * dim + d];
-}
-
 // ── Slice a contiguous row block (by element offset) ────────────────────────
 // output[i] = input[elemOffset + i]. Extracts image-token velocity rows from a full sequence.
 __global__ void dit_slice_rows_f32(
@@ -711,159 +626,7 @@ __global__ void dit_slice_lastdim_f32(
     output[i] = input[(size_t)row * inDim + offset + d];
 }
 
-// ── LTX-2 "split" rotary (rotate-half, per-head cos) ───────────────────────
-// LTX-2.3 (rope_type=split): x is [S, dim] = [S, numHeads, headDim]; cos/sin are [S, dim/2] = [S, numHeads, r]
-// with r=headDim/2 (per-head, ONE angle shared by both elements of a pair). For pair i in head h at token s:
-//   out[i]   = a*c - b*sn ; out[i+r] = b*c + a*sn ,  a=x[i], b=x[i+r], c=cos[i], sn=sin[i]
-// Distinct from dit_rope_f32 (per-position cos, dual-angle) and wan_rope_interleaved (adjacent-pair). Keeps LTX-2.3
-// Q/K GPU-resident through RoPE — the host loop D2H'd + re-uploaded [S,dim] Q/K per attention, and on this
-// block-swap-bound 22B model those re-uploads fight the 19 GB/forward weight stream on PCIe.
-__global__ void ltx2_split_rope_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int seqLen,
-    unsigned int numHeads,
-    unsigned int headDim)
-{
-    unsigned int r = headDim >> 1;
-    unsigned int dim = numHeads * headDim;
-    unsigned int cosWidth = dim >> 1;            // = numHeads * r
-    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % r);
-    unsigned long long t = gid / r;
-    unsigned int h = (unsigned int)(t % numHeads);
-    unsigned int s = (unsigned int)(t / numHeads);
-    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
-    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
-    float a = x[headBase + i];
-    float b = x[headBase + i + r];
-    float c = cos[cosBase + i], sn = sin[cosBase + i];
-    x[headBase + i]     = a * c - b * sn;
-    x[headBase + i + r] = b * c + a * sn;
-}
-
-
-// ── Patchify / unpatchify: NCHW pixels ↔ token grid (bit-preserving shuffle) ─────
-// innerChannelFastest=1 → token inner order (ph, pw, c) (Z-Image / Lumina2 patchify);
-// 0 → channel-outer (c, ph, pw) (Krea2 / diffusers view+permute+reshape).
-// Integer payloads keep every F32/F16/BF16 bit pattern intact (including signed zero and NaN payloads): these
-// are address permutations, not arithmetic. Grid-stride loops avoid imposing gridDim.x limits on valid tensors.
 } // extern "C" — templates cannot have C linkage
-
-template <typename Word>
-__device__ __forceinline__ void dit_patchify_words(
-    Word* __restrict__ output,
-    const Word* __restrict__ input,
-    unsigned int channels,
-    unsigned int height,
-    unsigned int width,
-    unsigned int patch,
-    unsigned int innerChannelFastest,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
-    unsigned int hPacked = height / patch;
-    unsigned int wPacked = width / patch;
-    unsigned long long seqLen = (unsigned long long)hPacked * wPacked;
-    unsigned long long patchVol = (unsigned long long)channels * patch * patch;
-    for (; i < total; i += stride)
-    {
-        unsigned long long inner = i % patchVol;
-        unsigned long long token = i / patchVol;
-        unsigned long long seq = token % seqLen;
-        unsigned long long b = token / seqLen;
-        unsigned int hp = (unsigned int)(seq / wPacked);
-        unsigned int wp = (unsigned int)(seq % wPacked);
-
-        unsigned int c, ph, pw;
-        if (innerChannelFastest)
-        {
-            c = (unsigned int)(inner % channels);
-            unsigned long long pixel = inner / channels;
-            ph = (unsigned int)(pixel / patch);
-            pw = (unsigned int)(pixel % patch);
-        }
-        else
-        {
-            pw = (unsigned int)(inner % patch);
-            unsigned long long t = inner / patch;
-            ph = (unsigned int)(t % patch);
-            c = (unsigned int)(t / patch);
-        }
-
-        unsigned int y = hp * patch + ph;
-        unsigned int x = wp * patch + pw;
-        unsigned long long src = ((b * channels + c) * height + y) * width + x;
-        output[i] = input[src];
-    }
-}
-
-template <typename Word>
-__device__ __forceinline__ void dit_unpatchify_words(
-    Word* __restrict__ output,
-    const Word* __restrict__ input,
-    unsigned int channels,
-    unsigned int hPacked,
-    unsigned int wPacked,
-    unsigned int patch,
-    unsigned int innerChannelFastest,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
-    unsigned int W = wPacked * patch;
-    unsigned int H = hPacked * patch;
-    unsigned long long seqLen = (unsigned long long)hPacked * wPacked;
-    unsigned long long patchVol = (unsigned long long)channels * patch * patch;
-    for (; i < total; i += stride)
-    {
-        unsigned int x = (unsigned int)(i % W);
-        unsigned long long t = i / W;
-        unsigned int y = (unsigned int)(t % H);
-        t /= H;
-        unsigned int c = (unsigned int)(t % channels);
-        unsigned long long b = t / channels;
-        unsigned int hp = y / patch, ph = y % patch;
-        unsigned int wp = x / patch, pw = x % patch;
-        unsigned long long seq = (unsigned long long)hp * wPacked + wp;
-        unsigned long long inner = innerChannelFastest
-            ? (((unsigned long long)ph * patch + pw) * channels + c)
-            : (((unsigned long long)c * patch + ph) * patch + pw);
-        output[i] = input[(b * seqLen + seq) * patchVol + inner];
-    }
-}
-
-extern "C" __global__ void dit_patchify_f32(
-    unsigned int* output, const unsigned int* input, unsigned int channels, unsigned int height,
-    unsigned int width, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
-{
-    dit_patchify_words(output, input, channels, height, width, patch, innerChannelFastest, total);
-}
-
-extern "C" __global__ void dit_patchify_u16(
-    unsigned short* output, const unsigned short* input, unsigned int channels, unsigned int height,
-    unsigned int width, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
-{
-    dit_patchify_words(output, input, channels, height, width, patch, innerChannelFastest, total);
-}
-
-extern "C" __global__ void dit_unpatchify_f32(
-    unsigned int* output, const unsigned int* input, unsigned int channels, unsigned int hPacked,
-    unsigned int wPacked, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
-{
-    dit_unpatchify_words(output, input, channels, hPacked, wPacked, patch, innerChannelFastest, total);
-}
-
-extern "C" __global__ void dit_unpatchify_u16(
-    unsigned short* output, const unsigned short* input, unsigned int channels, unsigned int hPacked,
-    unsigned int wPacked, unsigned int patch, unsigned int innerChannelFastest, unsigned long long total)
-{
-    dit_unpatchify_words(output, input, channels, hPacked, wPacked, patch, innerChannelFastest, total);
-}
 
 // Copy one arbitrary-axis split chunk from logical [outer,inputDim,inner] storage. Each logical CUDA block
 // owns a contiguous part of one outer slice, so only one 64-bit division is paid per block (not per element),
@@ -914,7 +677,6 @@ extern "C" __global__ void dit_split_slice_u16(
 }
 
 extern "C" {
-
 
 // ── MoE top-k gate weights (HiDream MoEGate) ────────────────────────────────
 // Per token: softmax(logits over E experts), select top-k by prob, renormalize the selected
@@ -989,85 +751,6 @@ __global__ void dit_row_gated_accum_f32(
         out[i] += g * val[i];
 }
 
-// ── Oasis spatio-temporal attention layout (device ports of the host loops) ──
-// Frame-major tokens qkv[token, 3*dim] (token = f*sp + i) → out[b, heads, seq, headDim].
-// spatial (temporal=0): b = frame f, s = spatial i, seq = sp
-// temporal(temporal=1): b = spatial i, s = frame f, seq = frames
-// One thread per output element (token, h, d) over the sliced `part` (q=0/k=1/v=2).
-__global__ void oasis_split_heads_f32(
-    float* __restrict__ out,
-    const float* __restrict__ qkv,
-    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
-    unsigned int part, unsigned int temporal)
-{
-    unsigned int dim = heads * headDim;
-    unsigned long long total = (unsigned long long)frames * sp * dim;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int d = (unsigned int)(gid % headDim);
-    unsigned long long tmp = gid / headDim;
-    unsigned int h = (unsigned int)(tmp % heads);
-    unsigned long long token = tmp / heads;
-    unsigned int f = (unsigned int)(token / sp);
-    unsigned int i = (unsigned int)(token % sp);
-    unsigned int b = temporal ? i : f;
-    unsigned int s = temporal ? f : i;
-    unsigned int seq = temporal ? frames : sp;
-    unsigned long long srcIdx = token * 3ULL * dim + (unsigned long long)part * dim + (unsigned long long)h * headDim + d;
-    unsigned long long dstIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
-    out[dstIdx] = qkv[srcIdx];
-}
-
-// Interleaved (2i, 2i+1) partial rotary on x[b, heads, seq, headDim]; cos/sin are [seq, rotDim].
-// Rotates only the first `rotDim` dims of each head (rest pass through). One thread per (b,h,s,pair).
-__global__ void oasis_rope_interleaved_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int batch, unsigned int heads, unsigned int seq, unsigned int headDim, unsigned int rotDim)
-{
-    unsigned int pairs = rotDim >> 1;
-    unsigned long long total = (unsigned long long)batch * heads * seq * pairs;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int p = (unsigned int)(gid % pairs);
-    unsigned long long tmp = gid / pairs;
-    unsigned int s = (unsigned int)(tmp % seq);
-    unsigned long long bh = tmp / seq;              // b*heads + h
-    unsigned int i0 = 2u * p;
-    unsigned long long xOff = bh * seq * headDim + (unsigned long long)s * headDim;
-    unsigned long long cOff = (unsigned long long)s * rotDim;
-    float re = x[xOff + i0], im = x[xOff + i0 + 1];
-    float c = cos[cOff + i0], sn = sin[cOff + i0];
-    x[xOff + i0]     = re * c - im * sn;
-    x[xOff + i0 + 1] = re * sn + im * c;
-}
-
-// Inverse of split: attn[b, heads, seq, headDim] → out[token, dim] (token = f*sp + i).
-__global__ void oasis_merge_heads_f32(
-    float* __restrict__ out,
-    const float* __restrict__ attn,
-    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
-    unsigned int temporal)
-{
-    unsigned int dim = heads * headDim;
-    unsigned long long total = (unsigned long long)frames * sp * dim;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int d = (unsigned int)(gid % headDim);
-    unsigned long long tmp = gid / headDim;
-    unsigned int h = (unsigned int)(tmp % heads);
-    unsigned long long token = tmp / heads;
-    unsigned int f = (unsigned int)(token / sp);
-    unsigned int i = (unsigned int)(token % sp);
-    unsigned int b = temporal ? i : f;
-    unsigned int s = temporal ? f : i;
-    unsigned int seq = temporal ? frames : sp;
-    unsigned long long srcIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
-    unsigned long long dstIdx = token * dim + (unsigned long long)h * headDim + d;
-    out[dstIdx] = attn[srcIdx];
-}
-
 // Fused Oasis adaLN: out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d], f = r/sp. scale/shift are sliced
 // from mod[f, modStride] at scaleOff/shiftOff. One block per row; replaces LayerNorm + slice×2 + addscalar +
 // affine-broadcast (5 kernels → 1). blockDim must be a power of two (tree reduction).
@@ -1101,31 +784,6 @@ __global__ void oasis_adaln_f32(
 
     for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
         outRow[i] = (inRow[i] - mean) * invStd * (1.0f + scale[i]) + shift[i];
-}
-
-// Oasis per-frame unpatchify: proj[t*sp, c*p*p] (token = f*sp + hp*gw+wp) → out[t, c, H, W], with the
-// out-vector laid [py, px, ci] (channel innermost), matching the reference einsum nhwpqc->nchpwq.
-// One thread per output element out[f, ci, y, x].
-__global__ void oasis_unpatchify_f32(
-    float* __restrict__ out,
-    const float* __restrict__ proj,
-    unsigned int frames, unsigned int channels, unsigned int gh, unsigned int gw, unsigned int patch)
-{
-    unsigned int W = gw * patch, H = gh * patch;
-    unsigned long long total = (unsigned long long)frames * channels * H * W;
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned int x = (unsigned int)(i % W);
-    unsigned long long r = i / W;
-    unsigned int y = (unsigned int)(r % H);
-    r /= H;
-    unsigned int ci = (unsigned int)(r % channels);
-    unsigned int f = (unsigned int)(r / channels);
-    unsigned int ty = y / patch, py = y % patch, tx = x / patch, px = x % patch;
-    unsigned int outVec = channels * patch * patch;
-    unsigned long long token = (unsigned long long)f * gh * gw + (unsigned long long)ty * gw + tx;
-    unsigned long long src = token * outVec + (unsigned long long)(py * patch + px) * channels + ci;
-    out[i] = proj[src];
 }
 
 // Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.

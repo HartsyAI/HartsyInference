@@ -92,16 +92,6 @@ public readonly struct TensorShape : IEquatable<TensorShape>
             destination[i] = this[i];
     }
 
-    /// <summary>Copies strides into the provided span.</summary>
-    public void CopyStridesTo(Span<long> destination)
-    {
-        if (destination.Length < Rank)
-            throw new ArgumentException($"Destination span length {destination.Length} is less than rank {Rank}.", nameof(destination));
-
-        for (int i = 0; i < Rank; i++)
-            destination[i] = Stride(i);
-    }
-
     /// <summary>Returns a new shape with a dimension of size 1 inserted at the given position.</summary>
     public TensorShape Unsqueeze(int dim)
     {

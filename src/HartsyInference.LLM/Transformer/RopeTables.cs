@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Split-half (rotate-half) RoPE cos/sin tables for the LLM transformer family: rows are <c>headDim</c>-strided with both halves of the rotated span duplicated, the layout <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> consumes.</summary>
+/// <summary>Split-half (rotate-half) RoPE cos/sin tables for the LLM transformer family: rows are <c>headDim</c>-strided with both halves of the rotated span duplicated, the layout <c>RotaryCall.TokenMajor</c> consumes.</summary>
 internal static unsafe class RopeTables
 {
     /// <summary>Builds duplicated-half cos/sin for <paramref name="t"/> consecutive positions from <paramref name="posStart"/>: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>; partial rotary fills only the first <paramref name="rotaryDim"/> dims of each row.</summary>
