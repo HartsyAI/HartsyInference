@@ -119,7 +119,7 @@ public static class RotaryCases
                     }
                     finally { be.FreeDevicePos(pos); }
                 },
-                be => be.GraphDecodeSupported, Gpu, Rotation));
+                ServesDevicePositions, Gpu, Rotation));
         }
 
         // LTX-2 fused QK path: full-row RMS norm, split rotation with per-head tables, head-major or token-major emit; and the no-rotation form.
@@ -136,6 +136,10 @@ public static class RotaryCases
     }
 
     /// <summary>Copies the recorded contents of in-place operand <paramref name="name"/> (input <c>{name}_init</c>) into its output before the op runs.</summary>
+    /// <summary>Whether the backend serves a device position buffer: the full graph-decode toolkit, or Vulkan's LLM graph decode, which carries the
+    /// position buffer without the rest of it.</summary>
+    private static bool ServesDevicePositions(IBackend be) => be.GraphDecodeSupported || be.LlmGraphDecodeSupported;
+
     private static void Prime(OpTensors t, string name) => t.Inputs[name + "_init"].AsReadOnlySpan<byte>().CopyTo(t.Outputs[name].AsSpan<byte>());
 
     /// <summary>Builds one case's operands: seeded inputs (a distinct salt each), zeroed outputs, and in-place operands recorded as an input and written as an output.</summary>
