@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -57,7 +58,7 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit). Two things block it, and the second is
         // decisive: Lumina-Image 2.0 is NextDiT so it predicts -v (handled now by PredictionType.NegatedFlowVelocity),
-        // but its PRODUCTION default runs Backend.CfgNormalizedEulerStep — a fused normalized-CFG + Euler op with no
+        // but its PRODUCTION default runs Backend.GuidedEulerStep — a fused normalized-CFG + Euler op with no
         // pair-form decomposition on the backend. Routing that through the sampler would silently DROP the CFG
         // normalization, which is changed output rather than changed cost. `cfgTruncRatio` also makes fused-vs-plain
         // a per-step decision, so a partial conversion would interleave direct and sampler steps and corrupt a
@@ -177,13 +178,13 @@ public sealed unsafe class Lumina2Pipeline : DiffusionPipelineBase
                 if (guided)
                 {
                     if (cfgNormalization)
-                        Backend.CfgNormalizedEulerStep(latent, velocity, uncondVelocity!, cfgScale, delta);
+                        Backend.GuidedEulerStep(latent, velocity, uncondVelocity!, GuidedEulerSpec.RowNorm(cfgScale, delta));
                     else
-                        Backend.CfgEulerStep(latent, velocity, uncondVelocity!, cfgScale, delta);
+                        Backend.GuidedEulerStep(latent, velocity, uncondVelocity!, GuidedEulerSpec.Lerp(cfgScale, delta));
                 }
                 else
                 {
-                    Backend.CfgEulerStep(latent, velocity, velocity, 1.0f, delta);
+                    Backend.GuidedEulerStep(latent, velocity, velocity, GuidedEulerSpec.Lerp(1.0f, delta));
                 }
             }
             finally

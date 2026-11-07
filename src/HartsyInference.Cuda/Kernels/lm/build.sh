@@ -7,7 +7,6 @@ KERNELS=(
     "lm_f32"
     "lm_history_f32"
     "lm_embed_gather"
-    "lm_cfg_topk_guided"
     "flash_attn_f32"
     "flash_attn_f32_split"
     "flash_attn_causal_f16"

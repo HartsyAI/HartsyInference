@@ -72,24 +72,18 @@ DTYPE_KERNELS=(
     elementwise
     transpose
     permute_0213
-    geglu
     broadcast_add
     groupnorm
     groupnorm_silu
     layernorm
-    layernorm_noaffine
     qkv_split_norm
     qkv_split_norm_head_major
-    layernorm_modulate
-    apply_rope_single
-    unpatchify_tokens
     prelu
     rmsnorm
     softmax
     im2col
     col2bias_add
     upsample_nearest2d
-    upsample_bilinear2d
     matmul_tiled
     mask_add
     maxpool2d
@@ -98,15 +92,14 @@ DTYPE_KERNELS=(
     conv_transpose1d
     snake
     slice_last_dim
-    apply_rope
     kv_cache_append
     sdpa_flash
-    affine_broadcast_last_dim
-    wan_rope_interleaved
-    ltx2_split_rope
-    repeat_kv_heads
     gated_residual_last_dim
-    situ_glu
+    accumulate_strided
+    rotary
+    norm_modulate_flat
+    glu
+    group_scale
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -115,15 +108,12 @@ DTYPE_KERNELS=(
 SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
-    fill_bias
     quant_int8_rowwise
     dequant_recipe_bf16
-    pixel_shuffle2d
-    modulation_split4
-    affine_broadcast_row_indexed
     gated_residual_row_indexed
-    cfg_euler
-    wan_rms_norm_channel
+    guided_euler
+    norm_modulate_channel
+    chunk_activate
     cast_f32_f16
     cast_f32_f16_sat
     cast_f16_f32
@@ -156,7 +146,6 @@ SINGLE_KERNELS=(
     repetition_penalty
     kv_cache_append_dev
     softplus
-    topk_lastdim
     moe_route
     moe_build_dispatch
     moe_combine
@@ -169,10 +158,8 @@ SINGLE_KERNELS=(
     hc_post_mix
     sparse_latent_attention
     indexer_scores
-    quantize_latent_rows
     act_quant_dequant
     build_window_indices
-    rope_interleaved_offset
     ssm_conv_split_prefill
     ssm_l2norm_rows
     ssm_conv_history_update
@@ -187,6 +174,13 @@ done
 
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
+done
+
+# Generic strided copy and pad: one module per word width (IBackend.CopyStrided / Pad; docs/BACKEND_OPS.md).
+for k in copy_strided pad_strided; do
+    compile_one "$k" -DWIDTH=2 -- "_u16"
+    compile_one "$k" -DWIDTH=4 -- "_u32"
+    compile_one "$k" -DWIDTH=8 -- "_u64"
 done
 
 # gemv_quant: the fused dequantizing decode GEMV, one module per GGUF block format (QTYPE selects the block decoder).
@@ -209,12 +203,15 @@ for moe_kernel in moe_expert_gate_up moe_expert_down; do
     compile_one "$moe_kernel" -DQTYPE=5 -- "_q5_k"
 done
 
-# rms_norm_modulate: input and output dtypes are independent (an F32 residual stream feeding an F16 branch), so the
+# norm_modulate_rows: input and output dtypes are independent (an F32 residual stream feeding an F16 branch), so the
 # variants are named <in>[_<out>]: _f32, _f16, and _f32_f16 / _f16_f32 for the mixed pairs.
-compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
-compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
-compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
-compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
+compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
+compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
+compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
+compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
+
+# group_scale with F16 gates over an F16 activation (an F16 head gate's logits); the F32-gate build is the DTYPE_KERNELS entry above.
+compile_one "group_scale" -DUSE_FP16=1 -DGATE_FP16=1 -- "_f16_f16"
 
 # kv_cache_append with F32 rows into an F16 cache (FixedKvCache appends projection rows as they come out); SRC_F32 changes
 # the source binding's type, so it is its own module.
@@ -241,16 +238,6 @@ compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
 # BF16 variants read a narrow table as 32-bit words; the output is F32 in every variant.
 compile_one "embed_gather_decode" -DTABLE_DTYPE=1 -- "_f16"
 compile_one "embed_gather_decode" -DTABLE_DTYPE=2 -- "_bf16"
-
-# affine_broadcast_last_dim: HAS_SHIFT=0 is Ideogram 4's scale-only adaLN (shift is null) — a distinct
-# #if-compiled binding layout (like USE_BETA/HAS_MASK above), needing its own SPIR-V module.
-compile_one "affine_broadcast_last_dim" -DUSE_FP16=0 -DHAS_SHIFT=0 -- "_noshift_f32"
-compile_one "affine_broadcast_last_dim" -DUSE_FP16=1 -DHAS_SHIFT=0 -- "_noshift_f16"
-
-# rope_decode_step: INTERLEAVED selects a #if-compiled code path (like USE_BETA/HAS_MASK above), so
-# the two pairing conventions need their own SPIR-V modules. F32-only (decode-graph state is F32).
-compile_one "rope_decode_step" -DINTERLEAVED=0 -- "_splithalf_f32"
-compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
 
 # sdpa_flash device-position variant (FlashAttentionDev): HAS_DEVICE_POS reads skv/qOffset from a device
 # buffer instead of push constants. Mutually exclusive with HAS_MASK (FlashAttentionDev has no mask param).

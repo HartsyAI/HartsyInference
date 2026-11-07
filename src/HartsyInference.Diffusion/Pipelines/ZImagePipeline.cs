@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -348,7 +349,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                             Tensor uncond = _transformer.ForwardPacked(Backend, x, negativeCaptionEmbeddings!, inverted, fpH, fpW);
                             if (PredictionStatsEnabled)
                                 ValidatePredictionFinite(uncond, $"unconditional step {stepIndex + 1}", logStats: true);
-                            // CfgEulerStep computes g·cond + (1−g)·uncond. Z-Image requires
+                            // GuidedEulerStep computes g·cond + (1−g)·uncond. Z-Image requires
                             // cond + cfg·(cond − uncond) = (1+cfg)·cond − cfg·uncond, hence g = cfg + 1.
                             return new DenoisePrediction(cond, uncond, cfgScale + 1.0f);
                         });
@@ -363,7 +364,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                     {
                         // Device unpack: a host read of the loop's tokens would D2H-and-free their device copy.
                         Tensor previewLatent = tensors.Own(new Tensor(latentShape, DType.F32), "preview latent");
-                        Backend.UnpatchifyTokens(previewLatent, packed!, _config.InChannels, fpH, fpW,
+                        PixelShuffles.UnpatchifyTokens(Backend, previewLatent, packed!, _config.InChannels, fpH, fpW,
                             _config.PatchSize, innerChannelFastest: true);
                         onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                         {
@@ -455,7 +456,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 if (graphMode)
                     tensors.Own(tokens, "graph latent snapshot");
                 latent = tensors.Own(new Tensor(latentShape, DType.F32), "unpatchified latent");
-                Backend.UnpatchifyTokens(latent, tokens, _config.InChannels, fpH, fpW, _config.PatchSize,
+                PixelShuffles.UnpatchifyTokens(Backend, latent, tokens, _config.InChannels, fpH, fpW, _config.PatchSize,
                     innerChannelFastest: true);
                 tensors.DisposeOwned(tokens);   // graph mode: the snapshot; eager: packed itself (as before)
                 Logs.Verbose($"[zimage-phase] unpatchify={sw.ElapsedMilliseconds - phU}ms");
@@ -559,7 +560,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Backend.FreeActivations();
 
             // FreeActivations just freed the step graph's fixed boundary buffers (they live in the ACTIVATION
-            // cache — CopyInto/CfgEulerStep re-cache them there), so a cross-gen replay would launch against freed
+            // cache — CopyInto/GuidedEulerStep re-cache them there), so a cross-gen replay would launch against freed
             // addresses: CUDA 700 that poisons the context (hit live on the first warm gen). The graph is therefore
             // per-generation here: invalidate now, re-warm + re-capture next gen at the fresh buffer addresses.
             if (graphMode)

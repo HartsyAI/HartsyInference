@@ -49,7 +49,7 @@ public static class FlowMatchSampling
 
     /// <summary>Builds the sampler for <paramref name="selection"/> over <paramref name="scheduler"/>'s own sigmas.
     /// Null or <c>euler</c> gives <see cref="EulerSampler"/>, whose step is the same fused
-    /// <see cref="Core.Backends.IBackend.CfgEulerStep"/> device op the pipeline called before — so a request that names
+    /// <see cref="Core.Backends.IBackend.GuidedEulerStep"/> device op the pipeline called before — so a request that names
     /// no sampler is unchanged, which is the property the whole rollout rests on.</summary>
     /// <exception cref="NotSupportedException">The sampler or sigma schedule is not available.</exception>
     /// <param name="startsFromNoisedInit">True when the initial latent was already noised at the FAMILY's

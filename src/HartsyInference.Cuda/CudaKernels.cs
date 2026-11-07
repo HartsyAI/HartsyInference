@@ -17,11 +17,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _msdaModule;
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
-    private readonly CudaModule _wanRopeModule;
-    private readonly CudaModule _wanVaeFramesModule;
     private readonly CudaModule _wanVaeConv3dModule;
-    private readonly CudaModule _wanVaeNormModule;
-    private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
     // Optional: across-step feature-cache gate reductions (stepcache.ptx). Null when the PTX has not been
@@ -29,16 +25,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule? _stepCacheModule;
     private readonly nint _stepCacheRelL1F32;
     private readonly nint _stepCacheRelL1F16;
-
-    // Optional: LTX-2.5 NA diffusion-decoder kernels (ltx25_na_decoder.ptx, src/HartsyInference.Cuda/Kernels/ltx25vae) —
-    // 3D neighborhood attention + its 3-axis interleaved rope. Null when the PTX has not been deployed; the
-    // backend then falls through to the managed reference rather than failing.
-    private readonly CudaModule? _ltx25NaModule;
-    private readonly nint _ltx25Na3dF32;
-    private readonly nint _ltx25Na3dTiled8x8F32;
-    private readonly nint _ltx25Na3dTiled4x8F32;
-    private readonly nint _ltx25NaRope3dF32;
-    private readonly nint _ltx25PixelShuffleF32;
 
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
@@ -96,7 +82,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _spatialF16Module;
     private readonly CudaModule _softmaxF16Module;
     private readonly CudaModule _transposeF16Module;
-    private readonly CudaModule _gegluF16Module;
     private readonly CudaModule _broadcastAddF16Module;
 
     // ── BF16 Modules (only the subset VAE needs; SDXL VAE F16 overflows) ─
@@ -114,10 +99,7 @@ public sealed partial class CudaKernels : IDisposable
 
     // ── DiT glue Modules ─────────────────────────────────────────────────
     private readonly CudaModule _ditF32Module;
-    private readonly CudaModule? _ditRopeModule;
     private readonly CudaModule? _ditFp8EmitModule;
-    private readonly CudaModule _mg3ActionModule;
-    private readonly nint _mg3SplitQkvTemporalF32, _mg3MergeTemporalF32, _mg3RopeBatchedF32, _mg3KvExpandF32, _mg3MouseMlpConcatF32;
 
     // ── Audio conv Module + handles (codec/TTS Conv1d + ConvTranspose1d, F32) ─
     private readonly CudaModule _audioConvF32Module;
@@ -143,17 +125,11 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _lmF32Module;
     private readonly CudaModule _lmHistoryModule;
     private readonly CudaModule _lmEmbedGatherModule;
-    private readonly CudaModule _lmCfgTopKModule;
-    private readonly nint _lmCfgTopKGuided;
-    private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
-    private readonly nint _lmGatherRowsF32;
-    private readonly nint _lmScatterAddWeightedRowsF32;
     private readonly nint _lmArgMaxLastDimF32;
     private readonly nint _lmArgMaxStage1F32;
     private readonly nint _lmArgMaxStage2F32;
-    private readonly nint _lmGluActF32;
     private readonly nint _lmQkvRopeScatterF32;
     private readonly nint _lmQkNormRopeScatterF32;
     private readonly nint _lmRmsNormQ8_1F32;
@@ -170,15 +146,11 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _lmSsmDeltaStepWarpRowF32;
     private readonly nint _lmSsmDeltaGatedNormF32;
     private readonly nint _lmAddRmsNormF32;
-    private readonly nint _lmRopeInterleavedF32;
-    private readonly nint _lmRopeDecodeSplitHalf;
-    private readonly nint _lmRopeDecodeInterleaved;
     private readonly nint _lmEmbedGatherDecodeF32;
     private readonly nint _lmEmbedGatherDecodeF16;
     private readonly nint _lmEmbedGatherDecodeBF16;
     private readonly nint _lmHistoryAppendDistinct;
     private readonly nint _lmRepetitionPenaltyF32;
-    private readonly nint _lmKvSliceTimeF32;
     private readonly CudaModule _flashAttnF32Module;
     private readonly nint _flashAttnF32;
     private readonly nint _flashAttnF16Kv;
@@ -256,34 +228,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _permute0213F32;
     private readonly nint _transpose2dF16;
     private readonly nint _permute0213F16;
-    private readonly nint _wanRopeInterleaved;
-    private readonly nint _wanRopeInterleavedPerHead;
-    private readonly nint _wanVaeExtractFrame;
-    private readonly nint _wanVaeWriteFrame;
     private readonly nint _wanVaeBuildPadded;
-    private readonly nint _wanVaeFillBias;
-    private readonly nint _wanVaeAccumulateTap;
-    private readonly nint _wanVaeExtractFrameBf16;
-    private readonly nint _wanVaeWriteFrameBf16;
     private readonly nint _wanVaeBuildPaddedBf16;
-    private readonly nint _wanVaeFillBiasBf16;
-    private readonly nint _wanVaeAccumulateTapBf16;
-    private readonly nint _seedVr2PixelShuffle;
-    private readonly nint _seedVr2PixelShuffleBf16;
-    private readonly nint _seedVr2PadBr;
-    private readonly nint _seedVr2PadBrBf16;
-    private readonly nint _wanVaeRmsNormChannel;
-    private readonly nint _wanVaeRmsNormChannelBf16;
-    private readonly nint _wanVaeUnpatchify;
-    private readonly nint _wanVaeUnpatchifyBf16;
-    private readonly nint _wanVaeDupUp3d;
-    private readonly nint _wanVaeDupUp3dBf16;
-    private readonly nint _wanVaeSplitQkv;
-    private readonly nint _wanVaeTokensToFrame;
-
-    // ── GeGlu function handles ───────────────────────────────────────────
-    private readonly nint _gegluF32;
-    private readonly nint _gegluF16;
 
     // ── BroadcastAdd function handles ────────────────────────────────────
     private readonly nint _broadcastAddF32;
@@ -301,105 +247,53 @@ public sealed partial class CudaKernels : IDisposable
 
     // ── DiT glue function handles (F32) ──────────────────────────────────
     private readonly nint _ditRmsNormF32;
-    private readonly nint _ditAffineBroadcastF32;
     private readonly nint _ditGatedResidualF32;
-    private readonly nint _ditModulation4F32;
-    private readonly nint _ditCfgEulerF32;
-    private readonly nint _ditCfgRenormReduceF32;
-    private readonly nint _ditCfgRenormFinalizeF32;
-    private readonly nint _ditCfgRenormEulerF32;
-    private readonly nint _ditCfgNormalizedEulerF32;
     private readonly nint _ditAffineMixF32;
     private readonly nint _ditMaskedAffineMixDenseF32;
     private readonly nint _ditMaskedAffineMixPackedOuterF32;
     private readonly nint _ditMaskedAffineMixPackedInnerF32;
-    private readonly nint _ditPatchifyF32;
-    private readonly nint _ditPatchifyU16;
-    private readonly nint _ditUnpatchifyF32;
-    private readonly nint _ditUnpatchifyU16;
     private readonly nint _ditSplitSliceU32;
     private readonly nint _ditSplitSliceU16;
     private readonly nint _ditTanhF32;
-    private readonly nint _ditRopeF32;
-    private readonly nint _ditRopeHeadMajorF32;
-    private readonly nint _ditRopeHeadMajorV2F32;
     private readonly nint _ditAffineBroadcastRowIndexedToFp8F32;
-    private readonly nint _ltx2SplitRopeF32;
-    private readonly nint _ltx2SplitRopeF16;
     private readonly nint _ltx2QkNormRopeHeadMajorF16;
     private readonly nint _ltx2QkNormRopeTokenMajorF16;
     private readonly nint _ltx2QkNormRopeHeadMajorRopeF16;
     private readonly nint _ltx2QkNormRopeTokenMajorRopeF16;
-    private readonly nint _ltx2HeadGateF16;
     private readonly nint _ltx2QkNormRopeHeadMajorF32;
     private readonly nint _ltx2QkNormRopeTokenMajorF32;
-    private readonly nint _ltx2HeadGateF32;
-    private readonly nint _ltx2RmsModulateF16;
-    private readonly nint _ltx2RmsModulateF32;
     private readonly nint _ditSliceLastDimF32;
-    private readonly nint _ditRowScaleF32;
     private readonly nint _ditAddScalarF32;
-    private readonly nint _ditLayerNormNoAffineF32;
-    private readonly nint _ditMoeTopkGateF32;
-    private readonly nint _ditRowGatedAccumF32;
-    private readonly nint _ditIndexAddF32;
-    private readonly nint _ditScatterRowsAfterF32;
     private readonly nint _ditSliceRowsF32;
-    private readonly nint _oasisSplitHeadsF32;
-    private readonly nint _oasisRopeInterleavedF32;
-    private readonly nint _oasisMergeHeadsF32;
-    private readonly nint _oasisUnpatchifyF32;
-    private readonly nint _oasisAdaLnF32;
-    private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
-    private readonly nint _gegluErfF32;
     private readonly nint _geluErfF32;
     private readonly nint _convTranspose2dF32;
     private readonly nint _ditConcat2F32;
-    private readonly nint _ditLayerNormModulateF32;
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _ditQkvSplitNormHeadMajorF32;
     private readonly nint _ditQkvSplitNormHeadMajorSubsetF32;
-    private readonly nint _fourierEmbedF32;
     private readonly nint _conv3dF32;
-    private readonly nint _sparseScatterToGridF32;
-    private readonly nint _sparseGatherFromGridF32;
-    private readonly nint _rowGatherF32;
-    private readonly nint _rowScatterAddF32;
-    private readonly nint _ditAffineBroadcastRowIndexedF32;
     private readonly nint _ditGatedResidualRowIndexedF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
     private readonly nint _ditRmsNormF16;
-    private readonly nint _ditLayerNormNoAffineF16;
-    private readonly nint _ditAffineBroadcastF16;
     private readonly nint _ditGatedResidualF16;
     private readonly nint _ditAddScalarF16;
     private readonly nint _ditSigmoidF16;
-    private readonly nint _ditRopeInterleavedF16;
-    private readonly nint _ditRopeF16;
     private readonly nint _ditSliceLastDimF16;
     private readonly nint _ditConcat2F16;
-    private readonly nint _ditLayerNormModulateF16;
     private readonly nint _ditQkvSplitNormF16;
     private readonly nint _ditQkvSplitNormHeadMajorF16;
     private readonly nint _ditQkvSplitNormHeadMajorSubsetF16;
-    private readonly nint _ditRepeatKvF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
-    private readonly nint _ditAffineBroadcastRowIndexedF16;
     private readonly nint _ditGatedResidualRowIndexedF16;
-    private readonly nint _ditGluActF16;
 
     // ── DiT glue function handles (BF16 — DiT BF16 activation path) ────
     private readonly CudaModule _ditBf16Module;
     private readonly nint _ditRmsNormBf16;
-    private readonly nint _ditGluActBf16;
-    private readonly nint _ditGeGluBf16;
-    private readonly nint _ditAffineBroadcastRowIndexedBf16;
     private readonly nint _ditGatedResidualRowIndexedBf16;
-    private readonly nint _ditAffineBroadcastBf16;
     private readonly nint _ditGatedResidualBf16;
 
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
@@ -760,40 +654,9 @@ public sealed partial class CudaKernels : IDisposable
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
         _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
 
-        _wanRopeModule = LoadOwnedModule(Ptx("wan_rope"));
-        _wanRopeInterleaved = _wanRopeModule.GetFunction("wan_rope_interleaved");
-        _wanRopeInterleavedPerHead = _wanRopeModule.GetFunction("wan_rope_interleaved_perhead");
-
-        _wanVaeFramesModule = LoadOwnedModule(Ptx("wan_vae_frames"));
-        _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
-        _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
-        _wanVaeExtractFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame_bf16");
-        _wanVaeWriteFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_write_frame_bf16");
-
         _wanVaeConv3dModule = LoadOwnedModule(Ptx("wan_vae_conv3d"));
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
-        _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
-        _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
         _wanVaeBuildPaddedBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded_bf16");
-        _wanVaeFillBiasBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias_bf16");
-        _wanVaeAccumulateTapBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap_bf16");
-        _seedVr2PixelShuffle = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_f32");
-        _seedVr2PixelShuffleBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_bf16");
-        _seedVr2PadBr = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_f32");
-        _seedVr2PadBrBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_bf16");
-
-        _wanVaeNormModule = LoadOwnedModule(Ptx("wan_vae_norm"));
-        _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
-        _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
-        _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
-        _wanVaeUnpatchifyBf16 = _wanVaeNormModule.GetFunction("wan_vae_unpatchify_bf16");
-        _wanVaeDupUp3d = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d");
-        _wanVaeDupUp3dBf16 = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d_bf16");
-        _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
-        _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
-
-        _gegluModule = LoadOwnedModule(Ptx("geglu_f32"));
-        _gegluF32 = _gegluModule.GetFunction("geglu_f32");
 
         _broadcastAddModule = LoadOwnedModule(Ptx("broadcast_add_f32"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
@@ -806,31 +669,6 @@ public sealed partial class CudaKernels : IDisposable
             _stepCacheModule = LoadOwnedModule(stepCachePath);
             _stepCacheRelL1F32 = _stepCacheModule.GetFunction("stepcache_rel_l1_f32");
             _stepCacheRelL1F16 = _stepCacheModule.GetFunction("stepcache_rel_l1_f16");
-        }
-
-        // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
-        // Absence is not an error — the decoder falls back to the managed reference.
-        string ltx25NaPath = Ptx("ltx25_na_decoder");
-        if (CanLoad(ltx25NaPath))
-        {
-            _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
-            _ltx25Na3dF32 = _ltx25NaModule.GetFunction("ltx25_na3d_f32");
-            _ltx25NaRope3dF32 = _ltx25NaModule.GetFunction("ltx25_na_rope3d_f32");
-            // A PTX predating the query-tiled rewrite still serves the two above, so missing tiled entries
-            // demote to the untiled kernel rather than failing the whole module.
-            try
-            {
-                _ltx25Na3dTiled8x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled8x8_f32");
-                _ltx25Na3dTiled4x8F32 = _ltx25NaModule.GetFunction("ltx25_na3d_tiled4x8_f32");
-            }
-            catch (CudaException)
-            {
-                _ltx25Na3dTiled8x8F32 = 0;
-                _ltx25Na3dTiled4x8F32 = 0;
-            }
-            // Same demotion for a PTX predating the pixel-shuffle entry: the upsample falls back to the host loop.
-            try { _ltx25PixelShuffleF32 = _ltx25NaModule.GetFunction("ltx25_pixel_shuffle_f32"); }
-            catch (CudaException) { _ltx25PixelShuffleF32 = 0; }
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
@@ -959,9 +797,6 @@ public sealed partial class CudaKernels : IDisposable
         _transpose2dF16 = _transposeF16Module.GetFunction("transpose_2d_f16");
         _permute0213F16 = _transposeF16Module.GetFunction("permute_0213_f16");
 
-        _gegluF16Module = LoadOwnedModule(Ptx("geglu_f16"));
-        _gegluF16 = _gegluF16Module.GetFunction("geglu_f16");
-
         _broadcastAddF16Module = LoadOwnedModule(Ptx("broadcast_add_f16"));
         _broadcastAddF16 = _broadcastAddF16Module.GetFunction("broadcast_add_f16");
 
@@ -1027,36 +862,14 @@ public sealed partial class CudaKernels : IDisposable
         // ── DiT glue (F32) ───────────────────────────────────────────────
         _ditF32Module = LoadOwnedModule(Ptx("dit_f32"));
         _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
-        _ditAffineBroadcastF32 = _ditF32Module.GetFunction("dit_affine_broadcast_lastdim_f32");
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
-        _ditModulation4F32 = _ditF32Module.GetFunction("dit_modulation4_f32");
-        _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
-        _ditCfgRenormReduceF32 = _ditF32Module.GetFunction("dit_cfg_renorm_reduce_f32");
-        _ditCfgRenormFinalizeF32 = _ditF32Module.GetFunction("dit_cfg_renorm_finalize_f32");
-        _ditCfgRenormEulerF32 = _ditF32Module.GetFunction("dit_cfg_renorm_euler_f32");
-        _ditCfgNormalizedEulerF32 = _ditF32Module.GetFunction("dit_cfg_normalized_euler_f32");
         _ditAffineMixF32 = _ditF32Module.GetFunction("dit_affine_mix_f32");
         _ditMaskedAffineMixDenseF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_dense_f32");
         _ditMaskedAffineMixPackedOuterF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_outer_f32");
         _ditMaskedAffineMixPackedInnerF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_inner_f32");
-        _ditPatchifyF32 = _ditF32Module.GetFunction("dit_patchify_f32");
-        _ditPatchifyU16 = _ditF32Module.GetFunction("dit_patchify_u16");
-        _ditUnpatchifyF32 = _ditF32Module.GetFunction("dit_unpatchify_f32");
-        _ditUnpatchifyU16 = _ditF32Module.GetFunction("dit_unpatchify_u16");
         _ditSplitSliceU32 = _ditF32Module.GetFunction("dit_split_slice_u32");
         _ditSplitSliceU16 = _ditF32Module.GetFunction("dit_split_slice_u16");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
-        _ditRopeF32 = _ditF32Module.GetFunction("dit_rope_f32");
-        _ditRopeHeadMajorF32 = _ditF32Module.GetFunction("dit_rope_head_major_f32");
-
-        // Separate module so rebuilding it can't perturb dit_f32.ptx's other 40 kernels. Optional:
-        // absent PTX just leaves the handle 0 and callers fall back to the v1 kernel above.
-        string ropeV2Path = Ptx("dit_rope");
-        if (CanLoad(ropeV2Path))
-        {
-            _ditRopeModule = LoadOwnedModule(ropeV2Path);
-            _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
-        }
 
         string fp8EmitPath = Ptx("dit_fp8emit");
         if (CanLoad(fp8EmitPath))
@@ -1065,89 +878,44 @@ public sealed partial class CudaKernels : IDisposable
             _ditAffineBroadcastRowIndexedToFp8F32 =
                 _ditFp8EmitModule.GetFunction("dit_affine_broadcast_rowindexed_to_fp8_f32");
         }
-        _ltx2SplitRopeF32 = _ditF32Module.GetFunction("ltx2_split_rope_f32");
         _ltx2QkNormRopeHeadMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_headmajor_f32");
         _ltx2QkNormRopeTokenMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f32");
-        _ltx2HeadGateF32 = _ditF32Module.GetFunction("ltx2_head_gate_f32");
-        _ltx2RmsModulateF32 = _ditF32Module.GetFunction("ltx2_rms_modulate_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
-        _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
-        _ditLayerNormNoAffineF32 = _ditF32Module.GetFunction("dit_layernorm_noaffine_f32");
-        _ditMoeTopkGateF32 = _ditF32Module.GetFunction("dit_moe_topk_gate_f32");
-        _ditRowGatedAccumF32 = _ditF32Module.GetFunction("dit_row_gated_accum_f32");
-        _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
-        _ditScatterRowsAfterF32 = _ditF32Module.GetFunction("dit_scatter_rows_after_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
-        _oasisSplitHeadsF32 = _ditF32Module.GetFunction("oasis_split_heads_f32");
-        _oasisRopeInterleavedF32 = _ditF32Module.GetFunction("oasis_rope_interleaved_f32");
-        _oasisMergeHeadsF32 = _ditF32Module.GetFunction("oasis_merge_heads_f32");
-        _oasisUnpatchifyF32 = _ditF32Module.GetFunction("oasis_unpatchify_f32");
-        _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
-        _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
-        _gegluErfF32 = _ditF32Module.GetFunction("geglu_erf_f32");
         _geluErfF32 = _ditF32Module.GetFunction("gelu_erf_f32");
         _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
         _ditConcat2F32 = _ditF32Module.GetFunction("dit_concat2_f32");
-        _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _ditQkvSplitNormHeadMajorF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_f32");
         _ditQkvSplitNormHeadMajorSubsetF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_subset_f32");
-        _fourierEmbedF32 = _ditF32Module.GetFunction("fourier_embed_f32");
         _conv3dF32 = _ditF32Module.GetFunction("conv3d_f32");
-        _sparseScatterToGridF32 = _ditF32Module.GetFunction("sparse_scatter_to_grid_f32");
-        _sparseGatherFromGridF32 = _ditF32Module.GetFunction("sparse_gather_from_grid_f32");
-        _rowGatherF32 = _ditF32Module.GetFunction("row_gather_f32");
-        _rowScatterAddF32 = _ditF32Module.GetFunction("row_scatter_add_f32");
-        _ditAffineBroadcastRowIndexedF32 = _ditF32Module.GetFunction("dit_affine_broadcast_rowindexed_f32");
         _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
-
-        _mg3ActionModule = LoadOwnedModule(Ptx("mg3_action"));
-        _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
-        _mg3MergeTemporalF32 = _mg3ActionModule.GetFunction("mg3_merge_temporal_f32");
-        _mg3RopeBatchedF32 = _mg3ActionModule.GetFunction("mg3_rope_batched_f32");
-        _mg3KvExpandF32 = _mg3ActionModule.GetFunction("mg3_kv_expand_f32");
-        _mg3MouseMlpConcatF32 = _mg3ActionModule.GetFunction("mg3_mouse_mlp_concat_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = LoadOwnedModule(Ptx("dit_f16"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
-        _ditLayerNormNoAffineF16 = _ditF16Module.GetFunction("dit_layernorm_noaffine_f16");
-        _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
         _ditGatedResidualF16 = _ditF16Module.GetFunction("dit_gated_residual_lastdim_f16");
         _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
         _ditSigmoidF16 = _ditF16Module.GetFunction("dit_sigmoid_f16");
-        _ditRopeInterleavedF16 = _ditF16Module.GetFunction("dit_rope_interleaved_f16");
-        _ltx2SplitRopeF16 = _ditF16Module.GetFunction("ltx2_split_rope_f16");
         _ltx2QkNormRopeHeadMajorF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_f16");
         _ltx2QkNormRopeTokenMajorF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f16");
         _ltx2QkNormRopeHeadMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_rf16_f16");
         _ltx2QkNormRopeTokenMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_rf16_f16");
-        _ltx2HeadGateF16 = _ditF16Module.GetFunction("ltx2_head_gate_f16");
-        _ltx2RmsModulateF16 = _ditF16Module.GetFunction("ltx2_rms_modulate_f16");
-        _ditRopeF16 = _ditF16Module.GetFunction("dit_rope_f16");
         _ditSliceLastDimF16 = _ditF16Module.GetFunction("dit_slice_lastdim_f16");
         _ditConcat2F16 = _ditF16Module.GetFunction("dit_concat2_f16");
-        _ditLayerNormModulateF16 = _ditF16Module.GetFunction("dit_layernorm_modulate_f16");
         _ditQkvSplitNormF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_f16");
         _ditQkvSplitNormHeadMajorF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_f16");
         _ditQkvSplitNormHeadMajorSubsetF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_subset_f16");
-        _ditRepeatKvF16 = _ditF16Module.GetFunction("dit_repeat_kv_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
-        _ditAffineBroadcastRowIndexedF16 = _ditF16Module.GetFunction("dit_affine_broadcast_rowindexed_f16");
         _ditGatedResidualRowIndexedF16 = _ditF16Module.GetFunction("dit_gated_residual_rowindexed_f16");
-        _ditGluActF16 = _ditF16Module.GetFunction("dit_glu_act_f16");
 
         // ── DiT glue (BF16 I/O, F32 accumulate) — DiT BF16 activation path ─
         _ditBf16Module = LoadOwnedModule(Ptx("dit_bf16"));
         _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
-        _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
-        _ditGeGluBf16 = _ditBf16Module.GetFunction("dit_geglu_bf16");
-        _ditAffineBroadcastRowIndexedBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_rowindexed_bf16");
         _ditGatedResidualRowIndexedBf16 = _ditBf16Module.GetFunction("dit_gated_residual_rowindexed_bf16");
-        _ditAffineBroadcastBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_lastdim_bf16");
         _ditGatedResidualBf16 = _ditBf16Module.GetFunction("dit_gated_residual_lastdim_bf16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
@@ -1170,15 +938,11 @@ public sealed partial class CudaKernels : IDisposable
 
         // ── Language-model glue (F32) ────────────────────────────────────
         _lmF32Module = LoadOwnedModule(Ptx("lm_f32"));
-        _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
         _lmKvAppendF16 = _lmF32Module.GetFunction("lm_kv_append_f16");
-        _lmGatherRowsF32 = _lmF32Module.GetFunction("lm_gather_rows_f32");
-        _lmScatterAddWeightedRowsF32 = _lmF32Module.GetFunction("lm_scatter_add_weighted_rows_f32");
         _lmArgMaxLastDimF32 = _lmF32Module.GetFunction("lm_argmax_lastdim_f32");
         _lmArgMaxStage1F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage1_f32");
         _lmArgMaxStage2F32 = _lmF32Module.GetFunction("lm_argmax_lastdim_stage2_f32");
-        _lmGluActF32 = _lmF32Module.GetFunction("lm_glu_act_f32");
         _lmQkvRopeScatterF32 = _lmF32Module.GetFunction("lm_qkv_rope_scatter_f32");
         _lmQkNormRopeScatterF32 = _lmF32Module.GetFunction("lm_qknorm_rope_scatter_f32");
         _lmRmsNormQ8_1F32 = _lmF32Module.GetFunction("lm_rmsnorm_q8_1_f32");
@@ -1195,21 +959,15 @@ public sealed partial class CudaKernels : IDisposable
         _lmSsmDeltaStepWarpRowF32 = _lmF32Module.GetFunction("lm_ssm_delta_step_warprow_f32");
         _lmSsmDeltaGatedNormF32 = _lmF32Module.GetFunction("lm_ssm_delta_gated_norm_f32");
         _lmAddRmsNormF32 = _lmF32Module.GetFunction("lm_add_rmsnorm_f32");
-        _lmRopeInterleavedF32 = _lmF32Module.GetFunction("lm_rope_interleaved_f32");
-        _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
-        _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
         _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
         // Half/bfloat16 table gathers sit in their own module, so the hand-tuned lm_f32 PTX is not rebuilt for them.
         _lmEmbedGatherModule = LoadOwnedModule(Ptx("lm_embed_gather"));
         _lmEmbedGatherDecodeF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_f16");
         _lmEmbedGatherDecodeBF16 = _lmEmbedGatherModule.GetFunction("lm_embed_gather_decode_bf16");
-        _lmCfgTopKModule = LoadOwnedModule(Ptx("lm_cfg_topk_guided"));
-        _lmCfgTopKGuided = _lmCfgTopKModule.GetFunction("lm_cfg_topk_guided_f32");
         // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
         _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
         _lmHistoryAppendDistinct = _lmHistoryModule.GetFunction("lm_history_append_distinct");
         _lmRepetitionPenaltyF32 = _lmF32Module.GetFunction("lm_repetition_penalty_f32");
-        _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
         _flashAttnF32Module = LoadOwnedModule(Ptx("flash_attn_f32"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF16Kv = _flashAttnF32Module.GetFunction("lm_flash_attn_f16kv_f32");
@@ -1332,6 +1090,13 @@ public sealed partial class CudaKernels : IDisposable
         LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
+        LoadLayoutKernels();
+        LoadRotaryKernels();
+        LoadNormModulateKernels();
+        LoadGatingKernels();
+        LoadGuidanceKernels();
+        LoadRowIndexKernels();
+        LoadNeighborhoodAttentionKernels();
         LoadInt8AttentionV2Kernels();
         if (_skippedModules.Count > 0)
             ReportSkippedModules();
@@ -1624,50 +1389,6 @@ public sealed partial class CudaKernels : IDisposable
             sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchAffineBroadcastImpl(nint func, ulong output, ulong input, ulong scale, ulong shift,
-        int seqLen, int dim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input, scaleArg = scale, shiftArg = shift;
-        uint seqArg = (uint)seqLen, dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[7];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &scaleArg;
-        args[3] = &shiftArg;
-        args[4] = &seqArg;
-        args[5] = &dimArg;
-        args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchAffineBroadcastRowIndexedImpl(nint func, ulong output, ulong input, ulong scaleTable,
-        ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input, scaleArg = scaleTable, shiftArg = shiftTable, idxArg = rowIndex;
-        uint dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[7];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &scaleArg;
-        args[3] = &shiftArg;
-        args[4] = &idxArg;
-        args[5] = &dimArg;
-        args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Whether the fused modulate-to-fp8 producer kernel is loaded.</summary>
     public bool HasAffineBroadcastRowIndexedToFp8 => _ditAffineBroadcastRowIndexedToFp8F32 != 0;
 
@@ -1733,177 +1454,6 @@ public sealed partial class CudaKernels : IDisposable
         args[4] = &seqArg;
         args[5] = &dimArg;
         args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchRepeatKvImpl(nint func, ulong output, ulong input,
-        int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint kvArg = (uint)kvHeads, groupArg = (uint)group, seqArg = (uint)seqLen, dimArg = (uint)headDim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[7];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &kvArg;
-        args[3] = &groupArg;
-        args[4] = &seqArg;
-        args[5] = &dimArg;
-        args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchModulation4Impl(nint func, ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp,
-        ulong proj, int dim, int batch, nint stream)
-    {
-        ulong sMsaArg = scaleMsa, gMsaArg = gateMsa, sMlpArg = scaleMlp, gMlpArg = gateMlp, projArg = proj;
-        uint dimArg = (uint)dim, batchArg = (uint)batch;
-
-        void** args = stackalloc void*[7];
-        args[0] = &sMsaArg;
-        args[1] = &gMsaArg;
-        args[2] = &sMlpArg;
-        args[3] = &gMlpArg;
-        args[4] = &projArg;
-        args[5] = &dimArg;
-        args[6] = &batchArg;
-
-        uint total = (uint)(batch * dim);
-        uint gridDim = (total + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchCfgEulerImpl(nint func, ulong z, ulong pos, ulong neg,
-        float guidance, float delta, int count, nint stream)
-    {
-        ulong zArg = z, posArg = pos, negArg = neg;
-        float gArg = guidance, dArg = delta;
-        uint countArg = (uint)count;
-
-        void** args = stackalloc void*[6];
-        args[0] = &zArg;
-        args[1] = &posArg;
-        args[2] = &negArg;
-        args[3] = &gArg;
-        args[4] = &dArg;
-        args[5] = &countArg;
-
-        uint gridDim = ((uint)count + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchRopeImpl(nint func, ulong x, ulong cos, ulong sin,
-        int numHeads, int headDim, long totalVecs, int rotaryDim, nint stream)
-    {
-        // rotaryDim 0 (or >= headDim) = full rotary; else partial (rotate the first rotaryDim dims of each head).
-        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotArg = (uint)rdim;
-        ulong vecsArg = (ulong)totalVecs;
-
-        void** args = stackalloc void*[7];
-        args[0] = &xArg;
-        args[1] = &cosArg;
-        args[2] = &sinArg;
-        args[3] = &headsArg;
-        args[4] = &headDimArg;
-        args[5] = &vecsArg;
-        args[6] = &rotArg;
-
-        long threads = totalVecs * (rdim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchRowScaleImpl(nint func, ulong output, ulong input, ulong rowScale,
-        int channels, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input, scaleArg = rowScale;
-        uint chArg = (uint)channels;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[5];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &scaleArg;
-        args[3] = &chArg;
-        args[4] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchLayerNormNoAffineImpl(nint func, ulong output, ulong input,
-        int dim, int totalRows, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint dimArg = (uint)dim, rowsArg = (uint)totalRows;
-        float epsArg = eps;
-
-        void** args = stackalloc void*[5];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &dimArg;
-        args[3] = &rowsArg;
-        args[4] = &epsArg;
-
-        uint gridDim = (uint)totalRows;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchIndexAddImpl(nint func, ulong h, ulong table, ulong indices,
-        int dim, long total, nint stream)
-    {
-        ulong hArg = h, tableArg = table, idxArg = indices;
-        uint dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[5];
-        args[0] = &hArg;
-        args[1] = &tableArg;
-        args[2] = &idxArg;
-        args[3] = &dimArg;
-        args[4] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchScatterRowsAfterImpl(nint func, ulong output, ulong input,
-        int headRows, int dim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint headArg = (uint)headRows, dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[5];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &headArg;
-        args[3] = &dimArg;
-        args[4] = &totalArg;
 
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(
@@ -2240,24 +1790,6 @@ public sealed partial class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchGeGluImpl(nint func, ulong output, ulong input, int innerDim, int outputElements, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint innerDimArg = (uint)innerDim;
-        uint outElemArg = (uint)outputElements;
-
-        void** args = stackalloc void*[4];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &innerDimArg;
-        args[3] = &outElemArg;
-
-        uint gridDim = ((uint)outputElements + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     private unsafe void LaunchBroadcastAddImpl(nint func, ulong hidden, ulong bias, int channels, int spatial, int totalElements, nint stream)
     {
         ulong hiddenArg = hidden, biasArg = bias;
@@ -2308,136 +1840,6 @@ public sealed partial class CudaKernels : IDisposable
         nint func = isF16 ? _stepCacheRelL1F16 : _stepCacheRelL1F32;
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Whether the optional ltx25_na_decoder.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).</summary>
-    public bool HasLtx25NaKernels => _ltx25NaModule is not null;
-
-    /// <summary>Whether the loaded ltx25_na_decoder.ptx carries the pixel-shuffle entry.</summary>
-    public bool HasLtx25PixelShuffle => _ltx25PixelShuffleF32 != 0;
-
-    /// <summary>Shared-memory bytes <see cref="LaunchLtx25Na3d"/> needs: the q row plus one score per window position.</summary>
-    public static int Ltx25Na3dSharedBytes(int headDim, int kt, int kh, int kw) => (headDim + kt * kh * kw) * sizeof(float);
-
-    /// <summary>3D neighborhood attention over [batch,T,H,W,heads,headDim]; one block per (batch,t,h,w,head) query. Kernel extents must already be clamped to their axis length, as the managed reference does.</summary>
-    public unsafe void LaunchLtx25Na3d(ulong output, ulong q, ulong k, ulong v,
-        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
-        int kt, int kh, int kw, float scale, nint stream)
-    {
-        if (_ltx25NaModule is null)
-            throw new InvalidOperationException("ltx25_na_decoder.ptx is not loaded; gate on HasLtx25NaKernels first.");
-
-        ulong outArg = output, qArg = q, kArg = k, vArg = v;
-        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
-        uint headsArg = (uint)heads, hdArg = (uint)headDim;
-        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
-        float scaleArg = scale;
-
-        void** args = stackalloc void*[14];
-        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
-        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
-        args[8] = &headsArg; args[9] = &hdArg;
-        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
-
-        // One block per query·head. Threads split the window in the score pass and head_dim in the value pass,
-        // so a block wider than either is wasted; 256 covers head_dim 64 and keeps 8 warps on the window.
-        uint blockDim = 256;
-        uint gridDim = (uint)((long)batch * dimT * dimH * dimW * heads);
-        uint sharedBytes = (uint)Ltx25Na3dSharedBytes(headDim, kt, kh, kw);
-        CudaDriverApi.cuLaunchKernel(_ltx25Na3dF32, gridDim, 1, 1, blockDim, 1, 1,
-            sharedBytes, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Query-tile height/width the tiled na3d kernels stage a shared window for, or (0, 0) when the shape is not one they cover — head_dim must be 64, and a tile only pays for itself once it holds real queries.</summary>
-    public (int H, int W) Ltx25Na3dTile(int dimH, int dimW, int headDim)
-    {
-        if (_ltx25Na3dTiled8x8F32 == 0 || headDim != 64) return (0, 0);
-        // A tile wider than the volume is all padding, and the union it stages is then the whole volume anyway.
-        if (dimH >= 8 && dimW >= 8) return (8, 8);
-        if (dimH >= 4 && dimW >= 8) return (4, 8);
-        return (0, 0);
-    }
-
-    /// <summary>Query-tiled 3D neighborhood attention: one block per (batch, t, h-tile, w-tile, head), streaming the tile's union window through shared memory. Same contract as <see cref="LaunchLtx25Na3d"/>; the tile must come from <see cref="Ltx25Na3dTile"/>.</summary>
-    public unsafe void LaunchLtx25Na3dTiled(ulong output, ulong q, ulong k, ulong v,
-        int batch, int dimT, int dimH, int dimW, int heads, int headDim,
-        int kt, int kh, int kw, float scale, int tileH, int tileW, nint stream)
-    {
-        nint func = tileH == 8 ? _ltx25Na3dTiled8x8F32 : _ltx25Na3dTiled4x8F32;
-        if (func == 0)
-            throw new InvalidOperationException("ltx25_na3d_tiled*_f32 is not loaded; gate on Ltx25Na3dTile first.");
-
-        ulong outArg = output, qArg = q, kArg = k, vArg = v;
-        uint bArg = (uint)batch, tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
-        uint headsArg = (uint)heads, hdArg = (uint)headDim;
-        uint ktArg = (uint)kt, khArg = (uint)kh, kwArg = (uint)kw;
-        float scaleArg = scale;
-
-        void** args = stackalloc void*[14];
-        args[0] = &outArg; args[1] = &qArg; args[2] = &kArg; args[3] = &vArg;
-        args[4] = &bArg; args[5] = &tArg; args[6] = &hArg; args[7] = &wArg;
-        args[8] = &headsArg; args[9] = &hdArg;
-        args[10] = &ktArg; args[11] = &khArg; args[12] = &kwArg; args[13] = &scaleArg;
-
-        long hTiles = (dimH + tileH - 1) / tileH, wTiles = (dimW + tileW - 1) / tileW;
-        uint gridDim = (uint)((long)batch * dimT * hTiles * wTiles * heads);
-        CudaDriverApi.cuLaunchKernel(func, gridDim, 1, 1, 256, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches the channels-last 3D pixel shuffle over one temporal chunk; one thread per SOURCE element, so <paramref name="total"/> is the projection's element count.</summary>
-    public unsafe void LaunchLtx25PixelShuffle(ulong dst, ulong src, int start, int h, int w,
-        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW,
-        long total, nint stream)
-    {
-        if (_ltx25PixelShuffleF32 == 0)
-            throw new InvalidOperationException("ltx25_pixel_shuffle_f32 is not loaded; gate on HasLtx25PixelShuffle first.");
-
-        ulong dstArg = dst, srcArg = src;
-        int startArg = start, hArg = h, wArg = w;
-        int p1Arg = strideT, p2Arg = strideH, p3Arg = strideW;
-        int ocArg = outChannels, dropArg = dropped, ohArg = outH, owArg = outW;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[13];
-        args[0] = &dstArg; args[1] = &srcArg;
-        args[2] = &startArg; args[3] = &hArg; args[4] = &wArg;
-        args[5] = &p1Arg; args[6] = &p2Arg; args[7] = &p3Arg;
-        args[8] = &ocArg; args[9] = &dropArg; args[10] = &ohArg; args[11] = &owArg;
-        args[12] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ltx25PixelShuffleF32, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>3-axis interleaved rope on x[1,t,h,w,heads,headDim], in place. cos/sin tables are per axis, laid out [axisLength, pairs]; the three head chunks sit at offsets 0 / offsetH / offsetW.</summary>
-    public unsafe void LaunchLtx25NaRope3d(ulong x,
-        ulong cosT, ulong sinT, ulong cosH, ulong sinH, ulong cosW, ulong sinW,
-        int dimT, int dimH, int dimW, int heads, int headDim,
-        int pairsT, int pairsH, int pairsW, int offsetH, int offsetW, nint stream)
-    {
-        if (_ltx25NaModule is null)
-            throw new InvalidOperationException("ltx25_na_decoder.ptx is not loaded; gate on HasLtx25NaKernels first.");
-
-        ulong xArg = x, ctArg = cosT, stArg = sinT, chArg = cosH, shArg = sinH, cwArg = cosW, swArg = sinW;
-        uint tArg = (uint)dimT, hArg = (uint)dimH, wArg = (uint)dimW;
-        uint headsArg = (uint)heads, hdArg = (uint)headDim;
-        uint ptArg = (uint)pairsT, phArg = (uint)pairsH, pwArg = (uint)pairsW;
-        uint ohArg = (uint)offsetH, owArg = (uint)offsetW;
-
-        void** args = stackalloc void*[17];
-        args[0] = &xArg;
-        args[1] = &ctArg; args[2] = &stArg; args[3] = &chArg; args[4] = &shArg; args[5] = &cwArg; args[6] = &swArg;
-        args[7] = &tArg; args[8] = &hArg; args[9] = &wArg;
-        args[10] = &headsArg; args[11] = &hdArg;
-        args[12] = &ptArg; args[13] = &phArg; args[14] = &pwArg;
-        args[15] = &ohArg; args[16] = &owArg;
-
-        long threads = (long)dimT * dimH * dimW * heads * (pairsT + pairsH + pairsW);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ltx25NaRope3dF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -2956,42 +2358,6 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchRmsNormBf16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormBf16, output, input, weight, normDim, totalRows, eps, stream);
 
-    /// <summary>Launches broadcast affine over the last dim: out = in*scale + shift (shift optional, pass 0 to skip).</summary>
-    public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Broadcast affine over the last dim, F16 activation I/O (scale/shift stay F32).</summary>
-    public void LaunchAffineBroadcastLastDimF16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF16, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Broadcast affine over the last dim, BF16 activation I/O (scale/shift stay F32).</summary>
-    public void LaunchAffineBroadcastLastDimBf16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastBf16, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Row-indexed affine with the table gather and the <c>1 +</c> folded in (shift optional, pass 0 to skip).</summary>
-    public void LaunchAffineBroadcastRowIndexed(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF32, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
-    /// <summary>Row-indexed affine, F16 activation I/O (the modulation table stays F32).</summary>
-    public void LaunchAffineBroadcastRowIndexedF16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
-    /// <summary>Row-indexed affine, BF16 activation I/O (the modulation table stays F32).</summary>
-    public void LaunchAffineBroadcastRowIndexedBf16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedBf16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
-    /// <summary>Launches GQA K/V head repeat (block pattern): [B,Hkv,L,D] → [B,Hkv*group,L,D].</summary>
-    public void LaunchRepeatKv(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
-        => LaunchRepeatKvImpl(_lmRepeatKvF32, output, input, kvHeads, group, seqLen, headDim, total, stream);
-
-    /// <summary>GQA K/V head repeat with F16 I/O (pure copy — no accumulation).</summary>
-    public void LaunchRepeatKvF16(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
-        => LaunchRepeatKvImpl(_ditRepeatKvF16, output, input, kvHeads, group, seqLen, headDim, total, stream);
-
-    /// <summary>GQA K/V head repeat with BF16 I/O; reuses the 16-bit bit-copy kernel without numeric conversion.</summary>
-    public void LaunchRepeatKvBf16(ulong output, ulong input, int kvHeads, int group, int seqLen, int headDim, long total, nint stream)
-        => LaunchRepeatKvImpl(_ditRepeatKvF16, output, input, kvHeads, group, seqLen, headDim, total, stream);
-
     private static void ValidateFlashAttentionHeadDim(int headDim)
     {
         if (headDim <= 0 || headDim > 1024)
@@ -3196,46 +2562,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_kvAppendF16Sat != 0 ? _kvAppendF16Sat : _lmKvAppendF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches KV time-range extraction: output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len).</summary>
-    public unsafe void LaunchKvSliceTime(ulong output, ulong input, int heads, int tIn, int headDim, int start, int len, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint hArg = (uint)heads, tInArg = (uint)tIn, dArg = (uint)headDim, startArg = (uint)start, lenArg = (uint)len;
-        ulong total = (ulong)heads * (ulong)len * (ulong)headDim;
-        ulong totalArg = total;
-
-        void** args = stackalloc void*[8];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &hArg; args[3] = &tInArg;
-        args[4] = &dArg; args[5] = &startArg; args[6] = &lenArg; args[7] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmKvSliceTimeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches MoE row-gather: output[m,j] = input[rowIndices[m], j]. total = M·K.</summary>
-    public unsafe void LaunchGatherRows(ulong outPtr, ulong inPtr, ulong idxPtr, int k, ulong total, nint stream)
-    {
-        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr;
-        uint kArg = (uint)k;
-        ulong totalArg = total;
-        void** args = stackalloc void*[5];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &kArg; args[4] = &totalArg;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmGatherRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches MoE weighted scatter-add: output[rowIndices[m], j] += scales[m]·input[m,j]. total = M·K.</summary>
-    public unsafe void LaunchScatterAddWeightedRows(ulong outPtr, ulong inPtr, ulong idxPtr, ulong scalePtr, int k, ulong total, nint stream)
-    {
-        ulong outArg = outPtr, inArg = inPtr, idxArg = idxPtr, scaleArg = scalePtr;
-        uint kArg = (uint)k;
-        ulong totalArg = total;
-        void** args = stackalloc void*[6];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &idxArg; args[3] = &scaleArg; args[4] = &kArg; args[5] = &totalArg;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmScatterAddWeightedRowsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Fused graph-decode QKV epilogue: ropes q/k and scatters q,k,v into their caches at pos.</summary>
     public unsafe void LaunchQkvRopeScatter(ulong qOut, ulong kCache, ulong vCache, ulong qIn, ulong kIn, ulong vIn,
         ulong cos, ulong sin, int nq, int nkv, int headDim, int rotaryDim, bool interleaved, int maxSeq, ulong devicePos, nint stream)
@@ -3284,30 +2610,6 @@ public sealed partial class CudaKernels : IDisposable
         args[5] = &dimA; args[6] = &rowsA; args[7] = &epsA;
         uint sharedMem = BlockSize * sizeof(float);
         CudaDriverApi.cuLaunchKernel(_lmAddRmsNormF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused gated-FFN activation epilogue over the concatenated [gate | up] projection output (act 0 = SiLU, 1 = GELU-tanh): one elementwise pass, no slice/activation/multiply intermediates.</summary>
-    public unsafe void LaunchGluAct(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
-        => LaunchGluActImpl(_lmGluActF32, comb, gateUp, rows, ff, gelu, stream);
-
-    /// <summary>Gated-FFN activation epilogue with BF16 I/O (F32 compute). Same launch geometry as the F32 kernel.</summary>
-    public unsafe void LaunchGluActBf16(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
-        => LaunchGluActImpl(_ditGluActBf16, comb, gateUp, rows, ff, gelu, stream);
-
-    /// <summary>Gated-FFN activation epilogue with F16 I/O (F32 compute). Same launch geometry as the F32 kernel.</summary>
-    public unsafe void LaunchGluActF16(ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
-        => LaunchGluActImpl(_ditGluActF16, comb, gateUp, rows, ff, gelu, stream);
-
-    private unsafe void LaunchGluActImpl(nint func, ulong comb, ulong gateUp, int rows, int ff, bool gelu, nint stream)
-    {
-        ulong combA = comb, guA = gateUp;
-        uint rowsA = (uint)rows, ffA = (uint)ff;
-        int actA = gelu ? 1 : 0;
-        void** args = stackalloc void*[5];
-        args[0] = &combA; args[1] = &guA; args[2] = &rowsA; args[3] = &ffA; args[4] = &actA;
-        long total = (long)rows * ff;
-        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>RMSNorm + Q8_1 sidecar emission in one launch (bit-identical F32 output to the plain RmsNorm kernel — same body and geometry; sidecar math verbatim from quantize_activation_q8_1_f32).</summary>
@@ -3578,14 +2880,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_ditSigmoidF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches AdaLN modulation split: proj[B,4D] → (1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp)), each [B,D].</summary>
-    public void LaunchModulation4(ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp, ulong proj, int dim, int batch, nint stream)
-        => LaunchModulation4Impl(_ditModulation4F32, scaleMsa, gateMsa, scaleMlp, gateMlp, proj, dim, batch, stream);
-
-    /// <summary>Launches CFG combine + Euler step in-place on z: z[i] += delta*(guidance*pos[i] + (1-guidance)*neg[i]).</summary>
-    public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
-        => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
-
     /// <summary>Elementwise affine mix: output = xScale*x + yScale*y.</summary>
     public unsafe void LaunchAffineMix(
         ulong output, ulong x, ulong y, float xScale, float yScale, long count, nint stream)
@@ -3655,128 +2949,6 @@ public sealed partial class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Global-renormalized CFG plus Euler update. Scratch layout is two double partial arrays followed by one float scale; all three stages are ordered on <paramref name="stream"/> and inputs remain unchanged.</summary>
-    public unsafe void LaunchCfgRenormEuler(
-        ulong z, ulong cond, ulong uncond, ulong scratch, int partialCount,
-        float guidance, float delta, float renormMin, long count, nint stream)
-    {
-        ulong condPartials = scratch;
-        ulong guidedPartials = scratch + (ulong)partialCount * sizeof(double);
-        ulong scale = guidedPartials + (ulong)partialCount * sizeof(double);
-
-        ulong condArg = cond, uncondArg = uncond, condPartialsArg = condPartials;
-        ulong guidedPartialsArg = guidedPartials, countArg = (ulong)count;
-        float guidanceArg = guidance;
-        void** reduceArgs = stackalloc void*[6];
-        reduceArgs[0] = &condArg;
-        reduceArgs[1] = &uncondArg;
-        reduceArgs[2] = &condPartialsArg;
-        reduceArgs[3] = &guidedPartialsArg;
-        reduceArgs[4] = &guidanceArg;
-        reduceArgs[5] = &countArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormReduceF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
-            2 * BlockSize * sizeof(double), stream, (nint)reduceArgs, 0).ThrowOnError();
-
-        ulong scaleArg = scale;
-        uint partialCountArg = (uint)partialCount;
-        float renormMinArg = renormMin;
-        void** finalizeArgs = stackalloc void*[5];
-        finalizeArgs[0] = &scaleArg;
-        finalizeArgs[1] = &condPartialsArg;
-        finalizeArgs[2] = &guidedPartialsArg;
-        finalizeArgs[3] = &partialCountArg;
-        finalizeArgs[4] = &renormMinArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormFinalizeF32, 1, 1, 1, BlockSize, 1, 1,
-            2 * BlockSize * sizeof(double), stream, (nint)finalizeArgs, 0).ThrowOnError();
-
-        ulong zArg = z;
-        float deltaArg = delta;
-        void** updateArgs = stackalloc void*[7];
-        updateArgs[0] = &zArg;
-        updateArgs[1] = &condArg;
-        updateArgs[2] = &uncondArg;
-        updateArgs[3] = &scaleArg;
-        updateArgs[4] = &guidanceArg;
-        updateArgs[5] = &deltaArg;
-        updateArgs[6] = &countArg;
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgRenormEulerF32, (uint)partialCount, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)updateArgs, 0).ThrowOnError();
-    }
-
-    /// <summary>Last-dimension-normalized CFG plus Euler update. Each block cooperatively reduces one logical row and applies its broadcast norm ratio to the in-place latent update.</summary>
-    public unsafe void LaunchCfgNormalizedEuler(
-        ulong z, ulong cond, ulong uncond, float guidance, float delta, float eps,
-        long rows, long lastDim, nint stream)
-    {
-        ulong zArg = z, condArg = cond, uncondArg = uncond;
-        float guidanceArg = guidance, deltaArg = delta, epsArg = eps;
-        ulong rowsArg = (ulong)rows, lastDimArg = (ulong)lastDim;
-        void** args = stackalloc void*[8];
-        args[0] = &zArg;
-        args[1] = &condArg;
-        args[2] = &uncondArg;
-        args[3] = &guidanceArg;
-        args[4] = &deltaArg;
-        args[5] = &epsArg;
-        args[6] = &rowsArg;
-        args[7] = &lastDimArg;
-        uint threads = 32;
-        while (threads < (ulong)lastDim && threads < BlockSize) threads <<= 1;
-        uint gridDim = (uint)Math.Min(rows, 65_535L);
-        CudaDriverApi.cuLaunchKernel(
-            _ditCfgNormalizedEulerF32, gridDim, 1, 1, threads, 1, 1,
-            2 * threads * sizeof(double), stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches patchify: NCHW <c>[B,C,H,W]</c> → token grid <c>[B,(H/p)·(W/p),C·p²]</c> (F32). <paramref name="innerChannelFastest"/> selects (ph,pw,c) when true and (c,ph,pw) when false.</summary>
-    public unsafe void LaunchDitPatchify(ulong output, ulong input, int batch, int channels, int height, int width,
-        int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitPatchifyImpl(
-            _ditPatchifyF32, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
-
-    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
-    public unsafe void LaunchDitPatchifyU16(ulong output, ulong input, int batch, int channels, int height, int width,
-        int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitPatchifyImpl(
-            _ditPatchifyU16, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
-
-    private unsafe void LaunchDitPatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
-        int height, int width, int patch, bool innerChannelFastest, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint chArg = (uint)channels, hArg = (uint)height, wArg = (uint)width, pArg = (uint)patch;
-        uint innerArg = innerChannelFastest ? 1u : 0u;
-        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)height * (ulong)width;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &chArg;
-        args[3] = &hArg;
-        args[4] = &wArg;
-        args[5] = &pArg;
-        args[6] = &innerArg;
-        args[7] = &totalArg;
-        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
-        CudaDriverApi.cuLaunchKernel(
-            kernel, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches unpatchify: token grid [B,hP·wP,C·p²] → pixel latent [B,C,H,W] (F32). <paramref name="innerChannelFastest"/>: token inner order (ph, pw, c) when true (Z-Image), (c, ph, pw) when false (Krea2).</summary>
-    public unsafe void LaunchDitUnpatchify(ulong output, ulong input, int batch, int channels, int hPacked,
-        int wPacked, int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitUnpatchifyImpl(
-            _ditUnpatchifyF32, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
-
-    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
-    public unsafe void LaunchDitUnpatchifyU16(ulong output, ulong input, int batch, int channels, int hPacked,
-        int wPacked, int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitUnpatchifyImpl(
-            _ditUnpatchifyU16, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
-
     /// <summary>Copies one split chunk from logical <c>[outer,inputDimension,inner]</c> storage; the 16-bit variant is shared by F16 and BF16, treating every element as an opaque payload word.</summary>
     public unsafe void LaunchSplitSlice(
         bool sixteenBit,
@@ -3810,166 +2982,9 @@ public sealed partial class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchDitUnpatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
-        int hPacked, int wPacked, int patch, bool innerChannelFastest, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint chArg = (uint)channels, hpArg = (uint)hPacked, wpArg = (uint)wPacked, pArg = (uint)patch;
-        uint innerArg = innerChannelFastest ? 1u : 0u;
-        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)hPacked * (ulong)wPacked
-            * (ulong)patch * (ulong)patch;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &chArg;
-        args[3] = &hpArg;
-        args[4] = &wpArg;
-        args[5] = &pArg;
-        args[6] = &innerArg;
-        args[7] = &totalArg;
-        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
-        CudaDriverApi.cuLaunchKernel(
-            kernel, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Launches tanh: output[i] = tanh(input[i]) (F32).</summary>
     public void LaunchTanh(ulong output, ulong input, int count, nint stream)
         => LaunchUnaryImpl(_ditTanhF32, output, input, count, stream);
-
-    /// <summary>Launches in-place rotary embedding on x [B,L,numHeads,headDim]; cos/sin [B,L,headDim].</summary>
-    public void LaunchRope(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
-        => LaunchRopeImpl(_ditRopeF32, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
-
-    /// <summary>Rotate-half rotary embedding with F16 x (cos/sin stay F32). Same geometry as the F32 kernel.</summary>
-    public void LaunchRopeF16(ulong x, ulong cos, ulong sin, int numHeads, int headDim, long totalVecs, nint stream, int rotaryDim = 0)
-        => LaunchRopeImpl(_ditRopeF16, x, cos, sin, numHeads, headDim, totalVecs, rotaryDim, stream);
-
-    /// <summary>Whether the division-free head-major rope kernel is available and fits this shape.</summary>
-    /// <remarks>Needs the token count in gridDim.x and (batch,head) in gridDim.y, so it declines shapes that
-    /// would blow the 65535 gridDim.y ceiling or need a block wider than 1024.</remarks>
-    public bool CanUseRopeHeadMajorV2(int heads, int headDim, int seq, int batch, int rotaryDim)
-    {
-        if (_ditRopeHeadMajorV2F32 == 0) return false;
-        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        int half = rdim >> 1;
-        if (half <= 0) return false;
-        int padHalf = 1;
-        while (padHalf < half) padHalf <<= 1;
-        return padHalf <= 1024 && (long)batch * heads <= 65535 && seq > 0;
-    }
-
-    /// <summary>Head-major rope with block-indexed tokens; bit-identical to <see cref="LaunchRopeHeadMajor"/>.</summary>
-    public unsafe void LaunchRopeHeadMajorV2(ulong x, ulong cos, ulong sin, int heads, int headDim, int seq,
-        int batch, nint stream, int rotaryDim = 0)
-    {
-        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        int half = rdim >> 1;
-        // Scalar, one pair per thread. A float4 variant (four pairs, 128-bit loads) measured SLOWER --
-        // 169 ms/step against this kernel's 124 -- so the kernel is latency-bound on occupancy, not on
-        // access width. Do not re-try it without first raising occupancy.
-        int units = half;
-        int padUnits = 1, padShift = 0;
-        while (padUnits < units) { padUnits <<= 1; padShift++; }
-        int vecsPerBlock = Math.Max(1, 256 / padUnits);
-        int blockDimX = vecsPerBlock * padUnits;
-
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headDimArg = (uint)headDim, halfArg = (uint)half, seqArg = (uint)seq;
-        uint headsArg = (uint)heads, padShiftArg = (uint)padShift;
-
-        void** args = stackalloc void*[8];
-        args[0] = &xArg;
-        args[1] = &cosArg;
-        args[2] = &sinArg;
-        args[3] = &headDimArg;
-        args[4] = &halfArg;
-        args[5] = &seqArg;
-        args[6] = &headsArg;
-        args[7] = &padShiftArg;
-
-        uint gridX = (uint)((seq + vecsPerBlock - 1) / vecsPerBlock);
-        uint gridY = (uint)(batch * heads);
-        CudaDriverApi.cuLaunchKernel(
-            _ditRopeHeadMajorV2F32, gridX, gridY, 1, (uint)blockDimX, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches in-place rotary embedding on head-major x [B,heads,seq,headDim]; cos/sin stay [B,seq,headDim].</summary>
-    public unsafe void LaunchRopeHeadMajor(ulong x, ulong cos, ulong sin, int heads, int headDim, int seq,
-        long totalVecs, nint stream, int rotaryDim = 0)
-    {
-        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headsArg = (uint)heads, headDimArg = (uint)headDim, rotArg = (uint)rdim, seqArg = (uint)seq;
-        ulong vecsArg = (ulong)totalVecs;
-
-        void** args = stackalloc void*[8];
-        args[0] = &xArg;
-        args[1] = &cosArg;
-        args[2] = &sinArg;
-        args[3] = &headsArg;
-        args[4] = &headDimArg;
-        args[5] = &vecsArg;
-        args[6] = &rotArg;
-        args[7] = &seqArg;
-
-        long threads = totalVecs * (rdim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            _ditRopeHeadMajorF32, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches in-place interleaved (GPT-J) rotary embedding on x [B,L,numHeads,headDim]; cos/sin [B,L,headDim]. Rotates adjacent pairs (2i,2i+1) by frequency i (not the split-half convention). <paramref name="rotaryDim"/> 0 (or &gt;=headDim) rotates every pair (full rotary); otherwise only pairs inside [0, rotaryDim) rotate — dims [rotaryDim, headDim) pass through (GLM-4's partial rotary).</summary>
-    public unsafe void LaunchRopeInterleaved(ulong x, ulong cos, ulong sin, int numHeads, int headDim, int rotaryDim, long totalVecs, nint stream)
-    {
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotaryDimArg = (uint)rotaryDim;
-        ulong vecsArg = (ulong)totalVecs;
-        void** args = stackalloc void*[7];
-        args[0] = &xArg;
-        args[1] = &cosArg;
-        args[2] = &sinArg;
-        args[3] = &headsArg;
-        args[4] = &headDimArg;
-        args[5] = &rotaryDimArg;
-        args[6] = &vecsArg;
-        long threads = totalVecs * (headDim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            _lmRopeInterleavedF32, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Graph-capture decode: split-half RoPE on a single decode-step Q/K tensor [1,numHeads,1,headDim], reading the rotation row from a precomputed full table via devicePos[1] (qOffset). Grid is fixed (position-independent) — same devicePos convention as LaunchKvAppend/LaunchFlashAttention.</summary>
-    public unsafe void LaunchRopeDecodeSplitHalf(
-        ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, int rotaryDim,
-        ulong devicePos, nint stream)
-    {
-        ulong xArg = x, cosArg = cosTable, sinArg = sinTable, posArg = devicePos;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim, rotArg = (uint)rotaryDim;
-        void** args = stackalloc void*[7];
-        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg;
-        args[3] = &headsArg; args[4] = &headDimArg; args[5] = &rotArg; args[6] = &posArg;
-        int rdim = rotaryDim == 0 ? headDim : Math.Min(rotaryDim, headDim);
-        long threads = (long)numHeads * (rdim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmRopeDecodeSplitHalf, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Graph-capture decode: interleaved (GPT-J) RoPE on a single decode-step Q/K tensor, position from devicePos[1]. Same table/convention as <see cref="LaunchRopeDecodeSplitHalf"/>.</summary>
-    public unsafe void LaunchRopeDecodeInterleaved(ulong x, ulong cosTable, ulong sinTable, int numHeads, int headDim, ulong devicePos, nint stream)
-    {
-        ulong xArg = x, cosArg = cosTable, sinArg = sinTable, posArg = devicePos;
-        uint headsArg = (uint)numHeads, headDimArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg;
-        args[3] = &headsArg; args[4] = &headDimArg; args[5] = &posArg;
-        long threads = (long)numHeads * (headDim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_lmRopeDecodeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
 
     /// <summary>Graph-capture decode: gathers one row (the token in <paramref name="tokenId"/>, a persistent 1-int device buffer) from a GPU-resident embedding table into <paramref name="output"/> [1,1,hidden]. Fixed grid — capturable.</summary>
     public unsafe void LaunchEmbedGatherDecode(ulong output, ulong embedTable, ulong tokenId, int hidden, nint stream)
@@ -3980,21 +2995,6 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &outArg; args[1] = &embArg; args[2] = &tokArg; args[3] = &hiddenArg;
         uint gridDim = (uint)(((uint)hidden + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_lmEmbedGatherDecodeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MiniMax guided semantic logits: the conditional top-K candidates get <c>u + (c - u)·g</c>, all other entries -inf
-    /// (lm_cfg_topk_guided.cu). One block per row; <paramref name="count"/> is capped at the kernel mask of 16448 entries.</summary>
-    public unsafe void LaunchCfgTopKGuided(ulong output, ulong cond, ulong uncond, int count, int topK, float guidance, nint stream)
-    {
-        if (_lmCfgTopKGuided == 0) throw new InvalidOperationException("lm_cfg_topk_guided.ptx not present in the Ptx folder.");
-        if (count < 1 || count > 16448 || topK < 1 || topK > count)
-            throw new ArgumentOutOfRangeException(nameof(count), $"guided top-K needs 1 <= topK <= count <= 16448; got count={count} topK={topK}; the mask holds up to 16448 entries.");
-        ulong outArg = output, condArg = cond, uncondArg = uncond;
-        int countArg = count, topKArg = topK;
-        float guidanceArg = guidance;
-        void** args = stackalloc void*[6];
-        args[0] = &outArg; args[1] = &condArg; args[2] = &uncondArg; args[3] = &countArg; args[4] = &topKArg; args[5] = &guidanceArg;
-        CudaDriverApi.cuLaunchKernel(_lmCfgTopKGuided, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Device-indexed gather from a half- or bfloat16-stored table into an F32 row (lm_embed_gather.cu).</summary>
@@ -4038,86 +3038,9 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchSliceLastDimF16(ulong output, ulong input, int outDim, int inDim, int offset, long total, nint stream)
         => LaunchSliceLastDimImpl(_ditSliceLastDimF16, output, input, outDim, inDim, offset, total, stream);
 
-    /// <summary>Launches per-row scalar multiply: out[row,c] = in[row,c] * rowScale[row] (token masking).</summary>
-    public void LaunchRowScale(ulong output, ulong input, ulong rowScale, int channels, long total, nint stream)
-        => LaunchRowScaleImpl(_ditRowScaleF32, output, input, rowScale, channels, total, stream);
-
     /// <summary>Launches add-scalar: out[i] = in[i] + c (F32).</summary>
     public void LaunchAddScalar(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF32, output, input, c, count, stream);
-
-    /// <summary>Pixel-quantize to 256 levels (DIAMOND EDM output; enables a drain-free graph-capturable step).</summary>
-    public void LaunchPixelQuantize(ulong output, ulong input, int count, nint stream)
-        => LaunchScaleImpl(_ditPixelQuantizeF32, output, input, 0f, count, stream);
-
-    /// <summary>Oasis head split: frame-major qkv[token,3·dim] → out[b,heads,seq,headDim] (part q/k/v, spatial/temporal).</summary>
-    public unsafe void LaunchOasisSplitHeads(
-        ulong output, ulong qkv, int frames, int sp, int heads, int headDim, int part,
-        bool temporal, nint stream)
-    {
-        ulong outArg = output, qkvArg = qkv;
-        uint fArg = (uint)frames, spArg = (uint)sp, hArg = (uint)heads, hdArg = (uint)headDim, pArg = (uint)part, tArg = temporal ? 1u : 0u;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg; args[1] = &qkvArg; args[2] = &fArg; args[3] = &spArg;
-        args[4] = &hArg; args[5] = &hdArg; args[6] = &pArg; args[7] = &tArg;
-        long threads = (long)frames * sp * heads * headDim;
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_oasisSplitHeadsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Interleaved (2i,2i+1) partial rope on x[b,heads,seq,headDim]; cos/sin are [seq,rotDim].</summary>
-    public unsafe void LaunchOasisRopeInterleaved(ulong x, ulong cos, ulong sin, int batch, int heads, int seq, int headDim, int rotDim, nint stream)
-    {
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint bArg = (uint)batch, hArg = (uint)heads, sArg = (uint)seq, hdArg = (uint)headDim, rArg = (uint)rotDim;
-        void** args = stackalloc void*[8];
-        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg; args[3] = &bArg;
-        args[4] = &hArg; args[5] = &sArg; args[6] = &hdArg; args[7] = &rArg;
-        long threads = (long)batch * heads * seq * (rotDim / 2);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_oasisRopeInterleavedF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Oasis head merge: attn[b,heads,seq,headDim] → out[token,dim] (inverse of split).</summary>
-    public unsafe void LaunchOasisMergeHeads(ulong output, ulong attn, int frames, int sp, int heads, int headDim, bool temporal, nint stream)
-    {
-        ulong outArg = output, attnArg = attn;
-        uint fArg = (uint)frames, spArg = (uint)sp, hArg = (uint)heads, hdArg = (uint)headDim, tArg = temporal ? 1u : 0u;
-        void** args = stackalloc void*[7];
-        args[0] = &outArg; args[1] = &attnArg; args[2] = &fArg; args[3] = &spArg;
-        args[4] = &hArg; args[5] = &hdArg; args[6] = &tArg;
-        long threads = (long)frames * sp * heads * headDim;
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_oasisMergeHeadsF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused Oasis adaLN: LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame (5 kernels → 1).</summary>
-    public unsafe void LaunchOasisAdaLn(
-        ulong output, ulong input, ulong mod, int dim, int sp, int totalRows, int modStride,
-        int shiftOff, int scaleOff, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input, modArg = mod;
-        uint dimArg = (uint)dim, spArg = (uint)sp, rowsArg = (uint)totalRows, msArg = (uint)modStride, shArg = (uint)shiftOff, scArg = (uint)scaleOff;
-        float epsArg = eps;
-        void** args = stackalloc void*[10];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &modArg; args[3] = &dimArg; args[4] = &spArg;
-        args[5] = &rowsArg; args[6] = &msArg; args[7] = &shArg; args[8] = &scArg; args[9] = &epsArg;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(_oasisAdaLnF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Oasis per-frame unpatchify: proj[t·sp, c·p²] → out[t,c,H,W] with [py,px,ci] inner layout.</summary>
-    public unsafe void LaunchOasisUnpatchify(ulong output, ulong proj, int frames, int channels, int gh, int gw, int patch, nint stream)
-    {
-        ulong outArg = output, projArg = proj;
-        uint fArg = (uint)frames, cArg = (uint)channels, ghArg = (uint)gh, gwArg = (uint)gw, pArg = (uint)patch;
-        void** args = stackalloc void*[7];
-        args[0] = &outArg; args[1] = &projArg; args[2] = &fArg; args[3] = &cArg;
-        args[4] = &ghArg; args[5] = &gwArg; args[6] = &pArg;
-        long threads = (long)frames * channels * (gh * patch) * (gw * patch);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_oasisUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
 
     /// <summary>TripoSR triplane grid-sample: writes <paramref name="count"/>×[3·C] features to <paramref name="outF"/>. <paramref name="coords"/> may be 0 when <paramref name="gridRes"/>&gt;0 (coords generated in-kernel).</summary>
     public unsafe void LaunchTriplaneGridSample(ulong outF, ulong planes, ulong coords, ulong chunkStart,
@@ -4149,18 +3072,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_convTranspose2dF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>GEGLU with exact erf gate: <paramref name="outp"/>[rows,inner] = proj[:,:inner]·gelu_erf(proj[:,inner:]).</summary>
-    public unsafe void LaunchGegluErf(ulong outp, ulong proj, long rows, int inner, nint stream)
-    {
-        ulong outArg = outp, projArg = proj, rowsArg = (ulong)rows;
-        uint innerArg = (uint)inner;
-        void** args = stackalloc void*[4];
-        args[0] = &outArg; args[1] = &projArg; args[2] = &rowsArg; args[3] = &innerArg;
-        long threads = rows * inner;
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_gegluErfF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Exact (erf) GELU, elementwise: <paramref name="outp"/>[i] = 0.5·x·(1+erf(x/√2)).</summary>
     public unsafe void LaunchGeluErf(ulong outp, ulong input, long count, nint stream)
     {
@@ -4182,20 +3093,6 @@ public sealed partial class CudaKernels : IDisposable
         long threads = (long)outer * (aDim + bDim) * inner;
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(f16 ? _ditConcat2F16 : _ditConcat2F32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused adaLN modulation: out = (1+scale)·LayerNormNoAffine(in) + shift (one block per row).</summary>
-    public unsafe void LaunchLayerNormModulate(bool f16, ulong output, ulong input, ulong scale, ulong shift,
-        int dim, int seqLen, int totalRows, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input, scArg = scale, shArg = shift;
-        uint dimArg = (uint)dim, seqArg = (uint)seqLen, rowsArg = (uint)totalRows; float epsArg = eps;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &scArg; args[3] = &shArg;
-        args[4] = &dimArg; args[5] = &seqArg; args[6] = &rowsArg; args[7] = &epsArg;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ditLayerNormModulateF16 : _ditLayerNormModulateF32,
-            (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     private static uint QkvNormBlockSize(int headDim)
@@ -4249,39 +3146,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(fn, grid, 1, 1, block, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>FourierEmbedder over device coords [count,3] → dst [count, 3·(2·bands+1)] (one thread per point·coord).</summary>
-    public unsafe void LaunchFourierEmbed(ulong dst, ulong coords, int count, int bands, int dim, nint stream)
-    {
-        ulong dArg = dst, cArg = coords; uint countArg = (uint)count, bArg = (uint)bands, dimArg = (uint)dim;
-        void** args = stackalloc void*[5];
-        args[0] = &dArg; args[1] = &cArg; args[2] = &countArg; args[3] = &bArg; args[4] = &dimArg;
-        uint grid = (uint)(((long)count * 3 + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Sparse submanifold-conv scatter/gather (one thread per voxel·channel). <paramref name="scatter"/> selects scatter (feats→grid) vs gather (grid→feats).</summary>
-    public unsafe void LaunchSparseGridScatterGather(bool scatter, ulong grid, ulong feats, ulong coords, int n, int c, int r, nint stream)
-    {
-        ulong gArg = grid, fArg = feats, cArg = coords; int nA = n, cA = c, rA = r;
-        void** args = stackalloc void*[6];
-        // kernel signature: (grid/feats first arg, feats/grid second, coords, n, c, r)
-        args[0] = scatter ? &gArg : &fArg; args[1] = scatter ? &fArg : &gArg; args[2] = &cArg;
-        args[3] = &nA; args[4] = &cA; args[5] = &rA;
-        uint grid1 = (uint)(((long)n * c + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(scatter ? _sparseScatterToGridF32 : _sparseGatherFromGridF32,
-            grid1, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Row gather (<paramref name="gather"/>=true: out[j]=in[idx[j]]) or scatter-add (out[idx[j]]+=in[j]).</summary>
-    public unsafe void LaunchRowGatherScatter(bool gather, ulong outp, ulong input, ulong indices, int m, int c, nint stream)
-    {
-        ulong oArg = outp, iArg = input, idxArg = indices; int mA = m, cA = c;
-        void** args = stackalloc void*[5];
-        args[0] = &oArg; args[1] = &iArg; args[2] = &idxArg; args[3] = &mA; args[4] = &cA;
-        uint grid = (uint)(((long)m * c + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(gather ? _rowGatherF32 : _rowScatterAddF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Dense 3D convolution (gather form, one thread per output element). Weight [Cout,Cin,kD,kH,kW].</summary>
     public unsafe void LaunchConv3d(ulong outp, ulong input, ulong weight, ulong bias,
         int n, int cin, int cout, int iD, int iH, int iW, int oD, int oH, int oW,
@@ -4303,56 +3167,6 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
     public void LaunchAddScalarF16(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF16, output, input, c, count, stream);
-
-    /// <summary>Launches non-affine LayerNorm: per-row zero-mean unit-variance, no scale/bias.</summary>
-    public void LaunchLayerNormNoAffine(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
-        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF32, output, input, dim, totalRows, eps, stream);
-
-    /// <summary>Non-affine LayerNorm with F16 activation I/O (F32 accumulate) — the DiT F16 activation path.</summary>
-    public void LaunchLayerNormNoAffineF16(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
-        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF16, output, input, dim, totalRows, eps, stream);
-
-    /// <summary>MoE top-k gate weights: softmax over E + top-k renorm per token (one thread per token).</summary>
-    public unsafe void LaunchMoeTopkGate(ulong weights, ulong logits, int numExperts, int topK, long totalTokens, nint stream)
-    {
-        ulong wArg = weights, lArg = logits;
-        uint eArg = (uint)numExperts, kArg = (uint)topK;
-        ulong totalArg = (ulong)totalTokens;
-        void** args = stackalloc void*[5];
-        args[0] = &wArg;
-        args[1] = &lArg;
-        args[2] = &eArg;
-        args[3] = &kArg;
-        args[4] = &totalArg;
-        uint gridDim = (uint)((totalTokens + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ditMoeTopkGateF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Per-token gated accumulate: out[i] += gate[row(i), expertIdx] * val[i] (MoE combine).</summary>
-    public unsafe void LaunchRowGatedAccum(ulong inout, ulong value, ulong gate, int numExperts, int expertIdx, int dim, long total, nint stream)
-    {
-        ulong oArg = inout, vArg = value, gArg = gate;
-        uint eArg = (uint)numExperts, xArg = (uint)expertIdx, dArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-        void** args = stackalloc void*[7];
-        args[0] = &oArg;
-        args[1] = &vArg;
-        args[2] = &gArg;
-        args[3] = &eArg;
-        args[4] = &xArg;
-        args[5] = &dArg;
-        args[6] = &totalArg;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ditRowGatedAccumF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches index-add of embedding rows in-place: h[row,d] += table[indices[row], d].</summary>
-    public void LaunchIndexAdd(ulong h, ulong table, ulong indices, int dim, long total, nint stream)
-        => LaunchIndexAddImpl(_ditIndexAddF32, h, table, indices, dim, total, stream);
-
-    /// <summary>Launches scatter-rows-after: output = [zeros(headRows), input] along the row axis.</summary>
-    public void LaunchScatterRowsAfter(ulong output, ulong input, int headRows, int dim, long total, nint stream)
-        => LaunchScatterRowsAfterImpl(_ditScatterRowsAfterF32, output, input, headRows, dim, total, stream);
 
     /// <summary>Launches contiguous row-block slice: output[i] = input[elemOffset + i].</summary>
     public void LaunchSliceRows(ulong output, ulong input, long elemOffset, long total, nint stream)
@@ -4492,118 +3306,6 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchPermute0213F16(ulong output, ulong input, int s, int h, int d, int totalElements, nint stream)
         => LaunchPermute0213Impl(_permute0213F16, output, input, s, h, d, totalElements, stream);
 
-    /// <summary>Wan-Video interleaved RoPE, in-place on <paramref name="x"/> [S, heads·headDim]. One thread per (s, head, pair); cos/sin are [S, headDim] shared across heads (duplicated-pair layout).</summary>
-    public unsafe void LaunchWanRopeInterleaved(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
-    {
-        ulong xA = x, cA = cos, sA = sin;
-        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
-        long total = (long)S * heads * (headDim / 2);
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanRopeInterleaved, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Per-head interleaved RoPE (MG3 sigma_theta): cos/sin are [heads, S, headDim]. F32.</summary>
-    public unsafe void LaunchWanRopeInterleavedPerHead(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
-    {
-        ulong xA = x, cA = cos, sA = sin;
-        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
-        long total = (long)S * heads * (headDim / 2);
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanRopeInterleavedPerHead, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MG3 ActionModule: gather QKV slot into the batched temporal layout [sp, heads, tt, headDim].</summary>
-    public unsafe void LaunchMg3SplitQkvTemporal(ulong qkv, ulong outp, int tt, int sp, int heads, int headDim, int part, int stride, nint stream)
-    {
-        ulong qkvArg = qkv, outpArg = outp;
-        uint ttArg = (uint)tt, spArg = (uint)sp, headsArg = (uint)heads, headDimArg = (uint)headDim, partArg = (uint)part, strideArg = (uint)stride;
-        void** args = stackalloc void*[8];
-        args[0] = &qkvArg; args[1] = &outpArg; args[2] = &ttArg; args[3] = &spArg;
-        args[4] = &headsArg; args[5] = &headDimArg; args[6] = &partArg; args[7] = &strideArg;
-        long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_mg3SplitQkvTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MG3 ActionModule: [sp, heads, tt, headDim] back to token rows [tt·sp, streamDim].</summary>
-    public unsafe void LaunchMg3MergeTemporal(ulong attn, ulong outp, int tt, int sp, int heads, int headDim, nint stream)
-    {
-        ulong attnArg = attn, outpArg = outp;
-        uint ttArg = (uint)tt, spArg = (uint)sp, headsArg = (uint)heads, headDimArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &attnArg; args[1] = &outpArg; args[2] = &ttArg; args[3] = &spArg; args[4] = &headsArg; args[5] = &headDimArg;
-        long total = (long)tt * sp * heads * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_mg3MergeTemporalF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MG3 ActionModule: interleaved rope on [sp, heads, tt, headDim]; cos/sin [gridRows, headDim].</summary>
-    public unsafe void LaunchMg3RopeBatched(
-        ulong x, ulong cos, ulong sin, int sp, int heads, int tt, int headDim, int gh, int gw,
-        int broadcast, nint stream)
-    {
-        ulong xArg = x, cosArg = cos, sinArg = sin;
-        uint spArg = (uint)sp, headsArg = (uint)heads, ttArg = (uint)tt, headDimArg = (uint)headDim;
-        uint ghArg = (uint)gh, gwArg = (uint)gw, broadcastArg = (uint)broadcast;
-        void** args = stackalloc void*[10];
-        args[0] = &xArg; args[1] = &cosArg; args[2] = &sinArg; args[3] = &spArg; args[4] = &headsArg;
-        args[5] = &ttArg; args[6] = &headDimArg; args[7] = &ghArg; args[8] = &gwArg; args[9] = &broadcastArg;
-        long total = (long)sp * heads * tt * (headDim / 2);
-        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_mg3RopeBatchedF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MG3 ActionModule keyboard: expand K/V [tt, 2·streamDim] → k,v [sp, heads, tt, headDim].</summary>
-    public unsafe void LaunchMg3KvExpand(ulong kv, ulong kOut, ulong vOut, int sp, int heads, int tt, int headDim, nint stream)
-    {
-        ulong kvArg = kv, kOutArg = kOut, vOutArg = vOut;
-        uint spArg = (uint)sp, headsArg = (uint)heads, ttArg = (uint)tt, headDimArg = (uint)headDim;
-        void** args = stackalloc void*[7];
-        args[0] = &kvArg; args[1] = &kOutArg; args[2] = &vOutArg;
-        args[3] = &spArg; args[4] = &headsArg; args[5] = &ttArg; args[6] = &headDimArg;
-        long total = (long)sp * heads * tt * headDim; uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_mg3KvExpandF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>MG3 mouse stream: build MLP input [tt·sp, imgDim+winFloats] = [hidden | broadcast mouse window].</summary>
-    public unsafe void LaunchMg3MouseMlpConcat(ulong hidden, ulong mouseWin, ulong outp, int tt, int sp, int imgDim, int winFloats, nint stream)
-    {
-        ulong hiddenArg = hidden, mouseWinArg = mouseWin, outpArg = outp;
-        uint ttArg = (uint)tt, spArg = (uint)sp, imgDimArg = (uint)imgDim, winFloatsArg = (uint)winFloats;
-        void** args = stackalloc void*[7];
-        args[0] = &hiddenArg; args[1] = &mouseWinArg; args[2] = &outpArg;
-        args[3] = &ttArg; args[4] = &spArg; args[5] = &imgDimArg; args[6] = &winFloatsArg;
-        long total = (long)tt * sp * (imgDim + winFloats); uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_mg3MouseMlpConcatF32, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Interleaved RoPE with F16 activation I/O (cos/sin stay F32). Same geometry as the F32 kernel.</summary>
-    public unsafe void LaunchWanRopeInterleavedF16(ulong x, ulong cos, ulong sin, int S, int heads, int headDim, nint stream)
-    {
-        ulong xA = x, cA = cos, sA = sin;
-        uint sArg = (uint)S, hArg = (uint)heads, dArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
-        long total = (long)S * heads * (headDim / 2);
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ditRopeInterleavedF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>LTX-2 split (rotate-half, per-head cos) rotary. x [S, numHeads*headDim] in-place; cos/sin [S, dim/2].</summary>
-    public unsafe void LaunchLtx2SplitRope(ulong x, ulong cos, ulong sin, int S, int numHeads, int headDim, nint stream, bool f16 = false)
-    {
-        ulong xA = x, cA = cos, sA = sin;
-        uint sArg = (uint)S, hArg = (uint)numHeads, dArg = (uint)headDim;
-        void** args = stackalloc void*[6];
-        args[0] = &xA; args[1] = &cA; args[2] = &sA; args[3] = &sArg; args[4] = &hArg; args[5] = &dArg;
-        long total = (long)S * numHeads * (headDim / 2);
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2SplitRopeF16 : _ltx2SplitRopeF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-
     /// <summary>Fused LTX-2 QK path: full-row RMS norm -> optional split RoPE -> head-major emit, one pass. <paramref name="normW"/>/<paramref name="cos"/>/<paramref name="sin"/> may be 0. Shared memory is <c>(BlockSize + heads*headDim)</c> floats, so the caller must keep that under the 48 KB static limit. <paramref name="ropeF16"/> selects the F16-cos/sin variant (F32 activation has none — see the dispatch).</summary>
     public unsafe void LaunchLtx2QkNormRopeHeadMajor(ulong outp, ulong x, ulong normW, ulong cos, ulong sin,
         int seq, int heads, int headDim, float eps, nint stream, bool f16, bool ropeF16 = false)
@@ -4632,52 +3334,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(fn, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Fused LTX-2 RMS-norm + AdaLN shift/scale: <c>out = norm(in)*(1+scale)+shift</c>, one pass.</summary>
-    public unsafe void LaunchLtx2RmsModulate(ulong outp, ulong x, ulong scale, ulong shift,
-        int dim, int rows, float eps, nint stream, bool f16)
-    {
-        ulong oA = outp, xA = x, scA = scale, shA = shift;
-        uint dA = (uint)dim, rA = (uint)rows; float eA = eps;
-        void** args = stackalloc void*[7];
-        args[0] = &oA; args[1] = &xA; args[2] = &scA; args[3] = &shA; args[4] = &dA; args[5] = &rA; args[6] = &eA;
-        uint shared = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2RmsModulateF16 : _ltx2RmsModulateF32, (uint)rows, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused LTX-2 per-head output gate, in place: <c>x[s, h*headDim+d] *= 2*sigmoid(logits[s,h])</c>.</summary>
-    public unsafe void LaunchLtx2HeadGate(ulong x, ulong logits, int seq, int heads, int headDim, nint stream, bool f16)
-    {
-        ulong xA = x, lA = logits;
-        uint sA = (uint)seq, hA = (uint)heads, dA = (uint)headDim;
-        void** args = stackalloc void*[5];
-        args[0] = &xA; args[1] = &lA; args[2] = &sA; args[3] = &hA; args[4] = &dA;
-        long total = (long)seq * heads * headDim;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2HeadGateF16 : _ltx2HeadGateF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> tensor into a 4D <c>[B,C,H,W]</c> frame, on-device.</summary>
-    public unsafe void LaunchWanVaeExtractFrame(ulong outp, ulong src, int ti, int B, int C, int Tsrc, int frameHW, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, sA = src; uint tiA = (uint)ti, bA = (uint)B, cA = (uint)C, tsA = (uint)Tsrc, fA = (uint)frameHW;
-        void** args = stackalloc void*[7];
-        args[0] = &oA; args[1] = &sA; args[2] = &tiA; args[3] = &bA; args[4] = &cA; args[5] = &tsA; args[6] = &fA;
-        long total = (long)B * C * frameHW;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeExtractFrameBf16 : _wanVaeExtractFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Writes a 4D <c>[B,C,H,W]</c> frame (plus optional per-channel bias) into temporal slot <paramref name="to"/> of a 5D <c>[B,C,Tout,H,W]</c> tensor, on-device. <paramref name="bias"/>=0 for none.</summary>
-    public unsafe void LaunchWanVaeWriteFrame(ulong outp, ulong acc, ulong bias, int to, int B, int C, int Tout, int frameHW, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, aA = acc, bsA = bias; uint toA = (uint)to, bA = (uint)B, cA = (uint)C, tA = (uint)Tout, fA = (uint)frameHW;
-        void** args = stackalloc void*[8];
-        args[0] = &oA; args[1] = &aA; args[2] = &bsA; args[3] = &toA; args[4] = &bA; args[5] = &cA; args[6] = &tA; args[7] = &fA;
-        long total = (long)B * C * frameHW;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeWriteFrameBf16 : _wanVaeWriteFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Builds the frame-major padded input [paddedT, cIn, H+2·padH, W+2·padW] (transpose + temporal zero/replicate-first pad + cache + spatial edge-replicate pad) for batched CausalConv3d. <paramref name="cache"/>=0 for none.</summary>
     public unsafe void LaunchWanVaeBuildPadded(ulong padded, ulong input, ulong cache, int paddedT, int cIn, int Tin, int cacheLen, int zeroPad,
         int H, int W, int padH, int padW, bool replicateFirst, nint stream, bool bf16 = false, bool reflectSpatial = false)
@@ -4693,128 +3349,6 @@ public sealed partial class CudaKernels : IDisposable
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeBuildPaddedBf16 : _wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
-
-    /// <summary>Per-channel RMS norm: out[c] = x[c] * (sqrtC / max(||x||_2, eps)) * gamma[c], over the C axis at each spatial position.</summary>
-    public unsafe void LaunchWanVaeRmsNormChannel(
-        ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC,
-        long numPos, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, xA = x, gA = gamma; int cA = c; long spA = spatial, npA = numPos; float eA = eps, scA = sqrtC;
-        void** args = stackalloc void*[8];
-        args[0] = &oA; args[1] = &xA; args[2] = &gA; args[3] = &cA; args[4] = &spA; args[5] = &eA; args[6] = &scA; args[7] = &npA;
-        uint gridDim = (uint)((numPos + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeRmsNormChannelBf16 : _wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Unpatchifies [b, c*p*p, t, h, w] into [b, c, t, h*p, w*p] via pixel-shuffle.</summary>
-    public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, xA = x; int bA = b, cA = c, tA = t, hA = h, wA = w, pA = p; long nA = numOut;
-        void** args = stackalloc void*[9];
-        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &cA; args[4] = &tA; args[5] = &hA; args[6] = &wA; args[7] = &pA; args[8] = &nA;
-        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeUnpatchifyBf16 : _wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Wan2.2 VAE DupUp3D shortcut: channel repeat scattered into the temporal/spatial cells, dropping <paramref name="dropT"/> leading frames.</summary>
-    public unsafe void LaunchWanVaeDupUp3d(ulong outp, ulong x, int b, int inC, int t, int h, int w, int outC, int factorT,
-        int factorS, int dropT, long numOut, nint stream, bool bf16)
-    {
-        ulong oA = outp, xA = x;
-        int bA = b, inCA = inC, tA = t, hA = h, wA = w, outCA = outC, fTA = factorT, fSA = factorS, dA = dropT;
-        long nA = numOut;
-        void** args = stackalloc void*[12];
-        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &inCA; args[4] = &tA; args[5] = &hA; args[6] = &wA;
-        args[7] = &outCA; args[8] = &fTA; args[9] = &fSA; args[10] = &dA; args[11] = &nA;
-        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeDupUp3dBf16 : _wanVaeDupUp3d, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Splits fused attention input [bt, 3c, h, w] into q, k, v, each [bt, 1, hw, c].</summary>
-    public unsafe void LaunchWanVaeSplitQkv(ulong q, ulong k, ulong v, ulong src, int bt, int c, int hw, long numEl, nint stream)
-    {
-        ulong qA = q, kA = k, vA = v, sA = src; int btA = bt, cA = c, hwA = hw; long nA = numEl;
-        void** args = stackalloc void*[8];
-        args[0] = &qA; args[1] = &kA; args[2] = &vA; args[3] = &sA; args[4] = &btA; args[5] = &cA; args[6] = &hwA; args[7] = &nA;
-        uint gridDim = (uint)((numEl + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeSplitQkv, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Inverse of the qkv split: reshapes attention output [bt, 1, hw, c] back into a frame [bt, c, h, w].</summary>
-    public unsafe void LaunchWanVaeTokensToFrame(ulong outp, ulong a, int bt, int c, int hw, long numEl, nint stream)
-    {
-        ulong oA = outp, aA = a; int btA = bt, cA = c, hwA = hw; long nA = numEl;
-        void** args = stackalloc void*[6];
-        args[0] = &oA; args[1] = &aA; args[2] = &btA; args[3] = &cA; args[4] = &hwA; args[5] = &nA;
-        uint gridDim = (uint)((numEl + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_wanVaeTokensToFrame, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fills output [cOut, tout, HW] with per-channel bias (or 0 when <paramref name="bias"/>=0).</summary>
-    public unsafe void LaunchWanVaeFillBias(ulong outp, ulong bias, int cOut, int tout, int HW, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, bA = bias; uint coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
-        void** args = stackalloc void*[5];
-        args[0] = &oA; args[1] = &bA; args[2] = &coA; args[3] = &toA; args[4] = &hwA;
-        long total = (long)cOut * tout * HW;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeFillBiasBf16 : _wanVaeFillBias, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Temporal gather-sum: out[co][to][hw] += convDt[to·strideT+dt][co][hw]. out=[cOut,tout,HW], convDt=[paddedT,cOut,HW].</summary>
-    public unsafe void LaunchWanVaeAccumulateTap(ulong outp, ulong convDt, int dt, int strideT, int cOut, int tout, int HW, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, cA = convDt; uint dtA = (uint)dt, stA = (uint)strideT, coA = (uint)cOut, toA = (uint)tout, hwA = (uint)HW;
-        void** args = stackalloc void*[7];
-        args[0] = &oA; args[1] = &cA; args[2] = &dtA; args[3] = &stA; args[4] = &coA; args[5] = &toA; args[6] = &hwA;
-        long total = (long)cOut * tout * HW;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeAccumulateTapBf16 : _wanVaeAccumulateTap, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>SeedVR2 MAGViT channel-to-space shuffle (gather over output elements; temporal drops output frame 1).</summary>
-    public unsafe void LaunchSeedVr2PixelShuffle(ulong outp, ulong inp, int c, int fFinal, int hOut, int wOut,
-        int cIn, int f, int h, int w, int sr, int tr, bool dropDup, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, iA = inp;
-        uint cA = (uint)c, ffA = (uint)fFinal, hoA = (uint)hOut, woA = (uint)wOut;
-        uint ciA = (uint)cIn, fA = (uint)f, hA = (uint)h, wA = (uint)w;
-        uint srA = (uint)sr, trA = (uint)tr, ddA = dropDup ? 1u : 0u;
-        void** args = stackalloc void*[13];
-        args[0] = &oA; args[1] = &iA; args[2] = &cA; args[3] = &ffA; args[4] = &hoA; args[5] = &woA;
-        args[6] = &ciA; args[7] = &fA; args[8] = &hA; args[9] = &wA; args[10] = &srA; args[11] = &trA; args[12] = &ddA;
-        long total = (long)c * fFinal * hOut * wOut;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _seedVr2PixelShuffleBf16 : _seedVr2PixelShuffle,
-            gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>SeedVR2 asymmetric zero pad (right/bottom only): [planes,h,w] → [planes,h+1,w+1].</summary>
-    public unsafe void LaunchSeedVr2PadBottomRight(ulong outp, ulong inp, long planes, int h, int w, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, iA = inp, pA = (ulong)planes;
-        uint hA = (uint)h, wA = (uint)w;
-        void** args = stackalloc void*[5];
-        args[0] = &oA; args[1] = &iA; args[2] = &pA; args[3] = &hA; args[4] = &wA;
-        long total = planes * (h + 1L) * (w + 1L);
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _seedVr2PadBrBf16 : _seedVr2PadBr,
-            gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    // ── GeGlu Launches ──────────────────────────────────────────────────
-
-    /// <summary>Launches GEGLU: splits input along last dim, applies GELU gate (F32).</summary>
-    public void LaunchGeGlu(ulong output, ulong input, int innerDim, int outputElements, nint stream)
-        => LaunchGeGluImpl(_gegluF32, output, input, innerDim, outputElements, stream);
-
-    /// <summary>Launches GEGLU with F16 I/O, F32 internal compute.</summary>
-    public void LaunchGeGluF16(ulong output, ulong input, int innerDim, int outputElements, nint stream)
-        => LaunchGeGluImpl(_gegluF16, output, input, innerDim, outputElements, stream);
-
-    /// <summary>Launches GEGLU with BF16 I/O and F32 internal compute.</summary>
-    public void LaunchGeGluBf16(ulong output, ulong input, int innerDim, int outputElements, nint stream)
-        => LaunchGeGluImpl(_ditGeGluBf16, output, input, innerDim, outputElements, stream);
 
     // ── BroadcastAdd Launches ───────────────────────────────────────────
 

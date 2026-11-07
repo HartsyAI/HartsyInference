@@ -48,7 +48,7 @@ ROADMAP §3's remaining hardware item.
 
 **Not output parity.** SDXL on Vulkan and on CUDA produce different images from the same seed, and the gap grows
 with step count. The components isolated so far are clean — the batched convolution is bit-identical to
-per-image, GroupNorm/Silu/Linear/SDPA are bitwise batch-independent, `CfgEulerStep` holds at ~1e-7 across twenty
+per-image, GroupNorm/Silu/Linear/SDPA are bitwise batch-independent, `GuidedEulerStep` holds at ~1e-7 across twenty
 in-place steps, and TF32 was ruled out by re-running CUDA with `numerics.noTf32` for a 0.0001 SSIM difference.
 For calibration: a real precision change *inside* CUDA costs ~2% SSIM over 20 steps at this guidance, while the
 cross-backend gap is ~44%. So the residual is larger than rounding and remains unexplained; attention and the

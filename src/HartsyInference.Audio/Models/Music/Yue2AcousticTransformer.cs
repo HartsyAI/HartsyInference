@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Music;
@@ -168,7 +171,7 @@ public sealed class Yue2AcousticTransformer : IDisposable
             Layer layer = _layers[i];
             // The attention block runs at the same dtype as the chunk's key/value buffers. Its weights are BF16,
             // so an F32 activation was being cast down on every projection — the inefficiency alpha.69 fixed in
-            // the feed-forward. RmsNorm takes F32-in/F16-out and F16-in/F16-out, ApplyRopeSingle takes an F16 x
+            // the feed-forward. RmsNorm takes F32-in/F16-out and F16-in/F16-out, the rotate-half rotary (RotaryCall.TokenMajor) takes an F16 x
             // against an F32 table, and Permute0213 is a 16-bit byte shuffle, so the chain closes with no
             // intermediate casts and Q lands on the fused attention entry already at its dtype.
             using Tensor normed = new(new TensorShape(1, tokens, hidden), kv);
@@ -190,8 +193,8 @@ public sealed class Yue2AcousticTransformer : IDisposable
             using Tensor kNormed = new(new TensorShape(1, tokens, kvHeads, dim), kv);
             backend.RmsNorm(qNormed, q, layer.QNorm!, eps);
             backend.RmsNorm(kNormed, k, layer.KNorm!, eps);
-            backend.ApplyRopeSingle(qNormed, cos, sin, dim);
-            backend.ApplyRopeSingle(kNormed, cos, sin, dim);
+            backend.Rotary(RotaryCall.TokenMajor(qNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, dim));
+            backend.Rotary(RotaryCall.TokenMajor(kNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, dim));
 
             // Head-major, then prepend the AR prefix along the key axis.
             using Tensor qHeadMajor = new(new TensorShape(1, heads, tokens, dim), kv);
@@ -200,7 +203,6 @@ public sealed class Yue2AcousticTransformer : IDisposable
             backend.Permute0213(qHeadMajor, qNormed, tokens, heads, dim);
             backend.Permute0213(kHeadMajor, kNormed, tokens, kvHeads, dim);
             backend.Permute0213(vHeadMajor, v, tokens, kvHeads, dim);
-
 
             // Every acoustic query row attends over the whole prefix, so this is prefill-shaped: thousands of
             // query rows, not the single row IBackend.FlashAttention's kernel is tuned for. Measured at 2308
@@ -228,8 +230,8 @@ public sealed class Yue2AcousticTransformer : IDisposable
                 kAppendSrc = kHead32;
                 vAppendSrc = vHead32!;
             }
-            backend.RepeatKvHeads(wideKey, kAppendSrc, kvHeads, heads / kvHeads);
-            backend.RepeatKvHeads(wideValue, vAppendSrc, kvHeads, heads / kvHeads);
+            StridedCopies.RepeatInterleave(backend, wideKey, kAppendSrc, 1, heads / kvHeads);
+            StridedCopies.RepeatInterleave(backend, wideValue, vAppendSrc, 1, heads / kvHeads);
             backend.KvCacheAppend(prefix.Keys(i), wideKey, arLength);
             backend.KvCacheAppend(prefix.Values(i), wideValue, arLength);
 
@@ -323,7 +325,7 @@ public sealed class Yue2AcousticTransformer : IDisposable
     }
 
     /// <summary>Split-half (NeoX) RoPE tables for absolute positions <c>[posStart, posStart + tokens)</c>. Both
-    /// halves of each head carry the same angle, which is what <see cref="IBackend.ApplyRopeSingle"/> expects.</summary>
+    /// halves of each head carry the same angle, which is what <c>RotaryCall.TokenMajor</c> expects.</summary>
     private static unsafe void BuildRope(Tensor cos, Tensor sin, int tokens, int posStart, int headDim, float theta)
     {
         int half = headDim / 2;

@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends.Guidance;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -95,7 +97,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         _ditResident = true;
 
-        // Drain-free loop: CFG combine + Euler run as ONE in-place device op (CfgEulerStep:
+        // Drain-free loop: CFG combine + Euler run as ONE in-place device op (GuidedEulerStep:
         // z += (neg + gw·(pos−neg))·dt ≡ uncond + tg·(cond−uncond) Euler; gw=1 degenerates to the plain
         // step). The old host scheduler.Step + ApplyCfg forced a velocity D2H + latent re-upload per step.
         // Sampler selection (2026-08-20). Boogu drives its own BooguFlowMatchScheduler, whose schedule ASCENDS
@@ -134,7 +136,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             if (onProgress is not null)
             {
                 Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                Backend.UnpatchifyTokens(previewLatent, latent, _config.InChannels, hPacked, wPacked,
+                PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latent, _config.InChannels, hPacked, wPacked,
                     _config.PatchSize, innerChannelFastest: true);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
@@ -154,7 +156,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
 
         // One device unpatchify back to NCHW for the VAE (the packed latent never left the GPU).
         Tensor unpacked = new Tensor(latentShape, DType.F32);
-        Backend.UnpatchifyTokens(unpacked, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
+        PixelShuffles.UnpatchifyTokens(Backend, unpacked, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
             innerChannelFastest: true);
         latent.Dispose();
 
@@ -272,7 +274,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             {
                 // Text-only guidance with the reference kept: cond + (tg-1)*(cond - dropText), fused with the
                 // Euler update as one in-place device op (≡ dropText + tg·(cond−dropText)).
-                Backend.CfgEulerStep(latent, cond, dropText, textGuidanceScale, scheduler.Dt(i));
+                Backend.GuidedEulerStep(latent, cond, dropText, GuidedEulerSpec.Lerp(textGuidanceScale, scheduler.Dt(i)));
             }
             cond.Dispose();
             dropText.Dispose();

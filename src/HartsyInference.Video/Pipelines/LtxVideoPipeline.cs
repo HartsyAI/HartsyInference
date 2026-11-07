@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -111,7 +112,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         Action<GenerationProgress>? onProgress, out int seed, Tensor? firstFrameLatent = null)
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit): its denoise step is a host-side
-        // Euler in a different algebraic form than IBackend.CfgEulerStep, its schedule is a raw float[] rather
+        // Euler in a different algebraic form than IBackend.GuidedEulerStep, its schedule is a raw float[] rather
         // than a FlowMatchEulerDiscreteScheduler, and its I2V frame-0 re-pin is a post-step fixup a multi-evaluation sampler would skip. Converting it would change
         // default-Euler output, so it was deliberately skipped. Refuse a named sampler rather than accepting the
         // request and silently sampling with something else.
@@ -204,7 +205,7 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
         }
 
         // With numerics.ditGraph the transformer captures the CFG-pair step and replays it; the working latent must
-        // live in its fixed buffer (denoised in place by device CfgEulerStep). Off (default), this returns `latents`.
+        // live in its fixed buffer (denoised in place by device GuidedEulerStep). Off (default), this returns `latents`.
         Tensor stepLatent = condCache is null ? _transformer.PrepareGraphLatent(Backend, latents) : latents;
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);
 
@@ -247,9 +248,9 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             else
             {
                 // Graph path — in-place device Euler on the fixed latent; velocities are transformer-owned fixed buffers.
-                // CfgEulerStep does z += v·delta (v = guidance·pos+(1−guidance)·neg), so pass −dt to match the host
+                // GuidedEulerStep does z += v·delta (v = guidance·pos+(1−guidance)·neg), so pass −dt to match the host
                 // EulerCfgStep's z −= v·dt with LTX's positive dt = tsteps[k] − tsteps[k+1].
-                Backend.CfgEulerStep(stepLatent, vCond, vUncond!, guidance, -dt);
+                Backend.GuidedEulerStep(stepLatent, vCond, vUncond!, GuidedEulerSpec.Lerp(guidance, -dt));
             }
             sw.Stop();
             if (onProgress is not null)

@@ -105,7 +105,7 @@ public static partial class EngineKnobs
 
     /// <summary>Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.</summary>
     public static readonly Knob<bool> EpilogueFusion =
-        Bool("numerics.epilogueFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.");
+        Bool("numerics.epilogueFusion", true, KnobScope.Construction, KnobDomain.Numerics, "Uses cuBLASLt's fused bias epilogue for biased Linear instead of a separate BiasAdd kernel; 0 disables.");
 
     /// <summary>Enables the experimental F5-TTS DiT CUDA-graph capture; replay currently throws ILLEGAL_ADDRESS, keep off.</summary>
     public static readonly Knob<bool> F5Graph =
@@ -113,7 +113,7 @@ public static partial class EngineKnobs
 
     /// <summary>Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.</summary>
     public static readonly Knob<bool> Fp8StaticInputScale =
-        Bool("numerics.fp8StaticInputScale", true, KnobScope.Runtime, KnobDomain.Numerics, "Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.");
+        Bool("numerics.fp8StaticInputScale", true, KnobScope.Construction, KnobDomain.Numerics, "Quantizes fp8 activations with the checkpoint's .input_scale rather than a per-call absmax; changes numerics.");
 
     /// <summary>At Ideogram-4 checkpoint conversion, fuses each block's SwiGLU w1/w3 into one w13 weight (fp8 pairs requantized).</summary>
     public static readonly Knob<bool> FusedFfn =
@@ -139,9 +139,9 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Int8MmaWideGate =
         Bool("numerics.int8MmaWideGate", false, KnobScope.Runtime, KnobDomain.Numerics, "Widens the fused INT8 MMA GEMM admission bound from n<=2k to n<=4k, admitting LTX-2.5's ffn_up shape.");
 
-    /// <summary>Uses the query-tiled LTX-2.5 na3d kernel (online softmax over the tile's union window) over the per-query one.</summary>
-    public static readonly Knob<bool> Ltx25Na3dTiled =
-        Bool("numerics.ltx25Na3dTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled LTX-2.5 na3d kernel (online softmax over the tile's union window) over the per-query one.");
+    /// <summary>Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.</summary>
+    public static readonly Knob<bool> NeighborhoodAttentionTiled =
+        Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
     /// <summary>Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.</summary>
     public static readonly Knob<bool> Ltx2DiffusionVae =
@@ -184,17 +184,13 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> MusicgenGraphOff =
         Str("numerics.musicgenGraphOff", null, KnobScope.Runtime, KnobDomain.Numerics, "Presence-only: setting it to ANY value (even 0) disables CUDA-graph decode in the MusicGen AR loop.");
 
-    /// <summary>Kill-switch for the fused per-head QK-norm + rope + KV-scatter decode epilogue (Qwen3/Gemma-3 shapes).</summary>
-    public static readonly Knob<bool> QknormScatter =
-        Bool("numerics.qknormScatter", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for the fused per-head QK-norm + rope + KV-scatter decode epilogue (Qwen3/Gemma-3 shapes).");
+    /// <summary>Runs the graph-decode QKV epilogue (optional QK norm, rotation, KV scatter) as one fused CUDA kernel; =0 composes it from the separate ops.</summary>
+    public static readonly Knob<bool> QkvDecodeFused =
+        Bool("numerics.qkvDecodeFused", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the graph-decode QKV epilogue (optional QK norm, rotation, KV-cache scatter) as one fused CUDA kernel; outputs are bit-identical to the composed ops. =0 composes it from the separate ops.");
 
     /// <summary>0 disables the partial Q+K weight concat used when V's dtype differs; the all-match QKV fuse is unaffected.</summary>
     public static readonly Knob<bool> QkFusion =
         Bool("numerics.qkFusion", true, KnobScope.Construction, KnobDomain.Numerics, "0 disables the partial Q+K weight concat used when V's dtype differs; the all-match QKV fuse is unaffected.");
-
-    /// <summary>Kill switch for the fused [q|k] GEMV plus rope-scatter-V decode kernel; off restores the composed ops.</summary>
-    public static readonly Knob<bool> QkScatter =
-        Bool("numerics.qkScatter", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill switch for the fused [q|k] GEMV plus rope-scatter-V decode kernel; off restores the composed ops.");
 
     /// <summary>Kill-switch for norm kernels emitting a Q8_1 sidecar so the dp4a GEMV skips a separate quantize pass.</summary>
     public static readonly Knob<bool> QuantAtProducer =
@@ -203,10 +199,6 @@ public static partial class EngineKnobs
     /// <summary>Requantizes Chroma Radiance DiT blocks to fp8 during checkpoint conversion; 0 keeps the wide BF16 weights.</summary>
     public static readonly Knob<bool> RadianceFp8 =
         Bool("numerics.radianceFp8", true, KnobScope.Construction, KnobDomain.Numerics, "Requantizes Chroma Radiance DiT blocks to fp8 during checkpoint conversion; 0 keeps the wide BF16 weights.");
-
-    /// <summary>Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.</summary>
-    public static readonly Knob<bool> RopeV2 =
-        Bool("numerics.ropeV2", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.");
 
     /// <summary>Feeds the conditional audio to Wan-S2V's uncond branch so CFG steers text adherence only; changes output.</summary>
     public static readonly Knob<bool> S2vTextCfg =
@@ -247,10 +239,6 @@ public static partial class EngineKnobs
     /// <summary>Kill-switch for folding each graph-decode layer's final residual add (and an MoE layer's slot combine) into the next layer's input RMSNorm.</summary>
     public static readonly Knob<bool> DecodeResidualFold =
         Bool("numerics.decodeResidualFold", true, KnobScope.Runtime, KnobDomain.Numerics, "In the CUDA-graph decode step, adds each layer's FFN output to the residual inside the next layer's input norm (and an MoE layer's expert combine too), one launch instead of two or three; outputs are bit-identical. =0 keeps the separate kernels.");
-
-    /// <summary>Kill-switch for the fused full-width QK-norm + RoPE + KV-scatter graph-decode epilogue (OLMoE shapes).</summary>
-    public static readonly Knob<bool> QknormFullScatter =
-        Bool("numerics.qknormFullScatter", true, KnobScope.Runtime, KnobDomain.Numerics, "Fuses the full-width QK-norm (one norm over all q heads, one over all k heads, as OLMoE has), RoPE and the KV-cache scatter of a graph decode step into one kernel; outputs are bit-identical. =0 keeps slices, two norms and the scatter.");
 
     /// <summary>Kill-switch for the decode attention combine kernel emitting the Q8_1 copy of its output for the o-projection.</summary>
     public static readonly Knob<bool> AttnCombineQ8 =

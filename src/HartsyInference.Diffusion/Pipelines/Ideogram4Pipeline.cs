@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Memory.Vram;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -438,7 +439,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             }
 
             // v = gw·pos + (1−gw)·neg ; z = z + v·delta — in-place on the GPU-resident latent.
-            Backend.CfgEulerStep(z, posV, negV, gw, delta);
+            Backend.GuidedEulerStep(z, posV, negV, GuidedEulerSpec.Lerp(gw, delta));
             posV.Dispose();
             negV.Dispose();
 
@@ -490,7 +491,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             // Masked inpaint is the one path that must read z on the host every step (the blend above already
             // did); protect the blended host copy from the next forward's stale device pointer with a per-step
             // FreeActivations. The plain loop stays DRAIN-FREE: every intermediate is explicitly disposed, z
-            // stays device-resident across steps (CfgEulerStep is in-place), and the post-log z.DataPointer
+            // stays device-resident across steps (GuidedEulerStep is in-place), and the post-log z.DataPointer
             // materialize + FreeActivations that used to run here cost a measured ~325 ms/step of pipeline
             // drain (step wall 1156 ms vs 830 ms issued).
             if (packedMask is not null)

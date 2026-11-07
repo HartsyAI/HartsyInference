@@ -65,7 +65,8 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
 /// <summary>ShapeVAE <c>geo_decoder</c> (GPU-resident): Fourier-embeds query points, cross-attends them to the latents via precomputed K/V, and projects to a scalar occupancy.</summary>
 internal sealed unsafe class Hunyuan3DGeoDecoder
 {
-    private readonly int _width, _heads, _headDim, _bands, _fourierDim, _mlpDim;
+    private readonly int _width, _heads, _headDim, _mlpDim;
+    private readonly FourierEmbedSpec _fourier;
     private Tensor? _qProjW, _qProjB;
     private Tensor? _ln1W, _ln1B, _ln2W, _ln2B, _ln3W, _ln3B;
     private Tensor? _cqW, _ckW, _cvW, _cprojW, _cprojB, _qnW, _qnB, _knW, _knB;
@@ -73,9 +74,10 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     private Tensor? _lnPostW, _lnPostB, _outW, _outB;
     private AttentionLayer? _attn;
 
-    public Hunyuan3DGeoDecoder(int width, int heads, int bands, int fourierDim)
+    public Hunyuan3DGeoDecoder(int width, int heads, int bands)
     {
-        _width = width; _heads = heads; _headDim = width / heads; _bands = bands; _fourierDim = fourierDim; _mlpDim = 4 * width;
+        _width = width; _heads = heads; _headDim = width / heads; _mlpDim = 4 * width;
+        _fourier = new FourierEmbedSpec(InputDims: 3, bands, IncludeInput: true);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
@@ -125,8 +127,8 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         TensorShape flat = new(1, count, _width), heads = new(1, count, _heads, _headDim), qmh = new(1, _heads, count, _headDim);
 
         // Fourier embed on-device (coords [count,3] → feat stays GPU-resident) → query_proj → query_embeddings.
-        Tensor feat = new(new TensorShape(1, count, _fourierDim), DType.F32);
-        backend.FourierEmbed(feat, coords, count, _bands);
+        Tensor feat = new(new TensorShape(1, count, _fourier.Width), DType.F32);
+        backend.FourierEmbed(feat, coords, _fourier);
         Tensor qEmb = new(flat, DType.F32); backend.Linear(qEmb, feat, _qProjW!, _qProjB!); feat.Dispose();
 
         // cross-attn: q = q_norm(c_q(ln_1(qEmb))); attn(q, kP, vP); x = qEmb + c_proj(attn).

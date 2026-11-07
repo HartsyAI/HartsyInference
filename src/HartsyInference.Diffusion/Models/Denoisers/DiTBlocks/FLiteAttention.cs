@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -125,7 +127,10 @@ public sealed unsafe class FLiteAttention
         // Device RoPE PRE-permute (llama split-half convention; F-Lite's sign lives in the negated
         // sin table from FLiteRope.BuildDeviceTables).
         if (cosRope is not null && sinRope is not null)
-            backend.ApplyRope(q, k, cosRope, sinRope);
+        {
+            backend.Rotary(RotaryCall.TokenMajor(q, cosRope, sinRope, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+            backend.Rotary(RotaryCall.TokenMajor(k, cosRope, sinRope, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        }
 
         TensorShape bhsd = new TensorShape(batch, _numHeads, seqLen, _headDim);
         Tensor qHead = new Tensor(bhsd, DType.F32);

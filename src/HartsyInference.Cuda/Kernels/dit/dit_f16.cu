@@ -56,30 +56,6 @@ __global__ void dit_rmsnorm_f16(
         outRow[i] = __float2half(__half2float(inRow[i]) * invRms * weight[i]);
 }
 
-// ── Broadcast affine over the last dim (F16 activation, F32 scale/shift) ─────
-// out[b,s,d] = in[b,s,d] * scale[b,d] + (shift ? shift[b,d] : 0). scale/shift broadcast over S.
-__global__ void dit_affine_broadcast_lastdim_f16(
-    __half* __restrict__ output,
-    const __half* __restrict__ input,
-    const float* __restrict__ scale,
-    const float* __restrict__ shift,
-    unsigned int seqLen,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    unsigned int b = (unsigned int)(row / seqLen);
-    size_t pIdx = (size_t)b * dim + d;
-
-    float v = __half2float(input[i]) * scale[pIdx];
-    if (shift != 0) v += shift[pIdx];
-    output[i] = __float2half(v);
-}
-
 // ── Gated residual over the last dim (F16 activations, F32 gate) ────────────
 // out[b,s,d] = residual[b,s,d] + gate[b,d] * value[b,s,d]. gate broadcast over S.
 __global__ void dit_gated_residual_lastdim_f16(
@@ -100,29 +76,6 @@ __global__ void dit_gated_residual_lastdim_f16(
     size_t pIdx = (size_t)b * dim + d;
 
     output[i] = __float2half(__half2float(residual[i]) + gate[pIdx] * __half2float(value[i]));
-}
-
-// ── Row-indexed broadcast affine (gather fused in; F16 activation, F32 table) ─
-// out[r,d] = in[r,d] * (1 + scaleTable[rowIndex[r], d]) + (shiftTable ? shiftTable[rowIndex[r], d] : 0)
-__global__ void dit_affine_broadcast_rowindexed_f16(
-    __half* __restrict__ output,
-    const __half* __restrict__ input,
-    const float* __restrict__ scaleTable,
-    const float* __restrict__ shiftTable,
-    const int* __restrict__ rowIndex,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    size_t tIdx = (size_t)rowIndex[row] * dim + d;
-
-    float v = __half2float(input[i]) * (1.0f + scaleTable[tIdx]);
-    if (shiftTable != 0) v += shiftTable[tIdx];
-    output[i] = __float2half(v);
 }
 
 // ── Row-indexed gated residual (gather fused in; F16 activations, F32 table) ─
@@ -173,37 +126,6 @@ __global__ void dit_sigmoid_f16(
     output[i] = __float2half(y);
 }
 
-// ── Rotate-half RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
-// Mirrors dit_rope_f32: x is [totalVecs, headDim] (totalVecs = B*L*numHeads); cos/sin are
-// [B*L, headDim] broadcast over heads. Pairs (i, i+half); each thread owns one i and writes
-// both halves from the originals — race-free. rotaryDim semantics identical to the F32 twin.
-__global__ void dit_rope_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cosT,
-    const float* __restrict__ sinT,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = vec / numHeads;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = __half2float(x[baseX + i]);
-    float upper = __half2float(x[baseX + i + half]);
-    x[baseX + i] = __float2half(lower * cosT[baseCs + i] - upper * sinT[baseCs + i]);
-    x[baseX + i + half] = __float2half(upper * cosT[baseCs + i + half] + lower * sinT[baseCs + i + half]);
-}
-
 // ── Fused-lastdim slice (F16, pure copy) ────────────────────────────────────
 // Mirrors dit_slice_lastdim_f32: out[row, d] = in[row, offset + d] with in row stride = inDim.
 // Splits a fused [.., inDim] tensor (e.g. QKV [B,L,3H]) into a contiguous [.., outDim] chunk.
@@ -222,61 +144,6 @@ __global__ void dit_slice_lastdim_f16(
     output[i] = input[(size_t)row * inDim + offset + d];
 }
 
-// ── Interleaved RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
-// Mirrors wan_rope_interleaved: x is [S, heads*headDim]; rotate adjacent pair (2i,2i+1) by the
-// shared angle at cos/sin index 2i (cos/sin are [S, headDim] shared across heads).
-__global__ void dit_rope_interleaved_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cosT,
-    const float* __restrict__ sinT,
-    unsigned int S, unsigned int heads, unsigned int headDim)
-{
-    unsigned int pairs = headDim >> 1;
-    unsigned long long total = (unsigned long long)S * heads * pairs;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int i = (unsigned int)(idx % pairs); idx /= pairs;
-    unsigned int h = (unsigned int)(idx % heads); idx /= heads;
-    unsigned int s = (unsigned int)idx;
-    unsigned int i0 = 2u * i;
-    unsigned long long xoff = ((unsigned long long)s * heads + h) * headDim + i0;
-    unsigned long long coff = (unsigned long long)s * headDim + i0;   // shared across heads
-    float re = __half2float(x[xoff]), im = __half2float(x[xoff + 1]);
-    float c = cosT[coff], sn = sinT[coff];
-    x[xoff]     = __float2half(re * c - im * sn);
-    x[xoff + 1] = __float2half(re * sn + im * c);
-}
-
-// ── LTX-2 split (half-rotate) RoPE, in place (F16 twin of ltx2_split_rope_f32) ──
-// Pairs lane i with lane i+headDim/2 instead of the interleaved 2i/2i+1 above; cos/sin are laid out
-// [S, heads*headDim/2], per-head (NOT shared across heads like dit_rope_interleaved_f16's table).
-__global__ void ltx2_split_rope_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int seqLen,
-    unsigned int numHeads,
-    unsigned int headDim)
-{
-    unsigned int r = headDim >> 1;
-    unsigned int dim = numHeads * headDim;
-    unsigned int cosWidth = dim >> 1;            // = numHeads * r
-    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % r);
-    unsigned long long t = gid / r;
-    unsigned int h = (unsigned int)(t % numHeads);
-    unsigned int s = (unsigned int)(t / numHeads);
-    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
-    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
-    float a = __half2float(x[headBase + i]);
-    float b = __half2float(x[headBase + i + r]);
-    float c = cos[cosBase + i], sn = sin[cosBase + i];
-    x[headBase + i]     = __float2half(a * c - b * sn);
-    x[headBase + i + r] = __float2half(b * c + a * sn);
-}
-
 // ── Slice a contiguous row block (F16, pure copy) ───────────────────────────
 // output[i] = input[elemOffset + i]. Extracts the image-token rows from the joint [text,image] sequence.
 __global__ void dit_slice_rows_f16(
@@ -288,82 +155,6 @@ __global__ void dit_slice_rows_f16(
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
     output[i] = input[elemOffset + i];
-}
-
-// ── GQA K/V head repeat (F16, pure copy) ────────────────────────────────────
-// out head qh = h*group + g maps to input head qh/group. One thread per output element. No math.
-__global__ void dit_repeat_kv_f16(
-    __half* __restrict__ output,
-    const __half* __restrict__ input,
-    unsigned int kvHeads,
-    unsigned int group,
-    unsigned int seqLen,
-    unsigned int headDim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % headDim);
-    unsigned long long rem = i / headDim;
-    unsigned int l = (unsigned int)(rem % seqLen);
-    rem /= seqLen;
-    unsigned int qHeads = kvHeads * group;
-    unsigned int qh = (unsigned int)(rem % qHeads);
-    unsigned long long b = rem / qHeads;
-
-    unsigned int inH = qh / group;
-    unsigned long long inIdx = (((b * kvHeads + inH) * seqLen) + l) * (unsigned long long)headDim + d;
-    output[i] = input[inIdx];
-}
-
-// ── Non-affine LayerNorm (F16 I/O, F32 accumulate) ──────────────────────────
-// F16 twin of dit_layernorm_noaffine_f32: per row, normalize to zero mean / unit variance
-// (biased var, /dim), no scale/bias. One block per row; shared-mem reduction.
-__global__ void dit_layernorm_noaffine_f16(
-    __half* __restrict__ output,
-    const __half* __restrict__ input,
-    unsigned int dim,
-    unsigned int totalRows,
-    float eps)
-{
-    extern __shared__ float sdata[];
-    unsigned int row = blockIdx.x;
-    if (row >= totalRows) return;
-
-    const __half* inRow = input + (size_t)row * dim;
-    __half* outRow = output + (size_t)row * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        partial += __half2float(inRow[i]);
-    sdata[threadIdx.x] = partial;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
-        __syncthreads();
-    }
-    float mean = sdata[0] / (float)dim;
-    __syncthreads();
-
-    float vpart = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float diff = __half2float(inRow[i]) - mean;
-        vpart += diff * diff;
-    }
-    sdata[threadIdx.x] = vpart;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
-        __syncthreads();
-    }
-    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
-
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        outRow[i] = __float2half((__half2float(inRow[i]) - mean) * invStd);
 }
 
 // ── CHW F32 [-1,1] → HWC u8 [0,255] (image output conversion) ───────────────
@@ -407,37 +198,6 @@ __global__ void dit_concat2_f16(
         out[idx] = a[((o * aDim + dimIdx) * (unsigned long long)inner) + innerI];
     else
         out[idx] = b[((o * bDim + (dimIdx - aDim)) * (unsigned long long)inner) + innerI];
-}
-
-// Fused adaLN modulation (F16 activation I/O, F32 scale/shift + accumulate). See dit_layernorm_modulate_f32.
-__global__ void dit_layernorm_modulate_f16(
-    __half* __restrict__ output, const __half* __restrict__ input,
-    const float* __restrict__ scale, const float* __restrict__ shift,
-    unsigned int dim, unsigned int seqLen, unsigned int totalRows, float eps)
-{
-    extern __shared__ float sdata[];
-    unsigned int row = blockIdx.x;
-    if (row >= totalRows) return;
-    const __half* inRow = input + (size_t)row * dim;
-    __half* outRow = output + (size_t)row * dim;
-    unsigned int b = row / seqLen;
-    const float* sc = scale + (size_t)b * dim;
-    const float* sh = shift + (size_t)b * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += __half2float(inRow[i]);
-    sdata[threadIdx.x] = partial; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float mean = sdata[0] / (float)dim; __syncthreads();
-
-    float vpart = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = __half2float(inRow[i]) - mean; vpart += d * d; }
-    sdata[threadIdx.x] = vpart; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
-
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        outRow[i] = __float2half((__half2float(inRow[i]) - mean) * invStd * (1.0f + sc[i]) + sh[i]);
 }
 
 // Fused QKV split + per-head QK-RMSNorm (F16 activation I/O, F32 weights + accumulate). See dit_qkv_split_norm_f32.
@@ -577,11 +337,6 @@ __global__ void dit_qkv_split_norm_head_major_f16(
     }
 }
 
-// ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────
-// comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
-// F16 twin of lm_glu_act_f32 / dit_glu_act_bf16 — same fast-math formulas, same flat-index-to-(row, i)
-// decomposition (the split is on the LAST dim, not the flat midpoint). act 0 = SiLU, 1 = GELU-tanh.
-
 // Subset-emitting twin of dit_qkv_split_norm_head_major_f16. SEPARATE kernel on purpose: the fused call above must stay
 // byte-for-byte the shipped kernel, and folding slot guards into it changed its codegen enough to move
 // real generation output. packStride is how many W-wide segments the packed source holds; qSlot/kSlot/
@@ -660,41 +415,10 @@ __global__ void dit_qkv_split_norm_head_major_subset_f16(
     }
 }
 
-// ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────
-// comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
-// F16 twin of lm_glu_act_f32 / dit_glu_act_bf16 — same fast-math formulas, same flat-index-to-(row, i)
-// decomposition (the split is on the LAST dim, not the flat midpoint). act 0 = SiLU, 1 = GELU-tanh.
-
-__global__ void dit_glu_act_f16(
-    __half* __restrict__ comb,
-    const __half* __restrict__ gateUp,
-    unsigned int rows,
-    unsigned int ff,
-    int act)
-{
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = (unsigned long long)rows * ff;
-    if (gid >= total) return;
-    unsigned int r = (unsigned int)(gid / ff);
-    unsigned int i = (unsigned int)(gid % ff);
-    unsigned long long rowBase = (unsigned long long)r * 2u * ff;
-    const float g = __half2float(gateUp[rowBase + i]);
-    const float u = __half2float(gateUp[rowBase + ff + i]);
-    float a;
-    if (act == 0) {
-        a = g * __fdividef(1.0f, 1.0f + __expf(-g));                    // SiLU
-    } else {
-        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
-        const float s = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner)); // tanh(x) = 2·sigmoid(2x) − 1
-        a = 0.5f * g * (1.0f + (2.0f * s - 1.0f));                      // GELU-tanh
-    }
-    comb[gid] = __float2half(a * u);
-}
-
 } // extern "C"
 
 // ── LTX-2 fused QK-norm + split-RoPE + head-major emit ──────────────────────
-// Collapses RmsNorm -> Ltx2SplitRope -> Permute0213 into ONE pass over the tensor. The three-op version
+// Collapses RmsNorm -> the split rotary (RotaryCall.SplitRows) -> Permute0213 into ONE pass over the tensor. The three-op version
 // read and wrote the full [seq, heads*headDim] activation three times; this reads it once and writes the
 // head-major result once. Distinct from dit_qkv_split_norm_head_major_f16 above, which RMS-norms PER HEAD
 // against a fused qkv buffer — LTX-2 normalizes across the WHOLE row (all heads) with a [heads*headDim]
@@ -826,70 +550,4 @@ extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_rf16_f16(
 {
     extern __shared__ float smem[];
     ltx2_qk_norm_rope_body<__half, false>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
-}
-
-// ── LTX-2 fused per-head output gate (in place) ─────────────────────────────
-// x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]).
-// Replaces Sigmoid -> Scale -> Linear-against-a-constant-0/1-expansion-matrix -> Mul: the expansion GEMM
-// materialized a full [seq, heads*headDim] gate tensor purely to broadcast one scalar per (token, head),
-// so the old chain moved 4x this tensor's bytes and burned a GEMM to do a copy.
-extern "C" __global__ void ltx2_head_gate_f16(
-    __half* __restrict__ x,
-    const __half* __restrict__ logits,
-    unsigned int seq, unsigned int heads, unsigned int headDim)
-{
-    unsigned int W = heads * headDim;
-    unsigned long long total = (unsigned long long)seq * W;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int i = (unsigned int)(idx % W);
-    unsigned long long s = idx / W;
-    unsigned int h = i / headDim;
-    float g = __half2float(logits[s * heads + h]);
-    // Sign-aware form, matching dit_sigmoid_f16 — the gate is bounded [0,2] either way, but keeping one
-    // convention means a future A/B against the unfused chain is not chasing last-ulp differences.
-    float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
-    x[idx] = __float2half(__half2float(x[idx]) * 2.0f * sig);
-}
-
-// ── LTX-2 fused RMS-norm + AdaLN shift/scale ────────────────────────────────
-// out[r,d] = in[r,d] * rsqrt(mean_d(in[r,:]^2) + eps) * (1 + scale[d]) + shift[d]
-// Replaces RmsNorm (weight = a ones vector, so it folds away) followed by AddScalar(scale, +1) and
-// AffineBroadcastLastDim: two full passes over a [rows, dim] activation become one. Every LTX-2 block runs
-// this pair six times (video/audio x self-attn/cross-attn/FFN). scale/shift are F32 [dim] vectors.
-extern "C" __global__ void ltx2_rms_modulate_f16(
-    __half* __restrict__ out,
-    const __half* __restrict__ in,
-    const float* __restrict__ scale,
-    const float* __restrict__ shift,
-    unsigned int dim,
-    unsigned int rows,
-    float eps)
-{
-    extern __shared__ float sred2[];
-    unsigned int r = blockIdx.x;
-    if (r >= rows) return;
-    const __half* inRow = in + (size_t)r * dim;
-    __half* outRow = out + (size_t)r * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float v = __half2float(inRow[i]);
-        partial += v * v;
-    }
-    sred2[threadIdx.x] = partial;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sred2[threadIdx.x] += sred2[threadIdx.x + s];
-        __syncthreads();
-    }
-    float inv = rsqrtf(sred2[0] / (float)dim + eps);
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float v = __half2float(inRow[i]) * inv * (1.0f + scale[i]);
-        if (shift != 0) v += shift[i];
-        outRow[i] = __float2half(v);
-    }
 }

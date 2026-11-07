@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.DeepSeekV41;
@@ -21,7 +23,7 @@ internal static class DeepSeekV41Rotary
         using Tensor x = DeepSeekV41HostMath.Tensor(data, shape);
         using Tensor c = DeepSeekV41HostMath.Tensor(cos, 1, positions.Length, half);
         using Tensor sn = DeepSeekV41HostMath.Tensor(sin, 1, positions.Length, half);
-        backend.ApplyRopeInterleaved(x, c, sn, ropeDim, dimOffset);
+        backend.Rotary(RotaryCall.TokenMajor(x, c, sn, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, ropeDim, dimOffset));
         x.AsReadOnlySpan<float>().CopyTo(data);
     }
 }

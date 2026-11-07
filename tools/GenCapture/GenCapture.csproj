@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>HartsyInference.GenCapture</RootNamespace>
+    <AssemblyName>hartsy-gencapture</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

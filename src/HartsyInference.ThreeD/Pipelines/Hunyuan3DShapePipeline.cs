@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
@@ -114,7 +115,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
             // Keeps `latents` on the GPU across the whole loop — no per-step D2H drain of the two velocities (the
             // graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
-            Backend.CfgEulerStep(latents, vCond, vUncond, guidance, dt);
+            Backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.Lerp(guidance, dt));
             vCond.Dispose();
             vUncond.Dispose();
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));

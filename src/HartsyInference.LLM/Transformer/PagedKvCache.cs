@@ -1,11 +1,12 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
 /// <summary>Block/page-based KV cache for ONE sequence, backed by a shared <see cref="PagedKvPool"/>: unlike <see cref="FixedKvCache"/> (one contiguous per-layer buffer sized to a worst-case max sequence length, hard-restricted to a single sequence per instance), this allocates fixed-size pages from the pool on demand as the sequence grows and returns them on <see cref="Dispose"/>/<see cref="Reset"/>, so VRAM isn't reserved per-sequence for a worst case and a finished sequence's pages are immediately reusable.</summary>
 /// <remarks>
-/// <para><b>Design: "physically paged, logically contiguous."</b> <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> gather this sequence's pages into a contiguous scratch tensor each call (via <see cref="IBackend.SliceTimeRange"/> + <see cref="IBackend.KvCacheAppend"/>, page by page) so <c>FlashAttention</c>'s existing contiguous-buffer contract is unchanged — this gets the memory-management win without a new paged-attention kernel. A true paged-attention kernel that reads pages directly (no gather) is a natural follow-up once this is correctness-proven — see docs/Checklists/LLM_DECODE_PERF_GRIND.md.</para>
+/// <para><b>Design: "physically paged, logically contiguous."</b> <see cref="KeyPrefix"/>/<see cref="ValuePrefix"/> gather this sequence's pages into a contiguous scratch tensor each call (via <see cref="StridedCopies.SliceAxis"/> + <see cref="IBackend.KvCacheAppend"/>, page by page) so <c>FlashAttention</c>'s existing contiguous-buffer contract is unchanged — this gets the memory-management win without a new paged-attention kernel. A true paged-attention kernel that reads pages directly (no gather) is a natural follow-up once this is correctness-proven — see docs/Checklists/LLM_DECODE_PERF_GRIND.md.</para>
 /// <para><b>Backend capture:</b> <see cref="IKvCache.KeyPrefix"/>/<see cref="IKvCache.ValuePrefix"/> don't receive an <see cref="IBackend"/> parameter (matching the existing interface), but gathering pages requires issuing backend calls, so this cache captures the <see cref="IBackend"/> passed to the most recent <see cref="AppendStep"/> and reuses it for the gather; every caller in this codebase uses exactly one backend instance per session, so this holds in practice without a wider interface change.</para>
 /// </remarks>
 public sealed class PagedKvCache : IKvCache
@@ -81,8 +82,8 @@ public sealed class PagedKvCache : IKvCache
                 Tensor vChunk = new(new TensorShape(1, _pool.NumKvHeads, chunkLen, headDim), DType.F32);
                 try
                 {
-                    backend.SliceTimeRange(kChunk, newK, srcOffset, chunkLen);
-                    backend.SliceTimeRange(vChunk, newV, srcOffset, chunkLen);
+                    StridedCopies.SliceAxis(backend, kChunk, newK, 2, srcOffset, chunkLen);
+                    StridedCopies.SliceAxis(backend, vChunk, newV, 2, srcOffset, chunkLen);
                     backend.KvCacheAppend(kPage, kChunk, withinPage);
                     backend.KvCacheAppend(vPage, vChunk, withinPage);
                 }
@@ -146,7 +147,7 @@ public sealed class PagedKvCache : IKvCache
             Tensor sliced = new(new TensorShape(1, _pool.NumKvHeads, rem, headDim), DType.F32);
             try
             {
-                backend.SliceTimeRange(sliced, lastPage, 0, rem);
+                StridedCopies.SliceAxis(backend, sliced, lastPage, 2, 0, rem);
                 backend.KvCacheAppend(scratch, sliced, dstOffset);
             }
             finally

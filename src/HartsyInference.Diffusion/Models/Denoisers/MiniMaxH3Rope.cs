@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Builds MiniMax-H3's 3-axis rotary tables in the layout <see cref="Core.Backends.IBackend.ApplyRopeSingle"/>
+/// <summary>Builds MiniMax-H3's 3-axis rotary tables in the layout <c>RotaryCall.TokenMajor</c>
 /// consumes: NEOX split-half pairing over the first <c>rotaryDim</c> head dims, cos/sin stored at <c>headDim</c>
 /// stride. The rotated width is <c>3 * 2 * invFreqLen</c> (t, h, w axes, each duplicated across the pair halves) —
 /// for the reference config that is 96 of 128 dims, leaving the tail unrotated.</summary>

@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -162,7 +163,7 @@ public sealed unsafe class ZImageBlock
         // three Linears against the load-time-split Q/K/V weights. The ONLY ops left on the CPU are the tiny AdaLN
         // chunk ([1, 15360]) and ZImageRope.Forward — both contained host excursions the current block already runs.
 
-        // ── AdaLN: Linear(t_emb) → device 4-way split (ModulationSplit4: (1+scale), tanh(gate)) ──
+        // ── AdaLN: Linear(t_emb) → device 4-way split (ChunkActivate: (1+scale), tanh(gate)) ──
         // mod[0]/mod[2] come out ALREADY (1+scale)-folded, so the affines below apply them directly
         // (no Modulate/AddScalar). The old host split read projected.DataPointer — a full D2H sync
         // barrier per block (34×/step).
@@ -269,7 +270,7 @@ public sealed unsafe class ZImageBlock
         return (q, k, v);
     }
 
-    /// <summary>AdaLN: Linear(t_emb) → device 4-way split via <see cref="IBackend.ModulationSplit4"/>, which emits
+    /// <summary>AdaLN: Linear(t_emb) → device 4-way split via <see cref="IBackend.ChunkActivate"/>, which emits
     /// <c>(1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp))</c> — the diffusers Z-Image convention
     /// (tanh'd gates, transformer_z_image.py:233) with the <c>(1+scale)</c> pre-folded so the block applies the
     /// scales directly via AffineBroadcast. Fully device-resident: the old host split read
@@ -283,7 +284,7 @@ public sealed unsafe class ZImageBlock
         Tensor[] results = new Tensor[4];
         TensorShape paramShape = new TensorShape(batch, _hiddenSize);
         for (int p = 0; p < 4; p++) results[p] = new Tensor(paramShape, DType.F32);
-        backend.ModulationSplit4(results[0], results[1], results[2], results[3], projected);
+        backend.ChunkActivate([results[0], results[1], results[2], results[3]], projected, [ChunkActivation.OnePlus, ChunkActivation.Tanh, ChunkActivation.OnePlus, ChunkActivation.Tanh]);
         projected.Dispose();
         return results;
     }
