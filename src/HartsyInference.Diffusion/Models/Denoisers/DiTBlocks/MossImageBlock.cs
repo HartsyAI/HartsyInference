@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -108,7 +109,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         int seq = (int)x.Shape[1];
         TensorShape flat = new(1, seq, _hidden);
         Tensor y = new(flat, act);
-        backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
+        backend.NormModulate(NormModulateCall.Rows(y, x, NormKind.RmsNorm, _eps).WithAffine(_norm1!, null).WithModulation(ModulationSpec.Broadcast(x, modulation.ScaleAttn, modulation.ShiftAttn, ScaleMode.OnePlus)));
         Tensor attn = Attend(backend, y, cos, sin, cachedKeys is null ? null : new ReferenceKvRewrite(cachedKeys, cachedValues!, ReferenceKvOrder.Append), null);
         return Finish(backend, x, attn, modulation, act);
     }
@@ -123,7 +124,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         ArgumentNullException.ThrowIfNull(modulation);
         int seq = (int)x.Shape[1];
         Tensor y = new(new TensorShape(1, seq, _hidden), act);
-        backend.RmsNormModulate(y, x, _norm1!, modulation.ScaleAttn, modulation.ShiftAttn, _eps);
+        backend.NormModulate(NormModulateCall.Rows(y, x, NormKind.RmsNorm, _eps).WithAffine(_norm1!, null).WithModulation(ModulationSpec.Broadcast(x, modulation.ScaleAttn, modulation.ShiftAttn, ScaleMode.OnePlus)));
         CapturedKv captured = new();
         Tensor result;
         try
@@ -189,7 +190,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         projected.Dispose();
 
         Tensor y2 = new(flat, act);
-        backend.RmsNormModulate(y2, x1, _norm2!, modulation.ScaleFfn, modulation.ShiftFfn, _eps);
+        backend.NormModulate(NormModulateCall.Rows(y2, x1, NormKind.RmsNorm, _eps).WithAffine(_norm2!, null).WithModulation(ModulationSpec.Broadcast(x1, modulation.ScaleFfn, modulation.ShiftFfn, ScaleMode.OnePlus)));
         Tensor down = Ffn(backend, y2, seq, act);
         Tensor result = new(flat, DType.F32);
         backend.GatedResidualLastDim(result, x1, down, modulation.GateFfn);

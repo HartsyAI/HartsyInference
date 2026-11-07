@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
@@ -1073,7 +1074,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             fp8.Dispose();
         }
         Tensor outT = new Tensor(h.Shape, h.DType);
-        backend.AffineBroadcastRowIndexed(outT, h, scale, shift, modIndex);
+        backend.NormModulate(NormModulateCall.Rows(outT, h, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(h, scale, shift, modIndex, ScaleMode.OnePlus)));
         return outT;
     }
 
@@ -1154,7 +1155,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             else
             {
                 using Tensor indices = TimestepIndexTensor(targetTimestepRows);
-                backend.AffineBroadcastRowIndexed(modulated, slice, scale, shift, indices);
+                backend.NormModulate(NormModulateCall.Rows(modulated, slice, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(slice, scale, shift, indices, ScaleMode.OnePlus)));
             }
         }
         Tensor weight = weightOverride ?? Require($"{prefix}.weight");

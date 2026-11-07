@@ -1,12 +1,14 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.OpParity.Cases;
 
-/// <summary>Every normalization-plus-modulation the models apply, one case per caller parameter set: the DiT adaLN forms
-/// (broadcast affine, row-indexed affine, LayerNorm and RMSNorm modulation, LTX-2's RMS modulation, Oasis's packed
+/// <summary>Every normalization-plus-modulation the models apply, one case per caller parameter set, expressed through
+/// <see cref="IBackend.NormModulate"/> and <see cref="IBackend.ChunkActivate"/> exactly as the callers build them: the DiT adaLN
+/// forms (broadcast affine, row-indexed affine, LayerNorm and RMSNorm modulation, LTX-2's RMS modulation, Oasis's packed
 /// adaLN), the plain non-affine LayerNorm, the channel-axis norms of the VAEs (Wan 2.2's L2 form, TRELLIS's channel
-/// LayerNorm) and the four-way modulation split. Activations are seeded F32, with the F16 and BF16 forms each backend
+/// LayerNorm) and the four-way modulation split. The fixtures were recorded against the entry points these replaced. Activations are seeded F32, with the F16 and BF16 forms each backend
 /// serves; modulation vectors, weights and biases stay F32 as the models allocate them.</summary>
 public static class NormModulateCases
 {
@@ -46,9 +48,9 @@ public static class NormModulateCases
         foreach ((string suffix, DType dtype, Func<IBackend, bool> serves, string[] required) in Activations(be => be.Device.IsCuda, Cuda, bf16: true))
         {
             cases.Add(new(Family, "affine_rowindexed_" + suffix, seed => new Operands(seed, dtype).In("x", new TensorShape(1, 4, 8)).In("scale", new TensorShape(2, 8), DType.F32).In("shift", new TensorShape(2, 8), DType.F32).Index("rows", [1, 0, 1, 1]).Out("out", new TensorShape(1, 4, 8)).Tensors,
-                (be, t) => be.AffineBroadcastRowIndexed(t.Outputs["out"], t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], t.Inputs["rows"]), serves, required, Exact));
+                (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], t.Inputs["rows"], ScaleMode.OnePlus))), serves, required, Exact));
             cases.Add(new(Family, "affine_rowindexed_noshift_" + suffix, seed => new Operands(seed, dtype).In("x", new TensorShape(1, 4, 8)).In("scale", new TensorShape(2, 8), DType.F32).Index("rows", [1, 0, 1, 1]).Out("out", new TensorShape(1, 4, 8)).Tensors,
-                (be, t) => be.AffineBroadcastRowIndexed(t.Outputs["out"], t.Inputs["x"], t.Inputs["scale"], null, t.Inputs["rows"]), serves, required, Exact));
+                (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(t.Inputs["x"], t.Inputs["scale"], null, t.Inputs["rows"], ScaleMode.OnePlus))), serves, required, Exact));
         }
         // Non-affine LayerNorm over the last dim.
         foreach ((string suffix, DType dtype, Func<IBackend, bool> serves, string[] required) in Activations(be => be.Device.IsGpu, Gpu, bf16: false))
@@ -60,42 +62,43 @@ public static class NormModulateCases
         foreach ((string suffix, DType dtype, Func<IBackend, bool> serves, string[] required) in Activations(be => be.Device.IsGpu, Gpu, bf16: false))
         {
             cases.Add(new(Family, "layernorm_modulate_" + suffix, seed => new Operands(seed, dtype).In("x", new TensorShape(2, 3, 8)).In("scale", new TensorShape(2, 8), DType.F32).In("shift", new TensorShape(2, 8), DType.F32).Out("out", new TensorShape(2, 3, 8)).Tensors,
-                (be, t) => be.LayerNormModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], Eps), serves, required, Norm));
+                (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.LayerNorm, Eps).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], ScaleMode.OnePlus))), serves, required, Norm));
         }
         cases.Add(new(Family, "layernorm_modulate_f32_f16", seed => new Operands(seed).In("x", new TensorShape(2, 3, 8)).In("scale", new TensorShape(2, 8)).In("shift", new TensorShape(2, 8)).Out("out", new TensorShape(2, 3, 8), DType.F16).Tensors,
-            (be, t) => be.LayerNormModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], Eps), be => be.Device.IsCuda, Cuda, Norm));
+            (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.LayerNorm, Eps).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], ScaleMode.OnePlus))), be => be.Device.IsCuda, Cuda, Norm));
         // Weighted RMSNorm then adaLN, scale/shift [B, D] or [D]; no shift; F16; mixed F32/F16 in either direction.
         cases.Add(new(Family, "rmsnorm_modulate_f32", seed => new Operands(seed).In("x", new TensorShape(2, 3, 8)).In("w", new TensorShape(8)).In("scale", new TensorShape(2, 8)).In("shift", new TensorShape(2, 8)).Out("out", new TensorShape(2, 3, 8)).Tensors,
-            (be, t) => be.RmsNormModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["w"], t.Inputs["scale"], t.Inputs["shift"], Eps), _ => true, All, Norm));
+            (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.RmsNorm, Eps).WithAffine(t.Inputs["w"], null).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], ScaleMode.OnePlus))), _ => true, All, Norm));
         cases.Add(new(Family, "rmsnorm_modulate_shared_noshift", seed => new Operands(seed).In("x", new TensorShape(2, 3, 8)).In("w", new TensorShape(8)).In("scale", new TensorShape(8)).Out("out", new TensorShape(2, 3, 8)).Tensors,
-            (be, t) => be.RmsNormModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["w"], t.Inputs["scale"], null, Eps), _ => true, All, Norm));
+            (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.RmsNorm, Eps).WithAffine(t.Inputs["w"], null).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], null, ScaleMode.OnePlus))), _ => true, All, Norm));
         foreach ((string name, DType inDtype, DType outDtype) in new[] { ("rmsnorm_modulate_f16", DType.F16, DType.F16), ("rmsnorm_modulate_f32_f16", DType.F32, DType.F16), ("rmsnorm_modulate_f16_f32", DType.F16, DType.F32) })
         {
             cases.Add(new(Family, name, seed => new Operands(seed, inDtype).In("x", new TensorShape(2, 3, 8)).In("w", new TensorShape(8), DType.F32).In("scale", new TensorShape(2, 8), DType.F32).In("shift", new TensorShape(2, 8), DType.F32).Out("out", new TensorShape(2, 3, 8), outDtype).Tensors,
-                (be, t) => be.RmsNormModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["w"], t.Inputs["scale"], t.Inputs["shift"], Eps), _ => true, All, Norm));
+                (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.RmsNorm, Eps).WithAffine(t.Inputs["w"], null).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], ScaleMode.OnePlus))), _ => true, All, Norm));
         }
-        // LTX-2: unweighted RMSNorm then (1 + scale[d]) and shift[d] shared by every row; F16 on the GPUs.
+        // LTX-2: unweighted RMSNorm then (1 + scale[d]) and shift[d] shared by every row; F16 on the GPUs. The recorded "ones" input was
+        // the unit weight the replaced entry took; the call no longer reads it.
         foreach ((string suffix, DType dtype, Func<IBackend, bool> serves, string[] required) in Activations(be => be.Device.IsGpu, Gpu, bf16: false))
         {
             cases.Add(new(Family, "ltx2_rms_modulate_" + suffix, seed => new Operands(seed, dtype).In("x", new TensorShape(3, 16)).Ones("ones", 16).In("scale", new TensorShape(16), DType.F32).In("shift", new TensorShape(16), DType.F32).Out("out", new TensorShape(3, 16)).Tensors,
-                (be, t) => be.Ltx2RmsModulate(t.Outputs["out"], t.Inputs["x"], t.Inputs["ones"], t.Inputs["scale"], t.Inputs["shift"], Eps), serves, required, Norm));
+                (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.RmsNorm, Eps).WithModulation(ModulationSpec.Broadcast(t.Inputs["x"], t.Inputs["scale"], t.Inputs["shift"], ScaleMode.OnePlus))), serves, required, Norm));
         }
         // Oasis: LayerNorm then (1 + scale) and shift read from a packed modulation row [frames, modStride] at offsets, one row per sp tokens.
         cases.Add(new(Family, "oasis_adaln_f32", seed => new Operands(seed).In("x", new TensorShape(6, 8)).In("mod", new TensorShape(2, 48)).Out("out", new TensorShape(6, 8)).Tensors,
-            (be, t) => be.OasisAdaLn(t.Outputs["out"], t.Inputs["x"], t.Inputs["mod"], 8, 3, 6, 48, 0, 8, Eps), _ => true, All, Norm));
+            (be, t) => be.NormModulate(NormModulateCall.Rows(t.Outputs["out"], t.Inputs["x"], NormKind.LayerNorm, Eps).WithModulation(ModulationSpec.Packed(t.Inputs["mod"], 48, scaleOffset: 8, shiftOffset: 0, rowsPerMod: 3, ScaleMode.OnePlus))), _ => true, All, Norm));
         // Wan 2.2 channel RMS norm: x · sqrt(C) / max(‖x‖₂, eps) · gamma over the channel axis of [B, C, T, H, W]; no gamma; BF16 (CUDA).
         cases.Add(new(Family, "wan_rms_channel_f32", seed => new Operands(seed).In("x", new TensorShape([2, 4, 3, 2, 2])).In("gamma", new TensorShape(4)).Out("out", new TensorShape([2, 4, 3, 2, 2])).Tensors,
-            (be, t) => be.WanRmsNormChannel(t.Outputs["out"], t.Inputs["x"], t.Inputs["gamma"], 1e-12f), _ => true, All, ChannelNorm));
+            (be, t) => be.NormModulate(NormModulateCall.Channel(t.Outputs["out"], t.Inputs["x"], NormKind.L2Norm, 1e-12f).WithAffine(t.Inputs["gamma"], null)), _ => true, All, ChannelNorm));
         cases.Add(new(Family, "wan_rms_channel_nogamma", seed => new Operands(seed).In("x", new TensorShape(1, 4, 2, 3)).Out("out", new TensorShape(1, 4, 2, 3)).Tensors,
-            (be, t) => be.WanRmsNormChannel(t.Outputs["out"], t.Inputs["x"], null, 1e-8f), _ => true, All, ChannelNorm));
+            (be, t) => be.NormModulate(NormModulateCall.Channel(t.Outputs["out"], t.Inputs["x"], NormKind.L2Norm, 1e-8f)), _ => true, All, ChannelNorm));
         cases.Add(new(Family, "wan_rms_channel_bf16", seed => new Operands(seed, DType.BF16).In("x", new TensorShape([2, 4, 3, 2, 2])).In("gamma", new TensorShape(4), DType.F32).Out("out", new TensorShape([2, 4, 3, 2, 2])).Tensors,
-            (be, t) => be.WanRmsNormChannel(t.Outputs["out"], t.Inputs["x"], t.Inputs["gamma"], 1e-12f), be => be.Device.IsCuda, Cuda, ChannelNorm));
+            (be, t) => be.NormModulate(NormModulateCall.Channel(t.Outputs["out"], t.Inputs["x"], NormKind.L2Norm, 1e-12f).WithAffine(t.Inputs["gamma"], null)), be => be.Device.IsCuda, Cuda, ChannelNorm));
         // TRELLIS channel LayerNorm over [N, C, D, H, W] with a [C] affine (the host default served every backend).
         cases.Add(new(Family, "channel_layernorm3d_f32", seed => new Operands(seed).In("x", new TensorShape([1, 4, 2, 2, 2])).In("w", new TensorShape(4)).In("b", new TensorShape(4)).Out("out", new TensorShape([1, 4, 2, 2, 2])).Tensors,
-            (be, t) => be.ChannelLayerNorm3d(t.Outputs["out"], t.Inputs["x"], t.Inputs["w"], t.Inputs["b"], 1e-5f), _ => true, All, ChannelNorm));
+            (be, t) => be.NormModulate(NormModulateCall.Channel(t.Outputs["out"], t.Inputs["x"], NormKind.LayerNorm, 1e-5f).WithAffine(t.Inputs["w"], t.Inputs["b"])), _ => true, All, ChannelNorm));
         // Four-way modulation split: proj [B, 4D] into 1 + x for the scales and tanh(x) for the gates.
         cases.Add(new(Family, "modulation_split4_f32", seed => new Operands(seed).In("proj", new TensorShape(2, 32)).Out("scaleMsa", new TensorShape(2, 8)).Out("gateMsa", new TensorShape(2, 8)).Out("scaleMlp", new TensorShape(2, 8)).Out("gateMlp", new TensorShape(2, 8)).Tensors,
-            (be, t) => be.ModulationSplit4(t.Outputs["scaleMsa"], t.Outputs["gateMsa"], t.Outputs["scaleMlp"], t.Outputs["gateMlp"], t.Inputs["proj"]), _ => true, All, Tanh));
+            (be, t) => be.ChunkActivate([t.Outputs["scaleMsa"], t.Outputs["gateMsa"], t.Outputs["scaleMlp"], t.Outputs["gateMlp"]], t.Inputs["proj"], [ChunkActivation.OnePlus, ChunkActivation.Tanh, ChunkActivation.OnePlus, ChunkActivation.Tanh]), _ => true, All, Tanh));
         return cases;
     }
 

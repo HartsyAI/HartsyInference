@@ -48,41 +48,6 @@ public sealed partial class VulkanBackend
     }
 
     /// <inheritdoc/>
-    public void RmsNormModulate(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? shift, float eps)
-    {
-        using OpScope _op = EnterOp();
-        (int dim, long rows, long rowsPerBatch) = RmsNormModulateReference.Validate(output, input, weight, scale, shift);
-        if (rows == 0)
-            return;
-        string suffix = input.DType == output.DType ? DtypeSuffix(input.DType) : DtypeSuffix(input.DType) + DtypeSuffix(output.DType);
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer wBuf = GetBuffer(weight);
-        VulkanBuffer scaleBuf = GetBuffer(scale);
-        VulkanBuffer shiftBuf = shift is null ? scaleBuf : GetBuffer(shift);   // never read when hasShift is 0
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * output.DType.SizeInBytes));
-        try
-        {
-            VulkanKernel k = GetKernel("rms_norm_modulate" + suffix, storageBufferCount: 5, RowSpec(NormRowLocal));
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)dim);
-            pc.U32(checked((uint)rows));
-            pc.U32(checked((uint)rowsPerBatch));
-            pc.F32(eps);
-            pc.U32(shift is null ? 0u : 1u);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, scaleBuf.Handle, shiftBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc.Written, checked((uint)rows));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RmsNormModulate dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <inheritdoc/>
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
         int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
     {

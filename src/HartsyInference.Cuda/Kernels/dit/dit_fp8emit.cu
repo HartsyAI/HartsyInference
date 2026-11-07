@@ -8,7 +8,7 @@
 // absmax the scale is not known until a grid-wide reduction over the finished tensor has retired, so
 // a producer could not quantize from registers without a second pass or a device sync.
 //
-// The F32 output path is byte-identical to dit_affine_broadcast_rowindexed_f32 — same expressions in
+// The F32 output path is byte-identical to the row-indexed affine of norm_modulate.cu — same expressions in
 // the same order — so the unfused result is unchanged and only the sidecar is new.
 
 // VERBATIM COPY of fp8_quant.cu's f32_to_e4m3. It must stay byte-identical: the fused sidecar has to

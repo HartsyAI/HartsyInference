@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -502,7 +503,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
         // LayerNorm-no-affine + modulate, fused on-device.
         TensorShape seqShape = new TensorShape(batch, seqLen, hidden);
         Tensor modulated = new Tensor(seqShape, DType.F32);
-        backend.LayerNormModulate(modulated, x, scale, shift, _config.RmsNormEps);
+        backend.NormModulate(NormModulateCall.Rows(modulated, x, NormKind.LayerNorm, _config.RmsNormEps).WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
         shift.Dispose();
         scale.Dispose();
 

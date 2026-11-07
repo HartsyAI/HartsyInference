@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -428,7 +429,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     // embedded0/modIndex non-null (I2V conditioning): per-token final-layer modulation, mirroring diffusers'
     // scale_shift_table[None,None] + embedded_timestep[:,:,None] (embedded_timestep stays per-token through the
     // whole model, not just the blocks). Builds a [2,dim] shift/scale-raw table (row 0 = t=0, row 1 = t=t_cur) and
-    // looks it up per token via AffineBroadcastRowIndexed — same primitive the blocks use.
+    // looks it up per token via the row-indexed NormModulate — same primitive the blocks use.
     private Tensor FinalLayer(IBackend backend, Tensor hidden, Tensor embedded, int s, int dim, Tensor? embedded0 = null, Tensor? modIndex = null)
     {
         float* ss = (float*)_finalScaleShift!.DataPointer;
@@ -448,7 +449,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
                 shp[d] = ss[d] + em0[d]; scp[d] = ss[dim + d] + em0[d];               // row 0: conditioned (t=0)
                 shp[dim + d] = ss[d] + em1[d]; scp[dim + d] = ss[dim + d] + em1[d];   // row 1: denoising (t=t_cur)
             }
-            backend.AffineBroadcastRowIndexed(affined, normed, scaleTable, shiftTable, modIndex);
+            backend.NormModulate(NormModulateCall.Rows(affined, normed, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(normed, scaleTable, shiftTable, modIndex, ScaleMode.OnePlus)));
             shiftTable.Dispose(); scaleTable.Dispose();
         }
         else

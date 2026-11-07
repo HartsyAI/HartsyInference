@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -291,7 +292,7 @@ public sealed unsafe class OasisDit : IDisposable
 
         // Fused adaLN: shift + (1+scale)·LayerNorm(x). mod = [shift ‖ scale] over the last 2·dim (shiftOff 0, scaleOff dim).
         Tensor normed = new Tensor(new TensorShape([(long)t, sp, dim]), DType.F32);
-        backend.OasisAdaLn(normed, x, mod, dim, sp, t * sp, 2 * dim, 0, dim, 1e-6f);
+        backend.NormModulate(NormModulateCall.Rows(normed, x, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Packed(mod, 2 * dim, dim, 0, sp, ScaleMode.OnePlus)));
         mod.Dispose();
 
         int outVec = c * p * p;

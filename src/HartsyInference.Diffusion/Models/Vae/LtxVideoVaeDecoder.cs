@@ -1,6 +1,7 @@
 using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -212,7 +213,7 @@ public sealed unsafe class LtxVideoVaeDecoder
         if (_normOutTimeEmbedder is null)
         {
             normed = new Tensor(h.Shape, h.DType);
-            backend.WanRmsNormChannel(normed, h, null, 1e-8f);
+            backend.NormModulate(NormModulateCall.Channel(normed, h, NormKind.L2Norm, 1e-8f));
         }
         else
         {

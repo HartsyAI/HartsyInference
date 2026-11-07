@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
@@ -97,7 +98,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
 
         // Attention sub-half: adaLN(x) = shift + (1+scale)·LayerNorm(x) — one fused kernel (per-frame slice+affine).
         Tensor n1 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
-        backend.OasisAdaLn(n1, x, mod, _dim, sp, frames * sp, 6 * _dim, 0 * _dim, 1 * _dim, 1e-6f);
+        backend.NormModulate(NormModulateCall.Rows(n1, x, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Packed(mod, 6 * _dim, 1 * _dim, 0 * _dim, sp, ScaleMode.OnePlus)));
         if (Prof) { backend.Sync(); TModNorm += Now(); TAttnRest -= Now(); }
         Tensor attn = spatial ? SpatialAttention(backend, n1, frames, sp, spatialCos, spatialSin)
             : TemporalAttention(backend, n1, frames, sp, temporalCos, temporalSin, causalMask);
@@ -110,7 +111,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         (Tensor fc1W, Tensor? fc1B, Tensor fc2W, Tensor? fc2B) = spatial ? (_sFc1W!, _sFc1B, _sFc2W!, _sFc2B)
             : (_tFc1W!, _tFc1B, _tFc2W!, _tFc2B);
         Tensor n2 = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
-        backend.OasisAdaLn(n2, x, mod, _dim, sp, frames * sp, 6 * _dim, 3 * _dim, 4 * _dim, 1e-6f);
+        backend.NormModulate(NormModulateCall.Rows(n2, x, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Packed(mod, 6 * _dim, 4 * _dim, 3 * _dim, sp, ScaleMode.OnePlus)));
         Tensor mid = new Tensor(new TensorShape(frames * sp, _mlpHidden), DType.F32);
         backend.Linear(mid, n2, fc1W, fc1B);
         n2.Dispose();

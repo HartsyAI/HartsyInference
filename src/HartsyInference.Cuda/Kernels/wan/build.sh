@@ -5,7 +5,6 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
     "wan_vae_conv3d"
-    "wan_vae_norm"
 )
 
 # shellcheck source=../build_common.sh

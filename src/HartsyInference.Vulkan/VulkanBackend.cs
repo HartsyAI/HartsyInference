@@ -1437,39 +1437,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     #region Normalization
 
-    /// <summary>Dispatches a per-row norm that takes no weight or bias: one workgroup per row, two buffers.</summary>
-    private void DispatchNoAffineNorm(string shader, Tensor output, Tensor input, float eps, int normDim, int totalRows)
-    {
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-            };
-            VulkanKernel k = GetKernel(shader, storageBufferCount: 2, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)normDim);
-            pc.U32((uint)totalRows);
-            pc.F32(eps);
-
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc.Written, (uint)totalRows, 1, 1);
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan DispatchNoAffineNorm dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     private void DispatchPerRowNorm(
         string shader,
         int storageBufs,
@@ -1613,108 +1580,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
-    /// <summary>AdaLN modulation split: <c>proj [B,4D]</c> into four <c>[B,D]</c>, <c>1+x</c> for scales and
-    /// <c>tanh(x)</c> for gates.</summary>
-    public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
-    {
-        using OpScope _op = EnterOp();
-        if (proj.DType != DType.F32 || scaleMsa.DType != DType.F32)
-        {
-            IBackend.ModulationSplit4Reference(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
-            return;
-        }
-        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
-        int batch = (int)(scaleMsa.ElementCount / dim);
-        long total = (long)batch * dim;
-
-        VulkanBuffer projBuf = GetBuffer(proj);
-        ulong outBytes = (ulong)(total * sizeof(float));
-        VulkanBuffer sa = _xfer.AllocateDevice(outBytes);
-        VulkanBuffer ga = _xfer.AllocateDevice(outBytes);
-        VulkanBuffer sl = _xfer.AllocateDevice(outBytes);
-        VulkanBuffer gl = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-            };
-            VulkanKernel kernel = GetKernel("modulation_split4", storageBufferCount: 5, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)dim);
-            pc.U32((uint)batch);
-
-            Span<ulong> bufs = stackalloc ulong[] { projBuf.Handle, sa.Handle, ga.Handle, sl.Handle, gl.Handle };
-            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
-            CacheOutput(scaleMsa, sa);
-            CacheOutput(gateMsa, ga);
-            CacheOutput(scaleMlp, sl);
-            CacheOutput(gateMlp, gl);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan ModulationSplit4 dispatch failed", ex);
-            sa.Dispose();
-            ga.Dispose();
-            sl.Dispose();
-            gl.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Per-row affine whose scale and shift are gathered by a per-row index.</summary>
-    public void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
-    {
-        using OpScope _op = EnterOp();
-        if (output.DType != DType.F32 || input.DType != DType.F32 || scaleTable.DType != DType.F32
-            || (shiftTable is not null && shiftTable.DType != DType.F32) || rowIndex.DType != DType.I32)
-        {
-            IBackend.AffineBroadcastRowIndexedReference(output, input, scaleTable, shiftTable, rowIndex);
-            return;
-        }
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        long total = input.ElementCount;
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer scaleBuf = GetBuffer(scaleTable);
-        // The shader always binds five buffers, so an absent shift binds the scale table and a spec constant
-        // turns the read off — a null binding is not legal, and binding a stale descriptor would read garbage.
-        VulkanBuffer shiftBuf = shiftTable is null ? scaleBuf : GetBuffer(shiftTable);
-        VulkanBuffer idxBuf = GetBuffer(rowIndex);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, shiftTable is not null),
-            };
-            VulkanKernel kernel = GetKernel("affine_broadcast_row_indexed", storageBufferCount: 5, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)dim);
-            pc.U32((uint)total);
-
-            Span<ulong> bufs = stackalloc ulong[]
-            {
-                inBuf.Handle, scaleBuf.Handle, shiftBuf.Handle, idxBuf.Handle, outBuf.Handle,
-            };
-            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan AffineBroadcastRowIndexed dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>Per-token gated residual with the gate gather fused in.</summary>
     public void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
     {
@@ -1759,69 +1624,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             Logs.Error("Vulkan GatedResidualRowIndexed dispatch failed", ex);
             outBuf.Dispose();
             throw;
-        }
-    }
-
-    /// <summary>Per-row LayerNorm with no learned affine, then a per-batch modulation:
-    /// <c>y = norm(x) * (1 + scale[b]) + shift[b]</c>.</summary>
-    /// <remarks>Another true host fallback on the DiT path, not a composition: the default reads
-    /// <c>DataPointer</c> on four tensors. Every DiT block modulates right after normalizing, so it ran once per
-    /// block per step with a device round-trip each time.</remarks>
-    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != output.DType || (input.DType != DType.F32 && input.DType != DType.F16))
-        {
-            IBackend.LayerNormModulateReference(output, input, scale, shift, eps);
-            return;
-        }
-        int rank = input.Shape.Rank;
-        int normDim = (int)input.Shape[rank - 1];
-        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
-        int totalRows = (int)(input.ElementCount / normDim);
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer scBuf = GetBuffer(scale);
-        VulkanBuffer shBuf = GetBuffer(shift);
-        // The modulation vectors are FP32 in the shader signature whatever the activation dtype is, as the other
-        // norms do — they are per-channel and tiny, so the cast costs nothing next to the activation stream.
-        VulkanBuffer? scOwned = null, shOwned = null;
-        VulkanBuffer scEff = scBuf, shEff = shBuf;
-        if (scale.DType != DType.F32) (scEff, scOwned) = CastIfNeeded(scale, scBuf, DType.F32);
-        if (shift.DType != DType.F32) (shEff, shOwned) = CastIfNeeded(shift, shBuf, DType.F32);
-
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-            };
-            VulkanKernel kernel = GetKernel("layernorm_modulate" + DtypeSuffix(input.DType), storageBufferCount: 4, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)normDim);
-            pc.U32((uint)totalRows);
-            pc.U32((uint)Math.Max(1, seqLen));
-            pc.F32(eps);
-
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, scEff.Handle, shEff.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, (uint)totalRows, 1, 1);
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan LayerNormModulate dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-        finally
-        {
-            if (scOwned is not null) _xfer.FreeDevice(scOwned);
-            if (shOwned is not null) _xfer.FreeDevice(shOwned);
         }
     }
 
@@ -2023,25 +1825,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Per-row LayerNorm with no learned scale or bias.</summary>
-    /// <remarks>No override existed, so every call fell through to <see cref="IBackend"/>'s host default — which
-    /// refuses anything but F32 outright. That is what a Flux generation on Vulkan hit: the DiT runs its block
-    /// activations in F16 by default (<c>numerics.ditF16</c>), so the final pre-modulation norm handed the default
-    /// an F16 tensor and the generation failed with "LayerNormNoAffine default fallback only supports F32".
-    /// Every DiT normalizes before modulating, so this is on the hot path of the whole family.</remarks>
-    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != output.DType || (input.DType != DType.F32 && input.DType != DType.F16))
-        {
-            IBackend.LayerNormNoAffineReference(output, input, eps);
-            return;
-        }
-        int normDim = (int)input.Shape[input.Shape.Rank - 1];
-        int totalRows = (int)(input.ElementCount / normDim);
-        DispatchNoAffineNorm("layernorm_noaffine" + DtypeSuffix(input.DType), output, input, eps, normDim, totalRows);
-    }
-
     public void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
         using OpScope _op = EnterOp();
@@ -2049,89 +1832,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         int totalRows = (int)(input.ElementCount / normDim);
         string shader = "rmsnorm" + DtypeSuffix(input.DType);
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
-    }
-
-    /// <summary>Wan2.2 VAE channel-wise RMS norm. F32 only, matching both references; anything else falls back
-    /// to the CPU default.</summary>
-    public void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != DType.F32 || output.DType != DType.F32 || (gamma is not null && gamma.DType != DType.F32))
-        {
-            IBackend.WanRmsNormChannelReference(output, input, gamma, eps);
-            return;
-        }
-        int c = (int)input.Shape[1];
-        long spatial = input.ElementCount / ((long)input.Shape[0] * c);
-        long numPos = input.Shape[0] * spatial;
-        float sqrtC = MathF.Sqrt(c);
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer gammaBuf = gamma is not null ? GetBuffer(gamma) : inBuf;   // dummy when hasGamma=0 — never read
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            VulkanKernel k = GetKernel("wan_rms_norm_channel", 3, _default1DSpec);
-            Span<byte> pc = stackalloc byte[6 * 4];
-            BinaryWriteUInt(pc, 0, (uint)c);
-            BinaryWriteUInt(pc, 4, (uint)spatial);
-            BinaryWriteFloat(pc, 8, eps);
-            BinaryWriteFloat(pc, 12, sqrtC);
-            BinaryWriteUInt(pc, 16, gamma is not null ? 1u : 0u);
-            BinaryWriteUInt(pc, 20, (uint)numPos);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, gammaBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(numPos, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan WanRmsNormChannel dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>DiT adaLN modulation: <c>out = in*scale + (shift ?? 0)</c>, broadcasting scale/shift <c>[B,C]</c> over input/output <c>[B,seqLen,C]</c>. No override existed at all before this — every call fell through to IBackend's F32-only CPU default, which throws on an F16 activation (the shape Krea2's DiT actually uses — found via a real Krea2-on-Vulkan run, not a synthetic test).</summary>
-    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
-    {
-        using OpScope _op = EnterOp();
-        if ((input.DType != DType.F32 && input.DType != DType.F16) || output.DType != input.DType
-            || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
-        {
-            IBackend.AffineBroadcastLastDimReference(output, input, scale, shift);
-            return;
-        }
-        int rank = input.Shape.Rank;
-        int dim = (int)input.Shape[rank - 1];
-        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
-        long total = input.ElementCount;
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer scaleBuf = GetBuffer(scale);
-        VulkanBuffer? shiftBuf = shift is not null ? GetBuffer(shift) : null;
-        ulong outBytes = (ulong)(total * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            string shader = "affine_broadcast_last_dim" + (shift is null ? "_noshift" : "") + DtypeSuffix(input.DType);
-            int bufferCount = shift is null ? 3 : 4;
-            VulkanKernel k = GetKernel(shader, bufferCount, _default1DSpec);
-            Span<byte> pc = stackalloc byte[3 * 4];
-            BinaryWriteUInt(pc, 0, (uint)dim);
-            BinaryWriteUInt(pc, 4, (uint)seqLen);
-            BinaryWriteUInt(pc, 8, (uint)total);
-            Span<ulong> bufs = shift is null ? stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, outBuf.Handle }
-                : stackalloc ulong[] { inBuf.Handle, scaleBuf.Handle, shiftBuf!.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan AffineBroadcastLastDim dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
     }
 
     public void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
