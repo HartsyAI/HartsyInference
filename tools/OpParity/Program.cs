@@ -121,8 +121,12 @@ try
         foreach (Tensor o in run.Outputs.Values) o.AsSpan<byte>().Clear();
         c.Run(backend, run);
         backend.Sync();
-        Acceptance acceptance = new(Enum.Parse<AcceptanceKind>(recorded.AcceptanceKind), recorded.MaxAbs, recorded.MaxRel, recorded.Reason);
-        failures += Report(c, run, expected, acceptance, "vs fixture", recorded.MayBeNonFinite);
+        // The case's declared acceptance judges the check. The fixture's outputs stay the recorded ones; the tolerance a case declares
+        // at the head, with its reason, is the one the check enforces. A manifest that recorded a different acceptance says so.
+        Acceptance recordedAcceptance = new(Enum.Parse<AcceptanceKind>(recorded.AcceptanceKind), recorded.MaxAbs, recorded.MaxRel, recorded.Reason);
+        if (recordedAcceptance.Kind != c.Acceptance.Kind || recordedAcceptance.MaxAbs != c.Acceptance.MaxAbs || recordedAcceptance.MaxRel != c.Acceptance.MaxRel)
+            Console.WriteLine($"  {c.Family}/{c.Name}: acceptance changed since record: recorded {recordedAcceptance.Kind} ({recordedAcceptance.MaxAbs:E1} / {recordedAcceptance.MaxRel:E1}), judged {c.Acceptance.Kind} ({c.Acceptance.MaxAbs:E1} / {c.Acceptance.MaxRel:E1}): {c.Acceptance.Reason}");
+        failures += Report(c, run, expected, c.Acceptance, "vs fixture", recorded.MayBeNonFinite);
         foreach (Tensor e in expected.Values) e.Dispose();
     }
 }
