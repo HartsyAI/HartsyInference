@@ -61,14 +61,16 @@ try
                 continue;
             }
             using OpTensors t = c.Build(seed);
-            c.Run(backend, t);
-            backend.Sync();
             Dictionary<string, string> meta = new(StringComparer.Ordinal) { ["family"] = c.Family, ["case"] = c.Name, ["backend"] = kind, ["seed"] = seed.ToString(CultureInfo.InvariantCulture) };
+            // The inputs are written before the op runs: an entry that works in place on an operand the case lists as an input
+            // would otherwise leave its result in the fixture's inputs, and every later check would feed the op its own output.
             Dictionary<string, string> hashes = new(StringComparer.Ordinal)
             {
                 ["inputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "inputs.safetensors"), t.Inputs, meta),
-                ["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta),
             };
+            c.Run(backend, t);
+            backend.Sync();
+            hashes["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta);
             FixtureManifest m = Manifest(c, "recorded", hashes);
             m.MayBeNonFinite.AddRange(t.MayBeNonFinite);
             m.Save(FixtureStore.ManifestPath(dir));

@@ -18,7 +18,9 @@ public static class TensorCompare
             bool same = expected.AsReadOnlySpan<byte>().SequenceEqual(actual.AsReadOnlySpan<byte>());
             if (!mayBeNonFinite && !AllFinite(actual, out string where))
                 return new(name, false, "non-finite value " + where, double.NaN, double.NaN);
-            return new(name, same, same ? "bit-identical" : "bytes differ", same ? 0 : double.NaN, same ? 0 : double.NaN);
+            if (same) return new(name, true, "bit-identical", 0, 0);
+            (double byteAbs, double byteRel) = Deviation(expected, actual);
+            return new(name, false, double.IsNaN(byteAbs) ? "bytes differ" : $"bytes differ: maxAbs {byteAbs:E2} maxRel {byteRel:E2}", byteAbs, byteRel);
         }
         using Tensor e32 = expected.DType == DType.F32 ? expected : expected.CastTo(DType.F32);
         using Tensor a32 = actual.DType == DType.F32 ? actual : actual.CastTo(DType.F32);
@@ -41,6 +43,26 @@ public static class TensorCompare
         }
         bool pass = maxAbs <= acceptance.MaxAbs || maxRel <= acceptance.MaxRel;
         return new(name, pass, $"maxAbs {maxAbs:E2} maxRel {maxRel:E2} (limits {acceptance.MaxAbs:E1} / {acceptance.MaxRel:E1})", maxAbs, maxRel);
+    }
+
+    /// <summary>The largest absolute and relative deviation between two float tensors (F32, F16 or BF16), or NaN for other dtypes
+    /// and for a non-finite element: the number a bit mismatch is worth knowing.</summary>
+    private static (double MaxAbs, double MaxRel) Deviation(Tensor expected, Tensor actual)
+    {
+        if (expected.DType != DType.F32 && expected.DType != DType.F16 && expected.DType != DType.BF16) return (double.NaN, double.NaN);
+        using Tensor e32 = expected.DType == DType.F32 ? expected : expected.CastTo(DType.F32);
+        using Tensor a32 = actual.DType == DType.F32 ? actual : actual.CastTo(DType.F32);
+        ReadOnlySpan<float> e = e32.AsReadOnlySpan<float>();
+        ReadOnlySpan<float> a = a32.AsReadOnlySpan<float>();
+        double maxAbs = 0, maxRel = 0;
+        for (int i = 0; i < e.Length; i++)
+        {
+            if (!float.IsFinite(e[i]) || !float.IsFinite(a[i])) return (double.NaN, double.NaN);
+            double diff = Math.Abs((double)a[i] - e[i]);
+            maxAbs = Math.Max(maxAbs, diff);
+            maxRel = Math.Max(maxRel, diff / Math.Max(Math.Abs((double)e[i]), 1e-6));
+        }
+        return (maxAbs, maxRel);
     }
 
     private static bool AllFinite(Tensor t, out string where)
