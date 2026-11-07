@@ -1,6 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -383,7 +385,7 @@ public sealed unsafe class StableAudioDit : IDisposable
 
         /// <summary>flat [1,rows,H·D] → per-head QK-LayerNorm (on the pre-permute [1,rows,H,D] view — LayerNorm
         /// only reduces over the last dim, so this is identical to normalizing the post-permute layout) → optional
-        /// partial RoPE via <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> (pass <c>rotDim=0</c>/<c>cosTable=null</c>
+        /// partial RoPE via <c>RotaryCall.TokenMajor</c> (pass <c>rotDim=0</c>/<c>cosTable=null</c>
         /// to skip, e.g. cross-attention) → <see cref="Core.Backends.IBackend.Permute0213"/> to heads-first
         /// [1,H,rows,D]. Order matters: LayerNorm must run BEFORE RoPE (matches <c>stable_audio_tools.Attention</c>).</summary>
         private Tensor HeadsNormRope(IBackend backend, Tensor flat, int rows, int heads, int hd,
@@ -395,7 +397,7 @@ public sealed unsafe class StableAudioDit : IDisposable
                 backend.LayerNorm(normed, headsFlat, normW, normB!, _c.QkNormEps);
             else
                 backend.Scale(normed, headsFlat, 1.0f);
-            if (cosTable is not null) backend.ApplyRopeSingle(normed, cosTable, sinTable!, rotDim);
+            if (cosTable is not null) backend.Rotary(RotaryCall.TokenMajor(normed, cosTable, sinTable!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotDim));
             Tensor headsT = new Tensor(new TensorShape(1, heads, rows, hd), DType.F32);
             backend.Permute0213(headsT, normed, rows, heads, hd);
             normed.Dispose();

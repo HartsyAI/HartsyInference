@@ -58,10 +58,4 @@ public sealed partial class CpuBackend
         WindowIndicesReference.Apply(indices, windowSize, seqLen, startPos);
     }
 
-    /// <inheritdoc />
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset)
-    {
-        ThrowIfDisposed();
-        RopeInterleavedOffsetReference.Apply(x, cos, sin, rotaryDim, dimOffset);
-    }
 }

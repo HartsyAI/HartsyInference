@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -256,8 +257,8 @@ public sealed unsafe class SparkModel : ISsmModel
             ropes[slot] = (cos, sin);
         }
         (Tensor ropeCos, Tensor ropeSin) = ropes[slot]!.Value;
-        backend.ApplyRopeSingle(q, ropeCos, ropeSin, rotaryDim);
-        backend.ApplyRopeSingle(k, ropeCos, ropeSin, rotaryDim);
+        backend.Rotary(RotaryCall.TokenMajor(q, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotaryDim));
+        backend.Rotary(RotaryCall.TokenMajor(k, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotaryDim));
 
         int window = Config.SlidingLayers[i] ? Config.SlidingWindow : 0;
         Tensor output = HeadGatedAttention.Attend(backend, _attention, _kv, i, q, k, v, gateLogits, _pos, window, W($"{p}.out_proj.weight"));

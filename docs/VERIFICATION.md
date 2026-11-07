@@ -21,7 +21,7 @@ hartsy-opparity check --op attention --backend cuda --fixtures /data/fixtures
 
 - A **case** is one op invocation with seeded operands covering one caller's parameter set. Case sets live in
   `tools/OpParity/Cases/`; `hartsy-opparity list` prints them. A new op family adds a case class and registers it.
-  Families today: `smoke`, `attention`, `layout` (the strided copy, accumulate and pad calls of [BACKEND_OPS.md](BACKEND_OPS.md)) and `shuffle` (its pixel shuffles).
+  Families today: `smoke`, `attention`, `layout` (the strided copy, accumulate and pad calls of [BACKEND_OPS.md](BACKEND_OPS.md)) `shuffle` (its pixel shuffles) and `rotary` (every rotary position embedding).
 - `record` writes `inputs.safetensors`, `outputs.safetensors` and `manifest.json` under
   `{fixtures}/{family}/{case}/{backend}/`. The manifest holds the commit, backend and device, the hashes of the kernel
   artifacts the backend loads (PTX or SPIR-V), the settings file in force, the fixture hashes and the case's acceptance

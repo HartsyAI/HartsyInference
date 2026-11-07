@@ -25,13 +25,12 @@ public sealed partial class CudaKernels
     private nint _hcPreMixF32;
     private nint _hcPostMixF32;
     private CudaModule? _latentPositionsModule;
-    private nint _ropeInterleavedOffsetF32;
     private nint _windowIndicesI32;
 
     /// <summary>True when all four latent PTX modules loaded, so every attention primitive can run on this device.</summary>
     public bool HasAttentionKernels => _sparseLatentAttentionF32 != 0 && _indexerScoresF32 != 0 &&
         _actQuantDequantInplaceF32 != 0 && _hcSplitSinkhornF32 != 0 && _hcPreMixF32 != 0 && _hcPostMixF32 != 0 &&
-        _ropeInterleavedOffsetF32 != 0 && _windowIndicesI32 != 0;
+        _windowIndicesI32 != 0;
 
     // Optional modules: absence leaves the primitives unsupported on this backend instead of failing construction.
     private void LoadAttentionKernels()
@@ -61,7 +60,6 @@ public sealed partial class CudaKernels
         if (CanLoad(positionsPath))
         {
             _latentPositionsModule = LoadOwnedModule(positionsPath);
-            _ropeInterleavedOffsetF32 = _latentPositionsModule.GetFunction("rope_interleaved_offset_f32");
             _windowIndicesI32 = _latentPositionsModule.GetFunction("window_indices_i32");
         }
     }
@@ -152,20 +150,6 @@ public sealed partial class CudaKernels
         a[0] = &oA; a[1] = &xA; a[2] = &rA; a[3] = &pA; a[4] = &cA; a[5] = &tA; a[6] = &hA; a[7] = &dA;
         CudaDriverApi.cuLaunchKernel(_hcPostMixF32, Blocks(tokens * hc * dim), 1, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0)
             .ThrowOnError();
-    }
-
-    /// <summary>In-place interleaved rotary of the [dimOffset, dimOffset + 2*half) slice; one thread per pair.</summary>
-    public unsafe void LaunchRopeInterleavedOffset(ulong x, ulong cos, ulong sin, long positions, int heads, int dim,
-        int half, int dimOffset, nint stream)
-    {
-        if (_ropeInterleavedOffsetF32 == 0) throw new InvalidOperationException("latent_positions.ptx not present in the Ptx folder.");
-        ulong xA = x, cA = cos, sA = sin;
-        long pA = positions;
-        int hA = heads, dA = dim, halfA = half, oA = dimOffset;
-        void** a = stackalloc void*[8];
-        a[0] = &xA; a[1] = &cA; a[2] = &sA; a[3] = &pA; a[4] = &hA; a[5] = &dA; a[6] = &halfA; a[7] = &oA;
-        CudaDriverApi.cuLaunchKernel(_ropeInterleavedOffsetF32, Blocks(positions * heads * half), 1, 1, BlockSize, 1, 1, 0,
-            stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Fills the [rows, cols] sliding-window ring slots; one thread per entry.</summary>

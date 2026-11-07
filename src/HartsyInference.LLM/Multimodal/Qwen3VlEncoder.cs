@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
 
@@ -210,8 +212,8 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         backend.Linear(k, ln1, W($"{p}.attn_k.weight"), Has($"{p}.attn_k.bias") ? W($"{p}.attn_k.bias") : null);
         backend.Linear(v, ln1, W($"{p}.attn_v.weight"), Has($"{p}.attn_v.bias") ? W($"{p}.attn_v.bias") : null);
         ln1.Dispose();
-        backend.ApplyRopeSingle(q, cosT, sinT);
-        backend.ApplyRopeSingle(k, cosT, sinT);
+        backend.Rotary(RotaryCall.TokenMajor(q, cosT, sinT, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        backend.Rotary(RotaryCall.TokenMajor(k, cosT, sinT, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
         Tensor qM = new(new TensorShape(1, heads, np, hd), DType.F32);
         Tensor kM = new(new TensorShape(1, heads, np, hd), DType.F32);

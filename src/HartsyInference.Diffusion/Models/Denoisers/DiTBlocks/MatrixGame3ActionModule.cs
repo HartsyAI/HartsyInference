@@ -1,6 +1,8 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -289,11 +291,14 @@ public sealed unsafe class MatrixGame3ActionModule
 
     /// <summary>Rotates <c>[sp, heads, tt, headDim]</c> with cos/sin built over the (frames, gh, gw) grid: the sequence at
     /// spatial position s uses grid row <c>f·gh·gw + s</c> (or <c>f</c> when <paramref name="broadcastSpatial"/>).
-    /// Device-resident via <see cref="IBackend.Mg3RopeBatched"/>.</summary>
+    /// Interleaved pairs with duplicated-pair tables, one device rotation.</summary>
     private void ApplyRopeBatched(IBackend backend, Tensor x, Tensor cos, Tensor sin, int tt, int gh, int gw, bool broadcastSpatial = false)
     {
         int sp = (int)x.Shape[0];
-        backend.Mg3RopeBatched(x, cos, sin, sp, _heads, tt, _headDim, gh, gw, broadcastSpatial);
+        StridedView table = broadcastSpatial
+            ? RotaryViews.SharedTable(cos.Shape, sp, _heads)
+            : RotaryViews.Explicit([sp, _heads, tt, 1, 1, _headDim], [_headDim, 0, (long)gh * gw * _headDim, 0, 0, 1]);
+        backend.Rotary(new RotaryCall(x, cos, sin, RotaryViews.Create(RotaryViews.HeadMajor(x.Shape), table, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair)));
     }
 
     /// <summary>Affine LayerNorm over the trailing <paramref name="dim"/> of <paramref name="x"/> <c>[rows, dim]</c>,

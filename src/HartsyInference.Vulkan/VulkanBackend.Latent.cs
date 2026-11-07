@@ -187,43 +187,6 @@ public sealed partial class VulkanBackend
         }
     }
 
-    /// <inheritdoc/>
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset)
-    {
-        RopeInterleavedOffsetReference.Validate(x, cos, sin, rotaryDim, dimOffset);
-        using OpScope _op = EnterOp();
-        int rank = x.Shape.Rank;
-        long heads = rank == 4 ? x.Shape[2] : 1;
-        long half = rotaryDim / 2;
-        long total = x.Shape[0] * x.Shape[1] * heads * half;
-        VulkanBuffer xBuf = GetBuffer(x);
-        VulkanBuffer cosBuf = GetBuffer(cos);
-        VulkanBuffer sinBuf = GetBuffer(sin);
-        try
-        {
-            VulkanKernel kernel = GetKernel("rope_interleaved_offset", storageBufferCount: 3, _default1DSpec);
-            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosBuf.Handle, sinBuf.Handle };
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            for (long done = 0; done < total; done += MaxElementsPerDispatch)
-            {
-                Authoring.PushConstants pc = new(pcBytes);
-                pc.U32((uint)total);
-                pc.U32((uint)heads);
-                pc.U32((uint)x.Shape[rank - 1]);
-                pc.U32((uint)half);
-                pc.U32((uint)dimOffset);
-                pc.U32((uint)done);
-                Dispatch(kernel, bufs, pc.Written, GroupCount(Math.Min(total - done, MaxElementsPerDispatch), LocalX1D));
-            }
-            CacheOutput(x, xBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan ApplyRopeInterleaved (offset) dispatch failed", ex);
-            throw;
-        }
-    }
-
     // A source's code and scale buffers; an empty source, and F32's missing scales, bind an unread placeholder.
     private void BindSource(in LatentSource source, List<VulkanBuffer> temps, out VulkanBuffer codes, out VulkanBuffer scales)
     {

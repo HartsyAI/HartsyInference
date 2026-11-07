@@ -502,72 +502,6 @@ __global__ void dit_tanh_f32(
     output[i] = tanhf(input[i]);
 }
 
-// ── Rotary position embedding (in-place, rotate_half convention) ────────────
-// x is [B, L, numHeads, headDim] flattened to [totalVecs, headDim] (totalVecs = B*L*numHeads).
-// cos/sin are [B, L, headDim] broadcast over heads (cos row = vec / numHeads).
-// out[i]      = lower*cos[i]      - upper*sin[i]        (i in [0, half))
-// out[i+half] = upper*cos[i+half] + lower*sin[i+half]
-// where lower = x[i], upper = x[i+half] (originals). Each thread owns one i and writes both
-// halves from originals — race-free, no snapshot needed. Matches Ideogram4Mrope.ApplyOne.
-// rotaryDim: number of leading dims of each head to rotate (NEOX pairing (i, i+rotaryDim/2)); the rest pass
-// through. 0 (or >= headDim) means full rotary — the default, identical to the original kernel (DiT path).
-__global__ void dit_rope_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;   // rotate pairs (i, i+half) for i < half; cos/sin stride stays headDim
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = vec / numHeads;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = x[baseX + i];
-    float upper = x[baseX + i + half];
-    x[baseX + i] = lower * cos[baseCs + i] - upper * sin[baseCs + i];
-    x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
-}
-
-// Head-major twin of dit_rope_f32: x is [B, heads, seq, headDim], so the cos/sin row is (vec / (heads*seq))*seq
-// + vec % seq instead of vec / numHeads. Identical rotation math — only the vec→row map differs.
-__global__ void dit_rope_head_major_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int heads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim,
-    unsigned int seq)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = (vec / ((unsigned long long)heads * seq)) * seq + vec % seq;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = x[baseX + i];
-    float upper = x[baseX + i + half];
-    x[baseX + i] = lower * cos[baseCs + i] - upper * sin[baseCs + i];
-    x[baseX + i + half] = upper * cos[baseCs + i + half] + lower * sin[baseCs + i + half];
-}
-
 // ── Per-row scalar multiply (token masking) ────────────────────────────────
 // out[row, c] = in[row, c] * rowScale[row]. rowScale has one value per row (rows = total/channels).
 // Used to zero non-role token positions in Ideogram 4's masked text/image embedding.
@@ -692,41 +626,6 @@ __global__ void dit_slice_lastdim_f32(
     output[i] = input[(size_t)row * inDim + offset + d];
 }
 
-// ── LTX-2 "split" rotary (rotate-half, per-head cos) ───────────────────────
-// LTX-2.3 (rope_type=split): x is [S, dim] = [S, numHeads, headDim]; cos/sin are [S, dim/2] = [S, numHeads, r]
-// with r=headDim/2 (per-head, ONE angle shared by both elements of a pair). For pair i in head h at token s:
-//   out[i]   = a*c - b*sn ; out[i+r] = b*c + a*sn ,  a=x[i], b=x[i+r], c=cos[i], sn=sin[i]
-// Distinct from dit_rope_f32 (per-position cos, dual-angle) and wan_rope_interleaved (adjacent-pair). Keeps LTX-2.3
-// Q/K GPU-resident through RoPE — the host loop D2H'd + re-uploaded [S,dim] Q/K per attention, and on this
-// block-swap-bound 22B model those re-uploads fight the 19 GB/forward weight stream on PCIe.
-__global__ void ltx2_split_rope_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int seqLen,
-    unsigned int numHeads,
-    unsigned int headDim)
-{
-    unsigned int r = headDim >> 1;
-    unsigned int dim = numHeads * headDim;
-    unsigned int cosWidth = dim >> 1;            // = numHeads * r
-    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % r);
-    unsigned long long t = gid / r;
-    unsigned int h = (unsigned int)(t % numHeads);
-    unsigned int s = (unsigned int)(t / numHeads);
-    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
-    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
-    float a = x[headBase + i];
-    float b = x[headBase + i + r];
-    float c = cos[cosBase + i], sn = sin[cosBase + i];
-    x[headBase + i]     = a * c - b * sn;
-    x[headBase + i + r] = b * c + a * sn;
-}
-
-
 } // extern "C" — templates cannot have C linkage
 
 // Copy one arbitrary-axis split chunk from logical [outer,inputDim,inner] storage. Each logical CUDA block
@@ -778,7 +677,6 @@ extern "C" __global__ void dit_split_slice_u16(
 }
 
 extern "C" {
-
 
 // ── MoE top-k gate weights (HiDream MoEGate) ────────────────────────────────
 // Per token: softmax(logits over E experts), select top-k by prob, renormalize the selected
@@ -851,31 +749,6 @@ __global__ void dit_row_gated_accum_f32(
     float g = gate[row * numExperts + expertIdx];
     if (g != 0.0f)
         out[i] += g * val[i];
-}
-
-// Interleaved (2i, 2i+1) partial rotary on x[b, heads, seq, headDim]; cos/sin are [seq, rotDim].
-// Rotates only the first `rotDim` dims of each head (rest pass through). One thread per (b,h,s,pair).
-__global__ void oasis_rope_interleaved_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int batch, unsigned int heads, unsigned int seq, unsigned int headDim, unsigned int rotDim)
-{
-    unsigned int pairs = rotDim >> 1;
-    unsigned long long total = (unsigned long long)batch * heads * seq * pairs;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int p = (unsigned int)(gid % pairs);
-    unsigned long long tmp = gid / pairs;
-    unsigned int s = (unsigned int)(tmp % seq);
-    unsigned long long bh = tmp / seq;              // b*heads + h
-    unsigned int i0 = 2u * p;
-    unsigned long long xOff = bh * seq * headDim + (unsigned long long)s * headDim;
-    unsigned long long cOff = (unsigned long long)s * rotDim;
-    float re = x[xOff + i0], im = x[xOff + i0 + 1];
-    float c = cos[cOff + i0], sn = sin[cOff + i0];
-    x[xOff + i0]     = re * c - im * sn;
-    x[xOff + i0 + 1] = re * sn + im * c;
 }
 
 // Fused Oasis adaLN: out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d], f = r/sp. scale/shift are sliced

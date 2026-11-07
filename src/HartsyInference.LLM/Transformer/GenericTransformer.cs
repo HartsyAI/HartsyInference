@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
@@ -1128,7 +1129,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         for (int i = 0; i < row.Length; i++) row[i] *= inv;
     }
 
-    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
+    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <c>RotaryCall.TokenMajor</c> (shared by Qwen2/Qwen3/Llama).</summary>
     internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
 
     {
@@ -1722,13 +1723,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor qNormed = new(qRaw.Shape, DType.F32);
             backend.RmsNorm(qNormed, qRaw, _idxQNorm!, _cfg.RmsNormEps);
             qRaw.Dispose();
-            backend.ApplyRopeSingle(qNormed, cos, sin, rotary);
+            backend.Rotary(RotaryCall.TokenMajor(qNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             Tensor kRaw = new(new TensorShape(1, t, 1, index.KeyLength), DType.F32);
             Project(backend, kRaw, pre, _idxKW!, null, _cfg.LowVramQuant);
             Tensor kNormed = new(kRaw.Shape, DType.F32);
             backend.RmsNorm(kNormed, kRaw, _idxKNorm!, _cfg.RmsNormEps);
             kRaw.Dispose();
-            backend.ApplyRopeSingle(kNormed, cos, sin, rotary);
+            backend.Rotary(RotaryCall.TokenMajor(kNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             try
             {
                 SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
@@ -1811,14 +1812,14 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
                     int rotaryI = _cfg.RotaryDimFor(layerIndex);
-                    backend.ApplyRopeInterleaved(q, cos, sin, rotaryI);
-                    if (k is not null) backend.ApplyRopeInterleaved(k, cos, sin, rotaryI);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryI));
+                    if (k is not null) backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryI));
                 }
                 else
                 {
                     int rotary = _cfg.RotaryDimFor(layerIndex);
-                    backend.ApplyRopeSingle(q, cos, sin, rotary);
-                    if (k is not null) backend.ApplyRopeSingle(k, cos, sin, rotary);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                    if (k is not null) backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
                 }
             }
 
@@ -1976,7 +1977,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     q.Dispose();
                     q = qN;
                 }
-                backend.RopeApplyDecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+                backend.Rotary(RotaryCall.DecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos));
             }
             else if (!_cfg.QkNorm && !_cfg.VNorm && _qkvW is not null)
             {
@@ -2393,8 +2394,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             // (2i, 2i+1) with frequency i, not split-half: HF's apply_rotary_pos_emb de-interleaves before rotate_half,
             // and llama.cpp runs deepseek2 as LLAMA_ROPE_TYPE_NORM on un-permuted weights. The duplicated-half table
             // is read with stride qkRope, so its first half supplies the per-pair angles.
-            backend.ApplyRopeInterleaved(qRope, cos, sin, qkRope);
-            backend.ApplyRopeInterleaved(kRope, cos, sin, qkRope);
+            backend.Rotary(RotaryCall.TokenMajor(qRope, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, qkRope));
+            backend.Rotary(RotaryCall.TokenMajor(kRope, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, qkRope));
 
             // Move to head-major [1, heads, t, d] for the broadcast / concat / cache / attention.
             Tensor qNopeMh = new(new TensorShape(1, hq, t, qkNope), DType.F32); backend.Permute0213(qNopeMh, qNope, t, hq, qkNope);
@@ -2558,13 +2559,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
-                    backend.ApplyRopeInterleaved(q, cos, sin, _cfg.RotaryDim);
-                    backend.ApplyRopeInterleaved(k, cos, sin, _cfg.RotaryDim);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
+                    backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
                 }
                 else
                 {
-                    backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
-                    backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
+                    backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
                 }
             }
 

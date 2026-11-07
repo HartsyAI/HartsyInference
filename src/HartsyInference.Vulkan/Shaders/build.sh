@@ -81,7 +81,6 @@ DTYPE_KERNELS=(
     qkv_split_norm
     qkv_split_norm_head_major
     layernorm_modulate
-    apply_rope_single
     prelu
     rmsnorm
     softmax
@@ -96,15 +95,13 @@ DTYPE_KERNELS=(
     conv_transpose1d
     snake
     slice_last_dim
-    apply_rope
     kv_cache_append
     sdpa_flash
     affine_broadcast_last_dim
-    wan_rope_interleaved
-    ltx2_split_rope
     gated_residual_last_dim
     situ_glu
     accumulate_strided
+    rotary
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -166,7 +163,6 @@ SINGLE_KERNELS=(
     indexer_scores
     act_quant_dequant
     build_window_indices
-    rope_interleaved_offset
     ssm_conv_split_prefill
     ssm_l2norm_rows
     ssm_conv_history_update
@@ -247,11 +243,6 @@ compile_one "embed_gather_decode" -DTABLE_DTYPE=2 -- "_bf16"
 # #if-compiled binding layout (like USE_BETA/HAS_MASK above), needing its own SPIR-V module.
 compile_one "affine_broadcast_last_dim" -DUSE_FP16=0 -DHAS_SHIFT=0 -- "_noshift_f32"
 compile_one "affine_broadcast_last_dim" -DUSE_FP16=1 -DHAS_SHIFT=0 -- "_noshift_f16"
-
-# rope_decode_step: INTERLEAVED selects a #if-compiled code path (like USE_BETA/HAS_MASK above), so
-# the two pairing conventions need their own SPIR-V modules. F32-only (decode-graph state is F32).
-compile_one "rope_decode_step" -DINTERLEAVED=0 -- "_splithalf_f32"
-compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
 
 # sdpa_flash device-position variant (FlashAttentionDev): HAS_DEVICE_POS reads skv/qOffset from a device
 # buffer instead of push constants. Mutually exclusive with HAS_MASK (FlashAttentionDev has no mask param).

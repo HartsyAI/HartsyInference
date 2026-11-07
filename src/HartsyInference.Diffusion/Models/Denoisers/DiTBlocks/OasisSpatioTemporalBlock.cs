@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -144,8 +146,8 @@ public sealed unsafe class OasisSpatioTemporalBlock
         Tensor v = SplitHeads(backend, qkv, frames, sp, part: 2, temporal: false);
         qkv.Dispose();
         int rotDim = (int)cos.Shape[1];
-        backend.OasisRopeInterleaved(q, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
-        backend.OasisRopeInterleaved(k, cos, sin, batch: frames, heads: _heads, seq: sp, headDim: _headDim, rotDim);
+        backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair, rotDim));
+        backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair, rotDim));
 
         if (Prof) { backend.Sync(); TSdpa -= Now(); }
         // cuDNN fused flash attention: mask-null, D=64, F16-tolerant (verified corr>0.9999) — collapses the
@@ -174,8 +176,8 @@ public sealed unsafe class OasisSpatioTemporalBlock
         Tensor v = SplitHeads(backend, qkv, frames, sp, part: 2, temporal: true);
         qkv.Dispose();
         int rotDim = (int)cos.Shape[1];
-        backend.OasisRopeInterleaved(q, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
-        backend.OasisRopeInterleaved(k, cos, sin, batch: sp, heads: _heads, seq: frames, headDim: _headDim, rotDim);
+        backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair, rotDim));
+        backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair, rotDim));
 
         if (Prof) { backend.Sync(); TSdpa -= Now(); }
         // Temporal causal mask is [1,1,T,T] — a cuDNN-eligible [B,1,Sq,Skv] additive F32 mask; F16-tolerant.
