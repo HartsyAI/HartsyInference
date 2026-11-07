@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Requests;
@@ -443,7 +444,7 @@ public sealed class MossImageTransformer : IDisposable
             x.Dispose();
             x = null;
             head = new Tensor(image.Shape, DType.F32);
-            backend.RmsNormModulate(head, image, _finalNorm!, modulation.ScaleHead, modulation.ShiftHead, _config.Eps);
+            backend.NormModulate(NormModulateCall.Rows(head, image, NormKind.RmsNorm, _config.Eps).WithAffine(_finalNorm!, null).WithModulation(ModulationSpec.Broadcast(image, modulation.ScaleHead, modulation.ShiftHead, ScaleMode.OnePlus)));
             Tensor velocity = new(new TensorShape(1, imageTokens, _config.LatentChannels), DType.F32);
             backend.Linear(velocity, head, _finalLinear!, null);
             return velocity;

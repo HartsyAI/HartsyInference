@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -48,7 +51,7 @@ internal sealed unsafe class AceStep15Attention
     // chain stays device-resident (the old ReshapeTo/FromMultiHead + host ApplyRopeSplitHalf + host RepeatKvHeads
     // loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V directly as [1, S, H, D]
     // (byte-identical to [1, S, H·D]) so RmsNorm normalizes over headDim with no reshape; RoPE runs on that
-    // pre-permute layout via ApplyRopeSingle (broadcast over heads → GQA-correct per tensor); then Permute0213 to
+    // pre-permute layout via the rotate-half rotary (RotaryCall.TokenMajor) (broadcast over heads → GQA-correct per tensor); then Permute0213 to
     // [1, H, S, D] for SDPA. Activation dtype follows the input (F16 on the numerics.ditF16 path; norm/rope tables
     // stay F32). Q and K carry per-head RMSNorm, so pre-softmax scores are bounded and the F16 SDPA path is safe.
     public Tensor Forward(IBackend backend, Tensor x, Tensor? crossKv, float[]? ropeCos, float[]? ropeSin, Tensor? mask)
@@ -77,13 +80,13 @@ internal sealed unsafe class AceStep15Attention
         if (ropeCos is not null && ropeSin is not null)
         {
             // Split-half RoPE on the [1, S, H, D] layout. The half-width host table is expanded to [1, S, headDim]
-            // with duplicated halves so ApplyRopeSingle's c[i]/c[i+half] both read the pair angle — bit-identical to
+            // with duplicated halves so the rotate-half rotary (RotaryCall.TokenMajor)'s c[i]/c[i+half] both read the pair angle — bit-identical to
             // the old host ApplyRopeSplitHalf (a·cos − b·sin, b·cos + a·sin over pairs (i, i+half)). Self-attention:
             // l == s, so Q and K share one table.
             Tensor cosDev = ExpandRope(ropeCos, s, hd);
             Tensor sinDev = ExpandRope(ropeSin, s, hd);
-            backend.ApplyRopeSingle(qN, cosDev, sinDev, hd);
-            backend.ApplyRopeSingle(kN, cosDev, sinDev, hd);
+            backend.Rotary(RotaryCall.TokenMajor(qN, cosDev, sinDev, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, hd));
+            backend.Rotary(RotaryCall.TokenMajor(kN, cosDev, sinDev, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, hd));
             cosDev.Dispose(); sinDev.Dispose();
         }
 
@@ -102,9 +105,9 @@ internal sealed unsafe class AceStep15Attention
         {
             int group = heads / kvHeads;
             kRep = new Tensor(new TensorShape(1, heads, l, hd), act);
-            backend.RepeatKvHeads(kRep, kMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, group);
             vRep = new Tensor(new TensorShape(1, heads, l, hd), act);
-            backend.RepeatKvHeads(vRep, vMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, group);
             kMh.Dispose(); vMh.Dispose();
         }
 
@@ -121,7 +124,7 @@ internal sealed unsafe class AceStep15Attention
     }
 
     /// <summary>Expands a half-width RoPE table <c>[seqLen·headDim/2]</c> to a device tensor <c>[1, seqLen, headDim]</c>
-    /// with the second half duplicating the first, so <see cref="IBackend.ApplyRopeSingle"/> (which reads
+    /// with the second half duplicating the first, so <c>RotaryCall.TokenMajor</c> (which reads
     /// <c>c[i]</c> and <c>c[i+half]</c>) applies the same pair angle to both elements — matching split-half RoPE.</summary>
     private static Tensor ExpandRope(float[] halfTable, int seqLen, int headDim)
     {

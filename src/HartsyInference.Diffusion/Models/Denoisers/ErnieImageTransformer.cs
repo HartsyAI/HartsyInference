@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -543,7 +544,7 @@ public sealed unsafe class ErnieImageTransformer : IDisposable
         {
             TensorShape deviceOutShape = new TensorShape(1, outChannels, gridH * patch, gridW * patch);
             Tensor deviceOut = new Tensor(deviceOutShape, packed.DType);
-            backend.UnpatchifyTokens(deviceOut, packed, outChannels, gridH, gridW, patch, innerChannelFastest: true);
+            PixelShuffles.UnpatchifyTokens(backend, deviceOut, packed, outChannels, gridH, gridW, patch, innerChannelFastest: true);
             return deviceOut;
         }
         int height = gridH * patch;

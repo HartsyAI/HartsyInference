@@ -41,43 +41,6 @@ public sealed partial class CudaBackend
     }
 
     /// <inheritdoc />
-    public void RmsNormModulate(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? shift, float eps)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("RmsNormModulate");
-        (int dim, long rows, long rowsPerBatch) = RmsNormModulateReference.Validate(output, input, weight, scale, shift);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasDitNormActKernels)
-        {
-            RmsNormModulateReference.Apply(output, input, weight, scale, shift, eps);
-            return;
-        }
-        ulong pIn = 0, pOut = 0, pW = 0, pScale = 0, pShift = 0;
-        bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pW = GpuTransferHelper.CopyToDevice(weight);
-            pScale = GpuTransferHelper.CopyToDevice(scale);
-            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
-            nuint bytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels.LaunchRmsNormModulate(pOut, pIn, pW, pScale, pShift, dim, checked((int)rows), checked((int)rowsPerBatch), eps,
-                input.DType == DType.F16, output.DType == DType.F16, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, bytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pW);
-            GpuTransferHelper.FreeDevice(pScale);
-            GpuTransferHelper.FreeDevice(pShift);
-        }
-    }
-
-    /// <inheritdoc />
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
         int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
     {

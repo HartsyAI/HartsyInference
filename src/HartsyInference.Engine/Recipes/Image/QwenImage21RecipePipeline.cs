@@ -1,5 +1,6 @@
 using System.Globalization;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;

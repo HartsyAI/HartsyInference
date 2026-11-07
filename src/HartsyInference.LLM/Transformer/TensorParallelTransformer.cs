@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -414,13 +416,13 @@ public sealed unsafe class TensorParallelTransformer : IDisposable
 
         if (_cfg.Rope == RopeStyle.Interleaved)
         {
-            backend.ApplyRopeInterleaved(q, cos, sin, _cfg.RotaryDim);
-            backend.ApplyRopeInterleaved(k, cos, sin, _cfg.RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
         }
         else
         {
-            backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
-            backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
         }
 
         // GQA group is degree-invariant: (hq/deg) / (hkv/deg) == KvGroup, so each rank's Q-head slice reads

@@ -187,7 +187,7 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 - [ ] Review remaining MixContract/SplitContract, CFG-step, and interleaved-RoPE duplication with numerical gates.
 - [ ] CLI repeated settings/runner helpers only where behavior actually matches.
 - [ ] VideoRequest.VideoModel/VideoFormat: check extension consumers before altering public DTOs.
-- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across `AttentionReference.cs` and more). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
+- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across several attention files). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
 
 ## 13. Comfy-Org rollout shared infrastructure
 
@@ -220,8 +220,8 @@ with its first consumer and is removed here once it ships.
   - `.ckpt` loading through the safe-pickle parser.
 - [ ] Generalize `AnimaConfig`/`AnimaTransformer` into a Cosmos MiniTrainDIT with an optional `llm_adapter`, a T5-11B
   path and 14B: Cosmos-Predict2 and Anima-LLLite.
-- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Also fix CUDA
-  `UpsampleBilinear2D`. Consumers: RIFE, FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
+- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Consumers: RIFE,
+  FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
 - [ ] ViT 2D RoPE, QK-norm and view-grouped alternating attention, consumed by Depth-Anything-3 and DINOv3.
   - "Local" means per view and "global" means across views; neither is spatial windowing.
   - Tests: a reshape-equivalence test with identical positions, and a test of the real paths against the official code.

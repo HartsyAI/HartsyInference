@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -121,7 +122,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
         return (o[0], o[1], o[2], o[3]);
     }
 
-    /// <summary>Device channel RMS via the shared <see cref="IBackend.WanRmsNormChannel"/> op (same math to float
+    /// <summary>Device channel RMS via the shared <see cref="IBackend.NormModulate"/> channel L2 norm (same math to float
     /// rounding: <c>x·sqrt(C)/max(L2_C, eps)</c> vs <c>x/sqrt(mean_C(x²)+eps)</c>), keeping the activation
     /// GPU-resident between the convs. The timestep-conditioned path stays on the host loop because
     /// <see cref="ApplyShiftScale"/> mutates the host buffer in place — done to a GPU-cached tensor that would
@@ -129,7 +130,7 @@ public sealed unsafe class LtxVaeResnetBlock3d
     private static Tensor ChannelRmsDevice(IBackend backend, Tensor x)
     {
         Tensor outT = new Tensor(x.Shape, x.DType);
-        backend.WanRmsNormChannel(outT, x, null, NormEps);
+        backend.NormModulate(NormModulateCall.Channel(outT, x, NormKind.L2Norm, NormEps));
         return outT;
     }
 

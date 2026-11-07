@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
@@ -313,7 +315,7 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
     }
 
     /// <summary>Partial-rotary cos/sin tables, cached across steps. Only the leading <c>RotaryDim</c> entries of each
-    /// head-width row are populated; <see cref="IBackend.ApplyRopeSingle"/> reads no further.</summary>
+    /// head-width row are populated; <c>RotaryCall.TokenMajor</c> reads no further.</summary>
     /// <remarks>The rotary op indexes cos/sin as <c>[batch, seq, headDim]</c>, so a batched pass needs the table
     /// repeated per batch element — and unlike the batch-1 table, a longer cached one is then unusable, because the
     /// second batch element's block starts at the ACTUAL sequence length rather than the cached one.</remarks>
@@ -500,8 +502,8 @@ public sealed unsafe class MiniMaxMusic3Dit : IDisposable
             backend.Linear(scratch.Query, scratch.Normed, _toQ!, null);
             backend.Linear(scratch.Key, scratch.Normed, _toK!, null);
             backend.Linear(scratch.Value, scratch.Normed, _toV!, null);
-            backend.ApplyRopeSingle(scratch.Query, cos, sin, config.RotaryDim);
-            backend.ApplyRopeSingle(scratch.Key, cos, sin, config.RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(scratch.Query, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, config.RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(scratch.Key, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, config.RotaryDim));
             Attend(backend, scratch, rows, heads, headDim);
             backend.Linear(result, scratch.Attention, _toOut!, null);
             backend.Add(result, result, hidden);
