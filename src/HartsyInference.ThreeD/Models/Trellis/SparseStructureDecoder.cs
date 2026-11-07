@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -116,7 +117,8 @@ internal sealed class UpsampleBlock3d
         Tensor conv = SparseStructureDecoder.Conv3d(backend, x, _convW, _convB, _cOut8);
         int cOut = _cOut8 / 8, d = (int)x.Shape[2], hh = (int)x.Shape[3], ww = (int)x.Shape[4];
         Tensor o = new(new TensorShape(new long[] { x.Shape[0], cOut, d * 2, hh * 2, ww * 2 }), DType.F32);
-        backend.PixelShuffle3d(o, conv, 2); conv.Dispose();
+        PixelShuffles.DepthToSpace(backend, o, conv, ShuffleSpec.ChannelsFirst((int)x.Shape[0], d, hh, ww, cOut, 2, 2, 2, ChannelOrder.CTHW));
+        conv.Dispose();
         return o;
     }
 }

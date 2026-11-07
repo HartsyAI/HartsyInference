@@ -1620,62 +1620,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
-    /// <summary>DiT token sequence back to an image plane: <c>tokens [B, seq, patchVolume]</c> to
-    /// <c>[B, C, H, W]</c>.</summary>
-    /// <remarks>Driven from the OUTPUT — one invocation per output element, each computing the single source it
-    /// reads. Driving it from the input would have each invocation write patch*patch*C scattered locations: the
-    /// same work with none of the coalescing.</remarks>
-    public void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked, int patch,
-        bool innerChannelFastest)
-    {
-        using OpScope _op = EnterOp();
-        // The same validator CUDA and the host default use, so the geometry is agreed in one place rather than
-        // re-derived per backend — getting it wrong here produces a plausible image with the patches transposed.
-        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
-            output, tokens, channels, hPacked, wPacked, patch);
-        if (output.DType != tokens.DType || (output.DType != DType.F32 && output.DType != DType.F16))
-        {
-            PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
-            return;
-        }
-
-        VulkanBuffer inBuf = GetBuffer(tokens);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            const uint local = 256;
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, innerChannelFastest),
-            };
-            VulkanKernel kernel = GetKernel("unpatchify_tokens" + DtypeSuffix(output.DType), storageBufferCount: 2, spec);
-
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)geometry.Batch);
-            pc.U32((uint)geometry.Channels);
-            pc.U32((uint)geometry.Height);
-            pc.U32((uint)geometry.Width);
-            pc.U32((uint)patch);
-            pc.U32((uint)geometry.WPacked);
-            pc.U32((uint)geometry.SequenceLength);
-            pc.U32((uint)geometry.PatchVolume);
-
-            long total = output.ElementCount;
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan UnpatchifyTokens dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>AdaLN modulation split: <c>proj [B,4D]</c> into four <c>[B,D]</c>, <c>1+x</c> for scales and
     /// <c>tanh(x)</c> for gates.</summary>
     public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
@@ -2862,56 +2806,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan ChwF32ToHwcU8 dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
-    public void PixelShuffle2d(Tensor output, Tensor input, int ratio)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != DType.F32 || output.DType != DType.F32 || input.Shape.Rank != 5)
-        {
-            IBackend.PixelShuffle2dReference(output, input, ratio);
-            return;
-        }
-        int batch = (int)input.Shape[0];
-        int cIn = (int)input.Shape[1];
-        int depth = (int)input.Shape[2];
-        int inH = (int)input.Shape[3];
-        int inW = (int)input.Shape[4];
-        int r2 = ratio * ratio;
-        int cOut = cIn / r2;
-        if ((long)cOut * r2 != cIn || output.Shape[1] != cOut
-            || output.Shape[3] != inH * ratio || output.Shape[4] != inW * ratio)
-        {
-            throw new ArgumentException(
-                $"PixelShuffle2d ratio {ratio}: input {input.Shape} does not shuffle into {output.Shape}.");
-        }
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        long total = output.ElementCount;
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        try
-        {
-            VulkanKernel kernel = GetKernel("pixel_shuffle2d", storageBufferCount: 2, _default1DSpec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)batch);
-            pc.U32((uint)cOut);
-            pc.U32((uint)depth);
-            pc.U32((uint)inH);
-            pc.U32((uint)inW);
-            pc.U32((uint)ratio);
-            pc.U32((uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan PixelShuffle2d dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }

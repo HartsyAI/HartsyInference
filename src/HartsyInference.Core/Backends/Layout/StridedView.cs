@@ -8,8 +8,9 @@ namespace HartsyInference.Core.Backends.Layout;
 /// pairs a source view with a destination view for <see cref="IBackend.CopyStrided"/>.</summary>
 public readonly struct StridedView
 {
-    /// <summary>The most axes a view holds, the same limit as <see cref="TensorShape.MaxRank"/>.</summary>
-    public const int MaxRank = TensorShape.MaxRank;
+    /// <summary>The most axes a view holds. More than <see cref="TensorShape.MaxRank"/>, because a pixel shuffle splits a
+    /// five-axis tensor's channel and spatial axes into eight.</summary>
+    public const int MaxRank = 8;
 
     private readonly StridedExtents _dims;
     private readonly StridedExtents _strides;
@@ -163,6 +164,37 @@ public readonly struct StridedView
             throw new ArgumentException($"Cannot reshape {ElementCount} elements to {packed.ElementCount}.", nameof(dims));
         Span<long> strides = stackalloc long[packed.Rank];
         packed.CopyStridesTo(strides);
+        return new StridedView(dims, strides, Offset);
+    }
+
+    /// <summary>Splits <paramref name="axis"/> of extent <c>outer·inner</c> into two axes, the outer one stepping by
+    /// <paramref name="inner"/> strides; valid on any view, contiguous or not.</summary>
+    public StridedView Split(int axis, long outer, long inner)
+    {
+        CheckAxis(axis);
+        if (outer <= 0 || inner <= 0 || checked(outer * inner) != _dims[axis])
+            throw new ArgumentException($"Axis {axis} of extent {_dims[axis]} does not split into {outer} × {inner}.", nameof(outer));
+        if (Rank == MaxRank)
+            throw new InvalidOperationException($"A strided view holds at most {MaxRank} axes.");
+        Span<long> dims = stackalloc long[Rank + 1];
+        Span<long> strides = stackalloc long[Rank + 1];
+        int k = 0;
+        for (int a = 0; a < Rank; a++)
+        {
+            if (a == axis)
+            {
+                dims[k] = outer;
+                strides[k] = checked(_strides[a] * inner);
+                k++;
+                dims[k] = inner;
+                strides[k] = _strides[a];
+                k++;
+                continue;
+            }
+            dims[k] = _dims[a];
+            strides[k] = _strides[a];
+            k++;
+        }
         return new StridedView(dims, strides, Offset);
     }
 

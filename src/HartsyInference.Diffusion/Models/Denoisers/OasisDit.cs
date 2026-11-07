@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -300,7 +301,7 @@ public sealed unsafe class OasisDit : IDisposable
 
         // Device unpatchify → [T, C, gridH·p, gridW·p] (out-vector [py,px,ci], channel innermost).
         Tensor outT = new Tensor(new TensorShape([(long)t, c, gh * p, gw * p]), DType.F32);
-        backend.OasisUnpatchify(outT, proj, t, c, gh, gw, p);
+        PixelShuffles.UnpatchifyTokens(backend, outT, proj, c, gh, gw, p, innerChannelFastest: true);
         proj.Dispose();
         return outT;
     }

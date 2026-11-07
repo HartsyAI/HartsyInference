@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -363,7 +364,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                     {
                         // Device unpack: a host read of the loop's tokens would D2H-and-free their device copy.
                         Tensor previewLatent = tensors.Own(new Tensor(latentShape, DType.F32), "preview latent");
-                        Backend.UnpatchifyTokens(previewLatent, packed!, _config.InChannels, fpH, fpW,
+                        PixelShuffles.UnpatchifyTokens(Backend, previewLatent, packed!, _config.InChannels, fpH, fpW,
                             _config.PatchSize, innerChannelFastest: true);
                         onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                         {
@@ -455,7 +456,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 if (graphMode)
                     tensors.Own(tokens, "graph latent snapshot");
                 latent = tensors.Own(new Tensor(latentShape, DType.F32), "unpatchified latent");
-                Backend.UnpatchifyTokens(latent, tokens, _config.InChannels, fpH, fpW, _config.PatchSize,
+                PixelShuffles.UnpatchifyTokens(Backend, latent, tokens, _config.InChannels, fpH, fpW, _config.PatchSize,
                     innerChannelFastest: true);
                 tensors.DisposeOwned(tokens);   // graph mode: the snapshot; eager: packed itself (as before)
                 Logs.Verbose($"[zimage-phase] unpatchify={sw.ElapsedMilliseconds - phU}ms");

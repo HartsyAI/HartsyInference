@@ -274,10 +274,14 @@ public sealed unsafe class CausalConv3d
     /// <summary>Starts the batched conv output as its per-channel bias (or zero) broadcast over every position, on the device.</summary>
     private void FillBias(IBackend backend, Tensor fastOut)
     {
+        if (_biasCompute is null)
+        {
+            StridedCopies.FillFrom(backend, fastOut, _zero);
+            return;
+        }
         Span<long> dims = stackalloc long[5];
         fastOut.Shape.CopyDimsTo(dims);
-        StridedView source = _biasCompute is null ? new StridedView(dims, stackalloc long[5]) : StridedView.VectorAlong(dims, 1);
-        backend.CopyStrided(fastOut, _biasCompute ?? _zero, StridedCopySpec.Gather(source));
+        backend.CopyStrided(fastOut, _biasCompute, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
     }
 
 

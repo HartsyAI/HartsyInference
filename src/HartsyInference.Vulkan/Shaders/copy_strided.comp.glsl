@@ -1,4 +1,4 @@
-// copy_strided: out[dst(i)] = in[src(i)] over up to six axes — IBackend.CopyStrided (docs/BACKEND_OPS.md; the
+// copy_strided: out[dst(i)] = in[src(i)] over up to eight axes — IBackend.CopyStrided (docs/BACKEND_OPS.md; the
 // oracle is StridedCopyReference). A pure move of WIDTH-byte words; the output is bound read-write because a
 // scatter into a slot of a larger tensor leaves the rest of it untouched. The host contract has already collapsed
 // the axes, so most dispatches carry one to three.
@@ -24,7 +24,7 @@
 #define WORD uint
 #endif
 
-#define MAX_RANK 6
+#define MAX_RANK 8
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 

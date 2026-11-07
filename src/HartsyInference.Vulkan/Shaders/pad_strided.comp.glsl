@@ -1,4 +1,4 @@
-// pad_strided: F.pad over up to six axes — IBackend.Pad (docs/BACKEND_OPS.md; the oracle is StridedCopyReference).
+// pad_strided: F.pad over up to eight axes — IBackend.Pad (docs/BACKEND_OPS.md; the oracle is StridedCopyReference).
 // One invocation per OUTPUT word: each axis maps the output position back into the input, clamped (replicate),
 // mirrored (reflect) or marked zero. WIDTH-byte words, no arithmetic.
 //
@@ -26,7 +26,7 @@
 #define ZERO 0u
 #endif
 
-#define MAX_RANK 6
+#define MAX_RANK 8
 #define MODE_ZERO 0
 #define MODE_REPLICATE 1
 #define MODE_REFLECT 2

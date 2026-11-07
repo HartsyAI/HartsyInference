@@ -4014,72 +4014,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <inheritdoc />
-    public void PatchifyTokens(Tensor output, Tensor input, int patch, bool innerChannelFastest)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("PatchifyTokens");
-        PatchTokenGeometry geometry = PatchTokenContract.ValidatePatchify(output, input, patch);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (input.DType == DType.F32)
-                _kernels!.LaunchDitPatchify(
-                    pOut, pIn, geometry.Batch, geometry.Channels, geometry.Height, geometry.Width,
-                    patch, innerChannelFastest, _stream.Handle);
-            else
-                _kernels!.LaunchDitPatchifyU16(
-                    pOut, pIn, geometry.Batch, geometry.Channels, geometry.Height, geometry.Width,
-                    patch, innerChannelFastest, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <inheritdoc />
-    public void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked,
-        int patch, bool innerChannelFastest)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("UnpatchifyTokens");
-        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
-            output, tokens, channels, hPacked, wPacked, patch);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(tokens);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (tokens.DType == DType.F32)
-                _kernels!.LaunchDitUnpatchify(
-                    pOut, pIn, geometry.Batch, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
-            else
-                _kernels!.LaunchDitUnpatchifyU16(
-                    pOut, pIn, geometry.Batch, channels, hPacked, wPacked, patch, innerChannelFastest, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
     public void MoeTopKGate(Tensor weights, Tensor logits, int topK)
     {
         using NvtxRange _nvtx = NvtxRange.Push("MoeTopKGate");
@@ -4611,43 +4545,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         ApplyRopeSingle(k, cos, sin);
     }
 
-    /// <summary>LTX-2.5 channels-last 3D pixel shuffle — see <see cref="IBackend.Ltx25PixelShuffle"/>. The output spans every chunk, so it is allocated once and written in place rather than recached per call.</summary>
-    public void Ltx25PixelShuffle(Tensor output, Tensor projected, int start, int h, int w,
-        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("Ltx25PixelShuffle");
-        if (output.DType != DType.F32 || projected.DType != DType.F32)
-            throw new NotSupportedException($"CUDA Ltx25PixelShuffle supports F32 only — got output={output.DType}, projected={projected.DType}.");
-        EnsureKernels();
-        if (_kernels is null || !_kernels.HasLtx25PixelShuffle)
-        {
-            IBackend.Ltx25PixelShuffleReference(output, projected, start, h, w,
-                strideT, strideH, strideW, outChannels, dropped, outH, outW);
-            return;
-        }
-
-        using OpScope _op = EnterOp();
-        ulong pSrc = 0;
-        try
-        {
-            pSrc = GpuTransferHelper.CopyToDevice(projected);
-            // The destination persists across the caller's chunk loop — allocate on the first chunk without an
-            // upload (every destination element is written exactly once across the whole loop) and reuse after.
-            if (!GpuTransferHelper.IsActivationCached(output))
-            {
-                nuint outBytes = GpuTransferHelper.ByteSize(output);
-                GpuTransferHelper.CacheActivation(output, GpuTransferHelper.AllocateDevice(outBytes), outBytes);
-            }
-            ulong pDst = GpuTransferHelper.CopyToDevice(output);
-            _kernels.LaunchLtx25PixelShuffle(pDst, pSrc, start, h, w, strideT, strideH, strideW,
-                outChannels, dropped, outH, outW, projected.ElementCount, _stream.Handle);
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pSrc);
-        }
-    }
-
     /// <summary>3D neighborhood attention for the LTX-2.5 diffusion video decoder. Prefers the query-tiled kernel, which stages a whole tile's shared window instead of re-reading one window per query; falls back to the per-query kernel on shapes it does not cover, and to the managed reference when <c>ltx25_na_decoder.ptx</c> has not been deployed or the per-query kernel's scores would not fit 48 KB of shared memory.</summary>
     public void Na3d(Tensor output, Tensor q, Tensor k, Tensor v, int kernelT, int kernelH, int kernelW, float scale)
     {
@@ -4776,24 +4673,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchOasisAdaLn(pOut, pIn, pMod, dim, sp, totalRows, modStride, shiftOff, scaleOff, eps, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
-        }
-        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
-    }
-
-    /// <summary>Oasis per-frame unpatchify: proj[t·sp, c·p²] → out[t,c,H,W] ([py,px,ci] inner layout).</summary>
-    public void OasisUnpatchify(Tensor output, Tensor proj, int frames, int channels, int gh, int gw, int patch)
-    {
-        if (output.DType != DType.F32 || proj.DType != DType.F32) throw new NotSupportedException("CUDA OasisUnpatchify supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pOut = 0, pIn = 0; bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(proj);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchOasisUnpatchify(pOut, pIn, frames, channels, gh, gw, patch, _stream.Handle);
             GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
         }
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
@@ -5217,34 +5096,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>GPU MAGViT channel→space shuffle (SeedVR2 upsampler) — replaces the host per-element loop that forced a multi-GB D2H+H2D round trip per upsampler.</summary>
-    public unsafe void SeedVr2PixelShuffle(Tensor output, Tensor input, int spatialRatio, int temporalRatio)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("SeedVr2PixelShuffle");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        bool bf16 = RequireVaeFrameDtype(output.DType, input.DType);
-        int cIn = (int)input.Shape[1], f = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
-        int c = (int)output.Shape[1], fFinal = (int)output.Shape[2], hOut = (int)output.Shape[3], wOut = (int)output.Shape[4];
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchSeedVr2PixelShuffle(pOut, pIn, c, fFinal, hOut, wOut, cIn, f, h, w,
-                spatialRatio, temporalRatio, dropDup: temporalRatio > 1, _stream.Handle, bf16);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
     /// <summary>GPU channel-wise RMS norm for the Wan2.2 VAE (one thread per <c>[B, spatial]</c> position reduces over C).</summary>
     public unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
     {
@@ -5290,61 +5141,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchChwToHwcU8(pOut, pIn, height, width, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <summary>GPU Wan2.2 VAE unpatchify (pixel-shuffle), one thread per output element.</summary>
-    public unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("UnpatchifyVae");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
-        int p = patchSize, c = packedC / (p * p);
-        long numOut = output.ElementCount;
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeUnpatchify(pOut, pIn, b, c, t, h, w, p, numOut, _stream.Handle,
-                bf16: RequireVaeFrameDtype(output.DType, input.DType));
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <summary>GPU Wan2.2 VAE DupUp3D shortcut, one thread per output element.</summary>
-    public unsafe void DupUp3dVae(Tensor output, Tensor input, int factorT, int factorS, int dropT)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("DupUp3dVae");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int b = (int)input.Shape[0], inC = (int)input.Shape[1], t = (int)input.Shape[2];
-        int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeDupUp3d(pOut, pIn, b, inC, t, h, w, outC, factorT, factorS, dropT, output.ElementCount,
-                _stream.Handle, bf16: RequireVaeFrameDtype(output.DType, input.DType));
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;
         }

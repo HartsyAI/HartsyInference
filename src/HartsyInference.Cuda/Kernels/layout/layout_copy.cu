@@ -1,4 +1,4 @@
-// Generic strided copy, strided accumulate and N-d pad over up to six axes: IBackend.CopyStrided, AccumulateStrided
+// Generic strided copy, strided accumulate and N-d pad over up to eight axes: IBackend.CopyStrided, AccumulateStrided
 // and Pad. The contract is docs/BACKEND_OPS.md and the oracle is StridedCopyReference (Core). The geometry arrives
 // by value as one kernel parameter, so a launch is graph-capture safe and never touches constant memory. One
 // thread per element with a grid-stride loop; the host contract has already collapsed axes both views walk
@@ -6,7 +6,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#define LAYOUT_MAX_RANK 6
+#define LAYOUT_MAX_RANK 8
 
 // Mirrors CudaKernels.StridedGeomArgs field for field.
 struct StridedGeom

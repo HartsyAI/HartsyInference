@@ -15,6 +15,15 @@ public static class StridedCopies
     public static void ScatterAxis(IBackend backend, Tensor output, Tensor input, int axis, long start)
         => backend.CopyStrided(output, input, StridedCopySpec.Scatter(StridedView.Of(output.Shape).Slice(axis, start, input.Shape[axis])));
 
+    /// <summary>Fills every element of <paramref name="output"/> with the first element of <paramref name="element"/>: a
+    /// device-side fill through one broadcast copy, for an output a later in-place scatter completes.</summary>
+    public static void FillFrom(IBackend backend, Tensor output, Tensor element)
+    {
+        Span<long> dims = stackalloc long[output.Shape.Rank];
+        output.Shape.CopyDimsTo(dims);
+        backend.CopyStrided(output, element, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[dims.Length])));
+    }
+
     /// <summary>Repeats every position of <paramref name="axis"/> <paramref name="repeats"/> times in place, so output
     /// position <c>p</c> reads input position <c>p / repeats</c>: the GQA key/value head expansion
     /// (<c>[B,Hkv,L,D] → [B,Hkv·g,L,D]</c>, HF <c>repeat_kv</c>) and any other <c>repeat_interleave</c>.</summary>

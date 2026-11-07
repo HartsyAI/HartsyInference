@@ -1,4 +1,4 @@
-// accumulate_strided: out[dst(i)] += in[src(i)] over up to six axes, in place — IBackend.AccumulateStrided
+// accumulate_strided: out[dst(i)] += in[src(i)] over up to eight axes, in place — IBackend.AccumulateStrided
 // (docs/BACKEND_OPS.md; the oracle is StridedCopyReference). The add is F32 and rounds to the storage type; the
 // destination addresses every element once (contract), so no atomics and no order dependence.
 //
@@ -20,7 +20,7 @@
 #define DTYPE float
 #endif
 
-#define MAX_RANK 6
+#define MAX_RANK 8
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
