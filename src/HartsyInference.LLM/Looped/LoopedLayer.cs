@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
@@ -321,7 +322,7 @@ internal sealed class LoopedLayer : IDisposable
             ProjectionOps.Project(backend, gateUp, hidden, _gateUpW, null, _cfg.LowVramQuant);
             using Tensor scaled = new(gateUp.Shape, DType.F32);
             backend.AffineBroadcastLastDim(scaled, gateUp, _suvScale!, null);
-            backend.GluActivate(act, scaled, ff, gelu: false);
+            backend.Glu(act, scaled, GluSpec.SwiGlu);
         }
         else
         {

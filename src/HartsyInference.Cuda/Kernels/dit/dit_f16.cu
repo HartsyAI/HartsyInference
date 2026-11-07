@@ -337,11 +337,6 @@ __global__ void dit_qkv_split_norm_head_major_f16(
     }
 }
 
-// ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────
-// comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
-// F16 twin of lm_glu_act_f32 / dit_glu_act_bf16 — same fast-math formulas, same flat-index-to-(row, i)
-// decomposition (the split is on the LAST dim, not the flat midpoint). act 0 = SiLU, 1 = GELU-tanh.
-
 // Subset-emitting twin of dit_qkv_split_norm_head_major_f16. SEPARATE kernel on purpose: the fused call above must stay
 // byte-for-byte the shipped kernel, and folding slot guards into it changed its codegen enough to move
 // real generation output. packStride is how many W-wide segments the packed source holds; qSlot/kSlot/
@@ -418,37 +413,6 @@ __global__ void dit_qkv_split_norm_head_major_subset_f16(
         if (kSlot >= 0) k[outOff + i] = __float2half(__half2float(base[kBase + i]) * kred[0] * kW[i]);
         if (vSlot >= 0) v[outOff + i] = base[vBase + i];
     }
-}
-
-// ── Gated-FFN activation epilogue (F16 I/O, F32 compute) ───────────────────
-// comb[r*ff+i] = act(gateUp[r, i]) * gateUp[r, ff+i] over the CONCATENATED [gate | up] projection.
-// F16 twin of lm_glu_act_f32 / dit_glu_act_bf16 — same fast-math formulas, same flat-index-to-(row, i)
-// decomposition (the split is on the LAST dim, not the flat midpoint). act 0 = SiLU, 1 = GELU-tanh.
-
-__global__ void dit_glu_act_f16(
-    __half* __restrict__ comb,
-    const __half* __restrict__ gateUp,
-    unsigned int rows,
-    unsigned int ff,
-    int act)
-{
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = (unsigned long long)rows * ff;
-    if (gid >= total) return;
-    unsigned int r = (unsigned int)(gid / ff);
-    unsigned int i = (unsigned int)(gid % ff);
-    unsigned long long rowBase = (unsigned long long)r * 2u * ff;
-    const float g = __half2float(gateUp[rowBase + i]);
-    const float u = __half2float(gateUp[rowBase + ff + i]);
-    float a;
-    if (act == 0) {
-        a = g * __fdividef(1.0f, 1.0f + __expf(-g));                    // SiLU
-    } else {
-        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
-        const float s = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner)); // tanh(x) = 2·sigmoid(2x) − 1
-        a = 0.5f * g * (1.0f + (2.0f * s - 1.0f));                      // GELU-tanh
-    }
-    comb[gid] = __float2half(a * u);
 }
 
 } // extern "C"
@@ -586,28 +550,4 @@ extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_rf16_f16(
 {
     extern __shared__ float smem[];
     ltx2_qk_norm_rope_body<__half, false>(out, in, normW, cosT, sinT, seq, heads, headDim, eps, smem);
-}
-
-// ── LTX-2 fused per-head output gate (in place) ─────────────────────────────
-// x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]).
-// Replaces Sigmoid -> Scale -> Linear-against-a-constant-0/1-expansion-matrix -> Mul: the expansion GEMM
-// materialized a full [seq, heads*headDim] gate tensor purely to broadcast one scalar per (token, head),
-// so the old chain moved 4x this tensor's bytes and burned a GEMM to do a copy.
-extern "C" __global__ void ltx2_head_gate_f16(
-    __half* __restrict__ x,
-    const __half* __restrict__ logits,
-    unsigned int seq, unsigned int heads, unsigned int headDim)
-{
-    unsigned int W = heads * headDim;
-    unsigned long long total = (unsigned long long)seq * W;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int i = (unsigned int)(idx % W);
-    unsigned long long s = idx / W;
-    unsigned int h = i / headDim;
-    float g = __half2float(logits[s * heads + h]);
-    // Sign-aware form, matching dit_sigmoid_f16 — the gate is bounded [0,2] either way, but keeping one
-    // convention means a future A/B against the unfused chain is not chasing last-ulp differences.
-    float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
-    x[idx] = __float2half(__half2float(x[idx]) * 2.0f * sig);
 }

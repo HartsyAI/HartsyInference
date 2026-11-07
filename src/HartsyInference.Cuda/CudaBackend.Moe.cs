@@ -43,16 +43,16 @@ public sealed partial class CudaBackend
 
     /// <inheritdoc />
     public void MoeRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null)
+        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null, Tensor? dense = null)
     {
         using NvtxRange _nvtx = NvtxRange.Push("MoeRoute");
-        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds);
+        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
         using OpScope _op = EnterOp();
         EnsureKernels();
         RequireMoeKernels();
         int tokens = (int)(logits.ElementCount / args.NumExperts);
-        ulong pL = 0, pB = 0, pA = 0, pK = 0, pIdx = 0, pW = 0;
-        bool cachedIdx = false, cachedW = false;
+        ulong pL = 0, pB = 0, pA = 0, pK = 0, pIdx = 0, pW = 0, pD = 0;
+        bool cachedIdx = false, cachedW = false, cachedD = false;
         try
         {
             pL = GpuTransferHelper.CopyToDevice(logits);
@@ -62,16 +62,24 @@ public sealed partial class CudaBackend
             nuint idxBytes = GpuTransferHelper.ByteSize(topkIdx), wBytes = GpuTransferHelper.ByteSize(topkWeight);
             pIdx = GpuTransferHelper.AllocateDevice(idxBytes);
             pW = GpuTransferHelper.AllocateDevice(wBytes);
-            _kernels!.LaunchMoeRoute(pIdx, pW, pL, pB, pA, pK, tokens, args, _stream.Handle);
+            nuint denseBytes = dense is null ? 0 : GpuTransferHelper.ByteSize(dense);
+            if (dense is not null) pD = GpuTransferHelper.AllocateDevice(denseBytes);
+            _kernels!.LaunchMoeRoute(pIdx, pW, pL, pB, pA, pK, tokens, args, _stream.Handle, pD);
             GpuTransferHelper.CacheActivation(topkIdx, pIdx, idxBytes);
             cachedIdx = true;
             GpuTransferHelper.CacheActivation(topkWeight, pW, wBytes);
             cachedW = true;
+            if (dense is not null)
+            {
+                GpuTransferHelper.CacheActivation(dense, pD, denseBytes);
+                cachedD = true;
+            }
         }
         finally
         {
             if (!cachedIdx) GpuTransferHelper.FreeDevice(pIdx);
             if (!cachedW) GpuTransferHelper.FreeDevice(pW);
+            if (!cachedD) GpuTransferHelper.FreeDevice(pD);
             GpuTransferHelper.FreeDevice(pL);
             if (pB != 0) GpuTransferHelper.FreeDevice(pB);
             if (pA != 0) GpuTransferHelper.FreeDevice(pA);

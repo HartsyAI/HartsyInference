@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -108,7 +109,7 @@ public sealed class DeepSeekV41VisionTower : IDisposable
     {
         _backend.RmsNorm(w.Normed, w.X, b.Norm2, NormEps);
         _backend.Linear(w.GateUp, w.Normed, b.W1, null);
-        _backend.GluActivate(w.Act, w.GateUp, inter, gelu: false);
+        _backend.Glu(w.Act, w.GateUp, GluSpec.SwiGlu);
         _backend.Linear(w.Branch, w.Act, b.W2, null);
         _backend.Add(w.X, w.X, w.Branch);
     }

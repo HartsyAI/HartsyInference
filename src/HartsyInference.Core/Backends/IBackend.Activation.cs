@@ -1,8 +1,10 @@
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Activations, gated linear units and the fused linear-plus-activation epilogues.
+// Activations, the gated linear unit, the group gate and the fused linear prologue and epilogue.
 public partial interface IBackend
 {
     /// <summary>DIAMOND pixel quantize to 256 levels: <c>floor((clamp(v,−1,1)+1)·127.5)/127.5 − 1</c>.</summary>
@@ -17,29 +19,6 @@ public partial interface IBackend
             if (v > 1f) v = 1f; else if (v < -1f) v = -1f;
             int b = (int)((v + 1f) * 0.5f * 255f);
             op[i] = b / 255f * 2f - 1f;
-        }
-    }
-
-    /// <summary>GEGLU with exact (erf) GELU gate: <c>output[rows,inner] = proj[:,:inner] · gelu_erf(proj[:,inner:])</c>, fused split+gate.</summary>
-    unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
-        => GegluErfReference(output, proj, rows, inner);
-
-    /// <summary>The managed <see cref="GegluErf"/> body, callable directly. A backend override must
-    /// call THIS to fall back — <c>((IBackend)this).GegluErf(...)</c> re-enters the override and
-    /// recurses until the stack overflows.</summary>
-    static unsafe void GegluErfReference(Tensor output, Tensor proj, long rows, int inner)
-    {
-        if (output.DType != DType.F32 || proj.DType != DType.F32)
-            throw new NotSupportedException("GegluErf default fallback only supports F32.");
-        float* pp = (float*)proj.DataPointer, gp = (float*)output.DataPointer;
-        for (long row = 0; row < rows; row++)
-        {
-            float* hin = pp + row * 2 * inner, gin = hin + inner, gout = gp + row * inner;
-            for (int i = 0; i < inner; i++)
-            {
-                float g = gin[i];
-                gout[i] = hin[i] * (0.5f * g * (1f + Erf(g * 0.70710678118654752440f)));
-            }
         }
     }
 
@@ -68,90 +47,50 @@ public partial interface IBackend
         return sign * y;
     }
 
-    /// <summary>MoE expert combine, in-place: <c>inout += gate[expertIndex] * value</c>, gate from <see cref="MoeTopKGate"/>'s dense table.</summary>
-    unsafe void RowGatedAccumulate(Tensor inout, Tensor value, Tensor gate, int numExperts, int expertIndex)
-    {
-        if (inout.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
-            throw new NotSupportedException("RowGatedAccumulate default fallback only supports F32.");
-        int dim = (int)inout.Shape[inout.Shape.Rank - 1];
-        long rows = inout.ElementCount / dim;
-        float* op = (float*)inout.DataPointer;
-        float* vp = (float*)value.DataPointer;
-        float* gp = (float*)gate.DataPointer;
-        for (long r = 0; r < rows; r++)
-        {
-            float g = gp[r * numExperts + expertIndex];
-            if (g == 0f) continue;
-            long off = r * dim;
-            for (int d = 0; d < dim; d++)
-                op[off + d] += g * vp[off + d];
-        }
-    }
+    /// <summary>A gated linear unit over the two halves of the last axis: <c>out[r, i] = act(gate[r, i]) · value[r, i]</c>, the gate
+    /// and value halves in the order the <see cref="GluSpec"/> says (SwiGLU and GeGLU over <c>[gate | up]</c>, GEGLU and SiTU-GLU
+    /// over <c>[value | gate]</c>). Input and output are F32, F16 or BF16 alike; the output's last extent is half the input's.
+    /// Contract in <c>docs/BACKEND_OPS.md</c>; <see cref="GluReference.Apply"/> is its executable form.</summary>
+    void Glu(Tensor output, Tensor input, in GluSpec spec) => GluReference.Apply(output, input, spec);
 
-    /// <summary>Gated-FFN epilogue that may emit a Q8_1 sidecar (<see cref="RmsNormEmitQ8"/>); semantically = <see cref="GluActivate"/>.</summary>
-    void GluActivateEmitQ8(Tensor output, Tensor gateUp, int ff, bool gelu)
-        => GluActivate(output, gateUp, ff, gelu);
+    /// <summary><see cref="Glu"/> that may also emit a Q8_1 sidecar of its output, so the dp4a GEMV that follows skips its quantize
+    /// (see <see cref="RmsNormEmitQ8"/>); semantically <see cref="Glu"/>.</summary>
+    void GluEmitQ8(Tensor output, Tensor input, in GluSpec spec) => Glu(output, input, spec);
 
-    /// <summary>Fused gated-FFN epilogue: <c>output[r,i] = act(gateUp[r,i])·gateUp[r,ff+i]</c> over the concatenated [gate|up] projection.</summary>
-    /// <param name="gelu">false = SiLU (SwiGLU), true = GELU-tanh (GeGLU).</param>
-    void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
+    /// <summary>Scales every group of a row by its own gate: <c>out[r, group] = f(gates[offset + r · stride + group]) · in[r, group]</c>,
+    /// or adds it to the output, as the <see cref="GroupScaleSpec"/> says: token masking by a row vector, a per-head gate, one
+    /// expert of a dense routing table accumulated into the combine. The output may be the input (in place). Contract in
+    /// <c>docs/BACKEND_OPS.md</c>; <see cref="GroupScaleReference.Apply"/> is its executable form.</summary>
+    void GroupScale(Tensor output, Tensor input, Tensor gates, in GroupScaleSpec spec) => GroupScaleReference.Apply(output, input, gates, spec);
+
+    /// <summary>A projection with what the <see cref="LinearFusion"/> folds around it: a <see cref="GroupScale"/> of the input before
+    /// the GEMM and an activation of the output after it. A backend whose GEMM already walks the input or the output applies them
+    /// in that pass; the default runs the separate ops, scaling a copy of the input so the caller's tensor is untouched.</summary>
+    void LinearFused(Tensor output, Tensor input, Tensor weight, Tensor? bias, in LinearFusion fusion)
+        => ComposeLinearFused(this, output, input, weight, bias, fusion);
+
+    /// <summary>The unfused form of <see cref="LinearFused"/>: the prologue's group scale, the GEMM, the epilogue's activation. Static so a
+    /// backend whose fused path does not serve a call can still run it.</summary>
+    static void ComposeLinearFused(IBackend b, Tensor output, Tensor input, Tensor weight, Tensor? bias, in LinearFusion fusion)
     {
-        long rows = gateUp.ElementCount / (2L * ff);
-        TensorShape half = new(1, (int)rows, ff);
-        Tensor gate = new(half, DType.F32);
-        Tensor up = new(half, DType.F32);
+        Tensor? gated = null;
         try
         {
-            SliceLastDim(gate, gateUp, 0);
-            SliceLastDim(up, gateUp, ff);
-            if (gelu) Gelu(gate, gate);
-            else Silu(gate, gate);
-            Mul(output, gate, up);
+            Tensor source = input;
+            if (fusion.PrologueGates is not null)
+            {
+                gated = new Tensor(input.Shape, input.DType);
+                b.GroupScale(gated, input, fusion.PrologueGates, fusion.Prologue);
+                source = gated;
+            }
+            b.Linear(output, source, weight, bias);
+            if (fusion.Epilogue == LinearActivation.GeluTanh) b.Gelu(output, output);
+            else if (fusion.Epilogue != LinearActivation.None) throw new ArgumentOutOfRangeException(nameof(fusion), fusion.Epilogue, "Unknown linear activation.");
         }
         finally
         {
-            gate.Dispose();
-            up.Dispose();
+            gated?.Dispose();
         }
-    }
-
-    /// <summary>Linear immediately followed by GELU. Backends may fold the activation into the GEMM epilogue;
-    /// the default runs the two ops in sequence, which is what every caller did before.</summary>
-    unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
-    {
-        Linear(output, input, weight, bias);
-        Gelu(output, output);
-    }
-
-    /// <summary>LTX-2's per-head output gate followed by a projection. A backend whose Linear already walks the
-    /// activation (to quantize it) can apply the gate in that pass instead of in one of its own; the default is
-    /// the two ops in sequence, which is what the caller did before and which mutates <paramref name="input"/>
-    /// in place.</summary>
-    unsafe void LinearHeadGated(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        Tensor gateLogits, int heads, int headDim)
-    {
-        Ltx2HeadGate(input, gateLogits, (int)input.Shape[0], heads, headDim);
-        Linear(output, input, weight, bias);
-    }
-
-    /// <summary>LTX-2 per-head output gate, IN PLACE: <c>x[s, h*headDim+d] *= 2*sigmoid(logits[s,h])</c>.
-    /// Replaces expanding the per-(token,head) scalar to a full <c>[seq, heads*headDim]</c> tensor through a
-    /// constant 0/1 GEMM and then multiplying.</summary>
-    unsafe void Ltx2HeadGate(Tensor x, Tensor logits, int seq, int heads, int headDim)
-    {
-        if (x.DType != DType.F32 || logits.DType != DType.F32)
-            throw new NotSupportedException($"Ltx2HeadGate default fallback only supports F32, got x={x.DType}, logits={logits.DType}.");
-        float* p = (float*)x.DataPointer;
-        float* g = (float*)logits.DataPointer;
-        int w = heads * headDim;
-        for (int s = 0; s < seq; s++)
-            for (int h = 0; h < heads; h++)
-            {
-                float lg = g[(long)s * heads + h];
-                float sig = lg >= 0f ? 1f / (1f + MathF.Exp(-lg)) : MathF.Exp(lg) / (1f + MathF.Exp(lg));
-                long baseIdx = (long)s * w + (long)h * headDim;
-                for (int d = 0; d < headDim; d++) p[baseIdx + d] *= 2f * sig;
-            }
     }
 
     /// <summary>GELU activation using the standard tanh approximation; use <see cref="GeluErf"/> for the exact erf form.</summary>
@@ -211,7 +150,4 @@ public partial interface IBackend
                 for (int ti = 0; ti < timeDim; ti++) { float v = ip[off + ti]; op[off + ti] = v >= 0f ? v : a * v; }
             }
     }
-
-    /// <summary>GEGLU activation: splits input in half along last dim, applies GELU gate. Output has half the elements of input.</summary>
-    void GeGlu(Tensor output, Tensor input);
 }

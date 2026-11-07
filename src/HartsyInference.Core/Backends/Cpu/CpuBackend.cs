@@ -266,28 +266,6 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public unsafe void GeGlu(Tensor output, Tensor input)
-    {
-        ThrowIfDisposed();
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        int outputElements = (int)output.ElementCount;
-        int innerDim = (int)output.Shape[output.Shape.Rank - 1];
-
-        for (int i = 0; i < outputElements; i++)
-        {
-            int outerIdx = i / innerDim;
-            int d = i % innerDim;
-            int inputIdx = outerIdx * (innerDim * 2) + d;
-            float x = inPtr[inputIdx];
-            float gate = inPtr[inputIdx + innerDim];
-            float geluGate = gate * 0.5f * (1.0f + MathF.Tanh(
-                ActivationKernels.Sqrt2OverPi * (gate + ActivationKernels.GeluCoeff * gate * gate * gate)));
-            outPtr[i] = x * geluGate;
-        }
-    }
-
-    /// <inheritdoc />
     public unsafe void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
     {
         ThrowIfDisposed();

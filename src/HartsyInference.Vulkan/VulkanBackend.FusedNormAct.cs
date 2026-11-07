@@ -19,35 +19,6 @@ public sealed partial class VulkanBackend
     private const int DeltaScanMaxKeyDim = 256;
 
     /// <inheritdoc/>
-    public void SituGlu(Tensor output, Tensor input)
-    {
-        using OpScope _op = EnterOp();
-        (int inner, long rows) = SituGluReference.Validate(output, input);
-        long total = rows * inner;
-        if (total == 0)
-            return;
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * input.DType.SizeInBytes));
-        try
-        {
-            VulkanKernel k = GetKernel("situ_glu" + DtypeSuffix(input.DType), storageBufferCount: 2, _default1DSpec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)inner);
-            pc.U32(checked((uint)total));
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan SituGlu dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <inheritdoc/>
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
         int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
     {

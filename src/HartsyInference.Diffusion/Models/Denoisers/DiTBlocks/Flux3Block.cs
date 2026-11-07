@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -89,7 +90,7 @@ public sealed class Flux3Block(int hiddenSize, int numHeads, int mlpHidden, floa
         backend.Linear(branch, attn, _attnOut!, null);
         attn.Dispose();
         Tensor swiglu = new Tensor(new TensorShape(1, seqLen, _mlpHidden), act);
-        backend.GluActivate(swiglu, gateUp, _mlpHidden, gelu: false);
+        backend.Glu(swiglu, gateUp, GluSpec.SwiGlu);
         gateUp.Dispose();
         Tensor mlp = new Tensor(hiddenShape, act);
         backend.Linear(mlp, swiglu, _mlpOut!, null);

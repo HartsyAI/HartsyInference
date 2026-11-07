@@ -1,14 +1,10 @@
 namespace HartsyInference.Cuda;
 
-// Fused DiT activation kernels (Kernels/dit/dit_norm_act.cu): SiTU-GLU and the gated residual that joins an F32 residual
-// stream to an F16 branch.
+// The DiT gated residual that joins an F16 branch to an F32 stream (Kernels/dit/dit_norm_act.cu).
 public sealed partial class CudaKernels
 {
     private CudaModule? _ditNormActModule;
-    private nint _situGluF32, _situGluF16, _gatedResidualF32F16;
-
-    /// <summary>True when dit_norm_act.ptx loaded.</summary>
-    public bool HasDitNormActKernels => _situGluF32 != 0;
+    private nint _gatedResidualF32F16;
 
     /// <summary>True when the F32-stream / F16-branch gated residual loaded.</summary>
     public bool HasMixedStreamKernels => _gatedResidualF32F16 != 0;
@@ -20,8 +16,6 @@ public sealed partial class CudaKernels
         if (!CanLoad(path))
             return;
         _ditNormActModule = LoadOwnedModule(path);
-        _situGluF32 = _ditNormActModule.GetFunction("situ_glu_f32");
-        _situGluF16 = _ditNormActModule.GetFunction("situ_glu_f16");
         _gatedResidualF32F16 = _ditNormActModule.GetFunction("gated_residual_f32_f16");
     }
 
@@ -33,17 +27,4 @@ public sealed partial class CudaKernels
         LaunchGatedResidualImpl(_gatedResidualF32F16, output, residual, value, gate, seqLen, dim, total, stream);
     }
 
-    /// <summary>Launches SiTU-GLU over <paramref name="rows"/> rows of <c>[u | g]</c>, each half <paramref name="inner"/> wide.</summary>
-    public unsafe void LaunchSituGlu(ulong output, ulong input, int inner, long rows, bool f16, nint stream)
-    {
-        nint function = f16 ? _situGluF16 : _situGluF32;
-        if (function == 0) throw new InvalidOperationException("dit_norm_act.ptx not present in the Ptx folder.");
-        ulong oA = output, iA = input;
-        uint innerA = (uint)inner;
-        ulong total = (ulong)rows * (ulong)inner;
-        void** a = stackalloc void*[4];
-        a[0] = &oA; a[1] = &iA; a[2] = &innerA; a[3] = &total;
-        uint grid = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(function, grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
-    }
 }

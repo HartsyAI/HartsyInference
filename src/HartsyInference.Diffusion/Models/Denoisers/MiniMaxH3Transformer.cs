@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
@@ -970,7 +971,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Gated MLP: fc1 emits the packed gate/up pair, SwiGLU folds it, fc2 projects back. The gate/up pair
-    /// stays F32 — GluActivate has an F32 and a BF16 kernel but no F16 one — so only fc2's result rejoins the
+    /// stays F32 — the gated FFN ran as F32 or BF16 here, never F16 — so only fc2's result rejoins the
     /// stream at the body dtype.</summary>
     private Tensor Mlp(IBackend backend, Tensor x, string prefix)
     {
@@ -978,7 +979,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor gateUp = new Tensor(new TensorShape(seq, ffn * 2), DType.F32);
         backend.Linear(gateUp, x, Require($"{prefix}.fc1.weight"), Optional($"{prefix}.fc1.bias"));
         Tensor act = new Tensor(new TensorShape(seq, ffn), DType.F32);
-        backend.GluActivate(act, gateUp, ffn, gelu: false);
+        backend.Glu(act, gateUp, GluSpec.SwiGlu);
         gateUp.Dispose();
         Tensor outT = new Tensor(x.Shape, BodyDType);
         backend.Linear(outT, act, Require($"{prefix}.fc2.weight"), Optional($"{prefix}.fc2.bias"));
@@ -1012,7 +1013,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 using Tensor gateUpChunk = new Tensor(new TensorShape(c, ffn * 2), DType.F32);
                 backend.Linear(gateUpChunk, xChunk, fc1W, fc1B);
                 using Tensor actChunk = new Tensor(new TensorShape(c, ffn), DType.F32);
-                backend.GluActivate(actChunk, gateUpChunk, ffn, gelu: false);
+                backend.Glu(actChunk, gateUpChunk, GluSpec.SwiGlu);
                 using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
                 backend.Linear(outChunk, actChunk, fc2W, fc2B);
                 backend.ScatterRowsGeneric(outT, outChunk, r0);

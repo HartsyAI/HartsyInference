@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -273,7 +274,7 @@ public sealed unsafe class LtxVideo2Block : IStreamingBlock
         // gelu-approximate (tanh) folded into the up-projection's dequant epilogue where the backend supports
         // it — this intermediate is [tokens, 4*dim], the widest tensor in the block.
         Tensor act = new(new TensorShape(s, inner), x.DType);
-        backend.LinearGelu(act, x, w0, b0);
+        backend.LinearFused(act, x, w0, b0, LinearFusion.Gelu);
         Tensor o = new(new TensorShape(s, dim), x.DType);
         backend.Linear(o, act, w2, b2);
         act.Dispose();

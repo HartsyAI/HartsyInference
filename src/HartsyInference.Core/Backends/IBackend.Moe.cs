@@ -15,9 +15,11 @@ public partial interface IBackend
     /// <param name="bias">Selection-only bias added to the scores (the weights stay unbiased); null for none.</param>
     /// <param name="altBias">Bias used instead of <paramref name="bias"/> for tokens whose kind is non-zero (image tokens).</param>
     /// <param name="tokenKinds">I32 kind per token, required with <paramref name="altBias"/>.</param>
+    /// <param name="dense">F32 <c>[T, E]</c> to also receive every token's weights at its expert ids and zeros elsewhere, for a
+    /// combine that runs every expert densely; null for the pairs alone.</param>
     void MoeRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null) =>
-        throw NotSupportedPrimitive(nameof(MoeRoute));
+        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null, Tensor? dense = null) =>
+        MoeReference.Route(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
 
     /// <summary>Histogram, exclusive scan and stable expert-major permutation of the token-to-expert pairs.</summary>
     /// <param name="counts">I32 [E] rows per expert.</param>
@@ -104,52 +106,4 @@ public partial interface IBackend
 
     private NotSupportedException NotSupportedPrimitive(string name) =>
         new NotSupportedException($"{name} is not implemented on the {Device} backend.");
-
-    /// <summary>MoE top-k gate weights (HiDream <c>MoEGate</c>): softmax, top-k, renormalize to sum 1, write a dense <c>[B,S,E]</c> table.</summary>
-    unsafe void MoeTopKGate(Tensor weights, Tensor logits, int topK)
-    {
-        if (logits.DType != DType.F32 || weights.DType != DType.F32)
-            throw new NotSupportedException("MoeTopKGate default fallback only supports F32.");
-        int numExperts = (int)logits.Shape[logits.Shape.Rank - 1];
-        long tokens = logits.ElementCount / numExperts;
-        float* lp = (float*)logits.DataPointer;
-        float* wp = (float*)weights.DataPointer;
-        Span<float> probs = stackalloc float[numExperts];
-        int k = Math.Min(topK, numExperts);
-        for (long t = 0; t < tokens; t++)
-        {
-            long off = t * numExperts;
-            float maxLogit = lp[off];
-            for (int e = 1; e < numExperts; e++)
-                if (lp[off + e] > maxLogit) maxLogit = lp[off + e];
-            float sum = 0f;
-            for (int e = 0; e < numExperts; e++)
-            {
-                float ex = MathF.Exp(lp[off + e] - maxLogit);
-                probs[e] = ex;
-                sum += ex;
-            }
-            for (int e = 0; e < numExperts; e++)
-            {
-                probs[e] /= sum;
-                wp[off + e] = 0f;
-            }
-            float denom = 0f;
-            for (int kk = 0; kk < k; kk++)
-            {
-                int best = -1;
-                float bestVal = float.NegativeInfinity;
-                for (int e = 0; e < numExperts; e++)
-                {
-                    if (wp[off + e] != 0f) continue;
-                    if (probs[e] > bestVal) { bestVal = probs[e]; best = e; }
-                }
-                wp[off + best] = bestVal;
-                denom += bestVal;
-            }
-            denom += 1e-20f;
-            for (int e = 0; e < numExperts; e++)
-                if (wp[off + e] != 0f) wp[off + e] /= denom;
-        }
-    }
 }

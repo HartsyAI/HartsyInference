@@ -422,22 +422,6 @@ __global__ void dit_tanh_f32(
     output[i] = tanhf(input[i]);
 }
 
-// ── Per-row scalar multiply (token masking) ────────────────────────────────
-// out[row, c] = in[row, c] * rowScale[row]. rowScale has one value per row (rows = total/channels).
-// Used to zero non-role token positions in Ideogram 4's masked text/image embedding.
-__global__ void dit_row_scale_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    const float* __restrict__ rowScale,
-    unsigned int channels,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned long long row = i / channels;
-    output[i] = input[i] * rowScale[row];
-}
-
 // ── Add scalar (out = in + c) ───────────────────────────────────────────────
 __global__ void dit_add_scalar_f32(
     float* __restrict__ output,
@@ -550,79 +534,6 @@ extern "C" __global__ void dit_split_slice_u16(
 
 extern "C" {
 
-// ── MoE top-k gate weights (HiDream MoEGate) ────────────────────────────────
-// Per token: softmax(logits over E experts), select top-k by prob, renormalize the selected
-// weights to sum to 1 (norm_topk_prob: w_k / (sum_k w_k + 1e-20)). Dense [tokens, E] output with
-// zeros at non-selected slots so a dense per-expert accumulation reproduces sparse dispatch
-// exactly. One thread per token; E is small (4 for HiDream) so registers suffice (E <= 16).
-__global__ void dit_moe_topk_gate_f32(
-    float* __restrict__ weights,
-    const float* __restrict__ logits,
-    unsigned int numExperts,
-    unsigned int topK,
-    unsigned long long totalTokens)
-{
-    unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= totalTokens) return;
-    const float* lp = logits + t * numExperts;
-    float* wp = weights + t * numExperts;
-
-    float probs[16];
-    float maxLogit = lp[0];
-    for (unsigned int e = 1; e < numExperts; e++)
-        maxLogit = fmaxf(maxLogit, lp[e]);
-    float sum = 0.0f;
-    for (unsigned int e = 0; e < numExperts; e++)
-    {
-        float ex = expf(lp[e] - maxLogit);
-        probs[e] = ex;
-        sum += ex;
-    }
-    for (unsigned int e = 0; e < numExperts; e++)
-    {
-        probs[e] /= sum;
-        wp[e] = 0.0f;
-    }
-
-    float denom = 0.0f;
-    unsigned int k = topK < numExperts ? topK : numExperts;
-    for (unsigned int kk = 0; kk < k; kk++)
-    {
-        int best = -1;
-        float bestVal = -1.0f;
-        for (unsigned int e = 0; e < numExperts; e++)
-        {
-            if (wp[e] != 0.0f) continue;
-            if (probs[e] > bestVal) { bestVal = probs[e]; best = (int)e; }
-        }
-        wp[best] = bestVal;
-        denom += bestVal;
-    }
-    denom += 1e-20f;
-    for (unsigned int e = 0; e < numExperts; e++)
-        if (wp[e] != 0.0f) wp[e] /= denom;
-}
-
-// ── Per-row (per-token) gated accumulate (MoE expert combine) ───────────────
-// out[b,s,:] += gate[(b,s), expertIdx] * val[b,s,:]. gate is the dense [tokens, E] weight table from
-// dit_moe_topk_gate_f32; non-selected tokens carry weight 0 and contribute nothing. In-place on out.
-__global__ void dit_row_gated_accum_f32(
-    float* __restrict__ out,
-    const float* __restrict__ val,
-    const float* __restrict__ gate,
-    unsigned int numExperts,
-    unsigned int expertIdx,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned long long row = i / dim;
-    float g = gate[row * numExperts + expertIdx];
-    if (g != 0.0f)
-        out[i] += g * val[i];
-}
-
 // Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.
 // `(int)` truncation of a non-negative value == floor. Enables a drain-free EDM step for graph capture.
 __global__ void dit_pixel_quantize_f32(
@@ -708,26 +619,6 @@ __global__ void triplane_grid_sample_f32(
     tri_sample_plane(planes,                 C, planeH, planeW, gx, gy, outF + base);
     tri_sample_plane(planes + planeSz,       C, planeH, planeW, gx, gz, outF + base + C);
     tri_sample_plane(planes + 2 * planeSz,   C, planeH, planeW, gy, gz, outF + base + 2 * C);
-}
-
-// GEGLU with exact (erf) GELU gate: out[row,i] = proj[row,i] * gelu_erf(proj[row, inner+i]), where
-// proj is [rows, 2*inner], out is [rows, inner], gelu_erf(x) = 0.5*x*(1+erf(x/sqrt2)). Fuses the split +
-// erf-gelu + gate multiply into one device pass — replaces the per-block host loop whose proj.DataPointer
-// read drained the compute stream every block (serializing the whole backbone).
-__global__ void geglu_erf_f32(
-    float* __restrict__ out,
-    const float* __restrict__ proj,
-    unsigned long long rows, unsigned int inner)
-{
-    unsigned long long total = rows * inner;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned long long row = idx / inner;
-    unsigned int i = (unsigned int)(idx % inner);
-    const float* base = proj + row * 2ULL * inner;
-    float h = base[i];
-    float g = base[inner + i];
-    out[idx] = h * (0.5f * g * (1.0f + erff(g * 0.70710678118654752440f)));
 }
 
 // Exact (erf) GELU, elementwise: out[i] = 0.5*x*(1+erf(x/sqrt2)) — PyTorch's default nn.GELU().
@@ -1276,23 +1167,4 @@ extern "C" __global__ void ltx2_qk_norm_rope_tokenmajor_f32(
         else val = srow[i];
         outRow[i] = val;
     }
-}
-
-// ── LTX-2 fused per-head output gate, in place (F32 twin) ──────────────────
-// x[s, h*headDim + d] *= 2 * sigmoid(logits[s, h]). Sign-aware expf, matching dit_sigmoid_f32's form.
-extern "C" __global__ void ltx2_head_gate_f32(
-    float* __restrict__ x,
-    const float* __restrict__ logits,
-    unsigned int seq, unsigned int heads, unsigned int headDim)
-{
-    unsigned int W = heads * headDim;
-    unsigned long long total = (unsigned long long)seq * W;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int i = (unsigned int)(idx % W);
-    unsigned long long s = idx / W;
-    unsigned int h = i / headDim;
-    float g = logits[s * heads + h];
-    float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
-    x[idx] = x[idx] * 2.0f * sig;
 }
