@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
@@ -750,11 +751,11 @@ public sealed partial class AttentionLayer
         {
             int group = heads / kvHeads;
             Tensor kRep = new(new TensorShape(batch, heads, skv, d), kMh.DType);
-            backend.RepeatKvHeads(kRep, kMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, group);
             kMh.Dispose();
             kMh = kRep;
             Tensor vRep = new(new TensorShape(batch, heads, skv, d), vMh.DType);
-            backend.RepeatKvHeads(vRep, vMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, group);
             vMh.Dispose();
             vMh = vRep;
         }

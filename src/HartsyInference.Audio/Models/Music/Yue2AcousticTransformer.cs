@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -228,8 +229,8 @@ public sealed class Yue2AcousticTransformer : IDisposable
                 kAppendSrc = kHead32;
                 vAppendSrc = vHead32!;
             }
-            backend.RepeatKvHeads(wideKey, kAppendSrc, kvHeads, heads / kvHeads);
-            backend.RepeatKvHeads(wideValue, vAppendSrc, kvHeads, heads / kvHeads);
+            StridedCopies.RepeatInterleave(backend, wideKey, kAppendSrc, 1, heads / kvHeads);
+            StridedCopies.RepeatInterleave(backend, wideValue, vAppendSrc, 1, heads / kvHeads);
             backend.KvCacheAppend(prefix.Keys(i), wideKey, arLength);
             backend.KvCacheAppend(prefix.Values(i), wideValue, arLength);
 

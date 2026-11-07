@@ -12,7 +12,7 @@ namespace HartsyInference.Audio.Models.ZipVoice;
 // TODO(gpu-residency): SwooshL/R (this file) and BiasNorm.Forward (below) remain host `float*` loops — SwooshL/R
 // need a Softplus/Exp/Log primitive and BiasNorm needs a per-row sum-of-squares reduction, neither of which is
 // exposed on IBackend (searched: no Log/Exp/Softplus elementwise op, no generic per-row-scalar-broadcast op).
-// Adding either would need a new PTX kernel (the established pattern elsewhere, e.g. Mish/Prelu/RepeatKvHeads),
+// Adding either would need a new PTX kernel (the established pattern elsewhere, e.g. Mish/Prelu),
 // but this sandbox has no nvcc/CUDA compiler available (only a pip ptxas without the nvcc frontend) — see the
 // ZipVoice perf-pass entry in docs/Checklists/PHASE_5_AUDIO.md. Everything else in the Zipformer encoder layer
 // (residual adds, broadcast adds, bypass highway, GLU gate, attention value-mixing, NonlinAttention, the

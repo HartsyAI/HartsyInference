@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
@@ -2405,7 +2406,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
 
             // Broadcast the shared rope key across all heads.
             Tensor kRopeB = new(new TensorShape(1, hq, t, qkRope), DType.F32);
-            backend.RepeatKvHeads(kRopeB, kRopeMh, 1, hq);
+            StridedCopies.RepeatInterleave(backend, kRopeB, kRopeMh, 1, hq);
             kRopeMh.Dispose();
 
             // Assemble full per-head q/k [nope|rope] and v padded to qkHead.

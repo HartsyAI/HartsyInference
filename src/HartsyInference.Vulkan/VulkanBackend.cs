@@ -2821,50 +2821,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Sets every output element to its channel's bias, or to zero when there is none.</summary>
-    public void FillBias(Tensor output, Tensor? bias)
-    {
-        using OpScope _op = EnterOp();
-        if (output.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
-        {
-            IBackend.FillBiasReference(output, bias);
-            return;
-        }
-        int cOut = (int)output.Shape[1];
-        int tOut = (int)output.Shape[2];
-        long hw = output.ElementCount / ((long)cOut * tOut);
-        long total = output.ElementCount;
-
-        // The shader binds two buffers either way; an absent bias binds the output and the spec constant turns
-        // the read off, since a null binding is not legal and an unbound slot reads whatever bound it last.
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        VulkanBuffer biasBuf = bias is null ? outBuf : GetBuffer(bias);
-        try
-        {
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, bias is not null),
-            };
-            VulkanKernel kernel = GetKernel("fill_bias", storageBufferCount: 2, spec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)cOut);
-            pc.U32((uint)tOut);
-            pc.U32((uint)hw);
-            pc.U32((uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { biasBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan FillBias dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     /// <summary>The VAE's <c>[B,3,H,W]</c> F32 output in <c>[-1,1]</c> to <c>[H,W,3]</c> u8, on the device.</summary>
     /// <remarks>The last step of every image generation, and an interface default here until now — a host loop over
     /// every pixel, preceded by a device sync of the whole F32 image. The pixels have to reach the host either way
@@ -3850,36 +3806,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     // Real GPU dispatch, NOT the IBackend CPU-loop default: the default throws on non-F32 (Krea2's
     // GQA K/V is F16), and even for F32 it would force a D2H/H2D round trip on a GPU-resident tensor.
-    public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
-    {
-        using OpScope _op = EnterOp();
-        int batch = (int)input.Shape[0], seqLen = (int)input.Shape[2], headDim = (int)input.Shape[3];
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            string shader = "repeat_kv_heads" + DtypeSuffix(input.DType);
-            VulkanKernel kernel = GetKernel(shader, 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[5 * 4];
-            BinaryWriteUInt(pc, 0, (uint)kvHeads);
-            BinaryWriteUInt(pc, 4, (uint)groupSize);
-            BinaryWriteUInt(pc, 8, (uint)seqLen);
-            BinaryWriteUInt(pc, 12, (uint)headDim);
-            long total = (long)batch * kvHeads * groupSize * seqLen * headDim;
-            BinaryWriteUInt(pc, 16, (uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RepeatKvHeads dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
     {
         using OpScope _op = EnterOp();
