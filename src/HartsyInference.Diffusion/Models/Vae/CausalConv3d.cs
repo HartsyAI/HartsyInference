@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -36,7 +37,8 @@ public sealed unsafe class CausalConv3d
     private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
     private readonly Tensor _weight5d;    // [cOut, cIn, kt, kh, kw] in the compute dtype — what a native 3-D conv reads
     private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw] — the per-tap path (and convs a native op declines)
-    private readonly Tensor? _bias;
+    private readonly Tensor? _bias;         // F32 in every compute dtype: a BF16 output rounds the sum once
+    private readonly Tensor _zero;          // one zero in the compute dtype, broadcast when there is no bias
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
     /// <summary>Builds the op from a 5-D conv weight <c>[cOut, cIn, kt, kh, kw]</c> and optional bias, pre-slicing the kt temporal taps into 2-D conv weights. <paramref name="padT"/>/<paramref name="padH"/>/<paramref name="padW"/> are the nn.Conv3d <c>padding</c> values (temporal becomes <c>2·padT</c> causal-left). <paramref name="replicateFirstPad"/> fills the leading causal frames with copies of the input's first frame (LTX-Video, HunyuanVideo) instead of zeros (Wan2.2). <paramref name="spatialReplicatePad"/> pads H/W borders by edge replication (HunyuanVideo <c>F.pad(mode="replicate")</c>) instead of zeros. <paramref name="spatialReflectPad"/> pads H/W borders by mirror-reflection (LTX-2 <c>F.pad(mode="reflect")</c>) instead of zeros — mutually exclusive with <paramref name="spatialReplicatePad"/>, and only supported on the batch-1 fast path.</summary>
@@ -63,6 +65,8 @@ public sealed unsafe class CausalConv3d
         _padTLeft = causal ? 2 * padT : padT;     // non-causal splits the temporal pad symmetrically
         _padTRight = causal ? 0 : padT;
         _bias = bias is null ? null : (bias.DType == DType.F32 ? bias : bias.CastTo(DType.F32));
+        _zero = new Tensor(new TensorShape(1), _computeDtype);
+        _zero.AsSpan<byte>().Clear();
         _weight5d = weight5d.CastTo(_computeDtype);   // an owned copy either way
         // Both forms are built here, before inference: a backend with a native 3-D conv still declines small ones.
         _weight2d = SliceTemporal(_weight5d);
@@ -147,7 +151,7 @@ public sealed unsafe class CausalConv3d
         // FAST PATH — batched convolution (B=1: every video-VAE decode). The per-frame loop below fires tout·kt tiny
         // Conv2D+glue ops per layer (plus HOST replicate-pad loops on the HunyuanVideo/LTX path), leaving the GPU
         // idle ~66% on host dispatch. Instead build the frame-major padded input ONCE (temporal zero/replicate pad +
-        // spatial edge-replicate baked in), run kt batched Conv2D calls over ALL frames, then a temporal gather-sum —
+        // spatial edge-replicate baked in), run kt batched Conv2D calls over ALL frames, then a strided tap accumulate —
         // ~(2+2·kt) ops instead of tout·kt·4. Zero-pad frames convolve to 0 (no bias in the per-tap Conv2D),
         // matching the per-frame skip; replicate-pad frames contribute exactly like F.pad(mode="replicate").
         if (batch == 1 && !DisableBatchedPath)
@@ -174,20 +178,25 @@ public sealed unsafe class CausalConv3d
             // are computed — the per-tap pass below convolves all paddedT frames for each of the kt taps.
             if (!DisableNativeConv3d && backend.TryConv3DFrameMajor(fastOut, padded, _weight5d, _bias, _strideT, _strideH, _strideW, convPadH, convPadW))
                 return fastOut;
-            backend.FillBias(fastOut, _bias);
+            FillBias(backend, fastOut);
+            // Each tap's frame-major conv output [paddedT, cOut, H', W'] adds its strideT-spaced frames into the
+            // channel-major output: out[co, to] += convDt[to·strideT + dt, co].
+            StridedView taps = StridedView.Of(fastOut.Shape).Select(0, 0).Permute([1, 0, 2, 3]);
             for (int dt = 0; dt < _kt; dt++)
             {
                 using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), _computeDtype);
                 backend.Conv2D(convDt, padded, _weight2d[dt], null, _strideH, _strideW, convPadH, convPadW);
-                backend.AccumulateTap(fastOut, convDt, dt, _strideT);
+                backend.AccumulateStrided(fastOut, convDt, new StridedCopySpec(taps, StridedView.Of(convDt.Shape).Slice(0, dt, tout, _strideT)));
             }
             return fastOut;
         }
 
-        // Device-resident output: every temporal slot is written by WriteVaeFrame below (GPU), so no host clear.
+        // Device-resident output: every temporal slot is written by the strided frame scatter below (GPU), so no host clear.
         if (_computeDtype != DType.F32)
             throw new NotSupportedException("CausalConv3d BF16 compute supports only the batched B=1 fast path.");
         Tensor output = new Tensor(new TensorShape([(long)batch, _cOut, tout, hOut, wOut]), DType.F32);
+        Span<long> slotDims = [batch, _cOut, 1, hOut, wOut];
+        StridedView biasView = StridedView.VectorAlong(slotDims, 1);
 
         for (int to = 0; to < tout; to++)
         {
@@ -199,7 +208,7 @@ public sealed unsafe class CausalConv3d
                 if (frame is null) continue;                    // zero-pad frame contributes nothing
                 if (_spatialReplicatePad && (_padH > 0 || _padW > 0))
                 {
-                    Tensor padded = ReplicatePadSpatial(frame, batch, h, w);
+                    Tensor padded = ReplicatePadSpatial(backend, frame, batch, h, w);
                     frame.Dispose();
                     frame = padded;
                 }
@@ -211,13 +220,16 @@ public sealed unsafe class CausalConv3d
                 else { backend.Add(acc, acc, conv); conv.Dispose(); }   // taps must accumulate on-GPU: a host add is a D2H per tap
             }
 
-            // Write the accumulated (+bias) frame into output[:, :, to] on-GPU; a host write goes stale vs the device copy.
+            // Write the accumulated frame into output[:, :, to] on the device and add the bias in place; a host write goes
+            // stale vs the device copy.
             if (acc is null)
             {
                 acc = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);
                 new Span<float>((float*)acc.DataPointer, checked((int)acc.Shape.ElementCount)).Clear();
             }
-            backend.WriteVaeFrame(output, acc, _bias, to);
+            StridedView slot = StridedView.Of(output.Shape).Slice(2, to, 1);
+            backend.CopyStrided(output, acc, StridedCopySpec.Scatter(slot));
+            if (_bias is not null) backend.AccumulateStrided(output, _bias, new StridedCopySpec(slot, biasView));
             acc.Dispose();
         }
         return output;
@@ -231,52 +243,50 @@ public sealed unsafe class CausalConv3d
         if (srcT < zeroPad)                                     // leading causal-pad frame
         {
             if (!_replicateFirstPad) { outF.Dispose(); return null; }   // zero (Wan): no contribution
-            // LTX: replicate the input's first frame (CPU — rare replicate path).
-            int tinR = (int)input.Shape[2];
-            float* dp = (float*)outF.DataPointer, ipR = (float*)input.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int ci = 0; ci < _cIn; ci++)
-                    Buffer.MemoryCopy(ipR + ((long)b * _cIn + ci) * tinR * frame, dp + ((long)b * _cIn + ci) * frame, frame * 4, frame * 4);
+            StridedCopies.SliceAxis(backend, outF, input, 2, 0, 1);     // LTX: replicate the input's first frame
             return outF;
         }
         int afterZero = srcT - zeroPad;
-        if (afterZero < cacheLen)                               // cache frame → GPU strided extract
+        if (afterZero < cacheLen)                               // cache frame → device strided extract
         {
-            backend.ExtractVaeFrame(outF, cache!, afterZero);
+            StridedCopies.SliceAxis(backend, outF, cache!, 2, afterZero, 1);
         }
         else                                                    // real input frame (or trailing edge-replicate)
         {
             int ti = afterZero - cacheLen;
             int tin = (int)input.Shape[2];
             if (ti >= tin) ti = tin - 1;                        // non-causal trailing pad: replicate the last frame
-            backend.ExtractVaeFrame(outF, input, ti);
+            StridedCopies.SliceAxis(backend, outF, input, 2, ti, 1);
         }
         return outF;
     }
 
     /// <summary>Edge-replicate pads a <c>[B, cIn, H, W]</c> frame to <c>[B, cIn, H+2·padH, W+2·padW]</c> (HunyuanVideo <c>F.pad(mode="replicate")</c>).</summary>
-    private Tensor ReplicatePadSpatial(Tensor frame, int batch, int h, int w)
+    private Tensor ReplicatePadSpatial(IBackend backend, Tensor frame, int batch, int h, int w)
     {
-        int hp = h + 2 * _padH, wp = w + 2 * _padW;
-        Tensor outF = new Tensor(new TensorShape(batch, _cIn, hp, wp), DType.F32);
-        float* sp = (float*)frame.DataPointer;
-        float* dp = (float*)outF.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int ci = 0; ci < _cIn; ci++)
-            {
-                long srcBase = ((long)b * _cIn + ci) * h * w;
-                long dstBase = ((long)b * _cIn + ci) * hp * wp;
-                for (int y = 0; y < hp; y++)
-                {
-                    int sy = Math.Clamp(y - _padH, 0, h - 1);
-                    for (int x = 0; x < wp; x++)
-                    {
-                        int sx = Math.Clamp(x - _padW, 0, w - 1);
-                        dp[dstBase + (long)y * wp + x] = sp[srcBase + (long)sy * w + sx];
-                    }
-                }
-            }
+        Tensor outF = new Tensor(new TensorShape(batch, _cIn, h + 2 * _padH, w + 2 * _padW), DType.F32);
+        backend.Pad(outF, frame, new PadSpec(PadMode.Replicate, [0, 0, _padH, _padW], [0, 0, _padH, _padW]));
         return outF;
+    }
+
+    /// <summary>Starts the batched conv output as its per-channel bias (or zero) broadcast over every position, on the device.</summary>
+    private void FillBias(IBackend backend, Tensor fastOut)
+    {
+        Span<long> dims = stackalloc long[5];
+        fastOut.Shape.CopyDimsTo(dims);
+        if (_bias is null)
+        {
+            backend.CopyStrided(fastOut, _zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+            return;
+        }
+        if (_computeDtype == DType.F32)
+        {
+            backend.CopyStrided(fastOut, _bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
+            return;
+        }
+        // A BF16 output starts from zero and adds the F32 bias, so the bias is rounded once, not cast first.
+        backend.CopyStrided(fastOut, _zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+        backend.AccumulateStrided(fastOut, _bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
     }
 
 

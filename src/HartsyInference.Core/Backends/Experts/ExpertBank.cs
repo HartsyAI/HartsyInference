@@ -38,13 +38,6 @@ public sealed class ExpertBank
     {
     }
 
-    /// <summary>Creates a bank whose experts come from an <see cref="IExpertSource"/>.</summary>
-    public static ExpertBank FromSource(IExpertSource source, int layer, int count, ushort bank = 0)
-    {
-        ArgumentNullException.ThrowIfNull(source);
-        return new ExpertBank(layer, count, source.Resolve, bank, source.Backing);
-    }
-
     /// <summary>Layer number.</summary>
     public int Layer { get; }
 
@@ -59,15 +52,6 @@ public sealed class ExpertBank
 
     /// <summary>Routed experts in the layer.</summary>
     public int Count { get; }
-
-    /// <summary>How many experts have been resolved so far.</summary>
-    public int ResolvedCount
-    {
-        get
-        {
-            lock (_gate) return _created.Count(static weights => weights is not null);
-        }
-    }
 
     /// <summary>The key of <paramref name="expert"/> in this layer.</summary>
     public ExpertKey Key(int expert)

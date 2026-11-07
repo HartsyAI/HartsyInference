@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -102,9 +103,9 @@ internal sealed unsafe class AceStep15Attention
         {
             int group = heads / kvHeads;
             kRep = new Tensor(new TensorShape(1, heads, l, hd), act);
-            backend.RepeatKvHeads(kRep, kMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, kRep, kMh, 1, group);
             vRep = new Tensor(new TensorShape(1, heads, l, hd), act);
-            backend.RepeatKvHeads(vRep, vMh, kvHeads, group);
+            StridedCopies.RepeatInterleave(backend, vRep, vMh, 1, group);
             kMh.Dispose(); vMh.Dispose();
         }
 

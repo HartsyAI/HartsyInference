@@ -2546,7 +2546,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         if (kvLen < 0 || kvLen > key.Shape[2])
             throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
@@ -2555,11 +2555,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
         if (!FlashOnDevice(in call))
         {
-            RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionRows, in call);
     }
 
     /// <summary>The storage attention computes in: F32 when any operand is BF16 (more range than F16), else the GEMM rule.</summary>
@@ -2816,50 +2816,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan AffineMix dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>Sets every output element to its channel's bias, or to zero when there is none.</summary>
-    public void FillBias(Tensor output, Tensor? bias)
-    {
-        using OpScope _op = EnterOp();
-        if (output.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
-        {
-            IBackend.FillBiasReference(output, bias);
-            return;
-        }
-        int cOut = (int)output.Shape[1];
-        int tOut = (int)output.Shape[2];
-        long hw = output.ElementCount / ((long)cOut * tOut);
-        long total = output.ElementCount;
-
-        // The shader binds two buffers either way; an absent bias binds the output and the spec constant turns
-        // the read off, since a null binding is not legal and an unbound slot reads whatever bound it last.
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
-        VulkanBuffer biasBuf = bias is null ? outBuf : GetBuffer(bias);
-        try
-        {
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, bias is not null),
-            };
-            VulkanKernel kernel = GetKernel("fill_bias", storageBufferCount: 2, spec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)cOut);
-            pc.U32((uint)tOut);
-            pc.U32((uint)hw);
-            pc.U32((uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { biasBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan FillBias dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -3549,12 +3505,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DispatchUpsample("upsample_nearest2d", output, input, scaleH, scaleW);
     }
 
-    public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-    {
-        using OpScope _op = EnterOp();
-        DispatchUpsample("upsample_bilinear2d", output, input, scaleH, scaleW);
-    }
-
     private void DispatchUpsample(string baseName, Tensor output, Tensor input, int scaleH, int scaleW)
     {
         int N = (int)input.Shape[0], C = (int)input.Shape[1], H = (int)input.Shape[2], W = (int)input.Shape[3];
@@ -3856,36 +3806,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     // Real GPU dispatch, NOT the IBackend CPU-loop default: the default throws on non-F32 (Krea2's
     // GQA K/V is F16), and even for F32 it would force a D2H/H2D round trip on a GPU-resident tensor.
-    public void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
-    {
-        using OpScope _op = EnterOp();
-        int batch = (int)input.Shape[0], seqLen = (int)input.Shape[2], headDim = (int)input.Shape[3];
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            string shader = "repeat_kv_heads" + DtypeSuffix(input.DType);
-            VulkanKernel kernel = GetKernel(shader, 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[5 * 4];
-            BinaryWriteUInt(pc, 0, (uint)kvHeads);
-            BinaryWriteUInt(pc, 4, (uint)groupSize);
-            BinaryWriteUInt(pc, 8, (uint)seqLen);
-            BinaryWriteUInt(pc, 12, (uint)headDim);
-            long total = (long)batch * kvHeads * groupSize * seqLen * headDim;
-            BinaryWriteUInt(pc, 16, (uint)total);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RepeatKvHeads dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     public void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
     {
         using OpScope _op = EnterOp();
@@ -4059,14 +3979,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     #region Audio (not supported on this backend)
 
-    public void Fft(Tensor output, Tensor input)
-        => throw new NotSupportedException("VulkanBackend does not support FFT — use the CPU backend for audio preprocessing.");
-
     public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window)
         => throw new NotSupportedException("VulkanBackend does not support STFT — use the CPU backend.");
-
-    public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-        => throw new NotSupportedException("VulkanBackend does not support MelFilterbank — use the CPU backend.");
 
     #endregion
 
@@ -4547,45 +4461,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Per-row argmax over the last dimension, one workgroup per row.</summary>
-    /// <remarks>The batched form of <see cref="ArgMaxInto"/>, off the same kernel. Ties go to the lower index,
-    /// matching the reference. F32 logits into I32 indices; anything else takes the host reference, which is also
-    /// where the shape and dtype errors are raised.</remarks>
-    public void ArgMaxLastDim(Tensor indices, Tensor input)
-    {
-        using OpScope _op = EnterOp();
-        if (input.DType != DType.F32 || indices.DType != DType.I32)
-        {
-            IBackend.ArgMaxLastDimReference(indices, input);
-            return;
-        }
-        int c = (int)input.Shape[input.Shape.Rank - 1];
-        long rows = input.ElementCount / c;
-        if (indices.ElementCount < rows)
-        {
-            throw new ArgumentException($"ArgMaxLastDim indices length {indices.ElementCount} < rows {rows}.");
-        }
-
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(rows * sizeof(int)));
-        try
-        {
-            VulkanKernel k = GetKernel("argmax_lastdim", storageBufferCount: 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[4];
-            BinaryWriteUInt(pc, 0, (uint)c);
-            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, inBuf.Handle };
-            // One workgroup per row; the reduction inside each spans that row on its own.
-            Dispatch(k, bufs, pc, (uint)rows);
-            CacheOutput(indices, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan ArgMaxLastDim dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
     public void ArgMaxInto(ulong outputTokenId, Tensor input)
     {
         using OpScope _op = EnterOp();
@@ -4731,17 +4606,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
     {
-        kvGroup = ValidateFlashGroup(query, key, value, kvGroup);
+        _ = ValidateFlashGroup(query, key, value, kvGroup);
         ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
         AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
             slidingWindow);
         if (!DeviceKernelEligible(in call))
         {
-            RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+            RunAttentionRows(FlashAttentionDeviceRows, in call);
             return;
         }
         using OpScope _op = EnterOp();
-        RunAttentionRows(FlashAttentionDeviceRows, in call, kvGroup);
+        RunAttentionRows(FlashAttentionDeviceRows, in call);
     }
 
     private void DispatchFlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, float scale, bool causal, int kvGroup, ulong devicePos)
