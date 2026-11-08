@@ -691,6 +691,9 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
+            // Text / LLM — ERNIE-5.5-Flash-Base: config and catalog row only; the loader refuses it by name (Ernie5Config.RequireRunnable).
+            Ernie5Catalog.Build(),
+
             // Image / diffusion
             new CatalogEntry
             {

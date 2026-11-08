@@ -3,6 +3,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
+using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Models.Spark;
@@ -66,6 +67,8 @@ internal static class HfTextDirectoryLoader
     /// <exception cref="HartsyInferenceException">The model_type is not supported or the tokenizer is missing.</exception>
     internal static void RequireSupported(HfCheckpointInfo info)
     {
+        if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
+            Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal))
