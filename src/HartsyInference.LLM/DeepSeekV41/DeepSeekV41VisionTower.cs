@@ -1,4 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.DeepSeekV41;
@@ -90,8 +93,8 @@ public sealed class DeepSeekV41VisionTower : IDisposable
         _backend.SliceLastDim(w.Q, w.Qkv, 0);
         _backend.SliceLastDim(w.K, w.Qkv, dim);
         _backend.SliceLastDim(w.V, w.Qkv, 2 * dim);
-        _backend.ApplyRopeSingle(w.Q, cos, sin);
-        _backend.ApplyRopeSingle(w.K, cos, sin);
+        _backend.Rotary(RotaryCall.TokenMajor(w.Q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        _backend.Rotary(RotaryCall.TokenMajor(w.K, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         _backend.Permute0213(w.QHeads, w.Q, n, heads, headDim);
         _backend.Permute0213(w.KHeads, w.K, n, heads, headDim);
         _backend.Permute0213(w.VHeads, w.V, n, heads, headDim);
@@ -106,7 +109,7 @@ public sealed class DeepSeekV41VisionTower : IDisposable
     {
         _backend.RmsNorm(w.Normed, w.X, b.Norm2, NormEps);
         _backend.Linear(w.GateUp, w.Normed, b.W1, null);
-        _backend.GluActivate(w.Act, w.GateUp, inter, gelu: false);
+        _backend.Glu(w.Act, w.GateUp, GluSpec.SwiGlu);
         _backend.Linear(w.Branch, w.Act, b.W2, null);
         _backend.Add(w.X, w.X, w.Branch);
     }

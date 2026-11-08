@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Rope;
@@ -86,10 +87,10 @@ public sealed unsafe class FluxRope : IDisposable, IQkRotation, IHeadMajorQkRota
     }
 
     /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> (pre-permute) Q/K pair via
-    /// <see cref="IBackend.WanRopeInterleaved"/> — the same interleaved-pair rotation as <see cref="Forward"/>
+    /// <c>RotaryCall.Rows</c> — the same interleaved-pair rotation as <see cref="Forward"/>
     /// (<c>x0' = c·x0 − s·x1, x1' = s·x0 + c·x1</c>), so results are bit-identical; text tokens (position ids all
     /// zero → cos 1 / sin 0) rotate by identity exactly as on the host path. Applied BEFORE the head permute:
-    /// the pre-permute <c>[1, S, H, D]</c> layout is exactly WanRopeInterleaved's <c>[S, heads·headDim]</c>
+    /// the pre-permute <c>[1, S, H, D]</c> layout is exactly the interleaved rotary (RotaryCall.Rows)'s <c>[S, heads·headDim]</c>
     /// contract. Replaces the per-block host loop (full Q/K D2H→trig→H2D round trip per block per step).
     /// Requires batch 1 (flat-layout equivalence); callers keep the host <see cref="Forward"/> for B&gt;1.
     /// Mirrors <see cref="HunyuanImageRope.ApplyGpu"/>. Reads the signature without the precompute lock, so it must not
@@ -99,8 +100,8 @@ public sealed unsafe class FluxRope : IDisposable, IQkRotation, IHeadMajorQkRota
         CheckGpuPrecondition("ApplyGpu", q);
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, _cachedSeqLen, _positions!);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
-        backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, _cachedSeqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, _cachedSeqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>GQA variant of <see cref="ApplyGpu"/>: rotates Q with <paramref name="numHeads"/> and K with
@@ -110,8 +111,8 @@ public sealed unsafe class FluxRope : IDisposable, IQkRotation, IHeadMajorQkRota
         CheckGpuPrecondition("ApplyGpuGqa", q);
         using RopeTableLease lease = _deviceTables.Acquire(backend, 0, _cachedSeqLen, _positions!);
         (Tensor cos, Tensor sin) = DeviceTablesOf(lease);
-        backend.WanRopeInterleaved(q, cos, sin, _cachedSeqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, _cachedSeqLen, numKvHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, _cachedSeqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, _cachedSeqLen, numKvHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>Releases the device tables. Outstanding leases keep theirs until released.</summary>

@@ -1,5 +1,7 @@
 using System.Linq;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
@@ -249,10 +251,10 @@ public sealed unsafe class LtxVideo2VaeDecoder
         }
 
         // norm_out + final pixel-unshuffle run on-device: the host loops here D2H-drained the full-res tensor
-        // twice (the literal Krea2-VAE pattern). WanRmsNormChannel is the same channel-RMS math; UnpatchifyVae's
+        // twice (the literal Krea2-VAE pattern). the channel L2 NormModulate is the same channel-RMS math; the CWHT depth-to-space's
         // channel unpack (oc = c·p² + r·p + q, q→H, r→W) is exactly this decoder's (c·p + pa)·p + pb layout.
         Tensor normed = new Tensor(h.Shape, h.DType);
-        backend.WanRmsNormChannel(normed, h, null, 1e-8f);
+        backend.NormModulate(NormModulateCall.Channel(normed, h, NormKind.L2Norm, 1e-8f));
         h.Dispose();
         if (probe) ProbeStats("norm_out", normed);
         Tap?.Invoke("norm_out", normed);
@@ -265,7 +267,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         int ph = (int)patched.Shape[3], pw = (int)patched.Shape[4];
         int oc = pc / (_patch * _patch);
         Tensor rgb = new Tensor(new TensorShape([(long)pb, oc, pf, (long)ph * _patch, (long)pw * _patch]), patched.DType);
-        backend.UnpatchifyVae(rgb, patched, _patch);
+        PixelShuffles.DepthToSpace(backend, rgb, patched, ShuffleSpec.ChannelsFirst((int)patched.Shape[0], (int)patched.Shape[2], (int)patched.Shape[3], (int)patched.Shape[4], (int)rgb.Shape[1], 1, _patch, _patch, ChannelOrder.CWHT));
         patched.Dispose();
         // The decode's INTERNAL width is _computeDtype, but the returned RGB is always F32: every consumer
         // (VideoRgbFrames.ExtractFrame, ProbeStats, the restore chain) reads it as raw floats. Widening here

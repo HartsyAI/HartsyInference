@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.TextEncoders;
 
@@ -480,8 +483,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
             kRaw.Dispose();
             if (!ReferenceEquals(vRaw, kRaw)) vRaw.Dispose();
 
-            backend.ApplyRopeSingleHeadMajor(qNormed, ropeCos, ropeSin, _headDim);
-            backend.ApplyRopeSingleHeadMajor(kNormed, ropeCos, ropeSin, _headDim);
+            backend.Rotary(RotaryCall.HeadMajor(qNormed, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _headDim));
+            backend.Rotary(RotaryCall.HeadMajor(kNormed, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _headDim));
 
             Tensor kAttn = kNormed;
             Tensor vAttn = vNormed;
@@ -489,8 +492,8 @@ public sealed unsafe class Gemma4TextEncoder : ILtx2TextTower
             {
                 kAttn = new Tensor(qMhShape, DType.F32);
                 vAttn = new Tensor(qMhShape, DType.F32);
-                backend.RepeatKvHeads(kAttn, kNormed, _kvHeads, queryHeads / _kvHeads);
-                backend.RepeatKvHeads(vAttn, vNormed, _kvHeads, queryHeads / _kvHeads);
+                StridedCopies.RepeatInterleave(backend, kAttn, kNormed, 1, queryHeads / _kvHeads);
+                StridedCopies.RepeatInterleave(backend, vAttn, vNormed, 1, queryHeads / _kvHeads);
                 kNormed.Dispose();
                 vNormed.Dispose();
             }

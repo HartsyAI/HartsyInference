@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -29,11 +30,11 @@ public static class HairDeckEulerSampler
             using Tensor vCond = model.Forward(backend, x, t, ctx, uncond: false);
             if (cfg == 1f)
             {
-                backend.CfgEulerStep(x, vCond, vCond, 1f, delta);
+                backend.GuidedEulerStep(x, vCond, vCond, GuidedEulerSpec.Lerp(1f, delta));
                 continue;
             }
             using Tensor vUncond = model.Forward(backend, x, t, ctx, uncond: true);
-            backend.CfgEulerStep(x, vCond, vUncond, cfg, delta);
+            backend.GuidedEulerStep(x, vCond, vUncond, GuidedEulerSpec.Lerp(cfg, delta));
         }
         return x;
     }

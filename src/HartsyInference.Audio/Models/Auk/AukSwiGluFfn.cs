@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Auk;
@@ -25,7 +26,7 @@ public sealed class AukSwiGluFfn
     {
         Tensor gateUp = WhisperOps.ProjectLinear(backend, x, _inW!, null, 1, n, _dim, 2 * _inner);
         Tensor act = new(new TensorShape(1, n, _inner), DType.F32);
-        backend.GluActivate(act, gateUp, _inner, false);
+        backend.Glu(act, gateUp, GluSpec.SwiGlu);
         gateUp.Dispose();
         Tensor result = WhisperOps.ProjectLinear(backend, act, _outW!, null, 1, n, _inner, _dim);
         act.Dispose();
