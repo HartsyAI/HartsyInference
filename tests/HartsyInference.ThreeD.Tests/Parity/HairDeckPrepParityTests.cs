@@ -1,3 +1,4 @@
+using System.Text;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -55,17 +56,17 @@ public sealed class HairDeckPrepParityTests
         HairDeckSourceImage source = HairDeckSourceImage.Create(png.Rgb, png.Alpha, png.Width, png.Height);
         HairDeckPreprocessor preprocessor = new(segmenter, matter, backend);
         HairDeckLoadedImage loaded = HairDeckImageRules.Load(source);
-        IReadOnlyList<TextGroundedLogitResult> segmentation = preprocessor.Segment(loaded);
         float[] matte = preprocessor.MatteOf(loaded);
-        HairDeckPreprocessResult ours = preprocessor.FromModels(loaded, segmentation, matte);
-
-        CompareSegmentation(reference, segmentation);
         CompareMatte(reference, matte);
+        IReadOnlyList<TextGroundedLogitResult> segmentation = preprocessor.Segment(loaded);
+        CompareSegmentation(reference, segmentation);
+        HairDeckPreprocessResult ours = preprocessor.FromModels(loaded, segmentation, matte);
         ComparePreprocessing(reference, ours);
     }
 
-    private void CompareSegmentation(SafeTensorsLoader reference, IReadOnlyList<TextGroundedLogitResult> ours)
+    private static void CompareSegmentation(SafeTensorsLoader reference, IReadOnlyList<TextGroundedLogitResult> ours)
     {
+        StringBuilder failures = new();
         for (int p = 0; p < PromptOrder.Length; p++)
         {
             ReadOnlySpan<float> refScores = Floats(reference.GetTensor($"sam_scores_{p}"));
@@ -87,9 +88,23 @@ public sealed class HairDeckPrepParityTests
 
             Console.WriteLine($"sam3 {PromptOrder[p]}: {refScores.Length} instances, score maxAbs {scoreMax:G4}, "
                 + $"logit maxAbs {logitMax:G4}, logit meanAbs {logitSum / Math.Max(1, refScores.Length * theirs.LogitSide * theirs.LogitSide):G4}");
-            Assert.True(scoreMax < 1e-3f, $"{PromptOrder[p]}: score maxAbs {scoreMax}");
-            Assert.True(logitMax < 1e-2f, $"{PromptOrder[p]}: logit maxAbs {logitMax}");
+            if (refScores.Length != theirs.Instances.Count)
+            {
+                failures.AppendLine($"{PromptOrder[p]}: {theirs.Instances.Count} instances, reference {refScores.Length}");
+            }
+
+            if (scoreMax >= 1e-3f)
+            {
+                failures.AppendLine($"{PromptOrder[p]}: score maxAbs {scoreMax}");
+            }
+
+            if (logitMax >= 1e-2f)
+            {
+                failures.AppendLine($"{PromptOrder[p]}: logit maxAbs {logitMax}");
+            }
         }
+
+        Assert.True(failures.Length == 0, failures.ToString());
     }
 
     private void CompareMatte(SafeTensorsLoader reference, float[] ours)
