@@ -27,7 +27,7 @@ public readonly record struct RotaryCall(Tensor X, Tensor Cos, Tensor Sin, Rotar
 
     /// <summary>Rows <paramref name="x"/> <c>[S, heads·D]</c> (any shape with that element count) with tables <c>[S, E]</c> shared by every head.</summary>
     public static RotaryCall Rows(Tensor x, Tensor cos, Tensor sin, long tokens, int heads, int headDim, RotaryPairing pairing, RopeTableLayout layout, int rotaryDim = 0)
-        => new(x, cos, sin, RotaryViews.Create(RotaryViews.Rows(tokens, heads, headDim), RotaryViews.SharedTable(cos.Shape, 1, heads), pairing, layout, rotaryDim));
+        => new(x, cos, sin, RotaryViews.Create(RotaryViews.Rows(tokens, heads, headDim), RotaryViews.SharedTable(cos.Shape, 1, heads).Slice(2, 0, tokens), pairing, layout, rotaryDim));
 
     /// <summary>Rows <paramref name="x"/> <c>[S, heads·D]</c> with a table per head, <c>[heads, S, E]</c>.</summary>
     public static RotaryCall RowsPerHead(Tensor x, Tensor cos, Tensor sin, long tokens, int heads, int headDim, RotaryPairing pairing, RopeTableLayout layout, int rotaryDim = 0)
