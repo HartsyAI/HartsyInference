@@ -104,6 +104,11 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new InvalidOperationException("Chains were requested but the chain model produced none; no partial result is returned.");
         }
 
+        if (options.Rigged)
+        {
+            return HairDeckGlbExport.WriteRigged(result, prep.Input.HairBaseColorSrgb);
+        }
+
         return HairDeckGlbExport.Write(result, prep.Input.HairBaseColorSrgb, options.Chains);
     }
 
