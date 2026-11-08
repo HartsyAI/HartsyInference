@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.ModelAssets.PyTorch;
 
 /// <summary>A torch storage reference recovered from a pickle <c>persistent_id</c>.</summary>
-internal sealed record PickleStorage(DType DType, string Key, long NumEl);
+/// <param name="Complex">A complex-valued storage. Its DType is a placeholder; the tensors on it are not materialized.</param>
+internal sealed record PickleStorage(DType DType, string Key, long NumEl, bool Complex = false);
 
 /// <summary>A tensor reconstruction recovered from <c>torch._utils._rebuild_tensor_v2</c>.</summary>
 internal sealed record PickleTensor(PickleStorage Storage, long Offset, long[] Size, long[] Stride);
@@ -115,6 +116,10 @@ internal sealed class PickleMachine
         switch (g.Name)
         {
             case "_rebuild_tensor_v2" or "_rebuild_tensor":
+                // Complex tensors (e.g. precomputed RoPE frequencies) are dropped: the loader has no complex DType, and the
+                // Vision models compute those tables themselves. A missing key is reported by the model that needs it.
+                if (args[0] is PickleStorage { Complex: true })
+                    return null;
                 return new PickleTensor(
                     (PickleStorage)args[0]!, ToLong(args[1]), ToLongArray(args[2]), ToLongArray(args[3]));
             case "_rebuild_parameter":
@@ -133,7 +138,8 @@ internal sealed class PickleMachine
         // ('storage', <storage_type GLOBAL>, key, location, numel)
         object?[] t = (object?[])pid!;
         PickleGlobal st = (PickleGlobal)t[1]!;
-        return new PickleStorage(StorageDType(st.Name), Str(t[2]), ToLong(t[4]));
+        bool complex = st.Name is "ComplexFloatStorage" or "ComplexDoubleStorage";
+        return new PickleStorage(complex ? DType.F32 : StorageDType(st.Name), Str(t[2]), ToLong(t[4]), complex);
     }
 
     private static DType StorageDType(string name) => name switch
