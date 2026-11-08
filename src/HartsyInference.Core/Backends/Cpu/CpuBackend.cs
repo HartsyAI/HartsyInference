@@ -332,13 +332,6 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-    {
-        ThrowIfDisposed();
-        UpDownSampleKernels.UpsampleBilinear2D(output, input, scaleH, scaleW);
-    }
-
-    /// <inheritdoc />
     public unsafe void CopyTo(Tensor destination, Tensor source)
     {
         ThrowIfDisposed();
@@ -355,24 +348,10 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
-    public void Fft(Tensor output, Tensor input)
-    {
-        ThrowIfDisposed();
-        AudioKernels.Fft(output, input);
-    }
-
-    /// <inheritdoc />
     public void Stft(Tensor output, Tensor input, int fftSize, int hopLength, Tensor window)
     {
         ThrowIfDisposed();
         AudioKernels.Stft(output, input, fftSize, hopLength, window);
-    }
-
-    /// <inheritdoc />
-    public void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-    {
-        ThrowIfDisposed();
-        AudioKernels.MelFilterbank(output, input, filters);
     }
 
     private void ThrowIfDisposed()

@@ -5,25 +5,6 @@ namespace HartsyInference.Core.Backends.Cpu.Kernels;
 /// <summary>CPU audio processing kernels: FFT, STFT, and mel filterbank application.</summary>
 public static class AudioKernels
 {
-    /// <summary>Cooley-Tukey radix-2 FFT. Input is real-valued [N], output is complex [N] (interleaved real/imag). N must be a power of 2.</summary>
-    public static unsafe void Fft(Tensor output, Tensor input)
-    {
-        long n = input.Shape[input.Shape.Rank - 1];
-        if ((n & (n - 1)) != 0)
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"FFT size must be power of 2, got {n}.");
-
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        // Copy real input into complex output (real, imag=0)
-        for (int i = 0; i < (int)n; i++)
-        {
-            outPtr[2 * i] = inPtr[i];
-            outPtr[2 * i + 1] = 0f;
-        }
-
-        FftInPlaceComplex(outPtr, (int)n);
-    }
 
     /// <summary>In-place Cooley-Tukey radix-2 FFT over interleaved complex data [n·2]. n must be a power of 2.</summary>
     private static unsafe void FftInPlaceComplex(float* data, int n)
@@ -120,67 +101,6 @@ public static class AudioKernels
         {
             if (frameAlloc != null)
                 NativeMemory.Free(frameAlloc);
-        }
-    }
-
-    /// <summary>Applies a mel filterbank matrix to a magnitude spectrogram. Input: [NumFrames, FreqBins], Filters: [NumMels, FreqBins], Output: [NumFrames, NumMels].</summary>
-    public static unsafe void MelFilterbank(Tensor output, Tensor input, Tensor filters)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* filterPtr = (float*)filters.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-
-        int numFrames = (int)input.Shape[0];
-        int freqBins = (int)input.Shape[1];
-        int numMels = (int)filters.Shape[0];
-
-        // Pre-allocate the NEON reduction buffer outside the loop to avoid CA2014
-        float* neonTmp = stackalloc float[Vector128<float>.Count];
-
-        for (int f = 0; f < numFrames; f++)
-        {
-            float* frameIn = inPtr + f * freqBins;
-            float* frameOut = outPtr + f * numMels;
-
-            for (int m = 0; m < numMels; m++)
-            {
-                float* filterRow = filterPtr + m * freqBins;
-                float sum = 0f;
-
-                int i = 0;
-                if (Avx2.IsSupported)
-                {
-                    Vector256<float> vSum = Vector256<float>.Zero;
-                    for (; i <= freqBins - 8; i += 8)
-                    {
-                        Vector256<float> vIn = Avx.LoadVector256(frameIn + i);
-                        Vector256<float> vFilter = Avx.LoadVector256(filterRow + i);
-                        vSum = Fma.IsSupported ? Fma.MultiplyAdd(vIn, vFilter, vSum)
-                            : Avx.Add(vSum, Avx.Multiply(vIn, vFilter));
-                    }
-                    sum += SimdDispatch.HorizontalSum(vSum);
-                }
-                else if (AdvSimd.IsSupported)
-                {
-                    Vector128<float> vSum = Vector128<float>.Zero;
-                    for (; i <= freqBins - 4; i += 4)
-                    {
-                        Vector128<float> vIn = AdvSimd.LoadVector128(frameIn + i);
-                        Vector128<float> vFilter = AdvSimd.LoadVector128(filterRow + i);
-                        vSum = AdvSimd.Add(vSum, AdvSimd.Multiply(vIn, vFilter));
-                    }
-                    AdvSimd.Store(neonTmp, vSum);
-                    for (int j = 0; j < Vector128<float>.Count; j++)
-                        sum += neonTmp[j];
-                }
-
-                for (; i < freqBins; i++)
-                {
-                    sum += frameIn[i] * filterRow[i];
-                }
-
-                frameOut[m] = sum;
-            }
         }
     }
 

@@ -220,8 +220,8 @@ with its first consumer and is removed here once it ships.
   - `.ckpt` loading through the safe-pickle parser.
 - [ ] Generalize `AnimaConfig`/`AnimaTransformer` into a Cosmos MiniTrainDIT with an optional `llm_adapter`, a T5-11B
   path and 14B: Cosmos-Predict2 and Anima-LLLite.
-- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Also fix CUDA
-  `UpsampleBilinear2D`. Consumers: RIFE, FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
+- [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Consumers: RIFE,
+  FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
 - [ ] ViT 2D RoPE, QK-norm and view-grouped alternating attention, consumed by Depth-Anything-3 and DINOv3.
   - DINOv3 ViT-L/16 patch RoPE is in `Vision/Dinov3` (a 448 px encoder with real-weight parity). Still open: QK-norm,
     view-grouped attention and Depth-Anything-3.

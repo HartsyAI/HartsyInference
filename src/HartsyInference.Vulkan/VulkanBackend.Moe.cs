@@ -7,7 +7,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Vulkan;
 
 // Mixture-of-experts routing, dispatch, combine, top-k and softplus. Each follows the Core reference in
-// MoeReference / TopKReference / SoftplusReference; validation is the reference's own so the errors match.
+// MoeReference / SoftplusReference; validation is the reference's own so the errors match.
 public sealed partial class VulkanBackend
 {
     /// <summary>Most workgroups one dispatch may carry in x; guaranteed by the spec, so row-per-workgroup ops chunk by it.</summary>
@@ -185,47 +185,4 @@ public sealed partial class VulkanBackend
         }
     }
 
-    /// <inheritdoc/>
-    public void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false)
-    {
-        TopKReference.Validate(values, indices, input, k, validLengths);
-        using OpScope _op = EnterOp();
-        int n = (int)input.Shape[input.Shape.Rank - 1];
-        long rows = input.ElementCount / n;
-        if (rows == 0)
-        {
-            return;
-        }
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer validBuf = validLengths is null ? inBuf : GetBuffer(validLengths);
-        VulkanBuffer valBuf = _xfer.AllocateDevice((ulong)(rows * k * sizeof(float)));
-        VulkanBuffer idxBuf = _xfer.AllocateDevice((ulong)(rows * k * sizeof(int)));
-        try
-        {
-            VulkanKernel kernel = GetKernel("topk_lastdim", storageBufferCount: 4, _default1DSpec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Span<ulong> bufs = stackalloc ulong[] { valBuf.Handle, idxBuf.Handle, inBuf.Handle, validBuf.Handle };
-            for (long first = 0; first < rows; first += MaxWorkgroupsX)
-            {
-                uint chunk = (uint)Math.Min(rows - first, MaxWorkgroupsX);
-                Authoring.PushConstants pc = new(pcBytes);
-                pc.U32((uint)n);
-                pc.U32((uint)k);
-                pc.Bool(validLengths is not null);
-                pc.Bool(sortByIndex);
-                pc.U32((uint)first);
-                Dispatch(kernel, bufs, pc.Written, chunk);
-            }
-            CacheOutput(values, valBuf);
-            CacheOutput(indices, idxBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan TopKLastDim dispatch failed", ex);
-            valBuf.Dispose();
-            idxBuf.Dispose();
-            throw;
-        }
-    }
 }

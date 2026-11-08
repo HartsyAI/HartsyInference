@@ -139,31 +139,6 @@ public static class Int8AttentionV2Reference
         return dot;
     }
 
-    /// <summary>What query rows <c>[queryRow0, +queryRows)</c> of (<paramref name="batch"/>, <paramref name="head"/>)
-    /// see of key slots <c>[key0, +keys)</c> under the causal and window bounds, the valid key length and the bias's
-    /// exclusions. Rows past Sq are dropped, as in a partial query tile; keys past the valid ones are masked.</summary>
-    /// <exception cref="ArgumentException">A malformed operand or bias, a negative tile bound, or (batch, head) outside
-    /// the call.</exception>
-    /// <exception cref="AttentionUnsupportedException">The call carries something INT8 v2 does not run.</exception>
-    public static AttentionTileClass ClassifyTile(in AttentionCall call, int batch, int head, int queryRow0,
-        int queryRows, int key0, int keys)
-    {
-        Check(in call);
-        if ((uint)batch >= (uint)call.Batch)
-            throw new ArgumentOutOfRangeException(nameof(batch), batch, $"The call has {call.Batch} batches.");
-        if ((uint)head >= (uint)call.Heads)
-            throw new ArgumentOutOfRangeException(nameof(head), head, $"The call has {call.Heads} heads.");
-        if (queryRow0 < 0 || queryRows < 0 || key0 < 0 || keys < 0)
-            throw new ArgumentException(
-                $"Tile bounds are non-negative; got rows {queryRow0}+{queryRows}, keys {key0}+{keys}.");
-        int end = (int)Math.Min((long)key0 + keys, call.ValidKvLength);
-        bool[] excluded = new bool[Math.Max(0, end - key0)];
-        StageBias(in call, batch, head, key0, new float[excluded.Length], excluded);
-        int rowEnd = (int)Math.Min((long)queryRow0 + queryRows, call.QueryTokens);
-        return Classify(call.Mask, call.Positions.QueryOffset, call.ValidKvLength, queryRow0, rowEnd, key0, keys,
-            excluded);
-    }
-
     /// <summary>E4M3 rounded to nearest even and saturated to ±448, as <c>cvt.rn.satfinite</c>; NaN stays NaN.</summary>
     public static float RoundToE4M3(float x)
     {

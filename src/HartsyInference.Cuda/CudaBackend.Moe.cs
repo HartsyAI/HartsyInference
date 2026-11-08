@@ -152,41 +152,6 @@ public sealed partial class CudaBackend
         }
     }
 
-    /// <inheritdoc />
-    public void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("TopKLastDim");
-        TopKReference.Validate(values, indices, input, k, validLengths);
-        if (k > CudaKernels.TopKMaxK)
-            throw new NotSupportedException($"CUDA TopKLastDim supports k up to {CudaKernels.TopKMaxK}; got {k}.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasTopKKernel) throw new NotSupportedException("lm_topk_f32.ptx is not available on this device.");
-        int n = (int)input.Shape[input.Shape.Rank - 1];
-        int rows = (int)(input.ElementCount / n);
-        ulong pX = 0, pLen = 0, pV = 0, pI = 0;
-        bool cachedV = false, cachedI = false;
-        try
-        {
-            pX = GpuTransferHelper.CopyToDevice(input);
-            if (validLengths is not null) pLen = GpuTransferHelper.CopyToDevice(validLengths);
-            nuint vBytes = GpuTransferHelper.ByteSize(values), iBytes = GpuTransferHelper.ByteSize(indices);
-            pV = GpuTransferHelper.AllocateDevice(vBytes);
-            pI = GpuTransferHelper.AllocateDevice(iBytes);
-            _kernels.LaunchTopKLastDim(pV, pI, pX, pLen, rows, n, k, sortByIndex, _stream.Handle);
-            GpuTransferHelper.CacheActivation(values, pV, vBytes); cachedV = true;
-            GpuTransferHelper.CacheActivation(indices, pI, iBytes); cachedI = true;
-        }
-        finally
-        {
-            if (!cachedV) GpuTransferHelper.FreeDevice(pV);
-            if (!cachedI) GpuTransferHelper.FreeDevice(pI);
-            GpuTransferHelper.FreeDevice(pX);
-            if (pLen != 0) GpuTransferHelper.FreeDevice(pLen);
-        }
-    }
-
     private void RequireMoeKernels()
     {
         if (!_kernels!.HasMoeKernels)

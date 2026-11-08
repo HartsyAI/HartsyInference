@@ -13,9 +13,6 @@ internal static class Fp8E8M0RowDecoder
     private static readonly float[] E4M3 = BuildE4M3();
     private static readonly float[] E8M0 = BuildE8M0();
 
-    /// <summary>Value of a scale byte, 2^(b-127); 255 is NaN. Byte 0 is the float32 subnormal 2^-127, which its bit pattern cannot express as a normal.</summary>
-    public static float ScaleOf(byte code) => E8M0[code];
-
     public static void Decode(ReadOnlySpan<byte> fp8, ReadOnlySpan<byte> scales, Span<ushort> dest)
     {
         if (fp8.Length < Columns || scales.Length < Blocks || dest.Length < Columns)

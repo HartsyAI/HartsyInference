@@ -45,13 +45,6 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc />
-    public void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows)
-    {
-        ThrowIfDisposed();
-        LatentQuantReference.QuantizeRows(dest, rows, physicalRows);
-    }
-
-    /// <inheritdoc />
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         ThrowIfDisposed();

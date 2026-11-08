@@ -96,42 +96,6 @@ public static unsafe class Fsq
         }
     }
 
-    /// <summary>Converts grid-quantized codes to indices; inverse of <see cref="Dequantize"/> (skips <see cref="Quantize"/>'s tanh bound).</summary>
-    public static void CodesToIndices(Tensor codes, Tensor zHat, ReadOnlySpan<int> levels)
-    {
-        if (zHat.Shape.Rank != 3) throw new ArgumentException($"zHat must be rank-3 [B, T, D], got {zHat.Shape}.");
-        if (codes.Shape.Rank != 2) throw new ArgumentException($"codes must be rank-2 [B, T], got {codes.Shape}.");
-        int b = (int)zHat.Shape[0];
-        int t = (int)zHat.Shape[1];
-        int d = (int)zHat.Shape[2];
-        if (levels.Length != d) throw new ArgumentException($"levels.Length ({levels.Length}) must match D ({d}).");
-        if ((int)codes.Shape[0] != b || (int)codes.Shape[1] != t)
-            throw new ArgumentException($"codes shape mismatch: expected [{b}, {t}], got {codes.Shape}.");
-        if (codes.DType != DType.I32) throw new ArgumentException($"codes must be Int32, got {codes.DType}.");
-
-        Span<int> halfLevel = stackalloc int[d];
-        Span<int> placeValue = stackalloc int[d];
-        Basis(levels, placeValue);
-        for (int dd = 0; dd < d; dd++) halfLevel[dd] = levels[dd] / 2;
-
-        float* zp = (float*)zHat.DataPointer;
-        int* cp = (int*)codes.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ti = 0; ti < t; ti++)
-            {
-                int code = 0;
-                int rowBase = (bi * t + ti) * d;
-                for (int dd = 0; dd < d; dd++)
-                {
-                    int L = levels[dd], half = halfLevel[dd];
-                    int digit = (int)MathF.Round(zp[rowBase + dd] * half + half, MidpointRounding.ToEven);
-                    if (digit < 0) digit = 0; else if (digit >= L) digit = L - 1;
-                    code += digit * placeValue[dd];
-                }
-                cp[bi * t + ti] = code;
-            }
-    }
-
     /// <summary>Inverse of <see cref="Quantize"/>: codes <c>[B,T]</c> → vectors <c>[B,T,D]</c>, each axis as <c>(k−L/2)/(L/2)</c>.</summary>
     public static void Dequantize(Tensor zHat, Tensor codes, ReadOnlySpan<int> levels)
     {
