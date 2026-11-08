@@ -80,6 +80,17 @@ public static class ModelArchitectureDetector
         (ModelArchitecture.AuraFlow, k =>
             k.HasPrefixAfterOptional("model.", "double_layers.") &&
             k.HasPrefixAfterOptional("model.", "single_layers.")),
+
+        // ── Z-Image (NextDiT) ────────────────────────────────────────────
+        // The refiner stacks alone are shared with Lumina-Image-2.0 (NextDiT) and Zeta-Chroma (which adds a dec_net
+        // head). Z-Image's own markers are its learned padding tokens and its t_embedder MLP, which Lumina replaces
+        // with time_caption_embed.*.
+        (ModelArchitecture.ZImage, k =>
+            k.HasPrefixAfterOptional("model.diffusion_model.", "noise_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "context_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "cap_pad_token") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "t_embedder.mlp.0.weight") &&
+            !k.HasPrefixAfterOptional("model.diffusion_model.", "dec_net.")),
     ];
 
     /// <summary>Detects the architecture from a set of tensor keys.</summary>
