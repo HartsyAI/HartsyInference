@@ -50,6 +50,7 @@ if (selected.Count == 0)
 }
 
 int failures = 0;
+int compared = 0;
 IBackend? host = null;
 try
 {
@@ -154,12 +155,19 @@ try
         if (recordedAcceptance.Kind != c.Acceptance.Kind || recordedAcceptance.MaxAbs != c.Acceptance.MaxAbs || recordedAcceptance.MaxRel != c.Acceptance.MaxRel)
             Console.WriteLine($"  {c.Family}/{c.Name}: acceptance changed since record: recorded {recordedAcceptance.Kind} ({recordedAcceptance.MaxAbs:E1} / {recordedAcceptance.MaxRel:E1}), judged {c.Acceptance.Kind} ({c.Acceptance.MaxAbs:E1} / {c.Acceptance.MaxRel:E1}): {c.Acceptance.Reason}");
         failures += Report(c, run, expected, c.Acceptance, "vs fixture", recorded.MayBeNonFinite);
+        compared++;
         foreach (Tensor e in expected.Values) e.Dispose();
     }
 }
 finally
 {
     host?.Dispose();
+}
+// A check that compared nothing (every selected case skipped as unsupported on this backend) verified nothing, so it cannot pass.
+if (command == "check" && compared == 0)
+{
+    Console.WriteLine($"FAIL: no case was compared on backend {selector}; every selected case was skipped");
+    return 1;
 }
 Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures} output(s) outside acceptance");
 return failures == 0 ? 0 : 1;
