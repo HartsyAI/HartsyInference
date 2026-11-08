@@ -1904,6 +1904,19 @@ public static class ModelCatalog
                         Sha256 = "ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1" },
                 },
             },
+            // DINOv3 ViT-L/16 is under the DINOv3 License (Meta, custom; not MIT or Apache-2.0) and gated on the hub.
+            // The 448 px conditioning configuration loads through Dinov2Preset.FromDinov3Weights; no CLI or VisionService path yet.
+            new CatalogEntry
+            {
+                Id = "dinov3-vitl16", Modality = vis, DisplayName = "DINOv3 ViT-L/16 (pretrain)",
+                Architecture = "ViT-L/16 with RoPE, 4 storage tokens, LayerScale, GELU MLP", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Dinov3", Role = "transformer",
+                        Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+                },
+            },
             // YOLO8/11: raw Ultralytics .pt is a full pickled nn.Module object graph (not a flat state_dict) —
             // the engine's safe-subset pickle VM can't resolve it, and no pre-folded ungated safetensors mirror
             // was found on HF. CliDrivable stays false until either a pickle-VM extension or a found mirror
