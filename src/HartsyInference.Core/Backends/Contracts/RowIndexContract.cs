@@ -43,6 +43,8 @@ public static class RowIndexContract
             throw new ArgumentException($"ScatterAddRows weights must be F32 with one entry per scattered row ({rows}); got {weights.DType} {weights.Shape}.", nameof(weights));
         if (output.HasOverlappingHostStorageWithoutSync(input))
             throw new ArgumentException("ScatterAddRows output storage must not overlap the input.", nameof(output));
+        if (weights is not null && output.HasOverlappingHostStorageWithoutSync(weights))
+            throw new ArgumentException("ScatterAddRows output storage must not overlap the weights: the scatter rewrites values the later rows still read.", nameof(output));
         long outputRows = output.ElementCount / width;
         CheckRange("ScatterAddRows", indices, outputRows, unique: true);
         return new RowIndexGeometry(rows, width, outputRows);
