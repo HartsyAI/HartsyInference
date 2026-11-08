@@ -77,10 +77,8 @@ DTYPE_KERNELS=(
     groupnorm
     groupnorm_silu
     layernorm
-    layernorm_noaffine
     qkv_split_norm
     qkv_split_norm_head_major
-    layernorm_modulate
     prelu
     rmsnorm
     softmax
@@ -97,11 +95,11 @@ DTYPE_KERNELS=(
     slice_last_dim
     kv_cache_append
     sdpa_flash
-    affine_broadcast_last_dim
     gated_residual_last_dim
     situ_glu
     accumulate_strided
     rotary
+    norm_modulate_flat
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -112,11 +110,10 @@ SINGLE_KERNELS=(
     affine_mix
     quant_int8_rowwise
     dequant_recipe_bf16
-    modulation_split4
-    affine_broadcast_row_indexed
     gated_residual_row_indexed
     cfg_euler
-    wan_rms_norm_channel
+    norm_modulate_channel
+    chunk_activate
     cast_f32_f16
     cast_f32_f16_sat
     cast_f16_f32
@@ -206,12 +203,12 @@ for moe_kernel in moe_expert_gate_up moe_expert_down; do
     compile_one "$moe_kernel" -DQTYPE=5 -- "_q5_k"
 done
 
-# rms_norm_modulate: input and output dtypes are independent (an F32 residual stream feeding an F16 branch), so the
+# norm_modulate_rows: input and output dtypes are independent (an F32 residual stream feeding an F16 branch), so the
 # variants are named <in>[_<out>]: _f32, _f16, and _f32_f16 / _f16_f32 for the mixed pairs.
-compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
-compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
-compile_one "rms_norm_modulate" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
-compile_one "rms_norm_modulate" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
+compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
+compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
+compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
+compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
 
 # kv_cache_append with F32 rows into an F16 cache (FixedKvCache appends projection rows as they come out); SRC_F32 changes
 # the source binding's type, so it is its own module.
@@ -238,11 +235,6 @@ compile_one "sdpa_flash" -DUSE_FP16=1 -DHAS_MASK=1 -- "_mask_f16"
 # BF16 variants read a narrow table as 32-bit words; the output is F32 in every variant.
 compile_one "embed_gather_decode" -DTABLE_DTYPE=1 -- "_f16"
 compile_one "embed_gather_decode" -DTABLE_DTYPE=2 -- "_bf16"
-
-# affine_broadcast_last_dim: HAS_SHIFT=0 is Ideogram 4's scale-only adaLN (shift is null) — a distinct
-# #if-compiled binding layout (like USE_BETA/HAS_MASK above), needing its own SPIR-V module.
-compile_one "affine_broadcast_last_dim" -DUSE_FP16=0 -DHAS_SHIFT=0 -- "_noshift_f32"
-compile_one "affine_broadcast_last_dim" -DUSE_FP16=1 -DHAS_SHIFT=0 -- "_noshift_f16"
 
 # sdpa_flash device-position variant (FlashAttentionDev): HAS_DEVICE_POS reads skv/qOffset from a device
 # buffer instead of push constants. Mutually exclusive with HAS_MASK (FlashAttentionDev has no mask param).

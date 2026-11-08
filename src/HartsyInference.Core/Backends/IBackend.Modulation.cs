@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -6,40 +8,13 @@ namespace HartsyInference.Core.Backends;
 // DiT modulation and gating primitives (affine broadcast, gated residual, modulated norms, chunked activations) with host reference defaults.
 public partial interface IBackend
 {
-    // These keep the per-block modulation math GPU-resident in diffusion transformers
-    // (Ideogram 4, etc.). Default implementations are scalar-F32 CPU loops that also serve
-    // as the numerical reference; CudaBackend overrides them with PTX kernels.
+    // The per-block modulation math of the diffusion transformers. The norm-and-modulate forms route through
+    // NormModulate; the rest default to scalar F32 host loops that double as the numerical reference.
 
-    /// <summary>Broadcast affine over the last dim: <c>out = in*scale + (shift ?? 0)</c>; null shift = Ideogram 4's scale-only adaLN.</summary>
-    unsafe void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
-        => AffineBroadcastLastDimReference(output, input, scale, shift);
-
-    /// <summary>The managed <see cref="AffineBroadcastLastDim"/> body, callable directly. A backend override must call
-    /// THIS to fall back — <c>((IBackend)this).AffineBroadcastLastDim(...)</c> re-enters the override through
-    /// interface dispatch and recurses until the stack overflows.</summary>
-    static unsafe void AffineBroadcastLastDimReference(Tensor output, Tensor input, Tensor scale, Tensor? shift)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
-            throw new NotSupportedException("AffineBroadcastLastDim default fallback only supports F32.");
-        int rank = input.Shape.Rank;
-        int dim = (int)input.Shape[rank - 1];
-        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
-        long total = input.ElementCount;
-        float* pIn = (float*)input.DataPointer;
-        float* pOut = (float*)output.DataPointer;
-        float* pScale = (float*)scale.DataPointer;
-        float* pShift = shift is null ? null : (float*)shift.DataPointer;
-        for (long i = 0; i < total; i++)
-        {
-            int d = (int)(i % dim);
-            long row = i / dim;
-            int b = (int)(row / seqLen);
-            long pIdx = (long)b * dim + d;
-            float v = pIn[i] * pScale[pIdx];
-            if (pShift != null) v += pShift[pIdx];
-            pOut[i] = v;
-        }
-    }
+    /// <summary>Broadcast affine over the last dim: <c>out = in · scale + (shift ?? 0)</c> with <c>scale</c> and <c>shift</c> <c>[B, D]</c>
+    /// (or <c>[D]</c>) over <c>[B, S, D]</c>; <see cref="NormModulate"/> with no norm and a raw per-batch modulation.</summary>
+    void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
+        => NormModulate(NormModulateCall.Rows(output, input, NormKind.None, 0f).WithModulation(ModulationSpec.Broadcast(input, scale, shift, ScaleMode.Raw)));
 
     /// <summary>Gated residual over the last dim: <c>out = residual + gate*value</c>, gate <c>[B,D]</c> broadcast over the seq axis.</summary>
     unsafe void GatedResidualLastDim(Tensor output, Tensor residual, Tensor value, Tensor gate)
@@ -67,41 +42,6 @@ public partial interface IBackend
             int b = (int)(row / seqLen);
             long pIdx = (long)b * dim + d;
             pOut[i] = pRes[i] + pGate[pIdx] * pVal[i];
-        }
-    }
-
-    /// <summary>Per-token adaLN with the modulation gather fused in: <c>out[r,d] = in[r,d]*(1 + scaleTable[rowIndex[r],d]) + shiftTable[rowIndex[r],d]</c>.</summary>
-    /// <param name="scaleTable">Small <c>[modRows, D]</c> modulation table — the <c>1 +</c> is applied here, so pass the RAW scale (no AddScalar).</param>
-    /// <param name="shiftTable">Small <c>[modRows, D]</c> table, or null for scale-only.</param>
-    /// <param name="rowIndex">I32 <c>[rows]</c> — one table row per token; replaces materializing the gathered <c>[rows, D]</c> scale/shift.</param>
-    unsafe void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
-        => AffineBroadcastRowIndexedReference(output, input, scaleTable, shiftTable, rowIndex);
-
-    /// <summary>The managed <see cref="AffineBroadcastRowIndexed"/> body, callable directly. A backend override must
-    /// call THIS to fall back — <c>((IBackend)this).AffineBroadcastRowIndexed(...)</c> re-enters the override through
-    /// interface dispatch and recurses until the stack overflows.</summary>
-    static unsafe void AffineBroadcastRowIndexedReference(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || scaleTable.DType != DType.F32 || (shiftTable is not null && shiftTable.DType != DType.F32))
-            throw new NotSupportedException($"AffineBroadcastRowIndexed default fallback only supports F32 — got output={output.DType}, input={input.DType}, scaleTable={scaleTable.DType}, shiftTable={shiftTable?.DType.Name ?? "null"}.");
-        if (rowIndex.DType != DType.I32)
-            throw new NotSupportedException($"AffineBroadcastRowIndexed requires I32 rowIndex, got {rowIndex.DType}.");
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        long total = input.ElementCount;
-        if (rowIndex.ElementCount < total / dim)
-            throw new ArgumentException($"AffineBroadcastRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
-        float* pIn = (float*)input.DataPointer;
-        float* pOut = (float*)output.DataPointer;
-        float* pScale = (float*)scaleTable.DataPointer;
-        float* pShift = shiftTable is null ? null : (float*)shiftTable.DataPointer;
-        int* pIdx = (int*)rowIndex.DataPointer;
-        for (long i = 0; i < total; i++)
-        {
-            int d = (int)(i % dim);
-            long tIdx = (long)pIdx[i / dim] * dim + d;
-            float v = pIn[i] * (1f + pScale[tIdx]);
-            if (pShift != null) v += pShift[tIdx];
-            pOut[i] = v;
         }
     }
 
@@ -133,35 +73,6 @@ public partial interface IBackend
             int d = (int)(i % dim);
             long tIdx = (long)pIdx[i / dim] * dim + d;
             pOut[i] = pRes[i] + pGate[tIdx] * pVal[i];
-        }
-    }
-
-    /// <summary>Fused adaLN modulation for DiT NormModulate: <c>out = (1+scale)·LayerNormNoAffine(in) + shift</c>.</summary>
-    unsafe void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
-        => LayerNormModulateReference(output, input, scale, shift, eps);
-
-    /// <summary>The managed <see cref="LayerNormModulate"/> body, callable directly. A backend override must call
-    /// THIS to fall back — <c>((IBackend)this).LayerNormModulate(...)</c> re-enters the override through interface
-    /// dispatch and recurses until the stack overflows.</summary>
-    static unsafe void LayerNormModulateReference(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || shift.DType != DType.F32)
-            throw new NotSupportedException("LayerNormModulate default fallback only supports F32.");
-        int rank = input.Shape.Rank;
-        int dim = (int)input.Shape[rank - 1];
-        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
-        long rows = input.ElementCount / dim;
-        float* pIn = (float*)input.DataPointer, pOut = (float*)output.DataPointer;
-        float* pSc = (float*)scale.DataPointer, pSh = (float*)shift.DataPointer;
-        for (long row = 0; row < rows; row++)
-        {
-            float* inRow = pIn + row * dim; float* outRow = pOut + row * dim;
-            long b = (row / seqLen);
-            float* sc = pSc + b * dim; float* sh = pSh + b * dim;
-            double mean = 0; for (int i = 0; i < dim; i++) mean += inRow[i]; mean /= dim;
-            double variance = 0; for (int i = 0; i < dim; i++) { double d = inRow[i] - mean; variance += d * d; } variance /= dim;
-            float invStd = (float)(1.0 / Math.Sqrt(variance + eps));
-            for (int i = 0; i < dim; i++) outRow[i] = ((float)(inRow[i] - mean)) * invStd * (1f + sc[i]) + sh[i];
         }
     }
 
@@ -292,59 +203,12 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>Fused Oasis adaLN: <c>out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d]</c> (f=r/sp), scale/shift from <c>mod[f]</c>.</summary>
-    unsafe void OasisAdaLn(Tensor output, Tensor input, Tensor mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || mod.DType != DType.F32) throw new NotSupportedException("OasisAdaLn default fallback only supports F32.");
-        float* xp = (float*)input.DataPointer, op = (float*)output.DataPointer, mp = (float*)mod.DataPointer;
-        for (int r = 0; r < totalRows; r++)
-        {
-            long off = (long)r * dim;
-            int f = r / sp;
-            float* scale = mp + (long)f * modStride + scaleOff;
-            float* shift = mp + (long)f * modStride + shiftOff;
-            double mean = 0;
-            for (int d = 0; d < dim; d++) mean += xp[off + d];
-            mean /= dim;
-            double variance = 0;
-            for (int d = 0; d < dim; d++) { double dd = xp[off + d] - mean; variance += dd * dd; }
-            float inv = 1f / MathF.Sqrt((float)(variance / dim) + eps);
-            for (int d = 0; d < dim; d++)
-                op[off + d] = (float)((xp[off + d] - mean) * inv) * (1f + scale[d]) + shift[d];
-        }
-    }
-
-    /// <summary>AdaLN modulation split: chunks <c>proj [B,4D]</c> into 4 <c>[B,D]</c>, <c>1+x</c> for scales, <c>tanh(x)</c> for gates.</summary>
-    unsafe void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
-        => ModulationSplit4Reference(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
-
-    /// <summary>The managed <see cref="ModulationSplit4"/> body, callable directly. A backend override must
-    /// call THIS to fall back — <c>((IBackend)this).ModulationSplit4(...)</c> re-enters the override through
-    /// interface dispatch and recurses until the stack overflows.</summary>
-    static unsafe void ModulationSplit4Reference(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
-    {
-        if (proj.DType != DType.F32)
-            throw new NotSupportedException("ModulationSplit4 default fallback only supports F32.");
-        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
-        int batch = (int)(scaleMsa.ElementCount / dim);
-        float* pProj = (float*)proj.DataPointer;
-        float* sMsa = (float*)scaleMsa.DataPointer;
-        float* gMsa = (float*)gateMsa.DataPointer;
-        float* sMlp = (float*)scaleMlp.DataPointer;
-        float* gMlp = (float*)gateMlp.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            long src = (long)b * 4 * dim;
-            long dst = (long)b * dim;
-            for (int d = 0; d < dim; d++)
-            {
-                sMsa[dst + d] = 1.0f + pProj[src + d];
-                gMsa[dst + d] = MathF.Tanh(pProj[src + dim + d]);
-                sMlp[dst + d] = 1.0f + pProj[src + 2 * dim + d];
-                gMlp[dst + d] = MathF.Tanh(pProj[src + 3 * dim + d]);
-            }
-        }
-    }
+    /// <summary>Cuts the last axis of <paramref name="input"/> <c>[rows, count · width]</c> into <paramref name="outputs"/>, each
+    /// <c>[rows, width]</c>, passing chunk <c>c</c> through <paramref name="activations"/><c>[c]</c>: an adaLN modulation projection
+    /// split into its scales (<c>1 + x</c>) and gates (<c>tanh</c>, <c>sigmoid</c>) in one pass. F32; at most
+    /// <see cref="ChunkActivateReference.MaxChunks"/> chunks.</summary>
+    void ChunkActivate(ReadOnlySpan<Tensor> outputs, Tensor input, ReadOnlySpan<ChunkActivation> activations)
+        => ChunkActivateReference.Apply(outputs, input, activations);
 
     /// <summary>Elementwise affine mix: <c>output = xScale·x + yScale·y</c>. Inputs may alias each other, but neither input storage may overlap <paramref name="output"/>. All tensors are F32, nonempty, and identically shaped.</summary>
     unsafe void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
@@ -422,23 +286,6 @@ public partial interface IBackend
             targetPointer[elementIndex] =
                 targetPointer[elementIndex] * maskValue + replacement * (1f - maskValue);
         }
-    }
-
-    /// <summary>LTX-2 block norm+modulate in one pass: <c>out[r,d] = rms(in[r,:])[d] * (1+scale[d]) + shift[d]</c>,
-    /// where the RMS carries no affine weight. Replaces RmsNorm-then-AddScalar-then-AffineBroadcastLastDim, which
-    /// walked the activation twice. Default: composes exactly those ops.</summary>
-    unsafe void Ltx2RmsModulate(Tensor output, Tensor input, Tensor onesWeight, Tensor scale, Tensor? shift, float eps)
-    {
-        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
-        Tensor normed = new Tensor(input.Shape, input.DType);
-        Tensor scale1 = new Tensor(new TensorShape(dim), scale.DType);
-        try
-        {
-            RmsNorm(normed, input, onesWeight, eps);
-            AddScalar(scale1, scale, 1f);
-            AffineBroadcastLastDim(output, normed, scale1, shift);
-        }
-        finally { normed.Dispose(); scale1.Dispose(); }
     }
 
     /// <summary>Row-indexed affine broadcast writing e4m3 straight into <paramref name="outputFp8"/>, scaled for

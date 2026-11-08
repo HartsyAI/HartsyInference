@@ -18,7 +18,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _softmaxModule;
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanVaeConv3dModule;
-    private readonly CudaModule _wanVaeNormModule;
     private readonly CudaModule _gegluModule;
     private readonly CudaModule _broadcastAddModule;
 
@@ -246,8 +245,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _permute0213F16;
     private readonly nint _wanVaeBuildPadded;
     private readonly nint _wanVaeBuildPaddedBf16;
-    private readonly nint _wanVaeRmsNormChannel;
-    private readonly nint _wanVaeRmsNormChannelBf16;
 
     // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
@@ -269,9 +266,7 @@ public sealed partial class CudaKernels : IDisposable
 
     // ── DiT glue function handles (F32) ──────────────────────────────────
     private readonly nint _ditRmsNormF32;
-    private readonly nint _ditAffineBroadcastF32;
     private readonly nint _ditGatedResidualF32;
-    private readonly nint _ditModulation4F32;
     private readonly nint _ditCfgEulerF32;
     private readonly nint _ditCfgRenormReduceF32;
     private readonly nint _ditCfgRenormFinalizeF32;
@@ -293,24 +288,19 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ltx2QkNormRopeHeadMajorF32;
     private readonly nint _ltx2QkNormRopeTokenMajorF32;
     private readonly nint _ltx2HeadGateF32;
-    private readonly nint _ltx2RmsModulateF16;
-    private readonly nint _ltx2RmsModulateF32;
     private readonly nint _ditSliceLastDimF32;
     private readonly nint _ditRowScaleF32;
     private readonly nint _ditAddScalarF32;
-    private readonly nint _ditLayerNormNoAffineF32;
     private readonly nint _ditMoeTopkGateF32;
     private readonly nint _ditRowGatedAccumF32;
     private readonly nint _ditIndexAddF32;
     private readonly nint _ditSliceRowsF32;
-    private readonly nint _oasisAdaLnF32;
     private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
     private readonly nint _gegluErfF32;
     private readonly nint _geluErfF32;
     private readonly nint _convTranspose2dF32;
     private readonly nint _ditConcat2F32;
-    private readonly nint _ditLayerNormModulateF32;
     private readonly nint _ditQkvSplitNormF32;
     private readonly nint _ditQkvSplitNormHeadMajorF32;
     private readonly nint _ditQkvSplitNormHeadMajorSubsetF32;
@@ -320,26 +310,21 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _sparseGatherFromGridF32;
     private readonly nint _rowGatherF32;
     private readonly nint _rowScatterAddF32;
-    private readonly nint _ditAffineBroadcastRowIndexedF32;
     private readonly nint _ditGatedResidualRowIndexedF32;
 
     // ── DiT glue function handles (F16 — DiT F16 activation path) ──────
     private readonly CudaModule _ditF16Module;
     private readonly nint _ditRmsNormF16;
-    private readonly nint _ditLayerNormNoAffineF16;
-    private readonly nint _ditAffineBroadcastF16;
     private readonly nint _ditGatedResidualF16;
     private readonly nint _ditAddScalarF16;
     private readonly nint _ditSigmoidF16;
     private readonly nint _ditSliceLastDimF16;
     private readonly nint _ditConcat2F16;
-    private readonly nint _ditLayerNormModulateF16;
     private readonly nint _ditQkvSplitNormF16;
     private readonly nint _ditQkvSplitNormHeadMajorF16;
     private readonly nint _ditQkvSplitNormHeadMajorSubsetF16;
     private readonly nint _ditSliceRowsF16;
     private readonly nint _ditChwToHwcU8;
-    private readonly nint _ditAffineBroadcastRowIndexedF16;
     private readonly nint _ditGatedResidualRowIndexedF16;
     private readonly nint _ditGluActF16;
 
@@ -348,9 +333,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ditRmsNormBf16;
     private readonly nint _ditGluActBf16;
     private readonly nint _ditGeGluBf16;
-    private readonly nint _ditAffineBroadcastRowIndexedBf16;
     private readonly nint _ditGatedResidualRowIndexedBf16;
-    private readonly nint _ditAffineBroadcastBf16;
     private readonly nint _ditGatedResidualBf16;
 
     // ── FP8 Cast Modules + Handles ────────────────────────────────────────
@@ -715,10 +698,6 @@ public sealed partial class CudaKernels : IDisposable
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeBuildPaddedBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded_bf16");
 
-        _wanVaeNormModule = LoadOwnedModule(Ptx("wan_vae_norm"));
-        _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
-        _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
-
         _gegluModule = LoadOwnedModule(Ptx("geglu_f32"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
 
@@ -950,9 +929,7 @@ public sealed partial class CudaKernels : IDisposable
         // ── DiT glue (F32) ───────────────────────────────────────────────
         _ditF32Module = LoadOwnedModule(Ptx("dit_f32"));
         _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
-        _ditAffineBroadcastF32 = _ditF32Module.GetFunction("dit_affine_broadcast_lastdim_f32");
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
-        _ditModulation4F32 = _ditF32Module.GetFunction("dit_modulation4_f32");
         _ditCfgEulerF32 = _ditF32Module.GetFunction("dit_cfg_euler_f32");
         _ditCfgRenormReduceF32 = _ditF32Module.GetFunction("dit_cfg_renorm_reduce_f32");
         _ditCfgRenormFinalizeF32 = _ditF32Module.GetFunction("dit_cfg_renorm_finalize_f32");
@@ -976,23 +953,19 @@ public sealed partial class CudaKernels : IDisposable
         _ltx2QkNormRopeHeadMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_headmajor_f32");
         _ltx2QkNormRopeTokenMajorF32 = _ditF32Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_f32");
         _ltx2HeadGateF32 = _ditF32Module.GetFunction("ltx2_head_gate_f32");
-        _ltx2RmsModulateF32 = _ditF32Module.GetFunction("ltx2_rms_modulate_f32");
         _ditSliceLastDimF32 = _ditF32Module.GetFunction("dit_slice_lastdim_f32");
         _ditRowScaleF32 = _ditF32Module.GetFunction("dit_row_scale_f32");
         _ditAddScalarF32 = _ditF32Module.GetFunction("dit_add_scalar_f32");
-        _ditLayerNormNoAffineF32 = _ditF32Module.GetFunction("dit_layernorm_noaffine_f32");
         _ditMoeTopkGateF32 = _ditF32Module.GetFunction("dit_moe_topk_gate_f32");
         _ditRowGatedAccumF32 = _ditF32Module.GetFunction("dit_row_gated_accum_f32");
         _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
-        _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
         _gegluErfF32 = _ditF32Module.GetFunction("geglu_erf_f32");
         _geluErfF32 = _ditF32Module.GetFunction("gelu_erf_f32");
         _convTranspose2dF32 = _ditF32Module.GetFunction("conv_transpose2d_f32");
         _ditConcat2F32 = _ditF32Module.GetFunction("dit_concat2_f32");
-        _ditLayerNormModulateF32 = _ditF32Module.GetFunction("dit_layernorm_modulate_f32");
         _ditQkvSplitNormF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_f32");
         _ditQkvSplitNormHeadMajorF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_f32");
         _ditQkvSplitNormHeadMajorSubsetF32 = _ditF32Module.GetFunction("dit_qkv_split_norm_head_major_subset_f32");
@@ -1002,14 +975,11 @@ public sealed partial class CudaKernels : IDisposable
         _sparseGatherFromGridF32 = _ditF32Module.GetFunction("sparse_gather_from_grid_f32");
         _rowGatherF32 = _ditF32Module.GetFunction("row_gather_f32");
         _rowScatterAddF32 = _ditF32Module.GetFunction("row_scatter_add_f32");
-        _ditAffineBroadcastRowIndexedF32 = _ditF32Module.GetFunction("dit_affine_broadcast_rowindexed_f32");
         _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
         _ditF16Module = LoadOwnedModule(Ptx("dit_f16"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
-        _ditLayerNormNoAffineF16 = _ditF16Module.GetFunction("dit_layernorm_noaffine_f16");
-        _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
         _ditGatedResidualF16 = _ditF16Module.GetFunction("dit_gated_residual_lastdim_f16");
         _ditAddScalarF16 = _ditF16Module.GetFunction("dit_add_scalar_f16");
         _ditSigmoidF16 = _ditF16Module.GetFunction("dit_sigmoid_f16");
@@ -1018,16 +988,13 @@ public sealed partial class CudaKernels : IDisposable
         _ltx2QkNormRopeHeadMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_headmajor_rf16_f16");
         _ltx2QkNormRopeTokenMajorRopeF16 = _ditF16Module.GetFunction("ltx2_qk_norm_rope_tokenmajor_rf16_f16");
         _ltx2HeadGateF16 = _ditF16Module.GetFunction("ltx2_head_gate_f16");
-        _ltx2RmsModulateF16 = _ditF16Module.GetFunction("ltx2_rms_modulate_f16");
         _ditSliceLastDimF16 = _ditF16Module.GetFunction("dit_slice_lastdim_f16");
         _ditConcat2F16 = _ditF16Module.GetFunction("dit_concat2_f16");
-        _ditLayerNormModulateF16 = _ditF16Module.GetFunction("dit_layernorm_modulate_f16");
         _ditQkvSplitNormF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_f16");
         _ditQkvSplitNormHeadMajorF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_f16");
         _ditQkvSplitNormHeadMajorSubsetF16 = _ditF16Module.GetFunction("dit_qkv_split_norm_head_major_subset_f16");
         _ditSliceRowsF16 = _ditF16Module.GetFunction("dit_slice_rows_f16");
         _ditChwToHwcU8 = _ditF16Module.GetFunction("dit_chw_f32_to_hwc_u8");
-        _ditAffineBroadcastRowIndexedF16 = _ditF16Module.GetFunction("dit_affine_broadcast_rowindexed_f16");
         _ditGatedResidualRowIndexedF16 = _ditF16Module.GetFunction("dit_gated_residual_rowindexed_f16");
         _ditGluActF16 = _ditF16Module.GetFunction("dit_glu_act_f16");
 
@@ -1036,9 +1003,7 @@ public sealed partial class CudaKernels : IDisposable
         _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
         _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
         _ditGeGluBf16 = _ditBf16Module.GetFunction("dit_geglu_bf16");
-        _ditAffineBroadcastRowIndexedBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_rowindexed_bf16");
         _ditGatedResidualRowIndexedBf16 = _ditBf16Module.GetFunction("dit_gated_residual_rowindexed_bf16");
-        _ditAffineBroadcastBf16 = _ditBf16Module.GetFunction("dit_affine_broadcast_lastdim_bf16");
         _ditGatedResidualBf16 = _ditBf16Module.GetFunction("dit_gated_residual_lastdim_bf16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
@@ -1220,6 +1185,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadAttentionKernels();
         LoadLayoutKernels();
         LoadRotaryKernels();
+        LoadNormModulateKernels();
         LoadInt8AttentionV2Kernels();
         if (_skippedModules.Count > 0)
             ReportSkippedModules();
@@ -1512,50 +1478,6 @@ public sealed partial class CudaKernels : IDisposable
             sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchAffineBroadcastImpl(nint func, ulong output, ulong input, ulong scale, ulong shift,
-        int seqLen, int dim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input, scaleArg = scale, shiftArg = shift;
-        uint seqArg = (uint)seqLen, dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[7];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &scaleArg;
-        args[3] = &shiftArg;
-        args[4] = &seqArg;
-        args[5] = &dimArg;
-        args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchAffineBroadcastRowIndexedImpl(nint func, ulong output, ulong input, ulong scaleTable,
-        ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-    {
-        ulong outArg = output, inArg = input, scaleArg = scaleTable, shiftArg = shiftTable, idxArg = rowIndex;
-        uint dimArg = (uint)dim;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[7];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &scaleArg;
-        args[3] = &shiftArg;
-        args[4] = &idxArg;
-        args[5] = &dimArg;
-        args[6] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Whether the fused modulate-to-fp8 producer kernel is loaded.</summary>
     public bool HasAffineBroadcastRowIndexedToFp8 => _ditAffineBroadcastRowIndexedToFp8F32 != 0;
 
@@ -1628,28 +1550,6 @@ public sealed partial class CudaKernels : IDisposable
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    private unsafe void LaunchModulation4Impl(nint func, ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp,
-        ulong proj, int dim, int batch, nint stream)
-    {
-        ulong sMsaArg = scaleMsa, gMsaArg = gateMsa, sMlpArg = scaleMlp, gMlpArg = gateMlp, projArg = proj;
-        uint dimArg = (uint)dim, batchArg = (uint)batch;
-
-        void** args = stackalloc void*[7];
-        args[0] = &sMsaArg;
-        args[1] = &gMsaArg;
-        args[2] = &sMlpArg;
-        args[3] = &gMlpArg;
-        args[4] = &projArg;
-        args[5] = &dimArg;
-        args[6] = &batchArg;
-
-        uint total = (uint)(batch * dim);
-        uint gridDim = (total + BlockSize - 1) / BlockSize;
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
     private unsafe void LaunchCfgEulerImpl(nint func, ulong z, ulong pos, ulong neg,
         float guidance, float delta, int count, nint stream)
     {
@@ -1689,27 +1589,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             func, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchLayerNormNoAffineImpl(nint func, ulong output, ulong input,
-        int dim, int totalRows, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint dimArg = (uint)dim, rowsArg = (uint)totalRows;
-        float epsArg = eps;
-
-        void** args = stackalloc void*[5];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &dimArg;
-        args[3] = &rowsArg;
-        args[4] = &epsArg;
-
-        uint gridDim = (uint)totalRows;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(
-            func, gridDim, 1, 1, BlockSize, 1, 1,
-            sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     private unsafe void LaunchIndexAddImpl(nint func, ulong h, ulong table, ulong indices,
@@ -2719,30 +2598,6 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchRmsNormBf16(ulong output, ulong input, ulong weight, int normDim, int totalRows, float eps, nint stream)
         => LaunchRmsNormImpl(_ditRmsNormBf16, output, input, weight, normDim, totalRows, eps, stream);
 
-    /// <summary>Launches broadcast affine over the last dim: out = in*scale + shift (shift optional, pass 0 to skip).</summary>
-    public void LaunchAffineBroadcastLastDim(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF32, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Broadcast affine over the last dim, F16 activation I/O (scale/shift stay F32).</summary>
-    public void LaunchAffineBroadcastLastDimF16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastF16, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Broadcast affine over the last dim, BF16 activation I/O (scale/shift stay F32).</summary>
-    public void LaunchAffineBroadcastLastDimBf16(ulong output, ulong input, ulong scale, ulong shift, int seqLen, int dim, long total, nint stream)
-        => LaunchAffineBroadcastImpl(_ditAffineBroadcastBf16, output, input, scale, shift, seqLen, dim, total, stream);
-
-    /// <summary>Row-indexed affine with the table gather and the <c>1 +</c> folded in (shift optional, pass 0 to skip).</summary>
-    public void LaunchAffineBroadcastRowIndexed(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF32, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
-    /// <summary>Row-indexed affine, F16 activation I/O (the modulation table stays F32).</summary>
-    public void LaunchAffineBroadcastRowIndexedF16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedF16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
-    /// <summary>Row-indexed affine, BF16 activation I/O (the modulation table stays F32).</summary>
-    public void LaunchAffineBroadcastRowIndexedBf16(ulong output, ulong input, ulong scaleTable, ulong shiftTable, ulong rowIndex, int dim, long total, nint stream)
-        => LaunchAffineBroadcastRowIndexedImpl(_ditAffineBroadcastRowIndexedBf16, output, input, scaleTable, shiftTable, rowIndex, dim, total, stream);
-
     private static void ValidateFlashAttentionHeadDim(int headDim)
     {
         if (headDim <= 0 || headDim > 1024)
@@ -3313,10 +3168,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(_ditSigmoidF16, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches AdaLN modulation split: proj[B,4D] → (1+scale_msa, tanh(gate_msa), 1+scale_mlp, tanh(gate_mlp)), each [B,D].</summary>
-    public void LaunchModulation4(ulong scaleMsa, ulong gateMsa, ulong scaleMlp, ulong gateMlp, ulong proj, int dim, int batch, nint stream)
-        => LaunchModulation4Impl(_ditModulation4F32, scaleMsa, gateMsa, scaleMlp, gateMlp, proj, dim, batch, stream);
-
     /// <summary>Launches CFG combine + Euler step in-place on z: z[i] += delta*(guidance*pos[i] + (1-guidance)*neg[i]).</summary>
     public void LaunchCfgEuler(ulong z, ulong pos, ulong neg, float guidance, float delta, int count, nint stream)
         => LaunchCfgEulerImpl(_ditCfgEulerF32, z, pos, neg, guidance, delta, count, stream);
@@ -3582,21 +3433,6 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchPixelQuantize(ulong output, ulong input, int count, nint stream)
         => LaunchScaleImpl(_ditPixelQuantizeF32, output, input, 0f, count, stream);
 
-    /// <summary>Fused Oasis adaLN: LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame (5 kernels → 1).</summary>
-    public unsafe void LaunchOasisAdaLn(
-        ulong output, ulong input, ulong mod, int dim, int sp, int totalRows, int modStride,
-        int shiftOff, int scaleOff, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input, modArg = mod;
-        uint dimArg = (uint)dim, spArg = (uint)sp, rowsArg = (uint)totalRows, msArg = (uint)modStride, shArg = (uint)shiftOff, scArg = (uint)scaleOff;
-        float epsArg = eps;
-        void** args = stackalloc void*[10];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &modArg; args[3] = &dimArg; args[4] = &spArg;
-        args[5] = &rowsArg; args[6] = &msArg; args[7] = &shArg; args[8] = &scArg; args[9] = &epsArg;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(_oasisAdaLnF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>TripoSR triplane grid-sample: writes <paramref name="count"/>×[3·C] features to <paramref name="outF"/>. <paramref name="coords"/> may be 0 when <paramref name="gridRes"/>&gt;0 (coords generated in-kernel).</summary>
     public unsafe void LaunchTriplaneGridSample(ulong outF, ulong planes, ulong coords, ulong chunkStart,
         int count, int channels, int planeH, int planeW, float radius, int gridRes, nint stream)
@@ -3660,20 +3496,6 @@ public sealed partial class CudaKernels : IDisposable
         long threads = (long)outer * (aDim + bDim) * inner;
         uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(f16 ? _ditConcat2F16 : _ditConcat2F32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Fused adaLN modulation: out = (1+scale)·LayerNormNoAffine(in) + shift (one block per row).</summary>
-    public unsafe void LaunchLayerNormModulate(bool f16, ulong output, ulong input, ulong scale, ulong shift,
-        int dim, int seqLen, int totalRows, float eps, nint stream)
-    {
-        ulong outArg = output, inArg = input, scArg = scale, shArg = shift;
-        uint dimArg = (uint)dim, seqArg = (uint)seqLen, rowsArg = (uint)totalRows; float epsArg = eps;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg; args[1] = &inArg; args[2] = &scArg; args[3] = &shArg;
-        args[4] = &dimArg; args[5] = &seqArg; args[6] = &rowsArg; args[7] = &epsArg;
-        uint sharedMem = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ditLayerNormModulateF16 : _ditLayerNormModulateF32,
-            (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
     }
 
     private static uint QkvNormBlockSize(int headDim)
@@ -3781,14 +3603,6 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Add scalar (out = in + c) with F16 I/O (scalar stays F32).</summary>
     public void LaunchAddScalarF16(ulong output, ulong input, float c, int count, nint stream)
         => LaunchScaleImpl(_ditAddScalarF16, output, input, c, count, stream);
-
-    /// <summary>Launches non-affine LayerNorm: per-row zero-mean unit-variance, no scale/bias.</summary>
-    public void LaunchLayerNormNoAffine(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
-        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF32, output, input, dim, totalRows, eps, stream);
-
-    /// <summary>Non-affine LayerNorm with F16 activation I/O (F32 accumulate) — the DiT F16 activation path.</summary>
-    public void LaunchLayerNormNoAffineF16(ulong output, ulong input, int dim, int totalRows, float eps, nint stream)
-        => LaunchLayerNormNoAffineImpl(_ditLayerNormNoAffineF16, output, input, dim, totalRows, eps, stream);
 
     /// <summary>MoE top-k gate weights: softmax over E + top-k renorm per token (one thread per token).</summary>
     public unsafe void LaunchMoeTopkGate(ulong weights, ulong logits, int numExperts, int topK, long totalTokens, nint stream)
@@ -3994,18 +3808,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(fn, (uint)seq, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Fused LTX-2 RMS-norm + AdaLN shift/scale: <c>out = norm(in)*(1+scale)+shift</c>, one pass.</summary>
-    public unsafe void LaunchLtx2RmsModulate(ulong outp, ulong x, ulong scale, ulong shift,
-        int dim, int rows, float eps, nint stream, bool f16)
-    {
-        ulong oA = outp, xA = x, scA = scale, shA = shift;
-        uint dA = (uint)dim, rA = (uint)rows; float eA = eps;
-        void** args = stackalloc void*[7];
-        args[0] = &oA; args[1] = &xA; args[2] = &scA; args[3] = &shA; args[4] = &dA; args[5] = &rA; args[6] = &eA;
-        uint shared = BlockSize * sizeof(float);
-        CudaDriverApi.cuLaunchKernel(f16 ? _ltx2RmsModulateF16 : _ltx2RmsModulateF32, (uint)rows, 1, 1, BlockSize, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
-    }
-
     /// <summary>Fused LTX-2 per-head output gate, in place: <c>x[s, h*headDim+d] *= 2*sigmoid(logits[s,h])</c>.</summary>
     public unsafe void LaunchLtx2HeadGate(ulong x, ulong logits, int seq, int heads, int headDim, nint stream, bool f16)
     {
@@ -4032,18 +3834,6 @@ public sealed partial class CudaKernels : IDisposable
         long total = (long)paddedT * cIn * (H + 2L * padH) * (W + 2L * padW);
         uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeBuildPaddedBf16 : _wanVaeBuildPadded, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Per-channel RMS norm: out[c] = x[c] * (sqrtC / max(||x||_2, eps)) * gamma[c], over the C axis at each spatial position.</summary>
-    public unsafe void LaunchWanVaeRmsNormChannel(
-        ulong outp, ulong x, ulong gamma, int c, long spatial, float eps, float sqrtC,
-        long numPos, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, xA = x, gA = gamma; int cA = c; long spA = spatial, npA = numPos; float eA = eps, scA = sqrtC;
-        void** args = stackalloc void*[8];
-        args[0] = &oA; args[1] = &xA; args[2] = &gA; args[3] = &cA; args[4] = &spA; args[5] = &eA; args[6] = &scA; args[7] = &npA;
-        uint gridDim = (uint)((numPos + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeRmsNormChannelBf16 : _wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     // ── GeGlu Launches ──────────────────────────────────────────────────

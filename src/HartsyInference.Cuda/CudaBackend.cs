@@ -10,6 +10,7 @@ using HartsyInference.Core.Backends.Gpu;
 using HartsyInference.Cuda.Profiling;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Memory.Host;
 
@@ -3494,9 +3495,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     else _kernels!.LaunchCastBf16ToF32(pBCast, pB, (int)bias.ElementCount, _stream.Handle);
                     bPtr = pBCast;
                 }
-                // An F16 output is an F32 residual stream feeding an F16 branch: normalized in F32, rounded once.
+                // An F16 output is an F32 residual stream feeding an F16 branch: normalized in F32 by the generic norm kernel, rounded once.
                 if (output.DType == DType.F16)
-                    _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, wPtr, 0, bPtr, normDim, totalRows, totalRows, eps, _stream.Handle);
+                    _kernels!.LaunchNormModulate(pOut, pIn, wPtr, bPtr, 0, 0, 0, NormKind.LayerNorm, NormAxis.LastDim, DType.F32, DType.F16, false, eps,
+                        new NormModulateGeometry(totalRows, normDim, 1, 0, normDim, 0, 0), _stream.Handle);
                 else if (output.DType == DType.F32)
                     _kernels!.LaunchLayerNorm(pOut, pIn, wPtr, bPtr, normDim, totalRows, eps, _stream.Handle);
                 else
@@ -3737,49 +3739,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    public void AffineBroadcastLastDim(Tensor output, Tensor input, Tensor scale, Tensor? shift)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcast");
-        // F32 activation, or F16/BF16 activation with F32 scale/shift (the DiT 16-bit recipe: activation
-        // halved, tiny per-channel params kept F32 for precision). scale/shift must stay F32 in every case.
-        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        bool bf16 = input.DType == DType.BF16 && output.DType == DType.BF16;
-        if ((!f16 && !bf16 && (output.DType != DType.F32 || input.DType != DType.F32))
-            || scale.DType != DType.F32 || (shift is not null && shift.DType != DType.F32))
-            throw new NotSupportedException($"CUDA AffineBroadcastLastDim supports F32, or F16/BF16 activation with F32 scale/shift — got output={output.DType}, input={input.DType}, scale={scale.DType}, shift={shift?.DType.Name ?? "null"}.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int rank = input.Shape.Rank;
-        int dim = (int)input.Shape[rank - 1];
-        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
-
-        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pScale = GpuTransferHelper.CopyToDevice(scale);
-            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (f16)
-                _kernels!.LaunchAffineBroadcastLastDimF16(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
-            else if (bf16)
-                _kernels!.LaunchAffineBroadcastLastDimBf16(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
-            else
-                _kernels!.LaunchAffineBroadcastLastDim(pOut, pIn, pScale, pShift, seqLen, dim, input.ElementCount, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pScale);
-            if (shift is not null) GpuTransferHelper.FreeDevice(pShift);
-        }
-    }
-
     /// <inheritdoc/>
     public unsafe bool TryAffineBroadcastRowIndexedToFp8(Tensor outputFp8, Tensor input, Tensor scaleTable,
         Tensor? shiftTable, Tensor rowIndex, Tensor consumerWeight)
@@ -3871,48 +3830,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    public void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("AffineBroadcastRowIndexed");
-        // Activation may be F32/F16/BF16; the modulation table stays F32 (tiny, precision-sensitive) —
-        // same recipe as the lastdim twins above.
-        DType act = ValidateRowIndexedDtypes("AffineBroadcastRowIndexed", output, input, scaleTable, shiftTable, rowIndex);
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        long total = input.ElementCount;
-        if (rowIndex.ElementCount < total / dim)
-            throw new ArgumentException($"AffineBroadcastRowIndexed rowIndex has {rowIndex.ElementCount} entries, need {total / dim}.", nameof(rowIndex));
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-
-        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0, pIdx = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pScale = GpuTransferHelper.CopyToDevice(scaleTable);
-            if (shiftTable is not null) pShift = GpuTransferHelper.CopyToDevice(shiftTable);
-            pIdx = GpuTransferHelper.CopyToDevice(rowIndex);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (act == DType.F16)
-                _kernels!.LaunchAffineBroadcastRowIndexedF16(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
-            else if (act == DType.BF16)
-                _kernels!.LaunchAffineBroadcastRowIndexedBf16(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
-            else
-                _kernels!.LaunchAffineBroadcastRowIndexed(pOut, pIn, pScale, pShift, pIdx, dim, total, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pScale);
-            if (shiftTable is not null) GpuTransferHelper.FreeDevice(pShift);
-            GpuTransferHelper.FreeDevice(pIdx);
-        }
-    }
-
     public void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
     {
         using NvtxRange _nvtx = NvtxRange.Push("GatedResidualRowIndexed");
@@ -3968,46 +3885,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         if (rowIndex.DType != DType.I32)
             throw new NotSupportedException($"CUDA {op} requires I32 rowIndex, got {rowIndex.DType}.");
         return act;
-    }
-
-    public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("ModulationSplit4");
-        if (proj.DType != DType.F32)
-            throw new NotSupportedException("CUDA ModulationSplit4 supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
-        int batch = (int)(scaleMsa.ElementCount / dim);
-
-        ulong pProj = 0, pSMsa = 0, pGMsa = 0, pSMlp = 0, pGMlp = 0;
-        bool cached = false;
-        try
-        {
-            pProj = GpuTransferHelper.CopyToDevice(proj);
-            nuint bytes = GpuTransferHelper.ByteSize(scaleMsa);
-            pSMsa = GpuTransferHelper.AllocateDevice(bytes);
-            pGMsa = GpuTransferHelper.AllocateDevice(bytes);
-            pSMlp = GpuTransferHelper.AllocateDevice(bytes);
-            pGMlp = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels!.LaunchModulation4(pSMsa, pGMsa, pSMlp, pGMlp, pProj, dim, batch, _stream.Handle);
-            GpuTransferHelper.CacheActivation(scaleMsa, pSMsa, bytes);
-            GpuTransferHelper.CacheActivation(gateMsa, pGMsa, bytes);
-            GpuTransferHelper.CacheActivation(scaleMlp, pSMlp, bytes);
-            GpuTransferHelper.CacheActivation(gateMlp, pGMlp, bytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached)
-            {
-                GpuTransferHelper.FreeDevice(pSMsa);
-                GpuTransferHelper.FreeDevice(pGMsa);
-                GpuTransferHelper.FreeDevice(pSMlp);
-                GpuTransferHelper.FreeDevice(pGMlp);
-            }
-            GpuTransferHelper.FreeDevice(pProj);
-        }
     }
 
     public void MoeTopKGate(Tensor weights, Tensor logits, int topK)
@@ -4567,26 +4444,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Fused Oasis adaLN: out = LayerNorm(x)·(1+scale)+shift, scale/shift sliced from mod per frame.</summary>
-    public void OasisAdaLn(Tensor output, Tensor input, Tensor mod, int dim, int sp, int totalRows, int modStride, int shiftOff, int scaleOff, float eps)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || mod.DType != DType.F32)
-            throw new NotSupportedException("CUDA OasisAdaLn supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pOut = 0, pIn = 0, pMod = 0; bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pMod = GpuTransferHelper.CopyToDevice(mod);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchOasisAdaLn(pOut, pIn, pMod, dim, sp, totalRows, modStride, shiftOff, scaleOff, eps, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
-        }
-        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
-    }
-
     /// <summary>TripoSR triplane grid-sample (device); <paramref name="outputF"/> stays resident so the NeRF MLP hits the activation cache.</summary>
     /// <remarks><paramref name="planes"/> uploads once (weight-cache resident via PreloadWeights) — no host round-trip per point.</remarks>
     public unsafe void TriplaneGridSample(Tensor outputF, Tensor planes, Tensor? coords, long chunkStart,
@@ -4704,41 +4561,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
     }
 
-    /// <summary>Fused LTX-2 norm+modulate — see <see cref="IBackend.Ltx2RmsModulate"/>. The RMS weight is a ones vector at every call site, so it folds away rather than being read per element.</summary>
-    public unsafe void Ltx2RmsModulate(Tensor output, Tensor input, Tensor onesWeight, Tensor scale, Tensor? shift, float eps)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("Ltx2RmsModulate");
-        bool f16 = input.DType == DType.F16;
-        if ((input.DType != DType.F32 && !f16) || output.DType != input.DType || scale.DType != DType.F32
-            || (shift is not null && shift.DType != DType.F32))
-            throw new NotSupportedException(
-                $"CUDA Ltx2RmsModulate needs matching F32/F16 in/out with F32 scale+shift, got in={input.DType}, out={output.DType}, scale={scale.DType}.");
-        int dim = (int)scale.Shape[scale.Shape.Rank - 1];
-        int rows = (int)(input.ElementCount / dim);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pOut = 0, pIn = 0, pScale = 0, pShift = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pScale = GpuTransferHelper.CopyToDevice(scale);
-            if (shift is not null) pShift = GpuTransferHelper.CopyToDevice(shift);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchLtx2RmsModulate(pOut, pIn, pScale, pShift, dim, rows, eps, _stream.Handle, f16);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pScale);
-            if (pShift != 0) GpuTransferHelper.FreeDevice(pShift);
-        }
-    }
-
     /// <summary>Fused LTX-2 per-head output gate — see <see cref="IBackend.Ltx2HeadGate"/>.</summary>
     /// <remarks>In-place: x's device buffer is mutated and re-cached to the SAME pointer, the
     /// <c>RotaryViews.SplitRows</c> pattern. Allocating a fresh output here would leave the mutation in a buffer
@@ -4805,37 +4627,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
             if (pCache != 0) GpuTransferHelper.FreeDevice(pCache);
-        }
-    }
-
-    /// <summary>GPU channel-wise RMS norm for the Wan2.2 VAE (one thread per <c>[B, spatial]</c> position reduces over C).</summary>
-    public unsafe void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("WanRmsNormChannel");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int b = (int)input.Shape[0], c = (int)input.Shape[1];
-        long spatial = input.ElementCount / ((long)b * c);
-        long numPos = (long)b * spatial;
-        float sqrtC = MathF.Sqrt(c);
-        ulong pOut = 0, pIn = 0, pGamma = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            if (gamma is not null) pGamma = GpuTransferHelper.CopyToDevice(gamma);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchWanVaeRmsNormChannel(pOut, pIn, pGamma, c, spatial, eps, sqrtC, numPos, _stream.Handle,
-                bf16: RequireVaeFrameDtype(output.DType, input.DType, gamma));
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            if (pGamma != 0) GpuTransferHelper.FreeDevice(pGamma);
         }
     }
 
@@ -5306,77 +5097,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("LayerNormNoAffine");
-        // F32, or F16 activation I/O with F32 accumulation — the DiT F16 activation recipe.
-        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        if (!f16 && (output.DType != DType.F32 || input.DType != DType.F32))
-            throw new NotSupportedException("CUDA LayerNormNoAffine supports F32 or F16 (matching input/output dtype).");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        long rows = input.ElementCount / dim;
-
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (f16)
-                _kernels!.LaunchLayerNormNoAffineF16(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
-            else
-                _kernels!.LaunchLayerNormNoAffine(pOut, pIn, dim, (int)rows, eps, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <summary>Fused adaLN modulation: out = (1+scale)·LayerNormNoAffine(in) + shift (F32 or F16 activation, F32 scale/shift).</summary>
-    /// <remarks>Replaces LayerNormNoAffine + AddScalar(+1) + AffineBroadcast for the DiT NormModulate.</remarks>
-    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("LayerNormModulate");
-        bool f16 = input.DType == DType.F16 && output.DType == DType.F16;
-        bool mixed = input.DType == DType.F32 && output.DType == DType.F16;
-        if (!f16 && !mixed && (output.DType != DType.F32 || input.DType != DType.F32))
-            throw new NotSupportedException("CUDA LayerNormModulate supports F32 or F16 activations, or an F32 input into F16.");
-        if (scale.DType != DType.F32 || shift.DType != DType.F32)
-            throw new NotSupportedException("CUDA LayerNormModulate requires F32 scale/shift.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        int seqLen = input.Shape.Rank >= 2 ? (int)input.Shape[input.Shape.Rank - 2] : 1;
-        long rows = input.ElementCount / dim;
-        ulong pOut = 0, pIn = 0, pSc = 0, pSh = 0; bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pSc = GpuTransferHelper.CopyToDevice(scale);
-            pSh = GpuTransferHelper.CopyToDevice(shift);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (mixed)
-                _kernels!.LaunchLayerNormModulateF32ToF16(pOut, pIn, 0, pSc, pSh, dim, (int)rows, seqLen, eps, _stream.Handle);
-            else
-                _kernels!.LaunchLayerNormModulate(f16, pOut, pIn, pSc, pSh, dim, seqLen, (int)rows, eps, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn); GpuTransferHelper.FreeDevice(pSc); GpuTransferHelper.FreeDevice(pSh);
         }
     }
 

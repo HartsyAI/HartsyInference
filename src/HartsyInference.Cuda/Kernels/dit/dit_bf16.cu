@@ -56,31 +56,6 @@ __global__ void dit_rmsnorm_bf16(
         outRow[i] = __float2bfloat16(__bfloat162float(inRow[i]) * invRms * weight[i]);
 }
 
-// ── Row-indexed broadcast affine (gather fused in) ─────────────────────────
-// out[r,d] = in[r,d] * (1 + scaleTable[rowIndex[r], d]) + (shiftTable ? shiftTable[rowIndex[r], d] : 0)
-// Indexing the small table through rowIndex is what removes the materialized [seq, dim] gathers;
-// the `1 +` is folded in too, removing the caller's AddScalar over the table.
-__global__ void dit_affine_broadcast_rowindexed_bf16(
-    __nv_bfloat16* __restrict__ output,
-    const __nv_bfloat16* __restrict__ input,
-    const float* __restrict__ scaleTable,
-    const float* __restrict__ shiftTable,
-    const int* __restrict__ rowIndex,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    size_t tIdx = (size_t)rowIndex[row] * dim + d;
-
-    float v = __bfloat162float(input[i]) * (1.0f + scaleTable[tIdx]);
-    if (shiftTable != 0) v += shiftTable[tIdx];
-    output[i] = __float2bfloat16(v);
-}
-
 // ── Row-indexed gated residual (gather fused in) ───────────────────────────
 // out[r,d] = residual[r,d] + gateTable[rowIndex[r], d] * value[r,d]
 __global__ void dit_gated_residual_rowindexed_bf16(
@@ -100,32 +75,6 @@ __global__ void dit_gated_residual_rowindexed_bf16(
     size_t tIdx = (size_t)rowIndex[row] * dim + d;
 
     output[i] = __float2bfloat16(__bfloat162float(residual[i]) + gateTable[tIdx] * __bfloat162float(value[i]));
-}
-
-// ── Broadcast affine over the last dim (BF16 activation, F32 scale/shift) ───
-// out[b,s,d] = in[b,s,d] * scale[b,d] + (shift ? shift[b,d] : 0). BF16 twin of the F32/F16 kernels,
-// for the call sites that modulate one broadcast row (a DiT final layer's per-segment head) — an
-// index tensor would be pure overhead there.
-__global__ void dit_affine_broadcast_lastdim_bf16(
-    __nv_bfloat16* __restrict__ output,
-    const __nv_bfloat16* __restrict__ input,
-    const float* __restrict__ scale,
-    const float* __restrict__ shift,
-    unsigned int seqLen,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    unsigned int b = (unsigned int)(row / seqLen);
-    size_t pIdx = (size_t)b * dim + d;
-
-    float v = __bfloat162float(input[i]) * scale[pIdx];
-    if (shift != 0) v += shift[pIdx];
-    output[i] = __float2bfloat16(v);
 }
 
 // ── Gated residual over the last dim (BF16 activations, F32 gate) ──────────

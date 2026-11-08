@@ -154,6 +154,46 @@ The default composes the call from `CopyStrided`, `RmsNorm`, `Rotary` and `KvCac
 temporary for a packed v, plus the norm's inputs); CUDA runs one kernel per norm kind, each bit-identical to the
 composition it replaces.
 
+## NormModulate
+
+```
+y[r, d] = (norm(x[r, :])[d] · w[d] + b[d]) · s[m(r), d] + t[m(r), d]        every absent term dropped
+```
+
+Reference: `NormModulateReference.Apply`. Contract: `NormModulateContract.Validate`. A `NormModulateCall` names the row
+axis (`NormAxis.LastDim`, or `NormAxis.Channel` for axis 1 of `[N, C, ...]`), the norm (`NormKind`), the norm's learned
+affine `w` and `b` (`WithAffine`) and the adaLN modulation (`ModulationSpec`, `WithModulation`): a scale `s` and shift `t`
+with a `ScaleMode` (`Raw`: `v · s`; `OnePlus`: `v · (1 + s)`) and the row each activation row reads:
+
+| Variation | How the spec expresses it |
+|---|---|
+| one vector for every row, or `[B, D]` over each batch of `[B, S, D]` | `ModulationSpec.Broadcast(x, s, t, mode)`: rows share a modulation row in equal runs |
+| one modulation row per token, gathered | `ModulationSpec.RowIndexed(x, s, t, rowIndex, mode)` with an I32 index |
+| scale and shift cut from one packed `[mods, k · D]` projection | `ModulationSpec.Packed(mod, rowStride, scaleOffset, shiftOffset, rowsPerMod, mode)` |
+| explicit addressing | the constructor: row stride, offsets, rows per modulation row (0 shares row 0) |
+
+Norms: `LayerNorm` is `(x − mean) · rsqrt(var + eps)` with the biased variance, `RmsNorm` is `x · rsqrt(mean(x²) + eps)`,
+`L2Norm` is `x · sqrt(n) / max(‖x‖₂, eps)` (Wan 2.2's `RMS_norm`), `None` applies the affine and modulation alone. The
+reference accumulates the sums in F64; the kernels reduce in F32 (the channel kernel on CUDA in F64), so a norm is held to a
+tolerance while `None` is bit-identical.
+
+Rules: activations F32, F16 or BF16, the input and output dtypes independent and of equal element count; vectors F32 of
+the row width; a positive epsilon for a norm; a modulation along the last axis only, its vectors covering every modulation
+row the rows read, the index one I32 entry per row; the output overlaps no operand.
+
+`LayerNormNoAffine` and `AffineBroadcastLastDim` remain on `IBackend` as fixed spellings of this call (a LayerNorm with
+nothing else; no norm with a raw broadcast modulation).
+
+## ChunkActivate
+
+```
+outputs[c][r, d] = act_c(x[r, c · width + d])        act ∈ {identity, 1 + x, tanh, sigmoid}
+```
+
+Reference: `ChunkActivateReference.Apply`. Cuts an F32 `[rows, count · width]` projection into `count` F32 outputs
+`[rows, width]` through one `ChunkActivation` each, at most eight chunks: an adaLN modulation projection split into its
+scales and gates in one pass. tanh and sigmoid follow each backend's math library, so the gates are held to a tolerance.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -173,6 +213,8 @@ Every implementation of these ops:
 | `Pad` | reference | `pad_u8/u16/u32/u64` | `pad_strided_u16/u32/u64`; 1-byte elements take the reference |
 | `Rotary` | reference | `rotary.ptx` (`rotary_f32/f16/bf16`) | `rotary_f32/f16`; BF16 takes the reference |
 | `QkvDecodeEpilogue` | no device position buffer | `lm_qkv_rope_scatter_f32/f16kv`, `lm_qknorm_rope_scatter_f32/f16kv`, `lm_qknorm_full_rope_scatter_f32/f16kv` | composed; F32 caches only |
+| `NormModulate` | reference | `norm_modulate.ptx` (`norm_modulate_rows/flat/channel_<in>_<out>`: F32, F16, F32↔F16, BF16) | `norm_modulate_rows/flat_f32/f16/f32_f16/f16_f32`, `norm_modulate_channel_f32`; BF16 and a non-F32 channel norm take the reference |
+| `ChunkActivate` | reference | `chunk_activate_f32` | `chunk_activate` |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 
@@ -189,4 +231,6 @@ one case per former call shape. `PixelShuffle2d`, `PixelShuffle3d`, `SeedVr2Pixe
 `RopeApplyDecodeStep` are `Rotary` calls built with `RotaryCall`'s factories or `RotaryViews`; `Ltx2QkNormRopeHeadMajor`
 and `Ltx2QkNormRopeTokenMajor` are `RmsNormRotary` (`--op rotary`). `QkvRopeScatterDecodeStep`, `RopeScatterKvDecodeStep`,
 `QkRopeScatterVDecodeStep`, `QkvNormRopeScatterDecodeStep`, `QkNormRopeScatterVDecodeStep` and `QkNormFullRopeScatterDecodeStep`
-are `QkvDecodeEpilogue` calls built with `QkvDecodeCall`'s factories (`--op qkvdecode`).
+are `QkvDecodeEpilogue` calls built with `QkvDecodeCall`'s factories (`--op qkvdecode`). `AffineBroadcastRowIndexed`,
+`LayerNormModulate`, `RmsNormModulate`, `Ltx2RmsModulate`, `OasisAdaLn`, `WanRmsNormChannel` and `ChannelLayerNorm3d` are
+`NormModulate` calls, `ModulationSplit4` is a `ChunkActivate` (`--op normmod`).

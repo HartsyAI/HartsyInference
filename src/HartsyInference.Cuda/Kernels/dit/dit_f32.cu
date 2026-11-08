@@ -52,33 +52,6 @@ __global__ void dit_rmsnorm_f32(
         outRow[i] = inRow[i] * invRms * weight[i];
 }
 
-// ── Broadcast affine over the last dim ─────────────────────────────────────
-// input/output are [B, S, D] (row-major). scale and (optional) shift are [B, D],
-// broadcast over the S (sequence) axis. With shift == null this is a pure broadcast
-// multiply — covers Ideogram 4 ApplyScale (modulation, scale-only).
-// out[b,s,d] = in[b,s,d] * scale[b,d] + (shift ? shift[b,d] : 0)
-__global__ void dit_affine_broadcast_lastdim_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    const float* __restrict__ scale,
-    const float* __restrict__ shift,
-    unsigned int seqLen,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    unsigned int b = (unsigned int)(row / seqLen);
-    size_t pIdx = (size_t)b * dim + d;
-
-    float v = input[i] * scale[pIdx];
-    if (shift != 0) v += shift[pIdx];
-    output[i] = v;
-}
-
 // ── Gated residual over the last dim ───────────────────────────────────────
 // out[b,s,d] = residual[b,s,d] + gate[b,d] * value[b,s,d]
 // gate is [B, D] broadcast over S. Covers Ideogram 4 ApplyGatedResidual.
@@ -102,32 +75,6 @@ __global__ void dit_gated_residual_lastdim_f32(
     output[i] = residual[i] + gate[pIdx] * value[i];
 }
 
-// ── Row-indexed broadcast affine (gather fused in) ─────────────────────────
-// out[r,d] = in[r,d] * (1 + scaleTable[rowIndex[r], d]) + (shiftTable ? shiftTable[rowIndex[r], d] : 0)
-// The lastdim twin above needs the modulation already expanded to one row per token; this one indexes
-// the SMALL [modRows, dim] table directly, so the caller skips the materialized [seq, dim] gathers.
-// The `1 +` is folded in as well — the unfused path pays a separate AddScalar over the table for it.
-__global__ void dit_affine_broadcast_rowindexed_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    const float* __restrict__ scaleTable,
-    const float* __restrict__ shiftTable,
-    const int* __restrict__ rowIndex,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    size_t tIdx = (size_t)rowIndex[row] * dim + d;
-
-    float v = input[i] * (1.0f + scaleTable[tIdx]);
-    if (shiftTable != 0) v += shiftTable[tIdx];
-    output[i] = v;
-}
-
 // ── Row-indexed gated residual (gather fused in) ───────────────────────────
 // out[r,d] = residual[r,d] + gateTable[rowIndex[r], d] * value[r,d]
 __global__ void dit_gated_residual_rowindexed_f32(
@@ -147,33 +94,6 @@ __global__ void dit_gated_residual_rowindexed_f32(
     size_t tIdx = (size_t)rowIndex[row] * dim + d;
 
     output[i] = residual[i] + gateTable[tIdx] * value[i];
-}
-
-// ── AdaLN modulation split (scale-only, tanh-gated) ─────────────────────────
-// proj is [B, 4*D] = chunk(scale_msa, gate_msa, scale_mlp, gate_mlp). Writes four [B, D]
-// tensors applying (1 + x) to scales and tanh(x) to gates, matching Ideogram 4's
-// ComputeModulation. One thread per (b, d).
-__global__ void dit_modulation4_f32(
-    float* __restrict__ scaleMsa,
-    float* __restrict__ gateMsa,
-    float* __restrict__ scaleMlp,
-    float* __restrict__ gateMlp,
-    const float* __restrict__ proj,
-    unsigned int dim,
-    unsigned int batch)
-{
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned int total = batch * dim;
-    if (idx >= total) return;
-
-    unsigned int b = idx / dim;
-    unsigned int d = idx % dim;
-    size_t src = (size_t)b * 4u * dim;
-
-    scaleMsa[idx] = 1.0f + proj[src + d];
-    gateMsa[idx] = tanhf(proj[src + dim + d]);
-    scaleMlp[idx] = 1.0f + proj[src + 2u * dim + d];
-    gateMlp[idx] = tanhf(proj[src + 3u * dim + d]);
 }
 
 // ── CFG combine + Euler step (in-place on z) ────────────────────────────────
@@ -530,54 +450,6 @@ __global__ void dit_add_scalar_f32(
     output[i] = input[i] + c;
 }
 
-// ── Non-affine LayerNorm ────────────────────────────────────────────────────
-// Per row: normalize to zero mean, unit variance (biased var, /dim). No scale/bias.
-// One block per row; shared-mem reduction for mean and variance.
-__global__ void dit_layernorm_noaffine_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    unsigned int dim,
-    unsigned int totalRows,
-    float eps)
-{
-    extern __shared__ float sdata[];
-    unsigned int row = blockIdx.x;
-    if (row >= totalRows) return;
-
-    const float* inRow = input + (size_t)row * dim;
-    float* outRow = output + (size_t)row * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        partial += inRow[i];
-    sdata[threadIdx.x] = partial;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
-        __syncthreads();
-    }
-    float mean = sdata[0] / (float)dim;
-    __syncthreads();
-
-    float vpart = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float diff = inRow[i] - mean;
-        vpart += diff * diff;
-    }
-    sdata[threadIdx.x] = vpart;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
-        __syncthreads();
-    }
-    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        outRow[i] = (inRow[i] - mean) * invStd;
-}
-
 // ── Index-add of embedding rows (in-place) ──────────────────────────────────
 // h[row, d] += table[indices[row], d]. Keeps the indicator embedding a GPU-resident weight
 // (no host gather), one of two rows selected per token. total = totalRows * dim.
@@ -749,41 +621,6 @@ __global__ void dit_row_gated_accum_f32(
     float g = gate[row * numExperts + expertIdx];
     if (g != 0.0f)
         out[i] += g * val[i];
-}
-
-// Fused Oasis adaLN: out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d], f = r/sp. scale/shift are sliced
-// from mod[f, modStride] at scaleOff/shiftOff. One block per row; replaces LayerNorm + slice×2 + addscalar +
-// affine-broadcast (5 kernels → 1). blockDim must be a power of two (tree reduction).
-__global__ void oasis_adaln_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    const float* __restrict__ mod,
-    unsigned int dim, unsigned int sp, unsigned int totalRows,
-    unsigned int modStride, unsigned int shiftOff, unsigned int scaleOff, float eps)
-{
-    extern __shared__ float sdata[];
-    unsigned int row = blockIdx.x;
-    if (row >= totalRows) return;
-    const float* inRow = input + (size_t)row * dim;
-    float* outRow = output + (size_t)row * dim;
-    unsigned int f = row / sp;
-    const float* scale = mod + (size_t)f * modStride + scaleOff;
-    const float* shift = mod + (size_t)f * modStride + shiftOff;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += inRow[i];
-    sdata[threadIdx.x] = partial; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float mean = sdata[0] / (float)dim; __syncthreads();
-
-    float vpart = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = inRow[i] - mean; vpart += d * d; }
-    sdata[threadIdx.x] = vpart; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
-
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        outRow[i] = (inRow[i] - mean) * invStd * (1.0f + scale[i]) + shift[i];
 }
 
 // Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.
@@ -973,39 +810,6 @@ __global__ void dit_concat2_f32(
         out[idx] = a[((o * aDim + dimIdx) * (unsigned long long)inner) + innerI];
     else
         out[idx] = b[((o * bDim + (dimIdx - aDim)) * (unsigned long long)inner) + innerI];
-}
-
-// Fused adaLN modulation: out[r,d] = (1 + scale[b,d])·LayerNormNoAffine(in[r]) + shift[b,d], b = r/seqLen.
-// One block per row (tree reduction over dim). Replaces LayerNormNoAffine + AddScalar(+1) + AffineBroadcast (3 → 1)
-// — the DiT NormModulate, ~96×/forward. scale/shift are [B,dim] (per-channel, broadcast over seq).
-__global__ void dit_layernorm_modulate_f32(
-    float* __restrict__ output, const float* __restrict__ input,
-    const float* __restrict__ scale, const float* __restrict__ shift,
-    unsigned int dim, unsigned int seqLen, unsigned int totalRows, float eps)
-{
-    extern __shared__ float sdata[];
-    unsigned int row = blockIdx.x;
-    if (row >= totalRows) return;
-    const float* inRow = input + (size_t)row * dim;
-    float* outRow = output + (size_t)row * dim;
-    unsigned int b = row / seqLen;
-    const float* sc = scale + (size_t)b * dim;
-    const float* sh = shift + (size_t)b * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) partial += inRow[i];
-    sdata[threadIdx.x] = partial; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float mean = sdata[0] / (float)dim; __syncthreads();
-
-    float vpart = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) { float d = inRow[i] - mean; vpart += d * d; }
-    sdata[threadIdx.x] = vpart; __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s]; __syncthreads(); }
-    float invStd = rsqrtf(sdata[0] / (float)dim + eps);
-
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-        outRow[i] = (inRow[i] - mean) * invStd * (1.0f + sc[i]) + sh[i];
 }
 
 // Fused QKV split + per-head QK-RMSNorm: from a fused qkv[token, 3·W] (W = heads·headDim), writes q,k,v each
@@ -1491,43 +1295,4 @@ extern "C" __global__ void ltx2_head_gate_f32(
     float g = logits[s * heads + h];
     float sig = (g >= 0.0f) ? (1.0f / (1.0f + expf(-g))) : (expf(g) / (1.0f + expf(g)));
     x[idx] = x[idx] * 2.0f * sig;
-}
-
-// ── LTX-2 fused RMS-norm + AdaLN shift/scale (F32 twin) ────────────────────
-// See ltx2_rms_modulate_f16 in dit_f16.cu for the contract.
-extern "C" __global__ void ltx2_rms_modulate_f32(
-    float* __restrict__ out,
-    const float* __restrict__ in,
-    const float* __restrict__ scale,
-    const float* __restrict__ shift,
-    unsigned int dim,
-    unsigned int rows,
-    float eps)
-{
-    extern __shared__ float sredm[];
-    unsigned int r = blockIdx.x;
-    if (r >= rows) return;
-    const float* inRow = in + (size_t)r * dim;
-    float* outRow = out + (size_t)r * dim;
-
-    float partial = 0.0f;
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float v = inRow[i];
-        partial += v * v;
-    }
-    sredm[threadIdx.x] = partial;
-    __syncthreads();
-    for (unsigned int s = blockDim.x >> 1; s > 0; s >>= 1)
-    {
-        if (threadIdx.x < s) sredm[threadIdx.x] += sredm[threadIdx.x + s];
-        __syncthreads();
-    }
-    float inv = rsqrtf(sredm[0] / (float)dim + eps);
-    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x)
-    {
-        float v = inRow[i] * inv * (1.0f + scale[i]);
-        if (shift != 0) v += shift[i];
-        outRow[i] = v;
-    }
 }

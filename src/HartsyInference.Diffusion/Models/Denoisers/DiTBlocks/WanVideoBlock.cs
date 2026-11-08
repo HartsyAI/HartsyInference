@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
@@ -546,7 +547,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
     private Tensor NormModulateF16(IBackend backend, Tensor x, Tensor scale, Tensor shift, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F16);
-        backend.LayerNormModulate(o, x, scale, shift, _eps);
+        backend.NormModulate(NormModulateCall.Rows(o, x, NormKind.LayerNorm, _eps).WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
         return o;
     }
 

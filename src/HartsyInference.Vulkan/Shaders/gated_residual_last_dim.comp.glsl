@@ -1,7 +1,7 @@
 // gated_residual_last_dim: out = residual + gate*value, gate [B,D] broadcast over the seq axis of
 // value/residual/output [B,seqLen,D]. Matches IBackend.GatedResidualLastDim's CPU reference exactly
 // (DiT residual-gate, e.g. Flux/Krea2's attn/mlp gate). Activation (residual/value/out) may be F16 or
-// F32 (USE_FP16); gate is ALWAYS F32, same convention as affine_broadcast_last_dim's scale/shift.
+// F32 (USE_FP16); gate is ALWAYS F32, same convention as norm_modulate's scale/shift.
 //
 // Compile:
 //   glslc gated_residual_last_dim.comp.glsl -o gated_residual_last_dim_f32.spv
