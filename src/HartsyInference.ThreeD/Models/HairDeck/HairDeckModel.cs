@@ -38,6 +38,25 @@ public sealed class HairDeckModel : IDisposable
     /// <summary>Whether the chain model is loaded.</summary>
     public bool HasChains => _core.HasChains;
 
+    /// <summary>The HairDeck model folder for <paramref name="localPath"/>: the folder that holds <c>config.json</c>, found from the
+    /// path itself (a folder) or from the nearest parent of a file. The catalog's primary asset is a checkpoint inside that folder
+    /// (<c>ckpt/image_model/model.safetensors</c>), so its own folder is not the model root.</summary>
+    /// <returns>The model folder, or the path's own folder when no <c>config.json</c> is above it (the load then reports what is missing).</returns>
+    public static string ResolveModelRoot(string localPath)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(localPath);
+        string start = Directory.Exists(localPath) ? localPath : Path.GetDirectoryName(Path.GetFullPath(localPath))!;
+        for (DirectoryInfo? dir = new(start); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "config.json")))
+            {
+                return dir.FullName;
+            }
+        }
+
+        return start;
+    }
+
     /// <summary>Loads the HairDeck model set from <paramref name="modelRoot"/> (the folder holding <c>config.json</c>, <c>ckpt/</c> and
     /// <c>data/</c>) and the DINOv3 encoder from <paramref name="dinoWeightsPath"/>.</summary>
     /// <exception cref="FileNotFoundException">A required checkpoint or statistics file is missing.</exception>
