@@ -1,3 +1,4 @@
+using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -8,7 +9,7 @@ namespace HartsyInference.ThreeD.Models.HairDeck;
 public static class HairDeckEulerSampler
 {
     /// <summary>Samples tokens from the initial noise <paramref name="noise"/> <c>[N, TokenDim]</c>; the caller disposes the result.</summary>
-    public static Tensor Sample(IBackend backend, HairDeckSetDit model, Tensor ctx, Tensor noise, int steps, float cfg)
+    public static Tensor Sample(IBackend backend, HairDeckSetDit model, Tensor ctx, Tensor noise, int steps, float cfg, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(model);

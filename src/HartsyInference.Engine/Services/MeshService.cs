@@ -77,6 +77,21 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         HairDeckOptions options = HairDeckRequestMapper.ToOptions(request);
         HairDeckRuntime runtime = GetOrLoadHairDeck(spec);
+        // One run at a time per loaded model: the Vision models and the image model are not shared-safe, and a disposal
+        // waits for the run in progress. A queued request gives up when its own cancellation fires.
+        runtime.Gate.Wait(cancel);
+        try
+        {
+            return RunHairDeck(runtime, options, request, cancel);
+        }
+        finally
+        {
+            runtime.Gate.Release();
+        }
+    }
+
+    private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, CancellationToken cancel)
+    {
         HairDeckSourceImage source = HairDeckSourceImage.Create(request.Image!.Rgb, request.Image.Alpha, request.Image.Width, request.Image.Height);
         HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
         foreach (string note in prep.Notes)
@@ -93,7 +108,7 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         cancel.ThrowIfCancellationRequested();
-        HairDeckResult result = runtime.Model.Generate(prep.Input, options);
+        HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel);
         if (!result.HasCards)
         {
             throw new InvalidOperationException("No hair cards were generated for this image. Try another seed or another image.");
@@ -122,15 +137,17 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         string modelRoot = HairDeckModel.ResolveModelRoot(spec.LocalPath);
+        string visionRoot = Path.Combine(RepoPaths.ModelsRoot(), "Vision");
+        string key = $"{modelRoot}|{visionRoot}";
         lock (_gate)
         {
-            if (_hairDecks.TryGetValue(modelRoot, out HairDeckRuntime? cached))
+            if (_hairDecks.TryGetValue(key, out HairDeckRuntime? cached))
             {
                 return cached;
             }
 
-            HairDeckRuntime runtime = HairDeckRuntime.Load(_engine.Backend, modelRoot, Path.Combine(RepoPaths.ModelsRoot(), "Vision"));
-            _hairDecks[modelRoot] = runtime;
+            HairDeckRuntime runtime = HairDeckRuntime.Load(_engine.Backend, modelRoot, visionRoot);
+            _hairDecks[key] = runtime;
             return runtime;
         }
     }
