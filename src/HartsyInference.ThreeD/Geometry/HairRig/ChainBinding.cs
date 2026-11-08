@@ -10,6 +10,9 @@ public static class ChainBinding
     /// <summary>Mean distance of the lower 60% of a card, in face widths, under which the card follows a chain.</summary>
     public const double Assign = 0.4;
 
+    /// <summary>Fraction of a card's points (from the root end) that decide whether it follows a chain: the lower 60%, from index 0.4 of the points.</summary>
+    public const double LowerStart = 0.4;
+
     /// <summary>Arc length, in face widths, over which the chain weight ramps from 0 at the root to 1.</summary>
     public const double Ramp = 0.05;
 
@@ -104,7 +107,7 @@ public static class ChainBinding
     public static int AssignChain(double[] points, IReadOnlyList<double[]> chains, double faceWidth)
     {
         int m = points.Length / 3;
-        int from = (int)(0.4 * m);
+        int from = (int)(LowerStart * m);
         double[] lower = points[(3 * from)..];
         int best = -1;
         double bestDistance = Assign * faceWidth;

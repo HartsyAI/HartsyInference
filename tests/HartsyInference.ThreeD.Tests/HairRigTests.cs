@@ -159,6 +159,38 @@ public sealed class HairRigTests
         Assert.Throws<InvalidOperationException>(() => HairDeckRig.Build(cards, hair, [far], null));
     }
 
+    [Fact]
+    public void Card_whose_outer_vertices_are_far_from_the_chain_stays_rigid()
+    {
+        // The two narrow cards hang beside the chain. The wide card's centreline is on the chain, but the mean distance of
+        // its lower vertices (offset 0.2 m from the centreline) is over the assignment limit, so it stays with the head.
+        List<HairCard> cards = [];
+        foreach ((double x, double width) in new[] { (0.0, 0.02), (0.01, 0.02), (0.0, 0.4) })
+        {
+            double[] sequence = new double[4 * 8];
+            for (int i = 0; i < 4; i++)
+            {
+                sequence[8 * i] = x;
+                sequence[8 * i + 1] = 0.40 - 0.05 * i;
+                sequence[8 * i + 2] = 0.0;
+                sequence[8 * i + 3] = width;
+                sequence[8 * i + 4] = 0.005;
+                sequence[8 * i + 7] = 1.0;
+            }
+            cards.Add(new HairCard(sequence, 0, null));
+        }
+
+        Mesh hair = HairCardMesher.Build(cards, HairSrgb)!.Mesh;
+        HairRigResult result = HairDeckRig.Build(cards, hair, [new DecodedChain(FloatChain(), 4, 0.5f)], null);
+
+        Assert.Equal(2, result.CardsOnChains);
+        for (int v = 2 * 16; v < hair.VertexCount; v++)
+        {
+            Assert.Equal(0, result.HairSkin.JointIndices[4 * v]);
+            Assert.Equal(1f, result.HairSkin.Weights[4 * v]);
+        }
+    }
+
     private static (HairRigResult Result, Mesh Hair) BuildSample()
     {
         (IReadOnlyList<HairCard> cards, Mesh hair) = Cards(xOffset: 0.0);

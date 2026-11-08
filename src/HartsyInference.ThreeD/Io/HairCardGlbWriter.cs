@@ -62,7 +62,7 @@ public static class HairCardGlbWriter
     }
 
     /// <summary>Writes <paramref name="nodes"/> as GLB to <paramref name="path"/>.</summary>
-    public static void Save(string path, IReadOnlyList<HairGlbNode> nodes) => File.WriteAllBytes(path, Write(nodes));
+    public static void Save(string path, IReadOnlyList<HairGlbNode> nodes, HairGlbRig? rig = null) => File.WriteAllBytes(path, Write(nodes, rig));
 
     private static void ValidateRig(HairGlbRig rig)
     {

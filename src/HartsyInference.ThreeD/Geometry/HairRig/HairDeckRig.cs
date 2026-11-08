@@ -17,6 +17,8 @@ public sealed record HairRigResult(HairGlbRig Rig, HairGlbSkin HairSkin, HairGlb
 /// HairDeck's <c>hairdeck/spring/sim.py</c> and <c>hairdeck/vrm/prep.py</c>. The pivot of the head motion is the mean of the
 /// card roots, and the face width is <see cref="ChainBinding.FaceWidth"/>; the reference takes both from the VRM body, which
 /// this export does not have. Chain tubes follow the nearest chain with full chain weight, which the reference does not do.
+/// The input must be in the head frame (y up, face toward +z, metres): the motions rotate about that frame, so a head in
+/// another frame moves wrongly.
 /// </summary>
 public static class HairDeckRig
 {
@@ -102,7 +104,7 @@ public static class HairDeckRig
 
         if (used.Count == 0)
         {
-            throw new InvalidOperationException("No spring chain binds a hair card, so there is nothing to rig. Rigged output needs chains.");
+            throw new InvalidOperationException($"No spring chain binds a hair card (chains given: {chains.Count}, with at least two joints: {candidates.Count}, binding a card: 0). Rigged output needs a chain that binds at least one card.");
         }
 
         // Joints: 0 is the head; the bones of each used chain follow in chain order.
@@ -352,7 +354,7 @@ public static class HairDeckRig
     private static double MeanLowerDistance(double[] vertices, double[] chain)
     {
         int m = vertices.Length / 3;
-        double[] lower = vertices[(3 * (int)(0.4 * m))..];
+        double[] lower = vertices[(3 * (int)(ChainBinding.LowerStart * m))..];
         ChainBinding.Projection[] projections = ChainBinding.Project(lower, chain);
         double sum = 0;
         foreach (ChainBinding.Projection p in projections)
