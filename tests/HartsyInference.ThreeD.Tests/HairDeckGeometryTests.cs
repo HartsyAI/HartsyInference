@@ -8,24 +8,31 @@ public sealed class HairDeckGeometryTests
     private static readonly float[] HairSrgb = [0.4f, 0.3f, 0.25f];
 
     [Fact]
-    public void Root_width_direction_of_a_planar_card_is_its_plane_normal()
+    public void Root_normal_sets_the_width_direction_of_a_planar_card()
     {
-        DecodedCard card = Arc(4, rootZ: 0f);
+        DecodedCard card = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 1f]);
 
         HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
 
-        // corner 0 of ring 0 is root + (width / 2) * n, so its offset from the root is along the plane normal (z).
+        // corner 0 of ring 0 is root + (width / 2) * normal; the tangent is in the plane, so the normal is kept.
         float[] v = mesh!.Mesh.Vertices;
-        float offsetX = v[0] - card.Centerline[0];
-        float offsetY = v[1] - card.Centerline[1];
-        float offsetZ = v[2] - card.Centerline[2];
-        Assert.Equal(0f, offsetX, 6);
-        Assert.Equal(0f, offsetY, 6);
-        Assert.Equal(MathF.Abs(card.Width) / 2f, MathF.Abs(offsetZ), 6);
+        Assert.Equal(0f, v[0] - card.Centerline[0], 6);
+        Assert.Equal(0f, v[1] - card.Centerline[1], 6);
+        Assert.Equal(0.01f, v[2] - card.Centerline[2], 6);
     }
 
     [Fact]
-    public void Root_width_direction_of_an_oblique_planar_card_is_the_plane_normal()
+    public void Root_normal_sign_is_used_as_given()
+    {
+        DecodedCard card = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, -1f]);
+
+        HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
+
+        Assert.Equal(-0.01f, mesh!.Mesh.Vertices[2] - card.Centerline[2], 6);
+    }
+
+    [Fact]
+    public void Root_normal_of_an_oblique_planar_card_is_kept_in_its_plane_normal_direction()
     {
         // Card in the plane spanned by u = (1, 1, 0) / sqrt 2 and v = (0, 1, 1) / sqrt 2; its normal is (1, -1, 1).
         double s2 = Math.Sqrt(2.0);
@@ -35,11 +42,12 @@ public sealed class HairDeckGeometryTests
         {
             double sv = st[2 * i];
             double tv = st[2 * i + 1];
-            centreline[3 * i] = (float)((sv + 0.0) / s2);
+            centreline[3 * i] = (float)(sv / s2);
             centreline[3 * i + 1] = (float)((sv + tv) / s2);
             centreline[3 * i + 2] = (float)(tv / s2);
         }
-        DecodedCard card = new(centreline, 4, 0.02f, 0.004f, 0, null!);
+        float s3 = (float)Math.Sqrt(3.0);
+        DecodedCard card = Card(centreline, 4, [1f / s3, -1f / s3, 1f / s3]);
 
         HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
 
@@ -53,26 +61,43 @@ public sealed class HairDeckGeometryTests
     }
 
     [Fact]
-    public void Root_width_directions_point_away_from_the_mean_root()
+    public void Per_point_width_profile_drives_each_ring()
     {
-        DecodedCard low = Arc(4, rootZ: -1f);
-        DecodedCard high = Arc(4, rootZ: 1f);
+        float[] widths = [0.02f, 0.01f, 0.03f, 0.005f];
+        DecodedCard card = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 1f]) with { WidthProfile = widths };
 
-        HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([low, high], [], 0), HairSrgb);
+        HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
 
-        // Mean root is at z = 0; the rule flips each normal towards its own root's side, so the low card's
-        // normal points to -z and the high card's to +z (corner 0 offset = (width / 2) * normal).
         float[] v = mesh!.Mesh.Vertices;
-        int lowRing0 = 0;
-        int highRing0 = 4 * low.Points;
-        Assert.True(v[3 * lowRing0 + 2] - low.Centerline[2] < 0f);
-        Assert.True(v[3 * highRing0 + 2] - high.Centerline[2] > 0f);
+        for (int ring = 0; ring < 4; ring++)
+        {
+            int corner0 = 4 * ring;
+            Assert.Equal(widths[ring] / 2f, v[3 * corner0 + 2] - card.Centerline[3 * ring + 2], 6);
+        }
+    }
+
+    [Fact]
+    public void Root_normal_is_required_and_must_not_be_zero()
+    {
+        DecodedCard missing = Arc(4, rootZ: 0f, rootNormal: []);
+        DecodedCard zero = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 0f]);
+
+        Assert.Throws<ArgumentException>(() => HairDeckGeometry.BuildCards(new HairDeckResult([missing], [], 0), HairSrgb));
+        Assert.Throws<ArgumentException>(() => HairDeckGeometry.BuildCards(new HairDeckResult([zero], [], 0), HairSrgb));
+    }
+
+    [Fact]
+    public void Profiles_must_hold_one_value_per_point()
+    {
+        DecodedCard card = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 1f]) with { ThicknessProfile = [0.004f, 0.004f] };
+
+        Assert.Throws<ArgumentException>(() => HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb));
     }
 
     [Fact]
     public void Without_colours_the_base_colour_is_the_hair_colour()
     {
-        DecodedCard card = Arc(4, rootZ: 0f);
+        DecodedCard card = Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 1f]);
 
         HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
 
@@ -86,7 +111,7 @@ public sealed class HairDeckGeometryTests
     {
         float[] bins = new float[16 * 3];
         Array.Fill(bins, 0.5f);
-        DecodedCard card = Arc(4, rootZ: 0f) with { Color = bins };
+        DecodedCard card = Card(Arc(4, rootZ: 0f, rootNormal: [0f, 0f, 1f]).Centerline, 4, [0f, 0f, 1f], bins);
 
         HairCardMesh? mesh = HairDeckGeometry.BuildCards(new HairDeckResult([card], [], 0), HairSrgb);
 
@@ -97,7 +122,7 @@ public sealed class HairDeckGeometryTests
     [Fact]
     public void Cards_with_fewer_than_three_points_are_skipped_and_no_meshable_card_gives_null()
     {
-        DecodedCard two = new([0f, 0f, 0f, 0.01f, 0f, 0f], 2, 0.02f, 0.004f, 0, null!);
+        DecodedCard two = Card([0f, 0f, 0f, 0.01f, 0f, 0f], 2, [0f, 0f, 1f]);
 
         Assert.Null(HairDeckGeometry.BuildCards(new HairDeckResult([two], [], 0), HairSrgb));
     }
@@ -105,13 +130,13 @@ public sealed class HairDeckGeometryTests
     [Fact]
     public void Centreline_length_must_match_the_point_count()
     {
-        DecodedCard bad = new([0f, 0f, 0f, 1f, 0f, 0f], 3, 0.02f, 0.004f, 0, null!);
+        DecodedCard bad = Card([0f, 0f, 0f, 1f, 0f, 0f], 3, [0f, 0f, 1f]);
 
         Assert.Throws<ArgumentException>(() => HairDeckGeometry.BuildCards(new HairDeckResult([bad], [], 0), HairSrgb));
     }
 
     [Fact]
-    public void Chains_use_joint_count_and_skip_nothing_else()
+    public void Chains_use_joint_count_and_ignore_the_path()
     {
         DecodedChain chain = new([0f, 0f, 0f, 0f, 0f, 0.1f, 9f, 9f, 9f], 2, 0.5f);
 
@@ -129,8 +154,23 @@ public sealed class HairDeckGeometryTests
         Assert.Throws<ArgumentException>(() => HairDeckGeometry.BuildChains(new HairDeckResult([], [chain], 0)));
     }
 
-    /// <summary>Points on a circular arc in the xy plane at height rootZ (planar, so its normal is z).</summary>
-    private static DecodedCard Arc(int points, float rootZ)
+    /// <summary>Card with the given centreline; width and thickness profiles are constant.</summary>
+    private static DecodedCard Card(float[] centreline, int points, float[] rootNormal, float[]? colors = null)
+    {
+        float[] widths = new float[points];
+        float[] thicknesses = new float[points];
+        Array.Fill(widths, 0.02f);
+        Array.Fill(thicknesses, 0.004f);
+        return new DecodedCard(centreline, points, 0.02f, 0.004f, 0, colors)
+        {
+            WidthProfile = widths,
+            ThicknessProfile = thicknesses,
+            RootNormal = rootNormal,
+        };
+    }
+
+    /// <summary>Points on a circular arc in the xy plane at height rootZ (planar).</summary>
+    private static DecodedCard Arc(int points, float rootZ, float[] rootNormal)
     {
         float[] centreline = new float[points * 3];
         for (int i = 0; i < points; i++)
@@ -140,6 +180,6 @@ public sealed class HairDeckGeometryTests
             centreline[3 * i + 1] = (float)(0.1 * Math.Sin(angle));
             centreline[3 * i + 2] = rootZ;
         }
-        return new DecodedCard(centreline, points, 0.02f, 0.004f, 0, null!);
+        return Card(centreline, points, rootNormal);
     }
 }
