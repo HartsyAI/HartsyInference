@@ -75,7 +75,9 @@ public static class ModelCatalog
     /// <summary>HairDeck: one character image to hair cards (with optional colours and spring-bone chains). Pinned to the Hugging Face
     /// revision 7d2e07c5b4b22fbffa2df58d20b242db035ed69c; ModelAsset cannot name a revision, so each file's sha256 (from the repository's
     /// MANIFEST.json) verifies the bytes. The primary asset is config.json, whose folder is the model directory. The Vision assets are
-    /// the SAM 3 and BiRefNet-matting checkpoints the preprocessing uses, with the DINOv3 encoder of the image model.</summary>
+    /// the SAM 3 and BiRefNet-matting checkpoints the preprocessing uses, with the DINOv3 encoder of the image model.
+    /// Licences: HairDeck weights Apache-2.0; SAM 3 under the SAM License (gated); DINOv3 under the DINOv3 License (Meta, custom);
+    /// BiRefNet-matting MIT (Hugging Face metadata, 2026-11-08).</summary>
     private static CatalogEntry HairDeck() => new CatalogEntry
     {
         Id = "hairdeck", Modality = Modality.Mesh, DisplayName = "HairDeck (hair cards from one image)",

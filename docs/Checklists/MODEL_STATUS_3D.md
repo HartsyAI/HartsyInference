@@ -19,6 +19,7 @@ Detail in the retired 3D build plan (git history).
 
 | Model | Notes |
 |---|---|
+| **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CPU and CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
 | **Hunyuan3D-2** | Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). ([details](#hunyuan3d-2)) |
 
 Tests: `Hunyuan3DDinoParityTests`, `Hunyuan3DVaeParityTests` (both in
@@ -52,6 +53,11 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Correctness
 - [ ] Hunyuan3D-2 mesh "melting-wax" surface defect — bisect (ShapeVAE decode numerics / Fourier query encoding / missing floater post-process) before re-promoting to ✅.
 
+### HairDeck
+- [ ] Run demo `ex02`–`ex12` (downloads need approval; ~5.9 MB total).
+- [ ] VRM packaging: decide VRM 1.0 vs 0.x and supply a VRM body asset.
+- [ ] cuDNN 9 for CUDA 13 (fast convolution path); record per-step time and peak VRAM.
+
 ### TRELLIS
 - [ ] Sparse-3D conv / attn backend op.
 - [ ] Flexicubes + splat rendering.
@@ -76,6 +82,16 @@ Real-weight image → mesh, verified on **both CPU F32 and the RTX 3060** vs the
 ### Hunyuan3D-2
 
 Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). Rewritten from a wrong-architecture scaffold to the real **Flux-lineage MMDiT** (16 double + 32 single, QK-RMSNorm, no RoPE) + **DINOv2-giant** conditioner (SwiGLU) + **VecSet ShapeVAE** (`post_kl` → 16 self-attn resblocks → cross-attn `geo_decoder` w/ 51-dim Fourier queries). Every *component* is numerically verified in isolation vs hy3dgen: conditioner **corr 1.0**, DiT velocity **corr 0.99999738**, VAE occupancy **corr 0.99999518**. **However, the full pipeline's actual mesh output is defective** — re-verified 2026-07-21 by rendering the `hartsy 3d` CLI's GLB output from 4 angles and visually inspecting it (not just triangle count): the mesh is a recognizable chair silhouette (seat, backrest, four legs) but the surface is covered in "melting wax" drip artifacts, at both reduced (`--steps 20 --grid 128`) and full-default (`--steps 50 --grid 256`) settings — 380K vertices / 760K triangles vs. TripoSR's clean 42K/84K on the same input, consistent with spurious surface crossings from a noisy occupancy field. This was previously marked "✅ verified end-to-end" on the strength of `TriangleCount > 100` passing and a "coherent" claim below that was never re-checked against the actual rendered geometry — see `Hunyuan3DShapePipeline.cs`'s own doc comment, which already said "Numerics validation-pending — produces a real, watertight mesh structurally; per-checkpoint fidelity awaits the reference-diff pass." Root cause **not isolated** (candidates: ShapeVAE decode numerics, Fourier query-point encoding, or a missing floater/post-process step) — needs a dedicated bisect before re-promoting to ✅. Historical perf-pass data (kept for reference, not a correctness claim): gen-perf campaign Rounds 1–8 took 71.3 → 9.2 s (30 steps, grid 128) via a bit-exact fused `Concat` kernel, device DINOv2-giant LayerScale/SwiGLU, fused DiT adaLN + QKV-split-norm kernels, a device FourierEmbed for the VAE, cuDNN fused SDPA, DiT CUDA-graph, and F16 activations; the DiT + ShapeVAE blocks are GPU-resident. Three bugs previously fixed (see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)): timestep `max_period=time_factor=1000`; CUDA activation-cache reshape identity; async-race/perf (the GPU-residency rewrite) — none of these explain the current mesh-surface defect. **Caveat:** background removal is done in Python (shared C# foreground-tool TODO with TripoSR).
+
+### HairDeck
+
+Image → hair cards from `hyz317/HairDeck` (pinned revision in the catalog). Static GLB (`hair_cards`, `spring_chains`) and rigged GLB (skin to spring chains, clips `turn`, `nod`, `jump`, `sway`).
+
+- **Evidence:** CUDA (RTX 3060, driver 610.88) on `ex01.png`, seed 0: static and rigged GLBs written. Independent Python check of the rigged GLB: rest-pose error 1.5e-8 m; peak displacement 0.19–0.30 m per clip. Unit tests: spring simulation matches the reference's `sim.py` output to 1e-9 for turn and jump.
+- **Not run:** `ex02`–`ex12`; cuDNN fast path (the CUDA 12 cuDNN build is rejected under the CUDA 13 driver); per-step timings and VRAM; real-weight integration tests.
+- **Assumptions in the rig:** head-motion pivot is the mean card root; face width is 0.15 m (the reference takes both from a VRM body).
+- **Not implemented:** VRM packaging. Upstream exports VRM 0.x; `VRMC_springBone` is VRM 1.0. A VRM export needs a VRM body asset, which is not in the repo.
+- **Licences:** HairDeck weights Apache-2.0 (`hyz317/HairDeck`). SAM 3 under the SAM License (Hugging Face tag `other`, gated). DINOv3 under the DINOv3 License (Meta, `ai.meta.com`). BiRefNet-matting MIT (`ZhengPeng7/BiRefNet-matting`).
 
 ### TRELLIS
 
