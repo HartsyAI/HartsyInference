@@ -63,7 +63,7 @@ public sealed partial class CudaBackend
             switch (op)
             {
                 case LayoutOp.Copy: _kernels!.LaunchCopyStrided(pOut, pIn, strided, _stream.Handle); break;
-                case LayoutOp.Accumulate: _kernels!.LaunchAccumulateStrided(pOut, pIn, strided, output.DType, _stream.Handle); break;
+                case LayoutOp.Accumulate: _kernels!.LaunchAccumulateStrided(pOut, pIn, strided, output.DType, input.DType, _stream.Handle); break;
                 default: _kernels!.LaunchPad(pOut, pIn, pad, _stream.Handle); break;
             }
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
