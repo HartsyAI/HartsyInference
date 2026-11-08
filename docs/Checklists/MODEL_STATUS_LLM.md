@@ -141,12 +141,15 @@ streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCH
 - ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
 - ✅ Vision tower with deepstack merger: relative parity 2.7e-6 against a numpy transcription on the real weights (grid 1×16×24).
 - ✅ Cross-attention query and key RoPE and the row mask, as an optional `MultimodalRope` (mllama default unchanged).
-- ✅ Text decoder body (`Models/MossVl/MossVlTextDecoder`): headless `GenericTransformer` over `model.language_model.*`, the
-  token embedding, the separator, and the single-image positions with interleaved M-RoPE (`MossVlPositions`).
+- ✅ Text model (`Models/MossVl/MossVlTextDecoder`): `GenericTransformer` over `model.language_model.*` and `lm_head`, plus the
+  vision separator; single-image positions with interleaved M-RoPE (`MossVlPositions`).
 - ✅ Text parity on the real weights, layers 0–2 (self, self, gated cross): the cross layer's own delta matches the numpy
   transcription at relative 5e-7. The gates are about 1e-2, so the delta is checked directly; a missing query rotation fails it.
-- ❌ Multi-image cross-attention masks (refused with an error), tokenizer/processor, `lm_head` and logits.
-- ❌ Generation, realtime session loop, CUDA/Vulkan kernels, the full 48-layer parity. No real generation has run.
+- ✅ Logits and KV-cached decode (`MossVlDecodeSession`): prefill and one decode step match the reference at relative ~1e-6, and the greedy token agrees (`MossVlGenerationParityTests`).
+- ✅ Tokenizer: the chat template encodes to the HF `tokenizers` ids through the shared `tokenizer.json` loader (`MossVlTokenizerTests`).
+- ✅ Generator (`MossVlGenerator.Generate`): sampling loop on the shared `SamplerChain`, same defaults as `MllamaGenerator`.
+- ❌ Multi-image cross-attention masks (refused with an error). Image preprocessing and vision-tower wiring belong to Engine composition.
+- ❌ Realtime session loop, CUDA/Vulkan kernels, full 48-layer run. The full F32 text model needs about 42 GB, more than this machine's 40 GB of RAM, so a full-model run needs streamed or BF16 weights first. No real generation has run.
 
 ## Remaining work
 

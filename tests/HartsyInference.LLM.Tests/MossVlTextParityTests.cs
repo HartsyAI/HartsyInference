@@ -54,15 +54,15 @@ public sealed class MossVlTextParityTests
         using Tensor vision = decoder.AppendSeparator(merged);
 
         MossVlPositionPlan plan = MossVlPositions.Plan(ids, config.ImageTokenId, [new MossVlImage(MergedHeight, MergedWidth)]);
-        using MossVlRope rope = MossVlPositions.BuildRope(plan, config.Text.HeadDim, config.Text.RopeTheta,
-            [.. config.MropeSection], config.MropeInterleaved);
-        using Tensor embeds = decoder.EmbedTokens(ids);
-        using FixedKvCache cache = decoder.NewKvCache(ids.Length + 1);
+        using MossVlRope rope = MossVlPositions.BuildRope(plan, config);
+        using Tensor embeds = new(new TensorShape(1, ids.Length, config.Text.HiddenSize), DType.F32);
+        decoder.Model.EmbedLookup(embeds, ids);
+        using FixedKvCache cache = new(Layers, 1, config.Text.NumKvHeads, config.Text.HeadDim, ids.Length + 1);
 
         // Layers [0, CrossLayer) first, then the cross-attention layer alone on that state, so its contribution can be read off.
-        using Tensor before = decoder.Body.ForwardEmbeds(backend, embeds, ids.Length, 0, cache, applyFinalNorm: false,
+        using Tensor before = decoder.Model.ForwardEmbeds(backend, embeds, ids.Length, 0, cache, applyFinalNorm: false,
             endLayer: CrossLayer, crossStates: vision, crossLen: (int)vision.Shape[1], rope: rope.Rope);
-        using Tensor after = decoder.Body.ForwardEmbeds(backend, before, ids.Length, 0, cache, applyFinalNorm: false,
+        using Tensor after = decoder.Model.ForwardEmbeds(backend, before, ids.Length, 0, cache, applyFinalNorm: false,
             startLayer: CrossLayer, endLayer: CrossLayer + 1, crossStates: vision, crossLen: (int)vision.Shape[1], rope: rope.Rope,
             advanceCache: false);
 

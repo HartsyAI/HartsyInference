@@ -105,6 +105,10 @@ public static class MossVlPositions
         return new MossVlPositionPlan { Text = text, Vision = vision, VisionLength = visionLength, RowMask = rowMask };
     }
 
+    /// <summary>Builds the rotary tables for <paramref name="plan"/> from a MOSS-VL configuration's text section.</summary>
+    public static MossVlRope BuildRope(MossVlPositionPlan plan, MossVlConfig config) =>
+        BuildRope(plan, config.Text.HeadDim, config.Text.RopeTheta, [.. config.MropeSection], config.MropeInterleaved);
+
     /// <summary>Builds the rotary tables for <paramref name="plan"/>: pair <c>j</c> of each row rotates by its interleaved M-RoPE axis,
     /// as the modeling code's <c>apply_interleaved_mrope</c> does. The result owns its tensors.</summary>
     public static MossVlRope BuildRope(MossVlPositionPlan plan, int headDim, double theta, ReadOnlySpan<int> mropeSection, bool interleaved)

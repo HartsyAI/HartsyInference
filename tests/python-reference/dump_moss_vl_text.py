@@ -162,26 +162,14 @@ def cross_layer(w, x, i, vision, text_cos, text_sin, vision_cos, vision_sin, row
     return x + np.tanh(w.get(p + "cross_attn_mlp_gate")) * mlp
 
 
-def main():
-    out_dir = sys.argv[1]
-    merged_path = sys.argv[2]
-    root = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_CHECKPOINT
-    os.makedirs(out_dir, exist_ok=True)
-    w = Weights(root)
-
-    text_pos, vision_pos = positions(PROMPT_IDS, IMAGE_TOKEN_ID, MERGED_H, MERGED_W)
+def run_layers(w, ids, vision, merged_h, merged_w):
+    """Layers [0, LAYERS) over the prompt ids. Returns the hidden state and the input of the cross-attention layer."""
+    text_pos, vision_pos = positions(ids, IMAGE_TOKEN_ID, merged_h, merged_w)
     text_cos, text_sin = mrope_cos_sin(text_pos)
     vision_cos, vision_sin = mrope_cos_sin(vision_pos)
-
-    first_image = PROMPT_IDS.index(IMAGE_TOKEN_ID)
-    row_mask = np.array([1.0 if i >= first_image else 0.0 for i in range(len(PROMPT_IDS))], dtype=np.float32)
-
-    merged = np.load(merged_path).astype(np.float32)
-    assert merged.shape == (MERGED_H * MERGED_W, HIDDEN), merged.shape
-    vision = np.concatenate([merged, w.get("model.separator_token")[None]], axis=0)
-    assert vision.shape[0] == vision_pos.shape[1]
-
-    x = w.get("model.language_model.embed_tokens.weight")[np.array(PROMPT_IDS)].astype(np.float32)
+    first_image = ids.index(IMAGE_TOKEN_ID)
+    row_mask = np.array([1.0 if i >= first_image else 0.0 for i in range(len(ids))], dtype=np.float32)
+    x = w.get("model.language_model.embed_tokens.weight")[np.array(ids)].astype(np.float32)
     cross_input = None
     for i in range(LAYERS):
         if i in CROSS_LAYERS:
@@ -189,19 +177,55 @@ def main():
             x = cross_layer(w, x, i, vision, text_cos, text_sin, vision_cos, vision_sin, row_mask)
         else:
             x = self_layer(w, x, i, text_cos, text_sin)
+    return x, cross_input
+
+
+def last_logits(w, x):
+    """Final norm, then the lm_head, for the last position only."""
+    h = rms_norm(x[-1:], w.get("model.language_model.norm.weight"))
+    return linear(h, w.get("lm_head.weight"))[0]
+
+
+def main():
+    out_dir = sys.argv[1]
+    merged_path = sys.argv[2]
+    root = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_CHECKPOINT
+    os.makedirs(out_dir, exist_ok=True)
+    w = Weights(root)
+
+    merged = np.load(merged_path).astype(np.float32)
+    assert merged.shape == (MERGED_H * MERGED_W, HIDDEN), merged.shape
+    vision = np.concatenate([merged, w.get("model.separator_token")[None]], axis=0)
+
+    # Prompt: hidden state, cross-layer input (for the delta check), and the next-token logits.
+    x, cross_input = run_layers(w, PROMPT_IDS, vision, MERGED_H, MERGED_W)
+    prefill_logits = last_logits(w, x)
+    step_token = int(np.argmax(prefill_logits))
+
+    # Decode step: the same forward over the prompt plus that token, last row. Causality makes this equal to a KV-cache step;
+    # the new token's position continues the prompt's (max + 1), as the modeling code's rope_deltas do.
+    extended = PROMPT_IDS + [step_token]
+    x2, _ = run_layers(w, extended, vision, MERGED_H, MERGED_W)
+    step_logits = last_logits(w, x2)
+
     # The gated cross-attention output is small (gates ~1e-2), so the C# test checks the layer's own delta too.
     np.save(os.path.join(out_dir, "text_hidden.npy"), x.astype(np.float32))
     np.save(os.path.join(out_dir, "cross_input.npy"), cross_input.astype(np.float32))
+    np.save(os.path.join(out_dir, "prefill_logits.npy"), prefill_logits.astype(np.float32))
+    np.save(os.path.join(out_dir, "step_logits.npy"), step_logits.astype(np.float32))
     with open(os.path.join(out_dir, "prompt_ids.txt"), "w") as f:
         f.write(" ".join(str(t) for t in PROMPT_IDS))
+    with open(os.path.join(out_dir, "step_token.txt"), "w") as f:
+        f.write(str(step_token))
+    text_pos, _ = positions(PROMPT_IDS, IMAGE_TOKEN_ID, MERGED_H, MERGED_W)
     meta = {
         "prompt_ids": PROMPT_IDS, "image_token_id": IMAGE_TOKEN_ID, "merged_h": MERGED_H, "merged_w": MERGED_W,
         "layers": LAYERS, "text_positions": text_pos.tolist(), "vision_length": int(vision.shape[0]),
-        "row_mask": row_mask.tolist(), "seed_source": "vision merged.npy",
+        "step_token": step_token, "seed_source": "vision merged.npy",
     }
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)
-    print("wrote", os.path.join(out_dir, "text_hidden.npy"), x.shape)
+    print("wrote", out_dir, "step token", step_token)
 
 
 if __name__ == "__main__":

@@ -87,10 +87,15 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
   `HARTSY_MOSS_VL_REF`). The reference is a numpy transcription of `modeling_moss_vl.py`, not the official code executed.
 - Cross-attention RoPE: `MllamaCrossAttentionLayer.Forward` takes an optional `MultimodalRope` (text cos/sin for the queries,
   vision cos/sin for the keys, and a per-row mask). `GenericTransformer.ForwardEmbeds` takes the same tables; null keeps the mllama path.
-- Text decoder: `src/HartsyInference.LLM/Models/MossVl/MossVlTextDecoder.cs` (headless body, embedding, separator) and
+- Text model: `src/HartsyInference.LLM/Models/MossVl/MossVlTextDecoder.cs` (`GenericTransformer` with `lm_head`, and the separator) and
   `MossVlPositions.cs` (single-image positions per `compute_position_ids` and `compute_vision_position_ids`, interleaved M-RoPE).
   Parity: `tests/python-reference/dump_moss_vl_text.py` against `MossVlTextParityTests` (layers 0–2, real weights). The cross
   layer's delta matches at relative 5e-7. The checkpoint's gates are about 1e-2, so the full hidden state alone would not catch a
   cross-attention error; the test checks the delta.
-- Not built: multi-image cross-attention masks (refused), tokenizer/processor, `lm_head` and logits, generation, realtime loop,
-  CUDA and Vulkan kernels. No real generation has run.
+- Logits and decode: `MossVlDecodeSession` (`src/HartsyInference.LLM/Models/MossVl/MossVlGenerator.cs`) runs prefill and KV-cached
+  steps, with the decode token at the prompt's next position and the same vision features read by the cross layers. Parity
+  against the numpy recompute: relative ~1e-6, same greedy token. Reuses `GenericTransformer.ProjectLogits`, `SamplerChain` and
+  `VlmDecodeOps`, and `HfTokenizerJson` for `tokenizer.json`.
+- Not built: multi-image cross-attention masks (refused), image preprocessing and vision-tower wiring (Engine composition),
+  realtime loop, CUDA and Vulkan kernels. The full F32 text model is about 42 GB and does not fit this machine's 40 GB RAM, so a
+  full-model run needs streamed or BF16 weights first. No real generation has run.
