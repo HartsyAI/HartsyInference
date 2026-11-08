@@ -44,7 +44,7 @@ public sealed unsafe class Sam3Pipeline : ITextGroundedSegmenter
         try
         {
             loader.Load(checkpointPath);
-            Sam3WeightGroups groups = Sam3Converter.Convert(loader.GetAllTensors());
+            Sam3WeightGroups groups = Sam3Converter.Convert(loader.GetAllTensors(), config);
 
             tokenizer = new Sam3Tokenizer();
             Sam3TextEncoder textEncoder = new(config, groups.TextEncoder);

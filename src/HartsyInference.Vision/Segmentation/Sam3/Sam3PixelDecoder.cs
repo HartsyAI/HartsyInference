@@ -64,7 +64,7 @@ public sealed class Sam3PixelDecoder
                 throw new ArgumentException($"Pixel decoder level {i} must be F32 [1, {_channels}, H, W]; got {level.DType} {level.Shape}.", nameof(levels));
             }
 
-            if (i > 0 && (level.Shape[2] != 2 * levels[i - 1].Shape[2] || level.Shape[3] != 2 * levels[i - 1].Shape[3]))
+            if (i > 0 && (2 * level.Shape[2] != levels[i - 1].Shape[2] || 2 * level.Shape[3] != levels[i - 1].Shape[3]))
             {
                 throw new ArgumentException($"Pixel decoder level {i} must be half the size of level {i - 1}; got {level.Shape}.", nameof(levels));
             }

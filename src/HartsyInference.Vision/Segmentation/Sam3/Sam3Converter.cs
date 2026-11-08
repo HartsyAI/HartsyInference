@@ -60,22 +60,30 @@ public static class Sam3Converter
         ".position_ids",
     ];
 
-    /// <summary>Required relative keys per component, sorted ordinally so error messages are deterministic.</summary>
-    private static readonly Dictionary<Sam3Part, SortedSet<string>> ExpectedKeys = BuildExpectedKeys();
-
-    /// <summary>Splits a SAM 3 state dict into image-path weight groups and lists the keys the image path does not load.</summary>
+    /// <summary>Splits a SAM 3 state dict into image-path weight groups, using the upstream default sizes.</summary>
     /// <param name="stateDict">Checkpoint tensors keyed by full name. Not modified, copied or disposed.</param>
     /// <returns>Weight groups keyed relative to each component prefix, plus the sorted full names of unused keys.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="stateDict"/> is null.</exception>
     /// <exception cref="InvalidDataException">The dict is empty, holds an unexpected <c>detector.</c> key, or lacks a required key.</exception>
-    public static Sam3WeightGroups Convert(IReadOnlyDictionary<string, Tensor> stateDict)
+    public static Sam3WeightGroups Convert(IReadOnlyDictionary<string, Tensor> stateDict) => Convert(stateDict, Defaults);
+
+    /// <summary>Splits a SAM 3 state dict into image-path weight groups sized by <paramref name="config"/>.</summary>
+    /// <param name="stateDict">Checkpoint tensors keyed by full name. Not modified, copied or disposed.</param>
+    /// <param name="config">Hyperparameters that set the expected layer and block counts.</param>
+    /// <returns>Weight groups keyed relative to each component prefix, plus the sorted full names of unused keys.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="stateDict"/> or <paramref name="config"/> is null.</exception>
+    /// <exception cref="InvalidDataException">The dict is empty, holds an unexpected <c>detector.</c> key, or lacks a required key.</exception>
+    public static Sam3WeightGroups Convert(IReadOnlyDictionary<string, Tensor> stateDict, Sam3Config config)
     {
         ArgumentNullException.ThrowIfNull(stateDict);
+        ArgumentNullException.ThrowIfNull(config);
         if (stateDict.Count == 0)
         {
             throw new InvalidDataException("SAM 3 state dict is empty; expected detector.* tensors.");
         }
 
+        // Required relative keys per component, sorted ordinally so error messages are deterministic.
+        Dictionary<Sam3Part, SortedSet<string>> expectedKeys = BuildExpectedKeys(config);
         Dictionary<Sam3Part, Dictionary<string, Tensor>> buckets = CreateBuckets();
         List<string> unused = [];
 
@@ -100,7 +108,7 @@ public static class Sam3Converter
                 throw new InvalidDataException("SAM 3 checkpoint key '" + entry.Key + "' matches no image-path component.");
             }
 
-            if (!ExpectedKeys[part].Contains(partKey))
+            if (!expectedKeys[part].Contains(partKey))
             {
                 throw new InvalidDataException("SAM 3 checkpoint key '" + entry.Key + "' is not an expected key of the " + part + " group.");
             }
@@ -110,7 +118,7 @@ public static class Sam3Converter
 
         foreach (Sam3Part part in Enum.GetValues<Sam3Part>())
         {
-            foreach (string partKey in ExpectedKeys[part])
+            foreach (string partKey in expectedKeys[part])
             {
                 if (!buckets[part].ContainsKey(partKey))
                 {
@@ -211,27 +219,27 @@ public static class Sam3Converter
         _ => throw new ArgumentOutOfRangeException(nameof(part), part, "Unknown SAM 3 component."),
     };
 
-    private static Dictionary<Sam3Part, SortedSet<string>> BuildExpectedKeys()
+    private static Dictionary<Sam3Part, SortedSet<string>> BuildExpectedKeys(Sam3Config config)
     {
         Dictionary<Sam3Part, SortedSet<string>> expected = [];
-        expected[Sam3Part.VisionTrunk] = VisionTrunkKeys();
+        expected[Sam3Part.VisionTrunk] = VisionTrunkKeys(config);
         expected[Sam3Part.VisionNeck] = VisionNeckKeys();
-        expected[Sam3Part.TextEncoder] = TextEncoderKeys();
-        expected[Sam3Part.FusionEncoder] = FusionEncoderKeys();
-        expected[Sam3Part.Decoder] = DecoderKeys();
-        expected[Sam3Part.GeometryEncoder] = GeometryEncoderKeys();
+        expected[Sam3Part.TextEncoder] = TextEncoderKeys(config);
+        expected[Sam3Part.FusionEncoder] = FusionEncoderKeys(config);
+        expected[Sam3Part.Decoder] = DecoderKeys(config);
+        expected[Sam3Part.GeometryEncoder] = GeometryEncoderKeys(config);
         expected[Sam3Part.Scoring] = ScoringKeys();
         expected[Sam3Part.SegmentationHead] = SegmentationHeadKeys();
         return expected;
     }
 
-    private static SortedSet<string> VisionTrunkKeys()
+    private static SortedSet<string> VisionTrunkKeys(Sam3Config config)
     {
         SortedSet<string> keys = NewKeySet();
         keys.Add("patch_embed.proj.weight");
         keys.Add("pos_embed");
         AddPair(keys, "ln_pre");
-        for (int block = 0; block < Defaults.VitDepth; block++)
+        for (int block = 0; block < config.VitDepth; block++)
         {
             string prefix = "blocks." + block.ToString(CultureInfo.InvariantCulture) + ".";
             AddPair(keys, prefix + "norm1");
@@ -260,12 +268,12 @@ public static class Sam3Converter
         return keys;
     }
 
-    private static SortedSet<string> TextEncoderKeys()
+    private static SortedSet<string> TextEncoderKeys(Sam3Config config)
     {
         SortedSet<string> keys = NewKeySet();
         keys.Add("encoder.token_embedding.weight");
         keys.Add("encoder.positional_embedding");
-        for (int layer = 0; layer < Defaults.TextLayers; layer++)
+        for (int layer = 0; layer < config.TextLayers; layer++)
         {
             string prefix = "encoder.transformer.resblocks." + layer.ToString(CultureInfo.InvariantCulture) + ".";
             AddAttention(keys, prefix + "attn");
@@ -281,10 +289,10 @@ public static class Sam3Converter
         return keys;
     }
 
-    private static SortedSet<string> FusionEncoderKeys()
+    private static SortedSet<string> FusionEncoderKeys(Sam3Config config)
     {
         SortedSet<string> keys = NewKeySet();
-        for (int layer = 0; layer < Defaults.EncoderLayers; layer++)
+        for (int layer = 0; layer < config.EncoderLayers; layer++)
         {
             string prefix = "layers." + layer.ToString(CultureInfo.InvariantCulture) + ".";
             AddAttention(keys, prefix + "self_attn");
@@ -299,7 +307,7 @@ public static class Sam3Converter
         return keys;
     }
 
-    private static SortedSet<string> DecoderKeys()
+    private static SortedSet<string> DecoderKeys(Sam3Config config)
     {
         SortedSet<string> keys = NewKeySet();
         keys.Add("query_embed.weight");
@@ -319,7 +327,7 @@ public static class Sam3Converter
         AddPair(keys, "presence_token_head.layers.1");
         AddPair(keys, "presence_token_head.layers.2");
         AddPair(keys, "presence_token_out_norm");
-        for (int layer = 0; layer < Defaults.DecoderLayers; layer++)
+        for (int layer = 0; layer < config.DecoderLayers; layer++)
         {
             string prefix = "layers." + layer.ToString(CultureInfo.InvariantCulture) + ".";
             AddAttention(keys, prefix + "cross_attn");
@@ -336,7 +344,7 @@ public static class Sam3Converter
         return keys;
     }
 
-    private static SortedSet<string> GeometryEncoderKeys()
+    private static SortedSet<string> GeometryEncoderKeys(Sam3Config config)
     {
         SortedSet<string> keys = NewKeySet();
         keys.Add("label_embed.weight");
@@ -350,7 +358,7 @@ public static class Sam3Converter
         AddPair(keys, "img_pre_norm");
         AddPair(keys, "final_proj");
         AddPair(keys, "norm");
-        for (int layer = 0; layer < Defaults.GeometryLayers; layer++)
+        for (int layer = 0; layer < config.GeometryLayers; layer++)
         {
             string prefix = "encode." + layer.ToString(CultureInfo.InvariantCulture) + ".";
             AddAttention(keys, prefix + "self_attn");
