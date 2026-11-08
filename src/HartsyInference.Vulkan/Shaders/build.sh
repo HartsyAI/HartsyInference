@@ -111,7 +111,7 @@ SINGLE_KERNELS=(
     quant_int8_rowwise
     dequant_recipe_bf16
     gated_residual_row_indexed
-    cfg_euler
+    guided_euler
     norm_modulate_channel
     chunk_activate
     cast_f32_f16

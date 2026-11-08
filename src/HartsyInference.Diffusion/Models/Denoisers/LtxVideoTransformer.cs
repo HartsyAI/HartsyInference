@@ -29,7 +29,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     // ── Step-graph state (numerics.ditGraph; see ForwardPaired) ──────────────────────────────────────────
     // The captured body (proj_in → 28 blocks → final norm → proj_out, for the cond and uncond passes) reads ONLY
     // fixed device buffers and writes the velocity buffers. Everything per-step-varying is refreshed into a fixed
-    // buffer OUTSIDE the capture: the latent (in-place device CfgEulerStep by the pipeline + PrepareGraphLatent),
+    // buffer OUTSIDE the capture: the latent (in-place device GuidedEulerStep by the pipeline + PrepareGraphLatent),
     // and the tiny timestep tensors temb6/shift/scaleP1 (the existing host TimeEmbed/final-scale build runs outside
     // capture, then CopyInto). The projected encoders are step-invariant → computed once on call 1 and held.
     private Tensor? _latentFixed;
@@ -168,7 +168,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     }
 
     /// <summary>Copies the working latent into the transformer-owned fixed buffer the step graph captures against,
-    /// returning that buffer for the pipeline to denoise in place (device <c>CfgEulerStep</c>). Call once, after the
+    /// returning that buffer for the pipeline to denoise in place (device <c>GuidedEulerStep</c>). Call once, after the
     /// initial noise is built, ONLY when graph mode is being attempted; the returned tensor is transformer-owned
     /// (do NOT dispose it in the pipeline). Returns the original latent unchanged when graph mode is off, so the
     /// eager path allocates nothing extra.</summary>

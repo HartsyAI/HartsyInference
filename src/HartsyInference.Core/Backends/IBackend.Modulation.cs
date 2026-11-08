@@ -179,29 +179,11 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>FourierEmbedder (freqs 2^i, include_input, no include_pi): writes x, sin, cos per band into a 3·(2·bands+1) row.</summary>
-    unsafe void FourierEmbed(Tensor dst, Tensor coords, int count, int bands)
-    {
-        if (dst.DType != DType.F32 || coords.DType != DType.F32) throw new NotSupportedException("FourierEmbed default fallback only supports F32.");
-        int dim = 3 * (2 * bands + 1);
-        int sinBase = 3, cosBase = 3 + 3 * bands;
-        float* dp = (float*)dst.DataPointer, cp = (float*)coords.DataPointer;
-        for (int i = 0; i < count; i++)
-        {
-            long o = (long)i * dim;
-            for (int c = 0; c < 3; c++)
-            {
-                float x = cp[i * 3 + c];
-                dp[o + c] = x;
-                for (int band = 0; band < bands; band++)
-                {
-                    float a = x * (1 << band);
-                    dp[o + sinBase + c * bands + band] = MathF.Sin(a);
-                    dp[o + cosBase + c * bands + band] = MathF.Cos(a);
-                }
-            }
-        }
-    }
+    /// <summary>Fourier feature embedding of <c>[count, InputDims]</c> coordinates into <c>[count, spec.Width]</c> rows: the
+    /// coordinates when the spec includes them, then <c>sin(x · 2^b)</c> coordinate-major over the bands, then the cosines
+    /// (Hunyuan3D's query embedding: 3 coordinates, 8 bands, input included). F32. Contract:
+    /// <see cref="Contracts.FourierEmbedContract"/>; reference: <see cref="FourierEmbedReference"/>.</summary>
+    void FourierEmbed(Tensor output, Tensor coords, in FourierEmbedSpec spec) => FourierEmbedReference.Apply(output, coords, spec);
 
     /// <summary>Cuts the last axis of <paramref name="input"/> <c>[rows, count · width]</c> into <paramref name="outputs"/>, each
     /// <c>[rows, width]</c>, passing chunk <c>c</c> through <paramref name="activations"/><c>[c]</c>: an adaLN modulation projection

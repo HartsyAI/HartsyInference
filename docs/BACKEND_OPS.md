@@ -235,6 +235,95 @@ into the activation quantize that precedes the GEMM, and composes everything els
 elsewhere, for a combine that runs every expert densely and scales each one's rows with `GroupScale.Column`. The host
 reference writes it from the same routing pass; CUDA and Vulkan write it in the route kernel.
 
+## GuidedEulerStep
+
+```
+guided[i] = g · cond[i] + (1 − g) · uncond[i]          GuidanceForm.Lerp
+          = uncond[i] + g · (cond[i] − uncond[i])      GuidanceForm.Extrapolate
+ratio     = clamp(‖cond‖₂ / (‖guided‖₂ + eps), Min, Max)   over the whole tensor (Global) or each last-dimension row (PerRow); 0 when the denominator is 0
+z[i]     += guided[i] · ratio · delta                   in place; ratio is 1 for GuidanceNorm.None
+```
+
+Reference: `GuidedEulerReference.Apply`. Contract: `GuidedEulerContract.Validate`. A `GuidedEulerSpec` carries the guidance,
+the delta, the blend form and the `GuidanceNorm`; `GuidedEulerSpec.Lerp(g, delta)` is the flow-match samplers' step (both
+predictions the same tensor and `g` 1 is an unguided Euler step; a zero-filled latent and delta 1 leave the blended logits),
+`GlobalNorm(g, delta, min)` Lance's renormalized step and `RowNorm(g, delta)` Lumina 2's per-row normalized step. The two
+blend forms are one value in exact arithmetic and differ in the last bit in F32, so a model keeps the form its reference uses.
+The norms sum in F64. A zero delta leaves the latent untouched. F32; the predictions may be one tensor but neither may share
+storage with the latent.
+
+## TopKGuidedLogits
+
+```
+threshold = the K-th largest cond[r, ·]
+out[r, i] = cond[r, i] < threshold ? −∞ : uncond[r, i] + (cond[r, i] − uncond[r, i]) · g
+```
+
+Reference: `TopKGuidedReference.Apply`. Contract: `TopKGuidedContract.Validate`. Ties at the threshold stay candidates. F32
+rows of `[rows, width]` with `1 ≤ topK ≤ width`; the −∞ entries are the contract, so a sampler that follows draws only from the
+conditional top-K (MiniMax Music 3's semantic draw).
+
+## Row index ops
+
+```
+GatherRows      output[m] = input[indices[m]]
+ScatterAddRows  output[indices[m]] += weights[m] · input[m]     weights optional (1 without); each destination row named at most once
+GatherAddRows   h[r] += table[indices[r]]                       for every row of h
+```
+
+Reference: `RowIndexReference.Gather`, `ScatterAdd`, `GatherAdd`. Contract: `RowIndexContract.ValidateGather`, `ValidateScatterAdd`,
+`ValidateGatherAdd`. Rows are the last extent of the indexed tensor; F32 rows, I32 index, F32 weights. The index is bounds-checked
+(and, for the scatter-add, checked for repeats) when its host bytes are current (`Tensor.HostBytesCurrent`); an index that lives on
+the device is the caller's to keep in range and, for the scatter-add, free of repeats, because the kernels add without atomics.
+`GatherRows` and `ScatterAddRows` also take host spans, which become host tensors for the call (`IndexTensor.Rows`, `Values`).
+`TryGatherRowsResident` is the residency probe beside them: a gather that runs only when the input is already on the device.
+
+## GridScatter, GridGather
+
+```
+cell(v)              = (d · Height + h) · Width + w       (d, h, w) = coords[v, FirstCoordColumn .. +2] of a CoordStride-wide row
+GridScatter          grid[c, cell(v)] = features[v, c]    in place; every other cell keeps its bytes; each cell written at most once
+GridGather           features[v, c] = grid[c, cell(v)]
+```
+
+Reference: `GridReference.Scatter`, `Gather`. Contract: `GridContract.Validate`. A `GridSpec` names the grid extents and how a
+coordinate row is read; `GridSpec.Cube(r, 4, 1)` is TRELLIS's `[batch, d, h, w]` table over an `r³` grid. The grid holds
+`channels · Depth · Height · Width` F32 elements (`[1, C, D, H, W]` or `[C, D, H, W]`), features `[voxels, channels]`, coordinates
+I32. Coordinates are range-checked (and, for the scatter, checked for repeated cells) when their host bytes are current.
+
+## NeighborhoodAttention
+
+```
+out[b, t, h, w, head, :] = softmax_j(scale · q · k_j) · v_j     j over the window [t0, t0 + kT) × [h0, h0 + kH) × [w0, w0 + kW)
+start(i, n, k)           = clamp(i − k / 2, 0, n − k)             the window slides inward at the borders (NATTEN's rule)
+```
+
+Reference: `NeighborhoodAttentionReference.Apply`. Contract: `NeighborhoodAttentionContract.Validate` (`WindowStart` is the
+border rule). F32 `[batch, T, H, W, heads, headDim]` q, k and v; a `NeighborhoodWindow` extent longer than its axis collapses to
+the axis; the output is the q grid or its flat `[tokens, heads · headDim]` form, so a caller whose next op is row-wise allocates
+it flat and skips a reshape. CUDA runs the per-query kernel, or the query-tiled kernels at head width 64 unless
+`numerics.neighborhoodAttentionTiled` is off (the tiled path is an online softmax over the tile's union window, a different
+summation order).
+
+## FakeQuantizeUniform
+
+```
+out[i] = low + trunc((clamp(in[i], low, high) − low) / (high − low) · (levels − 1)) / (levels − 1) · (high − low)
+```
+
+Reference: `FakeQuantizeReference.Apply`. Contract: `FakeQuantizeContract.Validate`. F32; `low < high`, at least two levels.
+DIAMOND's pixel quantization is `(−1, 1, 256)`.
+
+## FourierEmbed
+
+```
+row = [ x₀ … x_{D−1} (IncludeInput) | sin(x_c · 2^b) for c, then b | cos(x_c · 2^b), the same order ]      width = (IncludeInput ? D : 0) + 2 · D · bands
+```
+
+Reference: `FourierEmbedReference.Apply`. Contract: `FourierEmbedContract.Validate`. A `FourierEmbedSpec` names the input
+dimensions, the bands (at most 30, so `2^b` stays an exact integer) and whether the coordinates lead the row. F32 `[count, D]`
+coordinates. Hunyuan3D's query embedding is `(3, 8, IncludeInput: true)`.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -243,7 +332,8 @@ Every implementation of these ops:
 - adds no host synchronization and reads no host memory of a device-resident operand;
 - is graph-capture safe: the geometry is passed by value as kernel parameters or push constants, never through
   constant memory or a device-side spec buffer;
-- is one launch per call.
+- is one launch per call, except the globally normalized `GuidedEulerStep`, which is three (the partial sums, the
+  ratio, the update), as the op it replaced was.
 
 ## Backend coverage
 
@@ -259,6 +349,13 @@ Every implementation of these ops:
 | `Glu` | reference | `glu_gate.ptx` (`glu_f32/f16/bf16`) | `glu_f32/f16`; BF16 takes the reference |
 | `GroupScale` | reference | `group_scale_f32`, `_f16_f32`, `_f16_f16`, `_bf16_f32`, `_bf16_bf16` | `group_scale_f32/f16/f16_f16`; BF16 takes the reference |
 | `LinearFused` | composed | int8 fused epilogues where eligible, else composed | composed |
+| `GuidedEulerStep` | reference | `guided_euler.ptx` (`guided_euler_f32`; `_reduce/_finalize/_scaled` for the global norm; `_rows` per row) | `guided_euler`; the normalized forms take the reference |
+| `TopKGuidedLogits` | reference | `topk_guided_logits.ptx` (`topk_guided_logits_f32`, rows up to 16448 wide) | reference |
+| `GatherRows`, `ScatterAddRows`, `GatherAddRows` | reference | `row_index.ptx` (`gather_rows_f32`, `scatter_add_rows_f32`, `gather_add_rows_f32`) | reference (`TryGatherRowsResident` copies resident rows) |
+| `GridScatter`, `GridGather` | reference | `grid_scatter_f32`, `grid_gather_f32` | reference |
+| `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
+| `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
+| `FourierEmbed` | reference | `fourier_embed_f32` | reference |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 
@@ -279,4 +376,10 @@ are `QkvDecodeEpilogue` calls built with `QkvDecodeCall`'s factories (`--op qkvd
 `LayerNormModulate`, `RmsNormModulate`, `Ltx2RmsModulate`, `OasisAdaLn`, `WanRmsNormChannel` and `ChannelLayerNorm3d` are
 `NormModulate` calls, `ModulationSplit4` is a `ChunkActivate` (`--op normmod`). `GluActivate`, `GluActivateEmitQ8`, `GeGlu`,
 `GegluErf` and `SituGlu` are `Glu` calls; `MaskRows`, `Ltx2HeadGate` and `RowGatedAccumulate` are `GroupScale`; `LinearGelu`
-and `LinearHeadGated` are `LinearFused`; `MoeTopKGate` is `MoeRoute` with its dense output (`--op gating`).
+and `LinearHeadGated` are `LinearFused`; `MoeTopKGate` is `MoeRoute` with its dense output (`--op gating`). `CfgEulerStep`, `CfgRenormEulerStep` and
+`CfgNormalizedEulerStep` are `GuidedEulerStep` calls built with `GuidedEulerSpec`'s factories; `CfgTopKGuided` is
+`TopKGuidedLogits` (`--op guidance`). The span-form `GatherRows` and `RowGather` are `GatherRows`; `ScatterAddWeightedRows`
+and `RowScatterAdd` are `ScatterAddRows`; `IndexAddRows` is `GatherAddRows`; `SparseScatterToGrid` and `SparseGatherFromGrid`
+are `GridScatter` and `GridGather` with a `GridSpec` (`--op rowindex`). `Na3d` is `NeighborhoodAttention` with a
+`NeighborhoodWindow` (`--op neighborhood`); `PixelQuantize` is `FakeQuantizeUniform(−1, 1, 256)` and `FourierEmbed` takes a
+`FourierEmbedSpec` (`--op point`).

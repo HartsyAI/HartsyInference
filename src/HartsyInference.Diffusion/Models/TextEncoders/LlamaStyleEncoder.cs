@@ -268,7 +268,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 hidden = next;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous M-RoPE layer activation");
                 if (deepstackFeatures is not null && i < deepstackFeatures.Count)
-                    backend.ScatterAddWeightedRows(hidden, deepstackFeatures[i], visualRows, visualScales);
+                    backend.ScatterAddRows(hidden, deepstackFeatures[i], visualRows, visualScales);
             }
 
             if (_config.HasFinalNorm)
@@ -348,7 +348,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
                 if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer M-RoPE activation");
                 hiddenIsCaptured = false;
                 if (deepstackFeatures is not null && i < deepstackFeatures.Count)
-                    backend.ScatterAddWeightedRows(hidden, deepstackFeatures[i], visualRows, visualScales);
+                    backend.ScatterAddRows(hidden, deepstackFeatures[i], visualRows, visualScales);
                 if (layerIndices[request] == i + 1)
                 {
                     captures.Add(hidden);

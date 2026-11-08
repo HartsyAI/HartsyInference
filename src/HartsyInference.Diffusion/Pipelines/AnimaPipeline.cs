@@ -242,7 +242,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
             float sigma = sigmas[i];
             float sigmaNext = sigmas[i + 1];
 
-            // CFG combine + flow-match Euler stay ONE in-place device op: CfgEulerStep computes
+            // CFG combine + flow-match Euler stay ONE in-place device op: GuidedEulerStep computes
             // v = g·pos + (1−g)·neg (identical to CfgHelper.ApplyCfg's uncond + g·(cond − uncond)) then
             // latent += v·dt, keeping the latent device-resident across the whole loop — EulerSampler.Step IS
             // that same fused call, so a request naming no sampler runs the sequence it always did. Anima hands
@@ -309,7 +309,7 @@ public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
                 }
                 MaskBlendUtilities.BlendChannelsInPlace(latent, noisedSource, latentMask);
                 if (noisedSource != sourceLatent) noisedSource.Dispose();
-                // The blend above wrote the latent on the HOST after CfgEulerStep left it device-resident; without
+                // The blend above wrote the latent on the HOST after GuidedEulerStep left it device-resident; without
                 // this the activation cache still holds the pre-blend device buffer and the next forward would run
                 // against stale data. Masked inpaint only — the plain loop stays drain-free.
                 Backend.FreeActivations();

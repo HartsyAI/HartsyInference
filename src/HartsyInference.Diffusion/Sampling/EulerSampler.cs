@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -7,7 +8,7 @@ namespace HartsyInference.Diffusion.Sampling;
 /// <see cref="SamplerMath"/>.
 ///
 /// <para>It collapses to the single fused device op every pipeline in the engine already calls:
-/// <see cref="IBackend.CfgEulerStep"/>, which combines cond/uncond by CFG and applies <c>z += v·dt</c> in place on the
+/// <see cref="IBackend.GuidedEulerStep"/>, which combines cond/uncond by CFG and applies <c>z += v·dt</c> in place on the
 /// GPU-resident latent. That is why <see cref="IDenoisePredictor"/> returns the prediction PAIR — so this path stays
 /// byte-for-byte the instruction sequence it was before the sampler abstraction existed.</para>
 ///
@@ -70,6 +71,6 @@ public sealed class EulerSampler : ISampler
             delta = -delta;
         }
         using DenoisePrediction prediction = predictor.Predict(z, _sigmas[stepIndex], stepIndex);
-        backend.CfgEulerStep(z, prediction.Cond, prediction.Uncond, prediction.Guidance, delta);
+        backend.GuidedEulerStep(z, prediction.Cond, prediction.Uncond, GuidedEulerSpec.Lerp(prediction.Guidance, delta));
     }
 }

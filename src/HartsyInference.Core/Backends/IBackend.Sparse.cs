@@ -1,8 +1,10 @@
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Row gather/scatter by index, sparse grid ops and the triplane sampler.
+// The triplane sampler, the row-index ops (gather, scatter-add, gather-add) and the dense-grid scatter and gather.
 public partial interface IBackend
 {
     /// <summary>TripoSR triplane grid-sample: bilinearly samples the 3 feature planes into a concatenated <c>[3·C]</c> vector per point.</summary>
@@ -52,60 +54,17 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>In-place index-add of embedding rows: <c>h[row,d] += table[indices[row],d]</c>, keeping the embedding GPU-resident.</summary>
-    unsafe void IndexAddRows(Tensor h, Tensor table, Tensor indices)
-    {
-        if (h.DType != DType.F32 || table.DType != DType.F32)
-            throw new NotSupportedException("IndexAddRows default fallback only supports F32.");
-        if (indices.DType != DType.I32)
-            throw new NotSupportedException("IndexAddRows requires I32 indices.");
-        int dim = (int)h.Shape[h.Shape.Rank - 1];
-        long rows = h.ElementCount / dim;
-        float* pH = (float*)h.DataPointer;
-        float* pTable = (float*)table.DataPointer;
-        int* pIdx = (int*)indices.DataPointer;
-        for (long r = 0; r < rows; r++)
-        {
-            long off = r * dim;
-            long tOff = (long)pIdx[r] * dim;
-            for (int d = 0; d < dim; d++) pH[off + d] += pTable[tOff + d];
-        }
-    }
+    /// <summary>Row gather: <c>output[m] = input[indices[m]]</c> over rows of the input's last extent; repeated indices are valid
+    /// (MoE dispatch, the last-row slice, position-row and embedding lookups, the sparse-conv rulebook). F32 rows, I32 index;
+    /// the index is bounds-checked when its host bytes are current. Contract: <see cref="Contracts.RowIndexContract.ValidateGather"/>;
+    /// reference: <see cref="RowIndexReference.Gather"/>.</summary>
+    void GatherRows(Tensor output, Tensor input, Tensor indices) => RowIndexReference.Gather(output, input, indices);
 
-    /// <summary>Gathers rows: <c>output[m] = input[rowIndices[m]]</c> — used for MoE expert dispatch (collects routed tokens).</summary>
-    unsafe void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
+    /// <summary><see cref="GatherRows(Tensor, Tensor, Tensor)"/> over a host index span: the span becomes a host I32 tensor for the call.</summary>
+    void GatherRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices)
     {
-        if (ReferenceEquals(output, input))
-            throw new ArgumentException("GatherRows does not support an in-place output.", nameof(output));
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("GatherRows default fallback only supports F32.");
-        if (input.Shape.Rank < 1)
-            throw new ArgumentException("GatherRows input must have at least one dimension.", nameof(input));
-        long width = input.Shape[input.Shape.Rank - 1];
-        if (width <= 0 || width > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(input), $"GatherRows row width must be in [1,{int.MaxValue}]; got {width}.");
-        long inputRows = input.ElementCount / width;
-        long requiredOutputElements = checked((long)rowIndices.Length * width);
-        if (output.ElementCount != requiredOutputElements)
-            throw new ArgumentException(
-                $"GatherRows output has {output.ElementCount} elements; {rowIndices.Length} rows of width {width} require {requiredOutputElements}.",
-                nameof(output));
-        for (int i = 0; i < rowIndices.Length; i++)
-        {
-            if (rowIndices[i] < 0 || (long)rowIndices[i] >= inputRows)
-                throw new ArgumentOutOfRangeException(
-                    nameof(rowIndices), rowIndices[i], $"Row index at position {i} is outside [0,{inputRows}).");
-        }
-        int k = (int)width;
-        int m = rowIndices.Length;
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        for (int row = 0; row < m; row++)
-        {
-            long src = (long)rowIndices[row] * k;
-            long dst = (long)row * k;
-            Buffer.MemoryCopy(pIn + src, pOut + dst, (long)k * 4, (long)k * 4);
-        }
+        using Tensor indices = IndexTensor.Rows(rowIndices);
+        GatherRows(output, input, indices);
     }
 
     /// <summary>Attempts a device-native row gather only when <paramref name="input"/> is already resident.
@@ -114,60 +73,32 @@ public partial interface IBackend
     /// memory-constrained device merely to collect a handful of rows.</summary>
     bool TryGatherRowsResident(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices) => false;
 
-    /// <summary>Scatter-add with per-row scale: <c>output[rowIndices[m]] += scales[m]*input[m]</c> — combines an MoE expert's output.</summary>
-    unsafe void ScatterAddWeightedRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices, ReadOnlySpan<float> scales)
+    /// <summary>Row scatter-add, in place on <paramref name="output"/>: <c>output[indices[m]] += weights[m] · input[m]</c>, or the
+    /// unweighted row when <paramref name="weights"/> is null (MoE combine, deepstack injection, the rulebook's accumulate). Each
+    /// destination row is named at most once: the kernels add without atomics. F32 rows and weights, I32 index; the index is
+    /// bounds- and repeat-checked when its host bytes are current. Contract: <see cref="Contracts.RowIndexContract.ValidateScatterAdd"/>;
+    /// reference: <see cref="RowIndexReference.ScatterAdd"/>.</summary>
+    void ScatterAddRows(Tensor output, Tensor input, Tensor indices, Tensor? weights = null) => RowIndexReference.ScatterAdd(output, input, indices, weights);
+
+    /// <summary><see cref="ScatterAddRows(Tensor, Tensor, Tensor, Tensor?)"/> over host index and weight spans: both become host tensors for the call.</summary>
+    void ScatterAddRows(Tensor output, Tensor input, ReadOnlySpan<int> rowIndices, ReadOnlySpan<float> weights)
     {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("ScatterAddWeightedRows default fallback only supports F32.");
-        int k = (int)input.Shape[input.Shape.Rank - 1];
-        int m = rowIndices.Length;
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        for (int row = 0; row < m; row++)
-        {
-            float s = scales[row];
-            long dst = (long)rowIndices[row] * k;
-            long src = (long)row * k;
-            for (int j = 0; j < k; j++) pOut[dst + j] += s * pIn[src + j];
-        }
+        using Tensor indices = IndexTensor.Rows(rowIndices);
+        using Tensor scales = IndexTensor.Values(weights);
+        ScatterAddRows(output, input, indices, scales);
     }
 
-    /// <summary>Scatters active-voxel features <c>[N,C]</c> onto a pre-zeroed grid <c>[1,C,R,R,R]</c> for submanifold conv.</summary>
-    unsafe void SparseScatterToGrid(Tensor grid, Tensor feats, Tensor coords, int channels, int resolution)
-    {
-        int n = (int)(feats.ElementCount / channels); long r3 = (long)resolution * resolution * resolution;
-        float* g = (float*)grid.DataPointer, f = (float*)feats.DataPointer; int* cp = (int*)coords.DataPointer;
-        for (int v = 0; v < n; v++)
-        {
-            long cell = (long)cp[v * 4 + 1] * resolution * resolution + (long)cp[v * 4 + 2] * resolution + cp[v * 4 + 3];
-            for (int c = 0; c < channels; c++) g[(long)c * r3 + cell] = f[(long)v * channels + c];
-        }
-    }
+    /// <summary>Gather-add, in place on <paramref name="h"/>: <c>h[r] += table[indices[r]]</c> for every row of <paramref name="h"/>
+    /// (an embedding table added to every token of a sequence). Repeated indices are the common case. F32 rows, I32 index.
+    /// Contract: <see cref="Contracts.RowIndexContract.ValidateGatherAdd"/>; reference: <see cref="RowIndexReference.GatherAdd"/>.</summary>
+    void GatherAddRows(Tensor h, Tensor table, Tensor indices) => RowIndexReference.GatherAdd(h, table, indices);
 
-    /// <summary>Gathers a dense grid to active-voxel features <c>[N,C]</c>: inverse of <see cref="SparseScatterToGrid"/>.</summary>
-    unsafe void SparseGatherFromGrid(Tensor feats, Tensor grid, Tensor coords, int channels, int resolution)
-    {
-        int n = (int)(feats.ElementCount / channels); long r3 = (long)resolution * resolution * resolution;
-        float* g = (float*)grid.DataPointer, f = (float*)feats.DataPointer; int* cp = (int*)coords.DataPointer;
-        for (int v = 0; v < n; v++)
-        {
-            long cell = (long)cp[v * 4 + 1] * resolution * resolution + (long)cp[v * 4 + 2] * resolution + cp[v * 4 + 3];
-            for (int c = 0; c < channels; c++) f[(long)v * channels + c] = g[(long)c * r3 + cell];
-        }
-    }
+    /// <summary>Scatters <c>[voxels, channels]</c> features into their cells of a dense <c>[channels, Depth, Height, Width]</c> grid
+    /// (in place: every other cell keeps its bytes), addressed by the I32 coordinate rows <paramref name="spec"/> describes. Each
+    /// cell is written at most once. F32. Contract: <see cref="Contracts.GridContract"/>; reference: <see cref="GridReference.Scatter"/>.</summary>
+    void GridScatter(Tensor grid, Tensor features, Tensor coords, in GridSpec spec) => GridReference.Scatter(grid, features, coords, spec);
 
-    /// <summary>Row gather: <c>output[j] = input[indices[j]]</c> (rows of length channels) — used by the sparse-conv rulebook.</summary>
-    unsafe void RowGather(Tensor output, Tensor input, Tensor indices, int m, int channels)
-    {
-        float* o = (float*)output.DataPointer, i = (float*)input.DataPointer; int* idx = (int*)indices.DataPointer;
-        for (int j = 0; j < m; j++) for (int c = 0; c < channels; c++) o[(long)j * channels + c] = i[(long)idx[j] * channels + c];
-    }
-
-    /// <summary>Row scatter-add: <c>output[indices[j]] += input[j]</c>, accumulating onto existing output. Indices must be
-    /// unique within a call: the CUDA kernel adds without atomics, so a repeated row races and loses updates.</summary>
-    unsafe void RowScatterAdd(Tensor output, Tensor input, Tensor indices, int m, int channels)
-    {
-        float* o = (float*)output.DataPointer, i = (float*)input.DataPointer; int* idx = (int*)indices.DataPointer;
-        for (int j = 0; j < m; j++) for (int c = 0; c < channels; c++) o[(long)idx[j] * channels + c] += i[(long)j * channels + c];
-    }
+    /// <summary>Gathers each voxel's channels from its cell of a dense grid into <c>[voxels, channels]</c> features: the inverse of
+    /// <see cref="GridScatter"/>. F32. Contract: <see cref="Contracts.GridContract"/>; reference: <see cref="GridReference.Gather"/>.</summary>
+    void GridGather(Tensor features, Tensor grid, Tensor coords, in GridSpec spec) => GridReference.Gather(features, grid, coords, spec);
 }

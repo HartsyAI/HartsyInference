@@ -129,7 +129,7 @@ public sealed class EulerDiscreteScheduler : IScheduler
         return (sigmas, timesteps);
     }
 
-    /// <summary>Whether <see cref="Step"/> reduces to <c>sample + modelOutput·dt</c> (epsilon prediction), i.e. the denoise loop may replace the host Step loop with the in-place device <c>IBackend.CfgEulerStep</c>.</summary>
+    /// <summary>Whether <see cref="Step"/> reduces to <c>sample + modelOutput·dt</c> (epsilon prediction), i.e. the denoise loop may replace the host Step loop with the in-place device <c>IBackend.GuidedEulerStep</c>.</summary>
     public bool FusedEulerCompatible => _config.PredictionType == PredictionType.Epsilon;
 
     /// <summary>Euler dt for the fused device step: <c>sigma[i+1] − sigma[i]</c>.</summary>

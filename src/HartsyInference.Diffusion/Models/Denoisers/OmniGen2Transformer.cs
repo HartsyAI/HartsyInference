@@ -273,7 +273,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     /// <c>[1, imgSeqLen, p²·in_channels]</c> (never consumed — caller owns it) and returns the packed velocity
     /// <c>[1, imgSeqLen, p²·out_channels]</c>, negated per upstream's <c>return -output</c>. Skips the per-forward
     /// host patchify/unpatchify D2H drains (the <c>cpu-glue-async-race</c> crash source) so the latent stays
-    /// GPU-resident across the whole sampling loop — the pipeline patchifies once, runs <see cref="CfgEulerStep"/>
+    /// GPU-resident across the whole sampling loop — the pipeline patchifies once, runs <see cref="GuidedEulerStep"/>
     /// per step, and unpatchifies once.</summary>
     public Tensor ForwardPacked(IBackend backend, Tensor packedLatent, float timestep, Tensor textEmbeds,
         int textSeqLen, int hPacked, int wPacked)
@@ -369,7 +369,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         normedOut.Dispose();
 
         // Realize upstream OmniGen2's `return -output` in packed token space (device negate); the drain-free loop
-        // consumes this negated velocity directly via CfgEulerStep and unpatchifies the clean latent once at the end.
+        // consumes this negated velocity directly via GuidedEulerStep and unpatchifies the clean latent once at the end.
         Tensor velocity = new(projOut.Shape, DType.F32);
         backend.Scale(velocity, projOut, -1.0f);
         projOut.Dispose();

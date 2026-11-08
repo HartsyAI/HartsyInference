@@ -96,23 +96,6 @@ __global__ void dit_gated_residual_rowindexed_f32(
     output[i] = residual[i] + gateTable[tIdx] * value[i];
 }
 
-// ── CFG combine + Euler step (in-place on z) ────────────────────────────────
-// v = guidance * pos + (1 - guidance) * neg ;  z += v * delta
-// Operates on flat [N]. z is the latent carried across denoise steps (kept resident).
-__global__ void dit_cfg_euler_f32(
-    float* __restrict__ z,
-    const float* __restrict__ pos,
-    const float* __restrict__ neg,
-    float guidance,
-    float delta,
-    unsigned int count)
-{
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
-    float v = guidance * pos[i] + (1.0f - guidance) * neg[i];
-    z[i] = z[i] + v * delta;
-}
-
 // ── Generic affine and mask-broadcast affine mixes ─────────────────────────
 // These are the shared image-pipeline glue primitives: scheduler AddNoise is a plain affine mix, while masked
 // inpaint replaces the preserved region with the source's affine noise trajectory. All sizes are 64-bit and all
@@ -237,180 +220,6 @@ __global__ void dit_masked_affine_mix_packed_inner_f32(
         target, source, noise, mask, sourceScale, noiseScale, tokens, featureDimension, patchArea, true);
 }
 
-// ── Global-renormalized CFG + Euler step ───────────────────────────────────
-// Stage 1 computes block partials for ||cond||² and ||uncond + guidance*(cond-uncond)||².
-// Double accumulation matches the host reference's global norm without sacrificing the parallel update.
-__global__ void dit_cfg_renorm_reduce_f32(
-    const float* __restrict__ cond,
-    const float* __restrict__ uncond,
-    double* __restrict__ condPartials,
-    double* __restrict__ guidedPartials,
-    float guidance,
-    unsigned long long count)
-{
-    extern __shared__ double sums[];
-    double* condSums = sums;
-    double* guidedSums = sums + blockDim.x;
-
-    double condSq = 0.0;
-    double guidedSq = 0.0;
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
-    for (; i < count; i += stride)
-    {
-        float c = cond[i];
-        float u = uncond[i];
-        float guided = u + guidance * (c - u);
-        condSq += (double)c * (double)c;
-        guidedSq += (double)guided * (double)guided;
-    }
-
-    condSums[threadIdx.x] = condSq;
-    guidedSums[threadIdx.x] = guidedSq;
-    __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
-    {
-        if (threadIdx.x < offset)
-        {
-            condSums[threadIdx.x] += condSums[threadIdx.x + offset];
-            guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0)
-    {
-        condPartials[blockIdx.x] = condSums[0];
-        guidedPartials[blockIdx.x] = guidedSums[0];
-    }
-}
-
-// Stage 2 reduces the small partial arrays and writes one device scalar. Branch clamps intentionally preserve
-// NaN, matching Math.Clamp: fmin/fmax would silently replace NaN with a clamp endpoint.
-__global__ void dit_cfg_renorm_finalize_f32(
-    float* __restrict__ scale,
-    const double* __restrict__ condPartials,
-    const double* __restrict__ guidedPartials,
-    unsigned int partialCount,
-    float renormMin)
-{
-    extern __shared__ double sums[];
-    double* condSums = sums;
-    double* guidedSums = sums + blockDim.x;
-    double condSq = 0.0;
-    double guidedSq = 0.0;
-    for (unsigned int i = threadIdx.x; i < partialCount; i += blockDim.x)
-    {
-        condSq += condPartials[i];
-        guidedSq += guidedPartials[i];
-    }
-    condSums[threadIdx.x] = condSq;
-    guidedSums[threadIdx.x] = guidedSq;
-    __syncthreads();
-    for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
-    {
-        if (threadIdx.x < offset)
-        {
-            condSums[threadIdx.x] += condSums[threadIdx.x + offset];
-            guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0)
-    {
-        double ratio = sqrt(condSums[0]) / (sqrt(guidedSums[0]) + 1.0e-8);
-        if (ratio < (double)renormMin) ratio = (double)renormMin;
-        else if (ratio > 1.0) ratio = 1.0;
-        scale[0] = (float)ratio;
-    }
-}
-
-// Stage 3 recomputes the cheap guided value and folds scale + Euler into the latent write. Inputs are read-only.
-__global__ void dit_cfg_renorm_euler_f32(
-    float* __restrict__ z,
-    const float* __restrict__ cond,
-    const float* __restrict__ uncond,
-    const float* __restrict__ scale,
-    float guidance,
-    float delta,
-    unsigned long long count)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
-    float s = scale[0];
-    for (; i < count; i += stride)
-    {
-        float guided = uncond[i] + guidance * (cond[i] - uncond[i]);
-        guided *= s;
-        z[i] += guided * delta;
-    }
-}
-
-// ── Last-dimension-normalized CFG + Euler step ───────────────────────────
-// One cooperative block handles each logical row (all dimensions except the last are flattened).
-// The grid-stride row loop keeps launch geometry bounded while still covering arbitrarily many rows.
-// Double accumulation mirrors CfgHelper.ApplyCfgNormalized's host reference; guided values and the
-// broadcast ratio remain float, matching the tensor's F32 storage and the subsequent Euler update.
-__global__ void dit_cfg_normalized_euler_f32(
-    float* __restrict__ z,
-    const float* __restrict__ cond,
-    const float* __restrict__ uncond,
-    float guidance,
-    float delta,
-    float eps,
-    unsigned long long rows,
-    unsigned long long lastDim)
-{
-    extern __shared__ double sums[];
-    double* condSums = sums;
-    double* guidedSums = sums + blockDim.x;
-    __shared__ float rowRatio;
-
-    for (unsigned long long row = blockIdx.x; row < rows; row += gridDim.x)
-    {
-        unsigned long long base = row * lastDim;
-        double condSq = 0.0;
-        double guidedSq = 0.0;
-        for (unsigned long long d = threadIdx.x; d < lastDim; d += blockDim.x)
-        {
-            unsigned long long i = base + d;
-            float c = cond[i];
-            float u = uncond[i];
-            float guided = u + guidance * (c - u);
-            condSq += (double)c * (double)c;
-            guidedSq += (double)guided * (double)guided;
-        }
-
-        condSums[threadIdx.x] = condSq;
-        guidedSums[threadIdx.x] = guidedSq;
-        __syncthreads();
-        for (unsigned int offset = blockDim.x >> 1; offset > 0; offset >>= 1)
-        {
-            if (threadIdx.x < offset)
-            {
-                condSums[threadIdx.x] += condSums[threadIdx.x + offset];
-                guidedSums[threadIdx.x] += guidedSums[threadIdx.x + offset];
-            }
-            __syncthreads();
-        }
-        if (threadIdx.x == 0)
-        {
-            // Zero denominator (eps=0, all-zero guided row) contributes nothing — ratio=0 avoids 0/0 -> NaN.
-            double denom = sqrt(guidedSums[0]) + (double)eps;
-            rowRatio = denom > 0.0 ? (float)(sqrt(condSums[0]) / denom) : 0.0f;
-        }
-        __syncthreads();
-
-        float ratio = rowRatio;
-        for (unsigned long long d = threadIdx.x; d < lastDim; d += blockDim.x)
-        {
-            unsigned long long i = base + d;
-            float guided = uncond[i] + guidance * (cond[i] - uncond[i]);
-            z[i] += delta * (guided * ratio);
-        }
-        __syncthreads();
-    }
-}
-
 // ── Tanh (general elementwise) ──────────────────────────────────────────────
 __global__ void dit_tanh_f32(
     float* __restrict__ output,
@@ -432,23 +241,6 @@ __global__ void dit_add_scalar_f32(
     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
     output[i] = input[i] + c;
-}
-
-// ── Index-add of embedding rows (in-place) ──────────────────────────────────
-// h[row, d] += table[indices[row], d]. Keeps the indicator embedding a GPU-resident weight
-// (no host gather), one of two rows selected per token. total = totalRows * dim.
-__global__ void dit_index_add_f32(
-    float* __restrict__ h,
-    const float* __restrict__ table,
-    const int* __restrict__ indices,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned int d = (unsigned int)(i % dim);
-    unsigned long long row = i / dim;
-    h[i] += table[(size_t)indices[row] * dim + d];
 }
 
 // ── Slice a contiguous row block (by element offset) ────────────────────────
@@ -533,23 +325,6 @@ extern "C" __global__ void dit_split_slice_u16(
 }
 
 extern "C" {
-
-// Pixel quantize to 256 levels (DIAMOND): out = floor((clamp(v,-1,1)+1)*127.5)/127.5 - 1.
-// `(int)` truncation of a non-negative value == floor. Enables a drain-free EDM step for graph capture.
-__global__ void dit_pixel_quantize_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    float unused,
-    unsigned int count)
-{
-    (void)unused;
-    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= count) return;
-    float v = input[i];
-    v = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
-    int b = (int)((v + 1.0f) * 0.5f * 255.0f);
-    output[i] = (float)b / 255.0f * 2.0f - 1.0f;
-}
 
 // TripoSR triplane grid-sample: for each of `count` points, bilinearly sample the three orthogonal
 // feature planes (align_corners=False, zeros pad — matches GridSampler.GridSamplePlane) and write the
@@ -846,11 +621,6 @@ __global__ void dit_qkv_split_norm_head_major_f32(
     }
 }
 
-// FourierEmbedder (num_freqs bands, freqs 2^i, include_input=true, include_pi=false): for each point i and coord
-// c∈{0,1,2}: out[i, c] = x; out[i, 3 + c·bands + band] = sin(x·2^band); out[i, 3 + 3·bands + c·bands + band] =
-// cos(x·2^band). One thread per (point, coord). Replaces the host trig loop in the ShapeVAE geo-decoder query
-// (kept feat on device → no per-chunk H2D of the Fourier features). dim = 3·(2·bands + 1).
-
 // Subset-emitting twin of dit_qkv_split_norm_head_major_f32. SEPARATE kernel on purpose: the fused call above must stay
 // byte-for-byte the shipped kernel, and folding slot guards into it changed its codegen enough to move
 // real generation output. packStride is how many W-wide segments the packed source holds; qSlot/kSlot/
@@ -929,31 +699,6 @@ __global__ void dit_qkv_split_norm_head_major_subset_f32(
     }
 }
 
-// FourierEmbedder (num_freqs bands, freqs 2^i, include_input=true, include_pi=false): for each point i and coord
-// c∈{0,1,2}: out[i, c] = x; out[i, 3 + c·bands + band] = sin(x·2^band); out[i, 3 + 3·bands + c·bands + band] =
-// cos(x·2^band). One thread per (point, coord). Replaces the host trig loop in the ShapeVAE geo-decoder query
-// (kept feat on device → no per-chunk H2D of the Fourier features). dim = 3·(2·bands + 1).
-
-__global__ void fourier_embed_f32(
-    float* __restrict__ dst, const float* __restrict__ coords,
-    unsigned int count, unsigned int bands, unsigned int dim)
-{
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= (unsigned long long)count * 3u) return;
-    unsigned int c = (unsigned int)(gid % 3u);
-    unsigned long long i = gid / 3u;
-    float x = coords[i * 3ULL + c];
-    unsigned long long o = i * dim;
-    unsigned int sinBase = 3u, cosBase = 3u + 3u * bands;
-    dst[o + c] = x;
-    for (unsigned int band = 0; band < bands; band++)
-    {
-        float a = x * (float)(1u << band);
-        dst[o + sinBase + c * bands + band] = sinf(a);
-        dst[o + cosBase + c * bands + band] = cosf(a);
-    }
-}
-
 // Dense 3D convolution (gather form — one thread per output element, no atomics). Weight is [Cout,Cin,kD,kH,kW]
 // (PyTorch Conv3d, groups=1). out[b,co,od,oh,ow] = bias[co] + Σ_{ci,kd,kh,kw} in[b,ci,id,ih,iw]·W, id = od·sD−pD+kd.
 // For the TRELLIS sparse-structure VAE decoder (16³ latent → 64³ occupancy).
@@ -991,62 +736,6 @@ __global__ void conv3d_f32(
         }
     }
     out[idx] = acc;
-}
-
-// Sparse submanifold-conv scatter: write active-voxel features onto a dense (pre-zeroed) grid on-device. Avoids the
-// host scatter loop + the multi-GB grid H2D that dominated the TRELLIS SLAT flow. grid is [1,C,R,R,R]; coords [N,4]
-// (b,x,y,z). One thread per (voxel, channel). cell = x·R² + y·R + z.
-__global__ void sparse_scatter_to_grid_f32(
-    float* __restrict__ grid, const float* __restrict__ feats, const int* __restrict__ coords,
-    int n, int c, int r)
-{
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long total = (long)n * c;
-    if (idx >= total) return;
-    int ch = (int)(idx % c);
-    long v = idx / c;
-    long r3 = (long)r * r * r;
-    long cell = (long)coords[v * 4 + 1] * r * r + (long)coords[v * 4 + 2] * r + coords[v * 4 + 3];
-    grid[(long)ch * r3 + cell] = feats[v * (long)c + ch];
-}
-
-// Inverse of the scatter: gather the conv output at the active voxels back into a feature matrix [N,C].
-__global__ void sparse_gather_from_grid_f32(
-    float* __restrict__ feats, const float* __restrict__ grid, const int* __restrict__ coords,
-    int n, int c, int r)
-{
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long total = (long)n * c;
-    if (idx >= total) return;
-    int ch = (int)(idx % c);
-    long v = idx / c;
-    long r3 = (long)r * r * r;
-    long cell = (long)coords[v * 4 + 1] * r * r + (long)coords[v * 4 + 2] * r + coords[v * 4 + 3];
-    feats[v * (long)c + ch] = grid[(long)ch * r3 + cell];
-}
-
-// Row gather: out[j] = in[indices[j]] (one thread per output element). For the sparse-conv rulebook (gather the
-// active neighbours for one kernel offset).
-__global__ void row_gather_f32(
-    float* __restrict__ out, const float* __restrict__ in, const int* __restrict__ indices, int m, int c)
-{
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (long)m * c) return;
-    int ch = (int)(idx % c);
-    long j = idx / c;
-    out[idx] = in[(long)indices[j] * c + ch];
-}
-
-// Row scatter-add: out[indices[j]] += in[j] without atomics, so indices must be unique within a call (a repeated row
-// races and loses updates). Accumulates a sparse-conv kernel offset's GEMM output and SeedVR2's window video rows.
-__global__ void row_scatter_add_f32(
-    float* __restrict__ out, const float* __restrict__ in, const int* __restrict__ indices, int m, int c)
-{
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (long)m * c) return;
-    int ch = (int)(idx % c);
-    long j = idx / c;
-    out[(long)indices[j] * c + ch] += in[idx];
 }
 
 } // extern "C"

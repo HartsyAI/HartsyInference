@@ -139,9 +139,9 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Int8MmaWideGate =
         Bool("numerics.int8MmaWideGate", false, KnobScope.Runtime, KnobDomain.Numerics, "Widens the fused INT8 MMA GEMM admission bound from n<=2k to n<=4k, admitting LTX-2.5's ffn_up shape.");
 
-    /// <summary>Uses the query-tiled LTX-2.5 na3d kernel (online softmax over the tile's union window) over the per-query one.</summary>
-    public static readonly Knob<bool> Ltx25Na3dTiled =
-        Bool("numerics.ltx25Na3dTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled LTX-2.5 na3d kernel (online softmax over the tile's union window) over the per-query one.");
+    /// <summary>Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.</summary>
+    public static readonly Knob<bool> NeighborhoodAttentionTiled =
+        Bool("numerics.neighborhoodAttentionTiled", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the query-tiled neighborhood attention kernel (online softmax over the tile's union window) over the per-query one.");
 
     /// <summary>Builds LTX-2.5's diffusion video decoder instead of the ~40x faster conv decoder when the checkpoint has both.</summary>
     public static readonly Knob<bool> Ltx2DiffusionVae =

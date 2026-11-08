@@ -114,7 +114,7 @@ public sealed class BooguFlowMatchScheduler : IScheduler
     }
 
     /// <summary>The Euler step delta <c>t_next − t</c> (positive; t ascends 0 → 1) — the <c>delta</c> for the
-    /// device <c>IBackend.CfgEulerStep</c> drain-free path, identical to the dt used by <see cref="Step"/>.</summary>
+    /// device <c>IBackend.GuidedEulerStep</c> drain-free path, identical to the dt used by <see cref="Step"/>.</summary>
     public float Dt(int stepIndex) => _timestepsFull[stepIndex + 1] - _timestepsFull[stepIndex];
 
     /// <summary>Boogu's own schedule value at a step boundary: time-to-data, ASCENDING 0 → 1, which is what the
