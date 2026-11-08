@@ -1973,6 +1973,21 @@ public static class ModelCatalog
                         Sha256 = "65b50056e05bcb13694174f51bb6da89c894b57b75ccdf0ba6352c597c5d1125" },
                 },
             },
+            new CatalogEntry
+            {
+                // Upstream facebook/sam3 @ 0570b3a5be9c4e694f23d85232fb55f4a6f1f7fc is gated (SAM License, license_name
+                // sam-license). Non-gated mirror: ModelScope facebook/sam3 @ f8ee5d16d5c30d0e87b1d22cbd358ce97761df56, file
+                // sam3.pt. The mirror file's checksum is not yet compared with the upstream sha256 below; the downloader
+                // currently reads only Hugging Face repos, so the Repo below is the gated upstream and needs a token.
+                Id = "sam3", Modality = vis, DisplayName = "SAM 3 (text-grounded)", Architecture = "ViT (RoPE, windowed) + CLIP text tower + DETR-style detector + mask head", Status = st,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/sam3", RepoPath = "sam3.pt",
+                        TargetSubdir = "sam3", Role = "transformer",
+                        Sha256 = "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e" },
+                },
+            },
             // "RetinaFace" was never actually built — the real, real-weight-verified face detector is a
             // YOLOv8-Face port (see MODEL_STATUS_VISION.md). Catalog id corrected to match; blocked on the same
             // pickle-graph issue as YOLO8/11 (every HF mirror checked 2026-07-22 — jaredthejelly/, arnabdhar/,
