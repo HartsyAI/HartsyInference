@@ -50,6 +50,7 @@ if (selected.Count == 0)
 }
 
 int failures = 0;
+int compared = 0;
 IBackend? host = null;
 try
 {
@@ -67,14 +68,16 @@ try
                 continue;
             }
             using OpTensors t = c.Build(seed);
-            c.Run(backend, t);
-            backend.Sync();
             Dictionary<string, string> meta = new(StringComparer.Ordinal) { ["family"] = c.Family, ["case"] = c.Name, ["backend"] = kind, ["seed"] = seed.ToString(CultureInfo.InvariantCulture) };
+            // The inputs are written before the op runs: an entry that works in place on an operand the case lists as an input
+            // would otherwise leave its result in the fixture's inputs, and every later check would feed the op its own output.
             Dictionary<string, string> hashes = new(StringComparer.Ordinal)
             {
                 ["inputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "inputs.safetensors"), t.Inputs, meta),
-                ["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta),
             };
+            c.Run(backend, t);
+            backend.Sync();
+            hashes["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta);
             FixtureManifest m = Manifest(c, "recorded", hashes);
             m.MayBeNonFinite.AddRange(t.MayBeNonFinite);
             m.Save(FixtureStore.ManifestPath(dir));
@@ -127,6 +130,7 @@ try
             Acceptance rule = hostByRule ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, "newly supported path, judged against the host reference");
             string why = recorded is null ? "no fixture" : recorded.Status == "unsupported" ? "unsupported on the baseline" : "host-reference rule";
             failures += Report(c, mine, theirs.Outputs, rule, $"vs host ({why})");
+            compared++;
             continue;
         }
         if (recorded.KernelHashes.Count > 0)
@@ -147,14 +151,25 @@ try
         foreach (Tensor o in run.Outputs.Values) o.AsSpan<byte>().Clear();
         c.Run(backend, run);
         backend.Sync();
-        Acceptance acceptance = new(Enum.Parse<AcceptanceKind>(recorded.AcceptanceKind), recorded.MaxAbs, recorded.MaxRel, recorded.Reason);
-        failures += Report(c, run, expected, acceptance, "vs fixture", recorded.MayBeNonFinite);
+        // The case's declared acceptance judges the check. The fixture's outputs stay the recorded ones; the tolerance a case declares
+        // at the head, with its reason, is the one the check enforces. A manifest that recorded a different acceptance says so.
+        Acceptance recordedAcceptance = new(Enum.Parse<AcceptanceKind>(recorded.AcceptanceKind), recorded.MaxAbs, recorded.MaxRel, recorded.Reason);
+        if (recordedAcceptance.Kind != c.Acceptance.Kind || recordedAcceptance.MaxAbs != c.Acceptance.MaxAbs || recordedAcceptance.MaxRel != c.Acceptance.MaxRel)
+            Console.WriteLine($"  {c.Family}/{c.Name}: acceptance changed since record: recorded {recordedAcceptance.Kind} ({recordedAcceptance.MaxAbs:E1} / {recordedAcceptance.MaxRel:E1}), judged {c.Acceptance.Kind} ({c.Acceptance.MaxAbs:E1} / {c.Acceptance.MaxRel:E1}): {c.Acceptance.Reason}");
+        failures += Report(c, run, expected, c.Acceptance, "vs fixture", recorded.MayBeNonFinite);
+        compared++;
         foreach (Tensor e in expected.Values) e.Dispose();
     }
 }
 finally
 {
     host?.Dispose();
+}
+// A check that compared nothing (every selected case skipped as unsupported on this backend) verified nothing, so it cannot pass.
+if (command == "check" && compared == 0)
+{
+    Console.WriteLine($"FAIL: no case was compared on backend {selector}; every selected case was skipped");
+    return 1;
 }
 Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures} output(s) outside acceptance");
 return failures == 0 ? 0 : 1;
