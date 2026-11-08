@@ -105,6 +105,12 @@ static int Compare(Dictionary<string, string> opts)
         if (!pass) failures++;
         Console.WriteLine($"  {rel}: {(pass ? "ok" : "FAIL")} {detail}");
     }
+    // An empty or mismatched baseline compares nothing; that is a failed gate, not a pass.
+    if (compared == 0)
+    {
+        Console.WriteLine("FAIL: no capture files were compared (empty baseline or no matching files)");
+        return 1;
+    }
     Console.WriteLine(failures == 0 ? $"PASS ({compared} file(s))" : $"FAIL: {failures} of {compared} file(s)");
     return failures == 0 ? 0 : 1;
 }
@@ -205,8 +211,10 @@ static (bool, string) CompareScores(string b, string c, double tol)
         if (fb.Length < 5 || fc.Length < 5) return (false, $"row {i} malformed");
         if (fb[1] != fc[1]) idMismatch++;
         if (fb[3] != fc[3]) topMismatch++;
-        double d = Math.Abs(double.Parse(fb[2], CultureInfo.InvariantCulture) - double.Parse(fc[2], CultureInfo.InvariantCulture));
-        worst = Math.Max(worst, d);
+        // Column 2 is the forced token's log-probability, column 4 the top token's: both are under the tolerance.
+        double forced = Math.Abs(double.Parse(fb[2], CultureInfo.InvariantCulture) - double.Parse(fc[2], CultureInfo.InvariantCulture));
+        double top = Math.Abs(double.Parse(fb[4], CultureInfo.InvariantCulture) - double.Parse(fc[4], CultureInfo.InvariantCulture));
+        worst = Math.Max(worst, Math.Max(forced, top));
     }
     bool pass = idMismatch == 0 && topMismatch == 0 && worst <= tol;
     return (pass, $"{lb.Length - 1} tokens, forced-id mismatches {idMismatch}, top-id mismatches {topMismatch}, max |Δlogprob| {worst:E2} (tol {tol:E1})");
