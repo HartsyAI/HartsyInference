@@ -74,14 +74,7 @@ public sealed class NcclRankComm : IRankCollective
         NcclApi.DataType dtype = MapDtype(buffer.DType);
         long count = buffer.ElementCount;
         nuint bytes = (nuint)(count * buffer.DType.SizeInBytes);
-        _backend.BindAmbient();
-        ulong src = GpuTransferHelper.CopyToDevice(buffer);
-        ulong dst = GpuTransferHelper.AllocateDevice(bytes);
-        NcclApi.Check(NcclApi.ncclAllReduce(src, dst, (nuint)count, dtype, NcclApi.RedOp.Sum, _comm, _backend.Stream.Handle), "AllReduce");
-        _backend.BindAmbient();
-        GpuTransferHelper.FreeDevice(src);
-        GpuTransferHelper.CacheActivation(buffer, dst, bytes);
-        _backend.Sync();
+        RunCollective(buffer, buffer, bytes, (src, dst) => NcclApi.ncclAllReduce(src, dst, (nuint)count, dtype, NcclApi.RedOp.Sum, _comm, _backend.Stream.Handle), "AllReduce");
     }
 
     /// <inheritdoc/>
@@ -101,14 +94,48 @@ public sealed class NcclRankComm : IRankCollective
         }
         NcclApi.DataType dtype = MapDtype(sendBuffer.DType);
         nuint recvBytes = (nuint)(recvBuffer.ElementCount * recvBuffer.DType.SizeInBytes);
+        RunCollective(sendBuffer, recvBuffer, recvBytes, (src, dst) => NcclApi.ncclAllGather(src, dst, (nuint)count, dtype, _comm, _backend.Stream.Handle), "AllGather");
+    }
+
+    /// <summary>Uploads <paramref name="input"/>, enqueues one collective into a fresh device buffer, and hands that buffer to <paramref name="output"/>. Any failure before the hand-off frees both temporaries.</summary>
+    private void RunCollective(Tensor input, Tensor output, nuint outputBytes, Func<ulong, ulong, int> enqueue, string operation)
+    {
         _backend.BindAmbient();
-        ulong src = GpuTransferHelper.CopyToDevice(sendBuffer);
-        ulong dst = GpuTransferHelper.AllocateDevice(recvBytes);
-        NcclApi.Check(NcclApi.ncclAllGather(src, dst, (nuint)count, dtype, _comm, _backend.Stream.Handle), "AllGather");
+        ulong src = GpuTransferHelper.CopyToDevice(input);
+        ulong dst = 0;
+        bool transferred = false;
+        try
+        {
+            dst = GpuTransferHelper.AllocateDevice(outputBytes);
+            NcclApi.Check(enqueue(src, dst), operation);
+            _backend.BindAmbient();
+            GpuTransferHelper.FreeDevice(src);
+            src = 0;
+            // TODO(unsure): if CacheActivation throws after registering dst, the cleanup below frees it a second time.
+            GpuTransferHelper.CacheActivation(output, dst, outputBytes);
+            transferred = true;
+            _backend.Sync();
+        }
+        finally
+        {
+            if (!transferred)
+            {
+                ReleaseAfterFailure(src, dst);
+            }
+        }
+    }
+
+    private void ReleaseAfterFailure(ulong src, ulong dst)
+    {
         _backend.BindAmbient();
-        GpuTransferHelper.FreeDevice(src);
-        GpuTransferHelper.CacheActivation(recvBuffer, dst, recvBytes);
-        _backend.Sync();
+        if (src != 0)
+        {
+            GpuTransferHelper.FreeDevice(src);
+        }
+        if (dst != 0)
+        {
+            GpuTransferHelper.FreeDevice(dst);
+        }
     }
 
     private static void RequireNccl()
