@@ -2072,6 +2072,21 @@ public static class ModelCatalog
                         Sha256 = "46ef7fe46f2ae284d8f1aaa24bfa5fca5ef25a34e2c7caa890a0029eb100e87f" },
                 },
             },
+            // BiRefNet-matting (trimap-free alpha matte). Pinned upstream revision eccde0a8cbdce7ac5fecfeb06340fe7b949e85d9;
+            // the sha256 verifies the bytes, since ModelAsset cannot name a revision. The model card declares MIT, but the
+            // repo ships no LICENSE file at that revision, so the weights' license is unverified.
+            new CatalogEntry
+            {
+                Id = "birefnet-matting", Modality = vis, DisplayName = "BiRefNet-matting (general foreground matting, Swin-L)",
+                Architecture = "Swin-L encoder + BiRefNet dual-scale decoder (deformable ASPP, gradient gates)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/BiRefNet-matting", Role = "transformer",
+                        Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+                },
+            },
 
             // Real-ESRGAN pixel-space super-resolution. The official release files live on GitHub, not HuggingFace;
             // these repos mirror them byte-for-byte — x4plus is the copy the ControlNet annotator bundle carries
