@@ -42,6 +42,12 @@ string[] requireOverride = args_.TryGetValue("require", out string? req) ? req.S
 using IBackend backend = BackendFactory.Create(selector);
 string device = string.IsNullOrEmpty(backend.Capabilities.DeviceName) ? backend.Capabilities.Name : backend.Capabilities.DeviceName;
 Console.WriteLine($"{command}: {selected.Count} case(s), backend {selector} ({device}), fixtures {root}");
+// A run that selects nothing (an unknown op, or no case for this backend) verifies nothing, so it cannot pass.
+if (selected.Count == 0)
+{
+    Console.WriteLine($"FAIL: no cases selected for --op {args_.GetValueOrDefault("op", "(all)")} on backend {selector}");
+    return 1;
+}
 
 int failures = 0;
 IBackend? host = null;
@@ -86,9 +92,24 @@ try
             Console.WriteLine($"  {c.Family}/{c.Name}: {status}");
             continue;
         }
-        if (recorded is null || recorded.Status != "recorded" || c.Acceptance.Kind == AcceptanceKind.HostReference)
+        // A fixture check needs its recorded manifest. Only a case judged against the host by rule, or one the baseline
+        // recorded as unsupported, may take the host path; a missing or unknown manifest must not pass silently.
+        bool hostByRule = c.Acceptance.Kind == AcceptanceKind.HostReference;
+        if (!hostByRule && recorded is null)
         {
-            // Newly supported, or judged against the host by rule: the CPU backend is the independent oracle.
+            failures++;
+            Console.WriteLine($"  {c.Family}/{c.Name}: FAIL (no recorded fixture; run record on the baseline first)");
+            continue;
+        }
+        if (!hostByRule && recorded!.Status is not ("recorded" or "unsupported"))
+        {
+            failures++;
+            Console.WriteLine($"  {c.Family}/{c.Name}: FAIL (fixture status '{recorded.Status}' is not a recorded result)");
+            continue;
+        }
+        if (recorded is null || recorded.Status != "recorded" || hostByRule)
+        {
+            // Newly supported, or judged against the host by rule: the case's oracle, else the CPU backend, is the independent reference.
             using OpTensors mine = c.Build(seed);
             using OpTensors theirs = c.Build(seed);
             c.Run(backend, mine);
@@ -104,7 +125,7 @@ try
                 host.Sync();
             }
             string oracleName = c.Oracle is null ? "CPU backend" : "contract reference";
-            Acceptance rule = c.Acceptance.Kind == AcceptanceKind.HostReference ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, $"newly supported path, judged against the {oracleName}");
+            Acceptance rule = hostByRule ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, $"newly supported path, judged against the {oracleName}");
             string why = recorded is null ? "no fixture" : recorded.Status == "unsupported" ? "unsupported on the baseline" : "host-reference rule";
             failures += Report(c, mine, theirs.Outputs, rule, $"vs {oracleName} ({why})");
             continue;
