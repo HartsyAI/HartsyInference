@@ -54,8 +54,9 @@ output[dst(i)] = round(float(output[dst(i)]) + float(input[src(i)]))
 
 Reference: `StridedCopyReference.Accumulate`. Contract: `StridedCopyContract.ValidateAccumulate`.
 
-- F32, F16 or BF16, the same on both sides. The add is F32; the result rounds to the storage dtype, and bfloat16 rounds
-  to nearest even (`BFloat16Bits.FromFloat`, the CUDA `__float2bfloat16` rounding).
+- F32, F16 or BF16, the same on both sides, or an F32 input into a BF16 output (a per-channel bias added to BF16
+  storage). The add is F32; the result rounds to the storage dtype once, and bfloat16 rounds to nearest even
+  (`BFloat16Bits.FromFloat`, the CUDA `__float2bfloat16` rounding).
 - The same geometry rules as `CopyStrided`. Because the destination addresses each element once, no two adds touch
   one element and the result does not depend on execution order; no atomics are needed.
 - Always in place.

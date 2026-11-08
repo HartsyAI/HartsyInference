@@ -103,6 +103,18 @@ extern "C" __global__ void accumulate_strided_bf16(__nv_bfloat16* out, const __n
     }
 }
 
+// An F32 input (a bias) into BF16 storage: the sum is formed in F32 and rounded once.
+extern "C" __global__ void accumulate_strided_bf16_f32in(__nv_bfloat16* out, const float* __restrict__ in, StridedGeom g)
+{
+    unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+    for (unsigned long long linear = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; linear < g.total; linear += stride)
+    {
+        long long s, d;
+        strided_offsets(g, linear, s, d);
+        out[d] = __float2bfloat16(__bfloat162float(out[d]) + in[s]);
+    }
+}
+
 // The input position an output position maps to on one axis, or -1 for a zero-filled one (StridedCopyReference.SourceIndex).
 __device__ __forceinline__ long long pad_source_index(long long outputIndex, long long before, long long extent, int mode)
 {
