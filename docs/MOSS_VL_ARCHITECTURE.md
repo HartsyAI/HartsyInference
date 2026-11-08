@@ -1,0 +1,84 @@
+# MOSS-VL-Realtime
+
+OpenMOSS's open-weights vision-language model for realtime video understanding (arXiv 2608.15045). Realtime means the
+model reads frames as they arrive, emits text incrementally, and can stay silent with `<|silence|>` when nothing needs a
+reply. It is **not** the full-duplex speech system MOSS-Live (API-only, no weights). ASR, TTS and memory come from the
+demo layer, not the model.
+
+## Sources (snapshot 2026-11-08)
+
+- Weights: `OpenMOSS-Team/MOSS-VL-Realtime-SGLANG` (sha `3d6407cc`, not gated, Apache-2.0). Five BF16 shards,
+  22,672,742,416 bytes in total, 895 tensors. Also `OpenMOSS-Team/MOSS-VL-Realtime-NF4` (three shards, about 11.8 GB).
+- Code: `modeling_moss_vl.py` (4,773 lines, transformers 5.12.1 style), `configuration_moss_vl.py`, `processing_moss_vl.py`,
+  `video_processing_moss_vl.py`, `inference.md`. Downloaded to `Models/LLM/moss-vl-realtime/` (gitignored).
+- Hashes and file sizes come from the Hub's LFS listing. The shard sha256 values match the listing.
+
+## Verified facts (from `config.json`, the index and the shard headers)
+
+| item | value |
+|---|---|
+| text decoder | 48 layers, hidden 4096, 32 heads, 8 KV heads, head_dim 128, FFN 12288, vocab 151936 |
+| cross-attention layers | `[2, 6, 10, …, 46]`, 12 of them; the other 36 are self-attention |
+| RoPE | theta 5,000,000; interleaved M-RoPE, sections `[24, 20, 20]` |
+| norms and bias | RMSNorm eps 1e-6; per-head Q/K RMSNorm on every layer; no attention bias |
+| embeddings | `tie_word_embeddings: false`; `lm_head.weight` separate |
+| ViT | 27 blocks, hidden 1152, FFN 4304, 16 heads, patch 16, merge 2, temporal patch 1, 2304 learned positions |
+| deepstack | taps at blocks 8, 16, 24; merger input = 4 × 4608 = 18432 (last block plus three taps) |
+| merger out | 4096 (the decoder width); cross-attention reads these features |
+| special tokens | image 151655, video 151656, vision start 151652, vision end 151653, separator is a learned parameter |
+| dtype | all 895 tensors BF16 |
+| checkpoint layout | HF transformers names (`model.language_model.*`, `model.visual.*`) |
+
+Checkpoint keys match the config exactly: 552 text-decoder keys (396 self-attention, 156 cross-attention), 324 ViT keys,
+12 merger keys, 2 patch-embed keys, 1 position key, 4 embedding/head keys, plus `model.separator_token`.
+
+Cross-attention layers store their two gates as **layer-level** names (`layers.N.cross_attn_attn_gate`, not `.weight`).
+These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
+
+## Architecture (from `modeling_moss_vl.py`)
+
+- **Vision.** Qwen3-VL-style ViT: conv patch embed, learned absolute positions interpolated to the grid, 2-D RoPE,
+  LayerNorm blocks with fused `attn.qkv`, GELU-tanh MLP. The merger LayerNorms each of the 4 streams separately,
+  concatenates them, then runs a 2-layer MLP to 4096.
+- **Text self-attention.** GQA with per-head Q/K RMSNorm, then interleaved M-RoPE. Causal.
+- **Cross-attention layer.** `h = x + tanh(attn_gate) · o(attn(q_norm(q_proj(rms(x))) rope, k_norm(k_proj(v)) rope, v_proj(v)))`,
+  `out = h + tanh(mlp_gate) · mlp(rms(h))`. Vision keys and values are not causal. Unlike Mllama, the **query is
+  RoPE-rotated** too (`query_position_embeddings`), and the keys carry the vision RoPE once, when they are first
+  computed. The cache holds rotated keys.
+- **Realtime.** A session queues frames and text. Each cycle drains the queues, encodes new frames, appends their
+  features to the cross-attention cache, then decodes. `<|silence|>` as the sampled token ends the cycle and waits for
+  new input. A separator embedding is inserted between segments. Realtime M-RoPE is computed per segment
+  (`_compute_realtime_mrope_for_segment`).
+
+## Reuse map
+
+| need | existing owner | fit |
+|---|---|---|
+| text decoder stack, GQA, RMSNorm, SwiGLU, KV cache | `LLM/Transformer/GenericTransformer` with `TransformerConfig` | direct. Config reader is `Models/MossVl/MossVlConfig` (new). |
+| gated cross-attention layer | `LLM/Multimodal/MllamaCrossAttentionLayer` | same weights and gates; **gap:** no query/key RoPE (it already has Q/K RMSNorm) |
+| cross-attention plumbing (`crossStates`, stage handoff) | `GenericTransformer.ForwardEmbeds*` | direct |
+| interleaved M-RoPE tables | `Core/Rope` (`MRopePositions`, `MRopePairAxes`, `MRopeTable`) | direct for Qwen-VL; check it matches `[24,20,20]` interleaved |
+| Qwen3-VL ViT | `Diffusion/Models/TextEncoders/Qwen3VlVisionEncoder` (safetensors), `LLM/Multimodal/Qwen3VlEncoder` (GGUF) | **gap:** neither has the deepstack merger (input 4× wide). Both are missing it per the code comments |
+| merger | none | new, but small |
+| tokenizer | `ModelAssets/Tokenizers` (`tokenizer.json`) | direct |
+| HF loader dispatch | `Engine/Services/HfTextDirectoryLoader` (`RequireSupported`) | add MOSS-VL to the Text path only after a text-only path exists; multimodal goes through the vision path |
+
+## Gaps and open items
+
+1. Cross-attention query/key RoPE and deepstack merger are not in the engine. Both are needed for the real model.
+2. Realtime session loop is not implemented. Offline prefill and decode come first.
+3. BF16 weights are 22.7 GB and this machine has an RTX 3060 with 12 GB. Full-precision generation needs CPU or offload.
+   The NF4 build is about 11.8 GB, still tight on 12 GB. The engine's NF4 codec exists (`ModelAssets/Nf4`) but has not been
+   checked against this checkpoint's NF4 layout.
+4. Python reference: Python 3.12 is installed and on PATH. Reference dumps still need `torch` and `transformers==5.12.1`.
+   Loading the BF16 shards needs roughly their 22.7 GB in RAM (estimate); this machine has 40 GB.
+5. The GGUF-side deepstack note in `Qwen3VlEncoder` says a future mmproj with deepstack tensors would need it. This model
+   has them, so that path is a useful reference but not a drop-in.
+
+## Status
+
+- Config reader: `src/HartsyInference.LLM/Models/MossVl/MossVlConfig.cs`. Verified by unit tests on the real config.
+- Layout check: `tests/HartsyInference.LLM.Tests/MossVlCheckpointTests.cs` (`Category=Integration`, guarded by
+  `HARTSY_MOSS_VL_INDEX`). Passes on the real index: 895 keys, exact match with the config-derived set.
+- Not built: vision tower, merger, cross-attention RoPE, text decoder wiring, tokenizer/processor, generation, realtime
+  loop, CUDA and Vulkan kernels, parity dumps. No real generation has run.

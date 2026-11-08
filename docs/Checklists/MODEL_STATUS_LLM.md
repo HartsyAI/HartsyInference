@@ -131,6 +131,17 @@ IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M by known-block test only, no small published file).
 | **GenericTransformer** (Qwen2/Qwen3/Llama-3) | ✅ | Parity tests; backs the text encoders + native LLM. Llama-3 RoPE NTK-by-parts validated. |
 | **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Diff tests present (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`); Pile-T5 == UMT5 (per-layer rel-attn-bias). |
 
+## MOSS-VL-Realtime — in progress (🔧, not runnable yet)
+
+OpenMOSS 48-layer VLM with 12 gated cross-attention layers, a Qwen3-VL-style ViT with deepstack taps, and a realtime
+streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCHITECTURE.md). Weights:
+`OpenMOSS-Team/MOSS-VL-Realtime-SGLANG` (BF16, 22.7 GB, Apache-2.0, not gated), placed at
+`Models/LLM/moss-vl-realtime/`; the five shards match their LFS sha256.
+
+- ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
+- ❌ Vision tower and deepstack merger, cross-attention query RoPE, text decoder wiring, tokenizer/processor.
+- ❌ Generation, realtime session loop, CUDA/Vulkan kernels, parity dumps. No real generation has run.
+
 ## Remaining work
 
 Distilled from the retired PHASE_12_LANGUAGE / LLM_MODEL_COVERAGE / LLM_CLI_CATALOG_HANDOFF /
