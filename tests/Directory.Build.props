@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- Adding a Directory.Build.props under tests/ stops MSBuild from auto-importing the repo-root one
+       for test projects (nearest wins), so re-import it explicitly to keep all shared settings. -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
+
+  <!-- Test projects run on net10.0 ONLY. The libraries multi-target net8.0;net10.0 for consumers, but
+       running every test on both frameworks just doubles CI wall-time with zero added coverage. Blank the
+       inherited TargetFrameworks (plural) so the singular TargetFramework takes effect. -->
+  <PropertyGroup>
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+</Project>

@@ -43,4 +43,8 @@ public enum ModelArchitecture
     /// <summary>MOSS-Image single-stream DiT (one <c>shared_block_modulation</c> for every joint block, fused
     /// <c>proj.ffn_up_gate</c> SiTU-GLU feed-forwards, <c>video_head_modulation</c> output head).</summary>
     MossImage,
+
+    /// <summary>Z-Image NextDiT (<c>noise_refiner</c> + <c>context_refiner</c> stacks). Turbo, Base and their
+    /// fine-tunes such as NitroFusion2 share this layout; the variant is chosen by the recipe, not here.</summary>
+    ZImage,
 }
