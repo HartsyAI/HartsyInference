@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>Which keys each query sees and the finite terms added to its scores; the components compose
 /// (docs/ATTENTION_CONTRACT.md §4). Positions are logical: a query's is <see cref="AttentionPositions.QueryOffset"/> plus

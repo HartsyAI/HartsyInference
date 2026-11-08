@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>How an attention operand's heads and tokens sit in its backing tensor (docs/ATTENTION_CONTRACT.md §1).</summary>
 public enum AttentionLayout

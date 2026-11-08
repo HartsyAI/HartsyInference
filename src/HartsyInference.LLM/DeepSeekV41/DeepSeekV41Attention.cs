@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.DeepSeekV41;

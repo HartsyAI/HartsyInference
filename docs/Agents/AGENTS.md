@@ -2,6 +2,8 @@
 
 Read this with [code style](../CODE_STYLE.md). Load only the linked sections your task needs.
 
+## Task routing
+
 <task_routing>
 Read the file that matches your task before you start. A task that spans two areas, such as adding a model and writing
 its kernel, loads both files.

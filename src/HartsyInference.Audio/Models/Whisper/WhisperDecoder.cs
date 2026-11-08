@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -390,8 +391,8 @@ internal sealed unsafe class WhisperDecoderLayer
         // always did, through the same kernel.
         Tensor kCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
         Tensor vCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
-        backend.SliceTimeRange(kCached, selfK, 0, totalPos);
-        backend.SliceTimeRange(vCached, selfV, 0, totalPos);
+        StridedCopies.SliceAxis(backend, kCached, selfK, 2, 0, totalPos);
+        StridedCopies.SliceAxis(backend, vCached, selfV, 2, 0, totalPos);
 
         // The mask is a tensor even at newCount == 1, where it is all zeros: it is never null.
         Tensor attnOut = _selfAttn.AttendHeadMajorOperands(backend, qMh, kCached, vCached, new AttentionCallContext { Bias = causalMask });

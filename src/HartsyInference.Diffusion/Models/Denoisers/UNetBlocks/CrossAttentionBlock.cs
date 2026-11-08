@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -406,7 +408,7 @@ internal sealed class FeedForwardBlock(int channels)
         // Split and apply GELU gate via backend: output = x[:innerDim] * GELU(x[innerDim:])
         TensorShape innerShape = new TensorShape(batch, seqLen, innerDim);
         Tensor gated = new Tensor(innerShape, dtype);
-        backend.GeGlu(gated, geGluOut);
+        backend.Glu(gated, geGluOut, GluSpec.GeGlu);
         geGluOut.Dispose();
 
         // Output linear: [B, seqLen, innerDim] → [B, seqLen, channels]

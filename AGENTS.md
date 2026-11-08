@@ -18,7 +18,7 @@ Read these once per task, in this order:
    spans two areas loads both files.
 
 After that, load only the sections your task needs from [open work](docs/Checklists/ROADMAP.md),
-[model status](docs/Checklists/MODEL_STATUS.md) and [research](docs/Research/). Search first, then open the matching
+[model status](docs/Checklists/MODEL_STATUS.md). Search first, then open the matching
 section. Reading the whole tree for one task wastes context and usually does not help.
 
 Before you debug wrong output, a crash or slowness, search [troubleshooting](docs/Checklists/TROUBLESHOOTING.md) for

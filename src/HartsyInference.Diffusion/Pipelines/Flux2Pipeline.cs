@@ -1,8 +1,9 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -311,7 +312,7 @@ _transformer.InvalidateStepGraph(Backend);
 
         // Drain-free fast path (plain t2i / img2img, the Chroma/Krea2 pattern): the latent stays
         // device-resident across the loop and the Euler step runs as ONE in-place device op (Flux.2 has no
-        // true-CFG — guidance is embedded — so CfgEulerStep with g=1 is the plain z += v·dt). Masked inpaint
+        // true-CFG — guidance is embedded — so GuidedEulerStep with g=1 is the plain z += v·dt). Masked inpaint
         // keeps the host branch (per-step host blend must read the latent anyway).
         bool drainFree = !isMaskedInpaint;
         Logs.Info(drainFree ? "Flux.2 loop: drain-free device-resident path." : "Flux.2 loop: host-step path.");
@@ -354,7 +355,7 @@ _transformer.InvalidateStepGraph(Backend);
 
         // Sampler selection (2026-08-20). Flux.2 is flow-matching with DISTILLED guidance (no true CFG), so the
         // predictor hands the same velocity back as both halves of the pair at guidance 1.0 — the sampler's combine
-        // degenerates to identity, exactly as the direct CfgEulerStep(z, v, v, 1.0f, dt) call did.
+        // degenerates to identity, exactly as the direct GuidedEulerStep(z, v, v, GuidedEulerSpec.Lerp(1.0f, dt)) call did.
         //
         // A non-default sampler excludes the step graph on the same grounds the gate already excludes step-cache and
         // regions: a capture bakes one fixed op sequence, and a second-order sampler adds a forward at an
@@ -410,7 +411,7 @@ _transformer.InvalidateStepGraph(Backend);
                 (Tensor velocity, bool callerOwns) = _transformer.ForwardGraphable(
                     Backend, packedLatent, textEmbeddings, sigma, guidanceScale, patH, patW);
                 // Euler stays OUTSIDE the capture: in-place on the fixed latent the graph reads next step.
-                Backend.CfgEulerStep(packedLatent, velocity, velocity, 1.0f, scheduler.Dt(i));
+                Backend.GuidedEulerStep(packedLatent, velocity, velocity, GuidedEulerSpec.Lerp(1.0f, scheduler.Dt(i)));
                 if (callerOwns) velocity.Dispose();
 
                 stepSw.Stop();

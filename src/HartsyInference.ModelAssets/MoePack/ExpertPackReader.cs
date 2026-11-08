@@ -3,6 +3,7 @@ using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using System.IO.MemoryMappedFiles;
+using HartsyInference.Core.Backends.Experts;
 
 namespace HartsyInference.ModelAssets.MoePack;
 

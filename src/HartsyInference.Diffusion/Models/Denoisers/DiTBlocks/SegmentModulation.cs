@@ -1,10 +1,11 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>adaLN shift/scale/gate that differ per <see cref="TokenSegment"/> group: one F32 table row per group, gathered
-/// per token by <see cref="IBackend.AffineBroadcastRowIndexed"/> and <see cref="IBackend.GatedResidualRowIndexed"/>
+/// per token by a row-indexed <see cref="IBackend.NormModulate"/> and <see cref="IBackend.GatedResidualRowIndexed"/>
 /// through the layout's row index instead of materializing <c>[S, D]</c> rows. Used where reference tokens take a
 /// different timestep's modulation than the live tokens. Operands are F32: Vulkan serves the row-indexed ops in F32 only.
 /// The layout is borrowed; the tables are owned.</summary>
@@ -55,7 +56,7 @@ public sealed class SegmentModulation : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         RequireRows(normed);
         Tensor output = new(normed.Shape, DType.F32);
-        backend.AffineBroadcastRowIndexed(output, normed, Scale, Shift, _layout.RowIndex);
+        backend.NormModulate(NormModulateCall.Rows(output, normed, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(normed, Scale, Shift, _layout.RowIndex, ScaleMode.OnePlus)));
         return output;
     }
 

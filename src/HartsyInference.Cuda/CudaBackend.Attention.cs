@@ -2,6 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
 using HartsyInference.Core.Backends.Gpu;
+using HartsyInference.Core.Backends.Latent;
+using HartsyInference.Core.Backends.Host;
 
 namespace HartsyInference.Cuda;
 
@@ -180,36 +182,6 @@ public sealed partial class CudaBackend
     }
 
     /// <inheritdoc />
-    /// <remarks>A destination row past the last row is skipped on the device; the CPU reference throws.</remarks>
-    public void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("QuantizeLatentRows");
-        LatentQuantReference.ValidateQuantize(dest, rows, physicalRows);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        RequireAttentionKernels();
-        int count = (int)physicalRows.ElementCount;
-        ulong pRows = 0, pPhys = 0, pWinner = 0, pCodes = 0, pScales = 0;
-        try
-        {
-            pRows = GpuTransferHelper.CopyToDevice(rows);
-            pPhys = GpuTransferHelper.CopyToDevice(physicalRows);
-            pWinner = GpuTransferHelper.AllocateDevice((nuint)((long)dest.Rows * sizeof(int)));
-            // The destination keeps its untouched rows, so its current contents go up and are updated in place.
-            pCodes = GpuTransferHelper.CopyToDevice(dest.Codes!);
-            if (dest.Scales is not null) pScales = GpuTransferHelper.CopyToDevice(dest.Scales);
-            _kernels!.LaunchQuantizeLatentRows(pCodes, pScales, pRows, pPhys, pWinner, count, dest.Dim, dest.Rows,
-                dest.Encoding, _stream.Handle);
-            RecacheInPlace(dest.Codes!, pCodes);
-            if (dest.Scales is not null) RecacheInPlace(dest.Scales, pScales);
-        }
-        finally
-        {
-            FreeAll(pRows, pPhys, pWinner, pCodes, pScales);
-        }
-    }
-
-    /// <inheritdoc />
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         using NvtxRange _nvtx = NvtxRange.Push("ActQuantDequantInPlace");
@@ -255,33 +227,6 @@ public sealed partial class CudaBackend
         finally
         {
             if (!cached) GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
-    /// <inheritdoc />
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleavedOffset");
-        RopeInterleavedOffsetReference.Validate(x, cos, sin, rotaryDim, dimOffset);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        RequireAttentionKernels();
-        int rank = x.Shape.Rank;
-        int heads = rank == 4 ? (int)x.Shape[2] : 1;
-        int dim = (int)x.Shape[rank - 1];
-        long positions = x.Shape[0] * x.Shape[1];
-        ulong pX = 0, pCos = 0, pSin = 0;
-        try
-        {
-            pX = GpuTransferHelper.CopyToDevice(x);
-            pCos = GpuTransferHelper.CopyToDevice(cos);
-            pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRopeInterleavedOffset(pX, pCos, pSin, positions, heads, dim, rotaryDim / 2, dimOffset, _stream.Handle);
-            RecacheInPlace(x, pX);
-        }
-        finally
-        {
-            FreeAll(pX, pCos, pSin);
         }
     }
 

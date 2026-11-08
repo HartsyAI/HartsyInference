@@ -24,7 +24,7 @@ arithmetic unless the validated algorithm requires otherwise.
 - GLSL is the source, and SPIR-V is a build artifact. Rebuild with `src/HartsyInference.Vulkan/Shaders/build.sh`, commit
   the generated changes together with the source, and register new variants in the build lists.
 - Run `VulkanShaderDriftTests` with a compiler that supports the shader set. A missing or inadequate compiler gives
-  inconclusive coverage, which is not a verified rebuild. See the [SPIR-V reference](../Research/SPIRV_COMPUTE_SHADERS.md).
+  inconclusive coverage, which is not a verified rebuild. See the the SPIR-V reference.
 
 ## Measurement
 

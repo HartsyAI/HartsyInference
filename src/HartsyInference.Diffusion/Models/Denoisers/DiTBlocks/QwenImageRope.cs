@@ -84,7 +84,7 @@ public sealed unsafe class QwenImageRope : IDisposable
     }
 
     /// <summary>Builds (or returns the cached) joint cos/sin tables for the device rope path, <c>[S, headDim]</c>
-    /// F32 in the <see cref="IBackend.WanRopeInterleaved"/> convention (pair i's angle at index
+    /// F32 in the <c>RotaryCall.Rows</c> convention (pair i's angle at index
     /// <c>2i</c>). Same position math as <see cref="ApplyJoint"/> — the rotation itself matches the interleaved
     /// kernel exactly (<c>x0·cos−x1·sin, x0·sin+x1·cos</c> on pairs (2i, 2i+1)).
     /// <para><paramref name="imgTokenStart"/>/<paramref name="imgTokenCount"/> restrict the image section to a

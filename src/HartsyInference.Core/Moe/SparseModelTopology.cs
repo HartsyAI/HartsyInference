@@ -53,16 +53,6 @@ public sealed class SparseModelTopology
     /// </summary>
     public string Fingerprint { get; }
 
-    /// <summary>Number of layers that are sparse.</summary>
-    public int SparseLayerCount => Layers.Count(static layer => layer.IsSparse);
-
-    /// <summary>Largest routed-expert count among sparse layers, or 0.</summary>
-    public int MaxExpertsPerLayer =>
-        Layers.Where(static layer => layer.Moe is not null).Select(static layer => layer.Moe!.ExpertCount).DefaultIfEmpty(0).Max();
-
-    /// <summary>Total payload bytes of every expert in every sparse layer.</summary>
-    public long TotalExpertPayloadBytes => Layers.Sum(static layer => layer.Moe?.PayloadBytes ?? 0);
-
     private void Validate()
     {
         for (int i = 0; i < Layers.Count; i++)

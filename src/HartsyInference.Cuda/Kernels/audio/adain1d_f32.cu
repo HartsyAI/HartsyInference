@@ -9,7 +9,7 @@
 // they come from a Linear projection of the speaker/style embedding.
 //
 // One block per row; shared-mem two-pass reduction for mean then variance. This mirrors
-// dit_layernorm_noaffine_f32 and matches the CPU reference in NormKernels.AdaInstanceNorm1d
+// the row LayerNorm of norm_modulate.cu and matches the CPU reference in NormKernels.AdaInstanceNorm1d
 // exactly (scale = (1+gamma)*invStd, shift = beta - mean*scale).
 //
 // Build:
