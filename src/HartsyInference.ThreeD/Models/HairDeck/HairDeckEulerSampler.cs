@@ -22,6 +22,7 @@ public static class HairDeckEulerSampler
         int points = steps + 1;
         for (int i = 0; i < steps; i++)
         {
+            cancel.ThrowIfCancellationRequested();
             float t = HairDeckNumerics.Linspace(i, points, 1f, 0f);
             float tNext = HairDeckNumerics.Linspace(i + 1, points, 1f, 0f);
             float delta = tNext - t;
