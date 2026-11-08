@@ -86,27 +86,4 @@ public static unsafe class GdMath
             Array.Copy(embs[c], 0, outp, (long)c * numPosFeats, numPosFeats);
         return outp;
     }
-
-    /// <summary>Swin relative-position index for a <paramref name="ws"/>×<paramref name="ws"/> window, flattened to
-    /// <c>[ws*ws * ws*ws]</c>. Each entry indexes into <c>relative_position_bias_table[(2ws-1)^2, heads]</c>.</summary>
-    public static int[] SwinRelativePositionIndex(int ws)
-    {
-        int n = ws * ws;
-        int[] coordsY = new int[n], coordsX = new int[n];
-        for (int y = 0; y < ws; y++)
-            for (int x = 0; x < ws; x++)
-            {
-                coordsY[y * ws + x] = y;
-                coordsX[y * ws + x] = x;
-            }
-        int[] index = new int[n * n];
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-            {
-                int ry = coordsY[i] - coordsY[j] + ws - 1;
-                int rx = coordsX[i] - coordsX[j] + ws - 1;
-                index[i * n + j] = ry * (2 * ws - 1) + rx;
-            }
-        return index;
-    }
 }
