@@ -65,26 +65,30 @@ public static class UniqueIdRendezvous
             while (joinedCount < options.WorldSize - 1)
             {
                 TcpClient? candidate = null;
-                int rank;
+                bool admitted = false;
                 try
                 {
                     candidate = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
-                    rank = await TryAcceptHelloAsync(candidate, options, expectedDigest, joined, ct).ConfigureAwait(false);
+                    int rank = await TryAcceptHelloAsync(candidate, options, expectedDigest, joined, ct).ConfigureAwait(false);
+                    if (rank > 0)
+                    {
+                        joined[rank] = candidate;
+                        admitted = true;
+                        joinedCount++;
+                        Logs.Info($"[Rendezvous] rank {rank} joined ({joinedCount + 1}/{options.WorldSize}).");
+                    }
                 }
                 catch (OperationCanceledException) when (!external.IsCancellationRequested)
                 {
-                    candidate?.Dispose();
                     throw MissingRanksTimeout(options, joined);
                 }
-                if (rank > 0)
+                finally
                 {
-                    joined[rank] = candidate;
-                    joinedCount++;
-                    Logs.Info($"[Rendezvous] rank {rank} joined ({joinedCount + 1}/{options.WorldSize}).");
-                }
-                else
-                {
-                    candidate.Dispose();
+                    // Covers rejected hellos and any exit (caller cancel, I/O fault) before the client is admitted.
+                    if (!admitted)
+                    {
+                        candidate?.Dispose();
+                    }
                 }
             }
             // TODO(unsure): if one rank drops after admission, the whole exchange fails; no re-admission path exists.
