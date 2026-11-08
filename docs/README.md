@@ -8,6 +8,7 @@ git preserves removed history.
 |---|---|
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
 | Attention semantics, numerical permissions and kernel planning | [ATTENTION_CONTRACT.md](ATTENTION_CONTRACT.md) |
+| Generic layout ops: strided views, strided copy and accumulate, pad | [BACKEND_OPS.md](BACKEND_OPS.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
 | Vulkan LLM and MoE: measured gap to CUDA and the port plan | [VULKAN_MOE_PLAN.md](VULKAN_MOE_PLAN.md) |

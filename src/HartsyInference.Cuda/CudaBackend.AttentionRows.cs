@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
@@ -369,9 +370,9 @@ public sealed partial class CudaBackend
             if (kvHeads != heads)
             {
                 kRep = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
-                RepeatKvHeads(kRep, kMh, kvHeads, heads / kvHeads);
+                StridedCopies.RepeatInterleave(this, kRep, kMh, 1, heads / kvHeads);
                 vRep = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
-                RepeatKvHeads(vRep, vMh, kvHeads, heads / kvHeads);
+                StridedCopies.RepeatInterleave(this, vRep, vMh, 1, heads / kvHeads);
                 kMh.Dispose();
                 vMh.Dispose();
             }

@@ -1,49 +1,35 @@
 using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Layout moves: head split/merge, patchify and pixel shuffles, VAE frame plumbing, row and sequence slices and scatters.
+// Layout moves: the generic strided copy, accumulate and pad, patchify and pixel shuffles, row and sequence slices and scatters.
 public partial interface IBackend
 {
     // Default host impls = numeric reference; CudaBackend overrides with PTX kernels to keep
     // the attention island GPU-resident.
 
-    /// <summary>Frame-major qkv <c>[token,3·dim]</c> → <c>[b,heads,seq,headDim]</c>; spatial: b=frame; temporal: b=spatial,seq=frames.</summary>
-    unsafe void OasisSplitHeads(Tensor output, Tensor qkv, int frames, int sp, int heads, int headDim, int part, bool temporal)
-    {
-        if (output.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("OasisSplitHeads default fallback only supports F32.");
-        int dim = heads * headDim;
-        int seq = temporal ? frames : sp;
-        float* src = (float*)qkv.DataPointer, dst = (float*)output.DataPointer;
-        for (int f = 0; f < frames; f++)
-            for (int i = 0; i < sp; i++)
-            {
-                long token = (long)f * sp + i;
-                int b = temporal ? i : f, s = temporal ? f : i;
-                for (int h = 0; h < heads; h++)
-                    for (int d = 0; d < headDim; d++)
-                        dst[(((long)b * heads + h) * seq + s) * headDim + d] = src[token * 3 * dim + (long)part * dim + (long)h * headDim + d];
-            }
-    }
+    /// <summary>Strided copy: <c>output[dst(i)] = input[src(i)]</c> for every multi-index <c>i</c> of the spec's extents, a
+    /// pure move of 1, 2, 4 or 8-byte elements between tensors of one dtype. Elements of <paramref name="output"/> the
+    /// destination view does not address keep their contents, so a scatter into a slot of a larger tensor is in place.
+    /// Slices, head splits and merges, permutes, broadcasts and <c>repeat_interleave</c> are all one call: build the view
+    /// with <see cref="StridedView"/> or a <see cref="StridedCopies"/> helper. Contract: <c>docs/BACKEND_OPS.md</c>;
+    /// <see cref="StridedCopyReference.Copy"/> is its executable form.</summary>
+    void CopyStrided(Tensor output, Tensor input, in StridedCopySpec spec) => StridedCopyReference.Copy(output, input, spec);
 
-    /// <summary><c>[b, heads, seq, headDim]</c> → frame-major <c>[token, dim]</c> (inverse of <see cref="OasisSplitHeads"/>).</summary>
-    unsafe void OasisMergeHeads(Tensor output, Tensor attn, int frames, int sp, int heads, int headDim, bool temporal)
-    {
-        if (output.DType != DType.F32 || attn.DType != DType.F32) throw new NotSupportedException("OasisMergeHeads default fallback only supports F32.");
-        int dim = heads * headDim;
-        int seq = temporal ? frames : sp;
-        float* src = (float*)attn.DataPointer, dst = (float*)output.DataPointer;
-        for (int f = 0; f < frames; f++)
-            for (int i = 0; i < sp; i++)
-            {
-                long token = (long)f * sp + i;
-                int b = temporal ? i : f, s = temporal ? f : i;
-                for (int h = 0; h < heads; h++)
-                    for (int d = 0; d < headDim; d++)
-                        dst[token * dim + (long)h * headDim + d] = src[(((long)b * heads + h) * seq + s) * headDim + d];
-            }
-    }
+    /// <summary>Strided accumulate: <c>output[dst(i)] += input[src(i)]</c> over the spec's extents, in place, for F32, F16 or
+    /// BF16 tensors of one dtype; the add is F32 and the result rounds to the storage dtype (bfloat16 ties to even). The
+    /// destination addresses every element once, so no two adds race and the order never matters. Contract:
+    /// <c>docs/BACKEND_OPS.md</c>; <see cref="StridedCopyReference.Accumulate"/> is its executable form.</summary>
+    void AccumulateStrided(Tensor output, Tensor input, in StridedCopySpec spec) => StridedCopyReference.Accumulate(output, input, spec);
+
+    /// <summary>Pads <paramref name="input"/> into <paramref name="output"/> (<c>F.pad</c>): every axis grows by the spec's
+    /// before and after counts, and the new positions are zero bits, the nearest edge element or its reflection per
+    /// <see cref="PadMode"/>. Any 1, 2, 4 or 8-byte dtype. Contract: <c>docs/BACKEND_OPS.md</c>;
+    /// <see cref="StridedCopyReference.Pad"/> is its executable form.</summary>
+    void Pad(Tensor output, Tensor input, in PadSpec spec) => StridedCopyReference.Pad(output, input, spec);
 
     /// <summary>Oasis per-frame unpatchify: <c>proj[t·sp, c·p²]</c> → <c>out[t,c,H,W]</c>, out-vector laid <c>[py,px,ci]</c>.</summary>
     unsafe void OasisUnpatchify(Tensor output, Tensor proj, int frames, int channels, int gh, int gw, int patch)
@@ -61,63 +47,6 @@ public partial interface IBackend
                             for (int px = 0; px < p; px++)
                                 dst[(((long)f * channels + ci) * h + ty * p + py) * w + tx * p + px] = src[token * outVec + (long)(py * p + px) * channels + ci];
                 }
-    }
-
-    /// <summary>Matrix-Game 3.0 ActionModule: gathers a QKV slot into the batched temporal layout <c>[sp,heads,tt,headDim]</c>.</summary>
-    unsafe void Mg3SplitQkvTemporal(Tensor outT, Tensor qkv, int tt, int sp, int heads, int headDim, int part, int stride)
-    {
-        int streamDim = heads * headDim, rowDim = stride * streamDim;
-        float* src = (float*)qkv.DataPointer, dst = (float*)outT.DataPointer;
-        for (int f = 0; f < tt; f++)
-            for (int s = 0; s < sp; s++)
-            {
-                long token = (long)f * sp + s;
-                for (int h = 0; h < heads; h++)
-                    for (int d = 0; d < headDim; d++)
-                        dst[(((long)s * heads + h) * tt + f) * headDim + d] = src[token * rowDim + part * streamDim + h * headDim + d];
-            }
-    }
-
-    /// <summary>Matrix-Game 3.0 ActionModule: inverse of <see cref="Mg3SplitQkvTemporal"/>, back to token rows <c>[tt·sp, streamDim]</c>.</summary>
-    unsafe void Mg3MergeTemporal(Tensor outT, Tensor attn, int tt, int sp, int heads, int headDim)
-    {
-        int streamDim = heads * headDim;
-        float* src = (float*)attn.DataPointer, dst = (float*)outT.DataPointer;
-        for (int s = 0; s < sp; s++)
-            for (int h = 0; h < heads; h++)
-                for (int f = 0; f < tt; f++)
-                    for (int d = 0; d < headDim; d++)
-                        dst[((long)f * sp + s) * streamDim + h * headDim + d] = src[(((long)s * heads + h) * tt + f) * headDim + d];
-    }
-
-    /// <summary>Matrix-Game 3.0 ActionModule keyboard stream: expands K/V into <c>[sp,heads,tt,headDim]</c>, broadcast across sp.</summary>
-    unsafe void Mg3KvExpand(Tensor kOut, Tensor vOut, Tensor kv, int sp, int heads, int tt, int headDim)
-    {
-        int streamDim = heads * headDim;
-        float* kvp = (float*)kv.DataPointer, kp = (float*)kOut.DataPointer, vp = (float*)vOut.DataPointer;
-        for (int s = 0; s < sp; s++)
-            for (int h = 0; h < heads; h++)
-                for (int f = 0; f < tt; f++)
-                    for (int d = 0; d < headDim; d++)
-                    {
-                        long dst = (((long)s * heads + h) * tt + f) * headDim + d;
-                        long kvBase = (long)f * 2 * streamDim + h * headDim + d;
-                        kp[dst] = kvp[kvBase]; vp[dst] = kvp[kvBase + streamDim];
-                    }
-    }
-
-    /// <summary>Matrix-Game 3.0 ActionModule mouse stream: builds the MLP input = hidden features concat per-frame mouse window.</summary>
-    unsafe void Mg3MouseMlpConcat(Tensor outT, Tensor hidden, Tensor mouseWin, int tt, int sp, int imgDim, int winFloats)
-    {
-        int rowW = imgDim + winFloats;
-        float* hp = (float*)hidden.DataPointer, wp = (float*)mouseWin.DataPointer, op = (float*)outT.DataPointer;
-        for (int f = 0; f < tt; f++)
-            for (int s = 0; s < sp; s++)
-            {
-                long token = (long)f * sp + s;
-                for (int c = 0; c < imgDim; c++) op[token * rowW + c] = hp[token * imgDim + c];
-                for (int wf = 0; wf < winFloats; wf++) op[token * rowW + imgDim + wf] = wp[(long)f * winFloats + wf];
-            }
     }
 
     /// <summary>LTX-2.5 channels-last 3D pixel shuffle of one temporal chunk: each source token
@@ -168,69 +97,6 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>Extracts temporal frame <paramref name="ti"/> of a 5D <c>[B,C,Tsrc,H,W]</c> source into the 4D <c>[B,C,H,W]</c> output.</summary>
-    unsafe void ExtractVaeFrame(Tensor output, Tensor src, int ti)
-    {
-        int b = (int)output.Shape[0], c = (int)output.Shape[1];
-        long frameHW = output.ElementCount / ((long)b * c);
-        int tsrc = (int)src.Shape[2];
-        float* op = (float*)output.DataPointer, sp = (float*)src.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-                Buffer.MemoryCopy(sp + ((((long)bi * c + ci) * tsrc + ti) * frameHW), op + (((long)bi * c + ci) * frameHW), frameHW * 4, frameHW * 4);
-    }
-
-    /// <summary>Writes 4D frame acc (plus optional per-channel bias) into temporal slot "to" of the 5D output, in place.</summary>
-    unsafe void WriteVaeFrame(Tensor output, Tensor acc, Tensor? bias, int to)
-    {
-        int b = (int)acc.Shape[0], c = (int)acc.Shape[1];
-        long frameHW = acc.ElementCount / ((long)b * c);
-        int tout = (int)output.Shape[2];
-        float* op = (float*)output.DataPointer, ap = (float*)acc.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-        for (int bi = 0; bi < b; bi++)
-            for (int ci = 0; ci < c; ci++)
-            {
-                float bv = bp is null ? 0f : bp[ci];
-                long srcOff = ((long)bi * c + ci) * frameHW, dstOff = (((long)bi * c + ci) * tout + to) * frameHW;
-                for (long i = 0; i < frameHW; i++) op[dstOff + i] = ap[srcOff + i] + bv;
-            }
-    }
-
-    /// <summary>Fills <paramref name="output"/> <c>[1,cOut,tout,H,W]</c> with per-channel bias (or 0 when null).</summary>
-    unsafe void FillBias(Tensor output, Tensor? bias)
-        => FillBiasReference(output, bias);
-
-    /// <summary>The managed <see cref="FillBias"/> body, callable directly. A backend override must
-    /// call THIS to fall back — <c>((IBackend)this).FillBias(...)</c> re-enters the override and
-    /// recurses until the stack overflows.</summary>
-    static unsafe void FillBiasReference(Tensor output, Tensor? bias)
-    {
-        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
-        long hw = output.ElementCount / ((long)cOut * tout);
-        float* op = (float*)output.DataPointer; float* bp = bias is null ? null : (float*)bias.DataPointer;
-        for (int co = 0; co < cOut; co++)
-        {
-            float bv = bp is null ? 0f : bp[co];
-            for (int to = 0; to < tout; to++) { long o = ((long)co * tout + to) * hw; for (long i = 0; i < hw; i++) op[o + i] = bv; }
-        }
-    }
-
-    /// <summary>Temporal gather-sum for batched CausalConv3d, in place: <c>output[co][to][hw] += convDt[to·strideT+dt][co][hw]</c>.</summary>
-    unsafe void AccumulateTap(Tensor output, Tensor convDt, int dt, int strideT)
-    {
-        int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
-        long hw = output.ElementCount / ((long)cOut * tout);
-        float* op = (float*)output.DataPointer, cp = (float*)convDt.DataPointer;
-        for (int co = 0; co < cOut; co++)
-            for (int to = 0; to < tout; to++)
-            {
-                int srcT = to * strideT + dt;
-                long o = ((long)co * tout + to) * hw, s = ((long)srcT * cOut + co) * hw;
-                for (long i = 0; i < hw; i++) op[o + i] += cp[s + i];
-            }
-    }
-
     /// <summary>SeedVR2 MAGViT channel→space shuffle: <c>[1,cIn,f,h,w] → [1,c,fFinal,h·sr,w·sr]</c> with
     /// <c>c = cIn/(sr²·tr)</c>, source channel <c>((xi·sr+yi)·tr+zi)·c+ci</c>, and (temporal only) OUTPUT
     /// FRAME INDEX 1 dropped (T→2T−1). Shapes carry every dim; F32/BF16. Default is the host reference.</summary>
@@ -258,29 +124,6 @@ public partial interface IBackend
             int x = ox / spatialRatio, yi = ox % spatialRatio;
             int srcC = ((xi * spatialRatio + yi) * temporalRatio + zi) * c + ci;
             dst[idx] = src[(((long)srcC * f + fi) * h + y) * w + x];
-        }
-    }
-
-    /// <summary>SeedVR2 asymmetric zero pad (right/bottom only, diffusers <c>Downsample2D(padding=0)</c>):
-    /// <c>[B,C,T,h,w] → [B,C,T,h+1,w+1]</c>. F32/BF16. Default is the host reference.</summary>
-    unsafe void SeedVr2PadBottomRight(Tensor output, Tensor input)
-    {
-        if (input.DType != DType.F32 || output.DType != DType.F32)
-            throw new NotSupportedException("SeedVr2PadBottomRight default fallback only supports F32.");
-        Sync();
-        int h = (int)input.Shape[3], w = (int)input.Shape[4];
-        long planes = input.ElementCount / ((long)h * w);
-        int hp = h + 1, wp = w + 1;
-        float* src = (float*)input.DataPointer;
-        float* dst = (float*)output.DataPointer;
-        long total = planes * hp * wp;
-        for (long idx = 0; idx < total; idx++)
-        {
-            int x = (int)(idx % wp);
-            long r = idx / wp;
-            int y = (int)(r % hp);
-            long p = r / hp;
-            dst[idx] = y < h && x < w ? src[(p * h + y) * w + x] : 0f;
         }
     }
 
@@ -385,34 +228,6 @@ public partial interface IBackend
                         }
     }
 
-    /// <summary>Wan2.2 VAE attention qkv split: <c>src [bt, 3c, h, w] → q,k,v each [bt, 1, hw, c]</c>. Default = host loop.</summary>
-    unsafe void SplitVaeQkv(Tensor q, Tensor k, Tensor v, Tensor qkv, int bt, int c, int hw)
-    {
-        float* src = (float*)qkv.DataPointer, qp = (float*)q.DataPointer, kp = (float*)k.DataPointer, vp = (float*)v.DataPointer;
-        long frame = hw;
-        for (int i = 0; i < bt; i++)
-            for (int ci = 0; ci < c; ci++)
-                for (int token = 0; token < hw; token++)
-                {
-                    long srcBase = ((long)i * 3 * c) * frame + token;
-                    long dstOff = ((long)i * hw + token) * c + ci;
-                    qp[dstOff] = src[srcBase + (long)ci * frame];
-                    kp[dstOff] = src[srcBase + (long)(c + ci) * frame];
-                    vp[dstOff] = src[srcBase + (long)(2 * c + ci) * frame];
-                }
-    }
-
-    /// <summary>Wan2.2 VAE attention output un-transpose: <c>attn [bt, 1, hw, c] → out [bt, c, h, w]</c>. Default = host loop.</summary>
-    unsafe void VaeTokensToFrame(Tensor output, Tensor attn, int bt, int c, int hw)
-    {
-        float* a = (float*)attn.DataPointer, o = (float*)output.DataPointer;
-        long frame = hw;
-        for (int i = 0; i < bt; i++)
-            for (int ci = 0; ci < c; ci++)
-                for (int token = 0; token < hw; token++)
-                    o[((long)i * c + ci) * frame + token] = a[((long)i * hw + token) * c + ci];
-    }
-
     /// <summary>Copies a contiguous last-dim slice: <c>out[row,d] = in[row,offset+d]</c>; splits a fused tensor (e.g. QKV) into a chunk.</summary>
     unsafe void SliceLastDim(Tensor output, Tensor input, int offset)
     {
@@ -434,24 +249,6 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>Extracts a TIME sub-range from a KV tensor: <c>output[1,h,t,d]=input[1,h,start+t,d]</c>; slices dim 2, not the last dim.</summary>
-    unsafe void SliceTimeRange(Tensor output, Tensor input, int start, int len)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("SliceTimeRange default fallback only supports F32.");
-        int h = (int)input.Shape[1];
-        int tIn = (int)input.Shape[2];
-        int d = (int)input.Shape[3];
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        for (int hi = 0; hi < h; hi++)
-        {
-            long srcBase = ((long)hi * tIn + start) * d;
-            long dstBase = (long)hi * len * d;
-            Buffer.MemoryCopy(pIn + srcBase, pOut + dstBase, (long)len * d * 4, (long)len * d * 4);
-        }
-    }
-
     /// <summary>Per-row scalar multiply: <c>out[row, c] = in[row, c] * rowMask[row]</c> — token masking for DiT embeddings.</summary>
     unsafe void MaskRows(Tensor output, Tensor input, Tensor rowMask)
     {
@@ -464,20 +261,6 @@ public partial interface IBackend
         float* pMask = (float*)rowMask.DataPointer;
         for (long i = 0; i < total; i++)
             pOut[i] = pIn[i] * pMask[i / channels];
-    }
-
-    /// <summary>Scatter rows after a zeroed head block: <c>output = [zeros(headRows), input]</c> — builds the conditional latent.</summary>
-    unsafe void ScatterRowsAfter(Tensor output, Tensor input, int headRows)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("ScatterRowsAfter default fallback only supports F32.");
-        int dim = (int)input.Shape[input.Shape.Rank - 1];
-        long total = output.ElementCount;
-        long headElems = (long)headRows * dim;
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        for (long i = 0; i < total; i++)
-            pOut[i] = i < headElems ? 0f : pIn[i - headElems];
     }
 
     /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
@@ -576,30 +359,6 @@ public partial interface IBackend
                 for (int s = 0; s < numSamples; s++) op[outBase + (long)ti * numSamples + s] = v;
             }
         }
-    }
-
-    /// <summary>GQA K/V head repeat: expands <c>[B,Hkv,L,D]</c> to <c>[B,Hkv*groupSize,L,D]</c>, matching HF <c>repeat_kv</c>.</summary>
-    unsafe void RepeatKvHeads(Tensor output, Tensor input, int kvHeads, int groupSize)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("RepeatKvHeads default fallback only supports F32.");
-        int batch = (int)input.Shape[0];
-        int seqLen = (int)input.Shape[2];
-        int headDim = (int)input.Shape[3];
-        long perHead = (long)seqLen * headDim;
-        float* ip = (float*)input.DataPointer;
-        float* op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-            for (int h = 0; h < kvHeads; h++)
-            {
-                long srcOff = ((long)b * kvHeads + h) * perHead;
-                for (int g = 0; g < groupSize; g++)
-                {
-                    int qHead = h * groupSize + g;
-                    long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
-                    Buffer.MemoryCopy(ip + srcOff, op + dstOff, perHead * 4, perHead * 4);
-                }
-            }
     }
 
     /// <summary>3D pixel-shuffle (TRELLIS SS-VAE upsample): <c>[N,C·r³,D,H,W] → [N,C,rD,rH,rW]</c>, matching reshape+permute.</summary>

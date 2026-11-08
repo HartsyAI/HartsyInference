@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -922,8 +923,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             {
                 kRepeated = new Tensor(qMhShape, DType.F32);
                 vRepeated = new Tensor(qMhShape, DType.F32);
-                backend.RepeatKvHeads(kRepeated, kMh, Hkv, _config.KvGroupSize);
-                backend.RepeatKvHeads(vRepeated, vMh, Hkv, _config.KvGroupSize);
+                StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
+                StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
                 kMh.Dispose();
                 vMh.Dispose();
             }

@@ -661,25 +661,6 @@ __global__ void dit_index_add_f32(
     h[i] += table[(size_t)indices[row] * dim + d];
 }
 
-// ── Scatter rows after a zeroed head block ──────────────────────────────────
-// output = [ zeros(headRows), input ] along the row axis. out[row,d] = row < headRows ? 0
-// : input[(row-headRows)*dim + d]. Builds Ideogram 4's conditional latent (text rows zeroed,
-// image rows = current latent z).
-__global__ void dit_scatter_rows_after_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    unsigned int headRows,
-    unsigned int dim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    unsigned long long row = i / dim;
-    if (row < headRows) { output[i] = 0.0f; return; }
-    unsigned int d = (unsigned int)(i % dim);
-    output[i] = input[(size_t)(row - headRows) * dim + d];
-}
-
 // ── Slice a contiguous row block (by element offset) ────────────────────────
 // output[i] = input[elemOffset + i]. Extracts image-token velocity rows from a full sequence.
 __global__ void dit_slice_rows_f32(
@@ -989,35 +970,6 @@ __global__ void dit_row_gated_accum_f32(
         out[i] += g * val[i];
 }
 
-// ── Oasis spatio-temporal attention layout (device ports of the host loops) ──
-// Frame-major tokens qkv[token, 3*dim] (token = f*sp + i) → out[b, heads, seq, headDim].
-// spatial (temporal=0): b = frame f, s = spatial i, seq = sp
-// temporal(temporal=1): b = spatial i, s = frame f, seq = frames
-// One thread per output element (token, h, d) over the sliced `part` (q=0/k=1/v=2).
-__global__ void oasis_split_heads_f32(
-    float* __restrict__ out,
-    const float* __restrict__ qkv,
-    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
-    unsigned int part, unsigned int temporal)
-{
-    unsigned int dim = heads * headDim;
-    unsigned long long total = (unsigned long long)frames * sp * dim;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int d = (unsigned int)(gid % headDim);
-    unsigned long long tmp = gid / headDim;
-    unsigned int h = (unsigned int)(tmp % heads);
-    unsigned long long token = tmp / heads;
-    unsigned int f = (unsigned int)(token / sp);
-    unsigned int i = (unsigned int)(token % sp);
-    unsigned int b = temporal ? i : f;
-    unsigned int s = temporal ? f : i;
-    unsigned int seq = temporal ? frames : sp;
-    unsigned long long srcIdx = token * 3ULL * dim + (unsigned long long)part * dim + (unsigned long long)h * headDim + d;
-    unsigned long long dstIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
-    out[dstIdx] = qkv[srcIdx];
-}
-
 // Interleaved (2i, 2i+1) partial rotary on x[b, heads, seq, headDim]; cos/sin are [seq, rotDim].
 // Rotates only the first `rotDim` dims of each head (rest pass through). One thread per (b,h,s,pair).
 __global__ void oasis_rope_interleaved_f32(
@@ -1041,31 +993,6 @@ __global__ void oasis_rope_interleaved_f32(
     float c = cos[cOff + i0], sn = sin[cOff + i0];
     x[xOff + i0]     = re * c - im * sn;
     x[xOff + i0 + 1] = re * sn + im * c;
-}
-
-// Inverse of split: attn[b, heads, seq, headDim] → out[token, dim] (token = f*sp + i).
-__global__ void oasis_merge_heads_f32(
-    float* __restrict__ out,
-    const float* __restrict__ attn,
-    unsigned int frames, unsigned int sp, unsigned int heads, unsigned int headDim,
-    unsigned int temporal)
-{
-    unsigned int dim = heads * headDim;
-    unsigned long long total = (unsigned long long)frames * sp * dim;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int d = (unsigned int)(gid % headDim);
-    unsigned long long tmp = gid / headDim;
-    unsigned int h = (unsigned int)(tmp % heads);
-    unsigned long long token = tmp / heads;
-    unsigned int f = (unsigned int)(token / sp);
-    unsigned int i = (unsigned int)(token % sp);
-    unsigned int b = temporal ? i : f;
-    unsigned int s = temporal ? f : i;
-    unsigned int seq = temporal ? frames : sp;
-    unsigned long long srcIdx = (((unsigned long long)b * heads + h) * seq + s) * headDim + d;
-    unsigned long long dstIdx = token * dim + (unsigned long long)h * headDim + d;
-    out[dstIdx] = attn[srcIdx];
 }
 
 // Fused Oasis adaLN: out[r,d] = LayerNorm(x[r])·(1+scale[f,d]) + shift[f,d], f = r/sp. scale/shift are sliced

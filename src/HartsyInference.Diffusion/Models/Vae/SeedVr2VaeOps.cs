@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -36,13 +37,12 @@ public static class SeedVr2VaeOps
     }
 
     /// <summary>Asymmetric zero pad (right/bottom only) on <c>[B,C,T,H,W]</c> — the diffusers
-    /// <c>Downsample2D(padding=0)</c> convention: <c>F.pad(x, (0,1,0,1))</c> before the stride-2 conv.
-    /// Device-resident via <see cref="IBackend.SeedVr2PadBottomRight"/> (host reference on CPU).</summary>
+    /// <c>Downsample2D(padding=0)</c> convention: <c>F.pad(x, (0,1,0,1))</c> before the stride-2 conv.</summary>
     public static Tensor PadBottomRight(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         Tensor padded = new Tensor(new TensorShape([(long)b, c, t, h + 1, w + 1]), x.DType);
-        backend.SeedVr2PadBottomRight(padded, x);
+        backend.Pad(padded, x, new PadSpec(PadMode.Zero, [0, 0, 0, 0, 0], [0, 0, 0, 1, 1]));
         return padded;
     }
 

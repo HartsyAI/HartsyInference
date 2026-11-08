@@ -53,34 +53,6 @@ extern "C" __global__ void wan_vae_unpatchify(
     out[idx] = x[srcOff];
 }
 
-// Wan2.2 VAE attention qkv split: src [bt, 3c, h, w] -> q,k,v each [bt, 1, hw, c] (channel<->token transpose).
-extern "C" __global__ void wan_vae_split_qkv(
-    float* __restrict__ q, float* __restrict__ k, float* __restrict__ v,
-    const float* __restrict__ src, int bt, int c, int hw, long numEl)
-{
-    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (idx >= numEl) return;               // numEl = bt*c*hw
-    int token = (int)(idx % hw); long tmp = idx / hw;
-    int ci = (int)(tmp % c);     int i = (int)(tmp / c);
-    long frame = hw;
-    long srcBase = (long)i * 3 * c * frame + token;
-    long dstOff = ((long)i * hw + token) * c + ci;
-    q[dstOff] = src[srcBase + (long)ci * frame];
-    k[dstOff] = src[srcBase + (long)(c + ci) * frame];
-    v[dstOff] = src[srcBase + (long)(2 * c + ci) * frame];
-}
-
-// Inverse: attn [bt, 1, hw, c] -> out [bt, c, h, w].
-extern "C" __global__ void wan_vae_tokens_to_frame(
-    float* __restrict__ out, const float* __restrict__ a, int bt, int c, int hw, long numEl)
-{
-    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;
-    if (idx >= numEl) return;               // numEl = bt*c*hw
-    int token = (int)(idx % hw); long tmp = idx / hw;
-    int ci = (int)(tmp % c);     int i = (int)(tmp / c);
-    out[((long)i * c + ci) * hw + token] = a[((long)i * hw + token) * c + ci];
-}
-
 // ── BF16 twins (BF16 I/O, F32/F64 compute) ──────────────────────────────────
 // Added for the LTX-2 conv video VAE's BF16 decode path: the decode's peak transient set is a handful of
 // full-output-grid tensors, so halving their width is what keeps the DiT's resident prefix from having to be

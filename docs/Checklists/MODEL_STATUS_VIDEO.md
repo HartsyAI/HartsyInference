@@ -148,8 +148,8 @@ API backend extension, which is a hosted provider, not a local model.
       `RowGather`/`RowScatterAdd` over per-geometry I32 index tensors, rope via `WanRopeInterleaved` with
       per-token tables (identity-padded beyond RotDim), AdaSingle as precombined emb+ada constant vectors
       (timestep is fixed at 1000), all cached in `SeedVr2DevicePlan` + block mod caches across chunks.
-      Plus GPU-resident `SeedVr2PixelShuffle`/`SeedVr2PadBottomRight` (the VAE's last host round-trips;
-      IBackend defaults keep the host reference for CPU). **Measured e2e (4090, BBB 25f): 960×540-area
+      Plus GPU-resident `SeedVr2PixelShuffle` and the generic `Pad` for the bottom-right zero pad (the VAE's last
+      host round-trips; IBackend defaults keep the host reference for CPU). **Measured e2e (4090, BBB 25f): 960×540-area
       14.5 → 2.7 s/frame (362 → 68 s); 720p-area 25.7 → 8.4 s/frame (pre-shuffle-kernel).** Per-chunk
       phase split at 960×540 (`diagnostics.logLevel=Debug` prints it): 4090 encode 1.0 s / dit 6.3 s /
       decode 2.5 s; 3060 5.2 / 6.2 / 13.8 (169 s wall — compute-bound in the decoder convs). Tiny-config

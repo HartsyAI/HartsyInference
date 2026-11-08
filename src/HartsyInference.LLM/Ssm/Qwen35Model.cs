@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
@@ -469,7 +470,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         return outv;
     }
 
-    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
+    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a strided time-axis slice over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
     private Tensor BlockAttnDeviceStep(IBackend backend, Tensor hIn, int i, Tensor stepCos, Tensor stepSin)
     {
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim;
@@ -480,13 +481,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.RmsNormEmitQ8(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
 
         // Fused [query | gate] projection, shaped [1, hq, 2, hd] so the per-head de-interleave is a
-        // device SliceTimeRange (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
+        // device time-axis slice (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
         Tensor qgFull = new(new TensorShape(1, hq, 2, hd), DType.F32);
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
         Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
         Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.SliceTimeRange(qHm, qgFull, 0, 1);
-        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        StridedCopies.SliceAxis(backend, qHm, qgFull, 2, 0, 1);
+        StridedCopies.SliceAxis(backend, gateHm, qgFull, 2, 1, 1);
         qgFull.Dispose();
 
         Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);
@@ -733,8 +734,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
         Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
         Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.SliceTimeRange(qHm, qgFull, 0, 1);
-        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        StridedCopies.SliceAxis(backend, qHm, qgFull, 2, 0, 1);
+        StridedCopies.SliceAxis(backend, gateHm, qgFull, 2, 1, 1);
         qgFull.Dispose();
 
         Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);

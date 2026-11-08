@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -364,8 +365,8 @@ public sealed unsafe class StableAudioDit : IDisposable
             {
                 kRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
                 vRep = new Tensor(new TensorShape(1, heads, condLen, hd), DType.F32);
-                backend.RepeatKvHeads(kRep, kHeads, kvHeads, group);
-                backend.RepeatKvHeads(vRep, vHeads, kvHeads, group);
+                StridedCopies.RepeatInterleave(backend, kRep, kHeads, 1, group);
+                StridedCopies.RepeatInterleave(backend, vRep, vHeads, 1, group);
                 kHeads.Dispose(); vHeads.Dispose();
             }
 

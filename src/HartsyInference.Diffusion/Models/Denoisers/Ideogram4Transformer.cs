@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
@@ -173,7 +174,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
         if (numText > 0)
         {
             h = new Tensor(hidShape, DType.F32);
-            backend.ScatterRowsAfter(h, xProjImg, numText);
+            backend.Pad(h, xProjImg, PadSpec.Axis(PadMode.Zero, 3, 1, numText, 0));
             xProjImg.Dispose();
         }
         else

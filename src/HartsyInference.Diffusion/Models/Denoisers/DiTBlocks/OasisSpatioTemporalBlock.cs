@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -153,7 +154,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         if (Prof) { backend.Sync(); TSdpa += Now(); }
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
-        backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: false);
+        MergeHeads(backend, merged, attn, frames, sp, temporal: false);
         attn.Dispose();
         Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
@@ -182,7 +183,7 @@ public sealed unsafe class OasisSpatioTemporalBlock
         if (Prof) { backend.Sync(); TSdpa += Now(); }
 
         Tensor merged = new(new TensorShape(frames * sp, _dim), DType.F32);
-        backend.OasisMergeHeads(merged, attn, frames, sp, _heads, _headDim, temporal: true);
+        MergeHeads(backend, merged, attn, frames, sp, temporal: true);
         attn.Dispose();
         Tensor projected = new(new TensorShape([(long)frames, sp, _dim]), DType.F32);
         backend.Linear(projected, merged, outW, outB);
@@ -201,14 +202,25 @@ public sealed unsafe class OasisSpatioTemporalBlock
         return mod;
     }
 
-    /// <summary>Device head-split: frame-major qkv <c>[token, 3·dim]</c> → <c>[batch, heads, seq, headDim]</c>
-    /// (spatial batches frames/seq=tokens, temporal batches spatial/seq=frames) via <see cref="IBackend.OasisSplitHeads"/>.</summary>
+    /// <summary>Head split: frame-major qkv <c>[token, 3·dim]</c> → <c>[batch, heads, seq, headDim]</c>, batching frames
+    /// (spatial, seq = positions) or positions (temporal, seq = frames). One strided copy of the chosen q/k/v slot.</summary>
     private Tensor SplitHeads(IBackend backend, Tensor qkv, int frames, int sp, int part, bool temporal)
     {
         int batch = temporal ? sp : frames;
         int seq = temporal ? frames : sp;
         Tensor o = new(new TensorShape([(long)batch, _heads, seq, _headDim]), DType.F32);
-        backend.OasisSplitHeads(o, qkv, frames, sp, _heads, _headDim, part, temporal);
+        StridedView slot = StridedView.Of(qkv.Shape).Reshape([frames, sp, 3, _heads, _headDim]).Select(2, part);
+        backend.CopyStrided(o, qkv, StridedCopySpec.Gather(slot.Permute(HeadMajorOrder(temporal))));
         return o;
     }
+
+    /// <summary>Inverse of <see cref="SplitHeads"/>: <c>[batch, heads, seq, headDim]</c> back into frame-major token rows <c>[token, dim]</c>.</summary>
+    private void MergeHeads(IBackend backend, Tensor merged, Tensor attn, int frames, int sp, bool temporal)
+    {
+        StridedView rows = StridedView.Of(merged.Shape).Reshape([frames, sp, _heads, _headDim]).Permute(HeadMajorOrder(temporal));
+        backend.CopyStrided(merged, attn, StridedCopySpec.Scatter(rows));
+    }
+
+    /// <summary>Axis order taking <c>[frame, position, head, dim]</c> to <c>[batch, head, seq, dim]</c>.</summary>
+    private static ReadOnlySpan<int> HeadMajorOrder(bool temporal) => temporal ? [1, 2, 0, 3] : [0, 2, 1, 3];
 }

@@ -6,7 +6,6 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNELS=(
     "wan_rope"
     "wan_vae_conv3d"
-    "wan_vae_frames"
     "wan_vae_norm"
 )
 

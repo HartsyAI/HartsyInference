@@ -12,37 +12,6 @@
 
 extern "C" {
 
-// ── GQA K/V head repeat (block pattern) ────────────────────────────────────
-// Expands grouped-query K or V from [B, Hkv, L, D] to [B, Hkv*group, L, D] so the
-// head count matches the query heads before SDPA. Block layout (matches HF repeat_kv and
-// Qwen2Attention.RepeatKvHeads): output head qh = h*group + g maps to input head h, i.e.
-// the input head for output head qh is qh / group.
-// One thread per output element.
-__global__ void lm_repeat_kv_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    unsigned int kvHeads,
-    unsigned int group,
-    unsigned int seqLen,
-    unsigned int headDim,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % headDim);
-    unsigned long long rem = i / headDim;
-    unsigned int l = (unsigned int)(rem % seqLen);
-    rem /= seqLen;
-    unsigned int qHeads = kvHeads * group;
-    unsigned int qh = (unsigned int)(rem % qHeads);
-    unsigned long long b = rem / qHeads;
-
-    unsigned int inH = qh / group;
-    unsigned long long inIdx = (((b * kvHeads + inH) * seqLen) + l) * (unsigned long long)headDim + d;
-    output[i] = input[inIdx];
-}
-
 // ── KV cache in-place append ────────────────────────────────────────────────
 // Writes newKv [1, H, tNew, D] into a fixed-capacity buffer [1, H, maxSeq, D] at sequence offset, so a KV
 // cache can grow without reallocating (the Concat-grown cache is O(n^2); this is O(tNew) per step).
@@ -104,33 +73,6 @@ __global__ void lm_kv_append_f16(
     if ((unsigned long long)offset + ti >= maxSeq) return;
     unsigned long long bufIdx = (((unsigned long long)h * maxSeq) + (offset + ti)) * headDim + d;
     buffer[bufIdx] = __float2half(newKv[i]);
-}
-
-// ── Paged KV: contiguous time-range extraction ──────────────────────────────
-// output[1,h,t,d] = input[1,h,start+t,d] for t in [0,len). Mirror of lm_kv_append_f32's per-head
-// addressing but reading a sub-range instead of writing one — used by the paged KV cache to (a) split a
-// multi-token append across page boundaries and (b) gather a partially-filled page's occupied prefix
-// before copying it into the contiguous scratch buffer FlashAttention expects. One thread per output element.
-__global__ void lm_kv_slice_time_f32(
-    float* __restrict__ output,
-    const float* __restrict__ input,
-    unsigned int heads,
-    unsigned int tIn,
-    unsigned int headDim,
-    unsigned int start,
-    unsigned int len,
-    unsigned long long total)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-
-    unsigned int d = (unsigned int)(i % headDim);
-    unsigned long long rem = i / headDim;
-    unsigned int t = (unsigned int)(rem % len);
-    unsigned int h = (unsigned int)(rem / len);
-
-    unsigned long long inIdx = (((unsigned long long)h * tIn) + (start + t)) * headDim + d;
-    output[i] = input[inIdx];
 }
 
 // ── MoE expert dispatch: gather + weighted scatter-add ──────────────────────

@@ -103,9 +103,9 @@ DTYPE_KERNELS=(
     affine_broadcast_last_dim
     wan_rope_interleaved
     ltx2_split_rope
-    repeat_kv_heads
     gated_residual_last_dim
     situ_glu
+    accumulate_strided
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -114,7 +114,6 @@ DTYPE_KERNELS=(
 SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
-    fill_bias
     quant_int8_rowwise
     dequant_recipe_bf16
     pixel_shuffle2d
@@ -184,6 +183,13 @@ done
 
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
+done
+
+# Generic strided copy and pad: one module per word width (IBackend.CopyStrided / Pad; docs/BACKEND_OPS.md).
+for k in copy_strided pad_strided; do
+    compile_one "$k" -DWIDTH=2 -- "_u16"
+    compile_one "$k" -DWIDTH=4 -- "_u32"
+    compile_one "$k" -DWIDTH=8 -- "_u64"
 done
 
 # gemv_quant: the fused dequantizing decode GEMV, one module per GGUF block format (QTYPE selects the block decoder).

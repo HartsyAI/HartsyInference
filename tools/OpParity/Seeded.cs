@@ -23,6 +23,14 @@ public static class Seeded
         return t;
     }
 
+    /// <summary>A seeded uniform tensor stored as <paramref name="dtype"/>: drawn as F32 and converted, so a 16-bit fixture holds the same values on every machine.</summary>
+    public static Tensor Of(TensorShape shape, DType dtype, int seed, int salt, float scale = 1f)
+    {
+        Tensor f32 = F32(shape, seed, salt, scale);
+        if (dtype == DType.F32) return f32;
+        using (f32) return f32.CastTo(dtype);
+    }
+
     /// <summary>A zero-filled F32 tensor.</summary>
     public static Tensor Zeros(TensorShape shape) => Zeros(shape, DType.F32);
 

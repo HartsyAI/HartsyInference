@@ -53,34 +53,6 @@ extern "C" __global__ void wan_vae_build_padded(
     padded[idx] = v;
 }
 
-// out[1,cOut,tout,H,W] (=[cOut,tout,HW]) := bias[co]  (or 0 when bias==0).
-extern "C" __global__ void wan_vae_fill_bias(
-    float* __restrict__ out, const float* __restrict__ bias, unsigned int cOut, unsigned int tout, unsigned int HW)
-{
-    unsigned long long total = (unsigned long long)cOut * tout * HW;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned long long ct = idx / HW;
-    unsigned int co = (unsigned int)(ct / tout);
-    out[idx] = (bias != 0) ? bias[co] : 0.0f;
-}
-
-// out[co][to][hw] += convDt[to*strideT+dt][co][hw].  out is [cOut,tout,HW]; convDt is [paddedT,cOut,HW] (frame-major).
-extern "C" __global__ void wan_vae_accumulate_tap(
-    float* __restrict__ out, const float* __restrict__ convDt, unsigned int dt, unsigned int strideT,
-    unsigned int cOut, unsigned int tout, unsigned int HW)
-{
-    unsigned long long total = (unsigned long long)cOut * tout * HW;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int hw = (unsigned int)(idx % HW);
-    unsigned long long ct = idx / HW;
-    unsigned int to = (unsigned int)(ct % tout);
-    unsigned int co = (unsigned int)(ct / tout);
-    unsigned int srcT = to * strideT + dt;
-    out[idx] += convDt[((unsigned long long)srcT * cOut + co) * HW + hw];
-}
-
 // BF16 variants (bias stays FP32; per-element math in FP32). Same indexing as the FP32 kernels above.
 #include <cuda_bf16.h>
 
@@ -128,33 +100,6 @@ extern "C" __global__ void wan_vae_build_padded_bf16(
     padded[idx] = v;
 }
 
-extern "C" __global__ void wan_vae_fill_bias_bf16(
-    __nv_bfloat16* __restrict__ out, const float* __restrict__ bias, unsigned int cOut, unsigned int tout, unsigned int HW)
-{
-    unsigned long long total = (unsigned long long)cOut * tout * HW;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned long long ct = idx / HW;
-    unsigned int co = (unsigned int)(ct / tout);
-    out[idx] = __float2bfloat16((bias != 0) ? bias[co] : 0.0f);
-}
-
-extern "C" __global__ void wan_vae_accumulate_tap_bf16(
-    __nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ convDt, unsigned int dt, unsigned int strideT,
-    unsigned int cOut, unsigned int tout, unsigned int HW)
-{
-    unsigned long long total = (unsigned long long)cOut * tout * HW;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int hw = (unsigned int)(idx % HW);
-    unsigned long long ct = idx / HW;
-    unsigned int to = (unsigned int)(ct % tout);
-    unsigned int co = (unsigned int)(ct / tout);
-    unsigned int srcT = to * strideT + dt;
-    float acc = __bfloat162float(out[idx]) + __bfloat162float(convDt[((unsigned long long)srcT * cOut + co) * HW + hw]);
-    out[idx] = __float2bfloat16(acc);
-}
-
 // SeedVR2 MAGViT channel-to-space shuffle: in [1,cIn,f,h,w] -> out [1,c,fFinal,h*sr,w*sr] with
 // c = cIn/(sr*sr*tr), source channel ((xi*sr+yi)*tr+zi)*c+ci, and (temporal only) output frame INDEX 1
 // dropped (T -> 2T-1). One thread per OUTPUT element (pure gather; inverts the drop by of>=1 -> of+1).
@@ -200,36 +145,4 @@ extern "C" __global__ void seedvr2_pixel_shuffle_bf16(
     unsigned int x = ox / sr, yi = ox % sr;
     unsigned int srcC = ((xi * sr + yi) * tr + zi) * c + ci;
     out[idx] = in[(((unsigned long long)srcC * f + fi) * h + y) * w + x];
-}
-
-// SeedVR2 asymmetric zero pad (right/bottom only, diffusers Downsample2D(padding=0)): [B,C,T,h,w] ->
-// [B,C,T,h+1,w+1]. One thread per output element.
-extern "C" __global__ void seedvr2_pad_br_f32(
-    float* __restrict__ out, const float* __restrict__ in,
-    unsigned long long planes, unsigned int h, unsigned int w)
-{
-    unsigned int hp = h + 1u, wp = w + 1u;
-    unsigned long long total = planes * hp * wp;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int x = (unsigned int)(idx % wp);
-    unsigned long long r = idx / wp;
-    unsigned int y = (unsigned int)(r % hp);
-    unsigned long long p = r / hp;
-    out[idx] = (y < h && x < w) ? in[(p * h + y) * w + x] : 0.0f;
-}
-
-extern "C" __global__ void seedvr2_pad_br_bf16(
-    __nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ in,
-    unsigned long long planes, unsigned int h, unsigned int w)
-{
-    unsigned int hp = h + 1u, wp = w + 1u;
-    unsigned long long total = planes * hp * wp;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int x = (unsigned int)(idx % wp);
-    unsigned long long r = idx / wp;
-    unsigned int y = (unsigned int)(r % hp);
-    unsigned long long p = r / hp;
-    out[idx] = (y < h && x < w) ? in[(p * h + y) * w + x] : __float2bfloat16(0.0f);
 }
