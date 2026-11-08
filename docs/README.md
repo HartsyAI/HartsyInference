@@ -18,6 +18,7 @@ git preserves removed history.
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
+| Proving a numerical change on a GPU: op fixtures and generation captures | [VERIFICATION.md](VERIFICATION.md) |
 | Settings: where they live, how to change them | [SETTINGS.md](SETTINGS.md) |
 | Reproducible community performance | [Benchmark guide](../benchmarks/README.md) |
 
