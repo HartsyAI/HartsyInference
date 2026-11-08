@@ -121,7 +121,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 "No checkpoint found for 'hairdeck'. Download the catalog assets or supply the model directory as the local path.");
         }
 
-        string modelRoot = Directory.Exists(spec.LocalPath) ? spec.LocalPath : Path.GetDirectoryName(spec.LocalPath)!;
+        string modelRoot = HairDeckModel.ResolveModelRoot(spec.LocalPath);
         lock (_gate)
         {
             if (_hairDecks.TryGetValue(modelRoot, out HairDeckRuntime? cached))
