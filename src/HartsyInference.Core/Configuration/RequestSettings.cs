@@ -26,12 +26,10 @@ public sealed record RequestSettings
     /// <summary>True when this carries nothing, so a request without settings costs no scope push.</summary>
     public bool IsEmpty => string.IsNullOrWhiteSpace(Profile) && Set is not { Count: > 0 };
 
-    /// <summary>Ids in <paramref name="profile"/> that bind before a request exists and whose pinned value differs from
-    /// the value the engine is running with, so setting them per request cannot take effect.</summary>
-    /// <remarks>Only <see cref="KnobScope.Construction"/> knobs qualify: they enter a backend or a model when it is built,
-    /// and the pipeline is cached. A pin equal to the current value is honored by construction already (a server started
-    /// with <c>--profile reference</c> runs every construction pin of that profile), so it is not reported; only a pin
-    /// that would need a rebuild is.
+    /// <summary>Ids in <paramref name="profile"/> whose knob binds when the engine or a model is built, so a per-request pin cannot take effect.</summary>
+    /// <remarks>Every <see cref="KnobScope.Construction"/> id is reported, whatever its value: the value the engine was built
+    /// with is not recorded, and the live knob value changes on a runtime settings write without a rebuild, so a comparison
+    /// against it can accept a pin that changes nothing and refuse one that matches the built configuration.
     /// <para>Measured, not theorised: an API generation with <c>profile: reference</c> returned a byte-identical image to
     /// one without it, because the GEMM knobs it pins are read once in <c>CudaBackend</c>'s constructor. Those knobs are
     /// declared <see cref="KnobScope.Construction"/> for that reason. The CLI does not have this problem because it
@@ -39,14 +37,9 @@ public sealed record RequestSettings
     public static IReadOnlyList<string> UnreachablePerRequest(KnobProfile profile)
     {
         List<string> unreachable = [];
-        foreach ((string id, object? pinned) in profile.Values)
+        foreach ((string id, _) in profile.Values)
         {
-            if (KnobRegistry.Find(id) is not { } knob || KnobRegistry.Describe(knob).Scope != KnobScope.Construction)
-            {
-                continue;
-            }
-            object? current = knob.GetType().GetProperty("Value")!.GetValue(knob);
-            if (!Equals(pinned, current))
+            if (KnobRegistry.Find(id) is { } knob && KnobRegistry.Describe(knob).Scope == KnobScope.Construction)
             {
                 unreachable.Add(id);
             }
