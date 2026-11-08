@@ -46,36 +46,26 @@ public sealed class HairDeckPrepParityTests
 
         using IBackend backend = new CpuBackend();
         using Sam3Pipeline segmenter = Sam3Pipeline.Load(new Sam3Config(), sam3Path);
+        // the converted weights reference the loader's memory, so the loader outlives the matter
+        using SafeTensorsLoader weights = new();
+        weights.Load(birefnetPath);
         using BiRefNetMatter matter = new();
-        using (SafeTensorsLoader weights = new())
-        {
-            weights.Load(birefnetPath);
-            matter.LoadWeights(BiRefNetCheckpointConverter.Convert(weights.GetAllTensors()));
-        }
+        matter.LoadWeights(BiRefNetCheckpointConverter.Convert(weights.GetAllTensors()));
 
         HairDeckSourceImage source = HairDeckSourceImage.Create(png.Rgb, png.Alpha, png.Width, png.Height);
-        HairDeckPreprocessResult ours = new HairDeckPreprocessor(segmenter, matter, backend).Process(source);
+        HairDeckPreprocessor preprocessor = new(segmenter, matter, backend);
+        HairDeckLoadedImage loaded = HairDeckImageRules.Load(source);
+        IReadOnlyList<TextGroundedLogitResult> segmentation = preprocessor.Segment(loaded);
+        float[] matte = preprocessor.MatteOf(loaded);
+        HairDeckPreprocessResult ours = preprocessor.FromModels(loaded, segmentation, matte);
 
-        CompareSegmentation(reference, segmenter, backend, source);
-        CompareMatte(reference, matter, backend, source);
+        CompareSegmentation(reference, segmentation);
+        CompareMatte(reference, matte);
         ComparePreprocessing(reference, ours);
     }
 
-    private void CompareSegmentation(SafeTensorsLoader reference, Sam3Pipeline segmenter, IBackend backend, HairDeckSourceImage source)
+    private void CompareSegmentation(SafeTensorsLoader reference, IReadOnlyList<TextGroundedLogitResult> ours)
     {
-        HairDeckLoadedImage loaded = HairDeckImageRules.Load(source);
-        using Tensor tensor = new(new TensorShape(1, 3, loaded.Height, loaded.Width), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        int pixels = loaded.Width * loaded.Height;
-        for (int i = 0; i < pixels; i++)
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                values[c * pixels + i] = loaded.ModelRgb[i * 3 + c] / 255f;
-            }
-        }
-
-        IReadOnlyList<TextGroundedLogitResult> ours = segmenter.SegmentLogits(backend, tensor, PromptOrder, 0.2f);
         for (int p = 0; p < PromptOrder.Length; p++)
         {
             ReadOnlySpan<float> refScores = Floats(reference.GetTensor($"sam_scores_{p}"));
@@ -102,10 +92,8 @@ public sealed class HairDeckPrepParityTests
         }
     }
 
-    private void CompareMatte(SafeTensorsLoader reference, BiRefNetMatter matter, IBackend backend, HairDeckSourceImage source)
+    private void CompareMatte(SafeTensorsLoader reference, float[] ours)
     {
-        HairDeckLoadedImage loaded = HairDeckImageRules.Load(source);
-        float[] ours = matter.MatteFloat(backend, loaded.ModelRgb, loaded.Width, loaded.Height, HairDeckPreprocessor.MatteInputSize);
         ReadOnlySpan<float> theirs = Floats(reference.GetTensor("alpha_full"));
         float max = 0f;
         double sum = 0.0;

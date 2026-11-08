@@ -40,12 +40,37 @@ public sealed class HairDeckPreprocessor
     {
         ArgumentNullException.ThrowIfNull(source);
         HairDeckLoadedImage image = HairDeckImageRules.Load(source);
+        return FromModels(image, Segment(image), MatteOf(image));
+    }
+
+    /// <summary>The SAM 3 queries of the preset prompts above the working floor, for the loaded image.</summary>
+    internal IReadOnlyList<TextGroundedLogitResult> Segment(HairDeckLoadedImage image)
+    {
+        using Tensor tensor = new(new TensorShape(1, 3, image.Height, image.Width), DType.F32);
+        Span<float> values = tensor.AsSpan<float>();
+        int pixels = image.Width * image.Height;
+        for (int i = 0; i < pixels; i++)
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                values[c * pixels + i] = image.ModelRgb[i * 3 + c] / 255f;
+            }
+        }
+
+        return _segmenter.SegmentLogits(_backend, tensor, HairDeckMaskRecipe.Prompts, ScoreFloor);
+    }
+
+    /// <summary>The whole-character matte at the source size, in [0, 1], for the loaded image.</summary>
+    internal float[] MatteOf(HairDeckLoadedImage image) =>
+        _matter.MatteFloat(_backend, image.ModelRgb, image.Width, image.Height, MatteInputSize);
+
+    /// <summary>The rest of the preprocessing, from the model outputs of <paramref name="image"/>.</summary>
+    internal HairDeckPreprocessResult FromModels(HairDeckLoadedImage image, IReadOnlyList<TextGroundedLogitResult> sam, float[] matteSource)
+    {
         int width = image.Width, height = image.Height;
         int pixels = width * height;
         (int shapeHeight, int shapeWidth) = WorkingShape(width, height);
 
-        IReadOnlyList<TextGroundedLogitResult> sam = Segment(image);
-        float[] matteSource = _matter.MatteFloat(_backend, image.ModelRgb, width, height, MatteInputSize);
         float[] matte = new float[shapeHeight * shapeWidth];
         Resample.BilinearPlaneF32(matteSource, width, height, matte, shapeWidth, shapeHeight);
         HairDeckRecipeResult recipe = HairDeckMaskRecipe.Run(sam, shapeHeight, shapeWidth, matte);
@@ -146,22 +171,6 @@ public sealed class HairDeckPreprocessor
         int shapeHeight = Math.Max(1, (int)Math.Round(height * scale, MidpointRounding.ToEven));
         int shapeWidth = Math.Max(1, (int)Math.Round(width * scale, MidpointRounding.ToEven));
         return (shapeHeight, shapeWidth);
-    }
-
-    private IReadOnlyList<TextGroundedLogitResult> Segment(HairDeckLoadedImage image)
-    {
-        using Tensor tensor = new(new TensorShape(1, 3, image.Height, image.Width), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        int pixels = image.Width * image.Height;
-        for (int i = 0; i < pixels; i++)
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                values[c * pixels + i] = image.ModelRgb[i * 3 + c] / 255f;
-            }
-        }
-
-        return _segmenter.SegmentLogits(_backend, tensor, HairDeckMaskRecipe.Prompts, ScoreFloor);
     }
 
     /// <summary>Union of the selected instances, each upsampled from its logits to the source size (hairdeck.prep full()).</summary>
