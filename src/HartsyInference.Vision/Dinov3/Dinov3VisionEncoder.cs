@@ -144,7 +144,7 @@ public sealed unsafe class Dinov3VisionEncoder
     }
 
     /// <summary>The named weight, checked against its exact shape.</summary>
-    private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] expected)
+    internal static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] expected)
     {
         if (!weights.TryGetValue(key, out Tensor? t))
             throw new ArgumentException($"DINOv3 checkpoint is missing '{key}'.", nameof(weights));

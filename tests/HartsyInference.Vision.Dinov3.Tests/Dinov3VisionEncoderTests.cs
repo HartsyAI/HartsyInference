@@ -12,6 +12,28 @@ public sealed class Dinov3VisionEncoderTests
     private static readonly IBackend Backend = new CpuBackend();
 
     [Fact]
+    public void LoadWeights_RejectsAShortBlockTensorBeforeAnyKernelReadsIt()
+    {
+        Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);
+        Dictionary<string, Tensor> weights = Dinov3Fixture.Tiny(preset, seed: 5);
+        try
+        {
+            // A one-element norm1.bias would otherwise be read through an unchecked pointer in LayerNorm.
+            Tensor full = weights["layer.0.norm1.bias"];
+            weights["layer.0.norm1.bias"] = new Tensor(new TensorShape(1), DType.F32);
+            full.Dispose();
+
+            Dinov3VisionEncoder encoder = new(preset);
+            ArgumentException error = Assert.Throws<ArgumentException>(() => encoder.LoadWeights(weights, ""));
+            Assert.Contains("layer.0.norm1.bias", error.Message);
+        }
+        finally
+        {
+            Dinov3Fixture.Dispose(weights);
+        }
+    }
+
+    [Fact]
     public void TokenLayout_IsClsThenStorageThenPatches()
     {
         Dinov2Preset preset = Dinov3Fixture.TinyPreset(imageSize: 64);

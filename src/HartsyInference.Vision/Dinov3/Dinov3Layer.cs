@@ -22,16 +22,26 @@ internal sealed unsafe class Dinov3Layer
     /// <summary>Loads one block from the HF DINOv3 layout under <paramref name="prefix"/> (e.g. <c>layer.3</c>).</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
-        _n1W = Dinov3VisionEncoder.F32(w[$"{prefix}.norm1.weight"]); _n1B = Dinov3VisionEncoder.F32(w[$"{prefix}.norm1.bias"]);
-        _qW = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.q_proj.weight"]); _qB = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.q_proj.bias"]);
-        _kW = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.k_proj.weight"]);
-        _vW = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.v_proj.weight"]); _vB = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.v_proj.bias"]);
-        _oW = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.o_proj.weight"]); _oB = Dinov3VisionEncoder.F32(w[$"{prefix}.attention.o_proj.bias"]);
-        _ls1 = Dinov3VisionEncoder.F32(w[$"{prefix}.layer_scale1.lambda1"]);
-        _n2W = Dinov3VisionEncoder.F32(w[$"{prefix}.norm2.weight"]); _n2B = Dinov3VisionEncoder.F32(w[$"{prefix}.norm2.bias"]);
-        _fc1W = Dinov3VisionEncoder.F32(w[$"{prefix}.mlp.up_proj.weight"]); _fc1B = Dinov3VisionEncoder.F32(w[$"{prefix}.mlp.up_proj.bias"]);
-        _fc2W = Dinov3VisionEncoder.F32(w[$"{prefix}.mlp.down_proj.weight"]); _fc2B = Dinov3VisionEncoder.F32(w[$"{prefix}.mlp.down_proj.bias"]);
-        _ls2 = Dinov3VisionEncoder.F32(w[$"{prefix}.layer_scale2.lambda1"]);
+        // Every block tensor is checked against its exact shape before any kernel reads it: a short tensor would otherwise be
+        // read through an unchecked pointer in LayerNorm, Linear or the affine broadcast.
+        int h = _hidden, i = _inter;
+        _n1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.weight", h));
+        _n1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm1.bias", h));
+        _qW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.weight", h, h));
+        _qB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.q_proj.bias", h));
+        _kW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.k_proj.weight", h, h));
+        _vW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.weight", h, h));
+        _vB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.v_proj.bias", h));
+        _oW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.weight", h, h));
+        _oB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.attention.o_proj.bias", h));
+        _ls1 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale1.lambda1", h));
+        _n2W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm2.weight", h));
+        _n2B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.norm2.bias", h));
+        _fc1W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.up_proj.weight", i, h));
+        _fc1B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.up_proj.bias", i));
+        _fc2W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.weight", h, i));
+        _fc2B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.bias", h));
+        _ls2 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale2.lambda1", h));
         _attn = new AttentionLayer(
             new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
             new AttentionLayerWeights
