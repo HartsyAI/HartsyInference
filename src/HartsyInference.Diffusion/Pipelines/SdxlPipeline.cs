@@ -4,7 +4,6 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
-using HartsyInference.Core.Schedulers;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
 using HartsyInference.Diffusion.Models.Denoisers;

@@ -1,7 +1,7 @@
 using System.Buffers;
 using HartsyInference.Core.IO;
 
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>
 /// Reads rows of a table far larger than host memory (hundreds of millions of rows) from disk by position, keeps the hot ones in

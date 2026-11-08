@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Schedulers;
+namespace HartsyInference.Diffusion.Schedulers;
 
 /// <summary>Diffusion noise scheduler that determines noise levels at each step and computes the denoising update rule.</summary>
 public interface IScheduler

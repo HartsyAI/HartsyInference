@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>The official checkpoint: an F8_E4M3 <c>[rows, 256]</c> tensor and an F8_E8M0 <c>[rows, 8]</c> scale tensor, both row-major in one safetensors shard.</summary>
 public sealed class OfficialFp8E8M0RowLayout : IEngramRowLayout

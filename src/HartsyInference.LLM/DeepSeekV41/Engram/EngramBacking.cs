@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>Where an <see cref="EngramTableStore"/> keeps the rows it has read.</summary>
 public enum EngramBacking

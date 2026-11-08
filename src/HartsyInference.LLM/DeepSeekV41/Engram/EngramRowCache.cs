@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Engram;
+namespace HartsyInference.LLM.DeepSeekV41.Engram;
 
 /// <summary>Fixed-capacity LRU of packed rows. Slot bytes live in lazily allocated slabs so a large budget costs nothing until rows arrive. Not thread-safe.</summary>
 internal sealed class EngramRowCache

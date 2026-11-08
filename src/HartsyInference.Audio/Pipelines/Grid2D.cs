@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Collections;
+namespace HartsyInference.Audio.Pipelines;
 
 /// <summary>Conversions between a rectangular <c>T[,]</c> grid and the jagged rows or columns it is carried as in JSON and in
 /// per-step callbacks.</summary>
