@@ -129,6 +129,7 @@ try
             Acceptance rule = hostByRule ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, $"newly supported path, judged against the {oracleName}");
             string why = recorded is null ? "no fixture" : recorded.Status == "unsupported" ? "unsupported on the baseline" : "host-reference rule";
             failures += Report(c, mine, theirs.Outputs, rule, $"vs {oracleName} ({why})");
+            compared++;
             continue;
         }
         if (recorded.KernelHashes.Count > 0)
