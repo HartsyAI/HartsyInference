@@ -160,7 +160,7 @@ public partial interface IBackend
         int hq = call.Heads, hkv = call.KvHeads, d = call.HeadDim;
         bool interleaved = call.Pairing == RotaryPairing.Interleaved;
         Tensor k = new(new TensorShape(1, hkv, 1, d), DType.F32);
-        Tensor? vOwn = IsWhole(call.V, call.KvWidth) ? null : new(new TensorShape(1, hkv, 1, d), DType.F32);
+        Tensor? vOwn = IsWhole(call.V, hkv, d) ? null : new(new TensorShape(1, hkv, 1, d), DType.F32);
         try
         {
             NormalizeInto(b, call.QOut, call.Q, hq, call.Norm, call.QNormWeight, call.Eps);
@@ -177,7 +177,8 @@ public partial interface IBackend
             vOwn?.Dispose();
         }
 
-        static bool IsWhole(in QkvSection section, long width) => section.Offset == 0 && section.Tensor.ElementCount == width;
+        // The cache append reads the token count from the tensor's shape, so V is reused only in its [1, heads, 1, d] form.
+        static bool IsWhole(in QkvSection section, int heads, int d) => section.Offset == 0 && section.Tensor.Shape.Equals(new TensorShape(1, heads, 1, d));
 
         // The section's elements, packed into dst.
         static void Cut(IBackend b, Tensor dst, in QkvSection section, long width)
