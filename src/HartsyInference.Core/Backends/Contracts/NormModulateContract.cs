@@ -46,6 +46,15 @@ public static class NormModulateContract
         RequireVector(call.Weight, width, "weight");
         RequireVector(call.Bias, width, "bias");
         ModulationSpec mod = call.Modulation;
+        // An elementwise call may update its input in place: every element is read before it is written. Every call, modulated or not,
+        // runs this check before it returns: an unmodulated norm writes rows it may not have read yet just as a modulated one does.
+        bool inPlace = call.Kind == NormKind.None && ReferenceEquals(call.Input, call.Output);
+        foreach (Tensor? operand in new[] { call.Input, call.Weight, call.Bias, mod.Scale, mod.Shift, mod.RowIndex })
+        {
+            if (operand is null || (inPlace && ReferenceEquals(operand, call.Input))) continue;
+            if (call.Output.HasOverlappingHostStorageWithoutSync(operand))
+                throw new ArgumentException("NormModulate output storage must not overlap an operand.", nameof(call));
+        }
         if (mod.IsNone)
         {
             if (mod.RowIndex is not null)
@@ -71,14 +80,6 @@ public static class NormModulateContract
         }
         RequireModulationRows(mod.Scale, mod.ScaleOffset, mod.RowStride, width, modRows, "scale");
         RequireModulationRows(mod.Shift, mod.ShiftOffset, mod.RowStride, width, modRows, "shift");
-        // An elementwise call may update its input in place: every element is read before it is written.
-        bool inPlace = call.Kind == NormKind.None && ReferenceEquals(call.Input, call.Output);
-        foreach (Tensor? operand in new[] { call.Input, call.Weight, call.Bias, mod.Scale, mod.Shift, mod.RowIndex })
-        {
-            if (operand is null || (inPlace && ReferenceEquals(operand, call.Input))) continue;
-            if (call.Output.HasOverlappingHostStorageWithoutSync(operand))
-                throw new ArgumentException("NormModulate output storage must not overlap an operand.", nameof(call));
-        }
         return new NormModulateGeometry(rows, width, spatial, mod.RowIndex is null ? mod.RowsPerMod : 1, mod.RowStride, mod.ScaleOffset, mod.ShiftOffset);
     }
 
