@@ -21,6 +21,7 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     private const string Weight = ".weight";
     private const int Mxfp8BlockWidth = 32;
     private const int Nvfp4BlockWidth = 16;
+    private const int Mxfp4BlockWidth = 32;
     private const string PackedWeight = ".weight_packed";
     private const string GlobalScaleSuffix = ".weight_global_scale";
     private readonly ShardedSafeTensorSet _set;
@@ -303,7 +304,8 @@ public sealed partial class HfQuantCheckpoint : IDisposable
             }
             if (key.EndsWith(PackedWeight, StringComparison.Ordinal))
             {
-                AddNvfp4(key, location);
+                if (IsMxfp4Packed(key)) AddMxfp4(key, location);
+                else AddNvfp4(key, location);
                 continue;
             }
             if (key.EndsWith(".qweight", StringComparison.Ordinal))
@@ -346,6 +348,31 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         QuantBinding binding = new(key, QuantEncoding.Fp8E4M3BlockE8M0, new BlockGeometry(1, Mxfp8BlockWidth), DType.U8,
             location.Shape[0], location.Shape[1], scaleKey);
         Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.BlockRecipe, location.DType, key, Binding: binding));
+    }
+
+    /// <summary>compressed-tensors MXFP4 (<c>mxfp4-pack-quantized</c>): a packed <c>[out, in/2]</c> U8 weight with a U8 E8M0 scale
+    /// per 32 inputs, <c>[out, in/32]</c>, and no global scale. Recognized by its U8 companion scale; NVFP4 scales are F8E4M3.</summary>
+    private void AddMxfp4(string key, TensorLocation location)
+    {
+        string module = key[..^PackedWeight.Length];
+        string scaleKey = module + ".weight_scale";
+        RequireCompanion(scaleKey, key);
+        TensorLocation scale = _set.Inventory[scaleKey];
+        long rows = location.Shape[0], cols = location.Shape[1] * 2;
+        if (location.DType != DType.U8 || location.Shape.Rank != 2 || scale.DType != DType.U8 || scale.Shape.Rank != 2 || scale.Shape[0] != rows
+            || scale.Shape[1] * Mxfp4BlockWidth != cols)
+        {
+            throw new InvalidDataException(
+                $"MXFP4 weight '{key}' ({location.DType.Name} {location.Shape}) needs U8 scales [{rows}, {cols / Mxfp4BlockWidth}]; got {scale.DType.Name} {scale.Shape}.");
+        }
+        QuantBinding binding = new(module + Weight, QuantEncoding.Mxfp4E8M0, new BlockGeometry(1, Mxfp4BlockWidth), DType.U8, rows, cols, scaleKey);
+        Add(new HfQuantWeight(module + Weight, new TensorShape(rows, cols), HfWeightStorage.BlockRecipe, DType.U8, key, Binding: binding));
+    }
+
+    private bool IsMxfp4Packed(string key)
+    {
+        string scaleKey = key[..^PackedWeight.Length] + ".weight_scale";
+        return _set.Inventory.TryGetValue(scaleKey, out TensorLocation? scale) && scale is { } found && found.DType == DType.U8;
     }
 
     /// <summary>compressed-tensors NVFP4 (<c>nvfp4-pack-quantized</c>): packed <c>[out, in/2]</c> U8, an E4M3 scale per 16 inputs and a scalar F32 global scale.</summary>
