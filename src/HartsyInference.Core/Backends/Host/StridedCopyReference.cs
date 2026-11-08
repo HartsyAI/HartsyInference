@@ -38,6 +38,12 @@ public static unsafe class StridedCopyReference
             Half* o = (Half*)output.DataPointer, i = (Half*)input.DataPointer;
             Walk(g, (d, s) => o[d] = (Half)((float)o[d] + (float)i[s]));
         }
+        else if (input.DType == DType.F32)
+        {
+            ushort* o = (ushort*)output.DataPointer;
+            float* i = (float*)input.DataPointer;
+            Walk(g, (d, s) => o[d] = BFloat16Bits.FromFloat(BFloat16Bits.ToFloat(o[d]) + i[s]));
+        }
         else
         {
             ushort* o = (ushort*)output.DataPointer, i = (ushort*)input.DataPointer;
