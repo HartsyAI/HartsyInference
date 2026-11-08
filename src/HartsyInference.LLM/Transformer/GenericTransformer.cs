@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Decode;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
@@ -1519,7 +1520,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
                 // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
-                // GluActivate pass over the concatenated projection output.
+                // Glu pass over the concatenated projection output.
                 bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]
                     && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared or ActivationKind.SwigluOai);
                 if (gluFusable)
@@ -1528,8 +1529,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     Tensor gateUpOut = new(new TensorShape(1, n, ffDim * 2), DType.F32);
                     Project(backend, gateUpOut, preMlp, _gateUpW!, _gateUpB, _cfg.LowVramQuant);
                     comb = new(ff, DType.F32);
-                    if (emitQ) backend.GluActivateEmitQ8(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
-                    else backend.GluActivate(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
+                    if (emitQ) backend.GluEmitQ8(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
+                    else backend.Glu(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
                     gateUpOut.Dispose();
                     up.Dispose();
                 }
@@ -2148,7 +2149,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int rotaryWidth = interleaved ? 0 : rotaryDim;
             TensorShape flat = new(1, b, h);
 
-            // Rows=2 → the Q8-sidecar emit self-disables inside RmsNormEmitQ8/AddRmsNormEmitQ8/GluActivateEmitQ8
+            // Rows=2 → the Q8-sidecar emit self-disables inside RmsNormEmitQ8/AddRmsNormEmitQ8/GluEmitQ8
             // (falls back to the plain fused kernels); the M=2 GEMVs quantize their own activations instead.
             Tensor pre = new(flat, DType.F32);
             PreSublayer(backend, pre, hidden, _inNorm, _normBias);

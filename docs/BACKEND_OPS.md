@@ -194,6 +194,47 @@ Reference: `ChunkActivateReference.Apply`. Cuts an F32 `[rows, count · width]` 
 `[rows, width]` through one `ChunkActivation` each, at most eight chunks: an adaLN modulation projection split into its
 scales and gates in one pass. tanh and sigmoid follow each backend's math library, so the gates are held to a tolerance.
 
+## Glu
+
+```
+out[r, i] = act(gate[r, i]) · value[r, i]        gate and value the two halves of input row r, in the order the spec says
+```
+
+Reference: `GluReference.Apply`. Contract: `GluContract.Validate`. A `GluSpec` names the gate function (`GluActivation`:
+`Silu`, `GeluTanh`, `GeluErf`, or `Situ`, whose gate is `4 · tanh(g/4) · sigmoid(g)` and whose value side is soft-capped to
+`25 · tanh(u/25)`) and which half is the gate (`GluGateHalf.First` for `[gate | up]` projections, `Second` for
+`[value | gate]`). The presets `GluSpec.SwiGlu`, `GeGluFirst`, `GeGlu`, `GeGluErf` and `Situ` are the forms the models use.
+Input and output are F32, F16 or BF16 alike; the output's last extent is half the input's. The sigmoid takes the sign-aware
+form; the tanh GELU on CUDA keeps the fast-math `2 · sigmoid(2x) − 1` form of the kernels it replaced. `GluEmitQ8` is the same
+op with a Q8_1 sidecar of the output where a backend keeps one.
+
+## GroupScale
+
+```
+out[r, group] = f(gates[offset + r · stride + group]) · in[r, group]        or  out[r, group] += that, a zero gate skipped
+```
+
+Reference: `GroupScaleReference.Apply`. Contract: `GroupScaleContract.Validate`. A `GroupScaleSpec` cuts each row into
+groups of `GroupWidth` elements (0 for the whole row) and names the gate of row `r`, group `g` by its stride and offset, the
+function the gate passes through (`GateFunction.Identity` or `TwoSigmoid`) and whether the scaled value is written or
+accumulated. `PerRow()` is token masking by a `[rows]` vector, `PerGroup(headDim, heads, TwoSigmoid)` LTX-2's per-head
+output gate, `Column(experts, expert, accumulate: true)` one expert of a dense routing table added into the combine. The
+output may be the input (in place); gates are F32 or the activation's dtype.
+
+## LinearFused
+
+A projection with a `LinearFusion` folded around it: a `GroupScale` of the input before the GEMM (`PrologueGates` and
+`Prologue`) and a `LinearActivation` of the output after it. `LinearFusion.Gelu` and `LinearFusion.HeadGated(logits, heads,
+headDim)` are the two forms the models use. The default (`IBackend.ComposeLinearFused`) runs the group scale on a copy of
+the input, the GEMM and the activation; CUDA folds the GELU into its resident int8 dequant epilogue and the F16 head gate
+into the activation quantize that precedes the GEMM, and composes everything else.
+
+## MoeRoute dense table
+
+`MoeRoute` takes an optional `dense` output `[T, E]` that receives every token's weights at its expert ids and zeros
+elsewhere, for a combine that runs every expert densely and scales each one's rows with `GroupScale.Column`. The host
+reference writes it from the same routing pass; CUDA and Vulkan write it in the route kernel.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -215,6 +256,9 @@ Every implementation of these ops:
 | `QkvDecodeEpilogue` | no device position buffer | `lm_qkv_rope_scatter_f32/f16kv`, `lm_qknorm_rope_scatter_f32/f16kv`, `lm_qknorm_full_rope_scatter_f32/f16kv` | composed; F32 caches only |
 | `NormModulate` | reference | `norm_modulate.ptx` (`norm_modulate_rows/flat/channel_<in>_<out>`: F32, F16, F32↔F16, BF16) | `norm_modulate_rows/flat_f32/f16/f32_f16/f16_f32`, `norm_modulate_channel_f32`; BF16 and a non-F32 channel norm take the reference |
 | `ChunkActivate` | reference | `chunk_activate_f32` | `chunk_activate` |
+| `Glu` | reference | `glu_gate.ptx` (`glu_f32/f16/bf16`) | `glu_f32/f16`; BF16 takes the reference |
+| `GroupScale` | reference | `group_scale_f32`, `_f16_f32`, `_f16_f16`, `_bf16_f32`, `_bf16_bf16` | `group_scale_f32/f16/f16_f16`; BF16 takes the reference |
+| `LinearFused` | composed | int8 fused epilogues where eligible, else composed | composed |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 
@@ -233,4 +277,6 @@ and `Ltx2QkNormRopeTokenMajor` are `RmsNormRotary` (`--op rotary`). `QkvRopeScat
 `QkRopeScatterVDecodeStep`, `QkvNormRopeScatterDecodeStep`, `QkNormRopeScatterVDecodeStep` and `QkNormFullRopeScatterDecodeStep`
 are `QkvDecodeEpilogue` calls built with `QkvDecodeCall`'s factories (`--op qkvdecode`). `AffineBroadcastRowIndexed`,
 `LayerNormModulate`, `RmsNormModulate`, `Ltx2RmsModulate`, `OasisAdaLn`, `WanRmsNormChannel` and `ChannelLayerNorm3d` are
-`NormModulate` calls, `ModulationSplit4` is a `ChunkActivate` (`--op normmod`).
+`NormModulate` calls, `ModulationSplit4` is a `ChunkActivate` (`--op normmod`). `GluActivate`, `GluActivateEmitQ8`, `GeGlu`,
+`GegluErf` and `SituGlu` are `Glu` calls; `MaskRows`, `Ltx2HeadGate` and `RowGatedAccumulate` are `GroupScale`; `LinearGelu`
+and `LinearHeadGated` are `LinearFused`; `MoeTopKGate` is `MoeRoute` with its dense output (`--op gating`).

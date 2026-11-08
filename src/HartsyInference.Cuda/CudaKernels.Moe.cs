@@ -57,17 +57,17 @@ public sealed partial class CudaKernels
 
     /// <summary>Routes <paramref name="tokens"/> tokens: one 128-thread block each. Optional pointers are 0 when absent.</summary>
     public unsafe void LaunchMoeRoute(ulong topkIdx, ulong topkWeight, ulong logits, ulong bias, ulong altBias,
-        ulong tokenKinds, int tokens, in MoeRouteArgs args, nint stream)
+        ulong tokenKinds, int tokens, in MoeRouteArgs args, nint stream, ulong dense = 0)
     {
         if (_moeRouteF32 == 0) throw new InvalidOperationException("moe_route.ptx not present in the Ptx folder.");
-        ulong idxA = topkIdx, wA = topkWeight, lA = logits, bA = bias, abA = altBias, kA = tokenKinds;
+        ulong idxA = topkIdx, wA = topkWeight, lA = logits, bA = bias, abA = altBias, kA = tokenKinds, dA = dense;
         int e = args.NumExperts, k = args.TopK, scoring = (int)args.Scoring, groups = args.GroupCount,
             kept = args.GroupsKept, renorm = args.Renormalize ? 1 : 0;
         float masked = args.MaskedGroupValue, eps = args.RenormEpsilon, scale = args.Scale, div = args.LogitDivisor;
-        void** a = stackalloc void*[16];
+        void** a = stackalloc void*[17];
         a[0] = &idxA; a[1] = &wA; a[2] = &lA; a[3] = &bA; a[4] = &abA; a[5] = &kA; a[6] = &e; a[7] = &k;
         a[8] = &scoring; a[9] = &groups; a[10] = &kept; a[11] = &masked; a[12] = &renorm; a[13] = &eps;
-        a[14] = &scale; a[15] = &div;
+        a[14] = &scale; a[15] = &div; a[16] = &dA;
         CudaDriverApi.cuLaunchKernel(_moeRouteF32, (uint)tokens, 1, 1, 128, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 

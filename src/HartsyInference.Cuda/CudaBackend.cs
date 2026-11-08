@@ -1850,28 +1850,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>numerics.ltx2Gatefuse=false</c>).</summary>
     internal static bool FuseHeadGateIntoQuant => EngineKnobs.Ltx2Gatefuse.Value;
 
-    /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place exactly as the caller's own sequence did.</summary>
-    /// <remarks>The gate is a full read AND write of a <c>[seq, heads·headDim]</c> tensor — 81.8 MB per call at
-    /// LTX-2.5's video shape — whose only consumer is this projection, which then reads the same tensor again to
-    /// quantize it. Bit-identical either way: the fused kernel reproduces the separate pass's f16 store.</remarks>
-    public unsafe void LinearHeadGated(Tensor output, Tensor input, Tensor weight, Tensor? bias,
-        Tensor gateLogits, int heads, int headDim)
-    {
-        bool fused = FuseHeadGateIntoQuant && input.DType == DType.F16 && gateLogits.DType == DType.F16
-            && weight.LowRankAdjunct is not { IsActive: true }
-            && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi && qi.ConvRotGroupSize > 0
-            && CanRunResidentInt8(output, input, weight, qi, 0, -1) && _kernels is not null
-            && _kernels.HasFusedGatedConvRotQuant((int)weight.Shape[1], qi.ConvRotGroupSize, srcF16: true, heads, headDim);
-        if (!fused)
-        {
-            Ltx2HeadGate(input, gateLogits, (int)input.Shape[0], heads, headDim);
-            Linear(output, input, weight, bias);
-            return;
-        }
-        LinearImpl(output, input, weight, bias, cacheWeightCast: true, preGate: gateLogits, preGateHeads: heads,
-            preGateHeadDim: headDim);
-    }
-
     /// <summary>Fused quantized matmul (the low-VRAM path): same GEMM as <see cref="Linear"/> but the dequantized weight is never cached.</summary>
     /// <remarks>The quantized weight bytes stay resident (preloaded), so a Q4/Q5/Q6/Q8 model keeps its on-device
     /// footprint at the quant size instead of expanding to F16. Trades a per-call dequant (memory-bound, cheap) for
@@ -1887,15 +1865,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>GEMM against a contiguous ROW RANGE of <paramref name="weight"/>, sharing the resident weight (and its cached dtype cast) rather than materializing a slice. Rows are contiguous in <c>[outDim, inDim]</c>, so this is a pointer offset — which is the whole point: a real sub-tensor would be a separate cache identity and would upload a second copy of an already-resident weight. Lets a fused projection be evaluated in parts (see <c>MiniMaxH3Transformer</c>'s chunked attention, which projects k+v and then q from one packed qkv weight).</summary>
     public void LinearWeightRows(Tensor output, Tensor input, Tensor weight, Tensor? bias, int weightRowOffset, int weightRowCount)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true, weightRowOffset, weightRowCount);
-
-    /// <summary>Linear whose GELU is folded into the GEMM's dequant epilogue where the path allows it (the resident int8-ConvRot chain), else a plain Linear followed by <see cref="Gelu"/>. A DiT feed-forward's up-projection is always immediately GELU'd, and that intermediate is the widest tensor in the block — writing it once instead of writing, re-reading and re-writing it is worth a full pass over ~328 MB per call.</summary>
-    public unsafe void LinearGelu(Tensor output, Tensor input, Tensor weight, Tensor? bias)
-    {
-        bool fused = weight.LowRankAdjunct is not { IsActive: true } && weight.DType == DType.I8 && weight.QuantInfo is QuantWeightInfo qi
-            && CanRunResidentInt8(output, input, weight, qi, 0, -1);
-        LinearImpl(output, input, weight, bias, cacheWeightCast: true, fuseGelu: fused);
-        if (!fused) Gelu(output, output);
-    }
 
     /// <summary>Kill switch for grouped resident-int8 Linears (<c>numerics.groupedLinear=false</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
     internal static bool GroupedLinear => EngineKnobs.GroupedLinear.Value;
@@ -2029,7 +1998,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Runs the projection, then adds any LoRA adjunct the weight carries — <c>y = x·Wᵀ + Σ s·(x·Aᵀ)·Bᵀ</c>, the runtime form a block-quantized base needs because its bytes cannot be re-quantized after a merge.</summary>
     /// <remarks>Wrapping rather than folding into <see cref="LinearCore"/> is deliberate: that method returns early
     /// from a dozen fused-GEMV branches, and a per-branch accumulate is exactly the kind of miss that reads as a weak
-    /// LoRA. The two epilogue-fusing callers (<see cref="LinearGelu"/>, <see cref="LinearHeadGated"/>) un-fuse
+    /// LoRA. The epilogue-fusing caller (<see cref="LinearFused"/>) un-fuses
     /// themselves when an adjunct is present, since the adjunct belongs between the GEMM and the activation.</remarks>
     private unsafe void LinearImpl(Tensor output, Tensor input, Tensor weight, Tensor? bias, bool cacheWeightCast,
         int weightRowOffset = 0, int weightRowCount = -1, bool fuseGelu = false,
@@ -2045,7 +2014,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             throw new NotSupportedException(
                 "A LoRA adjunct cannot be added after a fused epilogue — the activation would apply to the base "
-                + "projection only. LinearGelu/LinearHeadGated must un-fuse when the weight carries one.");
+                + "projection only. LinearFused must un-fuse when the weight carries one.");
         }
         LowRankAdjunctGemm.Accumulate(this, output, input,
             weightRowCount >= 0 ? adjunct.SliceRows(weightRowOffset, weightRowCount) : adjunct);
@@ -2235,7 +2204,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (dp4a)
                 {
                     // Quantize-at-producer: the input's Q8_1 sidecar (emitted by RmsNormEmitQ8/
-                    // AddRmsNormEmitQ8/GluActivateEmitQ8 in the same launch as the F32 output — identical
+                    // AddRmsNormEmitQ8/GluEmitQ8 in the same launch as the F32 output — identical
                     // bytes to the quantize kernel below) lets this call skip its own quantize launch.
                     if (m == 1 && GpuTransferHelper.TryGetSidecar(input, k, out ulong scXq, out ulong scXd, out ulong scXs))
                     {
@@ -3887,65 +3856,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return act;
     }
 
-    public void MoeTopKGate(Tensor weights, Tensor logits, int topK)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("MoeTopKGate");
-        if (logits.DType != DType.F32 || weights.DType != DType.F32)
-            throw new NotSupportedException("CUDA MoeTopKGate supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int numExperts = (int)logits.Shape[logits.Shape.Rank - 1];
-        long tokens = logits.ElementCount / numExperts;
-        if (numExperts > 16)
-            throw new NotSupportedException($"CUDA MoeTopKGate supports up to 16 experts, got {numExperts}.");
-
-        ulong pW = 0, pL = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pL = GpuTransferHelper.CopyToDevice(logits);
-            nuint outBytes = GpuTransferHelper.ByteSize(weights);
-            pW = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchMoeTopkGate(pW, pL, numExperts, topK, tokens, _stream.Handle);
-            GpuTransferHelper.CacheActivation(weights, pW, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pW);
-            GpuTransferHelper.FreeDevice(pL);
-        }
-    }
-
-    public void RowGatedAccumulate(Tensor inout, Tensor value, Tensor gate, int numExperts, int expertIndex)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("RowGatedAccum");
-        if (inout.DType != DType.F32 || value.DType != DType.F32 || gate.DType != DType.F32)
-            throw new NotSupportedException("CUDA RowGatedAccumulate supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int dim = (int)inout.Shape[inout.Shape.Rank - 1];
-
-        ulong pOut = 0, pVal = 0, pGate = 0;
-        try
-        {
-            pOut = GpuTransferHelper.CopyToDevice(inout);
-            pVal = GpuTransferHelper.CopyToDevice(value);
-            pGate = GpuTransferHelper.CopyToDevice(gate);
-            _kernels!.LaunchRowGatedAccum(pOut, pVal, pGate, numExperts, expertIndex, dim, inout.ElementCount, _stream.Handle);
-
-            // In-place on inout: clear stale callbacks before re-caching (pitfall #17).
-            inout._gpuSyncCallback = null;
-            inout._gpuDisposeCallback = null;
-            GpuTransferHelper.CacheActivation(inout, pOut, GpuTransferHelper.ByteSize(inout));
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pVal);
-            GpuTransferHelper.FreeDevice(pGate);
-        }
-    }
-
     public void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("CfgEulerStep");
@@ -4503,26 +4413,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>GEGLU with exact erf gate (device): output[rows,inner] = proj[:,:inner]·gelu_erf(proj[:,inner:]).</summary>
-    public unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("GegluErf");
-        if (output.DType != DType.F32 || proj.DType != DType.F32)
-            throw new NotSupportedException("CUDA GegluErf supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pOut = 0; bool cached = false;
-        try
-        {
-            ulong pProj = GpuTransferHelper.CopyToDevice(proj);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchGegluErf(pOut, pProj, rows, inner, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
-        }
-        finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); }
-    }
-
     /// <summary>Exact (erf) GELU, elementwise on device — PyTorch's default <c>nn.GELU()</c> (DINOv2 MLPs).</summary>
     public unsafe void GeluErf(Tensor output, Tensor input)
     {
@@ -4559,30 +4449,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.CacheActivation(output, pOut, outBytes); cached = true;
         }
         finally { if (!cached) GpuTransferHelper.FreeDevice(pOut); GpuTransferHelper.FreeDevice(pIn); }
-    }
-
-    /// <summary>Fused LTX-2 per-head output gate — see <see cref="IBackend.Ltx2HeadGate"/>.</summary>
-    /// <remarks>In-place: x's device buffer is mutated and re-cached to the SAME pointer, the
-    /// <c>RotaryViews.SplitRows</c> pattern. Allocating a fresh output here would leave the mutation in a buffer
-    /// nothing reads.</remarks>
-    public unsafe void Ltx2HeadGate(Tensor x, Tensor logits, int seq, int heads, int headDim)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("Ltx2HeadGate");
-        bool f16 = x.DType == DType.F16;
-        if ((x.DType != DType.F32 && !f16) || logits.DType != x.DType)
-            throw new NotSupportedException(
-                $"CUDA Ltx2HeadGate needs matching F32 or F16 x/logits, got x={x.DType}, logits={logits.DType}.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pX = 0, pLogits = 0;
-        try
-        {
-            pX = GpuTransferHelper.CopyToDevice(x);          // in-place target (cached activation)
-            pLogits = GpuTransferHelper.CopyToDevice(logits);
-            _kernels!.LaunchLtx2HeadGate(pX, pLogits, seq, heads, headDim, _stream.Handle, f16);
-            GpuTransferHelper.CacheActivation(x, pX, GpuTransferHelper.ByteSize(x));   // in-place: re-assert x -> pX
-        }
-        finally { GpuTransferHelper.FreeDevice(pLogits); }
     }
 
     // ── Matrix-Game 3.0 ActionModule temporal-batched rearranges (GPU port of the host pointer-loops) ──
@@ -4938,80 +4804,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    public void GluActivateEmitQ8(Tensor output, Tensor gateUp, int ff, bool gelu)
-    {
-        long rows = gateUp.ElementCount / (2L * ff);
-        if (!_quantAtProducer || !EnableDp4aGemv || rows != 1 || ff % 32 != 0
-            || output.DType != DType.F32 || gateUp.DType != DType.F32)
-        {
-            GluActivate(output, gateUp, ff, gelu);
-            return;
-        }
-        using NvtxRange _nvtx = NvtxRange.Push("GluActivateQ8");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        ulong pOut = 0, pGu = 0, xq = 0, xd = 0, xs = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pGu = GpuTransferHelper.CopyToDevice(gateUp);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            (xq, xd, xs) = AllocSidecar(ff);
-            _kernels!.LaunchGluActQ8(pOut, xq, xd, xs, pGu, 1, ff, gelu, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            GpuTransferHelper.RegisterSidecar(output, xq, xd, xs, ff);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pGu);
-            if (!cachedOutput)
-            {
-                GpuTransferHelper.FreeDevice(pOut);
-                GpuTransferHelper.FreeDevice(xq);
-                GpuTransferHelper.FreeDevice(xd);
-                GpuTransferHelper.FreeDevice(xs);
-            }
-        }
-    }
-
-    public void GluActivate(Tensor output, Tensor gateUp, int ff, bool gelu)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("GluActivate");
-        bool bf16 = output.DType == DType.BF16 && gateUp.DType == DType.BF16;
-        bool f16 = output.DType == DType.F16 && gateUp.DType == DType.F16;
-        if (!bf16 && !f16 && (output.DType != DType.F32 || gateUp.DType != DType.F32))
-        {
-            throw new NotSupportedException(
-                $"CUDA GluActivate supports F32, F16 or BF16 (both sides same dtype); got output={output.DType}, gateUp={gateUp.DType}.");
-        }
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int rows = (int)(gateUp.ElementCount / (2L * ff));
-        ulong pIn = 0, pOut = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(gateUp);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            if (bf16)
-                _kernels!.LaunchGluActBf16(pOut, pIn, rows, ff, gelu, _stream.Handle);
-            else if (f16)
-                _kernels!.LaunchGluActF16(pOut, pIn, rows, ff, gelu, _stream.Handle);
-            else
-                _kernels!.LaunchGluAct(pOut, pIn, rows, ff, gelu, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pIn);
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-        }
-    }
-
     public void SliceLastDim(Tensor output, Tensor input, int offset)
     {
         using NvtxRange _nvtx = NvtxRange.Push("SliceLastDim");
@@ -5042,35 +4834,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         {
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    public void MaskRows(Tensor output, Tensor input, Tensor rowMask)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("MaskRows");
-        if (output.DType != DType.F32 || input.DType != DType.F32 || rowMask.DType != DType.F32)
-            throw new NotSupportedException("CUDA MaskRows supports F32 only.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int channels = (int)input.Shape[input.Shape.Rank - 1];
-
-        ulong pOut = 0, pIn = 0, pMask = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            pMask = GpuTransferHelper.CopyToDevice(rowMask);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            _kernels!.LaunchRowScale(pOut, pIn, pMask, channels, input.ElementCount, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-            GpuTransferHelper.FreeDevice(pMask);
         }
     }
 
@@ -9054,72 +8817,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.FreeDevice(pIn);
             GpuTransferHelper.FreeDevice(pIdx);
             GpuTransferHelper.FreeDevice(pScale);
-        }
-    }
-
-    /// <summary>GEGLU activation splitting each logical row as <c>[value | gate]</c> along its last dimension.</summary>
-    public void GeGlu(Tensor output, Tensor input)
-    {
-        using NvtxRange _nvtxProf = NvtxRange.Push("GeGlu");
-        if (input.Shape.Rank == 0 || output.Shape.Rank != input.Shape.Rank)
-        {
-            throw new HartsyInferenceException(
-                $"CUDA GeGlu requires input/output with the same positive rank; got input={input.Shape}, output={output.Shape}.");
-        }
-        if (input.DType != output.DType)
-            throw new NotSupportedException($"CUDA GeGlu requires matching dtypes; got output={output.DType}, input={input.DType}.");
-        if (input.DType != DType.F32 && input.DType != DType.F16 && input.DType != DType.BF16)
-            throw new NotSupportedException($"CUDA GeGlu supports F32, F16, and BF16; got {input.DType}.");
-
-        long inputLastDim = input.Shape[input.Shape.Rank - 1];
-        if (inputLastDim <= 0 || (inputLastDim & 1) != 0)
-            throw new HartsyInferenceException($"CUDA GeGlu requires an even, positive input last dimension; got {inputLastDim} in {input.Shape}.");
-        long expectedInnerDim = inputLastDim / 2;
-        for (int dim = 0; dim < input.Shape.Rank - 1; dim++)
-        {
-            if (output.Shape[dim] != input.Shape[dim])
-                throw new HartsyInferenceException($"CUDA GeGlu output prefix must match input; got input={input.Shape}, output={output.Shape}.");
-        }
-        if (output.Shape[output.Shape.Rank - 1] != expectedInnerDim)
-        {
-            throw new HartsyInferenceException(
-                $"CUDA GeGlu output last dimension must be {expectedInnerDim} for input {input.Shape}; got output={output.Shape}.");
-        }
-        if (expectedInnerDim > int.MaxValue || output.ElementCount <= 0 || output.ElementCount > int.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(output),
-                $"CUDA GeGlu shape exceeds the 32-bit launcher range: input={input.Shape}, output={output.Shape}.");
-        }
-
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-
-        ulong pOut = 0, pIn = 0;
-        bool cachedOutput = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint outBytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(outBytes);
-
-            int innerDim = (int)output.Shape[output.Shape.Rank - 1];
-            if (input.DType == DType.F32)
-                _kernels!.LaunchGeGlu(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
-            else if (input.DType == DType.F16)
-                _kernels!.LaunchGeGluF16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
-            else if (input.DType == DType.BF16)
-                _kernels!.LaunchGeGluBf16(pOut, pIn, innerDim, (int)output.ElementCount, _stream.Handle);
-            else
-                throw new NotSupportedException($"CUDA GeGlu does not have a launcher for {input.DType}.");
-
-            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
-            cachedOutput = true;
-        }
-        finally
-        {
-            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
         }
     }
 

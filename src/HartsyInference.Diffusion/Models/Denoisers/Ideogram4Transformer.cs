@@ -167,7 +167,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
 
         // ── Image embedding: input_proj over the image rows only, scattered after a zeroed text head. ──
         // Bit-identical to the old full-sequence masked path: text rows there were Linear-bias rows zeroed by
-        // the post-projection MaskRows; here they are never computed.
+        // the post-projection row gate; here they are never computed.
         Tensor xProjImg = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
         backend.Linear(xProjImg, imageTokens, _inputProjW!, _inputProjB);
         Tensor h;

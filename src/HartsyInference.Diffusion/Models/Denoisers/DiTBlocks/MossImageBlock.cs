@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -215,7 +216,7 @@ public sealed class MossImageBlock(int hidden, int numHeads, int ffnHidden, floa
         backend.Linear(pair, y, _ffnUpGate!, null);
         y.Dispose();
         Tensor activated = new(new TensorShape(1, seq, _ffnHidden), act);
-        backend.SituGlu(activated, pair);
+        backend.Glu(activated, pair, GluSpec.Situ);
         pair.Dispose();
         Tensor down = new(new TensorShape(1, seq, _hidden), DType.F32);
         backend.Linear(down, activated, _ffnDown!, null);

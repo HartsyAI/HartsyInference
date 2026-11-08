@@ -11,36 +11,6 @@ namespace HartsyInference.Cuda;
 public sealed partial class CudaBackend
 {
     /// <inheritdoc />
-    public void SituGlu(Tensor output, Tensor input)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("SituGlu");
-        (int inner, long rows) = SituGluReference.Validate(output, input);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasDitNormActKernels)
-        {
-            SituGluReference.Apply(output, input);
-            return;
-        }
-        ulong pIn = 0, pOut = 0;
-        bool cached = false;
-        try
-        {
-            pIn = GpuTransferHelper.CopyToDevice(input);
-            nuint bytes = GpuTransferHelper.ByteSize(output);
-            pOut = GpuTransferHelper.AllocateDevice(bytes);
-            _kernels.LaunchSituGlu(pOut, pIn, inner, rows, input.DType == DType.F16, _stream.Handle);
-            GpuTransferHelper.CacheActivation(output, pOut, bytes);
-            cached = true;
-        }
-        finally
-        {
-            if (!cached) GpuTransferHelper.FreeDevice(pOut);
-            GpuTransferHelper.FreeDevice(pIn);
-        }
-    }
-
-    /// <inheritdoc />
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
         int kernel, int kHeads, int skDim, int vHeads, int svDim, float eps, float qScale)
     {

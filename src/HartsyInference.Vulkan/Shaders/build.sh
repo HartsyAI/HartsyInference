@@ -72,7 +72,6 @@ DTYPE_KERNELS=(
     elementwise
     transpose
     permute_0213
-    geglu
     broadcast_add
     groupnorm
     groupnorm_silu
@@ -96,10 +95,11 @@ DTYPE_KERNELS=(
     kv_cache_append
     sdpa_flash
     gated_residual_last_dim
-    situ_glu
     accumulate_strided
     rotary
     norm_modulate_flat
+    glu
+    group_scale
     slice_rows
     fp8_absmax
     quant_e4m3
@@ -209,6 +209,9 @@ compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=0 -- "_f32"
 compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=1 -- "_f16"
 compile_one "norm_modulate_rows" -DIN_FP16=0 -DOUT_FP16=1 -- "_f32_f16"
 compile_one "norm_modulate_rows" -DIN_FP16=1 -DOUT_FP16=0 -- "_f16_f32"
+
+# group_scale with F16 gates over an F16 activation (an F16 head gate's logits); the F32-gate build is the DTYPE_KERNELS entry above.
+compile_one "group_scale" -DUSE_FP16=1 -DGATE_FP16=1 -- "_f16_f16"
 
 # kv_cache_append with F32 rows into an F16 cache (FixedKvCache appends projection rows as they come out); SRC_F32 changes
 # the source binding's type, so it is its own module.

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
@@ -916,7 +917,7 @@ public sealed partial class AttentionLayer
             case AttentionGate.PerHeadDoubledSigmoid:
             {
                 Tensor gatedOut = new(outShape, act);
-                backend.LinearHeadGated(gatedOut, flat, w.Output!, w.OutputBias, gate!, _config.Heads, _config.HeadDim);
+                backend.LinearFused(gatedOut, flat, w.Output!, w.OutputBias, LinearFusion.HeadGated(gate!, _config.Heads, _config.HeadDim));
                 gate!.Dispose();
                 flat.Dispose();
                 return gatedOut;

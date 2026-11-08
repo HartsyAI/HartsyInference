@@ -76,20 +76,6 @@ public partial interface IBackend
         }
     }
 
-    /// <summary>Per-row scalar multiply: <c>out[row, c] = in[row, c] * rowMask[row]</c> — token masking for DiT embeddings.</summary>
-    unsafe void MaskRows(Tensor output, Tensor input, Tensor rowMask)
-    {
-        if (output.DType != DType.F32 || input.DType != DType.F32 || rowMask.DType != DType.F32)
-            throw new NotSupportedException("MaskRows default fallback only supports F32.");
-        int channels = (int)input.Shape[input.Shape.Rank - 1];
-        long total = input.ElementCount;
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        float* pMask = (float*)rowMask.DataPointer;
-        for (long i = 0; i < total; i++)
-            pOut[i] = pIn[i] * pMask[i / channels];
-    }
-
     /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
     /// <c>[1, heads, seq, hd]</c> head-major tensor, in place and accumulating across calls. Same bytes to the same
     /// offsets as concatenating every chunk along dim 2, but without holding the whole chunk list alive alongside the

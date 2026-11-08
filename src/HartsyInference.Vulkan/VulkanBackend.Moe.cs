@@ -52,9 +52,9 @@ public sealed partial class VulkanBackend
 
     /// <inheritdoc/>
     public void MoeRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null)
+        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null, Tensor? dense = null)
     {
-        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds);
+        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
         using OpScope _op = EnterOp();
         long tokens = logits.ElementCount / args.NumExperts;
         if (tokens > MaxWorkgroupsX)
@@ -68,9 +68,10 @@ public sealed partial class VulkanBackend
         VulkanBuffer kindsBuf = tokenKinds is null ? logitsBuf : GetBuffer(tokenKinds);
         VulkanBuffer idxBuf = _xfer.AllocateDevice((ulong)(topkIdx.ElementCount * sizeof(int)));
         VulkanBuffer wBuf = _xfer.AllocateDevice((ulong)(topkWeight.ElementCount * sizeof(float)));
+        VulkanBuffer? denseBuf = dense is null ? null : _xfer.AllocateDevice((ulong)(dense.ElementCount * sizeof(float)));
         try
         {
-            VulkanKernel k = GetKernel("moe_route", storageBufferCount: 6, _default1DSpec);
+            VulkanKernel k = GetKernel("moe_route", storageBufferCount: 7, _default1DSpec);
             Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
             Authoring.PushConstants pc = new(pcBytes);
             pc.U32((uint)args.NumExperts);
@@ -85,19 +86,23 @@ public sealed partial class VulkanBackend
             pc.F32(args.LogitDivisor);
             pc.Bool(bias is not null);
             pc.Bool(altBias is not null && tokenKinds is not null);
+            pc.Bool(dense is not null);
+            // The dense binding is the weights buffer as a placeholder when no dense table is asked for.
             Span<ulong> bufs = stackalloc ulong[]
             {
-                idxBuf.Handle, wBuf.Handle, logitsBuf.Handle, biasBuf.Handle, altBuf.Handle, kindsBuf.Handle
+                idxBuf.Handle, wBuf.Handle, logitsBuf.Handle, biasBuf.Handle, altBuf.Handle, kindsBuf.Handle, (denseBuf ?? wBuf).Handle
             };
             Dispatch(k, bufs, pc.Written, (uint)tokens);
             CacheOutput(topkIdx, idxBuf);
             CacheOutput(topkWeight, wBuf);
+            if (dense is not null) CacheOutput(dense, denseBuf!);
         }
         catch (Exception ex)
         {
             Logs.Error("Vulkan MoeRoute dispatch failed", ex);
             idxBuf.Dispose();
             wBuf.Dispose();
+            denseBuf?.Dispose();
             throw;
         }
     }

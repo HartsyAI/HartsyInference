@@ -251,38 +251,6 @@ __global__ void lm_argmax_lastdim_stage2_f32(
     if (threadIdx.x == 0) indices[0] = sIdx[0];
 }
 
-// Fused gated-FFN activation epilogue: comb[r*ff+i] = act(gate) * up over the CONCATENATED
-// [gate | up] projection output (gateUp row r = [ff gate values][ff up values]) — replaces the
-// two SliceLastDim copies + the activation + the Mul (four kernels, three intermediate buffers)
-// with ONE elementwise pass and zero intermediates. act 0 = SiLU (x·sigmoid(x)), 1 = GELU-tanh;
-// the formulas mirror elementwise_silu_f32 / elementwise_gelu_f32 (fast-math sigmoid/exp).
-// Launch: grid = ceil(rows*ff / 256), block = 256.
-__global__ void lm_glu_act_f32(
-    float* __restrict__ comb,
-    const float* __restrict__ gateUp,
-    unsigned int rows,
-    unsigned int ff,
-    int act)
-{
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = (unsigned long long)rows * ff;
-    if (gid >= total) return;
-    unsigned int r = (unsigned int)(gid / ff);
-    unsigned int i = (unsigned int)(gid % ff);
-    unsigned long long rowBase = (unsigned long long)r * 2u * ff;
-    const float g = gateUp[rowBase + i];
-    const float u = gateUp[rowBase + ff + i];
-    float a;
-    if (act == 0) {
-        a = g * __fdividef(1.0f, 1.0f + __expf(-g));                    // SiLU
-    } else {
-        const float inner = 0.7978845608028654f * (g + 0.044715f * g * g * g);
-        const float s = __fdividef(1.0f, 1.0f + __expf(-2.0f * inner)); // tanh(x) = 2·sigmoid(2x) − 1
-        a = 0.5f * g * (1.0f + (2.0f * s - 1.0f));                      // GELU-tanh
-    }
-    comb[gid] = a * u;
-}
-
 // Fused QKV epilogue for the graph decode step (t=1, B=1, no QK-norm): consumes the CONCATENATED
 // [q | k | v] projection output and, in ONE launch, ropes q into qOut, ropes k and writes it into
 // the KV cache at the device position, and copies v into the cache — replacing 3× SliceLastDim +
@@ -550,7 +518,7 @@ extern "C" __global__ void lm_add_rmsnorm_q8_1_f32(
         q8_1_quantize_block(xqRow + (size_t)blk * 32, xdRow + blk, xsRow + blk, normRow + (size_t)blk * 32, lane);
 }
 
-// lm_glu_act_f32 (verbatim body) + Q8_1 sidecar epilogue. Each warp's 32 threads compute 32
+// The [gate | up] SiLU / GELU-tanh GLU body (the glu_f32 formulas, verbatim) + Q8_1 sidecar epilogue. Each warp's 32 threads compute 32
 // consecutive output elements = exactly one aligned 32-block, so the warp quantizes its own
 // register values (the same bits it writes). rows*ff must be a multiple of 32 (host-gated), so
 // warps are always fully active. Launch: grid = ceil(rows*ff / 256), block = 256.

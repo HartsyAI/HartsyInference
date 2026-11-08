@@ -2669,7 +2669,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     #endregion
 
-    #region Transpose / Permute / GeGlu / BroadcastAdd
+    #region Transpose / Permute / BroadcastAdd
 
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
     {
@@ -2722,56 +2722,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         catch (Exception ex)
         {
             Logs.Error("Vulkan Permute0213 dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    public void GeGlu(Tensor output, Tensor input)
-    {
-        using OpScope _op = EnterOp();
-        long lastDim = input.Shape[input.Shape.Rank - 1];
-        DispatchGeglu(output, input, lastDim / 2, input.ElementCount / lastDim, useErf: false);
-    }
-
-    /// <summary>GEGLU gated by the EXACT (erf) GELU rather than the tanh approximation.</summary>
-    /// <remarks>Same kernel, one spec constant apart. The two GELUs differ by about 1e-3 at the tails, which is
-    /// visible in a DiT's output, so which one a family wants is not interchangeable.</remarks>
-    public void GegluErf(Tensor output, Tensor proj, long rows, int inner)
-    {
-        using OpScope _op = EnterOp();
-        if (output.DType != proj.DType || (proj.DType != DType.F32 && proj.DType != DType.F16))
-        {
-            IBackend.GegluErfReference(output, proj, rows, inner);
-            return;
-        }
-        DispatchGeglu(output, proj, inner, rows, useErf: true);
-    }
-
-    private void DispatchGeglu(Tensor output, Tensor input, long D, long outerCount, bool useErf)
-    {
-        VulkanBuffer inBuf = GetBuffer(input);
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            string shader = "geglu" + DtypeSuffix(input.DType);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
-                SpecConstant.Bool(3, useErf),
-            };
-            VulkanKernel k = GetKernel(shader, 2, spec);
-            Span<byte> pc = stackalloc byte[2 * 4];
-            BinaryWriteUInt(pc, 0, (uint)outerCount);
-            BinaryWriteUInt(pc, 4, (uint)D);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc, GroupCount(outerCount * D, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan GeGlu dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
@@ -3086,7 +3036,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     // forces a full device-sync + host readback (see GetD2hSyncCount), and the NEXT GPU op that needs
     // the result pays a fresh H2D re-upload — measured as the dominant contributor to a synthetic LLM
     // decode step's residency cost (Measure_LlmDecodeStep_ResidencyVsDispatchOverhead): SliceLastDim
-    // alone accounted for 2 of the 5 D2H syncs/step (QKV split + GluActivate's internal gate/up split),
+    // alone accounted for 2 of the 5 D2H syncs/step (QKV split + the gated FFN's internal gate/up split),
     // and ApplyRope/KvCacheAppend are the other links in the same q/k/v-prep chain.
 
     public void SliceLastDim(Tensor output, Tensor input, int offset)
