@@ -49,8 +49,7 @@ public static class SeedVr2VaeOps
     /// <summary>MAGViT-style channel→space shuffle (reference Upsample3D):
     /// <c>b (x y z c) f h w → b c (f·z) (h·x) (w·y)</c> with x,y spatial and z temporal ratios, followed by
     /// <c>remove_head</c> when temporal (drops OUTPUT FRAME INDEX 1 — the duplicated half of frame 0 — giving
-    /// T→2T−1; note LTX drops index 0, the conventions differ). Device-resident via
-    /// <see cref="IBackend.SeedVr2PixelShuffle"/> (host reference on CPU).</summary>
+    /// T→2T−1; note LTX drops index 0, the conventions differ).</summary>
     public static Tensor PixelShuffle(IBackend backend, Tensor x, int spatialRatio, int temporalRatio)
     {
         int b = (int)x.Shape[0], cIn = (int)x.Shape[1], f = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
@@ -61,7 +60,8 @@ public static class SeedVr2VaeOps
         int fOut = f * temporalRatio;
         int fFinal = temporalRatio > 1 ? fOut - 1 : fOut;
         Tensor output = new Tensor(new TensorShape([(long)b, c, fFinal, h * spatialRatio, w * spatialRatio]), x.DType);
-        backend.SeedVr2PixelShuffle(output, x, spatialRatio, temporalRatio);
+        PixelShuffles.DepthToSpace(backend, output, x, new ShuffleSpec(ShuffleLayout.ChannelsFirst, ShuffleLayout.ChannelsFirst, b, f, h, w, c,
+            temporalRatio, spatialRatio, spatialRatio, ChannelOrder.HWTC, DropDuplicateFrame: temporalRatio > 1));
         return output;
     }
 

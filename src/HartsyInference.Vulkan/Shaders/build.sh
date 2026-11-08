@@ -82,7 +82,6 @@ DTYPE_KERNELS=(
     qkv_split_norm_head_major
     layernorm_modulate
     apply_rope_single
-    unpatchify_tokens
     prelu
     rmsnorm
     softmax
@@ -116,7 +115,6 @@ SINGLE_KERNELS=(
     affine_mix
     quant_int8_rowwise
     dequant_recipe_bf16
-    pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
     gated_residual_row_indexed

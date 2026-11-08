@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -165,7 +166,7 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         (Tensor ropeCos, Tensor ropeSin) = _rope.GetOrBuildImageTables(backend, prefix.Length, h, w);
 
         Tensor tokens = new Tensor(new TensorShape(1, imgSeq, channels), latent.DType);
-        backend.PatchifyTokens(tokens, latent, patch: 1, innerChannelFastest: true);
+        PixelShuffles.PatchifyTokens(backend, tokens, latent, patch: 1, innerChannelFastest: true);
         Tensor tokensAct = Cast(backend, tokens, _act);
         if (!ReferenceEquals(tokensAct, tokens)) tokens.Dispose();
 
@@ -191,7 +192,7 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         Tensor projectedOut = Cast(backend, projected, latent.DType);
         if (!ReferenceEquals(projectedOut, projected)) projected.Dispose();
         Tensor output = new Tensor(new TensorShape(1, _config.OutChannels, h, w), latent.DType);
-        backend.UnpatchifyTokens(output, projectedOut, _config.OutChannels, h, w, patch: 1, innerChannelFastest: true);
+        PixelShuffles.UnpatchifyTokens(backend, output, projectedOut, _config.OutChannels, h, w, patch: 1, innerChannelFastest: true);
         projectedOut.Dispose();
         return output;
     }

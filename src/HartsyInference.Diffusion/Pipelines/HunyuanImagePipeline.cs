@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
@@ -538,7 +539,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             if (onProgress is not null)
             {
                 Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                Backend.UnpatchifyTokens(previewLatent, latentTokens, inChannels, hPacked, wPacked, patch,
+                PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latentTokens, inChannels, hPacked, wPacked, patch,
                     innerChannelFastest: true);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
@@ -581,7 +582,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
         // Device unpatchify (innerChannelFastest: (py, px, c) inner order — matches PatchifyLatent) keeps the
         // latent → VAE chain device-resident; the CPU backend falls back to the IBackend host loop.
         Tensor latent = new(latentShape, DType.F32);
-        Backend.UnpatchifyTokens(latent, latentTokens, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
+        PixelShuffles.UnpatchifyTokens(Backend, latent, latentTokens, inChannels, hPacked, wPacked, patch, innerChannelFastest: true);
         latentTokens.Dispose();
 
         if (!ReferenceEquals(VaeBackend, Backend))

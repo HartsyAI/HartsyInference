@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -134,7 +135,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
             if (onProgress is not null)
             {
                 Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                Backend.UnpatchifyTokens(previewLatent, latent, _config.InChannels, hPacked, wPacked,
+                PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latent, _config.InChannels, hPacked, wPacked,
                     _config.PatchSize, innerChannelFastest: true);
                 onProgress.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
                 {
@@ -154,7 +155,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
 
         // One device unpatchify back to NCHW for the VAE (the packed latent never left the GPU).
         Tensor unpacked = new Tensor(latentShape, DType.F32);
-        Backend.UnpatchifyTokens(unpacked, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
+        PixelShuffles.UnpatchifyTokens(Backend, unpacked, latent, _config.InChannels, hPacked, wPacked, _config.PatchSize,
             innerChannelFastest: true);
         latent.Dispose();
 

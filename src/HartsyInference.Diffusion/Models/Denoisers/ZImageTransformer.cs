@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Prompting;
@@ -246,7 +247,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
             latent.DType);
         try
         {
-            backend.PatchifyTokens(output, latent, patch, innerChannelFastest: true);
+            PixelShuffles.PatchifyTokens(backend, output, latent, patch, innerChannelFastest: true);
             return output;
         }
         catch

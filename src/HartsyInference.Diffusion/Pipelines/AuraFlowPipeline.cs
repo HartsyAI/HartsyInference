@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
@@ -327,7 +328,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
                 if (emitPreview)
                 {
                     Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                    Backend.UnpatchifyTokens(previewLatent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+                    PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
                     try
                     {
                         onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -345,7 +346,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             }
 
             latent = new Tensor(latentShape, DType.F32);
-            Backend.UnpatchifyTokens(latent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+            PixelShuffles.UnpatchifyTokens(Backend, latent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
             latentTokens.Dispose();
             // Host-materialize for the tiled-VAE fallback's host slicing (and any host consumer).
             Backend.Sync();

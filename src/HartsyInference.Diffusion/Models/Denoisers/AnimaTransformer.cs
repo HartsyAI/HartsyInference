@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -394,7 +395,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
         {
             // Cosmos patch embedding flattens each patch as (channel, ph, pw): channel OUTERMOST.
             // PatchifyTokens(false) is that exact byte order and keeps the carried latent on the device.
-            backend.PatchifyTokens(gathered, latent, patchH, innerChannelFastest: false);
+            PixelShuffles.PatchifyTokens(backend, gathered, latent, patchH, innerChannelFastest: false);
 
             TensorShape outShape = new TensorShape(batch, gridH * gridW, _config.HiddenSize);
             output = new Tensor(outShape, DType.F32);
@@ -534,8 +535,7 @@ public sealed unsafe class AnimaTransformer : IDisposable
         {
             // Cosmos final projection is intentionally NOT the inverse of patch embedding: its token
             // feature order is (ph, pw, channel), i.e. channel INNERMOST.
-            backend.UnpatchifyTokens(
-                output, packed, outChannels, gridH, gridW, patchH, innerChannelFastest: true);
+            PixelShuffles.UnpatchifyTokens(backend, output, packed, outChannels, gridH, gridW, patchH, innerChannelFastest: true);
             success = true;
             return output;
         }

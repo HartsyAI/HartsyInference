@@ -37,7 +37,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ltx25Na3dTiled8x8F32;
     private readonly nint _ltx25Na3dTiled4x8F32;
     private readonly nint _ltx25NaRope3dF32;
-    private readonly nint _ltx25PixelShuffleF32;
 
     // Optional: W8A8 IMMA chain kernels (w8a8.ptx, src/HartsyInference.Cuda/Kernels/dequant) — per-row INT8 activation quant +
     // int32→F16/F32 dequant epilogue around Int8GemmExecutor. Null when not compiled.
@@ -257,14 +256,8 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _wanRopeInterleavedPerHead;
     private readonly nint _wanVaeBuildPadded;
     private readonly nint _wanVaeBuildPaddedBf16;
-    private readonly nint _seedVr2PixelShuffle;
-    private readonly nint _seedVr2PixelShuffleBf16;
     private readonly nint _wanVaeRmsNormChannel;
     private readonly nint _wanVaeRmsNormChannelBf16;
-    private readonly nint _wanVaeUnpatchify;
-    private readonly nint _wanVaeUnpatchifyBf16;
-    private readonly nint _wanVaeDupUp3d;
-    private readonly nint _wanVaeDupUp3dBf16;
 
     // ── GeGlu function handles ───────────────────────────────────────────
     private readonly nint _gegluF32;
@@ -298,10 +291,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ditMaskedAffineMixDenseF32;
     private readonly nint _ditMaskedAffineMixPackedOuterF32;
     private readonly nint _ditMaskedAffineMixPackedInnerF32;
-    private readonly nint _ditPatchifyF32;
-    private readonly nint _ditPatchifyU16;
-    private readonly nint _ditUnpatchifyF32;
-    private readonly nint _ditUnpatchifyU16;
     private readonly nint _ditSplitSliceU32;
     private readonly nint _ditSplitSliceU16;
     private readonly nint _ditTanhF32;
@@ -330,7 +319,6 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _ditIndexAddF32;
     private readonly nint _ditSliceRowsF32;
     private readonly nint _oasisRopeInterleavedF32;
-    private readonly nint _oasisUnpatchifyF32;
     private readonly nint _oasisAdaLnF32;
     private readonly nint _ditPixelQuantizeF32;
     private readonly nint _triplaneGridSampleF32;
@@ -748,16 +736,10 @@ public sealed partial class CudaKernels : IDisposable
         _wanVaeConv3dModule = LoadOwnedModule(Ptx("wan_vae_conv3d"));
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeBuildPaddedBf16 = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded_bf16");
-        _seedVr2PixelShuffle = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_f32");
-        _seedVr2PixelShuffleBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pixel_shuffle_bf16");
 
         _wanVaeNormModule = LoadOwnedModule(Ptx("wan_vae_norm"));
         _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
         _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
-        _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
-        _wanVaeUnpatchifyBf16 = _wanVaeNormModule.GetFunction("wan_vae_unpatchify_bf16");
-        _wanVaeDupUp3d = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d");
-        _wanVaeDupUp3dBf16 = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d_bf16");
 
         _gegluModule = LoadOwnedModule(Ptx("geglu_f32"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
@@ -795,9 +777,6 @@ public sealed partial class CudaKernels : IDisposable
                 _ltx25Na3dTiled8x8F32 = 0;
                 _ltx25Na3dTiled4x8F32 = 0;
             }
-            // Same demotion for a PTX predating the pixel-shuffle entry: the upsample falls back to the host loop.
-            try { _ltx25PixelShuffleF32 = _ltx25NaModule.GetFunction("ltx25_pixel_shuffle_f32"); }
-            catch (CudaException) { _ltx25PixelShuffleF32 = 0; }
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
@@ -1006,10 +985,6 @@ public sealed partial class CudaKernels : IDisposable
         _ditMaskedAffineMixDenseF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_dense_f32");
         _ditMaskedAffineMixPackedOuterF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_outer_f32");
         _ditMaskedAffineMixPackedInnerF32 = _ditF32Module.GetFunction("dit_masked_affine_mix_packed_inner_f32");
-        _ditPatchifyF32 = _ditF32Module.GetFunction("dit_patchify_f32");
-        _ditPatchifyU16 = _ditF32Module.GetFunction("dit_patchify_u16");
-        _ditUnpatchifyF32 = _ditF32Module.GetFunction("dit_unpatchify_f32");
-        _ditUnpatchifyU16 = _ditF32Module.GetFunction("dit_unpatchify_u16");
         _ditSplitSliceU32 = _ditF32Module.GetFunction("dit_split_slice_u32");
         _ditSplitSliceU16 = _ditF32Module.GetFunction("dit_split_slice_u16");
         _ditTanhF32 = _ditF32Module.GetFunction("dit_tanh_f32");
@@ -1046,7 +1021,6 @@ public sealed partial class CudaKernels : IDisposable
         _ditIndexAddF32 = _ditF32Module.GetFunction("dit_index_add_f32");
         _ditSliceRowsF32 = _ditF32Module.GetFunction("dit_slice_rows_f32");
         _oasisRopeInterleavedF32 = _ditF32Module.GetFunction("oasis_rope_interleaved_f32");
-        _oasisUnpatchifyF32 = _ditF32Module.GetFunction("oasis_unpatchify_f32");
         _oasisAdaLnF32 = _ditF32Module.GetFunction("oasis_adaln_f32");
         _ditPixelQuantizeF32 = _ditF32Module.GetFunction("dit_pixel_quantize_f32");
         _triplaneGridSampleF32 = _ditF32Module.GetFunction("triplane_grid_sample_f32");
@@ -2230,9 +2204,6 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Whether the optional ltx25_na_decoder.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).</summary>
     public bool HasLtx25NaKernels => _ltx25NaModule is not null;
 
-    /// <summary>Whether the loaded ltx25_na_decoder.ptx carries the pixel-shuffle entry.</summary>
-    public bool HasLtx25PixelShuffle => _ltx25PixelShuffleF32 != 0;
-
     /// <summary>Shared-memory bytes <see cref="LaunchLtx25Na3d"/> needs: the q row plus one score per window position.</summary>
     public static int Ltx25Na3dSharedBytes(int headDim, int kt, int kh, int kw) => (headDim + kt * kh * kw) * sizeof(float);
 
@@ -2299,32 +2270,6 @@ public sealed partial class CudaKernels : IDisposable
         long hTiles = (dimH + tileH - 1) / tileH, wTiles = (dimW + tileW - 1) / tileW;
         uint gridDim = (uint)((long)batch * dimT * hTiles * wTiles * heads);
         CudaDriverApi.cuLaunchKernel(func, gridDim, 1, 1, 256, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches the channels-last 3D pixel shuffle over one temporal chunk; one thread per SOURCE element, so <paramref name="total"/> is the projection's element count.</summary>
-    public unsafe void LaunchLtx25PixelShuffle(ulong dst, ulong src, int start, int h, int w,
-        int strideT, int strideH, int strideW, int outChannels, int dropped, int outH, int outW,
-        long total, nint stream)
-    {
-        if (_ltx25PixelShuffleF32 == 0)
-            throw new InvalidOperationException("ltx25_pixel_shuffle_f32 is not loaded; gate on HasLtx25PixelShuffle first.");
-
-        ulong dstArg = dst, srcArg = src;
-        int startArg = start, hArg = h, wArg = w;
-        int p1Arg = strideT, p2Arg = strideH, p3Arg = strideW;
-        int ocArg = outChannels, dropArg = dropped, ohArg = outH, owArg = outW;
-        ulong totalArg = (ulong)total;
-
-        void** args = stackalloc void*[13];
-        args[0] = &dstArg; args[1] = &srcArg;
-        args[2] = &startArg; args[3] = &hArg; args[4] = &wArg;
-        args[5] = &p1Arg; args[6] = &p2Arg; args[7] = &p3Arg;
-        args[8] = &ocArg; args[9] = &dropArg; args[10] = &ohArg; args[11] = &owArg;
-        args[12] = &totalArg;
-
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_ltx25PixelShuffleF32, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -3619,52 +3564,6 @@ public sealed partial class CudaKernels : IDisposable
             2 * threads * sizeof(double), stream, (nint)args, 0).ThrowOnError();
     }
 
-    /// <summary>Launches patchify: NCHW <c>[B,C,H,W]</c> → token grid <c>[B,(H/p)·(W/p),C·p²]</c> (F32). <paramref name="innerChannelFastest"/> selects (ph,pw,c) when true and (c,ph,pw) when false.</summary>
-    public unsafe void LaunchDitPatchify(ulong output, ulong input, int batch, int channels, int height, int width,
-        int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitPatchifyImpl(
-            _ditPatchifyF32, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
-
-    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
-    public unsafe void LaunchDitPatchifyU16(ulong output, ulong input, int batch, int channels, int height, int width,
-        int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitPatchifyImpl(
-            _ditPatchifyU16, output, input, batch, channels, height, width, patch, innerChannelFastest, stream);
-
-    private unsafe void LaunchDitPatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
-        int height, int width, int patch, bool innerChannelFastest, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint chArg = (uint)channels, hArg = (uint)height, wArg = (uint)width, pArg = (uint)patch;
-        uint innerArg = innerChannelFastest ? 1u : 0u;
-        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)height * (ulong)width;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &chArg;
-        args[3] = &hArg;
-        args[4] = &wArg;
-        args[5] = &pArg;
-        args[6] = &innerArg;
-        args[7] = &totalArg;
-        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
-        CudaDriverApi.cuLaunchKernel(
-            kernel, gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Launches unpatchify: token grid [B,hP·wP,C·p²] → pixel latent [B,C,H,W] (F32). <paramref name="innerChannelFastest"/>: token inner order (ph, pw, c) when true (Z-Image), (c, ph, pw) when false (Krea2).</summary>
-    public unsafe void LaunchDitUnpatchify(ulong output, ulong input, int batch, int channels, int hPacked,
-        int wPacked, int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitUnpatchifyImpl(
-            _ditUnpatchifyF32, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
-
-    /// <summary>16-bit payload variant shared by F16 and BF16; performs no floating-point conversion.</summary>
-    public unsafe void LaunchDitUnpatchifyU16(ulong output, ulong input, int batch, int channels, int hPacked,
-        int wPacked, int patch, bool innerChannelFastest, nint stream)
-        => LaunchDitUnpatchifyImpl(
-            _ditUnpatchifyU16, output, input, batch, channels, hPacked, wPacked, patch, innerChannelFastest, stream);
-
     /// <summary>Copies one split chunk from logical <c>[outer,inputDimension,inner]</c> storage; the 16-bit variant is shared by F16 and BF16, treating every element as an opaque payload word.</summary>
     public unsafe void LaunchSplitSlice(
         bool sixteenBit,
@@ -3695,29 +3594,6 @@ public sealed partial class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(
             sixteenBit ? _ditSplitSliceU16 : _ditSplitSliceU32,
             gridDim, 1, 1, BlockSize, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    private unsafe void LaunchDitUnpatchifyImpl(nint kernel, ulong output, ulong input, int batch, int channels,
-        int hPacked, int wPacked, int patch, bool innerChannelFastest, nint stream)
-    {
-        ulong outArg = output, inArg = input;
-        uint chArg = (uint)channels, hpArg = (uint)hPacked, wpArg = (uint)wPacked, pArg = (uint)patch;
-        uint innerArg = innerChannelFastest ? 1u : 0u;
-        ulong totalArg = (ulong)batch * (ulong)channels * (ulong)hPacked * (ulong)wPacked
-            * (ulong)patch * (ulong)patch;
-        void** args = stackalloc void*[8];
-        args[0] = &outArg;
-        args[1] = &inArg;
-        args[2] = &chArg;
-        args[3] = &hpArg;
-        args[4] = &wpArg;
-        args[5] = &pArg;
-        args[6] = &innerArg;
-        args[7] = &totalArg;
-        uint gridDim = (uint)Math.Min((totalArg + BlockSize - 1) / BlockSize, 65_535UL);
-        CudaDriverApi.cuLaunchKernel(
-            kernel, gridDim, 1, 1, BlockSize, 1, 1,
             0, stream, (nint)args, 0).ThrowOnError();
     }
 
@@ -3964,19 +3840,6 @@ public sealed partial class CudaKernels : IDisposable
         args[5] = &rowsArg; args[6] = &msArg; args[7] = &shArg; args[8] = &scArg; args[9] = &epsArg;
         uint sharedMem = BlockSize * sizeof(float);
         CudaDriverApi.cuLaunchKernel(_oasisAdaLnF32, (uint)totalRows, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Oasis per-frame unpatchify: proj[t·sp, c·p²] → out[t,c,H,W] with [py,px,ci] inner layout.</summary>
-    public unsafe void LaunchOasisUnpatchify(ulong output, ulong proj, int frames, int channels, int gh, int gw, int patch, nint stream)
-    {
-        ulong outArg = output, projArg = proj;
-        uint fArg = (uint)frames, cArg = (uint)channels, ghArg = (uint)gh, gwArg = (uint)gw, pArg = (uint)patch;
-        void** args = stackalloc void*[7];
-        args[0] = &outArg; args[1] = &projArg; args[2] = &fArg; args[3] = &cArg;
-        args[4] = &ghArg; args[5] = &gwArg; args[6] = &pArg;
-        long threads = (long)frames * channels * (gh * patch) * (gw * patch);
-        uint gridDim = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(_oasisUnpatchifyF32, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>TripoSR triplane grid-sample: writes <paramref name="count"/>×[3·C] features to <paramref name="outF"/>. <paramref name="coords"/> may be 0 when <paramref name="gridRes"/>&gt;0 (coords generated in-kernel).</summary>
@@ -4491,47 +4354,6 @@ public sealed partial class CudaKernels : IDisposable
         args[0] = &oA; args[1] = &xA; args[2] = &gA; args[3] = &cA; args[4] = &spA; args[5] = &eA; args[6] = &scA; args[7] = &npA;
         uint gridDim = (uint)((numPos + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeRmsNormChannelBf16 : _wanVaeRmsNormChannel, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Unpatchifies [b, c*p*p, t, h, w] into [b, c, t, h*p, w*p] via pixel-shuffle.</summary>
-    public unsafe void LaunchWanVaeUnpatchify(ulong outp, ulong x, int b, int c, int t, int h, int w, int p, long numOut, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, xA = x; int bA = b, cA = c, tA = t, hA = h, wA = w, pA = p; long nA = numOut;
-        void** args = stackalloc void*[9];
-        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &cA; args[4] = &tA; args[5] = &hA; args[6] = &wA; args[7] = &pA; args[8] = &nA;
-        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeUnpatchifyBf16 : _wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>Wan2.2 VAE DupUp3D shortcut: channel repeat scattered into the temporal/spatial cells, dropping <paramref name="dropT"/> leading frames.</summary>
-    public unsafe void LaunchWanVaeDupUp3d(ulong outp, ulong x, int b, int inC, int t, int h, int w, int outC, int factorT,
-        int factorS, int dropT, long numOut, nint stream, bool bf16)
-    {
-        ulong oA = outp, xA = x;
-        int bA = b, inCA = inC, tA = t, hA = h, wA = w, outCA = outC, fTA = factorT, fSA = factorS, dA = dropT;
-        long nA = numOut;
-        void** args = stackalloc void*[12];
-        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &inCA; args[4] = &tA; args[5] = &hA; args[6] = &wA;
-        args[7] = &outCA; args[8] = &fTA; args[9] = &fSA; args[10] = &dA; args[11] = &nA;
-        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeDupUp3dBf16 : _wanVaeDupUp3d, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-    }
-
-    /// <summary>SeedVR2 MAGViT channel-to-space shuffle (gather over output elements; temporal drops output frame 1).</summary>
-    public unsafe void LaunchSeedVr2PixelShuffle(ulong outp, ulong inp, int c, int fFinal, int hOut, int wOut,
-        int cIn, int f, int h, int w, int sr, int tr, bool dropDup, nint stream, bool bf16 = false)
-    {
-        ulong oA = outp, iA = inp;
-        uint cA = (uint)c, ffA = (uint)fFinal, hoA = (uint)hOut, woA = (uint)wOut;
-        uint ciA = (uint)cIn, fA = (uint)f, hA = (uint)h, wA = (uint)w;
-        uint srA = (uint)sr, trA = (uint)tr, ddA = dropDup ? 1u : 0u;
-        void** args = stackalloc void*[13];
-        args[0] = &oA; args[1] = &iA; args[2] = &cA; args[3] = &ffA; args[4] = &hoA; args[5] = &woA;
-        args[6] = &ciA; args[7] = &fA; args[8] = &hA; args[9] = &wA; args[10] = &srA; args[11] = &trA; args[12] = &ddA;
-        long total = (long)c * fFinal * hOut * wOut;
-        uint gridDim = (uint)((total + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(bf16 ? _seedVr2PixelShuffleBf16 : _seedVr2PixelShuffle,
-            gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     // ── GeGlu Launches ──────────────────────────────────────────────────
