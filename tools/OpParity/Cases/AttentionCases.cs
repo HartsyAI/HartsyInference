@@ -56,10 +56,17 @@ public static class AttentionCases
             ("flash_causal_softcap_alibi", true, 4, 4, 32, 32, 0, 30f, false, 0, true),   // the ALiBi/softcap order case
         })
         {
+            // The legacy CPU reference applied ALiBi before the softcap; the contract (§3) caps first. That case is judged
+            // against the contract reference, with the old output documented as wrong by design.
+            Acceptance rule = softcap > 0f && alibi
+                ? Acceptance.AgainstHost(2e-4, 1e-3, "the legacy reference applied ALiBi before the softcap; the contract caps first, so the contract reference is the oracle")
+                : F32Tol;
             cases.Add(new(Family, name, seed => Flash(seed, 1, hq, hkv, sq, skv, 64, sink, alibi), (be, t) =>
                 be.FlashAttention(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], kvLen: skv, kvGroup: hq / hkv, causal: causal, qOffset: qOff,
                     scale: 1f / 8f, softcap: softcap, sink: sink ? t.Inputs["sink"] : null, slidingWindow: window, alibiSlopes: alibi ? t.Inputs["alibi"] : null),
-                _ => true, All, F32Tol));
+                _ => true, All, rule,
+                t => AttentionHostReference.Run(AttentionCall.FromFlashAttention(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], skv, causal, qOff,
+                    1f / 8f, softcap, sink ? t.Inputs["sink"] : null, window, alibi ? t.Inputs["alibi"] : null))));
         }
         // FlashAttentionDev: positions read from a device buffer. Only backends that allocate one serve it.
         cases.Add(new(Family, "flashdev_causal_gqa", seed => Flash(seed, 1, 8, 2, 8, 40, 64, false, false), (be, t) =>

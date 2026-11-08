@@ -187,7 +187,7 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 - [ ] Review remaining MixContract/SplitContract, CFG-step, and interleaved-RoPE duplication with numerical gates.
 - [ ] CLI repeated settings/runner helpers only where behavior actually matches.
 - [ ] VideoRequest.VideoModel/VideoFormat: check extension consumers before altering public DTOs.
-- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across `AttentionReference.cs` and more). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
+- [ ] XML doc generation: `dotnet build -p:GenerateDocumentationFile=true` fails repo-wide (CS1570 in `EngineKnobs.Numerics.cs` and others, CS1573 across several attention files). The repo does not generate docs, so this is not a build break; fix the comments, then consider enabling it.
 
 ## 13. Comfy-Org rollout shared infrastructure
 

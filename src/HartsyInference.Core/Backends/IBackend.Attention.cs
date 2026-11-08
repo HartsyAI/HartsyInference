@@ -240,14 +240,19 @@ public partial interface IBackend
     /// <summary>True when the backend has the GPU-resident decode toolkit, so autoregressive decoders (e.g. Zonos) can run fully on-device.</summary>
     bool FlashDecodeSupported => false;
 
-    /// <summary>Fused online-softmax attention that never materializes the score matrix; grouped-query aware (head h reads kv h/kvGroup).</summary>
+    /// <summary>Fused online-softmax attention that never materializes the score matrix; grouped-query aware (head h reads kv h/kvGroup).
+    /// The default builds an <see cref="AttentionCall"/> and runs <see cref="Attention"/>, so a backend without an override
+    /// serves this entry through its kernel rows or the host reference.</summary>
     /// <param name="causal">When true, query row r (absolute position qOffset+r) attends keys 0..qOffset+r; otherwise all Lk keys.</param>
     /// <param name="softcap">&gt; 0 soft-caps each logit via <c>softcap·tanh(score/softcap)</c> before softmax (Gemma-2); 0 disables it.</param>
     /// <param name="sink">Non-null <c>[Hq]</c> F32 tensor (GPT-OSS sinks): each head's sink logit joins the softmax denominator only.</param>
     /// <param name="slidingWindow">&gt; 0 restricts each query to the most recent N keys (Gemma-2/3, Cohere2, GPT-OSS); else full causal.</param>
     /// <param name="alibiSlopes">Non-null <c>[Hq]</c> F32 tensor: adds ALiBi penalty <c>slope_h·(k_pos−q_pos)</c> (MPT/BLOOM/Falcon/Jais).</param>
     unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
-        => AttentionReference.FlashAttention(output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
+    {
+        AttentionCall.ValidateFlashGroup(query, key, kvGroup);
+        Attention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes));
+    }
 
     /// <summary>In-place KV-cache append: writes newKv <c>[1,H,tNew,D]</c> into the fixed buffer, avoiding the Concat-grown cache's O(n²).</summary>
     unsafe void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
