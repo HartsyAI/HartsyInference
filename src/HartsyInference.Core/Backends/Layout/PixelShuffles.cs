@@ -59,6 +59,9 @@ public static class PixelShuffles
     {
         if (output.Shape.Rank != 4)
             throw new ArgumentException($"UnpatchifyTokens output must be [B, C, H, W]; got {output.Shape}.", nameof(output));
+        long height = (long)hPacked * patch, width = (long)wPacked * patch;
+        if (output.Shape[1] != channels || output.Shape[2] != height || output.Shape[3] != width)
+            throw new ArgumentException($"UnpatchifyTokens output must be [B, {channels}, {height}, {width}]; got {output.Shape}.", nameof(output));
         DepthToSpace(backend, output, tokens, ShuffleSpec.TokenGrid((int)output.Shape[0], hPacked, wPacked, channels, patch, innerChannelFastest));
     }
 
