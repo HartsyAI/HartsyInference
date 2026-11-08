@@ -223,6 +223,8 @@ with its first consumer and is removed here once it ships.
 - [ ] `IBackend.GridSample2D` (bilinear; zeros/border padding; align_corners), with host and CUDA paths. Consumers: RIFE,
   FILM, RAFT/void-model and the Hunyuan3D-2.1 paint stage.
 - [ ] ViT 2D RoPE, QK-norm and view-grouped alternating attention, consumed by Depth-Anything-3 and DINOv3.
+  - DINOv3 ViT-L/16 patch RoPE is in `Vision/Dinov3` (a 448 px encoder with real-weight parity). Still open: QK-norm,
+    view-grouped attention and Depth-Anything-3.
   - "Local" means per view and "global" means across views; neither is spatial windowing.
   - Tests: a reshape-equivalence test with identical positions, and a test of the real paths against the official code.
 - [ ] A causal frame KV cache for Causal-Forcing (MatrixGame2 after it). This starts as an investigation, because

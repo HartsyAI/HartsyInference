@@ -39,13 +39,12 @@ public sealed record Dinov2Preset
     /// <summary>Number of learned register tokens (0 for plain DINOv2; 4 for the <c>-reg</c> variants and all DINOv3 ViTs).</summary>
     public int NumRegisterTokens { get; init; }
 
-    /// <summary>True for DINOv3 ViT variants, which replace DINOv2's learned+interpolated absolute position
-    /// embeddings with <b>rotary position embeddings (RoPE)</b> applied inside attention. <see cref="Dinov2VisionEncoder"/>
-    /// does not yet implement RoPE, so a DINOv3 preset loads structurally but will NOT match the reference until
-    /// RoPE support is added — real-weight parity for these presets is blocked on that encoder work, not config.</summary>
+    /// <summary>True for DINOv3 ViT variants, which replace DINOv2's absolute position embeddings with
+    /// <b>rotary position embeddings (RoPE)</b> applied inside attention. Only <c>Dinov3VisionEncoder</c> accepts these
+    /// presets; <see cref="Dinov2VisionEncoder"/> rejects them.</summary>
     public bool UsesRotaryPositionEmbedding { get; init; }
 
-    /// <summary>LayerNorm epsilon.</summary>
+    /// <summary>LayerNorm epsilon (1e-6 for DINOv2; 1e-5 for the DINOv3 ViT-S/B/L checkpoints).</summary>
     public float LayerNormEps { get; init; } = 1e-6f;
 
     /// <summary>Patches along one side.</summary>
@@ -106,32 +105,34 @@ public sealed record Dinov2Preset
     // ── DINOv3 ViT variants ──────────────────────────────────────────────
     // DINOv3 (Meta, 2025) keeps DINOv2's CLS + 4 register tokens, LayerScale, and (for L and up) a gated
     // SwiGLU FFN — all already handled here — but swaps absolute position embeddings for RoPE and uses a
-    // 16px patch. RoPE is NOT implemented in Dinov2VisionEncoder, so these presets are correct in every
-    // dimension yet cannot reach cos-sim parity until the encoder gains RoPE. UsesRotaryPositionEmbedding
-    // flags that so a loader/test can gate on it rather than silently emitting wrong features.
+    // 16px patch. Encoded by Dinov3VisionEncoder; these presets are not auto-selected from weights, see FromDinov3Weights.
+    // Every released DINOv3 ViT-S/B/L uses LayerNorm eps 1e-5, plain GELU MLP (up_proj/down_proj), 4 storage tokens,
+    // LayerScale and a 64-wide head.
 
-    /// <summary><c>facebook/dinov3-vits16</c> — DINOv3 ViT-S/16 (RoPE; parity blocked on encoder RoPE support).</summary>
+    /// <summary><c>facebook/dinov3-vits16</c> — DINOv3 ViT-S/16.</summary>
     public static Dinov2Preset V3Small16 => new()
     {
         Name = "facebook/dinov3-vits16",
         HiddenSize = 384, NumLayers = 12, NumHeads = 6, IntermediateSize = 1536,
-        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
     };
 
-    /// <summary><c>facebook/dinov3-vitb16</c> — DINOv3 ViT-B/16 (RoPE; parity blocked on encoder RoPE support).</summary>
+    /// <summary><c>facebook/dinov3-vitb16</c> — DINOv3 ViT-B/16.</summary>
     public static Dinov2Preset V3Base16 => new()
     {
         Name = "facebook/dinov3-vitb16",
         HiddenSize = 768, NumLayers = 12, NumHeads = 12, IntermediateSize = 3072,
-        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
     };
 
-    /// <summary><c>facebook/dinov3-vitl16</c> — DINOv3 ViT-L/16, SwiGLU FFN (RoPE; parity blocked on encoder RoPE support).</summary>
+    /// <summary><c>facebook/dinov3-vitl16-pretrain-lvd1689m</c> — DINOv3 ViT-L/16, plain GELU MLP. The default 224 px
+    /// size is the released one; HairDeck conditions on 448 px, so use <c>V3Large16 with { ImageSize = 448 }</c>
+    /// (28×28 patches, 789 tokens with CLS and 4 storage tokens).</summary>
     public static Dinov2Preset V3Large16 => new()
     {
         Name = "facebook/dinov3-vitl16",
         HiddenSize = 1024, NumLayers = 24, NumHeads = 16, IntermediateSize = 4096,
-        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true,
+        ImageSize = 224, PatchSize = 16, NumRegisterTokens = 4, UsesRotaryPositionEmbedding = true, LayerNormEps = 1e-5f,
     };
 
     /// <summary>The DINOv2 variant an HF-layout checkpoint was trained as, read from its width
@@ -156,8 +157,7 @@ public sealed record Dinov2Preset
         if (patchSize != 14)
         {
             throw new NotSupportedException(
-                $"DINOv2 checkpoint with {patchSize} px patches looks like DINOv3, which needs rotary position embeddings "
-                + "the encoder does not implement yet.");
+                $"DINOv2 checkpoint with {patchSize} px patches: a DINOv3 checkpoint must be read with FromDinov3Weights.");
         }
         Dinov2Preset? preset = (hidden, layers, registers) switch
         {
@@ -171,5 +171,48 @@ public sealed record Dinov2Preset
         return preset ?? throw new NotSupportedException(
             $"DINOv2 checkpoint with width {hidden}, {layers} layers and {registers} register tokens matches no supported "
             + "variant (Small 384×12, Base 768×12, Large 1024×24 with 0 or 4 registers, Giant 1536×40).");
+    }
+
+    /// <summary>The DINOv3 ViT-S/B/L preset an HF-layout DINOv3 checkpoint was trained as, at <paramref name="imageSize"/>.
+    /// This is the explicit DINOv3 selector: <see cref="FromWeights"/> never matches a DINOv3 file, so a caller opts in by
+    /// calling this and <c>Dinov3VisionEncoder</c>. Width and depth pick the variant; the caller states the input size.
+    /// Throws for a gated (SwiGLU) MLP, which the encoder does not implement.</summary>
+    public static Dinov2Preset FromDinov3Weights(IReadOnlyDictionary<string, Tensor> weights, int imageSize, string prefix = "")
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        if (imageSize <= 0 || imageSize % 16 != 0)
+            throw new ArgumentOutOfRangeException(nameof(imageSize), imageSize, "DINOv3 input size must be a positive multiple of 16.");
+        string p = prefix.Length == 0 ? "" : prefix + ".";
+        if (!weights.TryGetValue($"{p}embeddings.cls_token", out Tensor? cls)
+            || !weights.TryGetValue($"{p}embeddings.patch_embeddings.weight", out Tensor? patch)
+            || !weights.TryGetValue($"{p}embeddings.register_tokens", out Tensor? reg)
+            || !weights.ContainsKey($"{p}layer.0.mlp.up_proj.weight"))
+        {
+            throw new NotSupportedException(
+                $"Not an HF-layout DINOv3 checkpoint: '{p}embeddings.cls_token', '{p}embeddings.patch_embeddings.weight', "
+                + $"'{p}embeddings.register_tokens' or '{p}layer.0.mlp.up_proj.weight' is missing.");
+        }
+        if (weights.ContainsKey($"{p}layer.0.mlp.gate_proj.weight"))
+            throw new NotSupportedException("DINOv3 checkpoint with a gated (SwiGLU) MLP: the encoder implements the plain GELU MLP only.");
+
+        int hidden = (int)cls.Shape[cls.Shape.Rank - 1];
+        int patchSize = (int)patch.Shape[patch.Shape.Rank - 1];
+        int registers = (int)reg.Shape[1];
+        int layers = 0;
+        while (weights.ContainsKey($"{p}layer.{layers}.norm1.weight"))
+            layers++;
+        if (patchSize != 16 || registers != 4)
+            throw new NotSupportedException($"DINOv3 checkpoint with {patchSize} px patches and {registers} storage tokens; expected 16 px and 4.");
+
+        Dinov2Preset? preset = (hidden, layers) switch
+        {
+            (384, 12) => V3Small16,
+            (768, 12) => V3Base16,
+            (1024, 24) => V3Large16,
+            _ => null,
+        };
+        return (preset ?? throw new NotSupportedException(
+            $"DINOv3 checkpoint with width {hidden} and {layers} layers matches no supported variant (ViT-S 384×12, ViT-B 768×12, ViT-L 1024×24)."))
+            with { ImageSize = imageSize };
     }
 }
