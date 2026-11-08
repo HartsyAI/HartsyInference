@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
@@ -119,7 +120,7 @@ public static class RotaryCases
                     }
                     finally { be.FreeDevicePos(pos); }
                 },
-                be => be.GraphDecodeSupported, Gpu, Rotation));
+                ServesDevicePositions, Gpu, Rotation, t => DecodeStepOracle(t, interleaved)));
         }
 
         // LTX-2 fused QK path: full-row RMS norm, split rotation with per-head tables, head-major or token-major emit; and the no-rotation form.
@@ -136,6 +137,41 @@ public static class RotaryCases
     }
 
     /// <summary>Copies the recorded contents of in-place operand <paramref name="name"/> (input <c>{name}_init</c>) into its output before the op runs.</summary>
+    /// <summary>Table row the decode-step cases rotate by: the query offset their device position buffer carries.</summary>
+    private const int DecodeRow = 2;
+
+    /// <summary>The decode-step rotation on the host, for a backend newly serving it: row <see cref="DecodeRow"/> of each table copied out
+    /// as a one-row table and applied through the same views the device call builds, since the reference reads no position buffer.</summary>
+    private static void DecodeStepOracle(OpTensors t, bool interleaved)
+    {
+        Prime(t, "x");
+        Tensor x = t.Outputs["x"];
+        using Tensor cos = TableRow(t.Inputs["cos"], DecodeRow);
+        using Tensor sin = TableRow(t.Inputs["sin"], DecodeRow);
+        int headDim = (int)x.Shape[x.Shape.Rank - 1];
+        long heads = x.ElementCount / headDim;
+        long entries = cos.Shape[1];
+        StridedView vectors = RotaryViews.Explicit([1, heads, 1, 1, 1, headDim], [0, headDim, 0, 0, 0, 1]);
+        StridedView table = RotaryViews.Explicit([1, heads, 1, 1, 1, entries], [0, 0, 0, 0, 0, 1]);
+        RotarySpec spec = interleaved
+            ? RotaryViews.Create(vectors, table, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix)
+            : RotaryViews.Create(vectors, table, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, 0);
+        RotaryReference.Apply(new RotaryCall(x, cos, sin, spec));
+    }
+
+    /// <summary>Row <paramref name="row"/> of a <c>[rows, entries]</c> F32 table as its own <c>[1, entries]</c> tensor.</summary>
+    private static Tensor TableRow(Tensor table, int row)
+    {
+        int entries = (int)table.Shape[1];
+        Tensor one = Seeded.Zeros(new TensorShape(1, entries));
+        table.AsReadOnlySpan<float>().Slice(row * entries, entries).CopyTo(one.AsSpan<float>());
+        return one;
+    }
+
+    /// <summary>Whether the backend serves a device position buffer: the full graph-decode toolkit, or Vulkan's LLM graph decode, which carries the
+    /// position buffer without the rest of it.</summary>
+    private static bool ServesDevicePositions(IBackend be) => be.GraphDecodeSupported || be.LlmGraphDecodeSupported;
+
     private static void Prime(OpTensors t, string name) => t.Inputs[name + "_init"].AsReadOnlySpan<byte>().CopyTo(t.Outputs[name].AsSpan<byte>());
 
     /// <summary>Builds one case's operands: seeded inputs (a distinct salt each), zeroed outputs, and in-place operands recorded as an input and written as an output.</summary>

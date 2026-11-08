@@ -1904,6 +1904,19 @@ public static class ModelCatalog
                         Sha256 = "ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1" },
                 },
             },
+            // DINOv3 ViT-L/16 is under the DINOv3 License (Meta, custom; not MIT or Apache-2.0) and gated on the hub.
+            // The 448 px conditioning configuration loads through Dinov2Preset.FromDinov3Weights; no CLI or VisionService path yet.
+            new CatalogEntry
+            {
+                Id = "dinov3-vitl16", Modality = vis, DisplayName = "DINOv3 ViT-L/16 (pretrain)",
+                Architecture = "ViT-L/16 with RoPE, 4 storage tokens, LayerScale, GELU MLP", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Dinov3", Role = "transformer",
+                        Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+                },
+            },
             // YOLO8/11: raw Ultralytics .pt is a full pickled nn.Module object graph (not a flat state_dict) —
             // the engine's safe-subset pickle VM can't resolve it, and no pre-folded ungated safetensors mirror
             // was found on HF. CliDrivable stays false until either a pickle-VM extension or a found mirror
@@ -1958,6 +1971,21 @@ public static class ModelCatalog
                     new() { Repo = "facebook/sam2-hiera-tiny", RepoPath = "sam2_hiera_tiny.pt",
                         TargetSubdir = "sam2", Role = "transformer",
                         Sha256 = "65b50056e05bcb13694174f51bb6da89c894b57b75ccdf0ba6352c597c5d1125" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Upstream facebook/sam3 @ 0570b3a5be9c4e694f23d85232fb55f4a6f1f7fc is gated (SAM License, license_name
+                // sam-license). Non-gated mirror: ModelScope facebook/sam3 @ f8ee5d16d5c30d0e87b1d22cbd358ce97761df56, file
+                // sam3.pt. The mirror file's checksum is not yet compared with the upstream sha256 below; the downloader
+                // currently reads only Hugging Face repos, so the Repo below is the gated upstream and needs a token.
+                Id = "sam3", Modality = vis, DisplayName = "SAM 3 (text-grounded)", Architecture = "ViT (RoPE, windowed) + CLIP text tower + DETR-style detector + mask head", Status = st,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/sam3", RepoPath = "sam3.pt",
+                        TargetSubdir = "sam3", Role = "transformer",
+                        Sha256 = "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e" },
                 },
             },
             // "RetinaFace" was never actually built — the real, real-weight-verified face detector is a
@@ -2042,6 +2070,21 @@ public static class ModelCatalog
                     new() { Repo = "briaai/RMBG-1.4", RepoPath = "model.safetensors",
                         TargetSubdir = "Vision/Rmbg", Role = "transformer",
                         Sha256 = "46ef7fe46f2ae284d8f1aaa24bfa5fca5ef25a34e2c7caa890a0029eb100e87f" },
+                },
+            },
+            // BiRefNet-matting (trimap-free alpha matte). Pinned upstream revision eccde0a8cbdce7ac5fecfeb06340fe7b949e85d9;
+            // the sha256 verifies the bytes, since ModelAsset cannot name a revision. The model card declares MIT, but the
+            // repo ships no LICENSE file at that revision, so the weights' license is unverified.
+            new CatalogEntry
+            {
+                Id = "birefnet-matting", Modality = vis, DisplayName = "BiRefNet-matting (general foreground matting, Swin-L)",
+                Architecture = "Swin-L encoder + BiRefNet dual-scale decoder (deformable ASPP, gradient gates)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/BiRefNet-matting", Role = "transformer",
+                        Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
                 },
             },
 
