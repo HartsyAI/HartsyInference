@@ -7,10 +7,13 @@ namespace HartsyInference.ThreeD.Models.HairDeck;
 /// <param name="Thickness">Mean thickness over the points.</param>
 /// <param name="ShapeClass">0 for a square cross-section, 1 for a triangle.</param>
 /// <param name="Color">Sixteen RGB colours along the card, root to tip, linear, row-major (length 48); null when colours are disabled.</param>
-public sealed record DecodedCard(float[] Centerline, int Points, float Width, float Thickness, int ShapeClass, float[] Color)
+public sealed record DecodedCard(float[] Centerline, int Points, float Width, float Thickness, int ShapeClass, float[]? Color)
 {
     /// <summary>Width at each of the <see cref="Points"/> control points; the mesh needs this profile, not <see cref="Width"/>.</summary>
     public float[] WidthProfile { get; init; } = [];
+
+    /// <summary>Unit width direction at the root (three values), the card's root normal token.</summary>
+    public float[] RootNormal { get; init; } = [];
 
     /// <summary>Thickness at each of the <see cref="Points"/> control points.</summary>
     public float[] ThicknessProfile { get; init; } = [];
