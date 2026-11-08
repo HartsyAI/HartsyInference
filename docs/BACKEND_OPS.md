@@ -129,6 +129,31 @@ token-major rows, the rotation `spec` describes over those rows, and a token-maj
 emit. The default composes `RmsNorm`, `Rotary` and `Permute0213`; CUDA fuses the three for
 `RotaryViews.SplitRows` (rotate-half per head, one angle per pair, per-head lanes), the LTX-2 geometry its kernel runs.
 
+## QKV decode epilogue
+
+```
+q' = rotate(norm(q), position)      k' = rotate(norm(k), position)      kCache[h, position] = k'_h      vCache[h, position] = v_h
+```
+
+Reference: `QkvDecodeReference.Apply` (with the position given, since the host has no device position buffer). Contract:
+`QkvDecodeContract.Validate`. One `QkvDecodeCall` is a decode step's whole attention input path after the projection:
+the q, k and v sections (`QkvSection`: a tensor and the element the section starts at, so `[q | k | v]`, `[q | k]` + v or
+three tensors are the same call, built by `Fused`, `QkPlusV` and `Separate`), the norm (`QkvNormKind`: none, per head with a
+`[headDim]` weight, or full width with a `[heads·headDim]` weight, `WithNorm`), the rotation (the tables `[rows, headDim]`,
+the pairing and the rotated width, as `RotaryCall.DecodeStep` reads them) and the caches `[1, kvHeads, maxSeq, headDim]`.
+The position is the query offset of the device position buffer; a slot at or past the cache length writes nothing.
+
+Rules: sections F32 inside their tensors; q output F32 `[1, heads, 1, headDim]`; both caches F32 or both F16 (an F16 cache
+stores k and v rounded to nearest and saturated at ±65504), one shape; tables F32 with at least as many rows as the cache
+has slots; the rotated width even and at most the head dim, and 0 with interleaved pairing (an interleaved partial width
+comes from identity table rows); norm weights of the width the norm kind reads; the q output overlaps no section. The
+sections are read only. The norm is `x · rsqrt(mean(x²) + eps) · w` over each head or each full section; the rotation is
+the rotary formula.
+
+The default composes the call from `CopyStrided`, `RmsNorm`, `Rotary` and `KvCacheAppendDev` (one k temporary, one v
+temporary for a packed v, plus the norm's inputs); CUDA runs one kernel per norm kind, each bit-identical to the
+composition it replaces.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -146,6 +171,8 @@ Every implementation of these ops:
 | `CopyStrided` | reference | `layout_copy.ptx` (`copy_strided_u8/u16/u32/u64`) | `copy_strided_u16/u32/u64`; 1-byte elements take the reference |
 | `AccumulateStrided` | reference | `accumulate_strided_f32/f16/bf16` | `accumulate_strided_f32/f16`; BF16 takes the reference |
 | `Pad` | reference | `pad_u8/u16/u32/u64` | `pad_strided_u16/u32/u64`; 1-byte elements take the reference |
+| `Rotary` | reference | `rotary.ptx` (`rotary_f32/f16/bf16`) | `rotary_f32/f16`; BF16 takes the reference |
+| `QkvDecodeEpilogue` | no device position buffer | `lm_qkv_rope_scatter_f32/f16kv`, `lm_qknorm_rope_scatter_f32/f16kv`, `lm_qknorm_full_rope_scatter_f32/f16kv` | composed; F32 caches only |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 
@@ -160,4 +187,6 @@ one case per former call shape. `PixelShuffle2d`, `PixelShuffle3d`, `SeedVr2Pixe
 `ApplyRope`, `ApplyRopeSingle`, `ApplyRopeSingleHeadMajor`, both `ApplyRopeInterleaved` forms, `WanRopeInterleaved`,
 `WanRopeInterleavedPerHead`, `OasisRopeInterleaved`, `Mg3RopeBatched`, `Ltx2SplitRope`, `Ltx25NaRope3d` and
 `RopeApplyDecodeStep` are `Rotary` calls built with `RotaryCall`'s factories or `RotaryViews`; `Ltx2QkNormRopeHeadMajor`
-and `Ltx2QkNormRopeTokenMajor` are `RmsNormRotary` (`--op rotary`).
+and `Ltx2QkNormRopeTokenMajor` are `RmsNormRotary` (`--op rotary`). `QkvRopeScatterDecodeStep`, `RopeScatterKvDecodeStep`,
+`QkRopeScatterVDecodeStep`, `QkvNormRopeScatterDecodeStep`, `QkNormRopeScatterVDecodeStep` and `QkNormFullRopeScatterDecodeStep`
+are `QkvDecodeEpilogue` calls built with `QkvDecodeCall`'s factories (`--op qkvdecode`).

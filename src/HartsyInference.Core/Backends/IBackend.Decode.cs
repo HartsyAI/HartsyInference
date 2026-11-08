@@ -1,3 +1,6 @@
+using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Decode;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Tensors;
 
@@ -142,123 +145,67 @@ public partial interface IBackend
     void ApplyRepetitionPenaltyStep(Tensor logits, ulong history, ulong historyCount, float penalty) =>
         throw new NotSupportedException("ApplyRepetitionPenaltyStep requires GraphDecodeSupported.");
 
-    /// <summary>Fused graph-decode QKV epilogue (t=1, no QK-norm): ropes q into qOut, ropes+appends k into kCache, copies v into vCache.</summary>
-    void QkvRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qkv,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
+    /// <summary>A decode step's QKV epilogue: q, k and v cut from the projection output, q and k RMS-normalized as
+    /// <see cref="QkvDecodeCall.Norm"/> says and rotated by the table row at the device position, q written head-major
+    /// to its output and k, v scattered into slot <c>position</c> of their caches. One launch where a backend fuses it;
+    /// the default composes it from <see cref="CopyStrided"/>, <see cref="RmsNorm"/>, <see cref="Rotary"/> and
+    /// <see cref="KvCacheAppendDev"/>. Contract in <c>docs/BACKEND_OPS.md</c>.</summary>
+    void QkvDecodeEpilogue(in QkvDecodeCall call) => ComposeQkvDecodeEpilogue(this, call);
+
+    /// <summary>The unfused form of <see cref="QkvDecodeEpilogue"/>, the same ops in the same order on every backend. Static so a
+    /// backend whose fused kernel does not serve a call can still run it.</summary>
+    static void ComposeQkvDecodeEpilogue(IBackend b, in QkvDecodeCall call)
     {
-        int nq = hq * headDim, nkv = hkv * headDim;
-        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        Tensor v = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
+        QkvDecodeContract.Validate(call);
+        int hq = call.Heads, hkv = call.KvHeads, d = call.HeadDim;
+        bool interleaved = call.Pairing == RotaryPairing.Interleaved;
+        Tensor k = new(new TensorShape(1, hkv, 1, d), DType.F32);
+        Tensor? vOwn = IsWhole(call.V, hkv, d) ? null : new(new TensorShape(1, hkv, 1, d), DType.F32);
         try
         {
-            SliceLastDim(qOut, qkv, 0);
-            SliceLastDim(k, qkv, nq);
-            SliceLastDim(v, qkv, nq + nkv);
-            Rotary(RotaryCall.DecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            KvCacheAppendDev(kCache, k, 0, devicePos);
-            KvCacheAppendDev(vCache, v, 0, devicePos);
+            NormalizeInto(b, call.QOut, call.Q, hq, call.Norm, call.QNormWeight, call.Eps);
+            NormalizeInto(b, k, call.K, hkv, call.Norm, call.KNormWeight, call.Eps);
+            if (vOwn is not null) Cut(b, vOwn, call.V, call.KvWidth);
+            b.Rotary(RotaryCall.DecodeStep(call.QOut, call.Cos, call.Sin, call.RotaryDim, interleaved, call.DevicePosition));
+            b.Rotary(RotaryCall.DecodeStep(k, call.Cos, call.Sin, call.RotaryDim, interleaved, call.DevicePosition));
+            b.KvCacheAppendDev(call.KCache, k, 0, call.DevicePosition);
+            b.KvCacheAppendDev(call.VCache, vOwn ?? call.V.Tensor, 0, call.DevicePosition);
         }
         finally
         {
             k.Dispose();
-            v.Dispose();
+            vOwn?.Dispose();
         }
-    }
 
-    /// <summary>Variant of <see cref="QkvRopeScatterDecodeStep"/> for layers with q/k/v in SEPARATE tensors (mixed-dtype QKV).</summary>
-    void RopeScatterKvDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor q, Tensor k, Tensor v,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        Rotary(RotaryCall.DecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-        Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-        KvCacheAppendDev(kCache, k, 0, devicePos);
-        KvCacheAppendDev(vCache, v, 0, devicePos);
-        CopyTo(qOut, q);
-    }
+        // The cache append reads the token count from the tensor's shape, so V is reused only in its [1, heads, 1, d] form.
+        static bool IsWhole(in QkvSection section, int heads, int d) => section.Offset == 0 && section.Tensor.Shape.Equals(new TensorShape(1, heads, 1, d));
 
-    /// <summary>Variant of <see cref="QkvRopeScatterDecodeStep"/> for layers where q/k share a buffer but v is its own tensor (GGUF).</summary>
-    void QkRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        int nq = hq * headDim;
-        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        try
-        {
-            SliceLastDim(qOut, qk, 0);
-            SliceLastDim(k, qk, nq);
-            Rotary(RotaryCall.DecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            KvCacheAppendDev(kCache, k, 0, devicePos);
-            KvCacheAppendDev(vCache, v, 0, devicePos);
-        }
-        finally
-        {
-            k.Dispose();
-        }
-    }
+        // The section's elements, packed into dst.
+        static void Cut(IBackend b, Tensor dst, in QkvSection section, long width)
+            => b.CopyStrided(dst, section.Tensor, StridedCopySpec.Gather(StridedView.Of([section.Tensor.ElementCount]).Slice(0, section.Offset, width)));
 
-    /// <summary>QK-norm variant of <see cref="QkvRopeScatterDecodeStep"/>: per-head RMS-norms q/k from the projection, ropes, scatters.</summary>
-    void QkvNormRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qkv,
-        Tensor qNorm, Tensor kNorm, float eps,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        int nq = hq * headDim, nkv = hkv * headDim;
-        Tensor q = new(new TensorShape(1, hq, 1, headDim), DType.F32);
-        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        Tensor v = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        Tensor qN = new(new TensorShape(1, hq, 1, headDim), DType.F32);
-        Tensor kN = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        try
+        // The section lands in dst [1, heads, 1, d]: as projected, normalized per head, or normalized as one row and re-cut per head.
+        static void NormalizeInto(IBackend b, Tensor dst, in QkvSection section, int heads, QkvNormKind norm, Tensor? weight, float eps)
         {
-            SliceLastDim(q, qkv, 0);
-            SliceLastDim(k, qkv, nq);
-            SliceLastDim(v, qkv, nq + nkv);
-            RmsNorm(qN, q, qNorm, eps);
-            RmsNorm(kN, k, kNorm, eps);
-            RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v, cosTable, sinTable,
-                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-        }
-        finally
-        {
-            q.Dispose(); k.Dispose(); v.Dispose(); qN.Dispose(); kN.Dispose();
-        }
-    }
-
-    /// <summary>Full-width QK-norm variant of <see cref="QkvNormRopeScatterDecodeStep"/> (OLMoE): ONE RMSNorm over all q heads with the
-    /// <c>[hq·headDim]</c> weight <paramref name="qNorm"/> and one over all k heads, then RoPE and the KV scatter.</summary>
-    /// <param name="qk">The projection output: <c>[q | k | v]</c> when <paramref name="v"/> is null, else <c>[q | k]</c>.</param>
-    void QkNormFullRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
-        Tensor qNorm, Tensor kNorm, float eps,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-        => ComposeQkNormFullRopeScatter(this, qOut, kCache, vCache, qk, v, qNorm, kNorm, eps, cosTable, sinTable,
-            hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-
-    /// <summary>The unfused composition behind <see cref="QkNormFullRopeScatterDecodeStep"/>: slices, two full-width RMSNorms, the rope-scatter.
-    /// Static so a backend that overrides the op can still fall back to it.</summary>
-    static void ComposeQkNormFullRopeScatter(IBackend b, Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
-        Tensor qNorm, Tensor kNorm, float eps,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        int nq = hq * headDim, nkv = hkv * headDim;
-        Tensor q = new(new TensorShape(1, 1, nq), DType.F32);
-        Tensor k = new(new TensorShape(1, 1, nkv), DType.F32);
-        Tensor? vOwn = v is null ? new(new TensorShape(1, hkv, 1, headDim), DType.F32) : null;
-        Tensor qN = new(new TensorShape(1, 1, nq), DType.F32);
-        Tensor kN = new(new TensorShape(1, 1, nkv), DType.F32);
-        try
-        {
-            b.SliceLastDim(q, qk, 0);
-            b.SliceLastDim(k, qk, nq);
-            if (vOwn is not null) b.SliceLastDim(vOwn, qk, nq + nkv);
-            b.RmsNorm(qN, q, qNorm, eps);
-            b.RmsNorm(kN, k, kNorm, eps);
-            b.RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v ?? vOwn!, cosTable, sinTable,
-                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-        }
-        finally
-        {
-            q.Dispose(); k.Dispose(); vOwn?.Dispose(); qN.Dispose(); kN.Dispose();
+            long width = (long)heads * dst.Shape[3];
+            if (norm == QkvNormKind.None)
+            {
+                Cut(b, dst, section, width);
+                return;
+            }
+            Tensor raw = new(norm == QkvNormKind.PerHead ? dst.Shape : new TensorShape(1, 1, width), DType.F32);
+            Tensor? row = norm == QkvNormKind.FullWidth ? new(new TensorShape(1, 1, width), DType.F32) : null;
+            try
+            {
+                Cut(b, raw, section, width);
+                b.RmsNorm(row ?? dst, raw, weight!, eps);
+                if (row is not null) Cut(b, dst, row, width);
+            }
+            finally
+            {
+                raw.Dispose();
+                row?.Dispose();
+            }
         }
     }
 
@@ -270,31 +217,6 @@ public partial interface IBackend
     /// <summary>True when this backend can store a transformer KV cache as F16 and run attention and graph decode over it, which is what lets
     /// <c>vram.kvF16</c> default to on for text models. CUDA only today.</summary>
     bool SupportsF16KvCache => false;
-
-    /// <summary>Partial-fusion <see cref="QkvNormRopeScatterDecodeStep"/> variant: q/k concatenated, v separate (mixed-dtype v).</summary>
-    void QkNormRopeScatterVDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor v,
-        Tensor qNorm, Tensor kNorm, float eps,
-        Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        int nq = hq * headDim;
-        Tensor q = new(new TensorShape(1, hq, 1, headDim), DType.F32);
-        Tensor k = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        Tensor qN = new(new TensorShape(1, hq, 1, headDim), DType.F32);
-        Tensor kN = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        try
-        {
-            SliceLastDim(q, qk, 0);
-            SliceLastDim(k, qk, nq);
-            RmsNorm(qN, q, qNorm, eps);
-            RmsNorm(kN, k, kNorm, eps);
-            RopeScatterKvDecodeStep(qOut, kCache, vCache, qN, kN, v, cosTable, sinTable,
-                hq, hkv, headDim, rotaryDim, interleaved, devicePos);
-        }
-        finally
-        {
-            q.Dispose(); k.Dispose(); qN.Dispose(); kN.Dispose();
-        }
-    }
 
     /// <summary>Gemma-4 PLE graph-decode gather: dequantizes one row of the quantized per-layer embedding table.</summary>
     /// <param name="output"><c>[1, 1, ple·layers]</c>.</param>

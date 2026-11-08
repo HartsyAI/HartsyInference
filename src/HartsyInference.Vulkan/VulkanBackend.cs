@@ -3709,9 +3709,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     // and whose CONTENTS are refreshed between steps — exactly CUDA's own design principle, just without
     // CUDA Graph capture/replay itself (that mechanism is Phase 6's VulkanStepGraph, tracked separately;
     // these are the leaf ops it will eventually replay). Fully usable standalone today in an eager loop —
-    // a caller can drive AllocDeviceTokenId/WriteDeviceTokenId/EmbedGatherDecodeStep/RopeApplyDecodeStep/
+    // a caller can drive AllocDeviceTokenId/WriteDeviceTokenId/EmbedGatherDecodeStep/Rotary(RotaryCall.DecodeStep)/
     // FlashAttentionDev/KvCacheAppendDev/ArgMaxInto every step by hand, at greatly reduced D2H sync count
-    // vs. the eager ApplyRope/KvCacheAppend/host-argmax path, even before a graph wraps them.
+    // vs. the eager Rotary/KvCacheAppend/host-argmax path, even before a graph wraps them.
 
     /// <summary>Settable, default OFF: several real production call sites (Qwen35Model, GenericTransformer, SsmGenerationPipeline, CsmModel, MusicGenDecoder) gate straight onto the graph-decode path the instant this is true, with no separate opt-in of their own. Flip only after a real end-to-end decode-loop parity test (not just the per-op unit tests below) confirms this device-buffer path matches the eager path on a real model — matching the same staged-rollout discipline used for <see cref="EnableInt8Linear"/>, and for the same reason: a capability flag this many callers trust unconditionally must not flip on unit-level confidence alone.</summary>
     public bool GraphDecodeSupported { get; set; }
@@ -3777,41 +3777,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         {
             _stepGraph = savedGraph;
             _xfer.SwapStepGraphRetained(savedRetained);
-        }
-    }
-
-    /// <summary>Full-width QK-norm epilogue (OLMoE) for the decode graph. The interface's composition ropes the normed rows as they come, <c>[1, 1, heads*headDim]</c>, and the rope step takes the head size from the last dim, so it would rotate one giant head; the rows are re-shaped per head first (the same bytes).</summary>
-    public void QkNormFullRopeScatterDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor qk, Tensor? v,
-        Tensor qNorm, Tensor kNorm, float eps, Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim,
-        int rotaryDim, bool interleaved, ulong devicePos)
-    {
-        int nq = hq * headDim, nkv = hkv * headDim;
-        Tensor q = new(new TensorShape(1, 1, nq), DType.F32);
-        Tensor k = new(new TensorShape(1, 1, nkv), DType.F32);
-        Tensor? vOwn = v is null ? new(new TensorShape(1, hkv, 1, headDim), DType.F32) : null;
-        Tensor qN = new(new TensorShape(1, 1, nq), DType.F32);
-        Tensor kN = new(new TensorShape(1, 1, nkv), DType.F32);
-        Tensor qH = new(new TensorShape(1, hq, 1, headDim), DType.F32);
-        Tensor kH = new(new TensorShape(1, hkv, 1, headDim), DType.F32);
-        try
-        {
-            SliceLastDim(q, qk, 0);
-            SliceLastDim(k, qk, nq);
-            if (vOwn is not null) SliceLastDim(vOwn, qk, nq + nkv);
-            RmsNorm(qN, q, qNorm, eps);
-            RmsNorm(kN, k, kNorm, eps);
-            SliceLastDim(qH, qN, 0);
-            SliceLastDim(kH, kN, 0);
-            // The interface's RopeScatterKvDecodeStep, spelled out (an override cannot call the default it replaces).
-            Rotary(RotaryCall.DecodeStep(qH, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            Rotary(RotaryCall.DecodeStep(kH, cosTable, sinTable, rotaryDim, interleaved, devicePos));
-            KvCacheAppendDev(kCache, kH, 0, devicePos);
-            KvCacheAppendDev(vCache, v ?? vOwn!, 0, devicePos);
-            CopyTo(qOut, qH);
-        }
-        finally
-        {
-            q.Dispose(); k.Dispose(); vOwn?.Dispose(); qN.Dispose(); kN.Dispose(); qH.Dispose(); kH.Dispose();
         }
     }
 
@@ -4168,7 +4133,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     // ── KV-cache / flash-attention device-position variants (Phase 6d) ─────────────────────────────────
     // Both `offset`/`kvLen`/`qOffset` parameters below are the CALLER's placeholder host values (real
     // callers — see GenericTransformer.ForwardGraphDecodeStep — pass literal 0s here on purpose): the
-    // ACTUAL write slot / attend length must come from devicePos, exactly like RopeApplyDecodeStep. A
+    // ACTUAL write slot / attend length must come from devicePos, exactly like a RotaryCall.DecodeStep rotation. A
     // passthrough that forwards `offset`/`kvLen`/`qOffset` unchanged would silently corrupt the KV cache
     // (every step writing/attending at slot 0) the moment GraphDecodeSupported flips on — caught in review
     // before it shipped, not by the parity test that would have found it after.
