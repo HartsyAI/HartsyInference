@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 
@@ -13,7 +15,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// text branch through attention (joint attention needs it) but skips text mlp/ada — <c>vid_only</c>.
 /// <para>Device-resident: tokens stay <c>[L, C]</c> backend tensors end-to-end — RMS/modulate/gate via the
 /// DiT glue kernels, fused QKV split + per-head RMS qk-norm, window-local rope via
-/// <c>WanRopeInterleaved</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
+/// <c>the interleaved rotary (RotaryCall.Rows)</c> over <see cref="SeedVr2DevicePlan"/>'s global-token-order tables, window
 /// gather/scatter via <c>RowGather</c>/<c>RowScatterAdd</c> index tensors, same-shape windows batched into
 /// one SDPA call. Text is REPLICATED into every window and MEAN-pooled across windows afterwards
 /// (fixed-order <c>MoeCombine</c> sum + 1/N scale). The emb+ada modulation vectors are additive constants per
@@ -356,12 +358,12 @@ public sealed class SeedVr2DitBlock : IStreamingBlock
         Tensor tk = new Tensor(new TensorShape(lt, c), DType.F32);
         Tensor tv = new Tensor(new TensorShape(lt, c), DType.F32);
         backend.QkvSplitNorm(tq, tk, tv, txtQkv, normQTxt, normKTxt, 1e-5f);
-        backend.WanRopeInterleaved(vq, part.VidCos, part.VidSin, lv, heads, hd);
-        backend.WanRopeInterleaved(vk, part.VidCos, part.VidSin, lv, heads, hd);
+        backend.Rotary(RotaryCall.Rows(vq, part.VidCos, part.VidSin, lv, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(vk, part.VidCos, part.VidSin, lv, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         if (plan.TxtCos is not null)
         {
-            backend.WanRopeInterleaved(tq, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
-            backend.WanRopeInterleaved(tk, plan.TxtCos, plan.TxtSin!, lt, heads, hd);
+            backend.Rotary(RotaryCall.Rows(tq, plan.TxtCos, plan.TxtSin!, lt, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+            backend.Rotary(RotaryCall.Rows(tk, plan.TxtCos, plan.TxtSin!, lt, heads, hd, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         }
 
         Tensor catQ = Concat0(backend, vq, tq);

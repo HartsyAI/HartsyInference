@@ -36,7 +36,7 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     private readonly List<Tensor> _owned = new();
 
     /// <param name="act">Activation dtype, F32 by default. The reference computes in bf16, but this engine's CUDA
-    /// DiT recipe is F32-or-F16: <c>LayerNormNoAffine</c>, <c>RmsNorm</c> and <c>WanRopeInterleaved</c> have no BF16
+    /// DiT recipe is F32-or-F16: <c>LayerNormNoAffine</c>, <c>RmsNorm</c> and <c>the interleaved rotary (RotaryCall.Rows)</c> have no BF16
     /// kernel, so bf16 activations fail at the first norm rather than running slowly. Weights stay bf16 either way —
     /// only the activations widen. F16 is the other served recipe and is why the reference block carries a
     /// <c>clip(±65504)</c>; it is selectable here but unverified on this model.</param>

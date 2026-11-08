@@ -1,4 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Vae;
@@ -99,8 +102,8 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
         using (Tensor cosW = BuildTable(0, w, _invFreqW, sine: false))
         using (Tensor sinW = BuildTable(0, w, _invFreqW, sine: true))
         {
-            backend.Ltx25NaRope3d(q, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
-            backend.Ltx25NaRope3d(k, cosT, sinT, cosH, sinH, cosW, sinW, _ropeSplit.T, _ropeSplit.H);
+            RotateGrid(backend, q, cosT, sinT, cosH, sinH, cosW, sinW);
+            RotateGrid(backend, k, cosT, sinT, cosH, sinH, cosW, sinW);
         }
 
         Tap?.Invoke("attn_qrope", q);
@@ -137,5 +140,23 @@ internal sealed class LtxVideo25NeighborhoodAttention3d
             }
         }
         return table;
+    }
+
+    /// <summary>Three rotations of <c>x [1, T, H, W, heads, headDim]</c>, one per grid axis: head-dim segments
+    /// <c>[0, splitT)</c>, <c>[splitT, splitT + splitH)</c> and the rest, each over the token's t, h or w coordinate with
+    /// interleaved pairs and one angle per pair from a <c>[axis, pairs]</c> table.</summary>
+    private void RotateGrid(IBackend backend, Tensor x, Tensor cosT, Tensor sinT, Tensor cosH, Tensor sinH, Tensor cosW, Tensor sinW)
+    {
+        StridedView grid = RotaryViews.Grid(x.Shape);
+        int splitW = (int)x.Shape[5] - _ropeSplit.T - _ropeSplit.H;
+        RotateAxis(backend, x, cosT, sinT, grid, 0, _ropeSplit.T, 0);
+        RotateAxis(backend, x, cosH, sinH, grid, 1, _ropeSplit.H, _ropeSplit.T);
+        RotateAxis(backend, x, cosW, sinW, grid, 2, splitW, _ropeSplit.T + _ropeSplit.H);
+    }
+
+    private static void RotateAxis(IBackend backend, Tensor x, Tensor cos, Tensor sin, in StridedView grid, int axis, int width, int offset)
+    {
+        StridedView table = RotaryViews.AxisTable(grid[0], grid[1], grid[2], grid[3], grid[4], axis, width / 2);
+        backend.Rotary(new RotaryCall(x, cos, sin, RotaryViews.Create(grid, table, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, width, offset)));
     }
 }

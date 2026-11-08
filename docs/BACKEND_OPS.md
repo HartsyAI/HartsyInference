@@ -97,6 +97,38 @@ with the frame drops applied to `t·fT + iT`. A dropped frame splits the move in
 spec is one. `SpaceToDepth` is the inverse for a spec without repeats, drops or chunks. `UnpatchifyTokens` and
 `PatchifyTokens` are the DiT token grid (`TokenGrid` spec) with the two packings the DiT families use.
 
+## Rotary
+
+```
+x0' = x0·c0 − x1·s0        x1' = x1·c1 + x0·s1        for every pair (x0, x1) with entries (c0, s0), (c1, s1)
+```
+
+Reference: `RotaryReference.Apply`. Contract: `RotaryContract.Validate`. Each product and each sum is rounded once
+(no fused multiply-add), so every backend reproduces the reference bit for bit.
+
+A `RotarySpec` is three views over the canonical axes `[B, H, S1, S2, S3, P, 2]` (batch, head, up to three sequence
+axes, pair, element of the pair): `X` says which two activation elements form a pair, `Cos` and `Sin` say which table
+entries each element reads. That one shape expresses every rotation the models use:
+
+| Variation | How the views express it |
+|---|---|
+| interleaved `(2i, 2i+1)` or rotate-half `(i, i+half)` pairs | the pair axis and the pair-element stride of `X` (`RotaryViews.Create` with `RotaryPairing`) |
+| partial rotation, a rotated slice at an offset | the pair axis cut from `[dimOffset, dimOffset + rotaryDim)` |
+| one angle per pair, per element, or duplicated per pair (`RopeTableLayout`) | the table's pair-element stride: 0, `half`, or 0 over a step-2 pair axis |
+| tables per position, per batch, per head, per grid axis | broadcast (stride 0) table axes |
+| token-major, head-major, packed rows, 3-D grids | the activation base view (`RotaryViews.TokenMajor`, `HeadMajor`, `Rows`, `Grid`, `Explicit`) |
+| a captured decode step | `AtDevicePosition(handle, slot, rowStride)`: the table offsets grow by `position[slot] · rowStride` at run time |
+
+Rules: activations F32, F16 or BF16 with F32 tables; the three views share their extents; the pair axis has
+extent 2 and a non-zero activation stride; the activation view addresses every element once (the injectivity rule of
+`CopyStrided`); every view stays inside its tensor; a device position needs a positive row stride and host-indexed
+tables otherwise. In place on `X`.
+
+`RmsNormRotary(output, input, normWeight, eps, cos, sin, spec)` is the fused form of a full-row RMS norm over
+token-major rows, the rotation `spec` describes over those rows, and a token-major or head-major (four-axis output)
+emit. The default composes `RmsNorm`, `Rotary` and `Permute0213`; CUDA fuses the three for
+`RotaryViews.SplitRows` (rotate-half per head, one angle per pair, per-head lanes), the LTX-2 geometry its kernel runs.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -125,3 +157,7 @@ extract, frame write, bias fill and tap accumulate, Ideogram 4's `ScatterRowsAft
 are all one `CopyStrided`, `AccumulateStrided` or `Pad` call at their call sites; `tools/OpParity --op layout` holds
 one case per former call shape. `PixelShuffle2d`, `PixelShuffle3d`, `SeedVr2PixelShuffle`, `Ltx25PixelShuffle`, `DupUp3dVae`,
 `UnpatchifyVae`, `UnpatchifyTokens`, `OasisUnpatchify` and `PatchifyTokens` are `PixelShuffles` calls (`--op shuffle`).
+`ApplyRope`, `ApplyRopeSingle`, `ApplyRopeSingleHeadMajor`, both `ApplyRopeInterleaved` forms, `WanRopeInterleaved`,
+`WanRopeInterleavedPerHead`, `OasisRopeInterleaved`, `Mg3RopeBatched`, `Ltx2SplitRope`, `Ltx25NaRope3d` and
+`RopeApplyDecodeStep` are `Rotary` calls built with `RotaryCall`'s factories or `RotaryViews`; `Ltx2QkNormRopeHeadMajor`
+and `Ltx2QkNormRopeTokenMajor` are `RmsNormRotary` (`--op rotary`).

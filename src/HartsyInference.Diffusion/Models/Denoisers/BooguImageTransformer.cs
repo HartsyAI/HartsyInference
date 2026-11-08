@@ -41,7 +41,7 @@ public sealed unsafe class BooguImageTransformer : IDisposable
     // ── Step-invariant per-generation caches. ──
     // The RoPE tables are pure functions of the sequence layout (capLen, grid, refs) — previously the four
     // host float[] builds ran EVERY forward and each block re-applied them via a host loop that D2H-drained
-    // Q AND K. Cached here as device tensors in the WanRopeInterleaved layout. The context-refined caption is
+    // Q AND K. Cached here as device tensors in the the interleaved rotary (RotaryCall.Rows) layout. The context-refined caption is
     // timestep-independent (context refiner takes no temb) — cached on the instructionHidden reference (the
     // loader's prompt cache reuses refs, keeping this warm across gens); a >8-entry sweep guards prompt churn.
     private (int capLen, int hPacked, int wPacked, string refSig) _tableKey = (-1, -1, -1, "");

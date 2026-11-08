@@ -113,7 +113,7 @@ public sealed unsafe class LanceMoTBlock
     // GPU-residency rewrite: the old path routed roles via host gather/scatter memcpys (DataPointer reads), plus
     // host RoPE / head permutes / GQA expand / residual adds — every one a full-stream D2H drain, many times per
     // block × 36 blocks × CFG, which was the ~12 s/step cost. Contiguous role segments make routing a pair of
-    // device SliceRows/Concat ops; RoPE is the ApplyRopeSingle rotate-half kernel (per-tensor, so GQA's 16:2 head
+    // device SliceRows/Concat ops; RoPE is the the rotate-half rotary (RotaryCall.TokenMajor) rotate-half kernel (per-tensor, so GQA's 16:2 head
     // mismatch is fine); permutes are Permute0213; the GQA expand is StridedCopies.RepeatInterleave.
     public Tensor Forward(IBackend backend, Tensor x, Tensor cos, Tensor sin, int nPre, int nGen, Tensor? mask)
     {

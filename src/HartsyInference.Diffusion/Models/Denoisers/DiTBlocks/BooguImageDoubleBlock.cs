@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -342,8 +344,8 @@ public sealed unsafe class BooguImageDoubleBlock
 
         // Device RoPE on the pre-permute [1, S, H, D] layout (rotation is per (s, h) vector — permute-order
         // independent, bit-equivalent to the old post-permute host loop).
-        backend.WanRopeInterleaved(qFlat, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
-        backend.WanRopeInterleaved(kFlat, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(qFlat, ropeCos, ropeSin, seqLen, _numQHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(kFlat, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
 
         Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(qMh, qFlat, seqLen, _numQHeads, _headDim);

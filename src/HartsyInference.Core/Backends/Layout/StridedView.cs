@@ -6,7 +6,7 @@ namespace HartsyInference.Core.Backends.Layout;
 /// (0 broadcasts the axis) and an element offset. Views compose like NumPy's <c>as_strided</c> without touching
 /// data: reshape a contiguous view, select or slice an axis, permute, broadcast. A <see cref="StridedCopySpec"/>
 /// pairs a source view with a destination view for <see cref="IBackend.CopyStrided"/>.</summary>
-public readonly struct StridedView
+public readonly struct StridedView : IEquatable<StridedView>
 {
     /// <summary>The most axes a view holds. More than <see cref="TensorShape.MaxRank"/>, because a pixel shuffle splits a
     /// five-axis tensor's channel and spatial axes into eight.</summary>
@@ -103,6 +103,36 @@ public readonly struct StridedView
             return true;
         }
     }
+
+    /// <summary>True when both views address the same elements in the same order: equal rank, extents, strides and offset.</summary>
+    public bool Equals(StridedView other)
+    {
+        if (!HasSameDims(other) || other.Offset != Offset) return false;
+        for (int axis = 0; axis < Rank; axis++)
+        {
+            if (other._strides[axis] != _strides[axis]) return false;
+        }
+        return true;
+    }
+
+    public override bool Equals(object? obj) => obj is StridedView other && Equals(other);
+
+    public override int GetHashCode()
+    {
+        HashCode hash = new();
+        hash.Add(Rank);
+        hash.Add(Offset);
+        for (int axis = 0; axis < Rank; axis++)
+        {
+            hash.Add(_dims[axis]);
+            hash.Add(_strides[axis]);
+        }
+        return hash.ToHashCode();
+    }
+
+    public static bool operator ==(StridedView left, StridedView right) => left.Equals(right);
+
+    public static bool operator !=(StridedView left, StridedView right) => !left.Equals(right);
 
     /// <summary>True when both views have the same extents on every axis.</summary>
     public bool HasSameDims(in StridedView other)

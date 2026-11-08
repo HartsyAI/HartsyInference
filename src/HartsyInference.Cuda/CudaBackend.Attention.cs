@@ -230,33 +230,6 @@ public sealed partial class CudaBackend
         }
     }
 
-    /// <inheritdoc />
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("RopeInterleavedOffset");
-        RopeInterleavedOffsetReference.Validate(x, cos, sin, rotaryDim, dimOffset);
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        RequireAttentionKernels();
-        int rank = x.Shape.Rank;
-        int heads = rank == 4 ? (int)x.Shape[2] : 1;
-        int dim = (int)x.Shape[rank - 1];
-        long positions = x.Shape[0] * x.Shape[1];
-        ulong pX = 0, pCos = 0, pSin = 0;
-        try
-        {
-            pX = GpuTransferHelper.CopyToDevice(x);
-            pCos = GpuTransferHelper.CopyToDevice(cos);
-            pSin = GpuTransferHelper.CopyToDevice(sin);
-            _kernels!.LaunchRopeInterleavedOffset(pX, pCos, pSin, positions, heads, dim, rotaryDim / 2, dimOffset, _stream.Handle);
-            RecacheInPlace(x, pX);
-        }
-        finally
-        {
-            FreeAll(pX, pCos, pSin);
-        }
-    }
-
     // Uploads a source's codes and scales; both stay 0 for an empty source or for F32 (no scales).
     private static void UploadSource(in LatentSource source, out ulong codes, out ulong scales)
     {

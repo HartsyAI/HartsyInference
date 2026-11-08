@@ -1,9 +1,11 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -282,7 +284,7 @@ public sealed unsafe class WanVideoBlock : IStreamingBlock
         (Tensor kRef, Tensor drivingV) = ProjectDrivingKv(backend, drivingInput, refSeq, idx);
         if (!ReferenceEquals(drivingInput, stored)) drivingInput.Dispose();
         if (ctx.PoseStrength != 1.0f) backend.Scale(drivingV, drivingV, ctx.PoseStrength);
-        backend.WanRopeInterleaved(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim);
+        backend.Rotary(RotaryCall.Rows(kRef, ctx.RefCos, ctx.RefSin, refSeq, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
 
         ScaleReferenceRows(backend, v, hw, _dim, ctx.ReferenceImageStrength);
         Tensor kGen = ToBhsd(backend, kn, s);

@@ -1,5 +1,7 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Auk;
@@ -37,8 +39,8 @@ public sealed class AukAttnProj
         Tensor v = new(packed, DType.F32);
         backend.SliceLastDim(v, qkv, 2 * _dim);
         qkv.Dispose();
-        backend.WanRopeInterleaved(q, cos, sin, n, _heads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, n, _heads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, n, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, n, _heads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         return (q, k, v);
     }
 

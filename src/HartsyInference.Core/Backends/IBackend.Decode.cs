@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -103,11 +104,6 @@ public partial interface IBackend
     /// <summary>Reads back the token id from <see cref="AllocDeviceTokenId"/> (the one D2H sync decode needs); throws if unsupported.</summary>
     int ReadDeviceTokenId(ulong handle) => throw new NotSupportedException("ReadDeviceTokenId requires GraphDecodeSupported.");
 
-    /// <summary>RoPE on a single decode-step Q/K tensor <c>[1,numHeads,1,headDim]</c>, reading its row from the devicePos qOffset slot.</summary>
-    /// <remarks>The default throws: a backend without the kernel must be refused, not silently leave Q/K unrotated.</remarks>
-    void RopeApplyDecodeStep(Tensor x, Tensor cosTable, Tensor sinTable, int rotaryDim, bool interleaved, ulong devicePos) =>
-        throw new NotSupportedException("RopeApplyDecodeStep requires GraphDecodeSupported.");
-
     /// <summary>Gathers one row (id in the persistent tokenId buffer) from a GPU-resident embedding table into output <c>[1,1,hidden]</c>.</summary>
     /// <remarks>The default throws, like every decode step that writes an output.</remarks>
     void EmbedGatherDecodeStep(Tensor output, Tensor embedTable, ulong tokenId) =>
@@ -158,8 +154,8 @@ public partial interface IBackend
             SliceLastDim(qOut, qkv, 0);
             SliceLastDim(k, qkv, nq);
             SliceLastDim(v, qkv, nq + nkv);
-            RopeApplyDecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-            RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            Rotary(RotaryCall.DecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos));
+            Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
             KvCacheAppendDev(kCache, k, 0, devicePos);
             KvCacheAppendDev(vCache, v, 0, devicePos);
         }
@@ -174,8 +170,8 @@ public partial interface IBackend
     void RopeScatterKvDecodeStep(Tensor qOut, Tensor kCache, Tensor vCache, Tensor q, Tensor k, Tensor v,
         Tensor cosTable, Tensor sinTable, int hq, int hkv, int headDim, int rotaryDim, bool interleaved, ulong devicePos)
     {
-        RopeApplyDecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-        RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+        Rotary(RotaryCall.DecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos));
+        Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
         KvCacheAppendDev(kCache, k, 0, devicePos);
         KvCacheAppendDev(vCache, v, 0, devicePos);
         CopyTo(qOut, q);
@@ -191,8 +187,8 @@ public partial interface IBackend
         {
             SliceLastDim(qOut, qk, 0);
             SliceLastDim(k, qk, nq);
-            RopeApplyDecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos);
-            RopeApplyDecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+            Rotary(RotaryCall.DecodeStep(qOut, cosTable, sinTable, rotaryDim, interleaved, devicePos));
+            Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, rotaryDim, interleaved, devicePos));
             KvCacheAppendDev(kCache, k, 0, devicePos);
             KvCacheAppendDev(vCache, v, 0, devicePos);
         }

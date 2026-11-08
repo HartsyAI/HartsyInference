@@ -15,7 +15,7 @@ import statistics
 import sys
 from pathlib import Path
 
-ADJACENT = re.compile(r"^(Permute0213|CopyStrided|ApplyRope|RopeInterleaved|Ltx2SplitRope|Ltx2QkNormRope|Cast)")
+ADJACENT = re.compile(r"^(Permute0213|CopyStrided|Rotary|RmsNormRotary|Cast)")
 TICK = re.compile(r"\[(\d+)/(\d+)\] (\d+) ms")
 
 

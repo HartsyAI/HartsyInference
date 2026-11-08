@@ -1,10 +1,12 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.MiniMaxH3;
@@ -756,8 +758,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
-                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
+                backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             }
 
             ProbeV(v, prefix);
@@ -822,8 +824,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
-                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
+                backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             }
 
             Tensor attention = new Tensor(headed, DType.F32);
@@ -907,7 +909,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
                     backend.SliceRows(cosChunk, cos, r0);
                     backend.SliceRows(sinChunk, sin, r0);
-                    backend.ApplyRopeSingleHeadMajor(kc, cosChunk, sinChunk, rot);
+                    backend.Rotary(RotaryCall.HeadMajor(kc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot));
                 }
                 // k/v land straight in their full buffers and the chunk dies here; holding them in lists to Concat
                 // afterwards kept a SECOND full-size copy of each alive at the pass boundary (peak 5x seq*inner*F32
@@ -941,7 +943,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                         using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
                         backend.SliceRows(cosChunk, cos, r0);
                         backend.SliceRows(sinChunk, sin, r0);
-                        backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot2);
+                        backend.Rotary(RotaryCall.HeadMajor(qc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot2));
                     }
                     using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
                     backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, null, 1f / MathF.Sqrt(hd));

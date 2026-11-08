@@ -173,37 +173,6 @@ __global__ void dit_sigmoid_f16(
     output[i] = __float2half(y);
 }
 
-// ── Rotate-half RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
-// Mirrors dit_rope_f32: x is [totalVecs, headDim] (totalVecs = B*L*numHeads); cos/sin are
-// [B*L, headDim] broadcast over heads. Pairs (i, i+half); each thread owns one i and writes
-// both halves from the originals — race-free. rotaryDim semantics identical to the F32 twin.
-__global__ void dit_rope_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cosT,
-    const float* __restrict__ sinT,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned long long totalVecs,
-    unsigned int rotaryDim)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long vec = gid / half;
-    unsigned long long row = vec / numHeads;
-    size_t baseX = (size_t)vec * headDim;
-    size_t baseCs = (size_t)row * headDim;
-
-    float lower = __half2float(x[baseX + i]);
-    float upper = __half2float(x[baseX + i + half]);
-    x[baseX + i] = __float2half(lower * cosT[baseCs + i] - upper * sinT[baseCs + i]);
-    x[baseX + i + half] = __float2half(upper * cosT[baseCs + i + half] + lower * sinT[baseCs + i + half]);
-}
-
 // ── Fused-lastdim slice (F16, pure copy) ────────────────────────────────────
 // Mirrors dit_slice_lastdim_f32: out[row, d] = in[row, offset + d] with in row stride = inDim.
 // Splits a fused [.., inDim] tensor (e.g. QKV [B,L,3H]) into a contiguous [.., outDim] chunk.
@@ -220,61 +189,6 @@ __global__ void dit_slice_lastdim_f16(
     unsigned int d = (unsigned int)(i % outDim);
     unsigned long long row = i / outDim;
     output[i] = input[(size_t)row * inDim + offset + d];
-}
-
-// ── Interleaved RoPE (in-place, F16 x, F32 cos/sin) ─────────────────────────
-// Mirrors wan_rope_interleaved: x is [S, heads*headDim]; rotate adjacent pair (2i,2i+1) by the
-// shared angle at cos/sin index 2i (cos/sin are [S, headDim] shared across heads).
-__global__ void dit_rope_interleaved_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cosT,
-    const float* __restrict__ sinT,
-    unsigned int S, unsigned int heads, unsigned int headDim)
-{
-    unsigned int pairs = headDim >> 1;
-    unsigned long long total = (unsigned long long)S * heads * pairs;
-    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= total) return;
-    unsigned int i = (unsigned int)(idx % pairs); idx /= pairs;
-    unsigned int h = (unsigned int)(idx % heads); idx /= heads;
-    unsigned int s = (unsigned int)idx;
-    unsigned int i0 = 2u * i;
-    unsigned long long xoff = ((unsigned long long)s * heads + h) * headDim + i0;
-    unsigned long long coff = (unsigned long long)s * headDim + i0;   // shared across heads
-    float re = __half2float(x[xoff]), im = __half2float(x[xoff + 1]);
-    float c = cosT[coff], sn = sinT[coff];
-    x[xoff]     = __float2half(re * c - im * sn);
-    x[xoff + 1] = __float2half(re * sn + im * c);
-}
-
-// ── LTX-2 split (half-rotate) RoPE, in place (F16 twin of ltx2_split_rope_f32) ──
-// Pairs lane i with lane i+headDim/2 instead of the interleaved 2i/2i+1 above; cos/sin are laid out
-// [S, heads*headDim/2], per-head (NOT shared across heads like dit_rope_interleaved_f16's table).
-__global__ void ltx2_split_rope_f16(
-    __half* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int seqLen,
-    unsigned int numHeads,
-    unsigned int headDim)
-{
-    unsigned int r = headDim >> 1;
-    unsigned int dim = numHeads * headDim;
-    unsigned int cosWidth = dim >> 1;            // = numHeads * r
-    unsigned long long total = (unsigned long long)seqLen * numHeads * r;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % r);
-    unsigned long long t = gid / r;
-    unsigned int h = (unsigned int)(t % numHeads);
-    unsigned int s = (unsigned int)(t / numHeads);
-    size_t headBase = (size_t)s * dim + (size_t)h * headDim;
-    size_t cosBase = (size_t)s * cosWidth + (size_t)h * r;
-    float a = __half2float(x[headBase + i]);
-    float b = __half2float(x[headBase + i + r]);
-    float c = cos[cosBase + i], sn = sin[cosBase + i];
-    x[headBase + i]     = __float2half(a * c - b * sn);
-    x[headBase + i + r] = __float2half(b * c + a * sn);
 }
 
 // ── Slice a contiguous row block (F16, pure copy) ───────────────────────────
@@ -667,7 +581,7 @@ __global__ void dit_glu_act_f16(
 } // extern "C"
 
 // ── LTX-2 fused QK-norm + split-RoPE + head-major emit ──────────────────────
-// Collapses RmsNorm -> Ltx2SplitRope -> Permute0213 into ONE pass over the tensor. The three-op version
+// Collapses RmsNorm -> the split rotary (RotaryCall.SplitRows) -> Permute0213 into ONE pass over the tensor. The three-op version
 // read and wrote the full [seq, heads*headDim] activation three times; this reads it once and writes the
 // head-major result once. Distinct from dit_qkv_split_norm_head_major_f16 above, which RMS-norms PER HEAD
 // against a fused qkv buffer — LTX-2 normalizes across the WHOLE row (all heads) with a [heads*headDim]

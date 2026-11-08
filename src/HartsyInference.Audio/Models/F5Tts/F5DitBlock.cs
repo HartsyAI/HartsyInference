@@ -97,7 +97,7 @@ internal sealed unsafe class F5DitBlock
         backend.AffineBroadcastLastDim(modded, normed, scaleMsa, shiftMsa);
         normed.Dispose();
 
-        // 3. Self-attention with RoPE on Q, K, on-device (WanRopeInterleaved has a CUDA kernel; ApplyRopeInterleaved does not).
+        // 3. Self-attention with RoPE on Q, K, on-device (the interleaved rotary (RotaryCall.Rows) has a CUDA kernel; the interleaved rotary (RotaryCall.TokenMajor) does not).
         //    The ropes are the layer's own QueryRotation/KeyRotation, so q/k stay [1, T, heads, headDim].
         if (Prof) { backend.Sync(); _swQkv.Restart(); }
         (Tensor q, Tensor k, Tensor v) = _attn!.ProjectSelf(backend, modded, releaseInput: true);

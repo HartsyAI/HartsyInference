@@ -108,47 +108,6 @@ __global__ void lm_scatter_add_weighted_rows_f32(
     output[(unsigned long long)rowIndices[m] * K + j] += scales[m] * input[i];
 }
 
-// ── Interleaved (GPT-J) rotary embedding, in-place ─────────────────────────
-// x [B, L, numHeads, headDim]; rotates adjacent pairs (2i, 2i+1) sharing frequency i (cos/sin
-// index i, NOT the split-half convention of lm/dit_rope). cos/sin are [B, L, headDim] (only the
-// first headDim/2 entries per position are read); a vector's cos/sin row is vec/numHeads. Matches
-// IBackend.ApplyRopeInterleaved — the Sesame CSM / HeartMuLa backbone+decoder RoPE, and (with
-// partial rotary) GLM-4. One thread per (vector, pair); keeps q/k GPU-resident through RoPE (no
-// host round-trip per layer). rotaryDim: 0 (or >=headDim) rotates every pair (full rotary, prior
-// behavior); otherwise only pairs entirely inside [0, rotaryDim) rotate — dims [rotaryDim, headDim)
-// pass through untouched, matching HF's `q_rot, q_pass = q[...,:rotary_dim], q[...,rotary_dim:]`
-// partial-rotary split (GLM-4's `partial_rotary_factor`). This guard was missing before 2026-07-22:
-// the kernel always used headDim/2 pairs regardless of rotaryDim, so any interleaved-RoPE arch with
-// partial rotary had its un-rotated tail spuriously rotated with wrong (repeated-block) frequencies
-// instead of being left alone — a no-op at position 0 (angle=0) that corrupts every later position.
-__global__ void lm_rope_interleaved_f32(
-    float* __restrict__ x,
-    const float* __restrict__ cos,
-    const float* __restrict__ sin,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned int rotaryDim,
-    unsigned long long totalVecs)
-{
-    unsigned int half = headDim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = totalVecs * (unsigned long long)half;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    if (2u * i >= rdim) return;
-    unsigned long long vec = gid / half;
-    unsigned long long row = vec / numHeads;
-    size_t baseX = (size_t)vec * headDim + 2u * i;
-    size_t baseCs = (size_t)row * headDim + i;
-    float xe = x[baseX];
-    float xo = x[baseX + 1];
-    float c = cos[baseCs];
-    float s = sin[baseCs];
-    x[baseX]     = xe * c - xo * s;
-    x[baseX + 1] = xo * c + xe * s;
-}
-
 // ── Per-row argmax over the last dim ────────────────────────────────────────
 // indices[r] = argmax_c input[r, c]   (first max on ties, matching the CPU reference).
 // One block per row; each thread scans a strided slice, then a tree reduction keeps the
@@ -1335,67 +1294,6 @@ __global__ void lm_qknorm_rope_scatter_f32(
         }
         dst[i] = outv;
     }
-}
-
-// ── Graph-capture decode: device-indexed RoPE ───────────────────────────────
-// Applies rotary embedding to a single decode-step Q or K tensor [1, numHeads, 1, headDim] by
-// reading the rotation ROW from a precomputed FULL table [maxPos, headDim] (duplicated-half
-// layout, built once host-side via RopeFrequencyBuilder — identical math to GenericTransformer's
-// BuildRope, just for every position up front instead of one small per-step tensor) at the
-// position in devicePos[1] (qOffset — the position of the token this decode step is embedding;
-// same buffer/convention as lm_kv_append_f32/lm_flash_attn_f32's dPos). This removes RoPE's
-// per-token host Math.Cos/Sin + H2D upload (one of the two host rebuilds — with embed gather —
-// that blocked graph capture; see LLM_DECODE_PERF_GRIND.md Phase 6). Two entry points (not a
-// runtime branch) mirroring the existing split-half (dit_rope_f32) vs interleaved
-// (lm_rope_interleaved_f32) kernels this replaces for the graphed decode path only.
-__global__ void lm_rope_decode_splithalf(
-    float* __restrict__ x,
-    const float* __restrict__ cosTable,
-    const float* __restrict__ sinTable,
-    unsigned int numHeads,
-    unsigned int headDim,
-    unsigned int rotaryDim,
-    const int* __restrict__ devicePos)
-{
-    unsigned int rdim = (rotaryDim == 0u || rotaryDim > headDim) ? headDim : rotaryDim;
-    unsigned int half = rdim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = (unsigned long long)numHeads * half;   // totalVecs = numHeads (B=1, Tq=1)
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long h = gid / half;
-    int pos = devicePos[1];
-    size_t baseX = h * headDim;
-    size_t baseCs = (size_t)pos * headDim;
-    float lower = x[baseX + i];
-    float upper = x[baseX + i + half];
-    x[baseX + i] = lower * cosTable[baseCs + i] - upper * sinTable[baseCs + i];
-    x[baseX + i + half] = upper * cosTable[baseCs + i + half] + lower * sinTable[baseCs + i + half];
-}
-
-__global__ void lm_rope_decode_interleaved(
-    float* __restrict__ x,
-    const float* __restrict__ cosTable,
-    const float* __restrict__ sinTable,
-    unsigned int numHeads,
-    unsigned int headDim,
-    const int* __restrict__ devicePos)
-{
-    unsigned int half = headDim >> 1;
-    unsigned long long gid = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long total = (unsigned long long)numHeads * half;
-    if (gid >= total) return;
-    unsigned int i = (unsigned int)(gid % half);
-    unsigned long long h = gid / half;
-    int pos = devicePos[1];
-    size_t baseX = h * headDim + 2u * i;
-    size_t baseCs = (size_t)pos * headDim + i;
-    float xe = x[baseX];
-    float xo = x[baseX + 1];
-    float c = cosTable[baseCs];
-    float s = sinTable[baseCs];
-    x[baseX]     = xe * c - xo * s;
-    x[baseX + 1] = xo * c + xe * s;
 }
 
 // ── Graph-capture decode: device-indexed embedding gather ───────────────────

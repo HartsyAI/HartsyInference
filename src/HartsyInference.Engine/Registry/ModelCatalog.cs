@@ -650,7 +650,7 @@ public static class ModelCatalog
                 // UnsupportedModelException naming the declared arch instead — a wrong-architecture GGUF is still
                 // unusable, but no longer an opaque crash. (2) PARTIALLY FIXED 2026-07-22 (follow-up session): the
                 // CORRECT-architecture checkpoint's incoherent output was ONE real bug — a missing partial-rotary
-                // guard in the interleaved/GPT-J RoPE path (ApplyRopeInterleaved / lm_rope_interleaved_f32); glm4
+                // guard in the interleaved/GPT-J RoPE path (now the interleaved RotaryCall factories); glm4
                 // rotates only the first headDim/2 dims per HF/llama.cpp source but the kernel rotated the FULL
                 // headDim. Fixed (kernel + launcher + CudaBackend + IBackend default + both GenericTransformer
                 // call sites; regression test in RopeInterleavedPartialRotaryTests.cs) and confirmed via real

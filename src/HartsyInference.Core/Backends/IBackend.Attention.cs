@@ -76,11 +76,6 @@ public partial interface IBackend
     void BuildWindowIndices(Tensor indices, int windowSize, int seqLen, int startPos) =>
         throw NotSupportedPrimitive(nameof(BuildWindowIndices));
 
-    /// <summary>In-place interleaved rotary on the <c>[dimOffset, dimOffset+rotaryDim)</c> slice of each vector of
-    /// <c>x [B,L,D]</c> or <c>[B,L,H,D]</c>, with <c>cos</c>/<c>sin [B,L,rotaryDim/2]</c>; negate sin to invert.</summary>
-    void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset) =>
-        throw NotSupportedPrimitive(nameof(ApplyRopeInterleaved));
-
     /// <summary>Start of the attended window along one axis, using NATTEN's rule: the window is always exactly
     /// <paramref name="kernel"/> wide and slides inward at the borders rather than being truncated or zero-padded,
     /// so every query attends the same number of keys. Callers must pre-clamp <paramref name="kernel"/> to

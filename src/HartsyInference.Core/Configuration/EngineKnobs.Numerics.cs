@@ -204,10 +204,6 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> RadianceFp8 =
         Bool("numerics.radianceFp8", true, KnobScope.Construction, KnobDomain.Numerics, "Requantizes Chroma Radiance DiT blocks to fp8 during checkpoint conversion; 0 keeps the wide BF16 weights.");
 
-    /// <summary>Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.</summary>
-    public static readonly Knob<bool> RopeV2 =
-        Bool("numerics.ropeV2", true, KnobScope.Runtime, KnobDomain.Numerics, "Uses the division-free head-major RoPE kernel instead of the older one; bit-identical.");
-
     /// <summary>Feeds the conditional audio to Wan-S2V's uncond branch so CFG steers text adherence only; changes output.</summary>
     public static readonly Knob<bool> S2vTextCfg =
         Bool("numerics.s2vTextCfg", false, KnobScope.Runtime, KnobDomain.Numerics, "Feeds the conditional audio to Wan-S2V's uncond branch so CFG steers text adherence only; changes output.");
