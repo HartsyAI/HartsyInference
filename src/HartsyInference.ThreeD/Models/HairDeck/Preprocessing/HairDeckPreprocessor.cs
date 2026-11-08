@@ -120,7 +120,8 @@ public sealed class HairDeckPreprocessor
         byte[] composed = HairDeckCrop.ComposeOnWhite(image.StoredRgb, compositeMatte, pixels);
         byte[] crop = HairDeckCrop.CropOnWhite(composed, width, height, box, Resolution);
         byte[] matteCrop = HairDeckCrop.CropMatte(person, width, height, box, Resolution);
-        HairDeckInput input = HairDeckInput.Create(ToChannelMajor(crop, Resolution), matteCrop);
+        double[] hairColor = HairDeckCrop.HairColor(image.StoredRgb, hair, pixels);
+        HairDeckInput input = HairDeckInput.Create(ToChannelMajor(crop, Resolution), matteCrop, hairColor);
 
         return new HairDeckPreprocessResult
         {
@@ -133,7 +134,7 @@ public sealed class HairDeckPreprocessor
             Face = face,
             Width = width,
             Height = height,
-            HairColor = HairDeckCrop.HairColor(image.StoredRgb, hair, pixels),
+            HairColor = hairColor,
             MatteAgreement = recipe.Agreement,
         };
     }
