@@ -50,6 +50,7 @@ if (selected.Count == 0)
 }
 
 int failures = 0;
+int compared = 0;
 IBackend? host = null;
 try
 {
@@ -150,12 +151,19 @@ try
         backend.Sync();
         Acceptance acceptance = new(Enum.Parse<AcceptanceKind>(recorded.AcceptanceKind), recorded.MaxAbs, recorded.MaxRel, recorded.Reason);
         failures += Report(c, run, expected, acceptance, "vs fixture", recorded.MayBeNonFinite);
+        compared++;
         foreach (Tensor e in expected.Values) e.Dispose();
     }
 }
 finally
 {
     host?.Dispose();
+}
+// A check that compared nothing (every selected case skipped as unsupported on this backend) verified nothing, so it cannot pass.
+if (command == "check" && compared == 0)
+{
+    Console.WriteLine($"FAIL: no case was compared on backend {selector}; every selected case was skipped");
+    return 1;
 }
 Console.WriteLine(failures == 0 ? "PASS" : $"FAIL: {failures} output(s) outside acceptance");
 return failures == 0 ? 0 : 1;
