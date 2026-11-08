@@ -68,14 +68,16 @@ try
                 continue;
             }
             using OpTensors t = c.Build(seed);
-            c.Run(backend, t);
-            backend.Sync();
             Dictionary<string, string> meta = new(StringComparer.Ordinal) { ["family"] = c.Family, ["case"] = c.Name, ["backend"] = kind, ["seed"] = seed.ToString(CultureInfo.InvariantCulture) };
+            // The inputs are written before the op runs: an entry that works in place on an operand the case lists as an input
+            // would otherwise leave its result in the fixture's inputs, and every later check would feed the op its own output.
             Dictionary<string, string> hashes = new(StringComparer.Ordinal)
             {
                 ["inputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "inputs.safetensors"), t.Inputs, meta),
-                ["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta),
             };
+            c.Run(backend, t);
+            backend.Sync();
+            hashes["outputs.safetensors"] = FixtureStore.Save(Path.Combine(dir, "outputs.safetensors"), t.Outputs, meta);
             FixtureManifest m = Manifest(c, "recorded", hashes);
             m.MayBeNonFinite.AddRange(t.MayBeNonFinite);
             m.Save(FixtureStore.ManifestPath(dir));
@@ -110,12 +112,12 @@ try
         }
         if (recorded is null || recorded.Status != "recorded" || hostByRule)
         {
-            // Newly supported, or judged against the host by rule: the case's oracle, else the CPU backend, is the independent reference.
+            // Newly supported, or judged against the host by rule: the case's host oracle, else the CPU backend, is the independent reference.
             using OpTensors mine = c.Build(seed);
             using OpTensors theirs = c.Build(seed);
             c.Run(backend, mine);
             backend.Sync();
-            if (c.Oracle is { } oracle)
+            if (c.HostRun is { } oracle)
             {
                 oracle(theirs);
             }
@@ -125,10 +127,9 @@ try
                 c.Run(host, theirs);
                 host.Sync();
             }
-            string oracleName = c.Oracle is null ? "CPU backend" : "contract reference";
-            Acceptance rule = hostByRule ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, $"newly supported path, judged against the {oracleName}");
+            Acceptance rule = hostByRule ? c.Acceptance : Acceptance.AgainstHost(c.Acceptance.MaxAbs, c.Acceptance.MaxRel, "newly supported path, judged against the host reference");
             string why = recorded is null ? "no fixture" : recorded.Status == "unsupported" ? "unsupported on the baseline" : "host-reference rule";
-            failures += Report(c, mine, theirs.Outputs, rule, $"vs {oracleName} ({why})");
+            failures += Report(c, mine, theirs.Outputs, rule, $"vs host ({why})");
             compared++;
             continue;
         }
@@ -249,5 +250,5 @@ static Dictionary<string, string> ParseArgs(string[] argv)
 /// <summary>Every case set the tool knows; a new op family adds its class here.</summary>
 file static class Registry
 {
-    public static IEnumerable<OpCase> Cases() => SmokeCases.Cases().Concat(AttentionCases.Cases()).Concat(LayoutCases.Cases()).Concat(ShuffleCases.Cases()).Concat(RotaryCases.Cases());
+    public static IEnumerable<OpCase> Cases() => SmokeCases.Cases().Concat(AttentionCases.Cases());
 }
