@@ -215,6 +215,8 @@ void main() {
     if (pc.hasDense != 0u) {
         // The dense table holds the token's weight at each selected expert and zero elsewhere.
         for (uint e = tid; e < pc.numExperts; e += WGSIZE) dense[token * pc.numExperts + e] = 0.0;
+        // The zero stores are SSBO writes; barrier() orders only shared memory, so make them visible before the selected weights.
+        memoryBarrierBuffer();
         barrier();
     }
     for (uint j = tid; j < k; j += WGSIZE) {
