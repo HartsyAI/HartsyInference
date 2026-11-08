@@ -81,7 +81,15 @@ public sealed class MeshService : IMeshService, IDisposable
         HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
         foreach (string note in prep.Notes)
         {
-            Logs.Warning($"HairDeck: {note}");
+            // input_alpha only records that the input's alpha was applied as a mask; it does not degrade the result.
+            if (note == "input_alpha")
+            {
+                Logs.Info("HairDeck: input alpha applied as a mask.");
+            }
+            else
+            {
+                Logs.Warning($"HairDeck: {note}");
+            }
         }
 
         cancel.ThrowIfCancellationRequested();

@@ -819,6 +819,7 @@ public static class GenerationDispatch
             FileBytes = result.Data,
             Extension = result.Format,
             Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
         return artifact;

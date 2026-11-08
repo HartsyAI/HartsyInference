@@ -99,8 +99,6 @@ public static class ModelCatalog
                 Role = "latent statistics", Sha256 = "85a8470491342675c5fd2b026d060efb8c2fa1cc67a0ee2a158d5244d92f0263" },
             new() { Repo = "hyz317/HairDeck", RepoPath = "data/token_stats_head.json", TargetSubdir = "3D/HairDeck/data",
                 Role = "token statistics", Sha256 = "c7a1babaac873afd989f25c0f2b8b2d178499df31a4b70653973be3aaab070e2" },
-            new() { Repo = "hyz317/HairDeck", RepoPath = "data/head_frame_train.npz", TargetSubdir = "3D/HairDeck/data",
-                Role = "canonical head", Sha256 = "c5ba440bfa91c3c28ad1f1c9971d4d0826c28ff34b54279c9a28ed622a36de23" },
             new() { Repo = "hyz317/HairDeck", RepoPath = "data/spring/chain_stats_head.json", TargetSubdir = "3D/HairDeck/data/spring",
                 Role = "chain statistics", Sha256 = "059b051ef2f3e9dd8980f95f08c3c7d067c05fcf3e705b2294beb77171f5b70b" },
             new() { Repo = "facebook/sam3", RepoPath = "sam3.pt", TargetSubdir = "Vision/sam3", Role = "segmenter (gated)",
