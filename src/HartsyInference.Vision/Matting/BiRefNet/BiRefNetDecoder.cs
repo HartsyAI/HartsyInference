@@ -70,11 +70,9 @@ internal sealed class BiRefNetDecoder
 
         Tensor p1 = Level(backend, image, p2g, x1, level: 3);
         p2g.Dispose();
-        Tensor p1Block = _blocks[3].Forward(backend, p1);
-        p1.Dispose();
 
-        Tensor up = BiRefNetOps.Resize(backend, p1Block, h, w);
-        p1Block.Dispose();
+        Tensor up = BiRefNetOps.Resize(backend, p1, h, w);
+        p1.Dispose();
         Tensor injectedFull = Inject(backend, image, 4);
         Tensor full = BiRefNetOps.Concat(backend, up, injectedFull);
         up.Dispose(); injectedFull.Dispose();
