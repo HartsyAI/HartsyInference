@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -30,7 +31,7 @@ internal static class HeadGatedAttention
         backend.Permute0213(flat, attended, hq, seq, hd);
         attended.Dispose();
         // The shared head gate multiplies by 2*sigmoid; halving restores sigmoid.
-        backend.Ltx2HeadGate(flat, gateLogits, seq, hq, hd);
+        backend.GroupScale(flat, flat, gateLogits, GroupScaleSpec.PerGroup(hd, hq, GateFunction.TwoSigmoid));
         gateLogits.Dispose();
         Tensor gated = new(flat.Shape, DType.F32);
         backend.Scale(gated, flat, 0.5f);

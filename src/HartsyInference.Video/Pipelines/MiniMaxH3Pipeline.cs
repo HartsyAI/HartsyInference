@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using System.Linq;
@@ -994,13 +995,13 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
     /// <summary><c>z += v * delta</c> in place.</summary>
     private void EulerStep(Tensor z, Tensor velocity, float delta)
     {
-        Backend.CfgEulerStep(z, velocity, velocity, 1f, delta);
+        Backend.GuidedEulerStep(z, velocity, velocity, GuidedEulerSpec.Lerp(1f, delta));
     }
 
-    /// <summary>CFG-fused Euler step: <c>z += (uncond + g·(cond − uncond))·delta</c>, the shared <see cref="IBackend.CfgEulerStep"/>.</summary>
+    /// <summary>CFG-fused Euler step: <c>z += (uncond + g·(cond − uncond))·delta</c>, the shared <see cref="IBackend.GuidedEulerStep"/>.</summary>
     private void EulerStep(Tensor z, Tensor cond, Tensor uncond, float guidance, float delta)
     {
-        Backend.CfgEulerStep(z, cond, uncond, guidance, delta);
+        Backend.GuidedEulerStep(z, cond, uncond, GuidedEulerSpec.Lerp(guidance, delta));
     }
 
     /// <summary>The shared <see cref="SamplerMath.CombineCfg"/> combine, for the masked path that advances from one velocity.</summary>

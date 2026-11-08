@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -317,7 +318,7 @@ public sealed unsafe class AnimaBlock
         // LayerNorm-no-affine on x along last dim, then x * (1 + scale) + shift — one fused device op.
         TensorShape xShape = new TensorShape(batch, seqLen, _hidden);
         Tensor modulated = new Tensor(xShape, DType.F32);
-        backend.LayerNormModulate(modulated, x, scale, shift, _eps);
+        backend.NormModulate(NormModulateCall.Rows(modulated, x, NormKind.LayerNorm, _eps).WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
         shift.Dispose();
         scale.Dispose();
 

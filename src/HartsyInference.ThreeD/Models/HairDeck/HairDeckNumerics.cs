@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -170,7 +171,8 @@ internal static unsafe class HairDeckNumerics
     public static Tensor NormModulate(IBackend backend, Tensor input, Tensor scale, Tensor shift, float eps)
     {
         Tensor output = new(input.Shape, DType.F32);
-        backend.LayerNormModulate(output, input, scale, shift, eps);
+        backend.NormModulate(NormModulateCall.Rows(output, input, NormKind.LayerNorm, eps)
+            .WithModulation(ModulationSpec.Broadcast(input, scale, shift, ScaleMode.OnePlus)));
         return output;
     }
 
