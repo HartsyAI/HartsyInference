@@ -77,8 +77,13 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
 
 ## Status
 
-- Config reader: `src/HartsyInference.LLM/Models/MossVl/MossVlConfig.cs`. Verified by unit tests on the real config.
-- Layout check: `tests/HartsyInference.LLM.Tests/MossVlCheckpointTests.cs` (`Category=Integration`, guarded by
-  `HARTSY_MOSS_VL_INDEX`). Passes on the real index: 895 keys, exact match with the config-derived set.
-- Not built: vision tower, merger, cross-attention RoPE, text decoder wiring, tokenizer/processor, generation, realtime
-  loop, CUDA and Vulkan kernels, parity dumps. No real generation has run.
+- Config reader: `src/HartsyInference.LLM/Models/MossVl/MossVlConfig.cs`. Unit tests on the real config.
+- Layout check: `tests/HartsyInference.LLM.Tests/MossVlCheckpointTests.cs` (`Category=Integration`, `HARTSY_MOSS_VL_INDEX`).
+  Passes on the real index: 895 keys, exact match with the config-derived set.
+- Vision tower: `src/HartsyInference.Diffusion/Models/TextEncoders/MossVlVisionTower.cs`, which reuses
+  `Qwen3VlVisionEncoder` and adds the `UnifiedDeepstackMerger` mode (per-stream LayerNorm, concatenate, one MLP).
+  Parity against `tests/python-reference/dump_moss_vl_vision.py` on the real weights, grid 1×16×24:
+  max|diff| 7.5e-4 on max|ref| 279, relative 2.7e-6 (`MossVlVisionParityTests`, `HARTSY_MOSS_VL_INDEX` +
+  `HARTSY_MOSS_VL_REF`). The reference is a numpy transcription of `modeling_moss_vl.py`, not the official code executed.
+- Not built: cross-attention query RoPE, text decoder wiring, tokenizer/processor, generation, realtime loop, CUDA and
+  Vulkan kernels. No real generation has run.

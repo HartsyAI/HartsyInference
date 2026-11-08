@@ -139,7 +139,8 @@ streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCH
 `Models/LLM/moss-vl-realtime/`; the five shards match their LFS sha256.
 
 - ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
-- ❌ Vision tower and deepstack merger, cross-attention query RoPE, text decoder wiring, tokenizer/processor.
+- ✅ Vision tower with deepstack merger: relative parity 2.7e-6 against a numpy transcription on the real weights (grid 1×16×24).
+- ❌ Cross-attention query RoPE, text decoder wiring, tokenizer/processor.
 - ❌ Generation, realtime session loop, CUDA/Vulkan kernels, parity dumps. No real generation has run.
 
 ## Remaining work
