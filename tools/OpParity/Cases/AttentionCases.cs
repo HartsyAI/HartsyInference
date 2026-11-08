@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.OpParity.Cases;
@@ -28,10 +29,20 @@ public static class AttentionCases
         // Token-major SDPA (CUDA/Vulkan rows where they exist).
         cases.Add(new(Family, "sdpa_tm_b1h8s32d64", seed => SdpaTokenMajor(seed, 1, 8, 8, 32, 32, 64), (be, t) =>
             be.ScaledDotProductAttentionTokenMajor(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], null, 8, 64, 1f / 8f, false),
-            be => be.SupportsTokenMajorAttention, Gpu, F32Tol));
+            be => be.SupportsTokenMajorAttention, Gpu, F32Tol,
+            t =>
+            {
+                AttentionCall call = AttentionCall.FromTokenMajor(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], null, 8, 8, 64, 1f / 8f, false, 1);
+                AttentionHostReference.Run(in call);
+            }));
         cases.Add(new(Family, "sdpa_tm_gqa_b1h8kv2s32d64", seed => SdpaTokenMajor(seed, 1, 8, 2, 32, 32, 64), (be, t) =>
             be.ScaledDotProductAttentionTokenMajor(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], null, 8, 2, 64, 1f / 8f, false),
-            be => be.SupportsTokenMajorGqaAttention, Gpu, F32Tol));
+            be => be.SupportsTokenMajorGqaAttention, Gpu, F32Tol,
+            t =>
+            {
+                AttentionCall call = AttentionCall.FromTokenMajor(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"], null, 8, 2, 64, 1f / 8f, false, 1);
+                AttentionHostReference.Run(in call);
+            }));
         // FlashAttention: the LLM / vision-encoder entry. Causal and bidirectional, GQA, qOffset, softcap, sink, window, ALiBi.
         foreach ((string name, bool causal, int hq, int hkv, int sq, int skv, int qOff, float softcap, bool sink, int window, bool alibi) in new[]
         {
@@ -62,7 +73,14 @@ public static class AttentionCases
                 }
                 finally { be.FreeDevicePos(pos); }
             },
-            HasDevicePositions, Gpu, F32Tol));
+            HasDevicePositions, Gpu, F32Tol,
+            // The host reference takes host positions: the device buffer holds the same kvLen and qOffset.
+            t =>
+            {
+                AttentionCall call = AttentionCall.FromFlashAttention(t.Outputs["out"], t.Inputs["q"], t.Inputs["k"], t.Inputs["v"],
+                    kvLen: 40, causal: true, qOffset: 32, scale: 1f / 8f, softcap: 0f, sink: null, slidingWindow: 0, alibiSlopes: null);
+                AttentionHostReference.Run(in call);
+            }));
         return cases;
     }
 
