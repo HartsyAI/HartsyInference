@@ -21,6 +21,9 @@ internal sealed class HairDeckRuntime : IDisposable
     private readonly SafeTensorsLoader _matteWeights;
     private int _disposed;
 
+    /// <summary>Serialises generations on this runtime; held for the whole preprocessing and generation of one request.</summary>
+    public SemaphoreSlim Gate { get; } = new(1, 1);
+
     private HairDeckRuntime(Sam3Pipeline segmenter, BiRefNetMatter matter, SafeTensorsLoader matteWeights, HairDeckModel model, IBackend backend)
     {
         _segmenter = segmenter;
@@ -75,6 +78,8 @@ internal sealed class HairDeckRuntime : IDisposable
             return;
         }
 
+        // Wait for a generation in progress: the models must not be freed under it. Nothing releases the gate after this.
+        Gate.Wait();
         Model.Dispose();
         _matter.Dispose();
         _matteWeights.Dispose();

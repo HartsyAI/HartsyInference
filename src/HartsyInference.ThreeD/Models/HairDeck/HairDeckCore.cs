@@ -1,3 +1,4 @@
+using System.Threading;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -132,28 +133,28 @@ public sealed unsafe class HairDeckCore : IDisposable
     /// <c>[789, 1024]</c>; the colour inputs are the crop <c>[3, 448, 448]</c> in 0..255 and its person matte <c>[448, 448]</c>
     /// (0 or 1), both or neither. The caller owns the tensors it passes.</summary>
     public HairDeckResult Generate(IBackend backend, Tensor dinoTokens, Tensor? colorImage, Tensor? colorMatte, int seed,
-        int steps = 50, float cfg = 2f, bool withChains = true)
+        int steps = 50, float cfg = 2f, bool withChains = true, CancellationToken cancel = default)
         => Run(backend, dinoTokens, colorImage, colorMatte, seed, steps, cfg, withChains, cardNoise: null, chainNoise: null);
 
     /// <summary>As <see cref="Generate"/> with explicit initial noise <c>[192, 40]</c> for the cards and <c>[48, 27]</c> for the
     /// chains (the reference's injected noise); the seed is only reported.</summary>
     public HairDeckResult GenerateWithNoise(IBackend backend, Tensor dinoTokens, Tensor? colorImage, Tensor? colorMatte, Tensor cardNoise,
-        Tensor? chainNoise, int steps = 50, float cfg = 2f, bool withChains = true, int seed = 0)
+        Tensor? chainNoise, int steps = 50, float cfg = 2f, bool withChains = true, int seed = 0, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(cardNoise);
-        return Run(backend, dinoTokens, colorImage, colorMatte, seed, steps, cfg, withChains, cardNoise, chainNoise);
+        return Run(backend, dinoTokens, colorImage, colorMatte, seed, steps, cfg, withChains, cardNoise, chainNoise, cancel);
     }
 
     /// <summary>Samples the card tokens <c>[192, 40]</c> from the given noise; the caller disposes the result.</summary>
-    internal Tensor SampleCardTokens(IBackend backend, Tensor dinoTokens, Tensor cardNoise, int steps, float cfg)
+    internal Tensor SampleCardTokens(IBackend backend, Tensor dinoTokens, Tensor cardNoise, int steps, float cfg, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         using Tensor context = _image.EncodeContext(backend, dinoTokens);
-        return HairDeckEulerSampler.Sample(backend, _image.Core, context, cardNoise, steps, cfg);
+        return HairDeckEulerSampler.Sample(backend, _image.Core, context, cardNoise, steps, cfg, cancel);
     }
 
     private HairDeckResult Run(IBackend backend, Tensor dino, Tensor? colorImage, Tensor? colorMatte, int seed, int steps, float cfg,
-        bool withChains, Tensor? cardNoise, Tensor? chainNoise)
+        bool withChains, Tensor? cardNoise, Tensor? chainNoise, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(backend);
@@ -164,7 +165,7 @@ public sealed unsafe class HairDeckCore : IDisposable
         Tensor? ownCardNoise = cardNoise is null ? HairDeckNoise.Create(seed, CardSlots, CardDim) : null;
         try
         {
-            using Tensor x = SampleCardTokens(backend, dino, cardNoise ?? ownCardNoise!, steps, cfg);
+            using Tensor x = SampleCardTokens(backend, dino, cardNoise ?? ownCardNoise!, steps, cfg, cancel);
             List<PendingCard> pending = DecodeCards(backend, x);
             if (pending.Count == 0)
                 return new HairDeckResult([], [], seed);
@@ -175,7 +176,7 @@ public sealed unsafe class HairDeckCore : IDisposable
                 return new HairDeckResult(BuildCards(pending, null), [], seed);
 
             float[]?[]? colors = wantColor ? PredictColors(backend, dino, colorImage!, colorMatte!, x, pending) : null;
-            IReadOnlyList<DecodedChain> chains = wantChains ? SampleChains(backend, x, seed, chainNoise) : [];
+            IReadOnlyList<DecodedChain> chains = wantChains ? SampleChains(backend, x, seed, chainNoise, cancel) : [];
             return new HairDeckResult(BuildCards(pending, colors), chains, seed);
         }
         finally
@@ -218,14 +219,15 @@ public sealed unsafe class HairDeckCore : IDisposable
         return colors;
     }
 
-    private IReadOnlyList<DecodedChain> SampleChains(IBackend backend, Tensor x, int seed, Tensor? chainNoise)
+    private IReadOnlyList<DecodedChain> SampleChains(IBackend backend, Tensor x, int seed, Tensor? chainNoise, CancellationToken cancel)
     {
         Tensor? ownNoise = chainNoise is null ? HairDeckNoise.Create(seed, ChainSlots, ChainDim) : null;
         try
         {
             using Tensor clean = _tokenizer.Clean(x);
             using Tensor context = _chain!.EncodeContext(backend, clean);
-            using Tensor xc = HairDeckEulerSampler.Sample(backend, _chain.Core, context, chainNoise ?? ownNoise!, ChainSteps, ChainGuidance);
+            cancel.ThrowIfCancellationRequested();
+            using Tensor xc = HairDeckEulerSampler.Sample(backend, _chain.Core, context, chainNoise ?? ownNoise!, ChainSteps, ChainGuidance, cancel);
             return HairDeckChainDecoder.Decode(xc, _chainMu, _chainSd);
         }
         finally

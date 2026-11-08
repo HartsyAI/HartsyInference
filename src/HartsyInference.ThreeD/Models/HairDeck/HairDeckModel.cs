@@ -1,3 +1,4 @@
+using System.Threading;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -42,11 +43,15 @@ public sealed class HairDeckModel : IDisposable
     /// path itself (a folder) or from the nearest parent of a file. The catalog's primary asset is a checkpoint inside that folder
     /// (<c>ckpt/image_model/model.safetensors</c>), so its own folder is not the model root.</summary>
     /// <returns>The model folder, or the path's own folder when no <c>config.json</c> is above it (the load then reports what is missing).</returns>
+    private const int MaxLevelsUp = 4;
+
     public static string ResolveModelRoot(string localPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(localPath);
         string start = Directory.Exists(localPath) ? localPath : Path.GetDirectoryName(Path.GetFullPath(localPath))!;
-        for (DirectoryInfo? dir = new(start); dir is not null; dir = dir.Parent)
+        // The checkpoint sits at most a few levels below the model folder (ckpt/image_model/...); a higher config.json belongs to some other model.
+        DirectoryInfo? dir = new(start);
+        for (int level = 0; dir is not null && level <= MaxLevelsUp; level++, dir = dir.Parent)
         {
             if (File.Exists(Path.Combine(dir.FullName, "config.json")))
             {
@@ -88,7 +93,7 @@ public sealed class HairDeckModel : IDisposable
     /// <summary>Generates one hairstyle for <paramref name="input"/>: the DINOv3 tokens of the crop, then the image model, the
     /// colour model when <see cref="HairDeckOptions.Colors"/> is set and the chain model when <see cref="HairDeckOptions.Chains"/> is set.</summary>
     /// <exception cref="InvalidOperationException">A requested component is not loaded; no partial result is returned.</exception>
-    public HairDeckResult Generate(HairDeckInput input, HairDeckOptions options)
+    public HairDeckResult Generate(HairDeckInput input, HairDeckOptions options, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(input);
@@ -104,7 +109,7 @@ public sealed class HairDeckModel : IDisposable
         using Tensor? colorImage = options.Colors ? ColorImage(input.Rgb448) : null;
         using Tensor? colorMatte = options.Colors ? ColorMatte(input.Matte448) : null;
         return _core.Generate(_backend, dino, colorImage, colorMatte, (int)options.Seed,
-            options.Steps, (float)options.Cfg, options.Chains);
+            options.Steps, (float)options.Cfg, options.Chains, cancel: cancel);
     }
 
     /// <summary>DINOv3 tokens <c>[789, 1024]</c> of the crop. The reference feeds uint8 and the encoder applies the ImageNet
