@@ -46,9 +46,9 @@ public static class NormModulateContract
         RequireVector(call.Weight, width, "weight");
         RequireVector(call.Bias, width, "bias");
         ModulationSpec mod = call.Modulation;
-        // An elementwise call may update its input in place: every element is read before it is written. Every call, modulated or not,
-        // runs this check before it returns: an unmodulated norm writes rows it may not have read yet just as a modulated one does.
-        bool inPlace = call.Kind == NormKind.None && ReferenceEquals(call.Input, call.Output);
+        // A call may update its input in place: each row reads its own elements before it writes them, so an exact alias is safe.
+        // A partial overlap is not, because a row can write elements another row still has to read. Every call runs this check.
+        bool inPlace = ReferenceEquals(call.Input, call.Output);
         foreach (Tensor? operand in new[] { call.Input, call.Weight, call.Bias, mod.Scale, mod.Shift, mod.RowIndex })
         {
             if (operand is null || (inPlace && ReferenceEquals(operand, call.Input))) continue;
