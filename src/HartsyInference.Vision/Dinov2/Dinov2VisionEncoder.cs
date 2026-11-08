@@ -30,6 +30,9 @@ public sealed unsafe class Dinov2VisionEncoder
 
     public Dinov2VisionEncoder(Dinov2Preset preset)
     {
+        ArgumentNullException.ThrowIfNull(preset);
+        if (preset.UsesRotaryPositionEmbedding)
+            throw new ArgumentException("DINOv3 presets use RoPE and key names this encoder does not read; use Dinov3VisionEncoder.", nameof(preset));
         _preset = preset;
         _layers = new Dinov2Layer[preset.NumLayers];
         for (int i = 0; i < preset.NumLayers; i++)

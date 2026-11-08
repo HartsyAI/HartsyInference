@@ -52,11 +52,11 @@ Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.
 | Model | Status | Notes |
 |---|---|---|
 | **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ✅ x4plus / ⚠️ x2plus, anime-6B | x4plus matches BasicSR on real weights (2026-11-03, CPU: network max \|Δ\| 1.7e-6, every output byte identical, untiled). Seeded x4 and x2 fixtures pin the network, the x2 reflect pad and unshuffle in the CPU lane. x2plus and anime-6B have only the 2026-09-09 real-weight CPU smoke (expected sizes, sharper than bilinear); tiled output is not compared. ([details](#real-esrgan)) |
+| **DINOv3 ViT-L/16** (448 px encoder: RoPE, 4 storage tokens, LayerScale, GELU MLP) | 🔬 encoder only | Real-weight encoder parity on the pinned `facebook/dinov3-vitl16-pretrain-lvd1689m` (2026-11-07, CPU FP32): peak-relative error ≤1.4e-6 at every stage (final norm: max abs 2.2e-5, rms 5.6e-7). No consumer in this change (HairDeck conditioning and GPU paths are not built). ViT-S/B are config-only. Weights are under the DINOv3 License (Meta, custom; not MIT or Apache). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 
 ## Deferred (❌)
 
-**DINOv3** (needs encoder RoPE support — preset added but dimensionally-only), **EVA-CLIP** (EVA-02 vision
-tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), AM-RADIO.
+**EVA-CLIP** (EVA-02 vision tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), AM-RADIO.
 *(Done 2026-07-17, moved out of deferred: YOLO-seg head validated; SigLIP 2 + MetaCLIP presets are drop-ins;
 GPU-native MaxPool2D + depthwise-Conv kernels shipped with CUDA PTX + GPU-parity gate.)*
 See the [Remaining work](#remaining-work) section for the stretch list. **Segmentation ControlNet
@@ -77,7 +77,7 @@ Grounding DINO, YOLO-Face, YOLO-seg, SigLIP 2) are omitted.
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
 
 ### Deferred stretch models
-- [ ] DINOv3 (encoder RoPE support).
+- [x] DINOv3 ViT-L/16 encoder with RoPE at 448 px (encoder parity in the table above; consumers still open).
 - [ ] EVA-CLIP / EVA-02 vision tower (RoPE + SwiGLU + sub-LN).
 - [ ] AM-RADIO; MetaCLIP presets already exist (recorded above).
 
