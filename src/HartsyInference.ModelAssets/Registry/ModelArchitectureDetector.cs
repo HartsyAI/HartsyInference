@@ -82,11 +82,14 @@ public static class ModelArchitectureDetector
             k.HasPrefixAfterOptional("model.", "single_layers.")),
 
         // ── Z-Image (NextDiT) ────────────────────────────────────────────
-        // Both refiner stacks are unique to Z-Image's NextDiT. Zeta-Chroma shares them but adds a dec_net pixel head,
-        // so it is excluded here rather than matched as Z-Image.
+        // The refiner stacks alone are shared with Lumina-Image-2.0 (NextDiT) and Zeta-Chroma (which adds a dec_net
+        // head). Z-Image's own markers are its learned padding tokens and its t_embedder MLP, which Lumina replaces
+        // with time_caption_embed.*.
         (ModelArchitecture.ZImage, k =>
             k.HasPrefixAfterOptional("model.diffusion_model.", "noise_refiner.") &&
             k.HasPrefixAfterOptional("model.diffusion_model.", "context_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "cap_pad_token") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "t_embedder.mlp.0.weight") &&
             !k.HasPrefixAfterOptional("model.diffusion_model.", "dec_net.")),
     ];
 
