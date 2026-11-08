@@ -140,8 +140,13 @@ streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCH
 
 - ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
 - ✅ Vision tower with deepstack merger: relative parity 2.7e-6 against a numpy transcription on the real weights (grid 1×16×24).
-- ❌ Cross-attention query RoPE, text decoder wiring, tokenizer/processor.
-- ❌ Generation, realtime session loop, CUDA/Vulkan kernels, parity dumps. No real generation has run.
+- ✅ Cross-attention query and key RoPE and the row mask, as an optional `MultimodalRope` (mllama default unchanged).
+- ✅ Text decoder body (`Models/MossVl/MossVlTextDecoder`): headless `GenericTransformer` over `model.language_model.*`, the
+  token embedding, the separator, and the single-image positions with interleaved M-RoPE (`MossVlPositions`).
+- ✅ Text parity on the real weights, layers 0–2 (self, self, gated cross): the cross layer's own delta matches the numpy
+  transcription at relative 5e-7. The gates are about 1e-2, so the delta is checked directly; a missing query rotation fails it.
+- ❌ Multi-image cross-attention masks (refused with an error), tokenizer/processor, `lm_head` and logits.
+- ❌ Generation, realtime session loop, CUDA/Vulkan kernels, the full 48-layer parity. No real generation has run.
 
 ## Remaining work
 

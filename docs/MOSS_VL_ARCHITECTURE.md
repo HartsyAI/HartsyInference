@@ -85,5 +85,12 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
   Parity against `tests/python-reference/dump_moss_vl_vision.py` on the real weights, grid 1×16×24:
   max|diff| 7.5e-4 on max|ref| 279, relative 2.7e-6 (`MossVlVisionParityTests`, `HARTSY_MOSS_VL_INDEX` +
   `HARTSY_MOSS_VL_REF`). The reference is a numpy transcription of `modeling_moss_vl.py`, not the official code executed.
-- Not built: cross-attention query RoPE, text decoder wiring, tokenizer/processor, generation, realtime loop, CUDA and
-  Vulkan kernels. No real generation has run.
+- Cross-attention RoPE: `MllamaCrossAttentionLayer.Forward` takes an optional `MultimodalRope` (text cos/sin for the queries,
+  vision cos/sin for the keys, and a per-row mask). `GenericTransformer.ForwardEmbeds` takes the same tables; null keeps the mllama path.
+- Text decoder: `src/HartsyInference.LLM/Models/MossVl/MossVlTextDecoder.cs` (headless body, embedding, separator) and
+  `MossVlPositions.cs` (single-image positions per `compute_position_ids` and `compute_vision_position_ids`, interleaved M-RoPE).
+  Parity: `tests/python-reference/dump_moss_vl_text.py` against `MossVlTextParityTests` (layers 0–2, real weights). The cross
+  layer's delta matches at relative 5e-7. The checkpoint's gates are about 1e-2, so the full hidden state alone would not catch a
+  cross-attention error; the test checks the delta.
+- Not built: multi-image cross-attention masks (refused), tokenizer/processor, `lm_head` and logits, generation, realtime loop,
+  CUDA and Vulkan kernels. No real generation has run.

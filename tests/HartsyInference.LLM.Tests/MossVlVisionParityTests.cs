@@ -1,5 +1,3 @@
-using System.Text;
-using System.Text.RegularExpressions;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -26,8 +24,8 @@ public sealed class MossVlVisionParityTests
         string mergedPath = Environment.GetEnvironmentVariable(ReferenceVariable)!;
         string referenceDir = Path.GetDirectoryName(mergedPath)!;
 
-        (long[] patchShape, float[] patchData) = ReadNpy(Path.Combine(referenceDir, "patches.npy"));
-        (long[] refShape, float[] refData) = ReadNpy(mergedPath);
+        (long[] patchShape, float[] patchData) = NpyReader.ReadFloat32(Path.Combine(referenceDir, "patches.npy"));
+        (long[] refShape, float[] refData) = NpyReader.ReadFloat32(mergedPath);
         Assert.Equal(2, patchShape.Length);
         Assert.Equal(2, refShape.Length);
 
@@ -61,23 +59,4 @@ public sealed class MossVlVisionParityTests
         }
     }
 
-    /// <summary>Reads a little-endian float32 <c>.npy</c> (version 1 or 2 header, C order).</summary>
-    private static (long[] shape, float[] data) ReadNpy(string path)
-    {
-        byte[] bytes = File.ReadAllBytes(path);
-        int headerLength = bytes[8] | (bytes[9] << 8);
-        int dataOffset = 10 + headerLength;
-        string header = Encoding.ASCII.GetString(bytes, 10, headerLength);
-        Assert.Contains("'<f4'", header);
-        Assert.Contains("'fortran_order': False", header);
-
-        Match shapeMatch = Regex.Match(header, @"'shape':\s*\(([^)]*)\)");
-        long[] shape = shapeMatch.Groups[1].Value
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(long.Parse).ToArray();
-
-        float[] data = new float[(bytes.Length - dataOffset) / sizeof(float)];
-        Buffer.BlockCopy(bytes, dataOffset, data, 0, data.Length * sizeof(float));
-        return (shape, data);
-    }
 }

@@ -54,7 +54,8 @@ public sealed unsafe class MllamaCrossAttentionLayer
     }
 
     /// <summary>Cross-attention + gated FFN: <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query), <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features); returns <c>[1, t, hidden]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen)
+    /// <param name="rope">Optional MOSS-VL tables: the query rows are rotated by <see cref="MultimodalRope.TextCos"/>, the key rows by the vision tables, and rows with a 0 <see cref="MultimodalRope.RowMask"/> contribute nothing. Null (the mllama default) applies no rotation and no row mask.</param>
+    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen, MultimodalRope? rope = null)
     {
         int hq = _numHeads, hkv = _numKvHeads, d = _headDim;
         TensorShape flat = new(1, t, _hidden);
@@ -69,12 +70,14 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
         backend.RmsNorm(qN, q, _qNorm, _rmsEps);   // q-norm over the head dim
         q.Dispose();
+        if (rope is not null) backend.ApplyRopeSingle(qN, rope.TextCos, rope.TextSin);
 
         Tensor k = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: _lowVram);
         Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         backend.RmsNorm(kN, k, _kNorm, _rmsEps);
         k.Dispose();
+        if (rope is not null) backend.ApplyRopeSingle(kN, rope.VisionCos, rope.VisionSin);
         Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
 
@@ -90,6 +93,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor attnOut = new(flat, DType.F32);
         GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
         attnFlat.Dispose();
+        attnOut = ApplyRowMask(backend, attnOut, rope);
 
         // Gated residual: text + tanh(attn_gate) · attnOut.
         Tensor h = new(flat, DType.F32);
@@ -100,13 +104,23 @@ public sealed unsafe class MllamaCrossAttentionLayer
         // --- Gated FFN ---
         Tensor postNorm = new(flat, DType.F32);
         backend.RmsNorm(postNorm, h, _postAttnNorm, _rmsEps);
-        Tensor mlp = SwiGlu(backend, postNorm, t);
+        Tensor mlp = ApplyRowMask(backend, SwiGlu(backend, postNorm, t), rope);
         postNorm.Dispose();
         backend.Scale(mlp, mlp, MathF.Tanh(_mlpGate));
         Tensor outp = new(flat, DType.F32);
         backend.Add(outp, h, mlp);
         h.Dispose(); mlp.Dispose();
         return outp;
+    }
+
+    /// <summary>Returns <paramref name="x"/> with each row scaled by the rope's row mask, disposing <paramref name="x"/>; returns it unchanged when there is no mask.</summary>
+    private static Tensor ApplyRowMask(IBackend backend, Tensor x, MultimodalRope? rope)
+    {
+        if (rope?.RowMask is null) return x;
+        Tensor masked = new(x.Shape, DType.F32);
+        backend.MaskRows(masked, x, rope.RowMask);
+        x.Dispose();
+        return masked;
     }
 
     private Tensor SwiGlu(IBackend backend, Tensor x, int t)
