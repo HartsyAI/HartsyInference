@@ -117,11 +117,12 @@ public sealed class Sam3DotProductScorer
         Tensor hsProj = new Tensor(new TensorShape(1, numQueries, _channels), DType.F32);
         backend.Linear(hsProj, queryHidden, _hsProjWeight, _hsProjBias);
 
-        Tensor logits = new Tensor(new TensorShape(1, numQueries), DType.F32);
-        backend.BatchedMatMul(logits.Reshape(new TensorShape(1, numQueries, 1)), hsProj,
-            pooledProj.Reshape(new TensorShape(1, _channels, 1)));
+        // The GEMM writes an owned [1,Q,1] result; the [1,Q] view is taken afterwards, so Scale and Clamp read the computed scores.
+        Tensor logits3 = new Tensor(new TensorShape(1, numQueries, 1), DType.F32);
+        backend.BatchedMatMul(logits3, hsProj, pooledProj.Reshape(new TensorShape(1, _channels, 1)));
         hsProj.Dispose();
         pooledProj.Dispose();
+        Tensor logits = logits3.Reshape(new TensorShape(1, numQueries));
 
         backend.Scale(logits, logits, _scale);
         backend.Clamp(logits, logits, -_clamp, _clamp);

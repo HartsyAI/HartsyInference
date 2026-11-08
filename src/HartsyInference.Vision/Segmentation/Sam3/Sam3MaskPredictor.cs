@@ -55,12 +55,12 @@ public sealed class Sam3MaskPredictor
         Tensor flatQueries = queries.Reshape(new TensorShape(numQueries, _channels));
         Tensor embeds = _maskEmbed.Forward(backend, flatQueries);
 
-        Tensor output = new Tensor(new TensorShape(1, numQueries, height, width), DType.F32);
-        Tensor outputFlat = output.Reshape(new TensorShape(1, numQueries, pixels));
+        // The GEMM writes an owned flat result; the 4D view is taken afterwards, and Reshape reads the result first.
+        Tensor outputFlat = new Tensor(new TensorShape(1, numQueries, pixels), DType.F32);
         Tensor embedsBatched = embeds.Reshape(new TensorShape(1, numQueries, _channels));
         Tensor pixelsBatched = pixelEmbed.Reshape(new TensorShape(1, _channels, pixels));
         backend.BatchedMatMul(outputFlat, embedsBatched, pixelsBatched);
         embeds.Dispose();
-        return output;
+        return outputFlat.Reshape(new TensorShape(1, numQueries, height, width));
     }
 }

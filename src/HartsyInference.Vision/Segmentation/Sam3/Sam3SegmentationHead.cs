@@ -73,7 +73,7 @@ public sealed class Sam3SegmentationHead
         memoryTokens.Dispose();
 
         Tensor coarse = new Tensor(new TensorShape(1, c, grid, grid), DType.F32);
-        backend.Transpose2D(coarse.Reshape(new TensorShape(1, c, tokens)), fusedTokens, tokens, c);
+        backend.Transpose2D(coarse, fusedTokens, tokens, c);
         fusedTokens.Dispose();
 
         Tensor[] levels = [vision.Features[0], vision.Features[1], coarse];

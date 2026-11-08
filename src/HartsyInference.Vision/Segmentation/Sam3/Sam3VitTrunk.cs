@@ -93,7 +93,8 @@ public sealed class Sam3VitTrunk
         }
 
         Tensor features = new Tensor(new TensorShape(1, _dim, _grid, _grid), DType.F32);
-        backend.Transpose2D(features.Reshape(new TensorShape(1, _dim, _tokens)), state, _tokens, _dim);
+        // Write into the owned output: a backend op that writes through a reshape view leaves the parent's device result unread.
+        backend.Transpose2D(features, state, _tokens, _dim);
         state.Dispose();
         return features;
     }
