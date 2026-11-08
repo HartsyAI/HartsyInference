@@ -53,6 +53,18 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         SigmaShift = 3.0,
     };
 
+    /// <summary>NitroFusion2's official sampling settings: one guidance-free step at 1024x1024 with shift 6 (the upstream
+    /// flow-match config). Two steps run through the same recipe without the optional de-distillation LoRA, which the
+    /// model card recommends for two-step use.</summary>
+    public static ImageDefaults NitroFusion2Defaults { get; } = new ImageDefaults
+    {
+        Steps = 1,
+        CfgScale = 1.0f,
+        Width = 1024,
+        Height = 1024,
+        SigmaShift = 6.0,
+    };
+
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
 
@@ -61,7 +73,9 @@ public sealed class ZImageRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
-        variant is not null && !variant.Is(ZImageVariants.Turbo) ? BaseDefaults : FamilyDefaults;
+        variant is null || variant.Is(ZImageVariants.Turbo) ? FamilyDefaults
+        : variant.Is(ZImageVariants.NitroFusion2) ? NitroFusion2Defaults
+        : BaseDefaults;
 
     /// <inheritdoc/>
     /// <inheritdoc/>
@@ -102,6 +116,8 @@ public sealed class ZImageRecipe : IArchitectureRecipe
             checkpoint = new CompositeDisposable(source, prepared);
 
             ResolvedModelVariant variant = context.ResolveVariant(ZImageVariants.Catalog);
+            // Anything that is not Turbo takes the Base policy: F32 attention and shift 6. NitroFusion2 relies on this,
+            // since its F16 behaviour is unvalidated.
             bool isBase = !variant.Is(ZImageVariants.Turbo);
             if (variant.Source == ModelVariantSource.Default)
             {
