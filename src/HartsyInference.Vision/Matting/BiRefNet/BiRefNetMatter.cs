@@ -59,15 +59,16 @@ public sealed class BiRefNetMatter : IDisposable
     {
         const int plane = InputSize * InputSize;
         float* lp = (float*)logits.DataPointer;
-        float[] quantized = new float[plane];
+        byte[] quantized = new byte[plane];
         for (int i = 0; i < plane; i++)
         {
             float prob = 1f / (1f + MathF.Exp(-lp[i]));
-            quantized[i] = MathF.Floor(prob * 255f);
+            quantized[i] = (byte)MathF.Floor(prob * 255f);
         }
 
+        // Shared PIL-style resize: quantizeU8 rounds and clamps each separable pass, as PIL's 8-bit intermediate does.
         float[] matte = new float[(long)width * height];
-        Resample.BicubicPlane(quantized, InputSize, InputSize, matte, width, height, a: -0.5f, antialias: true);
+        Resample.BicubicHwc8(quantized, InputSize, InputSize, 1, matte, width, height, a: -0.5f, antialias: true, quantizeU8: true);
         for (int i = 0; i < matte.Length; i++)
             matte[i] = Math.Clamp(MathF.Round(matte[i]), 0f, 255f) / 255f;
         return matte;
