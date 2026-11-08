@@ -27,6 +27,13 @@ public static class GatingCases
     /// <summary>sigmoid, tanh, erf and exp follow each backend's math library (CUDA's fast-math intrinsics on the device).</summary>
     private static readonly Acceptance Transcendental = Acceptance.Within(1e-5, 1e-4, "the activation's exp, tanh or erf follows each backend's math library");
 
+    /// <summary>The replaced F16 <c>[gate | up]</c> entry had no Vulkan kernel: its host default sliced the F16 halves through the F32 slice
+    /// shader, so the bytes it recorded there are not a reference; the F16 shader is judged against the host reference at one F16 step.</summary>
+    private static readonly Acceptance GluF16Host = Acceptance.AgainstHost(2e-3, 1e-2, "the replaced entry's Vulkan F16 path sliced F16 halves through an F32 shader; the F16 output is judged against the reference");
+
+    /// <summary>The accumulate contracts the gate multiply-add into an FMA on a device where the replaced entry ran a host loop.</summary>
+    private static readonly Acceptance Fma = Acceptance.Within(1e-6, 1e-5, "the gate multiply-add contracts into an FMA where the replaced entry ran a host loop");
+
     /// <summary>A GEMM reduces in a backend-specific order before the epilogue.</summary>
     private static readonly Acceptance Gemm = Acceptance.Within(2e-5, 1e-4, "the GEMM reduction order differs per backend");
 
@@ -38,9 +45,9 @@ public static class GatingCases
         foreach ((string suffix, DType dtype, Func<IBackend, bool> serves, string[] required) in Activations(bf16: true))
         {
             cases.Add(new(Family, "glu_silu_first_" + suffix, seed => new Operands(seed, dtype).In("gateUp", new TensorShape(1, 3, 16)).Out("out", new TensorShape(1, 3, 8)).Tensors,
-                (be, t) => be.Glu(t.Outputs["out"], t.Inputs["gateUp"], GluSpec.SwiGlu), serves, required, Transcendental));
+                (be, t) => be.Glu(t.Outputs["out"], t.Inputs["gateUp"], GluSpec.SwiGlu), serves, required, dtype == DType.F16 ? GluF16Host : Transcendental));
             cases.Add(new(Family, "glu_gelu_first_" + suffix, seed => new Operands(seed, dtype).In("gateUp", new TensorShape(1, 3, 16)).Out("out", new TensorShape(1, 3, 8)).Tensors,
-                (be, t) => be.Glu(t.Outputs["out"], t.Inputs["gateUp"], GluSpec.GeGluFirst), serves, required, Transcendental));
+                (be, t) => be.Glu(t.Outputs["out"], t.Inputs["gateUp"], GluSpec.GeGluFirst), serves, required, dtype == DType.F16 ? GluF16Host : Transcendental));
             // GEGLU over [value | gate] with the tanh GELU.
             cases.Add(new(Family, "geglu_tanh_second_" + suffix, seed => new Operands(seed, dtype).In("x", new TensorShape(2, 3, 8)).Out("out", new TensorShape(2, 3, 4)).Tensors,
                 (be, t) => be.Glu(t.Outputs["out"], t.Inputs["x"], GluSpec.GeGlu), serves, required, Transcendental));
@@ -70,7 +77,7 @@ public static class GatingCases
             (be, t) => { Prime(t, "x"); be.GroupScale(t.Outputs["x"], t.Outputs["x"], t.Inputs["logits"], GroupScaleSpec.PerGroup(8, 2, GateFunction.TwoSigmoid)); }, be => be.Device.IsCuda, Cuda, Transcendental));
         // MoE gated accumulate, in place: out += gate[row, expert] · value over a dense [rows, experts] gate table with zeros.
         cases.Add(new(Family, "row_gated_accumulate_f32", seed => new Operands(seed).InPlace("acc", new TensorShape(1, 3, 8)).In("value", new TensorShape(1, 3, 8)).Gates("gate", 3, 4).Tensors,
-            (be, t) => { Prime(t, "acc"); be.GroupScale(t.Outputs["acc"], t.Inputs["value"], t.Inputs["gate"], GroupScaleSpec.Column(4, 1, accumulate: true)); }, _ => true, All, Exact));
+            (be, t) => { Prime(t, "acc"); be.GroupScale(t.Outputs["acc"], t.Inputs["value"], t.Inputs["gate"], GroupScaleSpec.Column(4, 1, accumulate: true)); }, _ => true, All, Fma));
 
         // Fused linear epilogues: GELU after the projection; the doubled-sigmoid head gate before it. The replaced entry gated the input in
         // place, so the recorded "x" output is the input as it was left; the fused call scales a copy and leaves "x" at its primed value,

@@ -37,8 +37,7 @@ public sealed unsafe class CausalConv3d
     private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
     private readonly Tensor _weight5d;    // [cOut, cIn, kt, kh, kw] in the compute dtype — what a native 3-D conv reads
     private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw] — the per-tap path (and convs a native op declines)
-    private readonly Tensor? _bias;
-    private readonly Tensor? _biasCompute;  // _bias in the compute dtype: what the batched path broadcasts into its output
+    private readonly Tensor? _bias;         // F32 in every compute dtype: a BF16 output rounds the sum once
     private readonly Tensor _zero;          // one zero in the compute dtype, broadcast when there is no bias
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
@@ -66,7 +65,6 @@ public sealed unsafe class CausalConv3d
         _padTLeft = causal ? 2 * padT : padT;     // non-causal splits the temporal pad symmetrically
         _padTRight = causal ? 0 : padT;
         _bias = bias is null ? null : (bias.DType == DType.F32 ? bias : bias.CastTo(DType.F32));
-        _biasCompute = _bias is null ? null : (_computeDtype == DType.F32 ? _bias : _bias.CastTo(_computeDtype));
         _zero = new Tensor(new TensorShape(1), _computeDtype);
         _zero.AsSpan<byte>().Clear();
         _weight5d = weight5d.CastTo(_computeDtype);   // an owned copy either way
@@ -274,14 +272,21 @@ public sealed unsafe class CausalConv3d
     /// <summary>Starts the batched conv output as its per-channel bias (or zero) broadcast over every position, on the device.</summary>
     private void FillBias(IBackend backend, Tensor fastOut)
     {
-        if (_biasCompute is null)
-        {
-            StridedCopies.FillFrom(backend, fastOut, _zero);
-            return;
-        }
         Span<long> dims = stackalloc long[5];
         fastOut.Shape.CopyDimsTo(dims);
-        backend.CopyStrided(fastOut, _biasCompute, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
+        if (_bias is null)
+        {
+            backend.CopyStrided(fastOut, _zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+            return;
+        }
+        if (_computeDtype == DType.F32)
+        {
+            backend.CopyStrided(fastOut, _bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
+            return;
+        }
+        // A BF16 output starts from zero and adds the F32 bias, so the bias is rounded once, not cast first.
+        backend.CopyStrided(fastOut, _zero, StridedCopySpec.Gather(new StridedView(dims, stackalloc long[5])));
+        backend.AccumulateStrided(fastOut, _bias, StridedCopySpec.Gather(StridedView.VectorAlong(dims, 1)));
     }
 
 
