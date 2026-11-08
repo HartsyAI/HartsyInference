@@ -80,6 +80,14 @@ public static class ModelArchitectureDetector
         (ModelArchitecture.AuraFlow, k =>
             k.HasPrefixAfterOptional("model.", "double_layers.") &&
             k.HasPrefixAfterOptional("model.", "single_layers.")),
+
+        // ── Z-Image (NextDiT) ────────────────────────────────────────────
+        // Both refiner stacks are unique to Z-Image's NextDiT. Zeta-Chroma shares them but adds a dec_net pixel head,
+        // so it is excluded here rather than matched as Z-Image.
+        (ModelArchitecture.ZImage, k =>
+            k.HasPrefixAfterOptional("model.diffusion_model.", "noise_refiner.") &&
+            k.HasPrefixAfterOptional("model.diffusion_model.", "context_refiner.") &&
+            !k.HasPrefixAfterOptional("model.diffusion_model.", "dec_net.")),
     ];
 
     /// <summary>Detects the architecture from a set of tensor keys.</summary>
