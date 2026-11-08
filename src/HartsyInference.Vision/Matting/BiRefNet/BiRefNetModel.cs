@@ -5,12 +5,10 @@ namespace HartsyInference.Vision.Matting.BiRefNet;
 
 /// <summary>The BiRefNet matting network in eval mode (Swin-L encoder, squeeze block, decoder). The encoder runs twice:
 /// once on the image and once on its half-resolution copy, and each stage pair is concatenated on channels (the
-/// upstream <c>mul_scl_ipt='cat'</c>). The three shallower stages are then resized to the 1/32 map and prepended to it
+/// upstream <c>mul_scl_ipt='cat'</c>). The three shallower stages are then resized to the deepest map and prepended to it
 /// (<c>cxt_num=3</c>) before the squeeze block. Output is the raw logit map; the caller applies the sigmoid.</summary>
 internal sealed class BiRefNetModel : IDisposable
 {
-    private const int SqueezeGrid = 32;
-
     private readonly BiRefNetSwinBackbone _backbone = new();
     private readonly BiRefNetBasicDecBlk _squeeze = new();
     private readonly BiRefNetDecoder _decoder = new();
@@ -46,10 +44,11 @@ internal sealed class BiRefNetModel : IDisposable
             up.Dispose(); full[s].Dispose(); small[s].Dispose();
         }
 
-        Tensor c1 = BiRefNetOps.Resize(backend, stages[0], SqueezeGrid, SqueezeGrid);
-        Tensor c2 = BiRefNetOps.Resize(backend, stages[1], SqueezeGrid, SqueezeGrid);
-        Tensor c3 = BiRefNetOps.Resize(backend, stages[2], SqueezeGrid, SqueezeGrid);
         Tensor deepest = stages[3];
+        int gridH = (int)deepest.Shape[2], gridW = (int)deepest.Shape[3];
+        Tensor c1 = BiRefNetOps.Resize(backend, stages[0], gridH, gridW);
+        Tensor c2 = BiRefNetOps.Resize(backend, stages[1], gridH, gridW);
+        Tensor c3 = BiRefNetOps.Resize(backend, stages[2], gridH, gridW);
         Tensor context = BiRefNetOps.Concat(backend, c1, c2, c3, deepest);
         c1.Dispose(); c2.Dispose(); c3.Dispose(); deepest.Dispose();
 
