@@ -232,6 +232,7 @@ public static class HairDeckRig
                 WriteQuaternion(headR, (f + 1) * 4, Matrix(motion.Rotations, f * 9));
             }
 
+            KeepQuaternionsContinuous(headR);
             channels.Add(new HairGlbChannel(headT, headR));
 
             // Bones: the simulated head position and rest-to-current rotation of each segment.
@@ -252,6 +253,7 @@ public static class HairDeckRig
                         WriteQuaternion(r, (f + 1) * 4, Matrix(state.Rotations, at * 9));
                     }
 
+                    KeepQuaternionsContinuous(r);
                     channels.Add(new HairGlbChannel(t, r));
                 }
             }
@@ -392,6 +394,28 @@ public static class HairDeckRig
     }
 
     /// <summary>Writes the quaternion (x, y, z, w) of a row-major rotation matrix, normalised.</summary>
+    /// <summary>Flips a key frame's quaternion to the hemisphere of the previous one (q and -q are the same rotation, but linear
+    /// resampling between opposite signs takes the long way), so a clip stays continuous on every importer.</summary>
+    private static void KeepQuaternionsContinuous(float[] quaternions)
+    {
+        for (int f = 1; f < quaternions.Length / 4; f++)
+        {
+            double dot = 0;
+            for (int i = 0; i < 4; i++)
+            {
+                dot += quaternions[4 * f + i] * quaternions[4 * (f - 1) + i];
+            }
+
+            if (dot < 0)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    quaternions[4 * f + i] = -quaternions[4 * f + i];
+                }
+            }
+        }
+    }
+
     private static void WriteQuaternion(float[] dst, int offset, double[] m)
     {
         double trace = m[0] + m[4] + m[8];

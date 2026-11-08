@@ -138,6 +138,29 @@ public sealed class HairRigTests
     }
 
     [Fact]
+    public void Rotation_keys_stay_in_one_hemisphere_between_frames()
+    {
+        (HairRigResult result, _) = BuildSample();
+        foreach (HairGlbAnimation clip in result.Rig.Animations)
+        {
+            foreach (HairGlbChannel channel in clip.Channels)
+            {
+                float[] q = channel.Rotations;
+                for (int f = 1; f < q.Length / 4; f++)
+                {
+                    double dot = 0;
+                    for (int i = 0; i < 4; i++)
+                    {
+                        dot += q[4 * f + i] * q[4 * (f - 1) + i];
+                    }
+
+                    Assert.True(dot >= 0, $"{clip.Name}: quaternion flips sign at key frame {f}");
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void Rigged_glb_has_a_skin_and_the_four_animations()
     {
         (HairRigResult result, Mesh hair) = BuildSample();
