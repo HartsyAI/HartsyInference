@@ -58,12 +58,13 @@ internal sealed unsafe class BiRefNetDeformConv
         float* xp = (float*)x.DataPointer;
         float* offp = (float*)offset.DataPointer;
         float* modp = (float*)modulator.DataPointer;
-        float* sp = (float*)samples.DataPointer;
-        float* cop = (float*)chunkOut.DataPointer;
         float* op = (float*)output.DataPointer;
         for (int start = 0; start < positions; start += chunk)
         {
             int n = Math.Min(chunk, positions - start);
+            // Re-acquire the GEMM buffers each chunk: on CUDA, Linear leaves its result device-resident, and the host copy
+            // is synchronized only when DataPointer is read after the call.
+            float* sp = (float*)samples.DataPointer;
             for (int pi = 0; pi < chunk; pi++)
             {
                 float* row = sp + (long)pi * cols;
@@ -84,6 +85,7 @@ internal sealed unsafe class BiRefNetDeformConv
                 }
             }
             backend.Linear(chunkOut, samples, weight2d, _regularB);
+            float* cop = (float*)chunkOut.DataPointer;
             for (int pi = 0; pi < n; pi++)
                 for (int oc = 0; oc < outChannels; oc++)
                     op[(long)oc * positions + start + pi] = cop[(long)pi * outChannels + oc];

@@ -33,10 +33,11 @@ internal sealed unsafe class BiRefNetAspp
     public Tensor Forward(IBackend backend, Tensor x)
     {
         int h = (int)x.Shape[2], w = (int)x.Shape[3];
-        Tensor a1 = BiRefNetOps.Relu(backend, _aspp1.Forward(backend, x));
-        Tensor d0 = BiRefNetOps.Relu(backend, _deforms[0].Forward(backend, x));
-        Tensor d1 = BiRefNetOps.Relu(backend, _deforms[1].Forward(backend, x));
-        Tensor d2 = BiRefNetOps.Relu(backend, _deforms[2].Forward(backend, x));
+        // Each pre-activation map is released as soon as its ReLU has been written.
+        Tensor a1 = ReluAndRelease(backend, _aspp1.Forward(backend, x));
+        Tensor d0 = ReluAndRelease(backend, _deforms[0].Forward(backend, x));
+        Tensor d1 = ReluAndRelease(backend, _deforms[1].Forward(backend, x));
+        Tensor d2 = ReluAndRelease(backend, _deforms[2].Forward(backend, x));
         Tensor pooled = GlobalPoolBranch(backend, x, h, w);
 
         Tensor cat = BiRefNetOps.Concat(backend, a1, d0, d1, d2, pooled);
@@ -47,6 +48,13 @@ internal sealed unsafe class BiRefNetAspp
         Tensor output = BiRefNetOps.Relu(backend, projected);
         projected.Dispose();
         return output;
+    }
+
+    private static Tensor ReluAndRelease(IBackend backend, Tensor preActivation)
+    {
+        Tensor activated = BiRefNetOps.Relu(backend, preActivation);
+        preActivation.Dispose();
+        return activated;
     }
 
     /// <summary>Global-average-pool → 1×1 conv → BN → ReLU, broadcast back to <c>[1,256,H,W]</c>.
