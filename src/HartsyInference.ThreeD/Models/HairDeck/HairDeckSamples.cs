@@ -33,4 +33,11 @@ public sealed record DecodedChain(float[] Joints, int JointCount, float Stiffnes
 /// <param name="Cards">Cards in the order of their slots in the card token set.</param>
 /// <param name="Chains">Chains in the order of their slots; empty when chains were not sampled.</param>
 /// <param name="Seed">Seed of the initial noise.</param>
-public sealed record HairDeckResult(IReadOnlyList<DecodedCard> Cards, IReadOnlyList<DecodedChain> Chains, int Seed);
+public sealed record HairDeckResult(IReadOnlyList<DecodedCard> Cards, IReadOnlyList<DecodedChain> Chains, int Seed)
+{
+    /// <summary>Whether the sample has at least one hair card.</summary>
+    public bool HasCards => Cards.Count > 0;
+
+    /// <summary>Whether the sample has at least one spring chain.</summary>
+    public bool HasChains => Chains.Count > 0;
+}

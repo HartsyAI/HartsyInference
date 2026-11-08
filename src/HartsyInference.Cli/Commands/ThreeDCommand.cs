@@ -17,10 +17,30 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Path to the input PNG image.")]
         public string Image { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, or trellis.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, trellis, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, or trellis.")]
+        [Description("Model id: triposr, hunyuan3d, trellis, or hairdeck.")]
         public string Model { get; init; } = "triposr";
+
+        /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
+        [CommandOption("-n|--samples")]
+        [Description("Samples to generate (hairdeck only; this build accepts 1).")]
+        public int Samples { get; init; } = 1;
+
+        /// <summary>Rigged (VRM) output (HairDeck only; not implemented yet).</summary>
+        [CommandOption("--rigged")]
+        [Description("Rigged output (hairdeck only; not implemented yet).")]
+        public bool Rigged { get; init; }
+
+        /// <summary>Skip the colour model (HairDeck only).</summary>
+        [CommandOption("--no-colors")]
+        [Description("Skip the colour model (hairdeck only).")]
+        public bool NoColors { get; init; }
+
+        /// <summary>Skip the spring-bone chains (HairDeck only).</summary>
+        [CommandOption("--no-chains")]
+        [Description("Skip the spring-bone chains (hairdeck only).")]
+        public bool NoChains { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>
         [CommandOption("--model-path")]
@@ -64,9 +84,10 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         if (!CommandRunner.RequireNonEmpty(settings.Image, "An input image path is required.", out int exitCode))
             return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath))
+        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
+        if (spec.LocalPath is null)
         {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red].[/]");
+            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red], or download its catalog assets.[/]");
             return 1;
         }
 
@@ -74,8 +95,10 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
-
-        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
+        parameters.Put("samples", settings.Samples.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("rigged", settings.Rigged ? "true" : "false");
+        parameters.Put("no-colors", settings.NoColors ? "true" : "false");
+        parameters.Put("no-chains", settings.NoChains ? "true" : "false");
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Image, parameters, settings.Backend, settings.Quiet,

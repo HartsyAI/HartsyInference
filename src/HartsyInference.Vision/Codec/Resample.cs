@@ -69,6 +69,46 @@ public static class Resample
             BuildWeights(srcW, dstW, 1.0, TriangleKernel, antialias), BuildWeights(srcH, dstH, 1.0, TriangleKernel, antialias), quantizeU8);
     }
 
+    /// <summary>Bilinear resize of one row-major F32 plane with torch's <c>align_corners=False</c> sampling and no
+    /// antialiasing, as <c>F.interpolate(mode="bilinear")</c> computes it on CPU.</summary>
+    public static void BilinearPlaneF32(ReadOnlySpan<float> src, int srcW, int srcH, Span<float> dst, int dstW, int dstH)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels: 1);
+        (int[] x0, int[] x1, float[] xl) = BuildTorchBilinearIndices(srcW, dstW);
+        (int[] y0, int[] y1, float[] yl) = BuildTorchBilinearIndices(srcH, dstH);
+        for (int y = 0; y < dstH; y++)
+        {
+            int r0 = y0[y] * srcW, r1 = y1[y] * srcW;
+            float ly = yl[y], hy = 1f - ly;
+            for (int x = 0; x < dstW; x++)
+            {
+                float lx = xl[x], hx = 1f - lx;
+                float top = hx * src[r0 + x0[x]] + lx * src[r0 + x1[x]];
+                float bottom = hx * src[r1 + x0[x]] + lx * src[r1 + x1[x]];
+                dst[y * dstW + x] = hy * top + ly * bottom;
+            }
+        }
+    }
+
+    private static (int[] Lo, int[] Hi, float[] Lambda) BuildTorchBilinearIndices(int srcLen, int dstLen)
+    {
+        double scale = (double)srcLen / dstLen;
+        int[] lo = new int[dstLen];
+        int[] hi = new int[dstLen];
+        float[] lambda = new float[dstLen];
+        for (int i = 0; i < dstLen; i++)
+        {
+            double src = scale * (i + 0.5) - 0.5;
+            if (src < 0.0) src = 0.0;
+            int l = (int)Math.Floor(src);
+            if (l > srcLen - 1) l = srcLen - 1;
+            lo[i] = l;
+            hi[i] = l < srcLen - 1 ? l + 1 : l;
+            lambda[i] = (float)(src - l);
+        }
+        return (lo, hi, lambda);
+    }
+
     /// <summary>Separable radius-3 Lanczos resize for interleaved 8-bit pixels. The tap geometry follows PIL's
     /// half-pixel-centred resize; border taps are clipped and renormalized.</summary>
     public static void LanczosHwc8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels,

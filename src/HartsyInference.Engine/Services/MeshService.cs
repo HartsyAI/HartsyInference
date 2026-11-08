@@ -3,6 +3,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models.HairDeck;
+using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
 
@@ -11,8 +13,10 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Image-to-3D service: loads TripoSR (feed-forward), Hunyuan3D (flow-match, mesh), or TRELLIS (two-stage flow, Gaussian splat) from the spec's model directory, runs one image-to-3D pass, and returns the geometry encoded as GLB (mesh models) or binary-PLY (splat models — TRELLIS's flexicubes mesh decoder is not yet ported, so it only ever emits splats). Loaded pipelines are cached per checkpoint for the life of the service; text-to-3D has no wired pipeline yet, so a request without an image is rejected by name.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
+    private const string HairDeckId = "hairdeck";
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -28,6 +32,11 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new NotSupportedException(
                 "Text-to-3D has no wired pipeline; supply MeshRequest.Image for image-to-3D (TripoSR / Hunyuan3D).");
         }
+        if (IsHairDeck(spec))
+        {
+            return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
+        }
+        HairDeckRequestMapper.RejectForOtherModels(request, spec.Catalog?.Id ?? spec.Requested);
         return Task.Run(
             () =>
             {
@@ -58,6 +67,59 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw new InvalidOperationException("The pipeline produced no geometry (try a foreground-on-gray input).");
             },
             cancel);
+    }
+
+    private static bool IsHairDeck(ModelSpec spec) =>
+        string.Equals(spec.Catalog?.Id, HairDeckId, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>One HairDeck request: the preprocessing of the image, then the image model; the GLB carries the chains when they were made.</summary>
+    private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, CancellationToken cancel)
+    {
+        HairDeckOptions options = HairDeckRequestMapper.ToOptions(request);
+        HairDeckRuntime runtime = GetOrLoadHairDeck(spec);
+        HairDeckSourceImage source = HairDeckSourceImage.Create(request.Image!.Rgb, request.Image.Alpha, request.Image.Width, request.Image.Height);
+        HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
+        foreach (string note in prep.Notes)
+        {
+            Logs.Warning($"HairDeck: {note}");
+        }
+
+        cancel.ThrowIfCancellationRequested();
+        HairDeckResult result = runtime.Model.Generate(prep.Input, options);
+        if (!result.HasCards)
+        {
+            throw new InvalidOperationException("No hair cards were generated for this image. Try another seed or another image.");
+        }
+
+        if (options.Chains && !result.HasChains)
+        {
+            throw new InvalidOperationException("Chains were requested but the chain model produced none; no partial result is returned.");
+        }
+
+        return HairDeckGlbExport.Write(result, prep.Input.HairBaseColorSrgb, options.Chains);
+    }
+
+    /// <summary>Loads (or returns the cached) HairDeck stack for <paramref name="spec"/>: the model directory is the one holding its config.json.</summary>
+    private HairDeckRuntime GetOrLoadHairDeck(ModelSpec spec)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                "No checkpoint found for 'hairdeck'. Download the catalog assets or supply the model directory as the local path.");
+        }
+
+        string modelRoot = Directory.Exists(spec.LocalPath) ? spec.LocalPath : Path.GetDirectoryName(spec.LocalPath)!;
+        lock (_gate)
+        {
+            if (_hairDecks.TryGetValue(modelRoot, out HairDeckRuntime? cached))
+            {
+                return cached;
+            }
+
+            HairDeckRuntime runtime = HairDeckRuntime.Load(_engine.Backend, modelRoot, Path.Combine(RepoPaths.ModelsRoot(), "Vision"));
+            _hairDecks[modelRoot] = runtime;
+            return runtime;
+        }
     }
 
     /// <summary>Loads (or returns the cached) image-to-3D pipeline for <paramref name="spec"/>.</summary>
@@ -115,6 +177,11 @@ public sealed class MeshService : IMeshService, IDisposable
                 loaded.Pipeline.Dispose();
             }
             _pipelines.Clear();
+            foreach (HairDeckRuntime runtime in _hairDecks.Values)
+            {
+                runtime.Dispose();
+            }
+            _hairDecks.Clear();
         }
     }
 
