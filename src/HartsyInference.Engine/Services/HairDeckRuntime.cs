@@ -17,12 +17,14 @@ internal sealed class HairDeckRuntime : IDisposable
 
     private readonly Sam3Pipeline _segmenter;
     private readonly BiRefNetMatter _matter;
+    private readonly SafeTensorsLoader _matteWeights;
     private int _disposed;
 
-    private HairDeckRuntime(Sam3Pipeline segmenter, BiRefNetMatter matter, HairDeckModel model, IBackend backend)
+    private HairDeckRuntime(Sam3Pipeline segmenter, BiRefNetMatter matter, SafeTensorsLoader matteWeights, HairDeckModel model, IBackend backend)
     {
         _segmenter = segmenter;
         _matter = matter;
+        _matteWeights = matteWeights;
         Model = model;
         Preprocessor = new HairDeckPreprocessor(segmenter, matter, backend);
     }
@@ -43,22 +45,20 @@ internal sealed class HairDeckRuntime : IDisposable
         RequireFile(birefnetPath);
 
         Sam3Pipeline segmenter = Sam3Pipeline.Load(new Sam3Config(), sam3Path);
+        SafeTensorsLoader matteWeights = new();
         BiRefNetMatter matter = new();
         try
         {
-            using (SafeTensorsLoader weights = new())
-            {
-                weights.Load(birefnetPath);
-                matter.LoadWeights(BiRefNetCheckpointConverter.Convert(weights.GetAllTensors()));
-            }
-
+            matteWeights.Load(birefnetPath);
+            matter.LoadWeights(BiRefNetCheckpointConverter.Convert(matteWeights.GetAllTensors()));
             HairDeckModel model = HairDeckModel.Load(backend, modelRoot);
-            return new HairDeckRuntime(segmenter, matter, model, backend);
+            return new HairDeckRuntime(segmenter, matter, matteWeights, model, backend);
         }
         catch (Exception ex)
         {
             Logs.Error($"Failed to load HairDeck from {modelRoot}", ex);
             matter.Dispose();
+            matteWeights.Dispose();
             segmenter.Dispose();
             throw;
         }
@@ -74,6 +74,7 @@ internal sealed class HairDeckRuntime : IDisposable
 
         Model.Dispose();
         _matter.Dispose();
+        _matteWeights.Dispose();
         _segmenter.Dispose();
     }
 
