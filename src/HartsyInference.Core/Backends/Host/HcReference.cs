@@ -27,11 +27,18 @@ public static class HcReference
         if (bias.ElementCount != width) throw new ArgumentException($"bias must hold {width} entries.", nameof(bias));
     }
 
+    /// <summary>Refuses the split on a device whose kernel fixes <c>preEps</c> to <paramref name="eps"/> and the post multiplier to 2.</summary>
+    public static void ValidateDeviceSplit(float eps, float preEps, float postMult)
+    {
+        if (preEps != eps || postMult != 2f)
+            throw new NotSupportedException($"HcSplitSinkhorn on this device requires preEps == eps and postMult == 2; got preEps {preEps}, eps {eps}, postMult {postMult}.");
+    }
+
     /// <summary>Splits each token's mixes into pre and post gates and a doubly-stochastic comb matrix.</summary>
-    /// <remarks><c>pre = sigmoid(m0*s0+b) + eps</c>, <c>post = 2*sigmoid(m1*s1+b)</c>, <c>comb = softmax_row(m2*s2+b) + eps</c>
+    /// <remarks><c>pre = sigmoid(m0*s0+b) + preEps</c>, <c>post = postMult*sigmoid(m1*s1+b)</c>, <c>comb = softmax_row(m2*s2+b) + eps</c>
     /// followed by a column normalization and <paramref name="iters"/>-1 row-then-column rounds, each dividing by sum + eps.</remarks>
     public static unsafe void SplitSinkhorn(Tensor pre, Tensor post, Tensor comb, Tensor mixes, Tensor scale, Tensor bias,
-        int hc, int iters, float eps)
+        int hc, int iters, float eps, float preEps, float postMult)
     {
         ValidateSplit(pre, post, comb, mixes, scale, bias, hc, iters);
         int width = (2 + hc) * hc;
@@ -44,8 +51,8 @@ public static class HcReference
             float* x = m + t * width;
             for (int i = 0; i < hc; i++)
             {
-                pr[t * hc + i] = Sigmoid(x[i] * s[0] + b[i]) + eps;
-                po[t * hc + i] = 2f * Sigmoid(x[hc + i] * s[1] + b[hc + i]);
+                pr[t * hc + i] = Sigmoid(x[i] * s[0] + b[i]) + preEps;
+                po[t * hc + i] = postMult * Sigmoid(x[hc + i] * s[1] + b[hc + i]);
             }
             for (int i = 0; i < hc * hc; i++) c[i] = x[2 * hc + i] * s[2] + b[2 * hc + i];
             for (int r = 0; r < hc; r++)

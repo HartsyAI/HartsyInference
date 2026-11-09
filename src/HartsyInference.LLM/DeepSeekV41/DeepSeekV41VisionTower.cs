@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -58,9 +59,9 @@ public sealed class DeepSeekV41VisionTower : IDisposable
         int dim = Config.HiddenSize, heads = Config.NumHeads, headDim = Config.HeadDim, inter = Config.IntermediateSize;
 
         DeepSeekV41VisionRopeTable rope = DeepSeekV41VisionRopeTable.Build(gridHeight, gridWidth, headDim, Config.RopeTheta);
-        using Tensor cos = DeepSeekV41HostMath.Tensor(rope.Cos, 1, n, headDim);
-        using Tensor sin = DeepSeekV41HostMath.Tensor(rope.Sin, 1, n, headDim);
-        using Tensor input = DeepSeekV41HostMath.Tensor(patches, n, Config.PatchInputDim);
+        using Tensor cos = HostMath.Tensor(rope.Cos, 1, n, headDim);
+        using Tensor sin = HostMath.Tensor(rope.Sin, 1, n, headDim);
+        using Tensor input = HostMath.Tensor(patches, n, Config.PatchInputDim);
         using Workspace w = new(n, dim, heads, headDim, inter);
 
         _backend.Linear(w.X, input, _weights.PatchProj, _weights.PatchBias);

@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -20,9 +21,9 @@ internal static class DeepSeekV41Rotary
             ReadOnlySpan<float> sinRow = rope.SinRow(positions[i]);
             for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
         }
-        using Tensor x = DeepSeekV41HostMath.Tensor(data, shape);
-        using Tensor c = DeepSeekV41HostMath.Tensor(cos, 1, positions.Length, half);
-        using Tensor sn = DeepSeekV41HostMath.Tensor(sin, 1, positions.Length, half);
+        using Tensor x = HostMath.Tensor(data, shape);
+        using Tensor c = HostMath.Tensor(cos, 1, positions.Length, half);
+        using Tensor sn = HostMath.Tensor(sin, 1, positions.Length, half);
         backend.Rotary(RotaryCall.TokenMajor(x, c, sn, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, ropeDim, dimOffset));
         x.AsReadOnlySpan<float>().CopyTo(data);
     }
