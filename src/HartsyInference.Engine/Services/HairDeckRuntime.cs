@@ -50,11 +50,14 @@ internal sealed class HairDeckRuntime : IDisposable
         RequireFile(birefnetPath);
         RequireFile(dinoPath);
 
-        Sam3Pipeline segmenter = Sam3Pipeline.Load(new Sam3Config(), sam3Path);
-        SafeTensorsLoader matteWeights = new();
-        BiRefNetMatter matter = new();
+        Sam3Pipeline? segmenter = null;
+        SafeTensorsLoader? matteWeights = null;
+        BiRefNetMatter? matter = null;
         try
         {
+            segmenter = Sam3Pipeline.Load(new Sam3Config(), sam3Path);
+            matteWeights = new SafeTensorsLoader();
+            matter = new BiRefNetMatter();
             matteWeights.Load(birefnetPath);
             matter.LoadWeights(BiRefNetCheckpointConverter.Convert(matteWeights.GetAllTensors()));
             HairDeckModel model = HairDeckModel.Load(backend, modelRoot, dinoPath);
@@ -63,9 +66,9 @@ internal sealed class HairDeckRuntime : IDisposable
         catch (Exception ex)
         {
             Logs.Error($"Failed to load HairDeck from {modelRoot}", ex);
-            matter.Dispose();
-            matteWeights.Dispose();
-            segmenter.Dispose();
+            matter?.Dispose();
+            matteWeights?.Dispose();
+            segmenter?.Dispose();
             throw;
         }
     }
