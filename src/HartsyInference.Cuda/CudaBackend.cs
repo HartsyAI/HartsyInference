@@ -6946,20 +6946,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         int strideH, int strideW, int padH, int padW)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("Conv2dDepthwise");
-        if (output.DType != DType.F32 && output.DType != DType.F16)
-            throw new NotSupportedException($"CUDA Conv2dDepthwise supports F32/F16 output — got {output.DType}.");
-        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
-            throw new ArgumentException($"Conv2dDepthwise requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
-        if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
-            throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
-        if (input.Shape[1] != weight.Shape[0] || output.Shape[1] != weight.Shape[0])
-            throw new ArgumentException("Conv2dDepthwise requires input/output channel count to equal weight channel count.");
+        DepthwiseConv2dGeometry g = DepthwiseConv2dPlan.Validate(input, weight, bias, output);
         using OpScope _op = EnterOp();
         EnsureKernels();
 
-        int n = (int)input.Shape[0], c = (int)input.Shape[1], iH = (int)input.Shape[2], iW = (int)input.Shape[3];
-        int oH = (int)output.Shape[2], oW = (int)output.Shape[3];
-        int kH = (int)weight.Shape[2], kW = (int)weight.Shape[3];
+        int n = g.Batch, c = g.Channels, iH = g.InH, iW = g.InW;
+        int oH = g.OutH, oW = g.OutW;
+        int kH = g.KernelH, kW = g.KernelW;
 
         ulong pOut = 0, pIn = 0, pW = 0, pB = 0, inCast = 0, wCast = 0, bCast = 0;
         bool cachedOutput = false;
