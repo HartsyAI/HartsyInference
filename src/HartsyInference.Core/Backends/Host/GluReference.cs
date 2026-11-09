@@ -11,9 +11,9 @@ namespace HartsyInference.Core.Backends.Host;
 public static unsafe class GluReference
 {
     /// <summary>The gate factor of <paramref name="gate"/> under <paramref name="activation"/>.</summary>
-    public static float Gate(float gate, GluActivation activation)
+    public static float Gate(float gate, in GluSpec spec)
     {
-        switch (activation)
+        switch (spec.Activation)
         {
             case GluActivation.Silu:
                 return gate * Sigmoid(gate);
@@ -21,14 +21,16 @@ public static unsafe class GluReference
                 return 0.5f * gate * (1f + MathF.Tanh(0.7978845608028654f * (gate + 0.044715f * gate * gate * gate)));
             case GluActivation.GeluErf:
                 return 0.5f * gate * (1f + Erf(gate * 0.70710678118654752440f));
+            case GluActivation.Situ:
+                return spec.SituBeta * MathF.Tanh(gate / spec.SituBeta) * Sigmoid(gate);
             default:
-                return 4f * MathF.Tanh(gate / 4f) * Sigmoid(gate);
+                throw new ArgumentOutOfRangeException(nameof(spec), spec, "Unknown GLU activation.");
         }
     }
 
-    /// <summary>The value factor under <paramref name="activation"/>: the value itself, soft-capped to <c>25 · tanh(u / 25)</c> for SiTU.</summary>
-    public static float Value(float value, GluActivation activation)
-        => activation == GluActivation.Situ ? 25f * MathF.Tanh(value / 25f) : value;
+    /// <summary>The value factor under <paramref name="spec"/>: the value itself, soft-capped to <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c> for SiTU.</summary>
+    public static float Value(float value, in GluSpec spec)
+        => spec.Activation == GluActivation.Situ ? spec.SituLinearBeta * MathF.Tanh(value / spec.SituLinearBeta) : value;
 
     public static void Apply(Tensor output, Tensor input, in GluSpec spec)
     {
@@ -40,7 +42,7 @@ public static unsafe class GluReference
         {
             long at = r * 2 * inner;
             for (int i = 0; i < inner; i++)
-                store(r * inner + i, Gate(load(at + gateAt + i), spec.Activation) * Value(load(at + valueAt + i), spec.Activation));
+                store(r * inner + i, Gate(load(at + gateAt + i), spec) * Value(load(at + valueAt + i), spec));
         }
     }
 

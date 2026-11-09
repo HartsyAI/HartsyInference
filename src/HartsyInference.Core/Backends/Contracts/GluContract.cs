@@ -15,6 +15,9 @@ public static class GluContract
             throw new NotSupportedException($"Glu takes an F32, F16 or BF16 input and an output of the same dtype; got input {input.DType}, output {output.DType}.");
         if (!Enum.IsDefined(spec.Activation) || !Enum.IsDefined(spec.Gate))
             throw new ArgumentOutOfRangeException(nameof(spec), spec, "Unknown GLU activation or gate half.");
+        if (spec.Activation == GluActivation.Situ
+            && !(float.IsFinite(spec.SituBeta) && spec.SituBeta > 0f && float.IsFinite(spec.SituLinearBeta) && spec.SituLinearBeta > 0f))
+            throw new ArgumentOutOfRangeException(nameof(spec), spec, "SiTU-GLU betas must be finite and positive.");
         int inner = (int)output.Shape[output.Shape.Rank - 1];
         if (inner <= 0 || input.Shape[input.Shape.Rank - 1] != 2L * inner)
             throw new ArgumentException($"Glu input {input.Shape} must be twice the output's last extent {output.Shape}.", nameof(input));
@@ -24,5 +27,14 @@ public static class GluContract
         if (output.HasOverlappingHostStorageWithoutSync(input))
             throw new ArgumentException("Glu output storage must not overlap the input.", nameof(output));
         return (inner, rows);
+    }
+
+    /// <summary>Refuses a SiTU whose betas differ from the constants a device kernel bakes in, so the device never runs other values.</summary>
+    public static void RequireBakedSitu(in GluSpec spec, string backend)
+    {
+        if (spec.Activation != GluActivation.Situ) return;
+        if (spec.SituBeta == SituDefaults.Beta && spec.SituLinearBeta == SituDefaults.LinearBeta) return;
+        throw new NotSupportedException($"{backend} SiTU-GLU has beta {SituDefaults.Beta} and linear beta {SituDefaults.LinearBeta} compiled in; "
+            + $"got beta {spec.SituBeta} and linear beta {spec.SituLinearBeta}. Run this on the CPU backend or parameterize the {backend} kernel.");
     }
 }

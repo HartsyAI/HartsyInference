@@ -1529,8 +1529,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     Tensor gateUpOut = new(new TensorShape(1, n, ffDim * 2), DType.F32);
                     Project(backend, gateUpOut, preMlp, _gateUpW!, _gateUpB, _cfg.LowVramQuant);
                     comb = new(ff, DType.F32);
-                    if (emitQ) backend.GluEmitQ8(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
-                    else backend.Glu(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
+                    GluSpec spec = GatedFfn.GluFor(_cfg.Activation, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta);
+                    if (emitQ) backend.GluEmitQ8(comb, gateUpOut, spec);
+                    else backend.Glu(comb, gateUpOut, spec);
                     gateUpOut.Dispose();
                     up.Dispose();
                 }
@@ -1538,7 +1539,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     Tensor gate = new(ff, DType.F32);
                     ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha);
+                    comb = _cfg.Activation == ActivationKind.Situ
+                        ? GatedFfn.SituGlu(backend, gate, up, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta)
+                        : GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha);
                 }
             }
             else

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -6,19 +7,48 @@ namespace HartsyInference.LLM.Transformer;
 /// <summary>The gated-FFN activation epilogue shared by dense and expert FFNs: <c>act(gate) · up</c>, optionally with the clamped-SwiGLU limit.</summary>
 internal static class GatedFfn
 {
-    /// <summary>Applies the FFN activation to <paramref name="inp"/> into <paramref name="outp"/> (same shape): SiLU, tanh-GELU, ReLU, or ReLU².</summary>
+    /// <summary>Applies the FFN activation to <paramref name="inp"/> into <paramref name="outp"/> (same shape): SiLU, tanh-GELU, ReLU, or ReLU².
+    /// Any other activation throws, so a gated-only one (SiTU, clamped SwiGLU) never runs as SiLU.</summary>
     public static void Activate(IBackend backend, ActivationKind activation, Tensor outp, Tensor inp)
     {
         switch (activation)
         {
+            case ActivationKind.Silu: backend.Silu(outp, inp); break;
             case ActivationKind.GeluTanh: backend.Gelu(outp, inp); break;
             case ActivationKind.Relu: backend.Clamp(outp, inp, 0f, float.PositiveInfinity); break;
             case ActivationKind.ReluSquared:
                 backend.Clamp(outp, inp, 0f, float.PositiveInfinity);
                 backend.Mul(outp, outp, outp);   // relu(x)² (elementwise, alias-safe)
                 break;
-            default: backend.Silu(outp, inp); break;   // SiLU / SwiGLU
+            default:
+                throw new NotSupportedException($"FFN activation {activation} has no elementwise form; it runs only through its gated path.");
         }
+    }
+
+    /// <summary>The GLU spec of a gated FFN over <c>[gate | up]</c>. Throws for an activation with no GLU form.</summary>
+    public static GluSpec GluFor(ActivationKind activation, float situBeta, float situLinearBeta) => activation switch
+    {
+        ActivationKind.Silu => new GluSpec(GluActivation.Silu, GluGateHalf.First),
+        ActivationKind.GeluTanh => new GluSpec(GluActivation.GeluTanh, GluGateHalf.First),
+        ActivationKind.Situ => new GluSpec(GluActivation.Situ, GluGateHalf.First, situBeta, situLinearBeta),
+        _ => throw new NotSupportedException($"FFN activation {activation} has no GLU form."),
+    };
+
+    /// <summary>SiTU-GLU over separate gate and up tensors: packs them as <c>[gate | up]</c> and runs one <see cref="IBackend.Glu"/>. Disposes both.</summary>
+    public static Tensor SituGlu(IBackend backend, Tensor gate, Tensor up, float situBeta, float situLinearBeta)
+    {
+        TensorShape outShape = gate.Shape;
+        Span<long> packedDims = stackalloc long[outShape.Rank];
+        outShape.CopyDimsTo(packedDims);
+        packedDims[^1] *= 2;
+        Tensor packed = new(new TensorShape(packedDims), DType.F32);
+        backend.Concat(packed, [gate, up], outShape.Rank - 1);
+        gate.Dispose();
+        up.Dispose();
+        Tensor comb = new(outShape, DType.F32);
+        backend.Glu(comb, packed, GluFor(ActivationKind.Situ, situBeta, situLinearBeta));
+        packed.Dispose();
+        return comb;
     }
 
     /// <summary>Returns <c>act(gate) · up</c> and disposes <paramref name="gate"/> and <paramref name="up"/>; a positive <paramref name="clampLimit"/> first clamps gate to (-inf, limit] and up to [-limit, limit].</summary>
