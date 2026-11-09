@@ -107,11 +107,13 @@ public static class MossVlPositions
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/> from a MOSS-VL configuration's text section.</summary>
     public static MossVlRope BuildRope(MossVlPositionPlan plan, MossVlConfig config) =>
-        BuildRope(plan, config.Text.HeadDim, config.Text.RopeTheta, [.. config.MropeSection], config.MropeInterleaved);
+        BuildRope(plan, config.Text.HeadDim, config.Text.RopeTheta, [.. config.MropeSection], config.MropeInterleaved, config.Text.HiddenSize);
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/>: pair <c>j</c> of each row rotates by its interleaved M-RoPE axis,
-    /// as the modeling code's <c>apply_interleaved_mrope</c> does. The result owns its tensors.</summary>
-    public static MossVlRope BuildRope(MossVlPositionPlan plan, int headDim, double theta, ReadOnlySpan<int> mropeSection, bool interleaved)
+    /// as the modeling code's <c>apply_interleaved_mrope</c> does. The row mask is expanded to <c>[1, T, hiddenSize]</c> so the
+    /// cross-attention layers can apply it with one elementwise multiply. The result owns its tensors.</summary>
+    public static MossVlRope BuildRope(MossVlPositionPlan plan, int headDim, double theta, ReadOnlySpan<int> mropeSection, bool interleaved,
+        int hiddenSize)
     {
         int t = plan.Text.Length / 3;
         int maxPosition = 0;
@@ -131,8 +133,10 @@ public static class MossVlPositions
                 Tensor? rowMask = null;
                 if (plan.RowMask is not null)
                 {
-                    rowMask = new Tensor(new TensorShape(t), DType.F32);
-                    plan.RowMask.AsSpan().CopyTo(rowMask.AsSpan<float>());
+                    rowMask = new Tensor(new TensorShape(1, t, hiddenSize), DType.F32);
+                    Span<float> dst = rowMask.AsSpan<float>();
+                    for (int r = 0; r < t; r++)
+                        dst.Slice(r * hiddenSize, hiddenSize).Fill(plan.RowMask[r]);
                 }
                 return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask));
             }

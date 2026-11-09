@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -70,14 +72,14 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
         backend.RmsNorm(qN, q, _qNorm, _rmsEps);   // q-norm over the head dim
         q.Dispose();
-        if (rope is not null) backend.ApplyRopeSingle(qN, rope.TextCos, rope.TextSin);
+        if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(qN, rope.TextCos, rope.TextSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
         Tensor k = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: _lowVram);
         Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         backend.RmsNorm(kN, k, _kNorm, _rmsEps);
         k.Dispose();
-        if (rope is not null) backend.ApplyRopeSingle(kN, rope.VisionCos, rope.VisionSin);
+        if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(kN, rope.VisionCos, rope.VisionSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
         Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
 
@@ -118,7 +120,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
     {
         if (rope?.RowMask is null) return x;
         Tensor masked = new(x.Shape, DType.F32);
-        backend.MaskRows(masked, x, rope.RowMask);
+        backend.Mul(masked, x, rope.RowMask);
         x.Dispose();
         return masked;
     }

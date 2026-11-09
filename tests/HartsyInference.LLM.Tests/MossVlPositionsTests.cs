@@ -72,7 +72,7 @@ public sealed class MossVlPositionsTests
         };
         const int headDim = 128;
         const double theta = 5_000_000.0;
-        using MossVlRope rope = MossVlPositions.BuildRope(plan, headDim, theta, [24, 20, 20], interleaved: true);
+        using MossVlRope rope = MossVlPositions.BuildRope(plan, headDim, theta, [24, 20, 20], interleaved: true, hiddenSize: 4096);
 
         ReadOnlySpan<float> cos = rope.Rope.TextCos.AsSpan<float>();
         for (int j = 0; j < headDim / 2; j++)
