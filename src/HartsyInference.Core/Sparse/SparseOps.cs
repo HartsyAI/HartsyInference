@@ -72,25 +72,36 @@ public static unsafe class SparseOps
     }
 
     /// <summary>Submanifold 3D conv via the spconv rulebook (no dense grid): per kernel offset, gather → cuBLAS GEMM (<paramref name="wSlices"/>) → scatter-add, ~20-90× less compute than the dense-grid path at high channel counts.</summary>
+    /// <remarks>The rulebook runs in row chunks of at most <see cref="RulebookChunkBytes"/>, so the gathered and GEMM temporaries stay bounded at any voxel count.</remarks>
     public static SparseTensor SubmanifoldConv3dSparse(IBackend backend, SparseTensor x, Tensor[] wSlices, Tensor? bias)
+        => SubmanifoldConv3dSparse(backend, x, wSlices, bias, RulebookChunkBytes);
+
+    /// <summary>Byte budget of one chunk's gathered rows; the GEMM output of a chunk is bounded by the same budget.</summary>
+    internal const long RulebookChunkBytes = 64L << 20;
+
+    internal static SparseTensor SubmanifoldConv3dSparse(IBackend backend, SparseTensor x, Tensor[] wSlices, Tensor? bias, long chunkBytes)
     {
         int n = x.Count, cin = x.Channels, cout = (int)wSlices[0].Shape[0];
+        int chunkRows = (int)Math.Max(1, chunkBytes / (sizeof(float) * Math.Max(cin, cout)));
         (int[] inIdx, int[] outIdx)[] rb = GetRulebook(x.Coords, n);   // spatial rulebook: cached per voxel set (see GetRulebook)
 
         Tensor outFeats = new(new TensorShape(1, n, cout), DType.F32); backend.Fill(outFeats, 0f);
-        List<Tensor> temps = new();   // disposed after one Sync — freeing device buffers mid-async-kernel races (AV)
         for (int off = 0; off < 27; off++)
         {
             int m = rb[off].inIdx.Length;
-            if (m == 0) continue;
-            Tensor inT = IndexTensor.Rows(rb[off].inIdx), outT = IndexTensor.Rows(rb[off].outIdx);
-            Tensor gathered = new(new TensorShape(1, m, cin), DType.F32); backend.GatherRows(gathered, x.Feats, inT);
-            Tensor gemm = new(new TensorShape(1, m, cout), DType.F32); backend.Linear(gemm, gathered, wSlices[off], null);
-            backend.ScatterAddRows(outFeats, gemm, outT);
-            temps.Add(inT); temps.Add(outT); temps.Add(gathered); temps.Add(gemm);
+            for (int start = 0; start < m; start += chunkRows)
+            {
+                int rows = Math.Min(chunkRows, m - start);
+                Tensor inT = IndexTensor.Rows(rb[off].inIdx.AsSpan(start, rows));
+                Tensor outT = IndexTensor.Rows(rb[off].outIdx.AsSpan(start, rows));
+                Tensor gathered = new(new TensorShape(1, rows, cin), DType.F32); backend.GatherRows(gathered, x.Feats, inT);
+                Tensor gemm = new(new TensorShape(1, rows, cout), DType.F32); backend.Linear(gemm, gathered, wSlices[off], null);
+                backend.ScatterAddRows(outFeats, gemm, outT);
+                // Released after the chunk's kernels drain: freeing device buffers mid-async-kernel races (AV).
+                backend.Sync();
+                inT.Dispose(); outT.Dispose(); gathered.Dispose(); gemm.Dispose();
+            }
         }
-        backend.Sync();
-        foreach (Tensor t in temps) t.Dispose();
         if (bias is not null)
         {
             Tensor ones = new(new TensorShape(1, cout), DType.F32); backend.Fill(ones, 1f);
