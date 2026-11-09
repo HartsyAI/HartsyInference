@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Dispatch;
@@ -26,6 +28,7 @@ public sealed class SanaWmEndToEndGpuTests
     private const string MinPsnrVariable = "SANAWM_E2E_MIN_PSNR";
     private const string MinSsimVariable = "SANAWM_E2E_MIN_SSIM";
     private const string OutputVariable = "SANAWM_E2E_OUTPUT_DIR";
+    private const string VramTraceVariable = "SANAWM_E2E_VRAM_TRACE";
     private readonly ITestOutputHelper _output;
 
     public SanaWmEndToEndGpuTests(ITestOutputHelper output)
@@ -62,12 +65,25 @@ public sealed class SanaWmEndToEndGpuTests
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
         _output.WriteLine(plan.Snapshot());
 
+        // SANAWM_E2E_VRAM_TRACE names a file for the per-phase device-memory trace (diagnostics.vramTrace).
+        string? trace = Environment.GetEnvironmentVariable(VramTraceVariable);
+        if (!string.IsNullOrWhiteSpace(trace))
+            KnobStore.Set(EngineKnobs.VramTrace, trace);
         List<VideoFrame> frames = [];
-        using (IWorldSession session = service.Open(spec, plan.Request))
+        Stopwatch clock = Stopwatch.StartNew();
+        try
         {
+            using IWorldSession session = service.Open(spec, plan.Request);
             await foreach (VideoFrame frame in session.StreamAsync(CancellationToken.None))
                 frames.Add(frame);
         }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(trace))
+                KnobStore.Clear(EngineKnobs.VramTrace);
+        }
+        _output.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"rollout wall: {clock.Elapsed.TotalSeconds:F1} s for {frames.Count} frames ({plan.Steps} steps)"));
         Assert.Equal(0, service.RunLedger.Outstanding);
         Assert.Equal(plan.Frames, frames.Count);
 

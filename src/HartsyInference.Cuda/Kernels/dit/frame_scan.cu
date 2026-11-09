@@ -91,13 +91,30 @@ __device__ __forceinline__ void frame_scan_recurrence(float* __restrict__ states
                 __syncthreads();
                 if (active)
                 {
+#pragma unroll 4
                     for (unsigned int jj = 0; jj < rows; jj++)
                     {
                         const float gj = gram[jj][r];
-                        const float* srow = &tile[cur][j0 + jj][0];
+                        if constexpr (COLS % 4 == 0)
+                        {
+                            // Broadcast row of the state: every thread reads the same address, four columns per load.
+                            const float4* srow = reinterpret_cast<const float4*>(&tile[cur][j0 + jj][0]);
 #pragma unroll
-                        for (int c = 0; c < COLS; c++)
-                            acc[c] += gj * srow[c];
+                            for (int c4 = 0; c4 < COLS / 4; c4++)
+                            {
+                                const float4 sv = srow[c4];
+                                acc[4 * c4 + 0] += gj * sv.x;
+                                acc[4 * c4 + 1] += gj * sv.y;
+                                acc[4 * c4 + 2] += gj * sv.z;
+                                acc[4 * c4 + 3] += gj * sv.w;
+                            }
+                        }
+                        else
+                        {
+#pragma unroll
+                            for (int c = 0; c < COLS; c++)
+                                acc[c] += gj * tile[cur][j0 + jj][c];
+                        }
                     }
                 }
                 __syncthreads();
