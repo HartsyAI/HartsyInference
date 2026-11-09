@@ -157,8 +157,8 @@ public sealed partial class CudaBackend
                 {
                     Saturates = true, Lowering = AttentionLowering.Cast,
                 }, "S.5",
-                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
-                    && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled,
+                (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
+                    && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled && CudnnReady(in c),
                 (in AttentionCall c) => TryCudnnSdpa(in c)),
             new DelegateAttentionRow(CudnnSdpaRows.Capability("cudnn.f32.bf16", E, AttentionDTypes.F32, HM, strided: false) with
                 {
@@ -166,7 +166,7 @@ public sealed partial class CudaBackend
                     Lowering = AttentionLowering.Cast,
                 }, "S.16",
                 (in AttentionCall c) => c.Query.DType == DType.F32 && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
-                    && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16) && Bf16CastFits(in c),
+                    && Bf16CastFits(in c) && CudnnReady(in c, CudnnSdpa.SdpaDtype.BF16),
                 (in AttentionCall c) => TryCudnnSdpa(in c, CudnnSdpa.SdpaDtype.BF16)),
             new DelegateAttentionRow(Cap("tiled.f32", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
                 {
@@ -284,9 +284,10 @@ public sealed partial class CudaBackend
                 // The Sage detour is the permute row's; a view or batch that row cannot take stays on cuDNN.
                 (in AttentionCall c) => !(SageTokenMajorDetour && WholeSequence(in c) && SageF16Preferred(c.Query.Storage, c.Key.Storage, c.Value.Storage,
                         c.Output.Storage, c.Mask.Bias, c.QueryTokens, c.KeyTokens, c.QkHeadDim))
-                    && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c) && CudnnReady(in c)
+                    && CudnnSdpaRows.MaskFits(in c) && CudnnSdpaRows.ViewsFit(in c)
                     && (CudnnSdpaRows.HalfOperands(in c)
-                        || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled)),
+                        || (c.Query.DType == DType.F32 && (c.Numerics.LegacyAssertedBounded || _sdpaF16ForceOn) && !_sdpaF16Disabled))
+                    && CudnnReady(in c),
                 (in AttentionCall c) => RunCudnnTokenMajor(in c)),
             new DelegateAttentionRow(Cap("permute.dense", E, AnyFloat, AnyFloat, TM) with
                 {
@@ -322,8 +323,8 @@ public sealed partial class CudaBackend
     /// <summary>The knob, the session, the head dim and the health of the signature the call runs under, F32 operands cast to
     /// <paramref name="castTarget"/>.</summary>
     private bool CudnnReady(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16) =>
-        _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
-        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64);
+        !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
+        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64) && SdpaCudnnOn;
 
     /// <summary>One sequence of whole tensors: all the permuting and widening rows take.</summary>
     private static bool WholeSequence(in AttentionCall c) =>
@@ -450,10 +451,10 @@ public sealed partial class CudaBackend
                         && c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
                         && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
                         && _kernels is not null && _kernels.HasCausalMaskKernel
-                        && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
+                        && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
                         && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.For(DType.F32, c.Heads, c.KvHeads, d, new CudnnBias(1, 1, c.QueryTokens)),
                             Environment.TickCount64)
-                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d);
+                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d) && SdpaCudnnOn;
                 },
                 (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
                     c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),

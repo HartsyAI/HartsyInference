@@ -1,5 +1,7 @@
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Rope;
+using HartsyInference.LLM.Transformer.Compression;
 
 namespace HartsyInference.LLM.Transformer;
 
@@ -30,6 +32,10 @@ public enum ActivationKind
 
     /// <summary>Clamped alpha-SwiGLU (MiniMax-M3): <c>(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)</c> with <c>g = min(gate, limit)</c>; alpha and limit come from the config.</summary>
     SwigluOai,
+
+    /// <summary>SiTU-GLU (ERNIE-5.5, MOSS-Image): gate <c>β · tanh(g / β) · sigmoid(g)</c> over the first half, value soft-capped to
+    /// <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c> over the second; β and β<sub>lin</sub> come from the config. Gated FFNs only.</summary>
+    Situ,
 }
 
 /// <summary>Block-max "lightning indexer" of MiniMax Sparse Attention: per query and per KV group it scores every key with a small dot-product branch, max-pools the scores over blocks of keys and keeps its top-k blocks after boosting the local ones, which count against k.</summary>
@@ -105,6 +111,12 @@ public sealed record MoeConfig
     /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/>.</summary>
     public float SwigluLimit { get; init; }
 
+    /// <summary>SiTU gate soft-cap β of <see cref="ActivationKind.Situ"/> (config <c>activation_situ_beta</c>); the default is ERNIE-5.5's shipped value.</summary>
+    public float ActivationSituBeta { get; init; } = SituDefaults.Beta;
+
+    /// <summary>SiTU value soft-cap β<sub>lin</sub> of <see cref="ActivationKind.Situ"/> (config <c>activation_situ_linear_beta</c>); the default is ERNIE-5.5's shipped value.</summary>
+    public float ActivationSituLinearBeta { get; init; } = SituDefaults.LinearBeta;
+
     /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>); 0 (default) makes every layer MoE.</summary>
     public int FirstDenseLayers { get; init; }
 
@@ -114,13 +126,29 @@ public sealed record MoeConfig
     /// <summary>Number of expert groups kept per token under group-limited routing (DeepSeek-V3 <c>topk_group</c>).</summary>
     public int ExpertGroupUsedCount { get; init; }
 
-    /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1).</summary>
+    /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1). Ignored under
+    /// <see cref="LearnedRoutedScale"/>.</summary>
     public float RoutedScalingFactor { get; init; } = 1f;
 
-    /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>): the block projects the layer input down with <c>pre_expert_proj</c>, RMS-normalizes it with <c>pre_expert_norm</c>, runs the experts there, and projects their sum back up with <c>post_expert_proj</c>. 0 (default) runs the experts at the model width.</summary>
+    /// <summary>ERNIE-5.5 split-feature routing (<c>moe_split_feature_routing</c>): a second router matrix (<c>mlp.gate.weight_1</c>) scores
+    /// every token too, and an expert's score is the sum of its two sigmoids. Sigmoid scoring only; the device router does not take it.</summary>
+    public bool SplitFeatureRouting { get; init; }
+
+    /// <summary>ERNIE-5.5 learned routed scale (<c>routed_scaling_factor_learnable</c>): each routed weight is multiplied by a per-expert
+    /// F32 vector (<c>mlp.gate.routed_scaling_factor_param</c>) instead of <see cref="RoutedScalingFactor"/>, which the reference then
+    /// never reads.</summary>
+    public bool LearnedRoutedScale { get; init; }
+
+    /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>, ERNIE-5.5 <c>moe_latent_size</c>): the block projects the
+    /// layer input down, runs the experts there, and projects their sum back up. The router and any shared expert read the full-width input,
+    /// and the shared expert's output joins after the exit projection. 0 (default) runs the experts at the model width.</summary>
     public int LatentSize { get; init; }
 
-    /// <summary>Epsilon of the <see cref="LatentSize"/> entry norm (<c>pre_expert_norm</c>).</summary>
+    /// <summary>Where the <see cref="LatentSize"/> block applies its latent RMSNorm; Muse Spark normalizes the expert input, ERNIE-5.5 the
+    /// expert sum.</summary>
+    public MoeLatentNorm LatentNorm { get; init; } = MoeLatentNorm.BeforeExperts;
+
+    /// <summary>Epsilon of the <see cref="LatentSize"/> norm.</summary>
     public float LatentNormEps { get; init; } = 1e-6f;
 
     /// <summary>Muse Spark's per-expert output norm: each routed row is scaled by <c>post_expert_norm</c> and then RMS-normalized, before its routing weight applies.</summary>
@@ -224,6 +252,12 @@ public sealed record TransformerConfig
 
     /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/> in the dense FFN.</summary>
     public float SwigluLimit { get; init; }
+
+    /// <summary>SiTU gate soft-cap β (config <c>activation_situ_beta</c>). The default is the value ERNIE-5.5 ships and MOSS-Image hard-codes.</summary>
+    public float ActivationSituBeta { get; init; } = SituDefaults.Beta;
+
+    /// <summary>SiTU value soft-cap β<sub>lin</sub> (config <c>activation_situ_linear_beta</c>). The default is the value ERNIE-5.5 ships and MOSS-Image hard-codes.</summary>
+    public float ActivationSituLinearBeta { get; init; } = SituDefaults.LinearBeta;
 
     /// <summary>MiniMax Sparse Attention indexer, present on every layer that carries indexer weights; null for dense attention.</summary>
     public IndexerConfig? Indexer { get; init; }
@@ -398,6 +432,13 @@ public sealed record TransformerConfig
 
     /// <summary>Muse Spark: the merged attention output is multiplied elementwise by <c>sigmoid(gate_proj(x))</c>, where <c>x</c> is the attention's normalized input, before <c>o_proj</c>.</summary>
     public bool AttnOutputGate { get; init; }
+
+    /// <summary>Per-layer <c>compress_ratios</c>: 0 standard, 1 compressed KV without pooling, <c>R &gt;= 2</c> compressed KV with one pooled latent per R tokens, -2 DSA sparse attention. Null means every layer is standard; when set, its length must equal <see cref="NumLayers"/>.</summary>
+    public IReadOnlyList<int>? CompressRatios { get; init; }
+
+    /// <summary>The attention kind of layer <paramref name="i"/>, read from <see cref="CompressRatios"/>.</summary>
+    public LayerAttentionKind AttentionKindFor(int i) =>
+        CompressRatios is null ? LayerAttentionKind.Standard : LayerAttentionKind.FromCompressRatio(CompressRatios[i]);
 
     /// <summary>Muse Spark: the post-attention sandwich norm carries no weight (a plain RMSNorm), so the checkpoint ships no tensor for it.</summary>
     public bool PostAttnNormWeightless { get; init; }

@@ -9,9 +9,11 @@ internal static class Ernie5Catalog
     /// <summary>Builds the entry. It has no <see cref="CatalogEntry.Assets"/>, so the CLI never offers the ~288 GB download for it.</summary>
     internal static CatalogEntry Build() => new()
     {
-        // Config is read and refused on feature grounds (Ernie5Config.RequireRunnable); no model class is wired, hence Structural.
+        // Ernie5Model implements the architecture on the host, but no real-weight run has verified it and the Text path refuses it
+        // by name (Ernie5Config.RequireRunnable), hence Structural.
         Id = Id, Modality = Modality.Text, DisplayName = "ERNIE-5.5-Flash-Base",
-        Architecture = "hybrid compressed attention + mHC + SiTU-GLU latent MoE (512 routed experts, 10 active) with 1 MTP layer",
+        Architecture = "37 HCA + 6 DSA attention layers, mHC (hc 4), SiTU-GLU latent MoE (512 routed experts, 10 active), multimax head; "
+            + "1 MTP layer (not loaded)",
         Status = ModelStatus.Structural, CliDrivable = false, HuggingFaceRepo = "baidu/ERNIE-5.5-Flash-Base",
         Variants =
         [
@@ -26,7 +28,8 @@ internal static class Ernie5Catalog
                     FileCount = 128, TotalBytes = 288_434_400_632,
                 },
                 Notes = "128 safetensors shards sum to 288,434,400,632 bytes (268.6 GiB) per the HF tree API; the index metadata.total_size "
-                    + "(288,416,689,496) is 17,711,136 bytes smaller and is not used. Scale tensor layout not yet inspected, so no QuantFlavor is set. "
+                    + "(288,416,689,496) is 17,711,136 bytes smaller and is not used. FP8 weights carry F32 [ceil(out/128), ceil(in/128)] weight_scale_inv grids "
+                    + "(three shard headers inspected); HfQuantCheckpoint reads them directly, so no QuantFlavor applies. "
                     + "License 'ernie-5.5-flash-base-model-license-v1.0' grants use only outside the EU, UK and South Korea, and needs separate "
                     + "authorization for commercial use above US$50M annual revenue (LICENSE 1.11, 2, 4.3, 5.3).",
             },
