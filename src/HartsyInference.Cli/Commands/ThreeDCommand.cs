@@ -6,7 +6,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR, Hunyuan3D, or TRELLIS.</summary>
+/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR, Hunyuan3D, TRELLIS, or HairDeck (hair cards).</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -57,9 +57,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Marching-cubes grid resolution (0 = model default).")]
         public int Grid { get; init; }
 
-        /// <summary>Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).</summary>
+        /// <summary>Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).")]
+        [Description("Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).")]
         public int Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
