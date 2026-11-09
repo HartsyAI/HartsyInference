@@ -82,6 +82,10 @@ public sealed class MeshService : IMeshService, IDisposable
         runtime.Gate.Wait(cancel);
         try
         {
+            if (runtime.IsDisposed)
+            {
+                throw new ObjectDisposedException(nameof(HairDeckRuntime), "The HairDeck model was unloaded while this request was queued.");
+            }
             return RunHairDeck(runtime, options, request, cancel);
         }
         finally
@@ -200,18 +204,24 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        // Take the entries out under the lock, then dispose outside it: a HairDeck disposal waits for a run in progress,
+        // and holding the lock meanwhile would stall every other model load.
+        List<LoadedMesh> pipelines;
+        List<HairDeckRuntime> hairDecks;
         lock (_gate)
         {
-            foreach (LoadedMesh loaded in _pipelines.Values)
-            {
-                loaded.Pipeline.Dispose();
-            }
+            pipelines = _pipelines.Values.ToList();
+            hairDecks = _hairDecks.Values.ToList();
             _pipelines.Clear();
-            foreach (HairDeckRuntime runtime in _hairDecks.Values)
-            {
-                runtime.Dispose();
-            }
             _hairDecks.Clear();
+        }
+        foreach (LoadedMesh loaded in pipelines)
+        {
+            loaded.Pipeline.Dispose();
+        }
+        foreach (HairDeckRuntime runtime in hairDecks)
+        {
+            runtime.Dispose();
         }
     }
 

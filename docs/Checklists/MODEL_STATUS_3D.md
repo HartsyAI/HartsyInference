@@ -90,6 +90,7 @@ Image → hair cards from `hyz317/HairDeck` (pinned revision in the catalog). St
 - **Evidence:** CUDA (RTX 3060, driver 610.88) on `ex01.png`, seed 0: static and rigged GLBs written. Independent Python check of the rigged GLB: rest-pose error 1.5e-8 m; peak displacement 0.19–0.30 m per clip. Unit tests: spring simulation matches the reference's `sim.py` output to 1e-9 for turn and jump.
 - **Not run:** `ex02`–`ex12`; cuDNN fast path (the CUDA 12 cuDNN build is rejected under the CUDA 13 driver); per-step timings and VRAM; real-weight integration tests.
 - **Assumptions in the rig:** head-motion pivot is the mean card root; face width is 0.15 m (the reference takes both from a VRM body).
+- **Cancellation:** the image sampler checks the token every step. Preprocessing (SAM 3, BiRefNet, DINOv3) does not observe it, so a cancel takes effect after the current preprocessing stage.
 - **Not implemented:** VRM packaging. Upstream exports VRM 0.x; `VRMC_springBone` is VRM 1.0. A VRM export needs a VRM body asset, which is not in the repo.
 - **Licences:** HairDeck weights Apache-2.0 (`hyz317/HairDeck`). SAM 3 under the SAM License (Hugging Face tag `other`, gated). DINOv3 under the DINOv3 License (Meta, `ai.meta.com`). BiRefNet-matting MIT (`ZhengPeng7/BiRefNet-matting`).
 
