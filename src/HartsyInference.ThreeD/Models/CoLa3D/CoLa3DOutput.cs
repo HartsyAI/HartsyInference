@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Models.CoLa3D;
 /// <see cref="ActiveSlots"/> before reading a logit or query row as live.</remarks>
 public sealed class CoLa3DOutput : IDisposable
 {
-    private readonly bool[] _activeSlots;
+    private readonly IReadOnlyList<bool> _activeSlots;
     private int _disposed;
 
     internal CoLa3DOutput(SparseTensor pointFeatures, Tensor maskLogits, Tensor queryFeatures, bool[] activeSlots)
@@ -16,7 +16,7 @@ public sealed class CoLa3DOutput : IDisposable
         PointFeatures = pointFeatures;
         MaskLogits = maskLogits;
         QueryFeatures = queryFeatures;
-        _activeSlots = activeSlots;
+        _activeSlots = Array.AsReadOnly(activeSlots);
     }
 
     /// <summary>Point features after the backbone, <c>[N, C]</c>, on the latent's coordinates.</summary>

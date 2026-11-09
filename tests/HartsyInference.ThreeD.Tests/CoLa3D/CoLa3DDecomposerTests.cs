@@ -43,6 +43,30 @@ public sealed class CoLa3DDecomposerTests
     }
 
     [Fact]
+    public void ActiveSlots_CannotBeCastBackToTheInternalArrayOrWrittenThrough()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 3);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [5, 4], seed: 4);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            using CoLa3DOutput output = decomposer.Forward(backend, latent, utonia);
+
+            Assert.False(output.ActiveSlots is bool[]);
+            Assert.Throws<NotSupportedException>(() => ((IList<bool>)output.ActiveSlots)[0] = false);
+            Assert.All(output.ActiveSlots, active => Assert.True(active));
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
     public void LearnableQueries_RunForward()
     {
         CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed)
