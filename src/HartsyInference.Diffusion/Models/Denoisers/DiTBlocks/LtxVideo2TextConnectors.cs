@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -137,7 +138,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
     /// and that was wrong on a device backend: <c>proj</c> is whatever <c>backend.Linear</c> just produced, so a
     /// host write to it is the discarded-device-write pattern, and the read-back it forces materializes the
     /// projection on the host and re-uploads it. The visible symptom was a weighted prompt exhausting VRAM at a
-    /// geometry the same unweighted prompt completed at. <c>MaskRows</c> keeps the whole thing on device and
+    /// geometry the same unweighted prompt completed at. the per-row <c>GroupScale</c> keeps the whole thing on device and
     /// takes the same shape <c>CondTokenWeights.ScaleRightAligned</c> uses, left-aligned here because the real
     /// tokens are at the FRONT and the registers replace the tail.</remarks>
     private static Tensor ApplyTokenWeights(IBackend backend, Tensor proj, ReadOnlySpan<float> tokenWeights, int seq)
@@ -166,7 +167,7 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         Tensor scaled = new Tensor(proj.Shape, DType.F32);
         try
         {
-            backend.MaskRows(scaled, proj, mask);
+            backend.GroupScale(scaled, proj, mask, GroupScaleSpec.PerRow());
         }
         catch
         {

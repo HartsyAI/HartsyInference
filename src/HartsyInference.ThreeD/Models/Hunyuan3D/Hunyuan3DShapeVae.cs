@@ -12,18 +12,15 @@ public sealed unsafe class Hunyuan3DShapeVae
     private readonly Hunyuan3DVaeResBlock[] _resblocks;
     private readonly Hunyuan3DGeoDecoder _geo;
     private Tensor? _postKlW, _postKlB;
-    private readonly int _fourierDim;
 
     public Hunyuan3DConfig Config => _cfg;
-    public int FourierDim => _fourierDim;
 
     public Hunyuan3DShapeVae(Hunyuan3DConfig cfg)
     {
         _cfg = cfg;
         _resblocks = new Hunyuan3DVaeResBlock[cfg.VaeDepth];
         for (int i = 0; i < cfg.VaeDepth; i++) _resblocks[i] = new Hunyuan3DVaeResBlock(cfg.VaeWidth, cfg.VaeNumHeads);
-        _fourierDim = 3 * (2 * cfg.FourierBands + 1);   // include_input + sin/cos: 3·(1+2·8) = 51
-        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth, cfg.VaeNumHeads, cfg.FourierBands, _fourierDim);
+        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth, cfg.VaeNumHeads, cfg.FourierBands);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")

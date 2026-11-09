@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -277,12 +279,12 @@ public sealed unsafe class LtxVideo2Rope
         // Device-resident RoPE — a host loop here D2H's + re-uploads the [S,dim] Q/K on every attention, and on a
         // block-swap-bound checkpoint those re-uploads fight the weight stream for PCIe.
         //  - Interleaved: adjacent-pair (2j,2j+1) over the full dim, duplicated-pair cos[2j]==cos[2j+1] → the shared
-        //    wan_rope_interleaved kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
+        //    the generic rotary kernel kernel (headDim=dim, heads=1), identical to LtxRope / LTX-0.9.
         //  - Split: rotate-half within each head, per-head cos[S,dim/2] with one angle per pair → the dedicated
         //    ltx2_split_rope kernel.
         if (_ropeType == RopeType.Interleaved)
-            backend.WanRopeInterleaved(x, cos, sin, seq, 1, _dim);
+            backend.Rotary(RotaryCall.Rows(x, cos, sin, seq, 1, _dim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
         else
-            backend.Ltx2SplitRope(x, cos, sin, seq, _numHeads, _headDim);
+            backend.Rotary(RotaryCall.SplitRows(x, cos, sin, seq, _numHeads, _headDim));
     }
 }

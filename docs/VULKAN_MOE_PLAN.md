@@ -37,15 +37,15 @@ passed as `--set` on the CLI.
    sampler's read of the logits) is the wait for the GPU itself. Host time per op totals about 1 s of the 8.4 s. This stops
    being true once the GEMV is fast: at a few ms of GPU time a token, recording 400 dispatches a token and the per-token
    drain become the next cost, which is what the step graph below is for.
-4. **MoE adds host round trips and per-expert launches.** Vulkan implements `MoeRoute`, `MoeBuildDispatch`, `MoeCombine`
-   and `TopKLastDim`, but nothing in the layer calls them: with no `SupportsMoeExpertIndexed`, `MoeFeedForward.Forward`
+4. **MoE adds host round trips and per-expert launches.** Vulkan implements `MoeRoute`, `MoeBuildDispatch` and `MoeCombine`,
+   but nothing in the layer calls them: with no `SupportsMoeExpertIndexed`, `MoeFeedForward.Forward`
    takes the host-routed path. On granite that is 85,308 `Linear` calls (about 670 a token, one per active expert
-   projection) and 22,397 host waits in `ScatterAddWeightedRows` (about 175 a token) on top of the router read per layer.
+   projection) and 22,397 host waits in `ScatterAddRows` (about 175 a token) on top of the router read per layer.
    GPU time was 8.0 s of a 17.3 s wall, so more than half the MoE run is host stall.
 
 ## What exists on Vulkan and what does not
 
-Present: `moe_route`, `moe_build_dispatch`, `moe_combine`, `topk_lastdim`, `softplus` (parity-tested by
+Present: `moe_route`, `moe_build_dispatch`, `moe_combine`, `softplus` (parity-tested by
 `VulkanMoePrimitiveTests`); `dequant_*` for Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and IQ4_XS, which write F16 and
 are used by the lazy weight-cast path; the decode-step leaf ops (`kv_cache_append_dev`, `embed_gather_decode`,
 `rope_decode_step`, `argmax_lastdim`, `repetition_penalty`, `history_append`, `FlashAttentionDev`); and `VulkanStepGraph`
@@ -362,8 +362,8 @@ card. This removes recording cost and the per-op submit batching decisions; whet
 step-4 timings, so measure the host share of a token before building it.
 
 **7. Device sampler (about three days, only if sampled decode is wanted in the graph).** `AllocDeviceRng` (seed and draw
-counter buffer), `SampleTopKInto` as a top-k dispatch (`topk_lastdim` exists; the vocabulary-wide case needs the two-stage
-slice-then-merge form CUDA uses) plus a temperature, nucleus, min-p and multinomial draw dispatch with a splitmix64 generator.
+counter buffer), `SampleTopKInto` as a top-k dispatch (a new top-k shader; the unused `topk_lastdim` shader was removed with the
+`TopKLastDim` op, and the vocabulary-wide case needs the two-stage slice-then-merge form CUDA uses) plus a temperature, nucleus, min-p and multinomial draw dispatch with a splitmix64 generator.
 Greedy graph decode does not need it.
 
 ## Order and reasons

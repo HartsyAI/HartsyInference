@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
@@ -166,14 +167,14 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
 
         // ── Image embedding: input_proj over the image rows only, scattered after a zeroed text head. ──
         // Bit-identical to the old full-sequence masked path: text rows there were Linear-bias rows zeroed by
-        // the post-projection MaskRows; here they are never computed.
+        // the post-projection row gate; here they are never computed.
         Tensor xProjImg = new Tensor(new TensorShape(batch, numImg, emb), DType.F32);
         backend.Linear(xProjImg, imageTokens, _inputProjW!, _inputProjB);
         Tensor h;
         if (numText > 0)
         {
             h = new Tensor(hidShape, DType.F32);
-            backend.ScatterRowsAfter(h, xProjImg, numText);
+            backend.Pad(h, xProjImg, PadSpec.Axis(PadMode.Zero, 3, 1, numText, 0));
             xProjImg.Dispose();
         }
         else
@@ -192,7 +193,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
             h = hSum;
         }
         Tensor indicatorIdx = BuildIndicatorIndices(indicator, batch, seqLen);
-        backend.IndexAddRows(h, _imageIndicatorW!, indicatorIdx);
+        backend.GatherAddRows(h, _imageIndicatorW!, indicatorIdx);
         indicatorIdx.Dispose();
         Ideogram4DebugDump.Dump("hidden_in", h);
 
@@ -414,7 +415,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
     }
 
     /// <summary>Builds per-token I32 indices into <c>embed_image_indicator</c> (row 1 for image tokens, row 0 otherwise),
-    /// shape <c>[B*L]</c>, for <see cref="IBackend.IndexAddRows"/>.</summary>
+    /// shape <c>[B*L]</c>, for <see cref="IBackend.GatherAddRows"/>.</summary>
     private static Tensor BuildIndicatorIndices(int[] indicator, int batch, int seqLen)
     {
         Tensor idx = new Tensor(new TensorShape(batch * seqLen), DType.I32);
