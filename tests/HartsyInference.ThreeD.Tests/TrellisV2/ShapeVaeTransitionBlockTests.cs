@@ -105,7 +105,7 @@ public sealed class ShapeVaeTransitionBlockTests
     }
 
     [Fact]
-    public void ChannelToSpatial_NoPositiveSubdivisionLogits_ThrowsWithTheLevelContext()
+    public void ChannelToSpatial_NoPositiveSubdivisionLogits_ThrowsClearly()
     {
         // Every to_subdiv logit is negative, so the subdivision keeps no children and must fail with a clear message.
         int[] coords = { 0, 1, 0, 1, 0, 1, 1, 1 };

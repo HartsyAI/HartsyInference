@@ -59,10 +59,19 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
         Tensor h = ShapeVaeOps.Linear(backend, latent.Feats, _fromLatentW, _fromLatentB, n, _firstChannels);
         SparseTensor cur = latent.Replace(h);
 
-        for (int i = 0; i < _levels; i++)
+        try
         {
-            foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = Advance(cur, block.Forward(backend, cur));
-            if (i < _levels - 1) cur = Advance(cur, _ups[i]!.Forward(backend, cur));
+            for (int i = 0; i < _levels; i++)
+            {
+                foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = Advance(cur, block.Forward(backend, cur));
+                if (i < _levels - 1) cur = Advance(cur, _ups[i]!.Forward(backend, cur));
+            }
+        }
+        catch
+        {
+            // cur.Feats is always a buffer this method owns (h or a block output), so it is released on failure.
+            cur.Feats.Dispose();
+            throw;
         }
 
         int m = cur.Count;
