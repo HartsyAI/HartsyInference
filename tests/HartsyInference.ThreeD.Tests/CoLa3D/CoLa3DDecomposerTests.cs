@@ -31,6 +31,36 @@ public sealed class CoLa3DDecomposerTests
             AssertFinite(output.QueryFeatures);
             Assert.True(output.MaskLogits.AsReadOnlySpan<float>().ToArray().Any(v => v != 0f), "Mask logits are all zero.");
             Assert.True(output.QueryFeatures.AsReadOnlySpan<float>().ToArray().Any(v => v != 0f), "Query features are all zero.");
+            Assert.Equal(6, output.ActiveSlots.Count);
+            Assert.All(output.ActiveSlots, active => Assert.True(active));
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
+    public void LearnableQueries_RunForward()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed)
+            with { QueryInit = CoLa3DConfig.QueryInitKind.Learnable };
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 35);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [5, 4], seed: 36);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            using CoLa3DOutput output = decomposer.Forward(backend, latent, utonia);
+
+            Assert.Equal(new TensorShape(9, 3), output.MaskLogits.Shape);
+            Assert.Equal(new TensorShape(2, 3, 16), output.QueryFeatures.Shape);
+            AssertFinite(output.PointFeatures.Feats);
+            AssertFinite(output.MaskLogits);
+            AssertFinite(output.QueryFeatures);
+            Assert.True(output.QueryFeatures.AsReadOnlySpan<float>().ToArray().Any(v => v != 0f), "Query features are all zero.");
         }
         finally
         {
@@ -147,6 +177,7 @@ public sealed class CoLa3DDecomposerTests
             Assert.Equal(new TensorShape(2, 3, 16), output.QueryFeatures.Shape);
             AssertFinite(output.QueryFeatures);
             AssertFinite(output.MaskLogits);
+            Assert.Equal(new bool[] { true, true, false, true, false, true }, output.ActiveSlots.ToArray());
             // Sample 0 (voxel rows 0-4) has slot 2 invalid; sample 1 (rows 5-8) has slot 1 invalid.
             AssertRowsZero(output.QueryFeatures, 2);
             AssertRowsZero(output.QueryFeatures, 4);
@@ -228,6 +259,121 @@ public sealed class CoLa3DDecomposerTests
 
             HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => decomposer.Forward(backend, latent, utonia, prompts));
             Assert.Contains("no active voxel", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Theory]
+    [InlineData(8, 0, 0)]
+    [InlineData(0, -1, 0)]
+    [InlineData(0, 0, 8)]
+    public void Forward_RejectsAPointPromptOutsideTheGrid(int x, int y, int z)
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.PromptPoint);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 37);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [3], seed: 38);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            CoLa3DQueryPrompts prompts = new() { Batch = 1, Queries = 1, Points = [x, y, z] };
+
+            HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => decomposer.Forward(backend, latent, utonia, prompts));
+            Assert.Contains("outside", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
+    public void PointPrompts_SkipInvalidSlotsWhateverTheirCoordinates()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.PromptPoint);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 39);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [6], seed: 40);
+        int[] c0 = Coords(latent, 0);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            // Slot 0 is invalid and lies outside the grid; only the valid slot is checked and gathered.
+            CoLa3DQueryPrompts prompts = new()
+            {
+                Batch = 1,
+                Queries = 2,
+                Points = [config.LatentResolution, 0, 0, c0[0], c0[1], c0[2]],
+                Valid = [false, true],
+            };
+            using CoLa3DOutput output = decomposer.Forward(backend, latent, utonia, prompts);
+
+            Assert.Equal(new bool[] { false, true }, output.ActiveSlots.ToArray());
+            AssertRowsZero(output.QueryFeatures, 0);
+            AssertColumnZero(output.MaskLogits, 0);
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
+    public void PointPrompts_WithEverySlotInvalidGiveZeroQueriesAndPointFeatures()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.PromptPoint);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 41);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [5, 4], seed: 42);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            CoLa3DQueryPrompts prompts = new()
+            {
+                Batch = 2,
+                Queries = 2,
+                Points = new int[12],
+                Valid = [false, false, false, false],
+            };
+            using CoLa3DOutput output = decomposer.Forward(backend, latent, utonia, prompts);
+
+            Assert.Equal(new TensorShape(9, 16), output.PointFeatures.Feats.Shape);
+            AssertFinite(output.PointFeatures.Feats);
+            Assert.All(output.ActiveSlots, active => Assert.False(active));
+            for (int row = 0; row < 4; row++)
+                AssertRowsZero(output.QueryFeatures, row);
+            Assert.All(output.MaskLogits.AsReadOnlySpan<float>().ToArray(), value => Assert.Equal(0f, value));
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
+    public void Forward_AfterDispose_ThrowsObjectDisposedException()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 43);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [3], seed: 44);
+        try
+        {
+            using CpuBackend backend = new();
+            CoLa3DDecomposer decomposer = new(config, weights);
+            decomposer.Dispose();
+
+            Assert.Throws<ObjectDisposedException>(() => decomposer.Forward(backend, latent, utonia));
         }
         finally
         {
