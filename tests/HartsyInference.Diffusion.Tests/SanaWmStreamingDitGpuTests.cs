@@ -163,6 +163,23 @@ public sealed class SanaWmStreamingDitGpuTests(ITestOutputHelper output)
     }
 }
 
+/// <summary>Skips at discovery unless <c>HARTSYINFERENCE_MODELS_DIR</c> holds the converted streaming DiT at
+/// <c>World/SanaWm/streaming/sana_dit/model.safetensors</c>. With <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> it is never skipped.</summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class SanaWmStreamingWeightsFactAttribute : FactAttribute
+{
+    public SanaWmStreamingWeightsFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable(SanaWmRealWeightsFactAttribute.RequireEnvironmentVariable) == "1")
+            return;
+        if (SanaWmStreamingReferenceFactAttribute.DitPathOrNull() is null)
+            Skip = $"SKIPPED: {SanaWmRealWeightsFactAttribute.ModelsDirEnvironmentVariable} does not hold the converted streaming DiT.";
+    }
+
+    /// <summary>The converted streaming DiT under the models root.</summary>
+    public static string DitPath() => SanaWmStreamingReferenceFactAttribute.DitPath();
+}
+
 /// <summary>Skips at discovery unless <c>SANAWM_STREAM_REFERENCE_DIR</c> names an upstream streaming run and
 /// <c>HARTSYINFERENCE_MODELS_DIR</c> holds the converted streaming DiT at <c>World/SanaWm/streaming/sana_dit/model.safetensors</c>.
 /// With <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c> it is never skipped.</summary>
@@ -187,7 +204,7 @@ public sealed class SanaWmStreamingReferenceFactAttribute : FactAttribute
     public static string DitPath() => DitPathOrNull()
         ?? throw new InvalidOperationException($"{SanaWmRealWeightsFactAttribute.ModelsDirEnvironmentVariable} must hold {DitRelativePath}.");
 
-    private static string? DitPathOrNull()
+    internal static string? DitPathOrNull()
     {
         string? root = Environment.GetEnvironmentVariable(SanaWmRealWeightsFactAttribute.ModelsDirEnvironmentVariable);
         if (string.IsNullOrWhiteSpace(root))

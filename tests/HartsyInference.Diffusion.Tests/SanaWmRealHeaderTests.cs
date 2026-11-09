@@ -19,4 +19,16 @@ public sealed class SanaWmRealHeaderTests
         SanaWmConfigTests.AssertRealDitDimensions(config);
         Assert.Empty(SanaWmCheckpointConverter.ValidateKeys(config, header.Tensors));
     }
+
+    /// <summary>The streaming release's DiT, converted from its pickle to safetensors, keeps the stage-1 layout: same derived
+    /// dimensions, and every expected tensor present with its expected shape.</summary>
+    [SanaWmStreamingWeightsFact]
+    public void StreamingDitHeader_KeepsTheStageOneLayout()
+    {
+        SafeTensorHeader header = SafeTensorHeaderReader.Read(SanaWmStreamingWeightsFactAttribute.DitPath());
+
+        SanaWmConfig config = SanaWmConfig.FromWeights(header.Tensors);
+        SanaWmConfigTests.AssertRealDitDimensions(config);
+        Assert.Empty(SanaWmCheckpointConverter.ValidateKeys(config, header.Tensors));
+    }
 }
