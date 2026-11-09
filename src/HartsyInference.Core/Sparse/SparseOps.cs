@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -39,11 +40,11 @@ public static unsafe class SparseOps
         // Grid built + consumed on-device (no host scatter loop, no multi-GB grid H2D).
         Tensor grid = new(new TensorShape(new long[] { 1, cin, r, r, r }), DType.F32);
         backend.Fill(grid, 0f);
-        backend.SparseScatterToGrid(grid, x.Feats, coordsT, cin, r);
+        backend.GridScatter(grid, x.Feats, coordsT, GridSpec.Cube(r, 4, 1));
         Tensor outGrid = new(new TensorShape(new long[] { 1, cout, r, r, r }), DType.F32);
         backend.Conv3d(outGrid, grid, weightP, bias, 1, 1, 1, 1, 1, 1);
         Tensor outFeats = new(new TensorShape(n, cout), DType.F32);
-        backend.SparseGatherFromGrid(outFeats, outGrid, coordsT, cout, r);
+        backend.GridGather(outFeats, outGrid, coordsT, GridSpec.Cube(r, 4, 1));
         grid.Dispose(); outGrid.Dispose(); coordsT.Dispose();
         return x.Replace(outFeats);
     }
@@ -82,10 +83,10 @@ public static unsafe class SparseOps
         {
             int m = rb[off].inIdx.Length;
             if (m == 0) continue;
-            Tensor inT = IntTensor(rb[off].inIdx, m), outT = IntTensor(rb[off].outIdx, m);
-            Tensor gathered = new(new TensorShape(1, m, cin), DType.F32); backend.RowGather(gathered, x.Feats, inT, m, cin);
+            Tensor inT = IndexTensor.Rows(rb[off].inIdx), outT = IndexTensor.Rows(rb[off].outIdx);
+            Tensor gathered = new(new TensorShape(1, m, cin), DType.F32); backend.GatherRows(gathered, x.Feats, inT);
             Tensor gemm = new(new TensorShape(1, m, cout), DType.F32); backend.Linear(gemm, gathered, wSlices[off], null);
-            backend.RowScatterAdd(outFeats, gemm, outT, m, cout);
+            backend.ScatterAddRows(outFeats, gemm, outT);
             temps.Add(inT); temps.Add(outT); temps.Add(gathered); temps.Add(gemm);
         }
         backend.Sync();
@@ -108,12 +109,6 @@ public static unsafe class SparseOps
     }
 
     private static long Pack(int x, int y, int z) => ((long)x << 20) | ((long)y << 10) | (long)z;
-    internal static Tensor IntTensor(int[] src, int m)
-    {
-        Tensor t = new(new TensorShape(m), DType.I32); int* p = (int*)t.DataPointer;
-        for (int i = 0; i < m; i++) p[i] = src[i];
-        return t;
-    }
 
     // The spconv rulebook (per kernel offset: the (in,out) voxel-index pairs of active neighbours) is a pure function
     // of the voxel COORDS — identical across all 44 sampler steps (feats change, coords don't). Building it is a host
@@ -199,9 +194,9 @@ public static unsafe class SparseOps
     public static SparseTensor Upsample(IBackend backend, SparseTensor x, int[] idx, int[] upCoords, int upResolution)
     {
         int n = idx.Length, c = x.Channels;
-        Tensor idxT = IntTensor(idx, n);
+        Tensor idxT = IndexTensor.Rows(idx);
         Tensor outFeats = new(new TensorShape(1, n, c), DType.F32);
-        backend.RowGather(outFeats, As3D(x.Feats), idxT, n, c);
+        backend.GatherRows(outFeats, As3D(x.Feats), idxT);
         idxT.Dispose();
         return new SparseTensor(outFeats, upCoords, upResolution);
     }

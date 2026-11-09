@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -101,8 +103,8 @@ public sealed unsafe class CosmosArBlock
             k.Dispose(); k = kN;
         }
 
-        backend.ApplyRopeSingle(q, cos, sin, d);
-        backend.ApplyRopeSingle(k, cos, sin, d);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
 
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, q, t, hq, d);
         Tensor kMh = new(new TensorShape(1, hkv, t, d), DType.F32); backend.Permute0213(kMh, k, t, hkv, d);

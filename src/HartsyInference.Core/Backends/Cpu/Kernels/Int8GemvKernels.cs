@@ -52,12 +52,6 @@ public static class Int8GemvKernels
         Tensor? diag, Tensor? diagInput) =>
         Run(Prepare(output, input, weight, scale, bias, diag, diagInput), Avx2.IsSupported);
 
-    /// <summary>The same product computed without SIMD, which non-AVX2 CPUs run. Public so a test can hold the AVX2
-    /// path to it on a machine that has AVX2.</summary>
-    public static unsafe void LinearScalar(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? bias,
-        Tensor? diag, Tensor? diagInput) =>
-        Run(Prepare(output, input, weight, scale, bias, diag, diagInput), simd: false);
-
     private static unsafe Pass Prepare(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? bias,
         Tensor? diag, Tensor? diagInput)
     {

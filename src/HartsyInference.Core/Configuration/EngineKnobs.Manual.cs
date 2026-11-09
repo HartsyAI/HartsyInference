@@ -17,7 +17,7 @@ public static partial class EngineKnobs
 
     /// <summary>Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).</summary>
     public static readonly Knob<bool?> Fp8Native =
-        BoolOverride("numerics.fp8Native", KnobScope.Runtime, KnobDomain.Numerics,
+        BoolOverride("numerics.fp8Native", KnobScope.Construction, KnobDomain.Numerics,
             "Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).");
 
     /// <summary>Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until the path is validated on a card, after which it follows the card like <see cref="Fp8Native"/>.</summary>

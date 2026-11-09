@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -166,7 +167,7 @@ public sealed unsafe class Fibo2Block : IDisposable
         _ownedSplits.Clear();
     }
 
-    /// <summary>Per-group adaLN rows for the attention and FFN sub-blocks. The 1 + scale of ModulationSplit4 is undone
+    /// <summary>Per-group adaLN rows for the attention and FFN sub-blocks. The 1 + scale of the ChunkActivate split is undone
     /// because <see cref="SegmentModulation"/> applies it; its gates arrive already tanh'd.</summary>
     private (SegmentModulation Attention, SegmentModulation Ffn) BuildModulation(IBackend backend,
         IReadOnlyList<Tensor> embeddings, TokenSegmentLayout layout)
@@ -184,7 +185,7 @@ public sealed unsafe class Fibo2Block : IDisposable
                 Tensor gateMsa = new(rowShape, DType.F32);
                 Tensor scaleMlp = new(rowShape, DType.F32);
                 Tensor gateMlp = new(rowShape, DType.F32);
-                backend.ModulationSplit4(scaleMsa, gateMsa, scaleMlp, gateMlp, projected);
+                backend.ChunkActivate([scaleMsa, gateMsa, scaleMlp, gateMlp], projected, [ChunkActivation.OnePlus, ChunkActivation.Tanh, ChunkActivation.OnePlus, ChunkActivation.Tanh]);
                 projected.Dispose();
                 attentionRows.Add((Zeros(rowShape), Unfolded(backend, scaleMsa, rowShape), gateMsa));
                 ffnRows.Add((Zeros(rowShape), Unfolded(backend, scaleMlp, rowShape), gateMlp));

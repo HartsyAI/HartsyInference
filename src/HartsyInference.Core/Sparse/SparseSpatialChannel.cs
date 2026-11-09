@@ -80,12 +80,13 @@ public static unsafe class SparseSpatialChannel
         if (plan.Index.Length != rows)
             throw new ArgumentException($"Plan maps {plan.Index.Length} input voxels, feats hold {rows}.", nameof(plan));
         int m = plan.Coords.Length / 4;
-        Tensor o = new(new TensorShape(1, m, plan.ChildCount * channels), DType.F32);
-        backend.Fill(o, 0f);
-        Tensor idx = SparseOps.IntTensor(plan.Index, rows);
-        backend.RowScatterAdd(o, feats, idx, rows, channels);
+        // Scatter into the flat [m·ChildCount, channels] layout the row ops address, then view it as [1, m, ChildCount·channels].
+        Tensor flat = new(new TensorShape(1, m * plan.ChildCount, channels), DType.F32);
+        backend.Fill(flat, 0f);
+        Tensor idx = IndexTensor(plan.Index, rows);
+        backend.ScatterAddRows(flat, feats, idx);
         idx.Dispose();
-        return o;
+        return flat.Reshape(new TensorShape(1, m, plan.ChildCount * channels));
     }
 
     /// <summary>Splits channel groups back onto children: feats <c>[N, ChildCount·channels]</c> → <c>[1, M, channels]</c>.</summary>
@@ -99,9 +100,11 @@ public static unsafe class SparseSpatialChannel
                 nameof(childFeats));
         }
         int m = plan.Index.Length;
+        long childRows = childFeats.ElementCount / channels;
+        Tensor flat = childFeats.Reshape(new TensorShape(childRows, channels));
         Tensor o = new(new TensorShape(1, m, channels), DType.F32);
-        Tensor idx = SparseOps.IntTensor(plan.Index, m);
-        backend.RowGather(o, childFeats, idx, m, channels);
+        Tensor idx = IndexTensor(plan.Index, m);
+        backend.GatherRows(o, flat, idx);
         idx.Dispose();
         return o;
     }
@@ -198,4 +201,12 @@ public static unsafe class SparseSpatialChannel
     /// <param name="Resolution">Grid resolution of the output coords.</param>
     /// <param name="ChildCount">Children per coarse or parent voxel, <c>factor³</c>.</param>
     public readonly record struct Plan(int[] Coords, int[] Index, int Resolution, int ChildCount);
+
+    private static unsafe Tensor IndexTensor(int[] src, int m)
+    {
+        Tensor t = new(new TensorShape(m), DType.I32);
+        int* p = (int*)t.DataPointer;
+        for (int i = 0; i < m; i++) p[i] = src[i];
+        return t;
+    }
 }

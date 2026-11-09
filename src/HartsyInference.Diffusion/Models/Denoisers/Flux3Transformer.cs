@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -480,7 +481,7 @@ public sealed class Flux3Transformer : IDisposable
     {
         Tensor[] shiftScale = _finalModulation.Forward(backend, imageVec);
         Tensor modulated = new Tensor(imageRows.Shape, imageRows.DType);
-        backend.LayerNormModulate(modulated, imageRows, shiftScale[1], shiftScale[0], _config.LayerNormEps);
+        backend.NormModulate(NormModulateCall.Rows(modulated, imageRows, NormKind.LayerNorm, _config.LayerNormEps).WithModulation(ModulationSpec.Broadcast(imageRows, shiftScale[1], shiftScale[0], ScaleMode.OnePlus)));
         shiftScale[0].Dispose();
         shiftScale[1].Dispose();
         Tensor velocity = new Tensor(new TensorShape(1, imageRows.Shape[1], _config.InChannels), DType.F32);
