@@ -43,6 +43,12 @@ internal sealed class HairDeckRuntime : IDisposable
     /// <exception cref="FileNotFoundException">A Vision checkpoint is missing; the names of the expected files are in the message.</exception>
     public static HairDeckRuntime Load(IBackend backend, string modelRoot, string visionRoot)
     {
+        if (backend is HartsyInference.Vulkan.VulkanBackend)
+        {
+            throw new NotSupportedException(
+                "HairDeck does not run on Vulkan yet (the image model needs LeakyRelu, which the Vulkan backend lacks). Use -b cuda or -b cpu.");
+        }
+
         string sam3Path = Path.Combine(visionRoot, "sam3", Sam3FileName);
         string birefnetPath = Path.Combine(visionRoot, "BiRefNet-matting", BiRefNetFileName);
         string dinoPath = Path.Combine(visionRoot, "Dinov3", DinoFileName);

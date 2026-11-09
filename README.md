@@ -71,8 +71,8 @@ features remain subject to their individual
 ## HairDeck: hair cards from one image
 
 HairDeck (`hairdeck`) turns one character image into a GLB of hair cards, with per-card colours and optional spring-bone
-chains. It runs through `hartsy 3d` and `POST /v1/native/mesh` on the CUDA and CPU backends (Vulkan is not implemented for
-HairDeck yet). Weights are from
+chains. It runs through `hartsy 3d` and `POST /v1/native/mesh` on the CUDA and CPU backends. Vulkan is rejected for HairDeck
+(its image model needs `LeakyRelu`, which the Vulkan backend lacks). Weights are from
 [`hyz317/HairDeck`](https://huggingface.co/hyz317/HairDeck) (Apache-2.0). Output is static only: rigged output and VRM
 packaging are not implemented here.
 
@@ -94,8 +94,8 @@ packaging are not implemented here.
 
 ### Input
 
-- A PNG. If it has an alpha channel, that alpha is used as the person matte. Otherwise the person is segmented
-  automatically with SAM 3 and BiRefNet-matting.
+- A PNG with an alpha channel uses that alpha as the person matte. Any other image (including a PNG without alpha) is
+  segmented automatically with SAM 3 and BiRefNet-matting.
 - One character per image. A request fails with a named error when the hair or face cannot be found.
 
 ### CLI
@@ -113,7 +113,7 @@ Writes `out/hairdeck-0001.glb`. Options that apply to HairDeck:
 | `--seed` | -1 (random) | RNG seed; use a fixed value to repeat a result |
 | `--no-colors` | off | Skip the colour model; the cards then have no per-card colour |
 | `--no-chains` | off | Skip the spring-bone chains; the GLB has only `hair_cards` |
-| `-b` | `auto` | `cuda`, `vulkan` or `cpu` |
+| `-b` | `auto` | `cuda` or `cpu`. `vulkan` is rejected; `auto` may pick Vulkan on some GPUs, so pass `-b cuda` or `-b cpu` |
 | `--rigged` | off | Rejected in this build |
 
 Samples are fixed at one per request (`-n 1`).
@@ -132,7 +132,7 @@ curl -X POST http://localhost:5000/v1/native/mesh -H "Content-Type: application/
 ```
 
 The response carries `data` (the GLB, base64), `format` (`glb`) and `savedPath`. Add `"save": false` to return the GLB
-without writing it to disk. `POST /v1/native/mesh/stream` sends step progress as server-sent events. Use your server's address; the example assumes a local server on port 5000.
+without writing it to disk. `POST /v1/native/mesh/stream` returns only the final result for HairDeck; step progress is not streamed yet. Use your server's address; the example assumes the default local port, 5000.
 
 ### Output
 
