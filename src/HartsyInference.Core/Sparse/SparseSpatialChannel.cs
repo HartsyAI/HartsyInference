@@ -6,12 +6,15 @@ namespace HartsyInference.Core.Sparse;
 /// <summary>
 /// Spatial-to-channel and channel-to-spatial resampling of sparse voxels by an integer factor: a coarse voxel owns
 /// <c>factor³</c> children, ordered <c>(x%f) + f·(y%f) + f²·(z%f)</c>, and its features are the children's features
-/// concatenated along the channel axis. Geometry is planned on the host; feature moves run through
-/// <see cref="IBackend"/> row scatter/gather.
+/// concatenated along the channel axis. Planning (<see cref="PlanSpatialToChannel"/>, <see cref="PlanChannelToSpatial"/>)
+/// is host code; <see cref="PlanChannelToSpatial"/> also reads its logits from host memory. The feature moves
+/// (<see cref="SpatialToChannelFeats"/>, <see cref="ChannelToSpatialFeats"/>) run through <see cref="IBackend"/> row
+/// scatter/gather. <see cref="MeanChannelGroups"/> is CPU-only: it reads and writes host memory directly.
 /// </summary>
 public static unsafe class SparseSpatialChannel
 {
     /// <summary>Plans a space-to-channel merge: input voxels sharing a coarse cell collapse into one output voxel.</summary>
+    /// <remarks>Host-only: works on the coords array alone, no tensor access.</remarks>
     public static Plan PlanSpatialToChannel(int[] coords, int resolution, int factor)
     {
         ValidateGeometry(coords, resolution, factor);
@@ -40,6 +43,7 @@ public static unsafe class SparseSpatialChannel
 
     /// <summary>Plans a channel-to-spatial expansion: each parent yields the children whose logit is positive, in child order.</summary>
     /// <param name="childLogits">F32 values <c>[N·factor³]</c>, one per parent child slot.</param>
+    /// <remarks>CPU-only: reads <paramref name="childLogits"/> through <c>DataPointer</c>, so it must be host-resident.</remarks>
     public static Plan PlanChannelToSpatial(int[] coords, int resolution, int factor, Tensor childLogits)
     {
         ValidateGeometry(coords, resolution, factor);
@@ -83,8 +87,9 @@ public static unsafe class SparseSpatialChannel
         // Scatter into the flat [m·ChildCount, channels] layout the row ops address, then view it as [1, m, ChildCount·channels].
         Tensor flat = new(new TensorShape(1, m * plan.ChildCount, channels), DType.F32);
         backend.Fill(flat, 0f);
-        Tensor idx = IndexTensor(plan.Index, rows);
+        Tensor idx = IndexTensor.Rows(plan.Index);
         backend.ScatterAddRows(flat, feats, idx);
+        backend.Sync();
         idx.Dispose();
         return flat.Reshape(new TensorShape(1, m, plan.ChildCount * channels));
     }
@@ -103,13 +108,15 @@ public static unsafe class SparseSpatialChannel
         long childRows = childFeats.ElementCount / channels;
         Tensor flat = childFeats.Reshape(new TensorShape(childRows, channels));
         Tensor o = new(new TensorShape(1, m, channels), DType.F32);
-        Tensor idx = IndexTensor(plan.Index, m);
+        Tensor idx = IndexTensor.Rows(plan.Index);
         backend.GatherRows(o, flat, idx);
+        backend.Sync();
         idx.Dispose();
         return o;
     }
 
     /// <summary>Averages contiguous channel groups: <c>[..., K]</c> → <c>[1, rows, groups]</c>; group <c>o</c> spans <c>[o·g, (o+1)·g)</c>.</summary>
+    /// <remarks>CPU-only: reads and writes host memory through <c>DataPointer</c>.</remarks>
     public static Tensor MeanChannelGroups(Tensor feats, int groups)
     {
         RequireF32(feats, nameof(feats));
@@ -127,21 +134,6 @@ public static unsafe class SparseSpatialChannel
                 for (int j = 0; j < g; j++) acc += s[(long)r * k + oc * g + j];
                 d[(long)r * groups + oc] = acc * inv;
             }
-        return o;
-    }
-
-    /// <summary>Repeats each channel in place: <c>[..., K]</c> → <c>[1, rows, K·repeats]</c>, channel <c>c</c> filling <c>[c·repeats, (c+1)·repeats)</c>.</summary>
-    public static Tensor RepeatChannels(Tensor feats, int repeats)
-    {
-        RequireF32(feats, nameof(feats));
-        int k = (int)feats.Shape[feats.Shape.Rank - 1];
-        if (repeats <= 0) throw new ArgumentOutOfRangeException(nameof(repeats), repeats, "Repeat count must be positive.");
-        int rows = (int)(feats.ElementCount / k), outK = k * repeats;
-        Tensor o = new(new TensorShape(1, rows, outK), DType.F32);
-        float* s = (float*)feats.DataPointer, d = (float*)o.DataPointer;
-        for (int r = 0; r < rows; r++)
-            for (int c = 0; c < k; c++)
-                for (int j = 0; j < repeats; j++) d[(long)r * outK + c * repeats + j] = s[(long)r * k + c];
         return o;
     }
 
@@ -201,12 +193,4 @@ public static unsafe class SparseSpatialChannel
     /// <param name="Resolution">Grid resolution of the output coords.</param>
     /// <param name="ChildCount">Children per coarse or parent voxel, <c>factor³</c>.</param>
     public readonly record struct Plan(int[] Coords, int[] Index, int Resolution, int ChildCount);
-
-    private static unsafe Tensor IndexTensor(int[] src, int m)
-    {
-        Tensor t = new(new TensorShape(m), DType.I32);
-        int* p = (int*)t.DataPointer;
-        for (int i = 0; i < m; i++) p[i] = src[i];
-        return t;
-    }
 }
