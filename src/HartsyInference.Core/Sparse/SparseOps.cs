@@ -87,32 +87,20 @@ public static unsafe class SparseOps
         (int[] inIdx, int[] outIdx)[] rb = GetRulebook(x.Coords, n);   // spatial rulebook: cached per voxel set (see GetRulebook)
 
         Tensor outFeats = new(new TensorShape(1, n, cout), DType.F32); backend.Fill(outFeats, 0f);
-        // Host-resident features are gathered on the host: a device gather would upload the whole input once per chunk.
-        bool hostGather = x.Feats.HostBytesCurrent;
         for (int off = 0; off < 27; off++)
         {
             int m = rb[off].inIdx.Length;
             for (int start = 0; start < m; start += chunkRows)
             {
                 int rows = Math.Min(chunkRows, m - start);
-                Tensor gathered = new(new TensorShape(1, rows, cin), DType.F32);
-                Tensor? inT = null;
-                if (hostGather)
-                {
-                    GatherRowsHost(gathered, x.Feats, rb[off].inIdx.AsSpan(start, rows), cin);
-                }
-                else
-                {
-                    inT = IndexTensor.Rows(rb[off].inIdx.AsSpan(start, rows));
-                    backend.GatherRows(gathered, x.Feats, inT);
-                }
-
+                Tensor inT = IndexTensor.Rows(rb[off].inIdx.AsSpan(start, rows));
                 Tensor outT = IndexTensor.Rows(rb[off].outIdx.AsSpan(start, rows));
+                Tensor gathered = new(new TensorShape(1, rows, cin), DType.F32); backend.GatherRows(gathered, x.Feats, inT);
                 Tensor gemm = new(new TensorShape(1, rows, cout), DType.F32); backend.Linear(gemm, gathered, wSlices[off], null);
                 backend.ScatterAddRows(outFeats, gemm, outT);
                 // Released after the chunk's kernels drain: freeing device buffers mid-async-kernel races (AV).
                 backend.Sync();
-                inT?.Dispose(); outT.Dispose(); gathered.Dispose(); gemm.Dispose();
+                inT.Dispose(); outT.Dispose(); gathered.Dispose(); gemm.Dispose();
             }
         }
         if (bias is not null)
@@ -138,17 +126,6 @@ public static unsafe class SparseOps
         Tensor t = new(new TensorShape(m), DType.I32); int* p = (int*)t.DataPointer;
         for (int i = 0; i < m; i++) p[i] = src[i];
         return t;
-    }
-
-    /// <summary>Copies the rows <paramref name="rows"/> of host-current <paramref name="source"/> into <paramref name="output"/>, row by row.</summary>
-    private static void GatherRowsHost(Tensor output, Tensor source, ReadOnlySpan<int> rows, int channels)
-    {
-        ReadOnlySpan<float> src = source.AsReadOnlySpan<float>();
-        Span<float> dst = output.AsSpan<float>();
-        for (int r = 0; r < rows.Length; r++)
-        {
-            src.Slice(rows[r] * channels, channels).CopyTo(dst.Slice(r * channels, channels));
-        }
     }
 
     // The spconv rulebook (per kernel offset: the (in,out) voxel-index pairs of active neighbours) is a pure function
