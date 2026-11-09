@@ -10,6 +10,7 @@ public static class LatentEncodings
         LatentEncoding.Fp8E4M3Ue8m0x32 => 32,
         LatentEncoding.Fp4E2M1E4M3x16 => 16,
         LatentEncoding.Fp4E2M1E8M0x32 => 32,
+        LatentEncoding.Fp8E4M3Ue8m0x128 => 128,
         _ => throw new ArgumentOutOfRangeException(nameof(encoding), encoding, "Unknown latent encoding."),
     };
 
@@ -17,11 +18,15 @@ public static class LatentEncodings
     public static bool IsFp4(LatentEncoding encoding) =>
         encoding == LatentEncoding.Fp4E2M1E4M3x16 || encoding == LatentEncoding.Fp4E2M1E8M0x32;
 
+    /// <summary>True for the FP8 formats, one e4m3 code byte per element with a UE8M0 group scale.</summary>
+    public static bool IsFp8(LatentEncoding encoding) =>
+        encoding == LatentEncoding.Fp8E4M3Ue8m0x32 || encoding == LatentEncoding.Fp8E4M3Ue8m0x128;
+
     /// <summary>Bytes of code storage per row of <paramref name="dim"/> elements.</summary>
     public static long CodeBytesPerRow(LatentEncoding encoding, int dim) => encoding switch
     {
         LatentEncoding.F32 => 4L * dim,
-        LatentEncoding.Fp8E4M3Ue8m0x32 => dim,
+        LatentEncoding.Fp8E4M3Ue8m0x32 or LatentEncoding.Fp8E4M3Ue8m0x128 => dim,
         _ => dim / 2,
     };
 
@@ -30,5 +35,13 @@ public static class LatentEncodings
     {
         int group = GroupSize(encoding);
         return group == 0 ? 0 : dim / group;
+    }
+
+    /// <summary>Refuses an encoding the device latent kernels do not decode; they take the encoding as a raw code.</summary>
+    /// <param name="operation">The backend and operation, for the message (e.g. "CUDA IndexerScores").</param>
+    public static void RequireDeviceKernel(LatentEncoding encoding, string operation)
+    {
+        if (encoding == LatentEncoding.Fp8E4M3Ue8m0x128)
+            throw new NotSupportedException($"{operation} has no kernel for {encoding}; it runs on the CPU backend only.");
     }
 }

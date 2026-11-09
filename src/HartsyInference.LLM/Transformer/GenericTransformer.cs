@@ -10,6 +10,7 @@ using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer.Compression;
 
 namespace HartsyInference.LLM.Transformer;
 
@@ -78,16 +79,20 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         _usesWindowOrSoftcap = _usesLocalWindow || cfg.AttnLogitSoftcap > 0f;
     }
 
-    // Compressed-KV (HCA) layers are config-selectable but not wired into this decoder yet; refusing beats running them as standard attention.
+    // Compressed-KV (HCA) and DSA layers are config-selectable but not wired into this decoder yet; refusing beats running them as standard attention.
     private static void RefuseCompressedKvLayers(TransformerConfig cfg)
     {
         if (cfg.CompressRatios is null) return;
         if (cfg.CompressRatios.Count != cfg.NumLayers)
             throw new ArgumentException("CompressRatios must hold one entry per layer.", nameof(cfg));
         for (int i = 0; i < cfg.NumLayers; i++)
-            if (cfg.AttentionKindFor(i).IsCompressed)
-                throw new NotSupportedException(
-                    $"Layer {i} uses compressed-KV attention (compress_ratio {cfg.CompressRatios[i]}), which GenericTransformer does not run yet.");
+        {
+            LayerAttentionKind kind = cfg.AttentionKindFor(i);
+            if (kind.IsStandard) continue;
+            string name = kind.IsDsa ? "DSA sparse attention" : "compressed-KV attention";
+            throw new NotSupportedException(
+                $"Layer {i} uses {name} (compress_ratio {cfg.CompressRatios[i]}), which GenericTransformer does not run yet.");
+        }
     }
 
     // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
