@@ -13,7 +13,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Interactive-world service: routes to a per-model pipeline by catalog id, caches it per checkpoint, and hands out sessions that drive it. <c>oasis</c> and <c>diamond</c> are fully wired. <c>hunyuan-gamecraft</c> has a real, code-complete checkpoint loader (<see cref="LoadHunyuanGameCraft"/> — see its remarks) but still fails fast with a clear, specific message today: it needs a VAE encoder no converter builds yet, so no session could ever succeed regardless of weights present. <c>matrix-game-2</c> and <c>matrix-game-3</c> are catalogued but not yet loadable here — each needs a multi-checkpoint loader (transformer + VAE + CLIP/T5 text encoder) this service does not build yet, and Matrix-Game 3.0 additionally has no image→latent encoder ported (<c>Wan22VaeEncoder</c> is decode-only today). Selecting any of those three fails fast with a clear message instead of silently mis-loading as Oasis.</summary>
+/// <summary>Interactive-world service: routes to a per-model pipeline by catalog id, caches it per checkpoint, and hands out sessions that drive it. <c>oasis</c> and <c>diamond</c> are fully wired. <c>sana-wm</c> renders each clip in one batch run whose components load one stage at a time (<see cref="SanaWmClipPipeline"/>). An id the service does not know is refused rather than loaded as Oasis. <c>hunyuan-gamecraft</c> has a real, code-complete checkpoint loader (<see cref="LoadHunyuanGameCraft"/> — see its remarks) but still fails fast with a clear, specific message today: it needs a VAE encoder no converter builds yet, so no session could ever succeed regardless of weights present. <c>matrix-game-2</c> and <c>matrix-game-3</c> are catalogued but not yet loadable here — each needs a multi-checkpoint loader (transformer + VAE + CLIP/T5 text encoder) this service does not build yet, and Matrix-Game 3.0 additionally has no image→latent encoder ported (<c>Wan22VaeEncoder</c> is decode-only today). Selecting any of those three fails fast with a clear message instead of silently mis-loading as Oasis.</summary>
 public sealed class WorldService : IWorldService, IDisposable
 {
     /// <summary>Aux key on <see cref="ModelSpec"/> that points at the model's VAE checkpoint (Oasis's ViT-VAE; Hunyuan-GameCraft's 3D causal VAE).</summary>
@@ -67,6 +67,10 @@ public sealed class WorldService : IWorldService, IDisposable
     /// <summary>Resources the batch runs own and have not yet released. Zero between runs; anything else is a leak.</summary>
     internal WorldPhaseLedger RunLedger => _runLedger;
 
+    /// <summary>Supplies an injected initial latent for each SANA-WM run (parity tests replay a recorded upstream <c>z0</c>);
+    /// null draws and encodes one. The run's phase takes ownership of the returned tensor.</summary>
+    internal Func<WorldPlan, Core.Tensors.Tensor?>? SanaWmInitialLatent { get; set; }
+
     /// <summary>Opens a session that renders <paramref name="plan"/>'s clip with <paramref name="pipeline"/> in one run. Every run
     /// from this service queues behind the same execution lease.</summary>
     internal IWorldSession OpenOneShot(IOneShotClipPipeline pipeline, WorldPlan plan) =>
@@ -80,13 +84,13 @@ public sealed class WorldService : IWorldService, IDisposable
         // Planning refuses an unsupported request before GetOrLoad touches a checkpoint.
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, _engine.BackendSelector);
         LoadedWorld loaded = GetOrLoad(spec);
-        return loaded.OpenSession(plan.Request);
+        return loaded.OpenSession(plan);
     }
 
     /// <summary>Loads (or returns the cached) world pipeline for <paramref name="spec"/>, chosen by catalog id.</summary>
     private LoadedWorld GetOrLoad(ModelSpec spec)
     {
-        string id = (spec.Catalog?.Id ?? "oasis").ToLowerInvariant();
+        string id = (spec.Catalog?.Id ?? spec.Requested).ToLowerInvariant();
         // Ordered before the checkpoint guard: these two are not loadable at any path, so the generic
         // "no checkpoint" line would send the caller hunting for weights that cannot help them.
         switch (id)
@@ -102,6 +106,8 @@ public sealed class WorldService : IWorldService, IDisposable
                     + "no image-to-latent encoder ported (Wan22VaeEncoder is decode-only today) — the seed image cannot "
                     + "reach the pipeline yet even with weights present.");
         }
+        // An id outside the known set is refused here, before any checkpoint is touched, instead of loading as Oasis.
+        WorldArchitecture architecture = WorldComponentResolver.ArchitectureOf(spec.Catalog?.Id ?? spec.Requested);
         if (spec.LocalPath is null)
         {
             throw new FileNotFoundException(
@@ -118,11 +124,13 @@ public sealed class WorldService : IWorldService, IDisposable
                 return cached;
             }
             _onLoad?.Invoke(spec);
-            LoadedWorld loaded = id switch
+            LoadedWorld loaded = architecture switch
             {
-                "diamond" => LoadDiamond(spec),
-                "hunyuan-gamecraft" => LoadHunyuanGameCraft(spec),
-                _ => LoadOasis(spec),
+                WorldArchitecture.Oasis => LoadOasis(spec),
+                WorldArchitecture.Diamond => LoadDiamond(spec),
+                WorldArchitecture.HunyuanGameCraft => LoadHunyuanGameCraft(spec),
+                WorldArchitecture.SanaWm => LoadSanaWm(spec),
+                _ => throw new NotSupportedException($"The {architecture} architecture has no loader."),
             };
             _pipelines[key] = loaded;
             return loaded;
@@ -155,7 +163,7 @@ public sealed class WorldService : IWorldService, IDisposable
             {
                 VaeBackend = _engine.EnsureBackend(_engine.Placement.VaeDevice),
             });
-            return new LoadedWorld(phase, request => new OasisWorldSession(pipeline, request));
+            return new LoadedWorld(phase, plan => new OasisWorldSession(pipeline, plan.Request));
         });
     }
 
@@ -167,7 +175,7 @@ public sealed class WorldService : IWorldService, IDisposable
         {
             DiamondWorldPipeline pipeline = phase.Own(
                 DiamondWorldPipeline.LoadFromPath(_engine.Backend, components.Backbone, DiamondConfig.Atari(4)));
-            return new LoadedWorld(phase, request => new DiamondWorldSession(pipeline, request));
+            return new LoadedWorld(phase, plan => new DiamondWorldSession(pipeline, plan.Request));
         });
     }
 
@@ -217,8 +225,18 @@ public sealed class WorldService : IWorldService, IDisposable
             phase.OwnRelease("the CLIP-L weight mapping", clipWeights.Clear);
 
             ClipTokenizer clipTokenizer = phase.Own(new ClipTokenizer());
-            return new LoadedWorld(phase, request => new HunyuanGameCraftWorldSession(pipeline, llava, clipL, clipTokenizer, request));
+            return new LoadedWorld(phase, plan => new HunyuanGameCraftWorldSession(pipeline, llava, clipL, clipTokenizer, plan.Request));
         });
+    }
+
+    /// <summary>Resolves SANA-WM's DiT, VAE, Gemma-2 text encoder and tokenizer files. Nothing is loaded here: every run loads
+    /// its components one stage at a time, each in its own <see cref="WorldPhase"/> reporting to the run ledger, and releases
+    /// each before the next (<see cref="SanaWmEngineComponents"/>), so the cache entry holds file paths only.</summary>
+    private LoadedWorld LoadSanaWm(ModelSpec spec)
+    {
+        WorldComponents components = WorldComponentResolver.Resolve(spec);
+        return LoadInPhase("SANA-WM", spec, phase => new LoadedWorld(phase, plan => OpenOneShot(
+            new SanaWmClipPipeline(() => new SanaWmEngineComponents(_engine.Backend, components, _runLedger), SanaWmInitialLatent), plan)));
     }
 
     /// <summary>Runs one model load under a fresh <see cref="WorldPhase"/>. A load that throws releases everything it acquired
@@ -269,10 +287,10 @@ public sealed class WorldService : IWorldService, IDisposable
     private sealed class LoadedWorld : IDisposable
     {
         private readonly WorldPhase _phase;
-        private readonly Func<WorldRequest, IWorldSession> _openSession;
+        private readonly Func<WorldPlan, IWorldSession> _openSession;
 
         /// <summary>Takes ownership of <paramref name="phase"/>, which holds the pipeline and the loaders it depends on.</summary>
-        public LoadedWorld(WorldPhase phase, Func<WorldRequest, IWorldSession> openSession)
+        public LoadedWorld(WorldPhase phase, Func<WorldPlan, IWorldSession> openSession)
         {
             ArgumentNullException.ThrowIfNull(phase);
             ArgumentNullException.ThrowIfNull(openSession);
@@ -280,8 +298,8 @@ public sealed class WorldService : IWorldService, IDisposable
             _openSession = openSession;
         }
 
-        /// <summary>Opens a new session over the loaded pipeline.</summary>
-        public IWorldSession OpenSession(WorldRequest request) => _openSession(request);
+        /// <summary>Opens a new session over the loaded pipeline for a resolved plan.</summary>
+        public IWorldSession OpenSession(WorldPlan plan) => _openSession(plan);
 
         /// <inheritdoc/>
         public void Dispose() => _phase.Release();

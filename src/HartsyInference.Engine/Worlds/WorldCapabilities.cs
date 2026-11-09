@@ -36,6 +36,9 @@ public sealed record WorldCapabilities
     /// <summary>Camera inputs the model accepts. Empty means the model takes no camera path.</summary>
     public IReadOnlyList<WorldCameraMode> CameraModes { get; init; } = [];
 
+    /// <summary>Expands <see cref="WorldCameraMode.ActionScript"/> camera input; required when <see cref="CameraModes"/> lists it.</summary>
+    public IWorldCameraScript? CameraScript { get; init; }
+
     /// <summary>Whether a camera path is mandatory.</summary>
     public bool CameraRequired { get; init; }
 

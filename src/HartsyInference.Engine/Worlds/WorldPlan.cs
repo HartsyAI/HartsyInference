@@ -58,8 +58,12 @@ public sealed record WorldPlan
     /// <summary>The pose count the camera path carried when it was longer than the frame count and was truncated.</summary>
     public int? CameraTruncatedFrom { get; init; }
 
-    /// <summary>The intrinsics the rollout projects with, validated against the seed image.</summary>
+    /// <summary>The intrinsics the rollout projects with, validated against the seed image; with per-frame intrinsics, the
+    /// first entry.</summary>
     public WorldIntrinsics? Intrinsics { get; init; }
+
+    /// <summary>Per-frame intrinsics entries the camera path carries; zero when one set covers every frame.</summary>
+    public int FrameIntrinsics { get; init; }
 
     /// <summary>Human-readable adjustments made while resolving (normalized frame counts, ignored steps, truncated poses).</summary>
     public IReadOnlyList<string> Notes { get; init; } = [];
@@ -97,10 +101,14 @@ public sealed record WorldPlan
             $"cameraTruncatedFrom={CameraTruncatedFrom?.ToString(CultureInfo.InvariantCulture) ?? "-"}",
             $"intrinsics={FormatIntrinsics(Intrinsics)}",
         ];
-        // Appended only when set, so the rendering of every plan that predates the flag stays byte-identical.
+        // Appended only when set, so the rendering of every plan that predates these fields stays byte-identical.
         if (SequentialCfg)
         {
             lines.Add($"sequentialCfg={SequentialCfg}");
+        }
+        if (FrameIntrinsics > 0)
+        {
+            lines.Add($"frameIntrinsics={FrameIntrinsics}");
         }
         foreach (string note in Notes)
         {

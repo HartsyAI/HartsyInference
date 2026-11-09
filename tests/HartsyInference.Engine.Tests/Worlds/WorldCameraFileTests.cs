@@ -105,6 +105,78 @@ public sealed class WorldCameraFileTests
     }
 
     /// <summary>A version-1 NumPy file: the magic, the header padded to a 64-byte boundary, then the data.</summary>
+    [Fact]
+    public void IntrinsicsNpy_PerFrameMatrices_ReadFxFyCxCy()
+    {
+        float[] k = [800f, 0f, 844f, 0f, 830f, 463f, 0f, 0f, 1f, 700f, 0f, 640f, 0f, 710f, 360f, 0f, 0f, 1f];
+        string path = TempFile(".npy", Npy("<f4", "2, 3, 3", MemoryMarshal.AsBytes(k.AsSpan()).ToArray()));
+        try
+        {
+            IReadOnlyList<WorldIntrinsics> intrinsics = WorldCameraFile.LoadIntrinsics(path);
+
+            Assert.Equal(2, intrinsics.Count);
+            Assert.Equal(new WorldIntrinsics { Fx = 800, Fy = 830, Cx = 844, Cy = 463 }, intrinsics[0]);
+            Assert.Equal(new WorldIntrinsics { Fx = 700, Fy = 710, Cx = 640, Cy = 360 }, intrinsics[1]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IntrinsicsNpy_SingleFloat64Vector_IsOneEntry()
+    {
+        double[] k = [320.5, 321, 320, 180];
+        string path = TempFile(".npy", Npy("<f8", "4,", MemoryMarshal.AsBytes(k.AsSpan()).ToArray()));
+        try
+        {
+            Assert.Equal([new WorldIntrinsics { Fx = 320.5, Fy = 321, Cx = 320, Cy = 180 }], WorldCameraFile.LoadIntrinsics(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IntrinsicsNpy_WrongShape_IsRefused()
+    {
+        string path = TempFile(".npy", Npy("<f4", "2, 3", new byte[24]));
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => WorldCameraFile.LoadIntrinsics(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void IntrinsicsOption_ReadsAFileWhenOneExists_AndTextOtherwise()
+    {
+        string path = TempFile(".json", Encoding.UTF8.GetBytes(
+            "[{\"fx\": 1, \"fy\": 2, \"cx\": 3, \"cy\": 4}, {\"fx\": 5, \"fy\": 6, \"cx\": 7, \"cy\": 8}]"));
+        try
+        {
+            Assert.Equal(2, WorldCameraFile.ParseIntrinsicsOption(path).Count);
+            Assert.Equal([new WorldIntrinsics { Fx = 9, Fy = 10, Cx = 11, Cy = 12 }], WorldCameraFile.ParseIntrinsicsOption("9,10,11,12"));
+            Assert.Throws<ArgumentException>(() => WorldCameraFile.ParseIntrinsicsOption("missing-file.npy"));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    private static string TempFile(string extension, byte[] bytes)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"world-intrinsics-{Guid.NewGuid():N}{extension}");
+        File.WriteAllBytes(path, bytes);
+        return path;
+    }
+
     private static byte[] Npy(string descr, string shape, byte[] data, bool fortranOrder = false)
     {
         string dict = "{'descr': '" + descr + "', 'fortran_order': " + (fortranOrder ? "True" : "False") + ", 'shape': (" + shape + "), }";

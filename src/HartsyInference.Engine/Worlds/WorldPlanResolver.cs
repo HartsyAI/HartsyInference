@@ -68,7 +68,8 @@ public static class WorldPlanResolver
             SeedDrawn = seedDrawn,
             CameraPoses = camera.Path?.Poses.Count ?? 0,
             CameraTruncatedFrom = camera.TruncatedFrom,
-            Intrinsics = camera.Path?.Intrinsics,
+            Intrinsics = camera.Path?.Intrinsics ?? camera.Path?.FrameIntrinsics?[0],
+            FrameIntrinsics = camera.Path?.FrameIntrinsics?.Count ?? 0,
             Notes = notes,
             Request = resolved,
         };
@@ -215,30 +216,80 @@ public static class WorldPlanResolver
         {
             if (caps.CameraRequired)
             {
-                throw new WorldPlanningException($"'{id}' needs a camera path: one camera-to-world pose per frame.");
+                string modes = caps.CameraModes.Contains(WorldCameraMode.ActionScript)
+                    ? "one camera-to-world pose per frame, or an action script"
+                    : "one camera-to-world pose per frame";
+                throw new WorldPlanningException($"'{id}' needs a camera path: {modes}.");
             }
             return new CameraPlan(null, null);
         }
-        if (!caps.CameraModes.Contains(WorldCameraMode.PerFramePose))
+        IReadOnlyList<float[]> poses = camera.Script is null ? camera.Poses : ExpandScript(caps, camera, id, notes);
+        if (camera.Script is null && !caps.CameraModes.Contains(WorldCameraMode.PerFramePose))
         {
             throw new WorldPlanningException($"'{id}' takes no camera path; camera input is not supported by this model.");
         }
-        ValidatePoses(camera.Poses, id);
-        if (camera.Poses.Count < frames)
+        ValidatePoses(poses, id);
+        if (poses.Count < frames)
         {
             throw new WorldPlanningException(
-                $"The camera path has {camera.Poses.Count} poses but {frames} frames were requested; supply one pose per frame.");
+                $"The camera path has {poses.Count} poses but {frames} frames were requested; supply one pose per frame.");
         }
         int? truncatedFrom = null;
-        IReadOnlyList<float[]> poses = camera.Poses;
-        if (camera.Poses.Count > frames)
+        if (poses.Count > frames)
         {
-            truncatedFrom = camera.Poses.Count;
-            poses = camera.Poses.Take(frames).ToArray();
+            truncatedFrom = poses.Count;
+            poses = poses.Take(frames).ToArray();
             notes.Add($"camera path truncated from {truncatedFrom} to {frames} poses");
         }
-        WorldIntrinsics? intrinsics = ValidateIntrinsics(camera.Intrinsics, caps, init, id);
-        return new CameraPlan(new WorldCameraPath { Poses = poses, Intrinsics = intrinsics }, truncatedFrom);
+        if (camera.Intrinsics is not null && camera.FrameIntrinsics is not null)
+        {
+            throw new WorldPlanningException("Give intrinsics for every frame or per-frame intrinsics, not both.");
+        }
+        WorldIntrinsics? intrinsics = null;
+        IReadOnlyList<WorldIntrinsics>? frameIntrinsics = null;
+        if (camera.FrameIntrinsics is not null)
+        {
+            if (camera.FrameIntrinsics.Count == 0)
+            {
+                throw new WorldPlanningException("The per-frame intrinsics list is empty.");
+            }
+            foreach (WorldIntrinsics entry in camera.FrameIntrinsics)
+            {
+                ValidateIntrinsics(entry, caps, init, id);
+            }
+            frameIntrinsics = camera.FrameIntrinsics;
+        }
+        else
+        {
+            intrinsics = ValidateIntrinsics(camera.Intrinsics, caps, init, id);
+        }
+        WorldCameraPath resolved = new WorldCameraPath { Poses = poses, Intrinsics = intrinsics, FrameIntrinsics = frameIntrinsics };
+        return new CameraPlan(resolved, truncatedFrom);
+    }
+
+    /// <summary>Expands an action-script camera path into poses. The resolved request carries the poses, so resolving it again
+    /// does not expand twice.</summary>
+    private static IReadOnlyList<float[]> ExpandScript(WorldCapabilities caps, WorldCameraPath camera, string id, List<string> notes)
+    {
+        if (!caps.CameraModes.Contains(WorldCameraMode.ActionScript) || caps.CameraScript is null)
+        {
+            throw new WorldPlanningException($"'{id}' takes no action-script camera path.");
+        }
+        if (camera.Poses.Count > 0)
+        {
+            throw new WorldPlanningException("A camera path carries poses or an action script, not both.");
+        }
+        IReadOnlyList<float[]> poses;
+        try
+        {
+            poses = caps.CameraScript.Expand(camera.Script!);
+        }
+        catch (FormatException ex)
+        {
+            throw new WorldPlanningException($"The camera action script for '{id}' is invalid: {ex.Message}");
+        }
+        notes.Add($"camera path expanded from action script '{camera.Script}' to {poses.Count} poses");
+        return poses;
     }
 
     private static void ValidatePoses(IReadOnlyList<float[]> poses, string id)

@@ -26,6 +26,49 @@ public static class ModelCatalog
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10 };
 
+    /// <summary>SANA-WM stage 1 (<c>flow_euler_ltx</c>, no refiner): CUDA and BF16 only, 16 fps because the camera smoothing is
+    /// defined per frame at 16 fps, 9 to 161 frames on the 8n+1 grid with off-grid counts refused, a camera path given as poses
+    /// or an action script, and intrinsics required. Batch generation; the DiT accepts batch 1, so sequential CFG is available.</summary>
+    private static WorldCapabilities SanaWmWorld => new WorldCapabilities
+    {
+        Backends = ["cuda"],
+        Precisions = ["bf16"],
+        DefaultFps = 16,
+        Fps = [16],
+        DefaultFrames = 161,
+        MinFrames = 9,
+        Frames = Recipes.FrameGrid.StepPlusOne(8, Recipes.FrameNormalization.Reject, 161),
+        DefaultSteps = 60,
+        CameraModes = [WorldCameraMode.PerFramePose, WorldCameraMode.ActionScript],
+        CameraScript = SanaWmCameraScript.Instance,
+        CameraRequired = true,
+        Intrinsics = WorldIntrinsicsPolicy.Required,
+        Samplers = ["flow_euler_ltx"],
+        SupportsGuidance = true,
+        SupportsFlowShift = true,
+        SupportsRefiner = false,
+        SupportsProgressivePreview = false,
+        SupportsSequentialCfg = true,
+    };
+
+    /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
+    /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
+    private static IReadOnlyList<ModelAsset> SanaWmAssets =>
+    [
+        new() { Repo = "Efficient-Large-Model/SANA-WM_bidirectional", RepoPath = "dit/sana_wm_1600m_720p.safetensors",
+            TargetSubdir = "World/SanaWm/dit", Role = "transformer",
+            Sha256 = "93a20c3fc184c44299234b0ed78b5895030533ff453fca2b66f9ed391e0ac258" },
+        new() { Repo = "Efficient-Large-Model/SANA-WM_bidirectional", RepoPath = "vae/diffusion_pytorch_model.safetensors",
+            TargetSubdir = "World/SanaWm/vae", Role = "vae",
+            Sha256 = "107cc359e3c4bce18c53d98686f4b3fe10c4207b6665d89b38b0741270514bfb" },
+        new() { Repo = "Efficient-Large-Model/gemma-2-2b-it", RepoPath = "gemma-2-2b-it.safetensors",
+            TargetSubdir = "World/SanaWm/text_encoder/gemma-2-2b-it", Role = "text encoder",
+            Sha256 = "bf06a1e6cfe1610beb98a2975e5602e7fc108d902b3ff9dd62282d749c7a2394" },
+        new() { Repo = "Efficient-Large-Model/gemma-2-2b-it", RepoPath = "tokenizer.model",
+            TargetSubdir = "World/SanaWm/text_encoder/gemma-2-2b-it", Role = "tokenizer",
+            Sha256 = "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2" },
+    ];
+
     /// <summary>One MOSS-Image build from Comfy-Org's export, with the side models <see cref="Recipes.Image.MossImageRecipe"/>
     /// falls back to outside an OpenMOSS folder.</summary>
     private static CatalogEntry MossImage(string id, string name, string file, string sha) => new CatalogEntry
@@ -2467,6 +2510,8 @@ public static class ModelCatalog
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
             E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true) with { World = OasisWorld },
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
+            E("sana-wm", act, "SANA-WM (stage 1)", "2.6B GDN/softmax camera DiT + LTX-2 VAE", vp, cli: true)
+                with { World = SanaWmWorld, Assets = SanaWmAssets },
 
             // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified
             // GgufLanguageModel/GenericTransformer GGUF pipeline chat models use). Not CLI-drivable yet: reachable

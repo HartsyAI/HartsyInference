@@ -53,6 +53,80 @@ public static class WorldCameraFile
         return new WorldIntrinsics { Fx = fx, Fy = fy, Cx = cx, Cy = cy };
     }
 
+    /// <summary>Reads intrinsics from a file, in pixels of the original seed image. NumPy: little-endian float32 or float64, C
+    /// order, shaped <c>(4,)</c> or <c>(F, 4)</c> as <c>[fx, fy, cx, cy]</c>, or <c>(3, 3)</c> or <c>(F, 3, 3)</c> as pinhole
+    /// matrices. JSON: an object with <c>fx</c>, <c>fy</c>, <c>cx</c> and <c>cy</c>, or an array of them. One entry covers every
+    /// frame; several are per-frame intrinsics.</summary>
+    /// <exception cref="FileNotFoundException">The file does not exist.</exception>
+    /// <exception cref="InvalidDataException">The file is not a well-formed intrinsics file.</exception>
+    public static IReadOnlyList<WorldIntrinsics> LoadIntrinsics(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Intrinsics file not found: {path}", path);
+        }
+        byte[] bytes = File.ReadAllBytes(path);
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".npy" => IntrinsicsFromNpy(bytes),
+            ".json" => IntrinsicsFromJson(bytes),
+            string extension => throw new InvalidDataException($"An intrinsics file must be .npy or .json; got '{extension}'."),
+        };
+    }
+
+    /// <summary>Reads an intrinsics option: the path of an intrinsics file (see <see cref="LoadIntrinsics"/>) when one exists
+    /// there, otherwise <c>fx,fy,cx,cy</c> text.</summary>
+    /// <exception cref="ArgumentException">The value is neither an existing file nor four comma-separated numbers.</exception>
+    public static IReadOnlyList<WorldIntrinsics> ParseIntrinsicsOption(string value)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value);
+        return File.Exists(value) ? LoadIntrinsics(value) : [ParseIntrinsics(value)];
+    }
+
+    private static IReadOnlyList<WorldIntrinsics> IntrinsicsFromNpy(byte[] bytes)
+    {
+        (double[] values, int[] shape) = ReadNpy(bytes);
+        bool matrices = shape.Length >= 2 && shape[^1] == 3 && shape[^2] == 3;
+        int count = shape switch
+        {
+            [4] or [3, 3] => 1,
+            [int n, 4] => n,
+            [int n, 3, 3] => n,
+            _ => throw new InvalidDataException("An intrinsics .npy array must be shaped (4,), (3, 3), (F, 4) or (F, 3, 3)."),
+        };
+        List<WorldIntrinsics> result = new List<WorldIntrinsics>(count);
+        int stride = matrices ? 9 : 4;
+        for (int i = 0; i < count; i++)
+        {
+            int b = i * stride;
+            result.Add(matrices
+                ? new WorldIntrinsics { Fx = values[b], Fy = values[b + 4], Cx = values[b + 2], Cy = values[b + 5] }
+                : new WorldIntrinsics { Fx = values[b], Fy = values[b + 1], Cx = values[b + 2], Cy = values[b + 3] });
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<WorldIntrinsics> IntrinsicsFromJson(byte[] bytes)
+    {
+        using JsonDocument document = JsonDocument.Parse(bytes);
+        JsonElement root = document.RootElement;
+        if (root.ValueKind == JsonValueKind.Object)
+        {
+            return [ReadIntrinsics(root)];
+        }
+        if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+        {
+            throw new InvalidDataException("An intrinsics JSON file is an object with fx, fy, cx and cy, or a non-empty array of them.");
+        }
+        List<WorldIntrinsics> result = [];
+        foreach (JsonElement entry in root.EnumerateArray())
+        {
+            result.Add(ReadIntrinsics(entry));
+        }
+        return result;
+    }
+
     private static WorldCameraPath ParseJson(byte[] bytes)
     {
         using JsonDocument document = JsonDocument.Parse(bytes);
@@ -129,9 +203,32 @@ public static class WorldCameraFile
 
     private static WorldCameraPath ParseNpy(byte[] bytes)
     {
+        (double[] values, int[] shape) = ReadNpy(bytes);
+        int count = shape.Length switch
+        {
+            2 when shape[1] == 16 => shape[0],
+            3 when shape[1] == 4 && shape[2] == 4 => shape[0],
+            _ => throw new InvalidDataException("A camera path .npy array must be shaped (N, 16) or (N, 4, 4)."),
+        };
+        List<float[]> poses = new List<float[]>(count);
+        for (int i = 0; i < count; i++)
+        {
+            float[] pose = new float[16];
+            for (int k = 0; k < 16; k++)
+            {
+                pose[k] = (float)values[i * 16 + k];
+            }
+            poses.Add(pose);
+        }
+        return new WorldCameraPath { Poses = poses };
+    }
+
+    /// <summary>Reads a little-endian float32 or float64 C-order NumPy array as doubles, with its shape.</summary>
+    private static (double[] Values, int[] Shape) ReadNpy(byte[] bytes)
+    {
         if (bytes.Length < 10 || bytes[0] != 0x93 || !bytes.AsSpan(1, 5).SequenceEqual("NUMPY"u8))
         {
-            throw new InvalidDataException("The camera path .npy file has no NUMPY header.");
+            throw new InvalidDataException("The .npy file has no NUMPY header.");
         }
         int major = bytes[6];
         int headerLength;
@@ -152,47 +249,40 @@ public static class WorldCameraFile
         }
         if (headerStart + headerLength > bytes.Length)
         {
-            throw new InvalidDataException("The camera path .npy header is truncated.");
+            throw new InvalidDataException("The .npy header is truncated.");
         }
         string header = Encoding.UTF8.GetString(bytes, headerStart, headerLength);
         if (header.Contains("'fortran_order': True", StringComparison.Ordinal))
         {
-            throw new InvalidDataException("Fortran-order camera path arrays are not supported; save the array in C order.");
+            throw new InvalidDataException("Fortran-order .npy arrays are not supported; save the array in C order.");
         }
         string descr = HeaderField(header, "'descr': '", '\'');
         int elementSize = descr switch
         {
             "<f4" => 4,
             "<f8" => 8,
-            _ => throw new InvalidDataException($"Camera path .npy dtype '{descr}' is not little-endian float32 or float64."),
+            _ => throw new InvalidDataException($".npy dtype '{descr}' is not little-endian float32 or float64."),
         };
         int[] shape = ParseShape(HeaderField(header, "'shape': (", ')'));
-        int count = shape.Length switch
+        long count = 1;
+        foreach (int dim in shape)
         {
-            2 when shape[1] == 16 => shape[0],
-            3 when shape[1] == 4 && shape[2] == 4 => shape[0],
-            _ => throw new InvalidDataException("A camera path .npy array must be shaped (N, 16) or (N, 4, 4)."),
-        };
+            count *= dim;
+        }
         long dataStart = headerStart + headerLength;
-        if (dataStart + (long)count * 16 * elementSize > bytes.Length)
+        if (count > int.MaxValue / elementSize || dataStart + count * elementSize > bytes.Length)
         {
-            throw new InvalidDataException("The camera path .npy data is shorter than its header declares.");
+            throw new InvalidDataException("The .npy data is shorter than its header declares.");
         }
         ReadOnlySpan<byte> data = bytes.AsSpan((int)dataStart);
-        List<float[]> poses = new List<float[]>(count);
-        for (int i = 0; i < count; i++)
+        double[] values = new double[count];
+        for (int i = 0; i < values.Length; i++)
         {
-            float[] pose = new float[16];
-            for (int k = 0; k < 16; k++)
-            {
-                int offset = (i * 16 + k) * elementSize;
-                pose[k] = elementSize == 4
-                    ? BinaryPrimitives.ReadSingleLittleEndian(data[offset..])
-                    : (float)BinaryPrimitives.ReadDoubleLittleEndian(data[offset..]);
-            }
-            poses.Add(pose);
+            values[i] = elementSize == 4
+                ? BinaryPrimitives.ReadSingleLittleEndian(data[(i * 4)..])
+                : BinaryPrimitives.ReadDoubleLittleEndian(data[(i * 8)..]);
         }
-        return new WorldCameraPath { Poses = poses };
+        return (values, shape);
     }
 
     private static string HeaderField(string header, string key, char terminator)
@@ -200,13 +290,13 @@ public static class WorldCameraFile
         int start = header.IndexOf(key, StringComparison.Ordinal);
         if (start < 0)
         {
-            throw new InvalidDataException($"The camera path .npy header has no {key.Trim('\'', ':', ' ', '(')} entry.");
+            throw new InvalidDataException($"The .npy header has no {key.Trim('\'', ':', ' ', '(')} entry.");
         }
         start += key.Length;
         int end = header.IndexOf(terminator, start);
         if (end < 0)
         {
-            throw new InvalidDataException("The camera path .npy header is malformed.");
+            throw new InvalidDataException("The .npy header is malformed.");
         }
         return header[start..end];
     }
@@ -218,7 +308,7 @@ public static class WorldCameraFile
         {
             if (!int.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture, out int dim) || dim < 1)
             {
-                throw new InvalidDataException($"The camera path .npy shape '{text}' is not a list of positive sizes.");
+                throw new InvalidDataException($"The .npy shape '{text}' is not a list of positive sizes.");
             }
             dims.Add(dim);
         }
