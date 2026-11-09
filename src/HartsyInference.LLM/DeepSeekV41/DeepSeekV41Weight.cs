@@ -3,6 +3,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -95,7 +96,7 @@ public sealed class DeepSeekV41Weight
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> with the weight as <c>[outDim, inDim]</c>.</summary>
     public float[] Linear(ReadOnlySpan<float> x, int tokens, int inDim, int outDim)
     {
-        if (_values is not null) return DeepSeekV41HostMath.Linear(x, _values, tokens, inDim, outDim);
+        if (_values is not null) return HostMath.Linear(x, _values, tokens, inDim, outDim);
         CheckShape(inDim, outDim);
         if (x.Length != (long)tokens * inDim) throw new ArgumentException("Linear operands do not match the stated shape.", nameof(x));
         float[] y = new float[checked(tokens * outDim)];
@@ -106,7 +107,7 @@ public sealed class DeepSeekV41Weight
             for (int row = 0; row < outDim; row += window)
             {
                 int count = Math.Min(window, outDim - row);
-                DeepSeekV41HostMath.LinearInto(x, ReadRows(row, count, inDim, scratch), tokens, inDim, count, y, outDim, row);
+                HostMath.LinearInto(x, ReadRows(row, count, inDim, scratch), tokens, inDim, count, y, outDim, row);
             }
         }
         finally

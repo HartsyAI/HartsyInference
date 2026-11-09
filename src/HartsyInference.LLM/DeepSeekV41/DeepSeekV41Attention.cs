@@ -67,13 +67,13 @@ public sealed class DeepSeekV41Attention
         if (startPos == 0) state.Reset();
 
         float[] qr = _w.WqA.Linear(x, tokens, s.Dim, s.QLoraRank);
-        DeepSeekV41HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
+        HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
         float[] q = _w.WqB.Linear(qr, tokens, s.QLoraRank, heads * hd);
         int[] positions = Range(startPos, tokens);
         Rotate(q, [1, tokens, heads, hd], positions, inverse: false);
 
         float[] kv = _w.Wkv.Linear(x, tokens, s.Dim, hd);
-        DeepSeekV41HostMath.RmsNormRows(kv, _w.KvNorm, hd, s.NormEps);
+        HostMath.RmsNormRows(kv, _w.KvNorm, hd, s.NormEps);
         Rotate(kv, [1, tokens, hd], positions, inverse: false);
         RoundTrip(kv, hd, LatentEncoding.Fp8E4M3Ue8m0x32);
         for (int p = Math.Max(0, tokens - win); p < tokens; p++)
@@ -85,7 +85,7 @@ public sealed class DeepSeekV41Attention
         (int idxRows, int idxCols) = WindowIndicesReference.Shape(win, tokens, startPos);
         using Tensor windowIdx = new(new TensorShape(idxRows, idxCols), DType.I32);
         _backend.BuildWindowIndices(windowIdx, win, tokens, startPos);
-        using Tensor windowCodes = DeepSeekV41HostMath.Tensor(prefill ? kv : state.Window, windowRows, hd);
+        using Tensor windowCodes = HostMath.Tensor(prefill ? kv : state.Window, windowRows, hd);
         LatentSource window = new(LatentEncoding.F32, windowCodes, null, windowRows, hd);
 
         int compressCols = 0;
@@ -119,7 +119,7 @@ public sealed class DeepSeekV41Attention
                 if (compressLen > 0)
                 {
                     float[] cache = shared.CompressKv ?? throw new InvalidOperationException("No compressed KV is available to this layer.");
-                    mainCodes = DeepSeekV41HostMath.Tensor(cache.AsSpan(0, compressLen * hd), compressLen, hd);
+                    mainCodes = HostMath.Tensor(cache.AsSpan(0, compressLen * hd), compressLen, hd);
                     main = new LatentSource(LatentEncoding.F32, mainCodes, null, compressLen, hd);
                 }
             }
@@ -133,10 +133,10 @@ public sealed class DeepSeekV41Attention
                 if (compressCols > 0) compressIdx!.AsSpan(t * compressCols, compressCols).CopyTo(indices.AsSpan(t * (idxCols + compressCols) + idxCols, compressCols));
             }
 
-            using Tensor query = DeepSeekV41HostMath.Tensor(q, tokens, heads, hd);
+            using Tensor query = HostMath.Tensor(q, tokens, heads, hd);
             using Tensor output = new(new TensorShape(tokens, heads, hd), DType.F32);
-            using Tensor indexT = DeepSeekV41HostMath.Tensor(indices, tokens, idxCols + compressCols);
-            using Tensor sink = DeepSeekV41HostMath.Tensor(_w.Sink, heads);
+            using Tensor indexT = HostMath.Tensor(indices, tokens, idxCols + compressCols);
+            using Tensor sink = HostMath.Tensor(_w.Sink, heads);
             _backend.SparseLatentAttention(output, query, window, main, indexT, windowRows, sink, 1f / MathF.Sqrt(hd));
 
             float[] o = output.AsReadOnlySpan<float>().ToArray();
@@ -158,7 +158,7 @@ public sealed class DeepSeekV41Attention
         float[] kv = c.Wkv.Linear(x, tokens, _s.Dim, hd);
         if (ratio == 1)
         {
-            DeepSeekV41HostMath.RmsNormRows(kv, c.Norm, hd, _s.NormEps);
+            HostMath.RmsNormRows(kv, c.Norm, hd, _s.NormEps);
             return (kv, tokens);
         }
         float[] score = c.Wgate!.Linear(x, tokens, _s.Dim, hd);
@@ -167,7 +167,7 @@ public sealed class DeepSeekV41Attention
         int rows = pool.Pool(kv, score, tokens, startPos, pooled);
         if (rows == 0) return (null, 0);
         float[] latent = pooled.AsSpan(0, rows * hd).ToArray();
-        DeepSeekV41HostMath.RmsNormRows(latent, c.Norm, hd, _s.NormEps);
+        HostMath.RmsNormRows(latent, c.Norm, hd, _s.NormEps);
         return (latent, rows);
     }
 
@@ -191,7 +191,7 @@ public sealed class DeepSeekV41Attention
         {
             int first = startPos / ratio;
             float[] k = ix.Wk!.Linear(latent, latentRows, _s.HeadDim, ihd);
-            DeepSeekV41HostMath.RmsNormRows(k, ix.KNorm!, ihd, _s.NormEps);
+            HostMath.RmsNormRows(k, ix.KNorm!, ihd, _s.NormEps);
             Rotate(k, [1, latentRows, ihd], CompressedRopePositions.GroupStart(first, latentRows, ratio), inverse: false);
             RoundTrip(k, ihd, LatentEncoding.Fp4E2M1E8M0x32);
             k.CopyTo(state.IndexKeys!.AsSpan(first * ihd, latentRows * ihd));
@@ -213,10 +213,10 @@ public sealed class DeepSeekV41Attention
         for (int t = 0; t < tokens; t++) lens[t] = startPos == 0 ? (t + 1) / ratio : keyRows;
 
         using Tensor scores = new(new TensorShape(tokens, keyRows), DType.F32);
-        using Tensor queryT = DeepSeekV41HostMath.Tensor(q, tokens, nh, ihd);
-        using Tensor keyCodes = DeepSeekV41HostMath.Tensor(keys.AsSpan(0, keyRows * ihd), keyRows, ihd);
-        using Tensor weightT = DeepSeekV41HostMath.Tensor(weights, tokens, nh);
-        using Tensor lensT = DeepSeekV41HostMath.Tensor(lens, tokens);
+        using Tensor queryT = HostMath.Tensor(q, tokens, nh, ihd);
+        using Tensor keyCodes = HostMath.Tensor(keys.AsSpan(0, keyRows * ihd), keyRows, ihd);
+        using Tensor weightT = HostMath.Tensor(weights, tokens, nh);
+        using Tensor lensT = HostMath.Tensor(lens, tokens);
         using Tensor? candidateT = _s.UsesCandidates ? CandidateTensor(shared, tokens, keyRows) : null;
         _backend.IndexerScores(scores, queryT, new LatentSource(LatentEncoding.F32, keyCodes, null, keyRows, ihd), weightT, lensT, candidateT, 1f);
 
@@ -257,7 +257,7 @@ public sealed class DeepSeekV41Attention
     private void RoundTrip(float[] data, int width, LatentEncoding encoding)
     {
         if (!_s.QuantizeLatents) return;
-        using Tensor x = DeepSeekV41HostMath.Tensor(data, data.Length / width, width);
+        using Tensor x = HostMath.Tensor(data, data.Length / width, width);
         _backend.ActQuantDequantInPlace(x, encoding);
         x.AsReadOnlySpan<float>().CopyTo(data);
     }
