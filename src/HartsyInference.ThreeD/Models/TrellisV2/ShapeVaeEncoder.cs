@@ -48,7 +48,17 @@ public sealed unsafe class ShapeVaeEncoder : IDisposable
     /// Encodes the dual-grid inputs to the latent mean. <paramref name="vertices"/> and <paramref name="intersected"/>
     /// are <c>[N, 3]</c> on identical coords; the grid resolution must be a multiple of 16. Output is <c>[1, M, latent]</c>.
     /// </summary>
-    public SparseTensor Encode(IBackend backend, SparseTensor vertices, SparseTensor intersected)
+    public SparseTensor Encode(IBackend backend, SparseTensor vertices, SparseTensor intersected) =>
+        EncodeCore(backend, vertices, intersected, keepLogVar: false).Mean;
+
+    /// <summary>Encodes and also returns the posterior log-variance, both <c>[M, latent]</c>, for parity checks.</summary>
+    internal (SparseTensor Mean, Tensor LogVar) EncodeMoments(IBackend backend, SparseTensor vertices, SparseTensor intersected)
+    {
+        (SparseTensor mean, Tensor? logVar) = EncodeCore(backend, vertices, intersected, keepLogVar: true);
+        return (mean, logVar!);
+    }
+
+    private (SparseTensor Mean, Tensor? LogVar) EncodeCore(IBackend backend, SparseTensor vertices, SparseTensor intersected, bool keepLogVar)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -86,8 +96,15 @@ public sealed unsafe class ShapeVaeEncoder : IDisposable
         // Mean is the first half of the moments; inference returns it without posterior sampling.
         Tensor mean = ShapeVaeOps.Alloc(m, _latentChannels);
         backend.SliceLastDim(mean, moments, 0);
+        Tensor? logVar = null;
+        if (keepLogVar)
+        {
+            logVar = ShapeVaeOps.Alloc(m, _latentChannels);
+            backend.SliceLastDim(logVar, moments, _latentChannels);
+        }
+
         moments.Dispose();
-        return new SparseTensor(mean, cur.Coords, cur.Resolution);
+        return (new SparseTensor(mean, cur.Coords, cur.Resolution), logVar);
     }
 
     /// <summary>Concatenates <c>vertices − 0.5</c> and <c>intersected − 0.5</c> per voxel, as upstream's encoder forward does.</summary>
