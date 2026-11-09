@@ -119,6 +119,17 @@ public sealed class WorldPlanStreamingTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ResolvedRequest_ResolvesToTheSamePlan(bool unbounded)
+    {
+        WorldRequest request = unbounded ? Request(frames: null, unbounded: true) : Request();
+        WorldPlan plan = WorldPlanResolver.Resolve(Streaming, request, WorldTestFixtures.CudaSelector);
+        WorldPlan again = WorldPlanResolver.Resolve(Streaming, plan.Request, WorldTestFixtures.CudaSelector);
+        Assert.Equal(plan.Snapshot(), again.Snapshot());
+    }
+
+    [Theory]
     [InlineData(25)]
     [InlineData(49)]
     [InlineData(241)]
