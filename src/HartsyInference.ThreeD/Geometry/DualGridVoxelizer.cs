@@ -585,6 +585,7 @@ public static class DualGridVoxelizer
     // Column-pivoted Householder QR in single precision, as Eigen 3.4 colPivHouseholderQr: column norms are downdated
     // between steps, and pivots under Eigen's nonzeroPivots() threshold are dropped. Only the leading nonzero pivots
     // are solved, because Gaussian elimination would divide by zero on rank-deficient QEFs.
+    // Sum order in the reflections and back-substitution can differ from Eigen by an ulp.
     internal static void SolveColPivQr(ReadOnlySpan<float> matrix, ReadOnlySpan<float> rhs, Span<float> solution)
     {
         int n = rhs.Length;
@@ -682,14 +683,14 @@ public static class DualGridVoxelizer
                     qr[k * n + j] -= tw;
                     for (int r = k + 1; r < n; r++)
                     {
-                        qr[r * n + j] -= tw * qr[r * n + k];
+                        qr[r * n + j] -= w * (tau[k] * qr[r * n + k]);
                     }
                 }
 
                 qr[k * n + k] = beta;
             }
 
-            // Runs after skipped reflections too: the downdate is what keeps the remaining norms exact.
+            // Runs after skipped reflections too, as in Eigen.
             for (int j = k + 1; j < n; j++)
             {
                 if (normUpdated[j] == 0f)
@@ -738,7 +739,7 @@ public static class DualGridVoxelizer
             c[k] -= tw;
             for (int r = k + 1; r < n; r++)
             {
-                c[r] -= tw * qr[r * n + k];
+                c[r] -= w * (tau[k] * qr[r * n + k]);
             }
         }
 

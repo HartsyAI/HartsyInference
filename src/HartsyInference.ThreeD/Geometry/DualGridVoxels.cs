@@ -19,9 +19,9 @@ public sealed record DualGridVoxels(int[] Coords, float[] DualVertices, bool[] I
             throw new ArgumentException("voxelSize must be positive on every axis.", nameof(voxelSize));
         }
 
-        if (DualVertices.Length != Coords.Length)
+        if (Coords is null || DualVertices is null || Coords.Length % 3 != 0 || DualVertices.Length != Coords.Length)
         {
-            throw new ArgumentException("DualVertices must be [N*3] to match Coords.", nameof(DualVertices));
+            throw new InvalidOperationException("Coords and DualVertices must be [N*3] with matching lengths.");
         }
 
         int n = Coords.Length / 3;
