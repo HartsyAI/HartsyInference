@@ -38,9 +38,11 @@ public sealed record WorldRefinerFiles
     public required string Connectors { get; init; }
 
     /// <summary>The refiner's text encoder: one safetensors file, or a folder of <c>model-*-of-*.safetensors</c> shards
-    /// (aux <c>refiner-text-encoder-path</c>).</summary>
+    /// (aux <c>refiner-text-encoder-path</c>). Defaults to the engine's FP8-scaled Gemma-3-12B side model, the file that
+    /// fits a 24 GB card.</summary>
     public required string TextEncoder { get; init; }
 
-    /// <summary>The refiner text encoder's tokenizer model (aux <c>refiner-tokenizer-path</c>).</summary>
-    public required string Tokenizer { get; init; }
+    /// <summary>The refiner text encoder's tokenizer model (aux <c>refiner-tokenizer-path</c>); null finds the Gemma-3
+    /// <c>tokenizer.model</c> beside the text encoder when the refiner opens.</summary>
+    public string? Tokenizer { get; init; }
 }

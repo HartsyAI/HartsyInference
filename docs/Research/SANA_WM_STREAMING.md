@@ -223,19 +223,33 @@ resulting state dict to safetensors with the keys unchanged (F32 or BF16; the en
 policy). The expected layout is the stage-1 layout exactly (`SanaWmCheckpointConverter.ExpectedTensors`), with `pos_embed`
 optional. `SanaWmCheckpointConverter.ValidateKeys` lists every mismatch, so run it on the header first.
 
-File layout the resolver expects (override any path with `--model-path`, `--vae-path`, `--text-encoder-path`):
+File layout the resolver expects, as on the RAID (override any path with `--model-path`, `--vae-path`,
+`--text-encoder-path`). Like stage 1, every companion is named relative to the DiT file:
 
 ```
-World/SanaWmStreaming/sana_dit/<dit>.safetensors
-World/SanaWmStreaming/ltx2_causal_vae/diffusion_pytorch_model.safetensors
-World/SanaWm/text_encoder/gemma-2-2b-it/{gemma-2-2b-it.safetensors, tokenizer.model}   (shared with stage 1)
+World/SanaWm/streaming/sana_dit/model.safetensors                  --model-path (the converted DiT)
+World/SanaWm/streaming/ltx2_causal_vae/diffusion_pytorch_model.safetensors   --vae-path
+World/SanaWm/text_encoder/gemma-2-2b-it/{gemma-2-2b-it.safetensors, tokenizer.model}   --text-encoder-path (shared with stage 1)
 ```
 
-The streaming release may also sit inside the stage-1 release (`World/SanaWm/streaming/sana_dit/…`); the shared text
-encoder is then found at `World/SanaWm/text_encoder/…` the same way.
+A streaming release that sits beside the stage-1 release (`World/SanaWmStreaming/…`) works the same way: the shared
+Gemma-2 is looked for at `../../SanaWm/text_encoder/…` and `../../text_encoder/…`, whichever exists.
 
-The catalog entry has no `Assets` yet: the DiT has no safetensors upstream, so the model path is explicit until a converted
-file is hosted.
+**The DiT is a pickle upstream.** Passing `sana_dit/model.pt` resolves to the converted `model.safetensors` beside it when
+that exists; otherwise the resolver refuses with the conversion rule above. There is no automatic repack: the pickle is
+32 GB with optimizer and critic state in it, and the conversion is a one-off.
+
+**The causal VAE decoder is retrained, not shared.** The release's decoder differs from stage 1's in 90 tensors (the
+encoder is bit-identical after BF16 rounding), so `OpenStreamingDecoder` loads the decoder from the streaming file
+(`_files.Vae`) and never from the stage-1 VAE; the file is F32 on disk and is cast to the engine's VAE dtype at load.
+`OpenImageEncoder` reads the encoder from the same file, which is equivalent.
+
+**Why the catalog entry has no `Assets`.** `ModelResolver` takes a catalog entry's primary asset (its `transformer`
+role, else its first asset) as the model path, and `ModelAcquisition` offers to download every missing asset. The
+streaming DiT has no hosted safetensors, so an asset for it would be a 32 GB pickle the engine cannot load, and any other
+asset would become the primary file. The entry gains `Assets` when the converted DiT is hosted; until then the model
+path is explicit (`--model-path`). The refiner's files are never catalog assets, so a stage-1-only run never offers a 40 GB
+download.
 
 ## Test handoff
 
@@ -281,9 +295,9 @@ Real-weight lane (needs the converted checkpoint and upstream dumps):
 
 1. ~~The streaming checkpoint header (key, shape, dtype) after conversion, to confirm the layout assumption.~~ Received
    2026-11-09: the converted header is the stage-1 layout exactly, without `pos_embed`, every tensor BF16.
-2. `ltx2_causal_vae/config.json`: the decoder is assumed to be the bidirectional VAE's decoder with
-   `decoder_causal: true` (`upsample_residual` all true, reflect padding, `scaling_factor` 1.0). If any of that differs,
-   `SanaWmEngineComponents.OpenStreamingDecoder` is the one place to change.
+2. ~~`ltx2_causal_vae/config.json`.~~ Received 2026-11-09: stage-1's VAE config plus `decoder_causal: true`,
+   `decoder_upsample_type: null`; reflect decoder padding, residual upsamplers, `scaling_factor` 1.0. Matches the
+   assumption.
 3. Upstream dumps for the real-weight lane above. The least to dump from one 3-chunk run at `--num_frames 73`: the
    initial `z`, the per-chunk `kv_cache` after each save pass, the model output of each of the 15 forwards, the latents
    after each chunk, and `decode_chunk` pixels per chunk.
@@ -350,11 +364,22 @@ placed. The tower is given only the prompt's own tokens: upstream left-pads to 1
 the tower's rotation is relative and padding is never attended to, the hidden states are the same. The connector then
 fills the sequence to 1024 with its registers, as upstream's does.
 
-**F32 Gemma shards are rounded to BF16 at load.** The release ships Gemma-3-12B as F32 shards (47 GB of projections),
-which no supported card holds; upstream loads the tower with `torch_dtype=bfloat16`. The engine components round plain
-F32 matrices to BF16 (nearest even, the embedding table excluded) when the text encoder is a shard folder. A file that
-is already BF16, F16 or quantized passes through untouched, so the encoder's own quantization handling still owns
-those.
+**The refiner's Gemma-3-12B is the engine's FP8-scaled LTX-2 side model by default.** `SideModels.GemmaLtx2`
+(`text_encoders/gemma_3_12B_it_fp8_scaled.safetensors`, 13.2 GB, Comfy layout, per-tensor `weight_scale`) is a
+quantization of the same checkpoint as the release's `gemma3_12b/` (five BF16 shards, 24.4 GB, whose sizes equal
+google/gemma-3-12b-it's), so within FP8 rounding it gives the same hidden states, and it is the one that fits a 24 GB
+card. Pass `--refiner-text-encoder-path` for the release's BF16 shard folder (parity runs). Both layouts load: the
+transformers export nests the decoder under `language_model`, which `Gemma3DecoderKey` maps onto the `model.layers.*`
+layout the encoder reads, dropping the vision tower, projector and head. **Do not point it at
+`text_encoders/gemma_3_12B_it.safetensors`**: that file is a mixed FP8/U8 quantization with `weight_scale_2`, an
+NVFP4-style format the encoder does not read.
+
+**The weight-cast cache is off while an FP8 Gemma-3 is loaded.** With the cache on, each FP8 matrix is widened once and
+the F16 copy kept beside the packed weight, about twice the footprint (`SideModels.GemmaLtx2` carries the same advice for
+24 GB cards). The stage turns `IBackend.CacheWeightCasts` off when the tower's weights are FP8 and restores it when the
+stage releases. The tokenizer is the Gemma-3 `tokenizer.model` found by the LTX-2 recipe's locator
+(`LtxVideo2Recipe.LocateGemmaTokenizer`, shared) beside the encoder; on the RAID it is `text_encoders/tokenizer.model`,
+which is the 4.69 MB Gemma-3 vocabulary, not the Gemma-2 one.
 
 **Weights are placed by `BlockStreamingScope`.** The refiner opens last. Its resident prefix is sized from the device
 memory the DiT and the decoder left free, minus the carried state at a full window (reserved up front, since it arrives
@@ -417,17 +442,16 @@ Sizes from the checkpoint header and tensor shapes, in GiB; nothing is measured 
 | refiner transformer, video keys, BF16 as shipped | 24.3 (0.51 per block, 0.29 shared) |
 | the same in FP8 | about 12.2 (0.26 per block) |
 | refiner carried state, window 11, F16 | 7.1 (0.64 + 0.645 per history frame) |
-| Gemma-3-12B, release shards rounded to BF16 | 23.6 on the device, plus the same again in host memory while it is loaded |
-| Gemma-3-12B, the engine's FP8-scaled single file | about 12 |
+| Gemma-3-12B, the engine's FP8-scaled single file (default) | about 12.3, cast cache off |
+| Gemma-3-12B, the release's BF16 shards (`--refiner-text-encoder-path`) | about 22 (language model only) |
 | text connector (`text_proj_in` 2.7 in F32, plus two blocks) | about 2.9 |
 | stage 1 (DiT and its carried state, Phase A estimate) | about 7.5 |
 
 *48 GB and up.* Everything is resident in BF16: 7.5 + 24.3 + 7.1 + 4 of headroom is about 43.
 
 *24 GB (the 4090).*
-1. Text: the BF16 tower does not fit beside its own activations. Use an FP8 Gemma-3-12B single file through
-   `--refiner-text-encoder-path` (the engine's LTX-2 side model `text_encoders/gemma_3_12B_it_fp8_scaled.safetensors`,
-   once it is confirmed to be the same checkpoint as the release's `gemma3_12b`). It loads and leaves before the DiT.
+1. Text: the default, the FP8-scaled single file, fits (12.3 GiB, cast cache off) and leaves before the DiT loads. The
+   BF16 shards (22 GiB) do not fit beside the tower's own activations.
 2. Transformer: with stage 1 resident about 15.5 is free. At the defaults (window 11, 4 of headroom) about 4.4 is left
    for blocks: 8 BF16 blocks resident and 40 streamed, 20 GiB over PCIe per forward and 4 forwards per block. That
    runs but is slow.
@@ -447,10 +471,11 @@ Compute, for scale: about 0.95 TFLOP per transformer block per forward at a full
 Release layout beside the DiT folder; each path can be overridden:
 
 ```
-World/SanaWmStreaming/refiner_diffusers/transformer/diffusion_pytorch_model.safetensors   --refiner-path
-World/SanaWmStreaming/refiner_diffusers/connectors/diffusion_pytorch_model.safetensors    --refiner-connectors-path
-World/SanaWmStreaming/gemma3_12b/                 (shards, or one .safetensors)            --refiner-text-encoder-path
-World/SanaWmStreaming/gemma3_12b/tokenizer.model  (beside a single-file encoder)           --refiner-tokenizer-path
+World/SanaWm/streaming/refiner_diffusers/transformer/diffusion_pytorch_model.safetensors   --refiner-path
+World/SanaWm/streaming/refiner_diffusers/connectors/diffusion_pytorch_model.safetensors    --refiner-connectors-path
+text_encoders/gemma_3_12B_it_fp8_scaled.safetensors   (SideModels.GemmaLtx2, found by the catalog's side-model path)
+                                                                                           --refiner-text-encoder-path (file or shard folder)
+text_encoders/tokenizer.model   (beside a single-file encoder; inside a shard folder)       --refiner-tokenizer-path
 ```
 
 The files are named when the model resolves and checked only when a run asks for the refiner, so a stage-1 install
@@ -496,11 +521,13 @@ those knobs are on.
 
 ### What the parent session needs to provide for the refiner
 
-1. The streaming repo's `refiner_diffusers/transformer` header and `config.json` and the connectors' `config.json`.
-   The code assumes they equal the bidirectional repo's (`LtxVideo2Config.V20`, connector 30×128, 2 blocks, 128
-   registers, 49 states).
-2. Whether the release's `gemma3_12b` is the same checkpoint as the engine's FP8-scaled Gemma-3-12B side model (compare
-   a few unquantized tensors, or the configs). That decides the text encoder file for 24 GB.
+1. ~~The streaming repo's refiner header and configs.~~ Received 2026-11-09: the same 3510 keys and shapes as the
+   bidirectional repo's, the same transformer and connector configs. One difference: all 194 modulation tables
+   (`scale_shift_table`, `video_a2v_cross_attn_scale_shift_table`, the audio ones and the two top-level tables) are BF16
+   here, F32 there; the loader widens them to F32 (`TensorCasts.LoadF32`), so the forward is unchanged.
+2. ~~Whether `gemma3_12b` is the same as the FP8 file.~~ Answered 2026-11-09: the release shards are BF16 and
+   google/gemma-3-12b-it's sizes byte for byte; the FP8-scaled side model quantizes the same weights. See the decision
+   above for which file to use.
 3. Upstream dumps from one 73-frame run with the refiner: the refiner prompt embeddings, the per-block noise, the
    velocity of each forward, `_sink_kv_pre`, `_history_kv_post` after each block, and each `refine_block` output.
    Note that upstream's `_streaming_self_attention` reads `attn.to_gate_logits`, which diffusers 0.37.0's
