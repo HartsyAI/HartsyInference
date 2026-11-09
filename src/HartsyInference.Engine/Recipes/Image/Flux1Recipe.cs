@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -146,14 +147,16 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             FluxConfig config = hasGuidance ? FluxConfig.Dev : FluxConfig.Schnell;
             Logs.Info($"[Flux1Recipe] Architecture: {doubleBlocks} double, {singleBlocks} single, guidance={hasGuidance} ({(hasGuidance ? "Dev" : "Schnell")}).");
 
-            // fp8 checkpoints on hardware without native FP8 GEMM (Ampere and below) cast each fp8 weight to F16/BF16
-            // on first use; caching those casts roughly doubles VRAM per fp8 tensor and OOMs a 12 GB card partway
-            // through Flux text encoding. Keep the weights fp8-resident with a transient per-GEMM dequant instead.
-            // Applied to EVERY placement backend: with the T5 on its own device, that device's backend needs the
-            // same flag or it re-inflates the fp8 encoder there.
+            // An fp8 Linear that casts to F16/BF16 on first use caches that cast by default. The cache roughly doubles
+            // VRAM per fp8 tensor and OOMs a 12 GB card partway through Flux text encoding, so keep the weights
+            // fp8-resident with a transient per-GEMM dequant instead. The DiT casts on every card unless
+            // numerics.fp8Native=true (see FluxTransformer.LoadWeights), so the cache stays on only for that native
+            // path, which casts nothing. Applied to EVERY placement backend: with the T5 on its own device, that
+            // device's backend needs the same flag or it re-inflates the fp8 encoder there.
+            bool ditCastsFp8 = EngineKnobs.Fp8Native.Value != true;
             if (HasFp8Weights(transformerWeights) || HasFp8Weights(clipLWeights) || HasFp8Weights(t5Weights))
             {
-                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: true);
+                RecipeBackendFlags.DisableCacheWeightCasts(context, "Flux1Recipe", onlyWithoutNativeFp8Gemm: !ditCastsFp8);
             }
 
             // Any quant this backend has no packed-weight kernel for widens here rather than failing inside the

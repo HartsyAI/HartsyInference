@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
@@ -78,8 +79,27 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     /// <summary>Loads all transformer weights from named tensors using diffusers naming.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
-        _f16Mode = DitDtype.Act == DType.F16;
+        // Schnell's 4-step chain amplifies 16-bit rounding, so its DiT runs in F32 (dev keeps the F16 path).
+        bool schnell = !_config.GuidanceEmbed;
+        _f16Mode = DitDtype.Act == DType.F16 && !schnell;
         float branchDamp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
+
+        // The native fp8 GEMM quantizes each input to e4m3 with one per-tensor scale; Flux keeps it off by default.
+        if (EngineKnobs.Fp8Native.Value != true)
+        {
+            foreach (Tensor weight in weights.Values)
+            {
+                weight.SkipNativeFp8Gemm = true;
+            }
+        }
+
+        if (schnell)
+        {
+            foreach (Tensor weight in weights.Values)
+            {
+                weight.ForceF32Gemm = true;
+            }
+        }
 
         // Image input projection (x_embedder in diffusers)
         _xEmbedWeight = weights["x_embedder.weight"];
@@ -962,7 +982,8 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         if (batch == 1)
         {
             Tensor normed = new Tensor(seqShape, DType.F32);
-            backend.LayerNormNoAffine(normed, hidden, 1e-6f);
+            // The stream reaches the final norm at damp scale under the F16 path; compensate the epsilon the same way.
+            backend.LayerNormNoAffine(normed, hidden, _f16Mode ? 1e-6f * ChromaF16.ResidualDamp * ChromaF16.ResidualDamp : 1e-6f);
 
             Tensor scaleRow = new Tensor(new TensorShape(1, dim), DType.F32);
             backend.SliceRows(scaleRow, modParams, 0);

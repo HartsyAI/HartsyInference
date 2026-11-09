@@ -2370,7 +2370,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // the GEMM as a device-side B_SCALE_POINTER so the whole chain stays async. Alignment: cuBLASLt fp8
             // needs 16-byte leading dims (lda/ldb = k fp8 bytes; ldc = n · output element bytes); non-conforming
             // shapes fall through to the cast-to-F16 path below.
-            if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
+            if (EnableNativeFp8Gemm && !weight.SkipNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
                 && weight.QuantInfo?.BlockScale is null   // an MXFP8 weight is not per-tensor fp8
                 && !(weight.DType == DType.F8E5M2 && input.DType == DType.F8E5M2)   // no E5M2 × E5M2 kernel exists
                 && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)
@@ -2553,7 +2553,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // F32 activation down too. Old behaviour resolved per-operand and ended up at F32,
             // forcing an oversized weight cast (151 MB for proj_mlp) plus a 75 MB intermediate
             // inside CastOnGpu's F8→F32 path.
-            DType gemmDtype = ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
+            // The 16-bit path rounds both operands to F16; ForceF32Gemm weights skip it.
+            bool forceF32 = weight.ForceF32Gemm;
+            DType gemmDtype = forceF32 ? DType.F32 : ResolveGemmDtype(input.DType, UnpackedWeightDType(weight));
             ulong inputPtr = CastIfNeeded(pInput, input.DType, gemmDtype, (int)input.ElementCount, out pInputCast);
 
             // Weight cast (fp8/quant → BF16/F16): identical every forward, so for a preloaded weight we
@@ -2563,7 +2565,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // HighPrecisionGemm upcasts a bf16 weight to F32 for the GEMM. Caching that cast would keep a full
             // F32 copy of every weight resident (≈2× the bf16 footprint — 14 GB for a 3.5B DiT, OOM on a 12 GB
             // 3060). Force the transient path so only one weight is F32 at a time, freed each call.
-            bool hipUpcast = HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32;
+            // ForceF32Gemm weights (T5, schnell DiT) take the same transient path: a persistent F32 copy of every fp8 weight
+            // adds roughly 40% peak VRAM on Flux (the T5 encoder alone is 4.7B parameters).
+            bool hipUpcast = forceF32 || (HighPrecisionGemm && weight.DType == DType.BF16 && gemmDtype == DType.F32);
             ulong weightPtr;
             if (weight.DType == gemmDtype)
             {
@@ -2629,6 +2633,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             }
 
             int gemmType = CublasDataTypeForGemm(gemmDtype, input.DType, weight.DType, output.DType, m, n, k);
+            int gemmCompute = forceF32 ? CublasApi.CUBLAS_COMPUTE_32F : Compute32F(gemmType);
             int outputType = CublasDataTypeForGemm(output.DType, input.DType, weight.DType, output.DType, m, n, k);
 
             // Bias prep shared by the fused-epilogue path and the separate-add fallback:
@@ -2675,7 +2680,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         ltBiasFused = lt.TryRun(
                             weight: weightPtr, input: inputPtr, outPtr: pOutput,
                             m: m, n: n, k: k, alpha: alpha,
-                            abType: gemmType, dType: outputType, computeType: Compute32F(gemmType),
+                            abType: gemmType, dType: outputType, computeType: gemmCompute,
                             biasPtr: biasDevicePtr, epilogue: CublasLtApi.CUBLASLT_EPILOGUE_BIAS,
                             stream: _stream.Handle);
                     }
@@ -2712,7 +2717,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                             inputPtr, gemmType, k,
                             &beta,
                             gemmOut, gemmOutType, n,
-                            Compute32F(gemmType), CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                            gemmCompute, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
                         if (outNeedsCast)
                             CastOnGpu(pOutput, pGemmTemp, gemmDtype, output.DType, m * n);
                     }

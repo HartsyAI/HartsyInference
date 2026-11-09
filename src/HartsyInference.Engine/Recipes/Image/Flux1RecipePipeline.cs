@@ -73,7 +73,6 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         int[] clipTokens = _clipTokenizer.Encode(PromptWeighting.Join(PromptWeighting.Parse(baseText)));
         int eosPos = ClipTokenizer.FindEosPosition(clipTokens);
         (int[] t5Tokens, float[]? t5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, baseText);
-        int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
         int[] emptyT5 = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
 
         // True CFG needs a negative prompt and a scale above 1; otherwise the single-pass loop runs.
@@ -144,8 +143,10 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
 
             regionalPlan = BuildRegionalPlan(prompt, reqWidth, reqHeight, steps);
 
+            // The T5 stream is unmasked, as diffusers' FluxPipeline and ComfyUI's Flux text encoder run it: the pad rows
+            // are encoded and attended, and the DiT was trained on that stream.
             (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
-                clipTokens, eosPos, t5Tokens, t5Mask, inner,
+                clipTokens, eosPos, t5Tokens, null, inner,
                 guidanceScale: guidance,
                 onProgress: bridge,
                 controlImage: controlImage,
@@ -162,7 +163,7 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 trueCfgScale: trueCfgScale,
                 negativeWeights: negT5Weights,
                 emptyTokenIdsT5: emptyT5,
-                emptyAttentionMaskT5: T5Tokenizer.CreateAttentionMask(emptyT5));
+                emptyAttentionMaskT5: null);
 
             return new ImageResult
             {
@@ -209,10 +210,8 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
             // Each region is its own leaf carrying its own emphasis, as encode_leaves does per region.
             (int[] tokens, float[]? weights) =
                 T5WeightedConditioning.Tokenize(_t5Tokenizer, PromptTagFlattening.Flatten(text));
-            int[] mask = T5Tokenizer.CreateAttentionMask(tokens);
             int[] empty = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
-            return _pipeline.EncodeRegionText(
-                tokens, mask, weights, empty, T5Tokenizer.CreateAttentionMask(empty));
+            return _pipeline.EncodeRegionText(tokens, null, weights, empty, null);
         });
     }
 
