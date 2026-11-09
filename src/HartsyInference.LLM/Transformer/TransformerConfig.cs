@@ -130,12 +130,13 @@ public sealed record MoeConfig
     /// <see cref="LearnedRoutedScale"/>.</summary>
     public float RoutedScalingFactor { get; init; } = 1f;
 
-    /// <summary>ERNIE-5.5 split-feature routing (<c>moe_split_feature_routing</c>): a second router matrix scores every token too, and an
-    /// expert's score is the sum of its two sigmoids. Sigmoid scoring only; the device router does not take it.</summary>
+    /// <summary>ERNIE-5.5 split-feature routing (<c>moe_split_feature_routing</c>): a second router matrix (<c>mlp.gate.weight_1</c>) scores
+    /// every token too, and an expert's score is the sum of its two sigmoids. Sigmoid scoring only; the device router does not take it.</summary>
     public bool SplitFeatureRouting { get; init; }
 
     /// <summary>ERNIE-5.5 learned routed scale (<c>routed_scaling_factor_learnable</c>): each routed weight is multiplied by a per-expert
-    /// F32 vector from the checkpoint instead of <see cref="RoutedScalingFactor"/>, which the reference then never reads.</summary>
+    /// F32 vector (<c>mlp.gate.routed_scaling_factor_param</c>) instead of <see cref="RoutedScalingFactor"/>, which the reference then
+    /// never reads.</summary>
     public bool LearnedRoutedScale { get; init; }
 
     /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>, ERNIE-5.5 <c>moe_latent_size</c>): the block projects the
@@ -149,9 +150,6 @@ public sealed record MoeConfig
 
     /// <summary>Epsilon of the <see cref="LatentSize"/> norm.</summary>
     public float LatentNormEps { get; init; } = 1e-6f;
-
-    /// <summary>Checkpoint key names of the block; the default is the engine naming the existing mappers produce.</summary>
-    public MoeTensorNames Names { get; init; } = MoeTensorNames.Default;
 
     /// <summary>Muse Spark's per-expert output norm: each routed row is scaled by <c>post_expert_norm</c> and then RMS-normalized, before its routing weight applies.</summary>
     public bool PostExpertNorm { get; init; }

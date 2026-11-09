@@ -121,16 +121,15 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _deviceShapeOk = null;
         _indexedAlignOk = null;
         ValidateRoutingOptions();
-        MoeTensorNames names = _moe.Names;
-        string block = $"{prefix}.{names.Block}";
-        _routerW = w[$"{block}.{names.RouterWeight}"];
-        _routerW2 = _moe.SplitFeatureRouting ? w[$"{block}.{names.RouterWeight2}"] : null;
+        string block = $"{prefix}.mlp";
+        _routerW = w[$"{block}.gate.weight"];
+        _routerW2 = _moe.SplitFeatureRouting ? w[$"{block}.gate.weight_1"] : null;
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
         // llama.cpp keeps router biases F32, so a direct host copy is exact.
         _correctionBias = null;
         _correctionBiasT = null;
-        if (w.TryGetValue($"{block}.{names.CorrectionBias}", out Tensor? cb))
+        if (w.TryGetValue($"{block}.gate.e_score_correction_bias", out Tensor? cb))
         {
             _correctionBias = HostVector(cb, _moe.NumExperts, "correction bias");
             _correctionBiasT = cb;
@@ -139,7 +138,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             throw new InvalidDataException("SigmoidLogitAdd routing requires an e_score_correction_bias tensor.");
         }
-        _routedScaleT = _moe.LearnedRoutedScale ? w[$"{block}.{names.RoutedScale}"] : null;
+        _routedScaleT = _moe.LearnedRoutedScale ? w[$"{block}.gate.routed_scaling_factor_param"] : null;
         _routedScale = _routedScaleT is null ? null : HostVector(_routedScaleT, _moe.NumExperts, "routed scale");
         LoadLatentAndExpertNorm(w, block);
         int e = _moe.NumExperts;
@@ -148,23 +147,24 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _downW = new Tensor[e];
         for (int i = 0; i < e; i++)
         {
-            string ep = $"{block}.{names.Experts}.{i}";
-            _gateW[i] = w[$"{ep}.{names.GateProj}.weight"];
-            _upW[i] = w[$"{ep}.{names.UpProj}.weight"];
-            _downW[i] = w[$"{ep}.{names.DownProj}.weight"];
+            string ep = $"{block}.experts.{i}";
+            _gateW[i] = w[$"{ep}.gate_proj.weight"];
+            _upW[i] = w[$"{ep}.up_proj.weight"];
+            _downW[i] = w[$"{ep}.down_proj.weight"];
         }
         _shGateW = _shUpW = _shDownW = _shGateScoreW = null;
         if (_moe.SharedExpertIntermediateSize > 0)
         {
-            string sp = $"{block}.{names.SharedExpert}";
-            _shGateW = w[$"{sp}.{names.GateProj}.weight"];
-            _shUpW = w[$"{sp}.{names.UpProj}.weight"];
-            _shDownW = w[$"{sp}.{names.DownProj}.weight"];
+            string sp = $"{block}.shared_expert";
+            _shGateW = w[$"{sp}.gate_proj.weight"];
+            _shUpW = w[$"{sp}.up_proj.weight"];
+            _shDownW = w[$"{sp}.down_proj.weight"];
             // The shared-expert sigmoid gate ([1, hidden]) is optional (Qwen2-MoE has it; some variants don't).
-            w.TryGetValue($"{block}.{names.SharedExpertGate}", out Tensor? sg);
+            w.TryGetValue($"{block}.shared_expert_gate.weight", out Tensor? sg);
             _shGateScoreW = sg;
             // A latent block's shared expert reads and writes the model width, not the expert width.
-            if (_latentDown is not null && (_shGateW.Shape[1] != _modelHidden || _shDownW.Shape[0] != _modelHidden))
+            if (_latentDown is not null
+                && (_shGateW.Shape[1] != _modelHidden || _shUpW.Shape[1] != _modelHidden || _shDownW.Shape[0] != _modelHidden))
                 throw new InvalidDataException($"{block}: the shared expert of a latent block must read and write the model width {_modelHidden}.");
         }
     }
@@ -182,19 +182,19 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <summary>Loads the optional latent entry/exit projections and the per-expert output norm the config asks for.</summary>
     private void LoadLatentAndExpertNorm(IReadOnlyDictionary<string, Tensor> w, string block)
     {
-        MoeTensorNames names = _moe.Names;
         _latentDown = _latentNorm = _latentUp = _postExpertNorm = _postExpertOnes = null;
         if (_moe.LatentSize > 0)
         {
-            _latentDown = w[$"{block}.{names.LatentDown}"];
-            _latentNorm = _moe.LatentNorm == MoeLatentNorm.None ? null : GenericTransformer.EnsureF32(w[$"{block}.{names.LatentNorm}"]);
-            _latentUp = w[$"{block}.{names.LatentUp}"];
+            // The latent norm weight keeps its Muse Spark name wherever MoeConfig.LatentNorm places it.
+            _latentDown = w[$"{block}.pre_expert_proj.weight"];
+            _latentNorm = _moe.LatentNorm == MoeLatentNorm.None ? null : GenericTransformer.EnsureF32(w[$"{block}.pre_expert_norm.weight"]);
+            _latentUp = w[$"{block}.post_expert_proj.weight"];
             if (_latentDown.Shape[0] != _hidden || _latentUp.Shape[1] != _hidden)
                 throw new InvalidDataException($"{block}: latent projections do not match the configured latent size {_hidden}.");
         }
         if (_moe.PostExpertNorm)
         {
-            _postExpertNorm = GenericTransformer.EnsureF32(w[$"{block}.{names.PostExpertNorm}"]);
+            _postExpertNorm = GenericTransformer.EnsureF32(w[$"{block}.post_expert_norm.weight"]);
             _postExpertOnes = GenericTransformer.Ones(_hidden);
         }
     }
@@ -233,17 +233,30 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         Tensor logits = new(shape, DType.F32);
         GenericTransformer.Project(backend, logits, x, _routerW, null, lowVram: false);
         if (_routerW2 is null) return logits;
-        using Tensor logits2 = new(shape, DType.F32);
-        GenericTransformer.Project(backend, logits2, x, _routerW2, null, lowVram: false);
-        using Tensor s1 = new(shape, DType.F32);
-        using Tensor s2 = new(shape, DType.F32);
-        backend.Sigmoid(s1, logits);
-        backend.Sigmoid(s2, logits2);
-        backend.Add(logits, s1, s2);
-        return logits;
+        Tensor scores = new(shape, DType.F32);
+        try
+        {
+            GenericTransformer.Project(backend, scores, x, _routerW2, null, lowVram: false);
+            using Tensor s1 = new(shape, DType.F32);
+            backend.Sigmoid(s1, logits);
+            backend.Sigmoid(logits, scores);
+            backend.Add(scores, s1, logits);
+        }
+        catch
+        {
+            scores.Dispose();
+            throw;
+        }
+        finally
+        {
+            logits.Dispose();
+        }
+        return scores;
     }
 
-    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>; <paramref name="routerLogits"/> overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a differently-normalized view of the attention output, computed by the caller) — same <c>[1, N, E]</c> shape either way, not disposed by this call.</summary>
+    /// <summary>MoE FFN: <paramref name="x"/> <c>[1, N, hidden]</c> → <c>[1, N, hidden]</c>; <paramref name="routerLogits"/> overrides the internal <c>x @ router_weight</c> projection when provided (Gemma-4: the router reads a differently-normalized view of the attention output, computed by the caller) — same <c>[1, N, E]</c> shape either way, not disposed by this call. Under
+    /// <see cref="MoeConfig.SplitFeatureRouting"/> it must hold the summed sigmoid scores <see cref="ComputeRouterLogits"/> returns, not raw
+    /// logits.</summary>
     /// <remarks>With <see cref="MoeConfig.LatentSize"/> set the router and the shared expert read the full-width <paramref name="x"/>. The
     /// experts read <c>fc1(x)</c>, normalized first under <see cref="MoeLatentNorm.BeforeExperts"/> (Muse Spark); their weighted sum is
     /// normalized under <see cref="MoeLatentNorm.AfterCombine"/> (ERNIE-5.5) and leaves through <c>fc2</c>; the shared expert's output is
