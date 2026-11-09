@@ -27,6 +27,10 @@ git preserves removed history.
 
 - Read only the relevant document or section; search before loading a long reference. One fact, one home — link
   to measurements instead of copying them into a README or plan.
+- Agent files (`AGENTS.md`, `docs/Agents/`, skills under `docs/Agents/skills/`) target current Claude models. Write them
+  to the [Claude prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices):
+  state the goal and the reason for each rule, phrase rules positively, separate sections with XML tags, and drop
+  CRITICAL or MUST emphasis, which current models tend to over-apply.
 - Status rows carry a verdict and a details link. Evidence records checkpoint/variant, backend, reference,
   metric/tolerance, date and limitations. A coherent output is not full numerical parity.
 - Quote a measurement as an absolute number against an external baseline ("1.671 s/step against ComfyUI's
