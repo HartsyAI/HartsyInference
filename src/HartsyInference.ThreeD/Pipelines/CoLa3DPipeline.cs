@@ -125,14 +125,15 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <param name="onProgress">Reports the three fixed stages, then once per decoded object. TotalSteps is 3 until the
     /// split fixes the object count.</param>
     /// <param name="prompt">Objects to decompose, as masks or points in <paramref name="scene"/>'s units. Null for free queries;
-    /// required by a prompt checkpoint and rejected by the free one. Point prompts need the 1024 grid.</param>
+    /// required by a prompt checkpoint and rejected by the free one. Point prompts need the 1024 grid, which they use when
+    /// <paramref name="resolution"/> is 0.</param>
     /// <exception cref="HartsyInferenceException">The scene decomposes into no object with triangles.</exception>
     public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null, CoLa3DPrompt? prompt = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(scene);
         ValidateRequest(_config, resolution, prompt);
-        int res = resolution > 0 ? resolution : DefaultResolution;
+        int res = ResolveResolution(_config, resolution, prompt);
         long started = MonotonicClock.NowNs();
         SceneGrid grid = SceneGrid.Fit(scene, res);
 
@@ -191,7 +192,7 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     public static void ValidateRequest(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
     {
         ArgumentNullException.ThrowIfNull(config);
-        int res = resolution > 0 ? resolution : DefaultResolution;
+        int res = ResolveResolution(config, resolution, prompt);
         if (res % LatentStride != 0)
             throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
         if (res > MaxResolution)
@@ -225,6 +226,14 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
                 $"Point prompts index a {config.LatentResolution}^3 latent, so the grid must be {grid}; this request uses {res}.",
                 nameof(prompt));
         }
+    }
+
+    /// <summary>The grid a request runs on: the caller's, else the latent grid a point prompt indexes, else <see cref="DefaultResolution"/>.</summary>
+    private static int ResolveResolution(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
+    {
+        if (resolution > 0)
+            return resolution;
+        return prompt?.Kind == CoLa3DConfig.QuerySourceKind.PromptPoint ? config.LatentResolution * LatentStride : DefaultResolution;
     }
 
     private static double ElapsedMs(long startedNs) => (MonotonicClock.NowNs() - startedNs) / 1e6;

@@ -146,7 +146,7 @@ public sealed class CoLa3DPipelineTests
         using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, new RecordingVoxelizer(), decomposer);
         CoLa3DPrompt prompt = new() { Queries = 1, Points = [0.5f, 0.5f, 0.5f] };
 
-        pipeline.Generate(ObjReader.Parse(TriangleScene), resolution: CoLa3DConfig.PointQ20.LatentResolution * CoLa3DPipeline.LatentStride, prompt: prompt);
+        pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt);
 
         Assert.NotNull(decomposer.Received);
         Assert.Equal(1, decomposer.Received!.Queries);

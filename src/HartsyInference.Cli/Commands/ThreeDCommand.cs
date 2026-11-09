@@ -55,7 +55,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Marching-cubes grid resolution (0 = model default).</summary>
         [CommandOption("--grid")]
-        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256).")]
+        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256, or 1024 with --prompt-point).")]
         public int Grid { get; init; }
 
         /// <summary>Mask PNGs for cola3d, one per object (repeatable); all the same size, red channel is the coverage.</summary>
