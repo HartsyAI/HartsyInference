@@ -1,3 +1,5 @@
+using HartsyInference.ThreeD.Models.CoLa3D;
+
 namespace HartsyInference.ThreeD.Pipelines;
 
 /// <summary>
@@ -21,6 +23,10 @@ public sealed record CoLa3DPrompt
     /// <summary>One <c>(x, y, z)</c> per query in the scene mesh's units, flat <c>[Queries, 3]</c>; null for a mask prompt.</summary>
     public float[]? Points { get; init; }
 
+    /// <summary>The query source a checkpoint must have to take this prompt.</summary>
+    public CoLa3DConfig.QuerySourceKind Kind =>
+        MaskCoverage is not null ? CoLa3DConfig.QuerySourceKind.PromptMask : CoLa3DConfig.QuerySourceKind.PromptPoint;
+
     /// <summary>Checks that exactly one prompt kind is set and that its buffers match the query count.</summary>
     public void Validate()
     {
@@ -34,10 +40,17 @@ public sealed record CoLa3DPrompt
                 throw new ArgumentOutOfRangeException(nameof(MaskHeight), MaskHeight, "Mask height must be positive.");
             if (MaskWidth < 1)
                 throw new ArgumentOutOfRangeException(nameof(MaskWidth), MaskWidth, "Mask width must be positive.");
-            int plane = MaskHeight * MaskWidth;
-            long expected = (long)Queries * plane;
-            if (MaskCoverage.LongLength != expected)
-                throw new ArgumentException($"Mask coverage holds {MaskCoverage.Length} bytes; expected {expected}.", nameof(MaskCoverage));
+            // The product of two positive ints fits in a long. Divide rather than multiply by Queries, which can overflow it.
+            long planeLong = (long)MaskHeight * MaskWidth;
+            if (MaskCoverage.LongLength % planeLong != 0 || MaskCoverage.LongLength / planeLong != Queries)
+            {
+                throw new ArgumentException(
+                    $"Mask coverage holds {MaskCoverage.Length} bytes; expected {Queries} masks of {MaskHeight}x{MaskWidth} bytes each.",
+                    nameof(MaskCoverage));
+            }
+
+            // The buffer length is an int, so a plane that matches it fits in an int too.
+            int plane = (int)planeLong;
             // An empty mask has no centroid, so the decomposer would place its query at the origin.
             for (int q = 0; q < Queries; q++)
             {

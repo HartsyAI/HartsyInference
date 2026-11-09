@@ -84,9 +84,9 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
         SceneMeshData sceneMesh = request.SceneMesh;
         CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : ToCoLa3DPrompt(request.ScenePrompt);
-        CoLa3DConfig.QuerySourceKind source = prompt is null
-            ? CoLa3DConfig.QuerySourceKind.Fixed
-            : prompt.MaskCoverage is not null ? CoLa3DConfig.QuerySourceKind.PromptMask : CoLa3DConfig.QuerySourceKind.PromptPoint;
+        CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
+        // Rejects the request before the checkpoint loads; the pipeline checks it again on Generate.
+        CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
 
         return Task.Run(
             () =>
@@ -186,7 +186,16 @@ public sealed class MeshService : IMeshService, IDisposable
         if (masks.Count == 0)
             throw new ArgumentException("A mask prompt names at least one object.", nameof(masks));
         int width = masks[0].Width, height = masks[0].Height;
-        int plane = width * height;
+        // Multiply in long: a plane that wraps an int could pass the length checks and then allocate a huge tensor later.
+        long planeLong = (long)width * height;
+        if (planeLong < 0 || planeLong > int.MaxValue / masks.Count)
+        {
+            throw new ArgumentException(
+                $"Mask prompt sizes are out of range: {masks.Count} masks of {width}x{height} must fit one {int.MaxValue}-byte buffer.",
+                nameof(masks));
+        }
+
+        int plane = (int)planeLong;
         byte[] coverage = new byte[masks.Count * plane];
         for (int i = 0; i < masks.Count; i++)
         {

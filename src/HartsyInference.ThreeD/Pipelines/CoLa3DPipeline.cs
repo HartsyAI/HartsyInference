@@ -121,11 +121,8 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(scene);
+        ValidateRequest(_config, resolution, prompt);
         int res = resolution > 0 ? resolution : DefaultResolution;
-        if (res % LatentStride != 0)
-            throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
-        prompt?.Validate();
-        ValidatePromptForCheckpoint(prompt, res);
         SceneGrid grid = SceneGrid.Fit(scene, res);
 
         DualGridVoxels voxels = _voxelizer.Voxelize(scene, grid);
@@ -178,34 +175,43 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         return new CoLa3DResult { Objects = meshes };
     }
 
-    // Rejects a prompt this checkpoint cannot take before voxelizing, so a bad request fails before the expensive stages.
-    private void ValidatePromptForCheckpoint(CoLa3DPrompt? prompt, int res)
+    /// <summary>Checks the grid and the prompt against a checkpoint's architecture. Loads no weights, so it can reject a request first.</summary>
+    /// <param name="config">Architecture of the checkpoint the request targets, from <see cref="CoLa3DConfig.ForQuerySource"/>.</param>
+    /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>.</param>
+    /// <param name="prompt">Prompt for a prompt checkpoint; null for the free one.</param>
+    public static void ValidateRequest(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
     {
+        ArgumentNullException.ThrowIfNull(config);
+        int res = resolution > 0 ? resolution : DefaultResolution;
+        if (res % LatentStride != 0)
+            throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
+        prompt?.Validate();
         if (prompt is null)
         {
-            if (_config.QuerySource != CoLa3DConfig.QuerySourceKind.Fixed)
-                throw new ArgumentException($"This checkpoint takes {_config.QuerySource} queries and requires a prompt.", nameof(prompt));
+            if (config.QuerySource != CoLa3DConfig.QuerySourceKind.Fixed)
+                throw new ArgumentException($"This checkpoint takes {config.QuerySource} queries and requires a prompt.", nameof(prompt));
             return;
         }
 
-        if (_config.QuerySource == CoLa3DConfig.QuerySourceKind.Fixed)
+        if (config.QuerySource == CoLa3DConfig.QuerySourceKind.Fixed)
             throw new ArgumentException("This checkpoint takes free queries; pass no prompt.", nameof(prompt));
-        CoLa3DConfig.QuerySourceKind kind = prompt.MaskCoverage is not null
-            ? CoLa3DConfig.QuerySourceKind.PromptMask
-            : CoLa3DConfig.QuerySourceKind.PromptPoint;
-        if (kind != _config.QuerySource)
-            throw new ArgumentException($"This checkpoint takes {_config.QuerySource} queries; the prompt gives {kind}.", nameof(prompt));
-        if (prompt.Queries > _config.MaxParts)
+        if (prompt.Kind != config.QuerySource)
         {
             throw new ArgumentException(
-                $"The prompt names {prompt.Queries} objects; this checkpoint takes at most {_config.MaxParts}.", nameof(prompt));
+                $"This checkpoint takes {config.QuerySource} queries; the prompt gives {prompt.Kind}.", nameof(prompt));
         }
 
-        if (kind == CoLa3DConfig.QuerySourceKind.PromptPoint && res / LatentStride != _config.LatentResolution)
+        if (prompt.Queries > config.MaxParts)
         {
-            int grid = _config.LatentResolution * LatentStride;
             throw new ArgumentException(
-                $"Point prompts index a {_config.LatentResolution}^3 latent, so the grid must be {grid}; this request uses {res}.",
+                $"The prompt names {prompt.Queries} objects; this checkpoint takes at most {config.MaxParts}.", nameof(prompt));
+        }
+
+        if (prompt.Kind == CoLa3DConfig.QuerySourceKind.PromptPoint && res / LatentStride != config.LatentResolution)
+        {
+            int grid = config.LatentResolution * LatentStride;
+            throw new ArgumentException(
+                $"Point prompts index a {config.LatentResolution}^3 latent, so the grid must be {grid}; this request uses {res}.",
                 nameof(prompt));
         }
     }

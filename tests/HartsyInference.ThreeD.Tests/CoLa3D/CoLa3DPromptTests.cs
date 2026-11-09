@@ -155,6 +155,24 @@ public sealed class CoLa3DPromptTests
         Assert.Equal("MaskHeight", height.ParamName);
     }
 
+    [Fact]
+    public void Validate_RejectsAMaskPlaneThatWouldWrapAnIntSize()
+    {
+        // 65537 * 65537 wraps to 131073 in int, so a buffer of that length must not pass as one mask.
+        CoLa3DPrompt prompt = new() { Queries = 1, MaskCoverage = new byte[131073], MaskHeight = 65537, MaskWidth = 65537 };
+
+        Assert.Throws<ArgumentException>(() => prompt.Validate());
+    }
+
+    [Fact]
+    public void ValidateRequest_RejectsAPromptForAnotherCheckpointWithoutLoadingWeights()
+    {
+        CoLa3DPrompt points = new() { Queries = 1, Points = [0f, 0f, 0f] };
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => CoLa3DPipeline.ValidateRequest(CoLa3DConfig.MaskQ20, 0, points));
+        Assert.Contains("PromptPoint", error.Message, StringComparison.Ordinal);
+    }
+
     // A 1024 dual grid over unit voxels from the origin: a point at 40.5 lies in dual voxel 40.
     private static SceneGrid OneVoxelGrid() => new()
     {
