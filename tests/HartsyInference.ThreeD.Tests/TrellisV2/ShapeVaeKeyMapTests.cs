@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Tests.TrellisV2;
 public sealed class ShapeVaeKeyMapTests
 {
     [Theory]
-    [InlineData("blocks.1.0.conv.conv.weight", "Blocks[1][0].Conv.Conv.Weight")]
+    [InlineData("blocks.1.0.conv.weight", "Blocks[1][0].Conv.Weight")]
     [InlineData("blocks.2.4.to_subdiv.bias", "Blocks[2][4].ToSubdiv.Bias")]
     [InlineData("input_layer.weight", "InputLayer.Weight")]
     [InlineData("blocks.0.1.mlp.2.weight", "Blocks[0][1].Mlp[2].Weight")]

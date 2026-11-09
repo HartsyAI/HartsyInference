@@ -9,8 +9,11 @@ public sealed record MeshRequest
     /// <summary>The text prompt; may be empty for pure image-to-3D.</summary>
     public string Prompt { get; init; } = "";
 
-    /// <summary>Input image for image-to-3D; null for text-to-3D.</summary>
+    /// <summary>Input image for image-to-3D; null for text-to-3D and for scene models.</summary>
     public ImageData? Image { get; init; }
+
+    /// <summary>Input triangle scene for scene-decomposition models (cola3d); null for image models.</summary>
+    public SceneMeshData? SceneMesh { get; init; }
 
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }

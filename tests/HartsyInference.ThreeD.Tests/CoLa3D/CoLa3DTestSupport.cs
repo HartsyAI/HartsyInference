@@ -8,18 +8,7 @@ namespace HartsyInference.ThreeD.Tests.CoLa3D;
 internal static class CoLa3DTestSupport
 {
     /// <summary>The architecture of <c>cola3d_free_q20.pt</c>, read from <c>configs/train/cola3d/free_q20.json</c>.</summary>
-    internal static CoLa3DConfig FreeQ20() => new()
-    {
-        LatentChannels = 32,
-        LatentResolution = 64,
-        UtoniaFeatureDim = 576,
-        HiddenDim = 768,
-        NumLayers = 6,
-        NumHeads = 12,
-        MaxParts = 20,
-        QuerySource = CoLa3DConfig.QuerySourceKind.Fixed,
-        QueryInit = CoLa3DConfig.QueryInitKind.Positional,
-    };
+    internal static CoLa3DConfig FreeQ20() => CoLa3DConfig.FreeQ20;
 
     /// <summary>The architecture of <c>cola3d_mask_q20.pt</c>.</summary>
     internal static CoLa3DConfig MaskQ20() => FreeQ20() with

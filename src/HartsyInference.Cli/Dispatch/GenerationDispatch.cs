@@ -785,14 +785,16 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
-    /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
+    /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        bool scene = MeshModelIds.SceneMesh.Contains((spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant());
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadImage(prompt),
+            Image = scene ? null : LoadImage(prompt),
+            SceneMesh = scene ? LoadSceneMesh(prompt) : null,
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
@@ -1294,6 +1296,21 @@ public static class GenerationDispatch
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    private static SceneMeshData LoadSceneMesh(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Input scene mesh not found: {path}");
+        }
+        string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+        if (format is not ("obj" or "glb"))
+        {
+            throw new NotSupportedException($"Scene mesh '{path}' must be a .obj or .glb file.");
+        }
+        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = format };
+    }
+
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');

@@ -6,20 +6,20 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an input image with TripoSR, Hunyuan3D, or TRELLIS.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, or one GLB mesh per decomposed object from a scene mesh with CoLa3D.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
     public sealed class Settings : CommandSettings
     {
-        /// <summary>Path to the input PNG image.</summary>
-        [CommandArgument(0, "<image>")]
-        [Description("Path to the input PNG image.")]
-        public string Image { get; init; } = "";
+        /// <summary>Path to the input: a PNG image, or a .obj/.glb scene mesh for cola3d.</summary>
+        [CommandArgument(0, "<input>")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb scene mesh (cola3d).")]
+        public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, or trellis.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, trellis, or cola3d.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, or trellis.")]
+        [Description("Model id: triposr, hunyuan3d, trellis, or cola3d.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Path to the model directory or checkpoint.</summary>
@@ -34,7 +34,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Marching-cubes grid resolution (0 = model default).</summary>
         [CommandOption("--grid")]
-        [Description("Marching-cubes grid resolution (0 = model default).")]
+        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16).")]
         public int Grid { get; init; }
 
         /// <summary>Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).</summary>
@@ -61,7 +61,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Image, "An input image path is required.", out int exitCode))
+        if (!CommandRunner.RequireNonEmpty(settings.Input, "An input path is required (an image, or a scene mesh for cola3d).", out int exitCode))
             return exitCode;
 
         if (string.IsNullOrWhiteSpace(settings.ModelPath))
@@ -78,7 +78,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
-        return CommandRunner.Run(Modality.Mesh, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.Mesh, spec, settings.Input, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
     }
 }

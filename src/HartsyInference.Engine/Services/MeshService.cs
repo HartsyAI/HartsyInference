@@ -1,21 +1,23 @@
+
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
+using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Image-to-3D service: loads TripoSR (feed-forward), Hunyuan3D (flow-match, mesh), or TRELLIS (two-stage flow, Gaussian splat) from the spec's model directory, runs one image-to-3D pass, and returns the geometry encoded as GLB (mesh models) or binary-PLY (splat models — TRELLIS's flexicubes mesh decoder is not yet ported, so it only ever emits splats). Loaded pipelines are cached per checkpoint for the life of the service; text-to-3D has no wired pipeline yet, so a request without an image is rejected by name.</summary>
+/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS) turn an image into GLB (mesh) or PLY (splat); the scene model
+/// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object. Loaded pipelines are cached per checkpoint for the
+/// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
-    /// <summary>Catalog ids with a wired image-to-3D pipeline; anything else is rejected before loading.</summary>
-    private static readonly string[] SupportedModelIds = { "triposr", "hunyuan3d", "trellis" };
-
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -26,6 +28,10 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
+        string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+        if (MeshModelIds.SceneMesh.Contains(id))
+            return GenerateSceneAsync(spec, id, request, progress, cancel);
+
         if (request.Image is null)
         {
             throw new NotSupportedException(
@@ -35,7 +41,7 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                LoadedMesh loaded = GetOrLoad(spec);
+                LoadedMesh loaded = GetOrLoad(spec, id);
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
                     ImageRgb = request.Image.Rgb,
@@ -63,8 +69,38 @@ public sealed class MeshService : IMeshService, IDisposable
             cancel);
     }
 
+    /// <summary>Scene decomposition: one GLB holding a mesh node per object.</summary>
+    private Task<MeshResult> GenerateSceneAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        if (request.SceneMesh is null)
+        {
+            throw new NotSupportedException(
+                $"3D model '{id}' decomposes a triangle scene; supply MeshRequest.SceneMesh as obj or glb.");
+        }
+        if (request.Image is not null)
+            throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
+        SceneMeshData sceneMesh = request.SceneMesh;
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                CoLa3DPipeline pipeline = GetOrLoadScene(spec, id);
+                Mesh scene = SceneMeshReader.Read(sceneMesh.Data, sceneMesh.Format);
+                CoLa3DResult result = pipeline.Generate(scene, request.GridResolution, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                });
+                if (result.Objects.Count == 0)
+                    throw new InvalidOperationException("The scene decomposed into no object geometry (try a finer grid).");
+                return new MeshResult { Data = GlbWriter.Write(result.Objects), Format = "glb" };
+            },
+            cancel);
+    }
+
     /// <summary>Loads (or returns the cached) image-to-3D pipeline for <paramref name="spec"/>.</summary>
-    private LoadedMesh GetOrLoad(ModelSpec spec)
+    private LoadedMesh GetOrLoad(ModelSpec spec, string id)
     {
         if (spec.LocalPath is null)
         {
@@ -78,10 +114,10 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 return cached;
             }
-            string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
-            if (!SupportedModelIds.Contains(id))
+            if (!MeshModelIds.ImageToMesh.Contains(id))
             {
-                throw new NotSupportedException($"3D model '{id}' has no wired pipeline yet; supported: {string.Join(", ", SupportedModelIds)}.");
+                throw new NotSupportedException(
+                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.All)}.");
             }
             try
             {
@@ -103,11 +139,43 @@ public sealed class MeshService : IMeshService, IDisposable
                 }
                 else
                 {
-                    // Unreachable while SupportedModelIds matches these branches; a new id must get its own branch.
-                    throw new System.Diagnostics.UnreachableException($"No loader wired for supported 3D model '{id}'.");
+                    // Unreachable while MeshModelIds.ImageToMesh matches these branches; a new id must get its own branch.
+                    throw new System.Diagnostics.UnreachableException($"No loader wired for image 3D model '{id}'.");
                 }
                 _pipelines[spec.LocalPath] = loaded;
                 return loaded;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to load the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Loads (or returns the cached) scene pipeline for <paramref name="spec"/>.</summary>
+    private CoLa3DPipeline GetOrLoadScene(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Supply its model directory as the local path.");
+        }
+        lock (_gate)
+        {
+            if (_scenePipelines.TryGetValue(spec.LocalPath, out CoLa3DPipeline? cached))
+            {
+                return cached;
+            }
+            if (id != "cola3d")
+            {
+                throw new System.Diagnostics.UnreachableException($"No loader wired for scene 3D model '{id}'.");
+            }
+            try
+            {
+                CoLa3DPipeline pipeline = CoLa3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
+                _scenePipelines[spec.LocalPath] = pipeline;
+                return pipeline;
             }
             catch (Exception ex)
             {
@@ -127,6 +195,11 @@ public sealed class MeshService : IMeshService, IDisposable
                 loaded.Pipeline.Dispose();
             }
             _pipelines.Clear();
+            foreach (CoLa3DPipeline pipeline in _scenePipelines.Values)
+            {
+                pipeline.Dispose();
+            }
+            _scenePipelines.Clear();
         }
     }
 
