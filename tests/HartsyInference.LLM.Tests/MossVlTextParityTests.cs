@@ -2,7 +2,9 @@ using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cuda;
 using HartsyInference.LLM.Models.MossVl;
+using HartsyInference.Vulkan;
 using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Tests;
@@ -10,7 +12,8 @@ namespace HartsyInference.LLM.Tests;
 /// <summary>The text decoder's first three layers (self, self, gated cross-attention) on the real checkpoint, against the numpy
 /// transcription in <c>tests/python-reference/dump_moss_vl_text.py</c>. <c>HARTSY_MOSS_VL_INDEX</c> is the checkpoint's index,
 /// <c>HARTSY_MOSS_VL_REF</c> the vision dump's <c>merged.npy</c> (the image input), <c>HARTSY_MOSS_VL_TEXT_REF</c> the text dump's
-/// <c>text_hidden.npy</c>; <c>cross_input.npy</c> and <c>prompt_ids.txt</c> sit beside it.</summary>
+/// <c>text_hidden.npy</c>; <c>cross_input.npy</c> and <c>prompt_ids.txt</c> sit beside it. <c>HARTSY_MOSS_VL_GGUF</c> is the
+/// quantized GGUF of the same model, for the GGUF source.</summary>
 /// <remarks>The checkpoint's cross-attention gates are about 1e-2, so the cross layer moves the hidden state only slightly. The test
 /// therefore also compares the layer's own contribution (its output minus its input), which a missing rotation or row mask would
 /// change by most of its size.</remarks>
@@ -20,15 +23,53 @@ public sealed class MossVlTextParityTests
     private const string CheckpointVariable = "HARTSY_MOSS_VL_INDEX";
     private const string VisionVariable = "HARTSY_MOSS_VL_REF";
     private const string TextVariable = "HARTSY_MOSS_VL_TEXT_REF";
+    private const string GgufVariable = "HARTSY_MOSS_VL_GGUF";
     private const int Layers = 3;
     private const int CrossLayer = 2;
     private const int MergedHeight = 8, MergedWidth = 12;
 
-    /// <summary>Largest allowed <c>max|diff| / max|ref|</c>. Both sides run F32 on the same widened weights.</summary>
+    /// <summary>Largest allowed <c>max|diff| / max|ref|</c> for the BF16 safetensors source. Both sides run F32 on the same widened weights.</summary>
     private const double RelativeTolerance = 1e-2;
+
+    /// <summary>Largest allowed relative error for the Q4_K/Q6_K GGUF source, against the BF16 reference. Measured on CPU: layers 0–2
+    /// relative 5.0e-3, cross-layer delta 6.5e-3. The bound leaves about three times that margin.</summary>
+    private const double QuantizedTolerance = 2e-2;
 
     [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable)]
     public void DecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
+        Run(config => MossVlTextDecoder.Open(checkpoint, config, Layers), () => new CpuBackend(), RelativeTolerance);
+    }
+
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable, GgufVariable)]
+    public void GgufDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
+        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers), () => new CpuBackend(), QuantizedTolerance);
+    }
+
+    /// <summary>The GGUF source on the CUDA backend: quantized projections stay packed and run through the quantized matmul.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable, GgufVariable)]
+    public void GgufCudaDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
+        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true, lowVramQuant: true),
+            () => new CudaBackend(0, CudaPtxDirectory.Resolve()), QuantizedTolerance);
+    }
+
+    /// <summary>The GGUF source on the Vulkan backend: Q4_K/Q6_K stay packed and <c>Linear</c> runs the packed GEMV.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable, GgufVariable)]
+    public void GgufVulkanDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
+        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true),
+            () => new VulkanBackend(), QuantizedTolerance);
+    }
+
+    private static void Run(Func<MossVlConfig, MossVlTextDecoder> open, Func<IBackend> makeBackend, double tolerance)
     {
         string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
         string mergedPath = Environment.GetEnvironmentVariable(VisionVariable)!;
@@ -46,8 +87,8 @@ public sealed class MossVlTextParityTests
         (_, float[] refCrossInput) = NpyReader.ReadFloat32(Path.Combine(refDir, "cross_input.npy"));
         Assert.Equal((long)ids.Length, refShape[0]);
 
-        using MossVlTextDecoder decoder = MossVlTextDecoder.Open(checkpoint, config, Layers);
-        using IBackend backend = new CpuBackend();
+        using MossVlTextDecoder decoder = open(config);
+        using IBackend backend = makeBackend();
 
         using Tensor merged = new(new TensorShape(mergedShape[0], mergedShape[1]), DType.F32);
         mergedData.AsSpan().CopyTo(merged.AsSpan<float>());
@@ -73,9 +114,9 @@ public sealed class MossVlTextParityTests
 
         // The layers before the cross layer, and the full stack's output.
         Report("layers 0-1", h1, refCrossInput, out double preRelative);
-        Assert.True(preRelative < RelativeTolerance, $"Layers 0-1 relative {preRelative:G6} >= {RelativeTolerance}.");
+        Assert.True(preRelative < tolerance, $"Layers 0-1 relative {preRelative:G6} >= {tolerance}.");
         Report("layers 0-2", h2, refHidden, out double fullRelative);
-        Assert.True(fullRelative < RelativeTolerance, $"Layers 0-2 relative {fullRelative:G6} >= {RelativeTolerance}.");
+        Assert.True(fullRelative < tolerance, $"Layers 0-2 relative {fullRelative:G6} >= {tolerance}.");
 
         // The cross-attention layer's own contribution: output minus input, on both sides.
         float[] deltaActual = new float[h1.Length];
@@ -86,7 +127,7 @@ public sealed class MossVlTextParityTests
             deltaRef[i] = refHidden[i] - refCrossInput[i];
         }
         Report("cross layer delta", deltaActual, deltaRef, out double deltaRelative);
-        Assert.True(deltaRelative < RelativeTolerance, $"Cross-layer delta relative {deltaRelative:G6} >= {RelativeTolerance}.");
+        Assert.True(deltaRelative < tolerance, $"Cross-layer delta relative {deltaRelative:G6} >= {tolerance}.");
     }
 
     private static void Report(string label, ReadOnlySpan<float> actual, ReadOnlySpan<float> reference, out double relative)
