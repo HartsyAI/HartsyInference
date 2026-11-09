@@ -102,6 +102,94 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
         return new Result(frames, outWidth, outHeight, fps);
     }
 
+    /// <summary>A video stream's size, frame rate and frame count.</summary>
+    /// <param name="FrameCount">The container's frame count, or duration × fps when the container does not record it.</param>
+    public sealed record StreamInfo(int Width, int Height, double Fps, int FrameCount);
+
+    /// <summary>Reads the first video stream's size, frame rate and frame count without decoding it.</summary>
+    public async Task<StreamInfo> ProbeStreamAsync(string path, CancellationToken cancel = default)
+    {
+        (int width, int height, double fps) = await ProbeAsync(path, cancel).ConfigureAwait(false);
+        string counts = await RunProbeAsync(
+            $"-v error -select_streams v:0 -show_entries stream=nb_frames:format=duration -of default=nw=1 \"{path}\"", cancel).ConfigureAwait(false);
+        int frames = 0;
+        double duration = 0;
+        foreach (string line in counts.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("nb_frames=", StringComparison.Ordinal))
+                int.TryParse(line.AsSpan(10), NumberStyles.Integer, CultureInfo.InvariantCulture, out frames);
+            else if (line.StartsWith("duration=", StringComparison.Ordinal))
+                double.TryParse(line.AsSpan(9), NumberStyles.Float, CultureInfo.InvariantCulture, out duration);
+        }
+        if (frames <= 0) frames = (int)Math.Round(duration * fps);
+        if (frames <= 0)
+            throw new InvalidOperationException($"ffprobe reported neither a frame count nor a duration for '{path}'.");
+        return new StreamInfo(width, height, fps, frames);
+    }
+
+    /// <summary>Streams the first video stream's frames at source size as RGB24, in decode order, without holding the clip.
+    /// Each yielded buffer is reused for the next frame: copy what you keep before advancing.</summary>
+    public async IAsyncEnumerable<ReadOnlyMemory<byte>> StreamFramesAsync(string path, int width, int height,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancel = default)
+    {
+        ProcessStartInfo psi = new()
+        {
+            FileName = _ffmpegPath,
+            Arguments = $"-v error -i \"{path}\" -f rawvideo -pix_fmt rgb24 -",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using Process proc = Start(psi, _ffmpegPath);
+        Task<string> stderrTask = proc.StandardError.ReadToEndAsync(cancel);
+        int frameBytes = width * height * 3;
+        byte[] buffer = new byte[frameBytes];
+        Stream stdout = proc.StandardOutput.BaseStream;
+        try
+        {
+            while (true)
+            {
+                int filled = 0;
+                while (filled < frameBytes)
+                {
+                    int read = await stdout.ReadAsync(buffer.AsMemory(filled, frameBytes - filled), cancel).ConfigureAwait(false);
+                    if (read == 0) break;
+                    filled += read;
+                }
+                if (filled < frameBytes) break;
+                yield return buffer;
+            }
+            await proc.WaitForExitAsync(cancel).ConfigureAwait(false);
+            if (proc.ExitCode != 0)
+                throw new InvalidOperationException($"ffmpeg decode exited {proc.ExitCode}: {await stderrTask.ConfigureAwait(false)}");
+        }
+        finally
+        {
+            // The consumer may stop early (it has every frame it planned); do not leave ffmpeg blocked on a full pipe.
+            if (!proc.HasExited)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            }
+        }
+    }
+
+    private async Task<string> RunProbeAsync(string arguments, CancellationToken cancel)
+    {
+        ProcessStartInfo psi = new()
+        {
+            FileName = _ffprobePath,
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        using Process proc = Start(psi, _ffprobePath);
+        string output = await proc.StandardOutput.ReadToEndAsync(cancel).ConfigureAwait(false);
+        await proc.StandardError.ReadToEndAsync(cancel).ConfigureAwait(false);
+        await proc.WaitForExitAsync(cancel).ConfigureAwait(false);
+        return output;
+    }
+
     private async Task<(int Width, int Height, double Fps)> ProbeAsync(string path, CancellationToken cancel)
     {
         ProcessStartInfo psi = new()
