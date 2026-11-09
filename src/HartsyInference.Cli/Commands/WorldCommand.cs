@@ -7,7 +7,11 @@ using Spectre.Console.Cli;
 namespace HartsyInference.Cli.Commands;
 
 /// <summary>Rolls out an interactive world model from a first-frame image with an action plan.</summary>
-/// <remarks>Oasis does a one-shot batch rollout; DIAMOND runs a genuinely per-frame loop, one real denoise per action.</remarks>
+/// <remarks>Oasis does a one-shot batch rollout; DIAMOND runs a genuinely per-frame loop, one real denoise per action.
+/// Every option is checked by the engine's world planner before a checkpoint is loaded.
+/// Camera file format: a JSON file <c>{"poses": [[16 numbers], ...], "intrinsics": {"fx", "fy", "cx", "cy"}}</c> or a
+/// NumPy <c>.npy</c> float32/float64 array shaped (N, 16) or (N, 4, 4). Each pose is a camera-to-world matrix, row-major,
+/// OpenCV convention (+X right, +Y down, +Z forward), one per frame; frame 0 is the seed image.</remarks>
 public sealed class WorldCommand : Command<WorldCommand.Settings>
 {
     /// <summary>Options for <c>hartsy world</c>.</summary>
@@ -38,10 +42,25 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
         public string Backend { get; init; } = "auto";
 
-        /// <summary>Number of frames to roll out.</summary>
+        /// <summary>Number of frames to roll out, counting the seed frame; null uses the model default.</summary>
         [CommandOption("--frames")]
-        [Description("Number of frames to roll out.")]
-        public int Frames { get; init; } = 16;
+        [Description("Frames to roll out, counting the seed frame (default: the model's own count, 16 for Oasis and DIAMOND).")]
+        public int? Frames { get; init; }
+
+        /// <summary>Output frame rate; null uses the model default.</summary>
+        [CommandOption("--fps")]
+        [Description("Output frame rate (default: the model's own rate, 24 for Oasis and DIAMOND).")]
+        public int? Fps { get; init; }
+
+        /// <summary>Path to a per-frame camera path (.json or .npy); see the command remarks for the format.</summary>
+        [CommandOption("--camera")]
+        [Description("Per-frame camera path, one camera-to-world pose per frame (.json or .npy). Models without camera input refuse it.")]
+        public string? Camera { get; init; }
+
+        /// <summary>Pinhole intrinsics as fx,fy,cx,cy in pixels of the seed image; needs --camera.</summary>
+        [CommandOption("--intrinsics")]
+        [Description("Intrinsics as fx,fy,cx,cy in pixels of the seed image. Overrides the camera file's intrinsics; needs --camera.")]
+        public string? Intrinsics { get; init; }
 
         /// <summary>Comma-separated action tokens, cycled to fill the frame count; model-specific default when omitted.</summary>
         /// <remarks>Oasis defaults to "forward"; DIAMOND defaults to a fire/left/right demo cycle.</remarks>
@@ -49,10 +68,10 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [Description("Comma-separated action tokens, cycled to fill --frames (default: a model-specific demo plan).")]
         public string? Actions { get; init; }
 
-        /// <summary>DDIM/denoising steps per frame (Oasis only; DIAMOND's step count is fixed by its config).</summary>
+        /// <summary>DDIM/denoising steps per frame; null uses the model default (10 for Oasis).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps per frame (Oasis only).")]
-        public int Steps { get; init; } = 10;
+        [Description("Denoising steps per frame (Oasis only; default 10). DIAMOND fixes its own step count.")]
+        public int? Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
@@ -89,11 +108,20 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
             return 1;
         }
 
+        if (settings.Intrinsics is not null && settings.Camera is null)
+        {
+            AnsiConsole.MarkupLine("[red]--intrinsics applies to a camera path; add[/] [#2ea5e0]--camera[/][red].[/]");
+            return 1;
+        }
+
         ParamState parameters = new ParamState(Modality.World) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
-        parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
+        PutIfSet(parameters, "frames", settings.Frames);
+        PutIfSet(parameters, "fps", settings.Fps);
+        PutIfSet(parameters, "steps", settings.Steps);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("actions", settings.Actions ?? "");
+        PutIfSet(parameters, "camera", settings.Camera);
+        PutIfSet(parameters, "intrinsics", settings.Intrinsics);
 
         Dictionary<string, string> aux = isOasis ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
             : new Dictionary<string, string>();
@@ -103,5 +131,23 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         return CommandRunner.Run(Modality.World, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
+    }
+
+    /// <summary>Stores an optional option so an unset one reads back as null and the model default applies.</summary>
+    private static void PutIfSet(ParamState parameters, string key, int? value)
+    {
+        if (value is int v)
+        {
+            parameters.Put(key, v.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>Stores an optional text option so an unset one reads back as null.</summary>
+    private static void PutIfSet(ParamState parameters, string key, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            parameters.Put(key, value);
+        }
     }
 }

@@ -5,6 +5,7 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Worlds;
 using HartsyInference.World.Pipelines;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -27,21 +28,30 @@ public sealed class WorldService : IWorldService, IDisposable
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedWorld> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
+    private readonly Action<ModelSpec>? _onLoad;
 
     /// <summary>Creates the service bound to its owning engine.</summary>
-    internal WorldService(InferenceEngine engine) => _engine = engine;
+    internal WorldService(InferenceEngine engine)
+        : this(engine, null)
+    {
+    }
+
+    /// <summary>Creates the service with a hook that runs immediately before a checkpoint is loaded; tests use it to count loads.</summary>
+    internal WorldService(InferenceEngine engine, Action<ModelSpec>? onLoad)
+    {
+        _engine = engine;
+        _onLoad = onLoad;
+    }
 
     /// <inheritdoc/>
     public IWorldSession Open(ModelSpec spec, WorldRequest request)
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
-        if (request.InitImage is null)
-        {
-            throw new ArgumentException("World models roll out from a first frame; set WorldRequest.InitImage.", nameof(request));
-        }
+        // Planning refuses an unsupported request before GetOrLoad touches a checkpoint.
+        WorldPlan plan = WorldPlanResolver.Resolve(spec, request, _engine.BackendSelector);
         LoadedWorld loaded = GetOrLoad(spec);
-        return loaded.OpenSession(request);
+        return loaded.OpenSession(plan.Request);
     }
 
     /// <summary>Loads (or returns the cached) world pipeline for <paramref name="spec"/>, chosen by catalog id.</summary>
@@ -78,6 +88,7 @@ public sealed class WorldService : IWorldService, IDisposable
             {
                 return cached;
             }
+            _onLoad?.Invoke(spec);
             LoadedWorld loaded = id switch
             {
                 "diamond" => LoadDiamond(spec),
