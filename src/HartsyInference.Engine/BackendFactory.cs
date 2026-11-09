@@ -103,7 +103,8 @@ public static class BackendFactory
         Volatile.Write(ref _cudaBelowBaselineReason, null);
         int ordinal = TryParseOrdinal(selector, out int parsed, out _) ? parsed : 0;
         // A driver-only machine has no cuBLAS: fetch it once here (only for a card the kernels can run on), or auto would
-        // never pick CUDA. No-op when cuBLAS is installed, paths.cublasAutofetch is off, or there is no NVIDIA GPU.
+        // never pick CUDA. No-op when cuBLAS is installed, paths.cublasAutofetch is off, or there is no NVIDIA GPU. With no driver,
+        // QuerySm throws and the baseline check passes, but the driver's CUDA major reads 0, so no fetch is armed.
         if (CudaMeetsKernelBaseline(ordinal)) CudaContext.EnsureProvisioned();
         if (CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0 && CudaMeetsKernelBaseline(ordinal))
         {

@@ -37,14 +37,16 @@ public static class CublasRuntime
     private static int _probed;
     private static volatile bool _available;
     private static volatile bool _fetchPending;
+    private static volatile bool _fetchInProgress;
     private static int _driverMajor;
     private static int[] _majors = KnownMajors;
 
     /// <summary>True when a cuBLAS no newer than the driver loaded.</summary>
     public static bool Available => _available;
 
-    /// <summary>True when no cuBLAS was found and the first CUDA backend construction will download one.</summary>
-    public static bool FetchPending => _fetchPending;
+    /// <summary>True when no cuBLAS was found and the first CUDA backend construction will download one, or a download is running.
+    /// <see cref="EnsureAvailable"/> waits for a running download rather than reporting cuBLAS missing.</summary>
+    public static bool FetchPending => _fetchPending || _fetchInProgress;
 
     /// <summary>Why cuBLAS is or is not usable, for logs and <see cref="CudaContext.LastUnavailableReason"/>.</summary>
     public static string Reason { get; private set; } = "not yet probed";
@@ -96,20 +98,46 @@ public static class CublasRuntime
     public static bool EnsureAvailable()
     {
         EnsureProbed();
-        if (!_fetchPending) return Available;
+        // A download another thread is running holds the lock: wait on it instead of reporting cuBLAS missing.
+        if (!_fetchPending && !_fetchInProgress) return Available;
         lock (_lock)
         {
             if (!_fetchPending) return Available;
-            _fetchPending = false;
-            CudaRedistSpec? spec = FetchSpec(_driverMajor);
-            string? fetched = spec is null ? null : CudaRedistProvisioner.FetchInto(spec);
-            Locate();
-            _fetchPending = false;
-            if (!Available && fetched is null)
-                Reason = $"cuBLAS not found and the download failed (driver is CUDA {_driverMajor}); see the warning above. " +
-                         $"Install the CUDA {_driverMajor} Toolkit, or set paths.cublasDir to a folder holding {Soname(Math.Min(_driverMajor, 13))}.";
+            _fetchInProgress = true;
+            _fetchPending = false;   // one attempt per process, successful or not
+            try
+            {
+                CudaRedistSpec? spec = FetchSpec(_driverMajor);
+                string? fetched = spec is null ? null : CudaRedistProvisioner.FetchInto(spec);
+                Locate();
+                _fetchPending = false;
+                string target = Soname(Math.Clamp(_driverMajor, KnownMajors[^1], KnownMajors[0]));
+                if (!Available && fetched is null)
+                    Reason = $"cuBLAS not found and the download failed (driver is CUDA {_driverMajor}); see the warning above. " +
+                             $"Install the CUDA {_driverMajor} Toolkit, or set paths.cublasDir to a folder holding {target}.";
+                else if (!Available)
+                    Reason = $"cuBLAS was downloaded to {fetched} but does not load: {LoadError(Path.Combine(fetched!, target))}";
+            }
+            finally
+            {
+                _fetchInProgress = false;
+            }
         }
         return Available;
+    }
+
+    /// <summary>The native loader's own error for <paramref name="path"/>, which <c>TryLoad</c> discards.</summary>
+    private static string LoadError(string path)
+    {
+        try
+        {
+            NativeLibrary.Free(NativeLibrary.Load(path));
+            return "it loads on its own, so a library it depends on is missing";
+        }
+        catch (Exception ex)
+        {
+            return $"{ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     /// <summary>Test hook: forgets the probe so the next call searches again.</summary>
@@ -120,6 +148,7 @@ public static class CublasRuntime
             _probed = 0;
             _available = false;
             _fetchPending = false;
+            _fetchInProgress = false;
             _majors = KnownMajors;
             LoadedPath = null;
             ResolvedMajor = 0;
@@ -136,7 +165,16 @@ public static class CublasRuntime
         string? versionOverride = EngineKnobs.CublasVersion.Value;
         int major = Math.Min(driverMajor, 13);
         if (!string.IsNullOrEmpty(versionOverride) && int.TryParse(versionOverride.Split('.')[0], out int overrideMajor))
-            major = Math.Min(overrideMajor, major);
+        {
+            // A cuBLAS newer than the driver loads and then fails at cublasCreate: refuse it before downloading it.
+            if (overrideMajor > driverMajor)
+            {
+                Logs.Warning($"[cuBLAS] paths.cublasVersion={versionOverride} is for CUDA {overrideMajor}, newer than the driver's CUDA "
+                             + $"{driverMajor}; nothing was downloaded. Pick a CUDA {Math.Min(driverMajor, 13)} or older version.");
+                return null;
+            }
+            major = overrideMajor;
+        }
         RedistBuild? build = DefaultBuilds.Cast<RedistBuild?>().FirstOrDefault(b => b!.Value.CudaMajor == major);
         string? sha = null;
         long? bytes = null;
@@ -160,6 +198,10 @@ public static class CublasRuntime
             {
                 Logs.Warning($"[cuBLAS] paths.cublasVersion={versionOverride} has no pinned sha256; the download is not verified.");
             }
+        }
+        else
+        {
+            Logs.Warning($"[cuBLAS] paths.cublasUrl is set; the archive from {url} is not checked against a pinned sha256.");
         }
         return new CudaRedistSpec(
             Component: "cublas",
@@ -207,7 +249,7 @@ public static class CublasRuntime
         }
         string hint = EngineKnobs.CublasAutofetch.Value ? string.Empty : "Set paths.cublasAutofetch=true to download it, ";
         Reason = $"cuBLAS could not be loaded (searched paths.cublasDir, paths.cudaLibDir, " +
-                 $"{CudaRedistProvisioner.CacheLibDir("cublas", Math.Max(_driverMajor, 11))}, {CudaRedistProvisioner.BundledDir("cublas")} " +
+                 $"{CudaRedistProvisioner.CacheLibDir("cublas", Math.Clamp(_driverMajor, KnownMajors[^1], KnownMajors[0]))}, {CudaRedistProvisioner.BundledDir("cublas")} " +
                  $"and the OS path; driver is CUDA {_driverMajor}).{newer} {hint}install the CUDA Toolkit, or set paths.cublasDir.";
     }
 }

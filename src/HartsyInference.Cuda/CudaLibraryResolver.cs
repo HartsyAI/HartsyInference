@@ -165,8 +165,11 @@ public static class CudaLibraryResolver
         // Lt-GEMM paths (all default-off, which is why this was dormant until perf flags got turned on).
         if (libraryName == "cublasLt" && (windows || linux))
         {
-            // cuBLASLt must match the loaded cuBLAS: look beside it first, then the driver-allowed majors.
-            string[] names = CublasRuntime.Sonames(lt: true);
+            // cuBLASLt must match the loaded cuBLAS: look beside it first, then only that major (any driver-allowed major when
+            // no cuBLAS loaded), so an OS-path cuBLAS 12 never pairs with a cached cuBLASLt 13.
+            string[] names = CublasRuntime.ResolvedMajor > 0
+                ? [CublasRuntime.Soname(CublasRuntime.ResolvedMajor, lt: true)]
+                : CublasRuntime.Sonames(lt: true);
             if (CublasRuntime.LibDir is { } dir && CublasRuntime.ResolvedMajor > 0
                 && NativeLibrary.TryLoad(Path.Combine(dir, CublasRuntime.Soname(CublasRuntime.ResolvedMajor, lt: true)), out nint loaded))
                 return loaded;

@@ -55,7 +55,9 @@ public static class CudaRedistProvisioner
     public static string? FetchInto(CudaRedistSpec spec)
     {
         string libDir = CacheLibDir(spec.Component, spec.CudaMajor);
-        string work = Path.Combine(Path.GetDirectoryName(libDir)!, "download");
+        // Per run, so two processes provisioning at once (several backends starting on a fresh machine) never share an archive
+        // or delete each other's extraction.
+        string work = Path.Combine(Path.GetDirectoryName(libDir)!, $"download-{Environment.ProcessId}-{Guid.NewGuid():N}");
         try
         {
             Directory.CreateDirectory(libDir);
@@ -98,8 +100,13 @@ public static class CudaRedistProvisioner
     private static string ArchiveName(string url) =>
         Path.GetFileName(IsLocal(url) ? LocalPath(url) : new Uri(url).LocalPath);
 
+    /// <summary>How long one read may wait for bytes before the download is declared stalled.</summary>
+    internal static TimeSpan StallTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
     /// <summary>Copies the archive to <paramref name="destination"/> in chunks, hashing as it goes, and returns its sha256.
-    /// Logs progress every 10 % or 60 s so a long first fetch is visibly alive.</summary>
+    /// Logs progress every 10 % or 60 s so a long first fetch is visibly alive. Connecting is bounded at 30 s and each read at
+    /// <see cref="StallTimeout"/>: <c>HttpClient.Timeout</c> stops at the response headers, so without these a connection that stalls
+    /// mid-body would hang the caller (and engine start) forever.</summary>
     private static string Download(CudaRedistSpec spec, string destination)
     {
         using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -118,7 +125,10 @@ public static class CudaRedistProvisioner
             }
             else
             {
-                http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromMinutes(60) };
+                http = new System.Net.Http.HttpClient(new System.Net.Http.SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(30) })
+                {
+                    Timeout = TimeSpan.FromMinutes(2),   // until the headers arrive; the body is bounded per read below
+                };
                 response = http.GetAsync(spec.Url, System.Net.Http.HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
                 response.EnsureSuccessStatusCode();
                 total = response.Content.Headers.ContentLength ?? spec.ExpectedBytes;
@@ -132,7 +142,7 @@ public static class CudaRedistProvisioner
                 int nextDecile = 1;
                 TimeSpan lastLog = TimeSpan.Zero;
                 int read;
-                while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+                while ((read = ReadWithStallTimeout(source, buffer)) > 0)
                 {
                     file.Write(buffer, 0, read);
                     hash.AppendData(buffer, 0, read);
@@ -157,9 +167,26 @@ public static class CudaRedistProvisioner
         return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
+    /// <summary>One read that fails with <see cref="TimeoutException"/> when no bytes arrive within <see cref="StallTimeout"/>.</summary>
+    internal static int ReadWithStallTimeout(Stream source, byte[] buffer)
+    {
+        using CancellationTokenSource stall = new(StallTimeout);
+        try
+        {
+            return source.ReadAsync(buffer.AsMemory(), stall.Token).AsTask().GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException) when (stall.IsCancellationRequested)
+        {
+            throw new TimeoutException($"the download stalled: no data for {StallTimeout.TotalSeconds:F0} s");
+        }
+    }
+
     /// <summary>Copies every file matching <paramref name="patterns"/> from the extracted tree into <paramref name="libDir"/>.
     /// Real files are copied first; a symlink (Linux sonames) is recreated as a link to its target's file name, so a
-    /// <c>libx.so.13 → libx.so.13.10.0.20</c> chain costs one copy of the library, not one per name.</summary>
+    /// <c>libx.so.13 → libx.so.13.10.0.20</c> chain costs one copy of the library, not one per name. NVIDIA's archives keep a
+    /// library's links beside it in one folder, which is what the bare-name link assumes.</summary>
+    /// <remarks>Each file is written under a temporary name and moved over the final one, so a process that already has the old
+    /// library mapped keeps its copy (a rename on Linux) instead of seeing it truncated under it.</remarks>
     internal static int Flatten(string extracted, string libDir, IReadOnlyList<string> patterns)
     {
         List<FileInfo> files = [];
@@ -171,14 +198,19 @@ public static class CudaRedistProvisioner
         int copied = 0;
         foreach (FileInfo file in files.Where(f => f.LinkTarget is null))
         {
-            File.Copy(file.FullName, Path.Combine(libDir, file.Name), overwrite: true);
+            string destination = Path.Combine(libDir, file.Name);
+            string staging = destination + $".{Environment.ProcessId}.tmp";
+            File.Copy(file.FullName, staging, overwrite: true);
+            File.Move(staging, destination, overwrite: true);
             copied++;
         }
         foreach (FileInfo link in files.Where(f => f.LinkTarget is not null))
         {
             string destination = Path.Combine(libDir, link.Name);
-            if (File.Exists(destination) || new FileInfo(destination).LinkTarget is not null) File.Delete(destination);
-            File.CreateSymbolicLink(destination, Path.GetFileName(link.LinkTarget!));
+            string staging = destination + $".{Environment.ProcessId}.tmp";
+            if (File.Exists(staging) || new FileInfo(staging).LinkTarget is not null) File.Delete(staging);
+            File.CreateSymbolicLink(staging, Path.GetFileName(link.LinkTarget!));
+            File.Move(staging, destination, overwrite: true);
             copied++;
         }
         return copied;

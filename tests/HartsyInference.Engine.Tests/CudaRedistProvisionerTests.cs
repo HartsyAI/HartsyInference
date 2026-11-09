@@ -6,8 +6,16 @@ using HartsyInference.Cuda;
 
 namespace HartsyInference.Engine.Tests;
 
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class CudaRedistProvisionerCollection
+{
+    public const string Name = "CudaRedistProvisioner";
+}
+
 /// <summary>cuBLAS/cuDNN redist provisioning without a network or a GPU: archives are built locally and passed as a path, and the
-/// cache root is redirected to a temp folder. One class, so the static cache root and knobs are never shared across threads.</summary>
+/// cache root is redirected to a temp folder. Runs alone (no other class in parallel), because the cache root and the knobs are
+/// process-wide and the resolver's probe folders are fixed the first time anything touches it.</summary>
+[Collection(CudaRedistProvisionerCollection.Name)]
 public sealed class CudaRedistProvisionerTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-redist-" + Guid.NewGuid().ToString("N"));
@@ -51,6 +59,12 @@ public sealed class CudaRedistProvisionerTests : IDisposable
     public void FetchSpec_PinsTheDefaultBuildAndItsHash(int driver, int major, string version)
     {
         CudaRedistSpec? spec = CublasRuntime.FetchSpec(driver);
+        if (CudaRedistProvisioner.Platform() is null)
+        {
+            // NVIDIA publishes no x86-64-named redist for this platform (e.g. an arm64 host): no download is offered.
+            Assert.Null(spec);
+            return;
+        }
         Assert.NotNull(spec);
         Assert.Equal(major, spec.CudaMajor);
         Assert.Contains(version, spec.Url);
@@ -79,6 +93,50 @@ public sealed class CudaRedistProvisionerTests : IDisposable
 
     [Fact]
     public void FetchSpec_RefusesADriverWithNoPublicBuild() => Assert.Null(CublasRuntime.FetchSpec(11));
+
+    [Fact]
+    public void FetchSpec_RefusesAVersionOverrideNewerThanTheDriver()
+    {
+        // A CUDA 13 cuBLAS on a CUDA 12 driver loads and then fails at cublasCreate; nothing should be downloaded for it.
+        KnobStore.Set(EngineKnobs.CublasVersion, "13.10.0.20");
+        Assert.Null(CublasRuntime.FetchSpec(12));
+    }
+
+    [Fact]
+    public void StalledReadFailsInsteadOfHanging()
+    {
+        TimeSpan saved = CudaRedistProvisioner.StallTimeout;
+        CudaRedistProvisioner.StallTimeout = TimeSpan.FromMilliseconds(200);
+        try
+        {
+            using NeverStream stalled = new();
+            Assert.Throws<TimeoutException>(() => CudaRedistProvisioner.ReadWithStallTimeout(stalled, new byte[16]));
+        }
+        finally
+        {
+            CudaRedistProvisioner.StallTimeout = saved;
+        }
+    }
+
+    /// <summary>A stream whose reads never complete, as a connection that stalls mid-body.</summary>
+    private sealed class NeverStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 
     [Fact]
     public void FetchInto_UnpacksAndFlattensAVerifiedLocalArchive()

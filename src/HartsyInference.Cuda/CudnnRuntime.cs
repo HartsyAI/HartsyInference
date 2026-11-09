@@ -28,6 +28,7 @@ public static class CudnnRuntime
 
     private static int _probed;
     private static volatile bool _fetchPending;
+    private static volatile bool _fetchInProgress;
     private static int _cudaMajor;
     private static readonly object _lock = new();
 
@@ -64,18 +65,27 @@ public static class CudnnRuntime
     public static bool EnsureAvailable()
     {
         EnsureProbed();
-        if (!_fetchPending) return Available;
+        // A download another thread is running holds the lock: wait on it instead of reporting cuDNN missing.
+        if (!_fetchPending && !_fetchInProgress) return Available;
         lock (_lock)
         {
             if (!_fetchPending) return Available;
+            _fetchInProgress = true;
             _fetchPending = false;   // one attempt per process, successful or not
-            string? fetched = TryFetch(_cudaMajor);
-            LibDir = fetched;
-            // Load either way: a fetched build sits in the cache, which the loader searches first, and a failed fetch still
-            // leaves the OS library path, where a matching system install works without the download.
-            if (Load(_cudaMajor) && fetched is null)
-                Reason = $"cuDNN not found and auto-fetch failed (driver is CUDA {_cudaMajor}); see the warning above. " +
-                         $"Install cuDNN 9 for CUDA {_cudaMajor} or set paths.cudnnDir.";
+            try
+            {
+                string? fetched = TryFetch(_cudaMajor);
+                LibDir = fetched;
+                // Load either way: a fetched build sits in the cache, which the loader searches first, and a failed fetch still
+                // leaves the OS library path, where a matching system install works without the download.
+                if (Load(_cudaMajor) && fetched is null)
+                    Reason = $"cuDNN not found and auto-fetch failed (driver is CUDA {_cudaMajor}); see the warning above. " +
+                             $"Install cuDNN 9 for CUDA {_cudaMajor} or set paths.cudnnDir.";
+            }
+            finally
+            {
+                _fetchInProgress = false;
+            }
         }
         return Available;
     }
