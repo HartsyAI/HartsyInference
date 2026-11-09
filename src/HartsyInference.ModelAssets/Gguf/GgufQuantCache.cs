@@ -189,6 +189,9 @@ public static class GgufQuantCache
         {
             using (GgufWriter writer = new(temporary))
             {
+                // Entry producers read a mapped checkpoint and quantize into their own buffers, so several run at once; the
+                // writer still emits them in order. Bounded so a few large F32 intermediates are the most held at a time.
+                writer.ProduceAhead = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
                 writer.SetMetadata("general.architecture", architecture);
                 writer.SetMetadata("general.name", $"{architecture} (HartsyInference quant cache)");
                 if (metadata is not null)

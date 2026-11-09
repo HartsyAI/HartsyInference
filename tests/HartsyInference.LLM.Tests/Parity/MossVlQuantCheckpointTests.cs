@@ -74,7 +74,15 @@ public sealed class MossVlQuantCheckpointTests
             using Tensor q4 = nf4.Produce(name, DType.Q4_0);
             using Tensor q4F32 = ModelAssets.Gguf.GgufDequantizer.Dequantize(q4, DType.F32);
             double q4Error = RelativeRms(q4F32.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
-            Console.WriteLine($"{name}: NF4 rel RMS {nf4Error:F4}, NF4→Q4_0 {q4Error:F4}, FP8 {fp8Error:F4}");
+            using Tensor q4k = nf4.Produce(name, DType.Q4_K);
+            using Tensor q4kF32 = ModelAssets.Gguf.GgufDequantizer.Dequantize(q4k, DType.F32);
+            double q4kError = RelativeRms(q4kF32.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
+            using Tensor q8 = fp8.Produce(name, DType.Q8_0);
+            using Tensor q8F32 = ModelAssets.Gguf.GgufDequantizer.Dequantize(q8, DType.F32);
+            double q8Error = RelativeRms(q8F32.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
+            Console.WriteLine($"{name}: NF4 rel RMS {nf4Error:F4}, NF4→Q4_0 {q4Error:F4}, NF4→Q4_K {q4kError:F4}, FP8 {fp8Error:F4}, FP8→Q8_0 {q8Error:F4}");
+            Assert.InRange(q4kError, 0, 0.20);
+            Assert.InRange(q8Error, 0, 0.05);
             // NF4 at block 64 sits near 10% relative RMS; the Q4_0 repack adds its own rounding; FP8 E4M3 per channel near 3%.
             Assert.InRange(nf4Error, 0, 0.15);
             Assert.InRange(q4Error, 0, 0.20);
