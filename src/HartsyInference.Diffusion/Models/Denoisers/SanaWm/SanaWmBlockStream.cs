@@ -9,10 +9,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// softmax block carries windows of keys and values; every block carries the input tail of its FFN's temporal convolution.</summary>
 /// <remarks>States are in this engine's layouts: a scan state is <c>[H, Dk, Dv]</c> (key-major), which is the transpose of
 /// upstream's <c>S_kv</c> slot and equal to its camera slot; keys and values are head-major <c>[1, H, N, D]</c>.
-/// <para>Storage dtypes follow upstream's cache, which holds its keys, values and key-convolution inputs in BF16: the softmax
-/// windows and the two key tails are stored as <see cref="StorageDType"/> and widened where they are read; scan states stay
-/// F32 (they are small and recur), and the FFN tail keeps its own dtype. A pass that closes a chunk converts only what it
-/// stages, so the F32 chunk tensors are released as soon as the narrow copies exist.</para></remarks>
+/// <para>Storage dtype is a choice of the stream: with a <c>stateDType</c> of BF16 (upstream's cache holds its keys, values and
+/// key-convolution inputs in BF16) the softmax windows and the two key tails are stored narrow and widened on every pass
+/// that reads them; with null they are stored as computed (F32). BF16 halves those states, about 0.9 GB at 720p, and costs
+/// about 40 ms per pass on a 4090 to widen them again, so it is the choice of a card with no room for F32, not a default
+/// (see <c>SanaWmStreamState</c>). Scan states stay F32 (they are small and recur), and the FFN tail keeps its own dtype. A
+/// pass that closes a chunk converts only what it stages, so the F32 chunk tensors are released as soon as the narrow copies
+/// exist.</para></remarks>
 internal sealed class SanaWmBlockStream
 {
     /// <summary>Earlier frames a key convolution reads: one less than its taps.</summary>
@@ -21,15 +24,14 @@ internal sealed class SanaWmBlockStream
     /// <summary>Earlier frames the FFN's temporal convolution reads.</summary>
     internal const int FfnTailFrames = 1;
 
-    /// <summary>The dtype softmax windows and key tails are held in between chunks.</summary>
-    internal static readonly DType StorageDType = DType.BF16;
-
     private const int TokenAxis = 2;
     private const int KeyValueStreams = 2;
 
+    /// <param name="stateDType">The dtype the softmax windows and key tails are held in; null holds them as computed.</param>
     internal SanaWmBlockStream(IBackend backend, StreamingStateSet states, bool softmax, bool camera, int spatial,
-        TokenWindowPolicy softmaxWindow)
+        TokenWindowPolicy softmaxWindow, DType? stateDType = null)
     {
+        StorageDType = stateDType;
         FfnTail = states.Add(new FrameTailCache(backend, FfnTailFrames, 0, spatial));
         if (softmax)
         {
@@ -48,6 +50,9 @@ internal sealed class SanaWmBlockStream
             CameraKeyTail = states.Add(new FrameTailCache(backend, KeyTailFrames, 0, spatial, StorageDType));
         }
     }
+
+    /// <summary>The dtype the softmax windows and key tails are held in, or null when they are held as computed (F32).</summary>
+    internal DType? StorageDType { get; }
 
     /// <summary>GDN main branch: the numerator scan state <c>[H, D, D]</c>.</summary>
     internal StreamingTensorSlot? Numerator { get; }

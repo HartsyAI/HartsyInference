@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
@@ -16,7 +17,10 @@ public sealed class SanaWmStreamCache : IDisposable
     /// <summary>Creates the empty state of a stream on a <paramref name="latentHeight"/> by <paramref name="latentWidth"/> grid.</summary>
     /// <param name="softmaxWindow">How many earlier chunks the softmax blocks attend to. Upstream's default is
     /// <c>TokenWindowPolicy.RecentChunks(2, sink: true)</c>: the first chunk and the previous one.</param>
-    public SanaWmStreamCache(IBackend backend, SanaWmConfig config, int latentHeight, int latentWidth, TokenWindowPolicy softmaxWindow)
+    /// <param name="stateDType">The dtype the softmax windows and the key tails are held in between chunks: BF16 to halve them
+    /// at the cost of widening them on every pass, null to hold them as computed (F32).</param>
+    public SanaWmStreamCache(IBackend backend, SanaWmConfig config, int latentHeight, int latentWidth, TokenWindowPolicy softmaxWindow,
+        DType? stateDType = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -32,7 +36,7 @@ public sealed class SanaWmStreamCache : IDisposable
             for (int i = 0; i < _blocks.Length; i++)
             {
                 _blocks[i] = new SanaWmBlockStream(backend, _states, config.IsSoftmaxBlock(i), config.HasCameraBranch,
-                    latentHeight * latentWidth, softmaxWindow);
+                    latentHeight * latentWidth, softmaxWindow, stateDType);
             }
 
             built = true;
