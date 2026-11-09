@@ -324,6 +324,17 @@ Reference: `FourierEmbedReference.Apply`. Contract: `FourierEmbedContract.Valida
 dimensions, the bands (at most 30, so `2^b` stays an exact integer) and whether the coordinates lead the row. F32 `[count, D]`
 coordinates. Hunyuan3D's query embedding is `(3, 8, IncludeInput: true)`.
 
+## Exp, Reciprocal
+
+```
+out[i] = e^in[i]        out[i] = 1 / in[i]
+```
+
+Reference: `ElementwiseMathReference.Exp` and `.Reciprocal`. Contract: `ElementwiseMathContract.Validate`. Input and output are
+each F32 or BF16, with equal element counts (shapes may differ); the value is read as F32, mapped in F32 and rounded once to the
+output dtype, BF16 to nearest even. The division is IEEE (`±0` gives `±∞`). `exp` follows each backend's math library, so it
+is held to a tolerance. The output shares no storage with the input. SANA-WM's Gated-DeltaNet decay rate and denominator use them.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -356,6 +367,7 @@ Every implementation of these ops:
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
+| `Exp`, `Reciprocal` | reference | `point_ops.ptx` (`elementwise_math_<in>_<out>`, F32 and BF16 each side) | reference |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 
