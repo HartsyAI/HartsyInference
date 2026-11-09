@@ -10,7 +10,7 @@ namespace HartsyInference.Core.Backends.Host;
 /// default and the oracle every kernel is checked against.</summary>
 public static unsafe class GluReference
 {
-    /// <summary>The gate factor of <paramref name="gate"/> under <paramref name="activation"/>.</summary>
+    /// <summary>The gate factor of <paramref name="gate"/> under <paramref name="spec"/>.</summary>
     public static float Gate(float gate, in GluSpec spec)
     {
         switch (spec.Activation)

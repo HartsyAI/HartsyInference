@@ -1517,8 +1517,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor comb;
             if (_cfg.GatedFfn)
             {
-                // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
-                // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
+                // Gated SwiGLU/GeGLU/SiTU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
+                // exists and the activation is SiLU, GELU-tanh or SiTU, the whole epilogue (2× SliceLastDim +
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
                 // Glu pass over the concatenated projection output.
                 bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]

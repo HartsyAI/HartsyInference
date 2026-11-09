@@ -42,6 +42,7 @@ internal static class GatedFfn
         outShape.CopyDimsTo(packedDims);
         packedDims[^1] *= 2;
         Tensor packed = new(new TensorShape(packedDims), DType.F32);
+        // Packing costs a 2x copy on this unfused fallback, but keeps SiTU in the one Glu op every backend checks.
         backend.Concat(packed, [gate, up], outShape.Rank - 1);
         gate.Dispose();
         up.Dispose();

@@ -40,6 +40,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private F32ExpertWeights?[]? _hostWeights;
     private ExpertAssignment[]? _lastPlan;
     private int _lastPlanCount;
+    private bool _useHostExpertRuntime;
 
     // Expert offload (attached by the engine when the placement planner chose it). Scratch is reused from call to call.
     private MoeExpertOffload? _offload;
@@ -65,6 +66,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     {
         ArgumentNullException.ThrowIfNull(offload);
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
+        // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward.
+        _ = HostExpertProgram(_moe.Activation);
         int e = _moe.NumExperts;
         offload.RegisterLayer(layer, e, ResolveExpert);
         _offIds = new int[e * Math.Max(1, _moe.NumExpertsPerTok)];
@@ -92,9 +95,17 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// Opt-in (default off): routes the routed experts through the heterogeneous runtime. The scheduler plans every expert on
     /// the CPU, <see cref="HostExpertCache"/> holds the layer's F32 weights without copying them, and
     /// <see cref="HeterogeneousExpertExecutor"/> runs the F32 reference. The combine is the same weighted scatter-add as the
-    /// direct path. Requires F32 expert weights.
+    /// direct path. Requires F32 expert weights and an activation the host runtime runs; enabling it otherwise throws.
     /// </summary>
-    public bool UseHostExpertRuntime { get; set; }
+    public bool UseHostExpertRuntime
+    {
+        get => _useHostExpertRuntime;
+        set
+        {
+            if (value) _ = HostExpertProgram(_moe.Activation);
+            _useHostExpertRuntime = value;
+        }
+    }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
@@ -277,15 +288,20 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
 
         // 4. Routed experts: gather → expert SwiGLU → weighted scatter-add.
-        if (_offload is not null)
+        if (_offload is not null || UseHostExpertRuntime)
         {
-            RunRoutedWithOffload(backend, x, n, output, expertTokens, expertWeights);
-            return output;
-        }
-        if (UseHostExpertRuntime)
-        {
-            RunRoutedThroughRuntime(backend, x, n, output, expertTokens, expertWeights);
-            return output;
+            bool routed = false;
+            try
+            {
+                if (_offload is not null) RunRoutedWithOffload(backend, x, n, output, expertTokens, expertWeights);
+                else RunRoutedThroughRuntime(backend, x, n, output, expertTokens, expertWeights);
+                routed = true;
+                return output;
+            }
+            finally
+            {
+                if (!routed) output.Dispose();
+            }
         }
         for (int ex = 0; ex < e; ex++)
         {
@@ -599,7 +615,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         return new MoeCombineParts(slotOut, topkWeight, shared, sharedGate, k);
     }
 
-    /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
+    /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) under <see cref="MoeConfig.Activation"/>: SiLU, tanh-GELU,
+    /// ReLU or ReLU², the clamped alpha-SwiGLU, or SiTU-GLU. Any other activation throws.</summary>
     private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter)
     {
         TensorShape ff = new(1, rows, inter);
