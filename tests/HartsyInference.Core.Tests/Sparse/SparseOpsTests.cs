@@ -41,6 +41,19 @@ public sealed unsafe class SparseOpsTests
     }
 
     [Fact]
+    public void SubmanifoldConv_NeighboursDoNotMatchAcrossBatchItems()
+    {
+        CpuBackend backend = new();
+        SparseTensor x = Make(new[] { 0, 1, 1, 1, 1, 1, 1, 1 }, resolution: 4, feats: new[] { 1f, 10f }, channels: 1);
+        Tensor w = new(new TensorShape(new long[] { 1, 3, 3, 3, 1 }), DType.F32);
+        backend.Fill(w, 1f);
+
+        SparseTensor y = SparseOps.SubmanifoldConv3dSparse(backend, x, SparseOps.ConvWeightSlices(w), null);
+
+        Assert.Equal(new[] { 1f, 10f }, Read(y.Feats));
+    }
+
+    [Fact]
     public void Upsample_GathersEachVoxelFromItsDownsampledGroup()
     {
         CpuBackend backend = new();
