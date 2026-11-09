@@ -23,12 +23,17 @@ public sealed class UtoniaWeights
     /// <summary>Every name supplied.</summary>
     public IEnumerable<string> Provided => _tensors.Keys;
 
-    /// <summary>Returns the named tensor after checking its exact shape.</summary>
+    /// <summary>Returns the named tensor after checking its dtype (F32 only) and exact shape.</summary>
     internal Tensor Get(string name, params long[] shape)
     {
         if (!_tensors.TryGetValue(name, out Tensor? tensor))
         {
             throw new HartsyInferenceException($"Utonia weight '{name}' is missing.");
+        }
+
+        if (tensor.DType != DType.F32)
+        {
+            throw new HartsyInferenceException($"Utonia weight '{name}' has dtype {tensor.DType.Name}, expected F32.");
         }
 
         TensorShape expected = new(shape);
