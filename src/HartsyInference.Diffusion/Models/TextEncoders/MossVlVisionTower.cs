@@ -100,16 +100,19 @@ public sealed class MossVlVisionTower : IDisposable
     /// <summary>Removes the rows a GGUF converter padded into a fused qkv weight or bias. q and k pad each rotary half of a head
     /// (<c>headDim/2</c> rows, then zeros up to <c>paddedHeadDim/2</c>); v pads each whole head. The result is the checkpoint's
     /// <c>[3·heads·headDim, …]</c> in the source dtype (caller owns). Returns <paramref name="qkv"/> itself when it is not padded.</summary>
-    /// <exception cref="InvalidDataException">The row count is not <c>3·heads·d</c> for an even <c>d ≥ headDim</c>.</exception>
+    /// <exception cref="InvalidDataException">The row count is not <c>3·heads·d</c> for a <c>d ≥ headDim</c>, a padded layout has an odd
+    /// width, or a padding row is not zero (the converter laid the padding out some other way).</exception>
     public static unsafe Tensor UnpadQkv(Tensor qkv, int heads, int headDim)
     {
         long rows = qkv.Shape[0];
         long cols = qkv.Shape.Rank == 2 ? qkv.Shape[1] : 1;
         long rowsPerSection = rows / 3;
         long padded = rowsPerSection / heads;
-        if (rows % 3 != 0 || rowsPerSection % heads != 0 || padded < headDim || padded % 2 != 0)
-            throw new InvalidDataException($"Fused qkv has {rows} rows, which is not 3 × {heads} heads × an even width ≥ {headDim}.");
+        if (rows % 3 != 0 || rowsPerSection % heads != 0 || padded < headDim)
+            throw new InvalidDataException($"Fused qkv has {rows} rows, which is not 3 × {heads} heads × a width ≥ {headDim}.");
         if (padded == headDim) return qkv;
+        if (padded % 2 != 0 || headDim % 2 != 0)
+            throw new InvalidDataException($"Fused qkv is padded from head width {headDim} to {padded}; the rotary-half layout needs even widths.");
         if (qkv.DType.IsQuantized)
             throw new InvalidDataException("A padded fused qkv must be dequantized before it is un-padded.");
 
@@ -131,6 +134,14 @@ public sealed class MossVlVisionTower : IDisposable
                 long bytes = block * rowBytes;
                 Buffer.MemoryCopy(src + srcRow * rowBytes, dst + outRow * rowBytes, bytes, bytes);
                 outRow += block;
+                // The dropped rows must be the converter's zeros; anything else means a different padding layout, which would
+                // otherwise load silently and give wrong features.
+                long padBytes = (paddedBlock - block) * rowBytes;
+                if (!new ReadOnlySpan<byte>(src + (srcRow + block) * rowBytes, (int)padBytes).ContainsAnyExcept((byte)0))
+                    continue;
+                output.Dispose();
+                throw new InvalidDataException($"Fused qkv padding rows {srcRow + block}..{srcRow + paddedBlock - 1} are not zero; "
+                    + "this converter pads differently from the layout the loader removes.");
             }
         }
         return output;
@@ -162,8 +173,11 @@ public sealed class MossVlVisionTower : IDisposable
                 // A GGUF lays rank-2 tensors out [in, out]; the bytes are already the checkpoint's row-major [out, in].
                 if (ggufLayout && t.Shape.Rank == 2)
                     t = t.Reshape(new TensorShape((int)t.Shape[1], (int)t.Shape[0]));
+                if (name.StartsWith("patch_embed.proj.weight.", StringComparison.Ordinal))
+                    throw new NotSupportedException($"'{origin}' splits the patch embedding over temporal kernels ({key}); this loader reads one kernel.");
+                // A quantized vision weight decodes straight to what the backend keeps: F32 on the host or CPU, F16 on a device.
                 if (t.DType.IsQuantized)
-                    t = Own(GgufDequantizer.Dequantize(t, DType.F16), t, converted);
+                    t = Own(GgufDequantizer.Dequantize(t, backend is null or Core.Backends.Cpu.CpuBackend ? DType.F32 : DType.F16), t, converted);
                 if (ggufLayout && (name.EndsWith(".attn.qkv.weight", StringComparison.Ordinal) || name.EndsWith(".attn.qkv.bias", StringComparison.Ordinal)))
                     t = Own(UnpadQkv(t, config.NumHeads, config.HiddenSize / config.NumHeads), t, converted);
                 bare[name] = Own(Store(name, t, backend), t, converted);
@@ -192,10 +206,18 @@ public sealed class MossVlVisionTower : IDisposable
         return TensorCasts.EnsureF32(t);
     }
 
-    /// <summary>Records <paramref name="result"/> as owned when it is a new tensor; returns it.</summary>
+    /// <summary>Records <paramref name="result"/> as owned when it is a new tensor, and frees <paramref name="source"/> when it was the last
+    /// intermediate this load made (a dequantized or un-padded copy the result replaces); returns <paramref name="result"/>. A mapped
+    /// checkpoint tensor or a reshape view is never in <paramref name="converted"/>, so it is never freed here.</summary>
     private static Tensor Own(Tensor result, Tensor source, List<Tensor> converted)
     {
-        if (!ReferenceEquals(result, source)) converted.Add(result);
+        if (ReferenceEquals(result, source)) return result;
+        if (converted.Count > 0 && ReferenceEquals(converted[^1], source))
+        {
+            source.Dispose();
+            converted.RemoveAt(converted.Count - 1);
+        }
+        converted.Add(result);
         return result;
     }
 }
