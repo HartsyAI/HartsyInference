@@ -19,10 +19,17 @@ public sealed class UtoniaEncoder : IDisposable
     private readonly UtoniaBlock[][] _encBlocks;
     private readonly UtoniaGridUnpooling[] _unpools;
     private readonly UtoniaBlock[][] _decBlocks;
+    private readonly long _chunkBytes;
     private bool _disposed;
 
     /// <summary>Builds the modules from the weights and records every name it requests in <see cref="UtoniaWeights.Consumed"/>.</summary>
     public UtoniaEncoder(IBackend backend, UtoniaConfig config, UtoniaWeights weights)
+        : this(backend, config, weights, UtoniaRowChunks.ChunkBytes)
+    {
+    }
+
+    /// <param name="chunkBytes">Byte budget of one row chunk; a smaller budget only changes how the work is split.</param>
+    internal UtoniaEncoder(IBackend backend, UtoniaConfig config, UtoniaWeights weights, long chunkBytes)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -30,6 +37,7 @@ public sealed class UtoniaEncoder : IDisposable
         config.Validate();
         _backend = backend;
         _config = config;
+        _chunkBytes = chunkBytes;
         _orders = config.Order.Select(UtoniaSerialization.ParseOrder).ToArray();
 
         int stages = config.EncDepths.Length;
@@ -52,10 +60,10 @@ public sealed class UtoniaEncoder : IDisposable
                 _pools[s - 1] = new UtoniaGridPooling(backend,
                     Linear(weights, prefix, UtoniaCheckpointKeys.DownProj, c, config.EncChannels[s - 1], true),
                     Norm(weights, prefix, UtoniaCheckpointKeys.DownNorm, c),
-                    config.Stride[s - 1]);
+                    config.Stride[s - 1], chunkBytes);
             }
 
-            _encBlocks[s] = BuildStage(backend, weights, config, false, s, config.EncDepths[s], c, config.EncNumHeads[s], config.EncPatchSize[s]);
+            _encBlocks[s] = BuildStage(backend, weights, config, false, s, config.EncDepths[s], c, config.EncNumHeads[s], config.EncPatchSize[s], chunkBytes);
         }
 
         _unpools = Array.Empty<UtoniaGridUnpooling>();
@@ -74,7 +82,7 @@ public sealed class UtoniaEncoder : IDisposable
                     Norm(weights, prefix, UtoniaCheckpointKeys.UpNorm, d),
                     Linear(weights, prefix, UtoniaCheckpointKeys.SkipLinear, d, config.EncChannels[s], true),
                     Norm(weights, prefix, UtoniaCheckpointKeys.SkipNorm, d));
-                _decBlocks[s] = BuildStage(backend, weights, config, true, s, config.DecDepths[s], d, config.DecNumHeads[s], config.DecPatchSize[s]);
+                _decBlocks[s] = BuildStage(backend, weights, config, true, s, config.DecDepths[s], d, config.DecNumHeads[s], config.DecPatchSize[s], chunkBytes);
             }
         }
     }
@@ -200,25 +208,28 @@ public sealed class UtoniaEncoder : IDisposable
 
     private UtoniaPoint Embed(UtoniaPoint raw)
     {
-        Tensor linear = _embedLinear.Forward(raw.Feat);
-        Tensor normed = _embedNorm.Forward(linear);
-        linear.Dispose();
-        Tensor activated = new(normed.Shape, DType.F32);
-        _backend.GeluErf(activated, normed);
-        normed.Dispose();
+        long width = _config.EncChannels[0];
+        Tensor activated = UtoniaRowChunks.Map(raw.Feat, width, UtoniaRowChunks.RowsPerChunk(_chunkBytes, width), (src, res) =>
+        {
+            using Tensor linear = new(new TensorShape(src.Shape[0], width), DType.F32);
+            _embedLinear.Forward(src, linear);
+            using Tensor normed = new(linear.Shape, DType.F32);
+            _embedNorm.Forward(linear, normed);
+            _backend.GeluErf(res, normed);
+        });
         UtoniaPoint embedded = new(activated, raw.Coord, raw.GridCoord, raw.Batch);
         raw.Dispose();
         return embedded;
     }
 
     private static UtoniaBlock[] BuildStage(IBackend backend, UtoniaWeights weights, UtoniaConfig config, bool decoder, int stage,
-        int depth, int channels, int heads, int patchSize)
+        int depth, int channels, int heads, int patchSize, long chunkBytes)
     {
         UtoniaBlock[] blocks = new UtoniaBlock[depth];
         for (int i = 0; i < depth; i++)
         {
             blocks[i] = new UtoniaBlock(backend, weights, UtoniaCheckpointKeys.BlockPrefix(decoder, stage, i), config, channels, heads,
-                patchSize, i % config.Order.Length);
+                patchSize, i % config.Order.Length, chunkBytes);
         }
 
         return blocks;

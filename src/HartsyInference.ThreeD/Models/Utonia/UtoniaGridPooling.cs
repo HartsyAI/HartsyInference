@@ -17,13 +17,16 @@ internal sealed class UtoniaGridPooling
     private readonly UtoniaLinear _proj;
     private readonly UtoniaLayerNorm _norm;
     private readonly int _stride;
+    private readonly long _chunkBytes;
 
-    public UtoniaGridPooling(IBackend backend, UtoniaLinear proj, UtoniaLayerNorm norm, int stride)
+    public UtoniaGridPooling(IBackend backend, UtoniaLinear proj, UtoniaLayerNorm norm, int stride,
+        long chunkBytes = UtoniaRowChunks.ChunkBytes)
     {
         _backend = backend;
         _proj = proj;
         _norm = norm;
         _stride = stride;
+        _chunkBytes = chunkBytes;
     }
 
     /// <summary>Pools <paramref name="point"/> into the coarser level; the result is ordered by (batch, x, y, z).</summary>
@@ -35,8 +38,9 @@ internal sealed class UtoniaGridPooling
             throw new HartsyInferenceException("Utonia grid pooling needs at least one point.");
         }
 
-        Tensor projected = _proj.Forward(point.Feat);
         int c = _proj.OutChannels;
+        Tensor projected = UtoniaRowChunks.Map(point.Feat, c, UtoniaRowChunks.RowsPerChunk(_chunkBytes, Math.Max(c, point.Feat.Shape[1])),
+            (src, res) => _proj.Forward(src, res));
         long[] keys = new long[n];
         for (int i = 0; i < n; i++)
         {
@@ -108,11 +112,13 @@ internal sealed class UtoniaGridPooling
             }
         }
 
-        Tensor normed = _norm.Forward(pooled);
+        Tensor activated = UtoniaRowChunks.Map(pooled, c, UtoniaRowChunks.RowsPerChunk(_chunkBytes, c), (src, res) =>
+        {
+            using Tensor normed = new(src.Shape, DType.F32);
+            _norm.Forward(src, normed);
+            _backend.GeluErf(res, normed);
+        });
         pooled.Dispose();
-        Tensor activated = new(normed.Shape, DType.F32);
-        _backend.GeluErf(activated, normed);
-        normed.Dispose();
 
         UtoniaPoint next = new(activated, coord, clusterGrid, clusterBatch, point, cluster);
         next.Serialize(orders);
