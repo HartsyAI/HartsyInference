@@ -16,6 +16,7 @@
   <ItemGroup>
     <None Include="Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\LtxVideo2VaeEncoder\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\sana_wm_s4_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
