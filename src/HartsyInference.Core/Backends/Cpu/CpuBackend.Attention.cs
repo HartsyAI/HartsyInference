@@ -58,4 +58,10 @@ public sealed partial class CpuBackend
         WindowIndicesReference.Apply(indices, windowSize, seqLen, startPos);
     }
 
+    /// <inheritdoc />
+    public void Hadamard(Tensor output, Tensor input, float scale)
+    {
+        ThrowIfDisposed();
+        HadamardReference.Apply(output, input, scale);
+    }
 }

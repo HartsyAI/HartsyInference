@@ -5,14 +5,24 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Partial rotary on the trailing <c>rotaryDim</c> values of each attention vector, routed through <see cref="IBackend.Rotary"/>.</summary>
+/// <summary>Partial rotary on a <c>rotaryDim</c> slice of each attention vector, routed through <see cref="IBackend.Rotary"/>.</summary>
 public static class PartialRotary
 {
     /// <summary>Rotates the trailing <paramref name="rotaryDim"/> values of every vector in <paramref name="data"/> (shape <paramref name="shape"/>, last dim = head width) at the given positions.</summary>
     /// <param name="pairing">Element pairing inside the rotated slice: <see cref="RotaryPairing.Interleaved"/> pairs <c>(2i, 2i+1)</c> (GPT-J, DeepSeek), <see cref="RotaryPairing.RotateHalf"/> pairs <c>(i, i+half)</c> (NeoX).</param>
     /// <param name="inverse">Negates sin, which undoes an earlier rotation.</param>
     public static void Rotate(IBackend backend, IRopeRowSource rope, int rotaryDim, float[] data, long[] shape, int[] positions,
-        bool inverse, RotaryPairing pairing = RotaryPairing.Interleaved)
+        bool inverse, RotaryPairing pairing = RotaryPairing.Interleaved) =>
+        RotateAt(backend, rope, rotaryDim, checked((int)shape[^1]) - rotaryDim, data, shape, positions, inverse, pairing);
+
+    /// <summary>Rotates the leading <paramref name="rotaryDim"/> values of every vector, the split some indexers use (rope first, then the rest).</summary>
+    public static void RotateLeading(IBackend backend, IRopeRowSource rope, int rotaryDim, float[] data, long[] shape, int[] positions,
+        bool inverse, RotaryPairing pairing) =>
+        RotateAt(backend, rope, rotaryDim, 0, data, shape, positions, inverse, pairing);
+
+    /// <summary>Rotates <c>[dimOffset, dimOffset + rotaryDim)</c> of every vector; the other values pass through.</summary>
+    public static void RotateAt(IBackend backend, IRopeRowSource rope, int rotaryDim, int dimOffset, float[] data, long[] shape, int[] positions,
+        bool inverse, RotaryPairing pairing)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(rope);
@@ -20,6 +30,7 @@ public static class PartialRotary
             throw new ArgumentException("rotaryDim must be even and match the table width.", nameof(rotaryDim));
         int headDim = checked((int)shape[^1]);
         if (rotaryDim > headDim) throw new ArgumentException("rotaryDim cannot exceed the head width.", nameof(rotaryDim));
+        if (dimOffset < 0 || dimOffset + rotaryDim > headDim) throw new ArgumentOutOfRangeException(nameof(dimOffset), "The rotated slice must lie inside the head.");
         int half = rope.HalfDim;
         float[] cos = new float[positions.Length * half], sin = new float[cos.Length];
         for (int i = 0; i < positions.Length; i++)
@@ -28,11 +39,11 @@ public static class PartialRotary
             ReadOnlySpan<float> sinRow = rope.SinRow(positions[i]);
             for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
         }
-        RopeTableLayout layout = pairing == RotaryPairing.Interleaved ? RopeTableLayout.InterleavedPrefix : RopeTableLayout.RotateHalf;
         using Tensor x = F32Tensor(data, shape);
         using Tensor c = F32Tensor(cos, 1, positions.Length, half);
         using Tensor sn = F32Tensor(sin, 1, positions.Length, half);
-        backend.Rotary(RotaryCall.TokenMajor(x, c, sn, pairing, layout, rotaryDim, headDim - rotaryDim));
+        // The rows hold one angle per pair whatever the pairing, which is the InterleavedPrefix table layout.
+        backend.Rotary(RotaryCall.TokenMajor(x, c, sn, pairing, RopeTableLayout.InterleavedPrefix, rotaryDim, dimOffset));
         x.AsReadOnlySpan<float>().CopyTo(data);
     }
 

@@ -18,6 +18,8 @@ public sealed partial class VulkanBackend
         Tensor indices, int windowSlots, Tensor sink, float scale)
     {
         SparseLatentAttentionReference.Validate(output, query, window, main, indices, windowSlots, sink);
+        LatentEncodings.RequireDeviceKernel(window.Encoding, "Vulkan SparseLatentAttention");
+        LatentEncodings.RequireDeviceKernel(main.Encoding, "Vulkan SparseLatentAttention");
         int k = (int)indices.Shape[1];
         if (k > LatentAttentionMaxK)
         {
@@ -76,6 +78,7 @@ public sealed partial class VulkanBackend
         Tensor? candidates, float scale)
     {
         IndexerScoresReference.Validate(scores, query, keys, headWeights, compressLens, candidates);
+        LatentEncodings.RequireDeviceKernel(keys.Encoding, "Vulkan IndexerScores");
         using OpScope _op = EnterOp();
         long total = scores.ElementCount;
         if (total == 0)
@@ -128,6 +131,7 @@ public sealed partial class VulkanBackend
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         LatentQuantReference.ValidateActQuant(x, encoding);
+        LatentEncodings.RequireDeviceKernel(encoding, "Vulkan ActQuantDequantInPlace");
         int group = LatentEncodings.GroupSize(encoding);
         if (group == 0)
         {

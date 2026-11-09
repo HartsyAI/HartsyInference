@@ -16,6 +16,8 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("SparseLatentAttention");
         SparseLatentAttentionReference.Validate(output, query, window, main, indices, windowSlots, sink);
+        LatentEncodings.RequireDeviceKernel(window.Encoding, "CUDA SparseLatentAttention");
+        LatentEncodings.RequireDeviceKernel(main.Encoding, "CUDA SparseLatentAttention");
         int k = (int)indices.Shape[1];
         if (k > CudaKernels.LatentAttentionMaxK)
             throw new NotSupportedException(
@@ -53,6 +55,7 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("IndexerScores");
         IndexerScoresReference.Validate(scores, query, keys, headWeights, compressLens, candidates);
+        LatentEncodings.RequireDeviceKernel(keys.Encoding, "CUDA IndexerScores");
         int tokens = (int)query.Shape[0], heads = (int)query.Shape[1], dim = (int)query.Shape[2];
         if (keys.Rows > 0 && dim > CudaKernels.IndexerMaxDim)
             throw new NotSupportedException($"CUDA IndexerScores supports dim <= {CudaKernels.IndexerMaxDim}; got {dim}.");
@@ -186,6 +189,7 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("ActQuantDequantInPlace");
         LatentQuantReference.ValidateActQuant(x, encoding);
+        LatentEncodings.RequireDeviceKernel(encoding, "CUDA ActQuantDequantInPlace");
         int group = LatentEncodings.GroupSize(encoding);
         if (group == 0) return;
         using OpScope _op = EnterOp();
