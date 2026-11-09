@@ -1,10 +1,10 @@
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.LLM.DeepSeekV41;
+namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Small F32 host kernels and tensor marshalling shared by the V4.1 reference modules.</summary>
-internal static class DeepSeekV41HostMath
+/// <summary>Small F32 host kernels and tensor marshalling shared by the reference transformer modules.</summary>
+internal static class HostMath
 {
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> for <paramref name="rows"/> rows.</summary>
     /// <remarks>Each output element is one sequential dot product, so running them across cores changes the speed and nothing else.</remarks>

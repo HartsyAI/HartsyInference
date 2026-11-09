@@ -14,9 +14,10 @@ public sealed partial class VulkanBackend
 
     /// <inheritdoc/>
     public void HcSplitSinkhorn(Tensor pre, Tensor post, Tensor comb, Tensor mixes, Tensor scale, Tensor bias, int hc,
-        int iters, float eps)
+        int iters, float eps, float preEps, float postMult)
     {
         HcReference.ValidateSplit(pre, post, comb, mixes, scale, bias, hc, iters);
+        HcReference.ValidateDeviceSplit(eps, preEps, postMult);
         using OpScope _op = EnterOp();
         long tokens = mixes.ElementCount / ((2 + hc) * hc);
         VulkanBuffer mixesBuf = GetBuffer(mixes);

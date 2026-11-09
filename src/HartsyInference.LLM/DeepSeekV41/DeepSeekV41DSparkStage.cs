@@ -1,3 +1,5 @@
+using HartsyInference.LLM.Transformer;
+
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>One DSpark draft stage (upstream <c>DSparkBlock</c>): hyper-connection mixing around the draft attention and a feed-forward layer over the draft experts,
@@ -7,8 +9,8 @@ internal sealed class DeepSeekV41DSparkStage
     private readonly int _dim;
     private readonly int _hc;
     private readonly float _normEps;
-    private readonly DeepSeekV41HyperConnection _hcAttn;
-    private readonly DeepSeekV41HyperConnection _hcFfn;
+    private readonly HyperConnection _hcAttn;
+    private readonly HyperConnection _hcFfn;
     private readonly float[] _attnNorm;
     private readonly float[] _ffnNorm;
     private readonly DeepSeekV41DSparkAttention _attention;
@@ -23,7 +25,7 @@ internal sealed class DeepSeekV41DSparkStage
     /// <param name="ffnNorm">Norm weight before the feed-forward layer, <c>[dim]</c>.</param>
     /// <param name="attention">The draft attention.</param>
     /// <param name="ffn">The draft feed-forward layer.</param>
-    public DeepSeekV41DSparkStage(int dim, int hc, float normEps, DeepSeekV41HyperConnection hcAttn, DeepSeekV41HyperConnection hcFfn, float[] attnNorm,
+    public DeepSeekV41DSparkStage(int dim, int hc, float normEps, HyperConnection hcAttn, HyperConnection hcFfn, float[] attnNorm,
         float[] ffnNorm, DeepSeekV41DSparkAttention attention, DeepSeekV41MoeLayer ffn)
     {
         ArgumentNullException.ThrowIfNull(hcAttn);
@@ -67,14 +69,14 @@ internal sealed class DeepSeekV41DSparkStage
         _hcAttn.Mixes(x, block, aPre, aPost, aComb);
         // as in the backbone block, the feed-forward layer collapses with the attention coefficients, and the next stage takes the feed-forward ones (upstream's deferred hc_pre)
         _hcAttn.Collapse(x, preMix, block, sublayerIn);
-        DeepSeekV41HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
+        HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
         _attention.Draft(sublayerIn, block, mainX, startPos, state, sublayerOut);
         tap?.Invoke("attn", sublayerOut.ToArray());
         _hcAttn.Expand(sublayerOut, x, aPost, aComb, block, mid);
 
         _hcFfn.Mixes(mid, block, fPre, fPost, fComb);
         _hcFfn.Collapse(mid, aPre, block, sublayerIn);
-        DeepSeekV41HostMath.RmsNormRows(sublayerIn, _ffnNorm, _dim, _normEps);
+        HostMath.RmsNormRows(sublayerIn, _ffnNorm, _dim, _normEps);
         _ffn.Forward(sublayerIn, block, ReadOnlySpan<byte>.Empty, sublayerOut);
         tap?.Invoke("ffn", sublayerOut.ToArray());
         _hcFfn.Expand(sublayerOut, mid, fPost, fComb, block, x);

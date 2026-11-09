@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.DeepSeekV41.Engram;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -111,9 +112,9 @@ public static class DeepSeekV41HostModelLoader
             new LayerExperts(expertCache, layer, experts), shared, (float)cfg.SwigluLimit);
 
         int mix = (2 + hc) * hc;
-        DeepSeekV41HyperConnection hcAttn = new(backend, hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps, read.Matrix(l + "hc_attn_fn", mix, hc * dim),
+        HyperConnection hcAttn = new(backend, HyperConnectionConfig.DeepSeekV41(hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps), read.Matrix(l + "hc_attn_fn", mix, hc * dim),
             read.Vector(l + "hc_attn_scale", 3), read.Vector(l + "hc_attn_base", mix));
-        DeepSeekV41HyperConnection hcFfn = new(backend, hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps, read.Matrix(l + "hc_ffn_fn", mix, hc * dim),
+        HyperConnection hcFfn = new(backend, HyperConnectionConfig.DeepSeekV41(hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps), read.Matrix(l + "hc_ffn_fn", mix, hc * dim),
             read.Vector(l + "hc_ffn_scale", 3), read.Vector(l + "hc_ffn_base", mix));
 
         DeepSeekV41EngramModule? engram = null;
