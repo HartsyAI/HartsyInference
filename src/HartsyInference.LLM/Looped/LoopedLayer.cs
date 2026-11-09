@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -157,8 +160,8 @@ internal sealed class LoopedLayer : IDisposable
         Tensor v = new(single ? new TensorShape(1, hkv, 1, d) : new TensorShape(1, t, hkv, d), DType.F32);
         ProjectQkv(backend, q, k, v, hidden, t);
         Tensor gate = ProjectGate(backend, hidden, t);
-        backend.ApplyRopeSingle(q, cos, sin, d);
-        backend.ApplyRopeSingle(k, cos, sin, d);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
         Tensor qNormed = HypersphereOps.Normalized(backend, q, _norms.Head, _cfg.NormEps);
         q.Dispose();
         Tensor kNormed = HypersphereOps.Normalized(backend, k, _norms.Head, _cfg.NormEps);
@@ -202,8 +205,8 @@ internal sealed class LoopedLayer : IDisposable
         Tensor v = new(new TensorShape(1, hkv, 1, d), DType.F32);
         ProjectQkv(backend, q, k, v, hidden, 1);
         Tensor gate = ProjectGate(backend, hidden, 1);
-        backend.RopeApplyDecodeStep(q, cosTable, sinTable, d, interleaved: false, devicePos);
-        backend.RopeApplyDecodeStep(k, cosTable, sinTable, d, interleaved: false, devicePos);
+        backend.Rotary(RotaryCall.DecodeStep(q, cosTable, sinTable, d, false, devicePos));
+        backend.Rotary(RotaryCall.DecodeStep(k, cosTable, sinTable, d, false, devicePos));
         Tensor qNormed = HypersphereOps.Normalized(backend, q, _norms.Head, _cfg.NormEps);
         q.Dispose();
         Tensor qScaled = new(qNormed.Shape, DType.F32);
@@ -229,8 +232,8 @@ internal sealed class LoopedLayer : IDisposable
         Tensor v = new(new TensorShape(1, b, hkv, d), DType.F32);
         ProjectQkv(backend, q, k, v, hidden, b);
         Tensor gate = ProjectGate(backend, hidden, b);
-        backend.ApplyRopeSingle(q, cos, sin, d);
-        backend.ApplyRopeSingle(k, cos, sin, d);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, d));
         Tensor qNormed = HypersphereOps.Normalized(backend, q, _norms.Head, _cfg.NormEps);
         q.Dispose();
         Tensor kNormed = HypersphereOps.Normalized(backend, k, _norms.Head, _cfg.NormEps);
@@ -319,7 +322,7 @@ internal sealed class LoopedLayer : IDisposable
             ProjectionOps.Project(backend, gateUp, hidden, _gateUpW, null, _cfg.LowVramQuant);
             using Tensor scaled = new(gateUp.Shape, DType.F32);
             backend.AffineBroadcastLastDim(scaled, gateUp, _suvScale!, null);
-            backend.GluActivate(act, scaled, ff, gelu: false);
+            backend.Glu(act, scaled, GluSpec.SwiGlu);
         }
         else
         {

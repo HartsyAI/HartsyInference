@@ -23,6 +23,7 @@ layout(set = 0, binding = 2) readonly buffer Logits_      { float logits[]; };
 layout(set = 0, binding = 3) readonly buffer Bias_        { float bias_data[]; };
 layout(set = 0, binding = 4) readonly buffer AltBias_     { float alt_bias_data[]; };
 layout(set = 0, binding = 5) readonly buffer Kinds_       { int kinds_data[]; };
+layout(set = 0, binding = 6) writeonly buffer Dense_      { float dense[]; };
 
 layout(push_constant) uniform Push {
     uint numExperts;
@@ -37,6 +38,7 @@ layout(push_constant) uniform Push {
     float logitDivisor;
     uint hasBias;
     uint hasAltAndKinds;
+    uint hasDense;       // also write every token's weights at its expert ids into [T, E] dense, zeros elsewhere
 } pc;
 
 shared float sRaw[MAX_EXPERTS];
@@ -210,11 +212,19 @@ void main() {
     }
     barrier();
     float wsum = sScalar;
+    if (pc.hasDense != 0u) {
+        // The dense table holds the token's weight at each selected expert and zero elsewhere.
+        for (uint e = tid; e < pc.numExperts; e += WGSIZE) dense[token * pc.numExperts + e] = 0.0;
+        // The zero stores are SSBO writes; barrier() orders only shared memory, so make them visible before the selected weights.
+        memoryBarrierBuffer();
+        barrier();
+    }
     for (uint j = tid; j < k; j += WGSIZE) {
         float w = sRaw[sPick[j]];
         if (pc.renormalize != 0u) w /= wsum + pc.renormEps;
         w *= pc.scale;
         topk_idx[token * k + j] = sPick[j];
         topk_weight[token * k + j] = w;
+        if (pc.hasDense != 0u) dense[token * pc.numExperts + sPick[j]] = w;
     }
 }

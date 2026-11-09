@@ -204,7 +204,7 @@ public sealed unsafe class HunyuanImageTransformer : IDisposable, IStreamableDen
 
         // Boundary A→B: both live streams plus the per-step conditioning every block reads. The streams MOVE
         // (A's copies are dead), but temb is only COPIED — the head on A still reads it after B's range. The
-        // rope's host cos/sin tables need no copy — they are built host-side and WanRopeInterleaved stages them
+        // rope's host cos/sin tables need no copy — they are built host-side and the interleaved rotary (RotaryCall.Rows) stages them
         // on whichever backend runs.
         Tensor imgB = MoveAcross(backendB, backendA, currentImg);
         Tensor txtB = MoveAcross(backendB, backendA, currentTxt);

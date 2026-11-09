@@ -77,9 +77,9 @@ public sealed unsafe class F5Dit : IDisposable
         _projOutB = WhisperOps.EnsureF32(w[$"{prefix}.proj_out.bias"]);
 
         // Precompute RoPE tables. F5-TTS uses full RoPE (rotary_dim = head_dim = 64) with theta=10000.
-        // Repacked into the backend's WanRopeInterleaved "duplicated-pair" layout: freq_i sits at position 2i
+        // Repacked into the backend's the interleaved rotary (RotaryCall.Rows) "duplicated-pair" layout: freq_i sits at position 2i
         // (and 2i+1) of each [maxPos, headDim] row, so the interleaved pair (2i, 2i+1) reads its angle at index
-        // 2i. This lets RoPE run via the on-device WanRopeInterleaved kernel — the previous ApplyRopeInterleaved
+        // 2i. This lets RoPE run via the on-device the interleaved rotary (RotaryCall.Rows) kernel — the previous the interleaved rotary (RotaryCall.TokenMajor)
         // has no CUDA override, so it yanked q/k to the host and back ~2800× per generation (the F5 slowdown).
         // The tables are long-lived, so weight auto-promotion keeps them GPU-resident.
         const int maxPos = 8_192;

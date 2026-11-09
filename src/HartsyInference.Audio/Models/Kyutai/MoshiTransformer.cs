@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -165,8 +166,8 @@ public sealed unsafe class MoshiTransformer : IDisposable
         pre.Dispose();
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, t); qkv.Dispose();
 
-        backend.ApplyRopeInterleaved(q, cos, sin);
-        backend.ApplyRopeInterleaved(k, cos, sin);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
         Tensor attn = Attend(backend, q, k, v, t, t, causal);
         q.Dispose(); k.Dispose(); v.Dispose();
 
@@ -189,8 +190,8 @@ public sealed unsafe class MoshiTransformer : IDisposable
         pre.Dispose();
         (Tensor q, Tensor k, Tensor v) = SplitQkv(qkv, 1); qkv.Dispose();   // each [1,1,H,D]
 
-        backend.ApplyRopeInterleaved(q, cos, sin);
-        backend.ApplyRopeInterleaved(k, cos, sin);
+        backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
+        backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
 
         Tensor qMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);
         Tensor kMh = new(new TensorShape(1, Heads, 1, HeadDim), DType.F32);

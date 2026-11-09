@@ -1,5 +1,8 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -156,14 +159,16 @@ public sealed unsafe class MatrixGame3ActionModule
         int sp = gh * gw, winFloats = WindowLength * _mouseDim;
 
         // Per-token MLP input: [token features (dim) | grouped mouse window (winFloats)] — sequence axis is the frame.
-        // Device concat (the old host loop read the [S, dim] hidden D2H every mouse block). The tiny window array is
-        // uploaded once into a device tensor.
+        // The tiny window array is uploaded once, broadcast over the spatial positions on the device, and concatenated.
         Tensor mouseWinT = new Tensor(new TensorShape(tt, winFloats), DType.F32);
         fixed (float* mw = mouseWin)
             Buffer.MemoryCopy(mw, (float*)mouseWinT.DataPointer, (long)tt * winFloats * 4, (long)tt * winFloats * 4);
-        Tensor mlpIn = new Tensor(new TensorShape(tt * sp, _imgDim + winFloats), DType.F32);
-        backend.Mg3MouseMlpConcat(mlpIn, hidden, mouseWinT, tt, sp, _imgDim, winFloats);
+        Tensor window = new Tensor(new TensorShape(tt * sp, winFloats), DType.F32);
+        backend.CopyStrided(window, mouseWinT, StridedCopySpec.Gather(StridedView.Of(mouseWinT.Shape).Broadcast(1, sp)));
         mouseWinT.Dispose();
+        Tensor mlpIn = new Tensor(new TensorShape(tt * sp, _imgDim + winFloats), DType.F32);
+        backend.Concat(mlpIn, [hidden, window], dim: 1);
+        window.Dispose();
 
         Tensor h1 = new Tensor(new TensorShape(tt * sp, _streamDim), DType.F32);
         backend.Linear(h1, mlpIn, _mouseMlp1W!, _mouseMlp1B);
@@ -236,12 +241,14 @@ public sealed unsafe class MatrixGame3ActionModule
         RmsNormHeads(backend, q, _keyQNorm!);
         ApplyRopeBatched(backend, q, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
 
-        // K/V are shared by every spatial position → expand kv[tt, 2·streamDim] directly to [sp, heads, tt, headDim]
-        // (device). RMS-norm + rope on the broadcast K are per-(head,frame) so all sp rows stay identical → equals the
+        // K/V are shared by every spatial position → broadcast kv[tt, (k|v)·heads·headDim] over sp into [sp, heads, tt, headDim]
+        // on the device. RMS-norm + rope on the broadcast K are per-(head,frame) so all sp rows stay identical → equals the
         // old norm-then-broadcast, without the host K/V build loop or BroadcastBatch.
         Tensor k = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
         Tensor v = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.Mg3KvExpand(k, v, kv, sp, _heads, tt, _headDim);
+        StridedView kvRows = StridedView.Of(kv.Shape).Reshape([tt, 2, _heads, _headDim]);
+        backend.CopyStrided(k, kv, StridedCopySpec.Gather(kvRows.Select(1, 0).Broadcast(0, sp).Permute([0, 2, 1, 3])));
+        backend.CopyStrided(v, kv, StridedCopySpec.Gather(kvRows.Select(1, 1).Broadcast(0, sp).Permute([0, 2, 1, 3])));
         kv.Dispose();
         RmsNormHeads(backend, k, _keyKNorm!);
         ApplyRopeBatched(backend, k, cosT, sinT, tt, 1, 1, broadcastSpatial: true);
@@ -259,12 +266,12 @@ public sealed unsafe class MatrixGame3ActionModule
     }
 
     /// <summary>Token rows <c>[(f·sp + s), stride·streamDim]</c> → batched temporal sequences <c>[sp, heads, tt, headDim]</c>,
-    /// taking QKV slot <paramref name="part"/>. Device-resident via <see cref="IBackend.Mg3SplitQkvTemporal"/> (the host
-    /// pointer-loop was a dominant per-block cost).</summary>
+    /// taking QKV slot <paramref name="part"/>: one strided copy on the device.</summary>
     private Tensor SplitQkvTemporal(IBackend backend, Tensor qkv, int tt, int sp, int part, int stride = 3)
     {
         Tensor o = new Tensor(new TensorShape([(long)sp, _heads, tt, _headDim]), DType.F32);
-        backend.Mg3SplitQkvTemporal(o, qkv, tt, sp, _heads, _headDim, part, stride);
+        StridedView slot = StridedView.Of(qkv.Shape).Reshape([tt, sp, stride, _heads, _headDim]).Select(2, part);
+        backend.CopyStrided(o, qkv, StridedCopySpec.Gather(slot.Permute([1, 2, 0, 3])));
         return o;
     }
 
@@ -272,7 +279,8 @@ public sealed unsafe class MatrixGame3ActionModule
     private Tensor MergeTemporal(IBackend backend, Tensor attn, int tt, int sp)
     {
         Tensor o = new Tensor(new TensorShape(tt * sp, _streamDim), DType.F32);
-        backend.Mg3MergeTemporal(o, attn, tt, sp, _heads, _headDim);
+        StridedView rows = StridedView.Of(o.Shape).Reshape([tt, sp, _heads, _headDim]).Permute([1, 2, 0, 3]);
+        backend.CopyStrided(o, attn, StridedCopySpec.Scatter(rows));
         return o;
     }
 
@@ -283,11 +291,14 @@ public sealed unsafe class MatrixGame3ActionModule
 
     /// <summary>Rotates <c>[sp, heads, tt, headDim]</c> with cos/sin built over the (frames, gh, gw) grid: the sequence at
     /// spatial position s uses grid row <c>f·gh·gw + s</c> (or <c>f</c> when <paramref name="broadcastSpatial"/>).
-    /// Device-resident via <see cref="IBackend.Mg3RopeBatched"/>.</summary>
+    /// Interleaved pairs with duplicated-pair tables, one device rotation.</summary>
     private void ApplyRopeBatched(IBackend backend, Tensor x, Tensor cos, Tensor sin, int tt, int gh, int gw, bool broadcastSpatial = false)
     {
         int sp = (int)x.Shape[0];
-        backend.Mg3RopeBatched(x, cos, sin, sp, _heads, tt, _headDim, gh, gw, broadcastSpatial);
+        StridedView table = broadcastSpatial
+            ? RotaryViews.SharedTable(cos.Shape, sp, _heads)
+            : RotaryViews.Explicit([sp, _heads, tt, 1, 1, _headDim], [_headDim, 0, (long)gh * gw * _headDim, 0, 0, 1]);
+        backend.Rotary(new RotaryCall(x, cos, sin, RotaryViews.Create(RotaryViews.HeadMajor(x.Shape), table, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair)));
     }
 
     /// <summary>Affine LayerNorm over the trailing <paramref name="dim"/> of <paramref name="x"/> <c>[rows, dim]</c>,

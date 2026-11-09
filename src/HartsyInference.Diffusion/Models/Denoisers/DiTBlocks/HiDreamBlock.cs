@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -437,7 +439,12 @@ public sealed unsafe class HiDreamBlock
         // ~29s/step wall). With top-k=1 (or fewer) this collapses to the single-expert fallback.
         Tensor gateWeights = new Tensor(new TensorShape(batch, seqLen, _numRoutedExperts), DType.F32);
         int activeK = _numActivatedExperts <= 1 ? 1 : _numActivatedExperts;
-        backend.MoeTopKGate(gateWeights, gateLogits, activeK);
+        // The routed pairs feed nothing here: the dense table drives the per-expert accumulate below.
+        Tensor routedIdx = new Tensor(new TensorShape(batch, seqLen, activeK), DType.I32);
+        Tensor routedWeight = new Tensor(new TensorShape(batch, seqLen, activeK), DType.F32);
+        backend.MoeRoute(routedIdx, routedWeight, gateLogits, new MoeRouteArgs(_numRoutedExperts, activeK, MoeRouteScoring.Softmax, Renormalize: true, RenormEpsilon: 1e-20f), dense: gateWeights);
+        routedIdx.Dispose();
+        routedWeight.Dispose();
         gateLogits.Dispose();
 
         // The shared (always-on) expert output is the accumulator; each routed expert adds in place,
@@ -445,7 +452,7 @@ public sealed unsafe class HiDreamBlock
         for (int e = 0; e < _numRoutedExperts; e++)
         {
             Tensor expertOut = SwiGluForward(backend, input, _expertW1![e], _expertW3![e], _expertW2![e], batch, seqLen);
-            backend.RowGatedAccumulate(shared, expertOut, gateWeights, _numRoutedExperts, e);
+            backend.GroupScale(shared, expertOut, gateWeights, GroupScaleSpec.Column(_numRoutedExperts, e, accumulate: true));
             expertOut.Dispose();
         }
         gateWeights.Dispose();

@@ -11,7 +11,7 @@ public static class MoeReference
 {
     /// <summary>Checks tensor shapes, dtypes and args for <see cref="Route"/>; shared by every backend.</summary>
     public static void ValidateRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias, Tensor? altBias, Tensor? tokenKinds)
+        Tensor? bias, Tensor? altBias, Tensor? tokenKinds, Tensor? dense = null)
     {
         int e = args.NumExperts, k = args.TopK;
         if (e < 1 || e > MoeRouteArgs.MaxExperts)
@@ -46,15 +46,17 @@ public static class MoeReference
             throw new ArgumentException("MoeRoute altBias and tokenKinds must be supplied together.");
         if (tokenKinds is not null && (tokenKinds.DType != DType.I32 || tokenKinds.ElementCount != tokens))
             throw new ArgumentException($"MoeRoute tokenKinds must be I32 with {tokens} entries.", nameof(tokenKinds));
+        if (dense is not null && (dense.DType != DType.F32 || dense.ElementCount != tokens * e))
+            throw new ArgumentException($"MoeRoute dense weights must be F32 with {tokens}x{e} entries; got {dense.DType} {dense.Shape}.", nameof(dense));
     }
 
     /// <summary>Score, biased top-k selection and gathered, renormalised, scaled weights per token.</summary>
     /// <remarks>Selection uses score + bias; the weights are the raw scores at the selected ids. Order inside a token's
     /// top-k is selection score descending, then index ascending. A non-zero token kind picks <paramref name="altBias"/>.</remarks>
     public static unsafe void Route(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias, Tensor? altBias, Tensor? tokenKinds)
+        Tensor? bias, Tensor? altBias, Tensor? tokenKinds, Tensor? dense = null)
     {
-        ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds);
+        ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
         int e = args.NumExperts, k = args.TopK;
         long tokens = logits.ElementCount / e;
         float* lp = (float*)logits.DataPointer;
@@ -63,6 +65,7 @@ public static class MoeReference
         float* bp = bias is null ? null : (float*)bias.DataPointer;
         float* ap = altBias is null ? null : (float*)altBias.DataPointer;
         int* kp = tokenKinds is null ? null : (int*)tokenKinds.DataPointer;
+        float* dp = dense is null ? null : (float*)dense.DataPointer;
 
         float[] raw = ArrayPool<float>.Shared.Rent(e);
         float[] sel = ArrayPool<float>.Shared.Rent(e);
@@ -90,6 +93,7 @@ public static class MoeReference
                     pick[kk] = best;
                     wsum += raw[best];
                 }
+                if (dp != null) new Span<float>(dp + t * e, e).Clear();
                 for (int kk = 0; kk < k; kk++)
                 {
                     float w = raw[pick[kk]];
@@ -97,6 +101,7 @@ public static class MoeReference
                     w *= args.Scale;
                     ip[t * k + kk] = pick[kk];
                     wp[t * k + kk] = w;
+                    if (dp != null) dp[t * e + pick[kk]] = w;
                 }
             }
         }

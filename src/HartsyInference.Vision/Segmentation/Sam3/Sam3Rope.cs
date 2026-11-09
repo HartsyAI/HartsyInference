@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Segmentation.Sam3;
@@ -56,8 +58,9 @@ public sealed class Sam3Rope : IDisposable
 
         Tensor cos = globalAttention ? _globalCos : _windowCos;
         Tensor sin = globalAttention ? _globalSin : _windowSin;
-        backend.ApplyRopeInterleaved(query, cos, sin);
-        backend.ApplyRopeInterleaved(key, cos, sin);
+        // Each token row shares its cos/sin row across heads; the table keeps one value per pair at the row start.
+        backend.Rotary(RotaryCall.Rows(query, cos, sin, query.Shape[0] * query.Shape[1], (int)query.Shape[2], _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
+        backend.Rotary(RotaryCall.Rows(key, cos, sin, key.Shape[0] * key.Shape[1], (int)key.Shape[2], _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix));
     }
 
     /// <summary>Releases the cos/sin tables.</summary>

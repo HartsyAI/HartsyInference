@@ -1,11 +1,13 @@
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Single-latent sparse attention, indexer, hyper-connection and latent-cache quantization primitives; backends
-// without a kernel inherit the throwing defaults.
+// Attention: the AttentionCall contract and its planner, the legacy SDPA and Flash entries, video sparse attention,
+// neighborhood and deformable attention, KV append, and the single-latent sparse-attention, indexer and
+// hyper-connection primitives. Backends without a kernel inherit the host-reference or throwing defaults.
 public partial interface IBackend
 {
     /// <summary>Runs one attention call (docs/ATTENTION_CONTRACT.md). A backend with kernel rows overrides this with its
@@ -64,11 +66,6 @@ public partial interface IBackend
     void HcPostMix(Tensor output, Tensor x, Tensor residual, Tensor post, Tensor comb) =>
         throw NotSupportedPrimitive(nameof(HcPostMix));
 
-    /// <summary>Quantizes F32 <paramref name="rows"/> <c>[n,dim]</c> into <paramref name="dest"/> row <c>physicalRows[i]</c>
-    /// (I32 <c>[n]</c>; negative skips); see <see cref="LatentQuantReference.QuantizeRows"/>.</summary>
-    void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows) =>
-        throw NotSupportedPrimitive(nameof(QuantizeLatentRows));
-
     /// <summary>Replaces F32 values with their quantize-dequantize round trip in <paramref name="encoding"/>,
     /// per group along the last dimension.</summary>
     void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding) =>
@@ -79,8 +76,171 @@ public partial interface IBackend
     void BuildWindowIndices(Tensor indices, int windowSize, int seqLen, int startPos) =>
         throw NotSupportedPrimitive(nameof(BuildWindowIndices));
 
-    /// <summary>In-place interleaved rotary on the <c>[dimOffset, dimOffset+rotaryDim)</c> slice of each vector of
-    /// <c>x [B,L,D]</c> or <c>[B,L,H,D]</c>, with <c>cos</c>/<c>sin [B,L,rotaryDim/2]</c>; negate sin to invert.</summary>
-    void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset) =>
-        throw NotSupportedPrimitive(nameof(ApplyRopeInterleaved));
+    /// <summary>3D neighborhood attention over <c>[batch, T, H, W, heads, headDim]</c>: each query attends the keys of its
+    /// <paramref name="window"/>, which slides inward at the borders so every query sees the same number of keys, with
+    /// <paramref name="scale"/> on the scores (1 when the caller folded it into q). The output is the q grid or its flat
+    /// <c>[tokens, heads · headDim]</c> form and must not share storage with any input. F32. Contract:
+    /// <see cref="Contracts.NeighborhoodAttentionContract"/>; reference: <see cref="NeighborhoodAttentionReference"/>.</summary>
+    void NeighborhoodAttention(Tensor output, Tensor q, Tensor k, Tensor v, in NeighborhoodWindow window, float scale)
+        => NeighborhoodAttentionReference.Apply(output, q, k, v, window, scale);
+
+    /// <summary>Whether this backend can execute the versioned MiniMax-H3 video sparse-attention contract without
+    /// falling back to dense attention. Planning must check this before model construction.</summary>
+    bool SupportsVideoSparseAttention => false;
+
+    /// <summary>Creates persistent generation-scoped VSA state. The default refuses so unsupported backends cannot
+    /// silently reinterpret a sparse checkpoint as dense attention.</summary>
+    IVideoSparseAttentionSession CreateVideoSparseAttentionSession(VideoSparseAttentionPlan plan)
+        => throw new NotSupportedException($"{GetType().Name} does not support video sparse attention.");
+
+    /// <summary>Scaled dot-product attention: output = softmax(Q @ K^T / sqrt(d)) @ V</summary>
+    /// <param name="allowF16">When true, a backend MAY run the attention in F16 for speed (halves score-matrix
+    /// traffic + F16 tensor cores). Callers pass true ONLY when pre-softmax scores are bounded — e.g. Q/K are
+    /// RMS/L2-normalized (Wan) — since unbounded scores (some fp8 archs) overflow F16 and produce black output.</param>
+    void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false);
+
+    /// <summary>Whether <see cref="ScaledDotProductAttentionTokenMajor"/> is served; false means the caller must
+    /// build head-major <c>[B,H,S,D]</c> tensors and use <see cref="ScaledDotProductAttention"/> instead.</summary>
+    bool SupportsTokenMajorAttention => false;
+
+    /// <summary>SDPA whose Q/K/V/output are TOKEN-MAJOR <c>[S, heads*headDim]</c> (or that one sequence as
+    /// <c>[1, S, heads*headDim]</c> or <c>[1, S, heads, headDim]</c>) — the layout a Linear already emits and <c>to_out</c>
+    /// already wants, so the caller pays no permute on either side. Semantics are otherwise identical to
+    /// <see cref="ScaledDotProductAttention"/>.</summary>
+    void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int headDim, float scale, bool allowF16 = false)
+        => throw new NotSupportedException($"{GetType().Name} does not serve token-major attention; check SupportsTokenMajorAttention first.");
+
+    /// <summary>Whether the grouped-query overload of <see cref="ScaledDotProductAttentionTokenMajor(Tensor, Tensor, Tensor, Tensor, Tensor?, int, int, int, float, bool)"/>
+    /// is served, reading K/V with fewer heads than Q without repeating them.</summary>
+    bool SupportsTokenMajorGqaAttention => false;
+
+    /// <summary>Token-major SDPA with <paramref name="kvHeads"/> K/V heads shared across <paramref name="heads"/> query
+    /// heads: Q/output are <c>[S, heads*headDim]</c>, K/V are <c>[Skv, kvHeads*headDim]</c>, and query head h reads
+    /// kv head <c>h / (heads/kvHeads)</c>.</summary>
+    void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        => throw new NotSupportedException($"{GetType().Name} does not serve grouped-query token-major attention; check SupportsTokenMajorGqaAttention first.");
+
+    /// <summary>True when the backend has the GPU-resident decode toolkit, so autoregressive decoders (e.g. Zonos) can run fully on-device.</summary>
+    bool FlashDecodeSupported => false;
+
+    /// <summary>Fused online-softmax attention that never materializes the score matrix; grouped-query aware (head h reads kv h/kvGroup).
+    /// The default builds an <see cref="AttentionCall"/> and runs <see cref="Attention"/>, so a backend without an override
+    /// serves this entry through its kernel rows or the host reference.</summary>
+    /// <param name="causal">When true, query row r (absolute position qOffset+r) attends keys 0..qOffset+r; otherwise all Lk keys.</param>
+    /// <param name="softcap">&gt; 0 soft-caps each logit via <c>softcap·tanh(score/softcap)</c> before softmax (Gemma-2); 0 disables it.</param>
+    /// <param name="sink">Non-null <c>[Hq]</c> F32 tensor (GPT-OSS sinks): each head's sink logit joins the softmax denominator only.</param>
+    /// <param name="slidingWindow">&gt; 0 restricts each query to the most recent N keys (Gemma-2/3, Cohere2, GPT-OSS); else full causal.</param>
+    /// <param name="alibiSlopes">Non-null <c>[Hq]</c> F32 tensor: adds ALiBi penalty <c>slope_h·(k_pos−q_pos)</c> (MPT/BLOOM/Falcon/Jais).</param>
+    unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+    {
+        AttentionCall.ValidateFlashGroup(query, key, kvGroup);
+        Attention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes));
+    }
+
+    /// <summary>In-place KV-cache append: writes newKv <c>[1,H,tNew,D]</c> into the fixed buffer, avoiding the Concat-grown cache's O(n²).</summary>
+    unsafe void KvCacheAppend(Tensor buffer, Tensor newKv, int offset)
+    {
+        if (buffer.DType != DType.F32 || newKv.DType != DType.F32)
+            throw new NotSupportedException("KvCacheAppend default fallback only supports F32.");
+        int h = (int)buffer.Shape[1];
+        int maxSeq = (int)buffer.Shape[2];
+        int d = (int)buffer.Shape[3];
+        int tNew = (int)newKv.Shape[2];
+        float* bp = (float*)buffer.DataPointer;
+        float* np = (float*)newKv.DataPointer;
+        for (int hi = 0; hi < h; hi++)
+        {
+            long srcBase = (long)hi * tNew * d;
+            long dstBase = ((long)hi * maxSeq + offset) * d;
+            Buffer.MemoryCopy(np + srcBase, bp + dstBase, (long)tNew * d * 4, (long)tNew * d * 4);
+        }
+    }
+
+    /// <summary>Multi-scale deformable attention (Deformable DETR): softmaxes logits, samples value maps, accumulates weighted taps.</summary>
+    /// <param name="refPoints"><c>[q·refQueryStride + l·refLevelStride + coord]</c> — GDINO uses per-level refs, RT-DETR shares one.</param>
+    unsafe void DeformableAttention(Tensor output, Tensor value, Tensor sampOff, Tensor attnLogits,
+        Tensor refPoints, ReadOnlySpan<int> spatialShapes, ReadOnlySpan<int> levelStart,
+        int heads, int levels, int points, int coords, int refQueryStride, int refLevelStride)
+    {
+        if (output.DType != DType.F32 || value.DType != DType.F32 || sampOff.DType != DType.F32
+            || attnLogits.DType != DType.F32 || refPoints.DType != DType.F32)
+            throw new NotSupportedException("DeformableAttention default fallback only supports F32.");
+        if (coords != 2 && coords != 4)
+            throw new ArgumentException($"DeformableAttention coords must be 2 or 4, got {coords}.");
+
+        int nq = (int)output.Shape[1];
+        int d = (int)output.Shape[output.Shape.Rank - 1];
+        int hd = d / heads;
+        int lp = levels * points;
+
+        float* offP = (float*)sampOff.DataPointer;
+        float* atP = (float*)attnLogits.DataPointer;
+        float* valP = (float*)value.DataPointer;
+        float* refP = (float*)refPoints.DataPointer;
+        float* outP = (float*)output.DataPointer;
+
+        for (int q = 0; q < nq; q++)
+        {
+            long refBase = (long)q * refQueryStride;
+            for (int h = 0; h < heads; h++)
+            {
+                long outOff = ((long)q * heads + h) * hd;
+                for (int c = 0; c < hd; c++) outP[outOff + c] = 0f;
+
+                // softmax denominator over lp for this (query, head)
+                long aBase = ((long)q * heads + h) * lp;
+                float amax = float.NegativeInfinity;
+                for (int i = 0; i < lp; i++) { float v = atP[aBase + i]; if (v > amax) amax = v; }
+                float asum = 0f;
+                for (int i = 0; i < lp; i++) asum += MathF.Exp(atP[aBase + i] - amax);
+                float invSum = 1f / asum;
+
+                for (int l = 0; l < levels; l++)
+                {
+                    int hL = spatialShapes[l * 2 + 0], wL = spatialShapes[l * 2 + 1], start = levelStart[l];
+                    long refOff = refBase + (long)l * refLevelStride;
+                    float refX = refP[refOff + 0], refY = refP[refOff + 1];
+                    float refW = coords == 4 ? refP[refOff + 2] : 0f;
+                    float refH = coords == 4 ? refP[refOff + 3] : 0f;
+                    for (int p = 0; p < points; p++)
+                    {
+                        long offIdx = ((((long)q * heads + h) * levels + l) * points + p) * 2;
+                        float ox = offP[offIdx + 0], oy = offP[offIdx + 1];
+                        float locX, locY;
+                        if (coords == 2)
+                        {
+                            locX = refX + ox / wL;
+                            locY = refY + oy / hL;
+                        }
+                        else
+                        {
+                            locX = refX + ox / points * refW * 0.5f;
+                            locY = refY + oy / points * refH * 0.5f;
+                        }
+                        float weight = MathF.Exp(atP[aBase + l * points + p] - amax) * invSum;
+                        float gx = 2f * locX - 1f, gy = 2f * locY - 1f;
+                        float ix = ((gx + 1f) * wL - 1f) * 0.5f;
+                        float iy = ((gy + 1f) * hL - 1f) * 0.5f;
+                        int x0 = (int)MathF.Floor(ix), y0 = (int)MathF.Floor(iy);
+                        int x1 = x0 + 1, y1 = y0 + 1;
+                        float wx1 = ix - x0, wx0 = 1f - wx1, wy1 = iy - y0, wy0 = 1f - wy1;
+                        bool x0ok = x0 >= 0 && x0 < wL, x1ok = x1 >= 0 && x1 < wL;
+                        bool y0ok = y0 >= 0 && y0 < hL, y1ok = y1 >= 0 && y1 < hL;
+                        long chanOff = (long)h * hd;
+                        for (int c = 0; c < hd; c++)
+                        {
+                            float acc = 0f;
+                            if (y0ok && x0ok) acc += wy0 * wx0 * valP[((long)start + (long)y0 * wL + x0) * d + chanOff + c];
+                            if (y0ok && x1ok) acc += wy0 * wx1 * valP[((long)start + (long)y0 * wL + x1) * d + chanOff + c];
+                            if (y1ok && x0ok) acc += wy1 * wx0 * valP[((long)start + (long)y1 * wL + x0) * d + chanOff + c];
+                            if (y1ok && x1ok) acc += wy1 * wx1 * valP[((long)start + (long)y1 * wL + x1) * d + chanOff + c];
+                            outP[outOff + c] += weight * acc;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

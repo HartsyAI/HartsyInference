@@ -45,7 +45,7 @@ public sealed record VramPolicy
     /// <summary>Whether a model too large for one card may spill onto another configured, idle device. Construction-scoped.</summary>
     public LeverState MultiGpuSpill { get; init; } = LeverState.Auto;
 
-    /// <summary>The tier's expansion with no lever overridden — what a backend uses before any request-level override.</summary>
+    /// <summary>The tier's expansion with no lever overridden — what a backend uses before any request-level override. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static VramPolicy For(VramTier tier) => VramPolicyResolver.Expand(tier);
 
     /// <summary>One line naming the tier and only the levers that differ from it, for the per-generation log.</summary>
