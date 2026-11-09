@@ -965,6 +965,38 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             if (_downProj is not null) yield return _downProj;
         }
 
+        /// <summary>Soft-capped attention through the fused kernel for rows whose first <paramref name="attendedKeys"/>
+        /// tokens are real and the rest right padding. Real queries attend causally inside the real prefix. Padding queries
+        /// sit past the prefix: under HF's causal-plus-key-padding mask each attends every real key, so they run as one
+        /// non-causal call over the prefix (the fused kernel refuses causal rows that lie past its key length).</summary>
+        private void SoftcappedAttention(IBackend backend, Tensor output, Tensor q, Tensor k, Tensor v,
+            int batch, int heads, int seqLen, int headDim, int attendedKeys, float scale)
+        {
+            float softcap = _config.AttentionLogitSoftcap;
+            if (attendedKeys >= seqLen)
+            {
+                backend.FlashAttention(output, q, k, v, attendedKeys, _config.KvGroupSize, causal: true, qOffset: 0,
+                    scale, softcap: softcap, slidingWindow: _slidingWindow);
+                return;
+            }
+            if (_slidingWindow > 0 && seqLen > _slidingWindow)
+                throw new NotSupportedException(
+                    $"Soft-capped right-padded attention past the {_slidingWindow}-token sliding window is not implemented.");
+            int padRows = seqLen - attendedKeys;
+            using Tensor qReal = new Tensor(new TensorShape(batch, heads, attendedKeys, headDim), DType.F32);
+            using Tensor qPad = new Tensor(new TensorShape(batch, heads, padRows, headDim), DType.F32);
+            using Tensor outReal = new Tensor(qReal.Shape, DType.F32);
+            using Tensor outPad = new Tensor(qPad.Shape, DType.F32);
+            StridedCopies.SliceAxis(backend, qReal, q, 2, 0, attendedKeys);
+            StridedCopies.SliceAxis(backend, qPad, q, 2, attendedKeys, padRows);
+            backend.FlashAttention(outReal, qReal, k, v, attendedKeys, _config.KvGroupSize, causal: true, qOffset: 0,
+                scale, softcap: softcap, slidingWindow: _slidingWindow);
+            backend.FlashAttention(outPad, qPad, k, v, attendedKeys, _config.KvGroupSize, causal: false, qOffset: 0,
+                scale, softcap: softcap);
+            StridedCopies.ScatterAxis(backend, output, outReal, 2, 0);
+            StridedCopies.ScatterAxis(backend, output, outPad, 2, attendedKeys);
+        }
+
         public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask,
             Tensor ropeCos, Tensor ropeSin, int seqLen, int attendedKeys)
         {
@@ -1039,8 +1071,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             Tensor attnOut = new Tensor(qMhShape, DType.F32);
             if (_config.AttentionLogitSoftcap > 0f)
             {
-                backend.FlashAttention(attnOut, qMh, kMh, vMh, attendedKeys, _config.KvGroupSize, causal: true, qOffset: 0,
-                    scale, softcap: _config.AttentionLogitSoftcap, slidingWindow: _slidingWindow);
+                SoftcappedAttention(backend, attnOut, qMh, kMh, vMh, batch, Hq, seqLen, D, attendedKeys, scale);
                 qMh.Dispose();
                 kMh.Dispose();
                 vMh.Dispose();

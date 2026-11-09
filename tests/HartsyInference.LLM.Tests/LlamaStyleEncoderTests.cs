@@ -103,6 +103,26 @@ public sealed class LlamaStyleEncoderTests
         AssertClose(Values(expected), Values(actual));
     }
 
+    /// <summary>CUDA's fused kernel refuses causal rows past its key length, so right-padded soft-capped rows take a
+    /// separate non-causal call over the real prefix; the result must match the CPU encode on every row.</summary>
+    [Fact]
+    [Trait("Category", "GpuIntegration")]
+    public void SoftcapRightPaddedRowsMatchCpuOnCuda()
+    {
+        if (!HartsyInference.Cuda.CudaContext.IsAvailable()) return;
+        int[][] batch = [[5, 9, 12, 0, 0]];
+        int[] validLengths = [3];
+        using LlamaStyleEncoder cpuEncoder = BuildEncoder(TinyConfig(gemmaLike: true, softcap: 50f), seed: 9);
+        using LlamaStyleEncoder cudaEncoder = BuildEncoder(TinyConfig(gemmaLike: true, softcap: 50f), seed: 9);
+        using Tensor expected = cpuEncoder.EncodeMultiLayerRightPadded(new CpuBackend(), batch, [Layers], validLengths, normalizeFinalOutput: true);
+        using HartsyInference.Cuda.CudaBackend cuda = new(0, CudaPtxDirectory.Resolve());
+        using Tensor actual = cudaEncoder.EncodeMultiLayerRightPadded(cuda, batch, [Layers], validLengths, normalizeFinalOutput: true);
+        float[] e = Values(expected);
+        float[] a = actual.CastTo(DType.F32).AsSpan<float>().ToArray();
+        for (int i = 0; i < e.Length; i++)
+            Assert.True(MathF.Abs(e[i] - a[i]) <= 2e-3f, $"element {i}: cpu {e[i]} cuda {a[i]}");
+    }
+
     [Fact]
     public void SoftcapChangesEncoderOutput()
     {
