@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <c>(0, i, 0, 0)</c>. Reference image <c>i</c> of an edit takes <c>r = i + 1</c>; with none, <c>r</c> is 0 everywhere and
 /// its quarter of the head is unrotated.
 /// Tables are full-width <c>[1, S, headDim]</c> (both halves repeat the per-pair value), the layout
-/// <see cref="Core.Backends.IBackend.ApplyRope"/> takes. Phases are F32 products, as the reference builds them.
+/// <see cref="Core.Rope.RopeTableLayout.RotateHalf"/> names. Phases are F32 products, as the reference builds them.
 /// The coordinates come from <see cref="MossImagePosEmbed"/>; <see cref="RopeTableExpander"/> writes the rotate-half rows.</summary>
 public static class MossImageRope
 {

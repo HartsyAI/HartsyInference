@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -28,7 +29,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     // ── Step-graph state (numerics.ditGraph; see ForwardPaired) ──────────────────────────────────────────
     // The captured body (proj_in → 28 blocks → final norm → proj_out, for the cond and uncond passes) reads ONLY
     // fixed device buffers and writes the velocity buffers. Everything per-step-varying is refreshed into a fixed
-    // buffer OUTSIDE the capture: the latent (in-place device CfgEulerStep by the pipeline + PrepareGraphLatent),
+    // buffer OUTSIDE the capture: the latent (in-place device GuidedEulerStep by the pipeline + PrepareGraphLatent),
     // and the tiny timestep tensors temb6/shift/scaleP1 (the existing host TimeEmbed/final-scale build runs outside
     // capture, then CopyInto). The projected encoders are step-invariant → computed once on call 1 and held.
     private Tensor? _latentFixed;
@@ -167,7 +168,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     }
 
     /// <summary>Copies the working latent into the transformer-owned fixed buffer the step graph captures against,
-    /// returning that buffer for the pipeline to denoise in place (device <c>CfgEulerStep</c>). Call once, after the
+    /// returning that buffer for the pipeline to denoise in place (device <c>GuidedEulerStep</c>). Call once, after the
     /// initial noise is built, ONLY when graph mode is being attempted; the returned tensor is transformer-owned
     /// (do NOT dispose it in the pipeline). Returns the original latent unchanged when graph mode is off, so the
     /// eager path allocates nothing extra.</summary>
@@ -428,7 +429,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     // embedded0/modIndex non-null (I2V conditioning): per-token final-layer modulation, mirroring diffusers'
     // scale_shift_table[None,None] + embedded_timestep[:,:,None] (embedded_timestep stays per-token through the
     // whole model, not just the blocks). Builds a [2,dim] shift/scale-raw table (row 0 = t=0, row 1 = t=t_cur) and
-    // looks it up per token via AffineBroadcastRowIndexed — same primitive the blocks use.
+    // looks it up per token via the row-indexed NormModulate — same primitive the blocks use.
     private Tensor FinalLayer(IBackend backend, Tensor hidden, Tensor embedded, int s, int dim, Tensor? embedded0 = null, Tensor? modIndex = null)
     {
         float* ss = (float*)_finalScaleShift!.DataPointer;
@@ -448,7 +449,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
                 shp[d] = ss[d] + em0[d]; scp[d] = ss[dim + d] + em0[d];               // row 0: conditioned (t=0)
                 shp[dim + d] = ss[d] + em1[d]; scp[dim + d] = ss[dim + d] + em1[d];   // row 1: denoising (t=t_cur)
             }
-            backend.AffineBroadcastRowIndexed(affined, normed, scaleTable, shiftTable, modIndex);
+            backend.NormModulate(NormModulateCall.Rows(affined, normed, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(normed, scaleTable, shiftTable, modIndex, ScaleMode.OnePlus)));
             shiftTable.Dispose(); scaleTable.Dispose();
         }
         else

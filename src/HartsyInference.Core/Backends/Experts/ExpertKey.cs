@@ -14,13 +14,6 @@ public readonly record struct ExpertKey(int Layer, int Expert, ushort Bank)
     /// <summary>The cache identity of this expert's layer.</summary>
     public ExpertLayerKey LayerKey => new(Bank, Layer);
 
-    /// <summary>The published two-output deconstruction, kept so existing callers still compile and link.</summary>
-    public void Deconstruct(out int Layer, out int Expert)
-    {
-        Layer = this.Layer;
-        Expert = this.Expert;
-    }
-
     /// <inheritdoc/>
     public override string ToString() => Bank == 0 ? $"L{Layer}.E{Expert}" : $"B{Bank}.L{Layer}.E{Expert}";
 }

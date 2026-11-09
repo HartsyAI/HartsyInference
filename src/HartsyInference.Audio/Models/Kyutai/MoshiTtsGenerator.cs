@@ -12,8 +12,7 @@ namespace HartsyInference.Audio.Models.Kyutai;
 /// sum_condition</c>; the text embedding DEMUXES the multiplexed second stream (<c>out1</c>/<c>out2</c>). The
 /// backbone runs one token per frame through a streaming <c>FixedKvCache</c> (see <see cref="StepText"/> /
 /// <see cref="MoshiTransformer.StepForward"/>) — O(n), not the O(n²) full-prefix re-run — yielding the per-frame
-/// context that drives the depformer. Greedy text sampling uses the device-resident
-/// <see cref="IBackend.ArgMaxLastDim"/>.</summary>
+/// context that drives the depformer. Greedy text sampling uses <c>LogitSampling.ArgMax</c> on the host.</summary>
 public sealed unsafe class MoshiTtsGenerator : IDisposable
 {
     public const int Dim = 2048, TextCard = 8000, AudioCard = 2048, NumCodebooks = 32;

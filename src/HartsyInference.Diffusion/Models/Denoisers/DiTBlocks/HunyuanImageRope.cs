@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -74,7 +75,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
         ApplyRotationBatched(q, k, cosTable, sinTable, batch, numHeads, seqLen);
     }
 
-    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> Q/K pair via <see cref="IBackend.WanRopeInterleaved"/>
+    /// <summary>GPU-resident RoPE on a <c>[1, S, H, D]</c> Q/K pair via <c>RotaryCall.Rows</c>
     /// (same interleaved-pair rotation): rotates the leading <c>Π packedDims</c> tokens in place, leaving any trailing
     /// (text) rows untouched — so it works both on a standalone image tensor and on a joint <c>[img, txt]</c> tensor
     /// with image-first layout. Replaces the per-block host path (a full Q/K D2H→trig→H2D round trip per block per
@@ -83,8 +84,8 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     public void ApplyGpu(IBackend backend, Tensor q, Tensor k, int numHeads, ReadOnlySpan<int> packedDims)
     {
         (Tensor cos, Tensor sin, int seqLen) = GetTables(backend, packedDims);
-        backend.WanRopeInterleaved(q, cos, sin, seqLen, numHeads, _headDim);
-        backend.WanRopeInterleaved(k, cos, sin, seqLen, numHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(q, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(k, cos, sin, seqLen, numHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 
     /// <summary>Releases the held device tables and the cache. Tables still under a lease are freed by their last release.</summary>
@@ -101,7 +102,7 @@ public sealed unsafe class HunyuanImageRope : IDisposable
     }
 
     /// <summary>Returns the duplicated-pair cos/sin tables <c>[S, headDim]</c> for <paramref name="packedDims"/> on
-    /// <paramref name="backend"/>, the layout <see cref="IBackend.WanRopeInterleaved"/> reads. Each backend holds one grid;
+    /// <paramref name="backend"/>, the layout <c>RotaryCall.Rows</c> reads. Each backend holds one grid;
     /// a grid change releases that backend's previous lease after the new one is acquired.</summary>
     private (Tensor Cos, Tensor Sin, int SeqLen) GetTables(IBackend backend, ReadOnlySpan<int> packedDims)
     {

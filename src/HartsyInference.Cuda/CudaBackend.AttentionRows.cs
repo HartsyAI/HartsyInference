@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 
@@ -10,11 +11,6 @@ namespace HartsyInference.Cuda;
 // call takes the branch it took before; AttentionRouteGoldenTests pins the routes.
 public sealed partial class CudaBackend
 {
-    /// <summary>The caller's FlashAttention <c>kvGroup</c> for the rows of the call in flight: kernels and the device-path
-    /// validator take the raw value, and the descriptor only knows <c>Hq / Hkv</c>.</summary>
-    // TODO(attention phase 4): carry the raw kvGroup in AttentionCall and delete this side channel.
-    [ThreadStatic] private static int t_flashKvGroup;
-
     private AttentionKernelRow[]? _denseRows, _tokenMajorRows, _tokenMajorGqaRows, _flashRows, _flashDeviceRows;
 
     private AttentionKernelRow[] DenseAttentionRows => _denseRows ??= BuildDenseRows();
@@ -24,21 +20,12 @@ public sealed partial class CudaBackend
     private AttentionKernelRow[] FlashAttentionDeviceRows => _flashDeviceRows ??= BuildFlashDeviceRows();
 
     /// <summary>Runs the first row of <paramref name="rows"/> that covers, admits and completes the call, and records its route.</summary>
-    private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call, int flashKvGroup = 0)
+    private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
-        int saved = t_flashKvGroup;
-        t_flashKvGroup = flashKvGroup;
-        try
-        {
-            AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
-            if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
-            AttentionPlanLog.Ran("cuda", row, in call);
-        }
-        finally
-        {
-            t_flashKvGroup = saved;
-        }
+        AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
+        if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
+        AttentionPlanLog.Ran("cuda", row, in call);
     }
 
     /// <summary>The rows a call pinned to <paramref name="route"/> is planned over.</summary>
@@ -107,10 +94,7 @@ public sealed partial class CudaBackend
         // The rows read the legacy kvLen, which a call without bounded positions leaves at 0; Attention() passes all keys.
         AttentionCall planned = call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded
             ? call with { Positions = call.Positions with { KvLength = call.KeyTokens, Bounded = true } } : call;
-        int saved = t_flashKvGroup;
-        t_flashKvGroup = call.KvGroup;
-        try { return AttentionPlanner.Plan(RowsFor(planned.Route), in planned); }
-        finally { t_flashKvGroup = saved; }
+        return AttentionPlanner.Plan(RowsFor(planned.Route), in planned);
     }
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
@@ -386,9 +370,9 @@ public sealed partial class CudaBackend
             if (kvHeads != heads)
             {
                 kRep = new Tensor(new TensorShape(1, heads, skv, headDim), key.DType);
-                RepeatKvHeads(kRep, kMh, kvHeads, heads / kvHeads);
+                StridedCopies.RepeatInterleave(this, kRep, kMh, 1, heads / kvHeads);
                 vRep = new Tensor(new TensorShape(1, heads, skv, headDim), value.DType);
-                RepeatKvHeads(vRep, vMh, kvHeads, heads / kvHeads);
+                StridedCopies.RepeatInterleave(this, vRep, vMh, 1, heads / kvHeads);
                 kMh.Dispose();
                 vMh.Dispose();
             }
@@ -445,11 +429,9 @@ public sealed partial class CudaBackend
                     MinHeadDim = 1025, Gqa = true, Masks = CW, LogitTerms = true, Lowering = AttentionLowering.HostReference,
                 }, "F.1",
                 static (in AttentionCall c) => !(c.QkHeadDim > 0 && c.QkHeadDim <= 1024),
-                (in AttentionCall c) =>
+                static (in AttentionCall c) =>
                 {
-                    AttentionReference.FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength,
-                        t_flashKvGroup, c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, c.Logits.Sinks,
-                        c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
+                    AttentionHostReference.Run(in c);
                     return true;
                 }),
             // Causal prefill keeps 64: LLM prefill below that head dim has not been measured on cuDNN.
@@ -495,7 +477,7 @@ public sealed partial class CudaBackend
                 {
                     Tensor key = c.Key.Storage, value = c.Value.Storage;
                     bool f16Kv = key.DType == DType.F16 && value.DType == DType.F16;
-                    int kvGroup = t_flashKvGroup;
+                    int kvGroup = c.KvGroup;
                     FlashAttentionFa2(c.Output.Storage, c.Query.Storage, key, value, c.Batch, c.Heads, c.KvHeads, c.QueryTokens, c.KeyTokens,
                         c.QkHeadDim, c.Positions.KvLength, kvGroup <= 0 ? 1 : kvGroup, c.Positions.QueryOffset, c.Scale, c.Mask.LegacySlidingWindow, f16Kv);
                     return true;
@@ -507,7 +489,7 @@ public sealed partial class CudaBackend
                 static (in AttentionCall c) => true,
                 (in AttentionCall c) =>
                 {
-                    FlashAttentionDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, t_flashKvGroup,
+                    FlashAttentionDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, c.KvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, c.Logits.Sinks, c.Mask.LegacySlidingWindow, c.Logits.AlibiSlopes);
                     return true;
                 }),
@@ -535,7 +517,7 @@ public sealed partial class CudaBackend
                 },
                 (in AttentionCall c) =>
                 {
-                    FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, t_flashKvGroup,
+                    FlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength, c.KvGroup,
                         c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Logits.Softcap, sink: null, c.Mask.LegacySlidingWindow, alibiSlopes: null);
                     t_attentionRoute = AttentionRouteText.Nested("V.0/", t_attentionRoute);
                     return true;
@@ -549,7 +531,7 @@ public sealed partial class CudaBackend
                 (in AttentionCall c) =>
                 {
                     FlashAttentionDeviceDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength,
-                        t_flashKvGroup, c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Positions.DeviceHandle, c.Logits.Softcap,
+                        c.KvGroup, c.Mask.Causal, c.Positions.QueryOffset, c.Scale, c.Positions.DeviceHandle, c.Logits.Softcap,
                         c.Mask.LegacySlidingWindow);
                     return true;
                 }),

@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <c>d + rotDim/2</c>), NOT interleaved adjacent pairs. Self-attention only — Stable Audio's cross-attention
 /// never receives <c>rotary_pos_emb</c>.
 ///
-/// <para>Applied via <see cref="Core.Backends.IBackend.ApplyRopeSingle"/> (GPU-resident on CUDA) rather than a
+/// <para>Applied via <c>RotaryCall.TokenMajor</c> (GPU-resident on CUDA) rather than a
 /// host loop — that op expects the pre-multi-head-permute <c>[B, L, H, D]</c> layout and a cos/sin table
 /// <b>duplicated</b> across the rotated half (<c>table[pos, i] == table[pos, i + half]</c> for
 /// <c>i in [0, half)</c>), which is what <see cref="BuildCosTable"/> below produces. The rows come from
@@ -18,10 +18,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// are zero, as before.</para></summary>
 public static unsafe class StableAudioRope
 {
-    /// <summary>Builds <c>[1, seqLen, headDim]</c> cos/sin tables for <see cref="Core.Backends.IBackend.ApplyRopeSingle"/>
+    /// <summary>Builds <c>[1, seqLen, headDim]</c> cos/sin tables for <c>RotaryCall.TokenMajor</c>
     /// from the checkpoint's <c>inv_freq</c> (loaded, not recomputed from theta — Stable Audio ships it verbatim as
     /// <c>transformer.rotary_pos_emb.inv_freq</c>). Only the leading <c>2 * invFreq.Length</c> channels are filled
-    /// (duplicated across the two halves, per <c>ApplyRopeSingle</c>'s expected layout); the trailing
+    /// (duplicated across the two halves, per <c>the rotate-half rotary (RotaryCall.TokenMajor)</c>'s expected layout); the trailing
     /// <c>[rotDim, headDim)</c> channels are left zero and are never read (partial rotary passthrough). Position 0
     /// is the prepended global token (rotation is identity there since angle = 0·inv_freq = 0).</summary>
     public static Tensor BuildCosTable(ReadOnlySpan<float> invFreq, int seqLen, int headDim) =>

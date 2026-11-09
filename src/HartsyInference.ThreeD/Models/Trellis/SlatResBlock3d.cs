@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 
@@ -55,7 +56,7 @@ internal sealed unsafe class SlatResBlock3d
         Tensor a1 = new(h1.Shape, DType.F32); backend.Silu(a1, h1); h1.Dispose();
         SparseTensor hc = SparseOps.SubmanifoldConv3dSparse(backend, x.Replace(a1), _c1Slices, _c1B); a1.Dispose();   // → [.,outCh]
 
-        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.LayerNormModulate(h2, SparseOps.As3D(hc.Feats), scale, shift, 1e-6f);
+        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.NormModulate(NormModulateCall.Rows(h2, SparseOps.As3D(hc.Feats), NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(SparseOps.As3D(hc.Feats), scale, shift, ScaleMode.OnePlus)));
         Tensor a2 = new(h2.Shape, DType.F32); backend.Silu(a2, h2); h2.Dispose();
         SparseTensor conv2 = SparseOps.SubmanifoldConv3dSparse(backend, hc.Replace(a2), _c2Slices, _c2B); a2.Dispose();
         scale.Dispose(); shift.Dispose();
