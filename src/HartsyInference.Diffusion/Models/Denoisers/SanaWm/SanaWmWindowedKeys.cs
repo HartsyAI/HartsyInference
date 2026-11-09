@@ -9,7 +9,6 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// tensors, borrowed; otherwise they are joined copies this scope owns.</summary>
 internal readonly struct SanaWmWindowedKeys : IDisposable
 {
-    private const int TokenAxis = 2;
     private const int KeyStream = 0, ValueStream = 1;
 
     private readonly bool _owned;
@@ -27,21 +26,29 @@ internal readonly struct SanaWmWindowedKeys : IDisposable
     /// <summary>Head-major values, shaped like <see cref="Keys"/>.</summary>
     public Tensor Values { get; }
 
-    /// <summary>Joins <paramref name="window"/>'s committed keys and values in front of the chunk's.</summary>
+    /// <summary>Joins <paramref name="window"/>'s committed keys and values in front of the chunk's, one concatenation each.</summary>
     public static SanaWmWindowedKeys Join(IBackend backend, RollingTokenWindow? window, Tensor keys, Tensor values)
     {
-        if (window?.Joined(KeyStream) is not Tensor earlierKeys || window.Joined(ValueStream) is not Tensor earlierValues)
+        if (window is null || window.IsEmpty)
             return new SanaWmWindowedKeys(keys, values, owned: false);
-        Tensor joinedKeys = StreamingTensors.Concat(backend, [earlierKeys, keys], TokenAxis);
+        Tensor joinedKeys = Joined(backend, window, KeyStream, keys);
         try
         {
-            return new SanaWmWindowedKeys(joinedKeys, StreamingTensors.Concat(backend, [earlierValues, values], TokenAxis), owned: true);
+            return new SanaWmWindowedKeys(joinedKeys, Joined(backend, window, ValueStream, values), owned: true);
         }
         catch
         {
             joinedKeys.Dispose();
             throw;
         }
+    }
+
+    private static Tensor Joined(IBackend backend, RollingTokenWindow window, int stream, Tensor chunk)
+    {
+        Tensor[] parts = new Tensor[window.PartCount + 1];
+        int count = window.CopyParts(stream, parts);
+        parts[count] = chunk;
+        return StreamingTensors.Concat(backend, parts, window.TokenAxis);
     }
 
     /// <inheritdoc />

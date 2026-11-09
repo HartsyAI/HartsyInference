@@ -5,7 +5,8 @@ namespace HartsyInference.Diffusion.Streaming;
 
 /// <summary>The attention context a chunk-causal layer keeps from earlier chunks: one or more parallel token streams (keys
 /// and values, say), appended a chunk at a time and trimmed by a <see cref="TokenWindowPolicy"/> to a permanent sink plus a
-/// sliding history. <see cref="Joined"/> is the context a chunk attends to, sink first, then the history oldest first.</summary>
+/// sliding history. <see cref="CopyParts"/> lists the context a chunk attends to, sink first, then the history oldest first;
+/// the layer joins those parts with its own chunk in one concatenation, so the window never holds a second, joined copy.</summary>
 /// <remarks>Tokens run along <c>tokenAxis</c> of every stream; a chunk's token count divided by its units is the tokens of
 /// one unit (a frame). The window owns what it holds and pins it on the backend. Appending is staged: a chunk joins the
 /// window at <see cref="Commit"/>.</remarks>
@@ -17,8 +18,6 @@ public sealed class RollingTokenWindow : IStreamingState
     private readonly List<Entry> _sink = [];
     private readonly List<Entry> _history = [];
     private Entry? _staged;
-    private Tensor[]? _joined;
-    private bool _joinedBorrowed;
     private int _disposed;
 
     /// <summary>Creates an empty window of <paramref name="streams"/> parallel streams.</summary>
@@ -88,17 +87,29 @@ public sealed class RollingTokenWindow : IStreamingState
         _staged = new Entry(owned, units);
     }
 
-    /// <summary>Stream <paramref name="stream"/> of the committed window joined along the token axis, or null while the window
-    /// is empty. Borrowed: valid until the next commit or reset.</summary>
-    public Tensor? Joined(int stream)
+    /// <summary>Committed chunks in the window, sink and history together: the parts <see cref="CopyParts"/> writes.</summary>
+    public int PartCount => _sink.Count + _history.Count;
+
+    /// <summary>The axis tokens run along in every stream.</summary>
+    public int TokenAxis => _tokenAxis;
+
+    /// <summary>Writes stream <paramref name="stream"/> of every committed chunk into <paramref name="destination"/>, sink first,
+    /// then the history oldest first, and returns how many were written. The tensors are borrowed: valid until the next commit
+    /// or reset.</summary>
+    public int CopyParts(int stream, Span<Tensor> destination)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (stream < 0 || stream >= Streams)
             throw new ArgumentOutOfRangeException(nameof(stream), stream, $"The window holds {Streams} streams.");
-        if (IsEmpty)
-            return null;
-        _joined ??= BuildJoined();
-        return _joined[stream];
+        if (destination.Length < PartCount)
+            throw new ArgumentException($"The window holds {PartCount} chunks; the destination has room for {destination.Length}.",
+                nameof(destination));
+        int at = 0;
+        foreach (Entry entry in _sink)
+            destination[at++] = entry.Streams[stream];
+        foreach (Entry entry in _history)
+            destination[at++] = entry.Streams[stream];
+        return at;
     }
 
     /// <inheritdoc />
@@ -107,7 +118,6 @@ public sealed class RollingTokenWindow : IStreamingState
         if (_staged is not Entry staged)
             return;
         _staged = null;
-        ReleaseJoined();
         if (_sink.Count < _policy.SinkChunks)
         {
             _sink.Add(staged);
@@ -131,7 +141,6 @@ public sealed class RollingTokenWindow : IStreamingState
     public void Reset()
     {
         Discard();
-        ReleaseJoined();
         foreach (Entry entry in _sink)
             Release(entry);
         foreach (Entry entry in _history)
@@ -198,58 +207,6 @@ public sealed class RollingTokenWindow : IStreamingState
     {
         Release(_history[0]);
         _history.RemoveAt(0);
-    }
-
-    // A window of one chunk is that chunk's own tensors; anything longer is a joined copy the window owns.
-    private Tensor[] BuildJoined()
-    {
-        int entries = _sink.Count + _history.Count;
-        if (entries == 1)
-        {
-            _joinedBorrowed = true;
-            return _sink.Count == 1 ? _sink[0].Streams : _history[0].Streams;
-        }
-
-        _joinedBorrowed = false;
-        Tensor[] joined = new Tensor[Streams];
-        Tensor[] parts = new Tensor[entries];
-        try
-        {
-            for (int s = 0; s < Streams; s++)
-            {
-                int at = 0;
-                foreach (Entry entry in _sink)
-                    parts[at++] = entry.Streams[s];
-                foreach (Entry entry in _history)
-                    parts[at++] = entry.Streams[s];
-                joined[s] = StreamingTensors.Concat(_backend, parts, _tokenAxis);
-                _backend.PinActivation(joined[s]);
-            }
-
-            return joined;
-        }
-        catch
-        {
-            foreach (Tensor? tensor in joined)
-                tensor?.Dispose();
-            throw;
-        }
-    }
-
-    private void ReleaseJoined()
-    {
-        if (_joined is null)
-            return;
-        if (!_joinedBorrowed)
-        {
-            foreach (Tensor tensor in _joined)
-            {
-                _backend.UnpinActivation(tensor);
-                tensor.Dispose();
-            }
-        }
-
-        _joined = null;
     }
 
     private void Release(Entry entry)
