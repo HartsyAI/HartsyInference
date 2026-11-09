@@ -19,10 +19,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["s2c.norm1.weight"] = Fill(1f, 8),
             ["s2c.norm1.bias"] = Zeros(8),
-            ["s2c.conv1.conv.weight"] = Zeros(2, 3, 3, 3, 8),
-            ["s2c.conv1.conv.bias"] = Zeros(2),
-            ["s2c.conv2.conv.weight"] = Zeros(16, 3, 3, 3, 16),
-            ["s2c.conv2.conv.bias"] = Fill(0.5f, 16),
+            ["s2c.conv1.weight"] = Zeros(2, 3, 3, 3, 8),
+            ["s2c.conv1.bias"] = Zeros(2),
+            ["s2c.conv2.weight"] = Zeros(16, 3, 3, 3, 16),
+            ["s2c.conv2.bias"] = Fill(0.5f, 16),
         };
         using ShapeVaeSpatialToChannelBlock block = new(w, "s2c", 8, 16);
         SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanSpatialToChannel(coords, 4, 2);
@@ -53,10 +53,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["c2s.norm1.weight"] = Fill(1f, 16),
             ["c2s.norm1.bias"] = Zeros(16),
-            ["c2s.conv1.conv.weight"] = Zeros(64, 3, 3, 3, 16),
-            ["c2s.conv1.conv.bias"] = Zeros(64),
-            ["c2s.conv2.conv.weight"] = Zeros(8, 3, 3, 3, 8),
-            ["c2s.conv2.conv.bias"] = Fill(0.5f, 8),
+            ["c2s.conv1.weight"] = Zeros(64, 3, 3, 3, 16),
+            ["c2s.conv1.bias"] = Zeros(64),
+            ["c2s.conv2.weight"] = Zeros(8, 3, 3, 3, 8),
+            ["c2s.conv2.bias"] = Fill(0.5f, 8),
             ["c2s.to_subdiv.weight"] = Zeros(8, 16),
             ["c2s.to_subdiv.bias"] = Values(subdivBias, 8),
         };
@@ -114,10 +114,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["c2s.norm1.weight"] = Fill(1f, 16),
             ["c2s.norm1.bias"] = Zeros(16),
-            ["c2s.conv1.conv.weight"] = Zeros(64, 3, 3, 3, 16),
-            ["c2s.conv1.conv.bias"] = Zeros(64),
-            ["c2s.conv2.conv.weight"] = Zeros(8, 3, 3, 3, 8),
-            ["c2s.conv2.conv.bias"] = Fill(0.5f, 8),
+            ["c2s.conv1.weight"] = Zeros(64, 3, 3, 3, 16),
+            ["c2s.conv1.bias"] = Zeros(64),
+            ["c2s.conv2.weight"] = Zeros(8, 3, 3, 3, 8),
+            ["c2s.conv2.bias"] = Fill(0.5f, 8),
             ["c2s.to_subdiv.weight"] = Zeros(8, 16),
             ["c2s.to_subdiv.bias"] = Fill(-1f, 8),
         };
