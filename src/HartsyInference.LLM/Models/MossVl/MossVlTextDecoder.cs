@@ -17,6 +17,7 @@ public sealed class MossVlTextDecoder : IDisposable
     private const string SeparatorKey = "model.separator_token";
     private const string LmHeadKey = "lm_head.weight";
 
+    private readonly GenericTransformer _model;
     private readonly IDisposable _weightOwner;
     private readonly List<Tensor> _converted;
     private readonly Tensor _separator;
@@ -26,7 +27,7 @@ public sealed class MossVlTextDecoder : IDisposable
         List<Tensor> converted)
     {
         TextConfig = text;
-        Model = model;
+        _model = model;
         _separator = separator;
         _weightOwner = weightOwner;
         _converted = converted;
@@ -37,7 +38,15 @@ public sealed class MossVlTextDecoder : IDisposable
 
     /// <summary>The text model: embedding, decoder layers, final norm and <c>lm_head</c>. Drive it with <see cref="GenericTransformer.ForwardEmbeds"/>
     /// and <see cref="GenericTransformer.ProjectLogits"/>.</summary>
-    public GenericTransformer Model { get; }
+    /// <exception cref="ObjectDisposedException">The decoder is disposed.</exception>
+    public GenericTransformer Model
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return _model;
+        }
+    }
 
     /// <summary>Opens the text model of a MOSS-VL safetensors checkpoint directory.</summary>
     /// <param name="checkpointDirectory">A directory holding <c>config.json</c> and the safetensors shards.</param>
@@ -46,6 +55,7 @@ public sealed class MossVlTextDecoder : IDisposable
     /// <exception cref="InvalidDataException">The checkpoint lacks the text embedding, <c>lm_head</c> or separator.</exception>
     public static MossVlTextDecoder Open(string checkpointDirectory, MossVlConfig config, int? layerLimit = null)
     {
+        ValidateLayerLimit(config, layerLimit);   // before any shard is mapped, so a bad limit leaks nothing
         CheckpointSource source = CheckpointSource.OpenShards(HfCheckpointDirectory.WeightFiles(checkpointDirectory));
         return Build(source.Weights, source, config, layerLimit, ggufLayout: false, keepQuantized: false, lowVramQuant: false,
             checkpointDirectory);
@@ -94,7 +104,7 @@ public sealed class MossVlTextDecoder : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        Model.Dispose();
+        _model.Dispose();
         foreach (Tensor t in _converted) t.Dispose();
         _weightOwner.Dispose();
     }
@@ -104,9 +114,8 @@ public sealed class MossVlTextDecoder : IDisposable
     private static MossVlTextDecoder Build(IReadOnlyDictionary<string, Tensor> weights, IDisposable weightOwner, MossVlConfig config,
         int? layerLimit, bool ggufLayout, bool keepQuantized, bool lowVramQuant, string origin)
     {
+        ValidateLayerLimit(config, layerLimit);
         int layers = layerLimit ?? config.Text.NumLayers;
-        if (layers < 1 || layers > config.Text.NumLayers)
-            throw new ArgumentOutOfRangeException(nameof(layerLimit), layerLimit, $"Layer limit must be in [1, {config.Text.NumLayers}].");
         TransformerConfig text = layers == config.Text.NumLayers
             ? config.Text
             : config.Text with { NumLayers = layers, CrossAttnLayers = config.Text.CrossAttnLayers.Where(i => i < layers).ToHashSet() };
@@ -146,6 +155,12 @@ public sealed class MossVlTextDecoder : IDisposable
             weightOwner.Dispose();
             throw;
         }
+    }
+
+    private static void ValidateLayerLimit(MossVlConfig config, int? layerLimit)
+    {
+        if (layerLimit is { } limit && (limit < 1 || limit > config.Text.NumLayers))
+            throw new ArgumentOutOfRangeException(nameof(layerLimit), layerLimit, $"Layer limit must be in [1, {config.Text.NumLayers}].");
     }
 
     /// <summary>True for a <c>model.language_model.layers.N.(self_attn|cross_attn|mlp).*.weight</c> key.</summary>

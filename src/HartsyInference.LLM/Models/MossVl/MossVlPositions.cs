@@ -121,20 +121,21 @@ public static class MossVlPositions
         return MRopeTable.BuildTensors(plan.Vision, plan.VisionLength, 0, plan.VisionLength, invFreq, scaling, pairAxes, headDim, headDim);
     }
 
-    /// <summary>The rotary tables of one decode step: the step's text row and row mask are built fresh, and the image's vision tables
-    /// are borrowed (the caller keeps them alive and disposes them). Positions match <see cref="BuildRope(MossVlPositionPlan, MossVlConfig)"/>.</summary>
-    public static MossVlRope BuildDecodeRope(MossVlPositionPlan step, MossVlConfig config, Tensor visionCos, Tensor visionSin)
+    /// <summary>The rotary tables for the text rows of <paramref name="plan"/> (the whole prompt, or one decode step) over the image's vision
+    /// tables. The text tables and row mask are built fresh; the vision tables are borrowed, so the caller keeps them alive and disposes
+    /// them. Text positions match <see cref="BuildRope(MossVlPositionPlan, MossVlConfig)"/>.</summary>
+    public static MossVlRope BuildRopeOverVisionTables(MossVlPositionPlan plan, MossVlConfig config, Tensor visionCos, Tensor visionSin)
     {
-        int headDim = config.Text.HeadDim, hidden = config.Text.HiddenSize, t = step.Text.Length / 3;
+        int headDim = config.Text.HeadDim, hidden = config.Text.HiddenSize, t = plan.Text.Length / 3;
         int maxPosition = 0;
-        foreach (int p in step.Text) maxPosition = Math.Max(maxPosition, p);
+        foreach (int p in plan.Text) maxPosition = Math.Max(maxPosition, p);
         (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(headDim, config.Text.RopeTheta, null, maxPosition + 1);
         byte[] pairAxes = MRopePairAxes.Build([.. config.MropeSection], headDim / 2,
             config.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
-        (Tensor textCos, Tensor textSin) = MRopeTable.BuildTensors(step.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
+        (Tensor textCos, Tensor textSin) = MRopeTable.BuildTensors(plan.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
         try
         {
-            Tensor? rowMask = step.RowMask is null ? null : BuildRowMask(step.RowMask, t, hidden);
+            Tensor? rowMask = plan.RowMask is null ? null : BuildRowMask(plan.RowMask, t, hidden);
             return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask), ownsVision: false);
         }
         catch

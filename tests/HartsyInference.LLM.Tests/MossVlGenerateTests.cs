@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Models.MossVl;
+using HartsyInference.LLM.Sampling;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vulkan;
 
@@ -18,6 +19,7 @@ public sealed class MossVlGenerateTests
     private const string VisionVariable = "HARTSY_MOSS_VL_REF";
     private const string GgufVariable = "HARTSY_MOSS_VL_GGUF";
     private const string BackendVariable = "HARTSY_MOSS_VL_BACKEND";
+    private const string GreedyVariable = "HARTSY_MOSS_VL_GREEDY";
     private const int MergedHeight = 8, MergedWidth = 12;
     private const string Question = "Describe the image.";
 
@@ -44,9 +46,12 @@ public sealed class MossVlGenerateTests
             keepQuantized: true, lowVramQuant: cuda);
         MossVlGenerator generator = new(decoder, config, tokenizer, backend);
 
-        string reply = generator.Generate(Question, merged, MergedHeight, MergedWidth, maxTokens: 48);
+        // HARTSY_MOSS_VL_GREEDY=1 decodes by argmax, so two backends with the same math must print the same reply.
+        bool greedy = Environment.GetEnvironmentVariable(GreedyVariable) == "1";
+        string reply = generator.Generate(Question, merged, MergedHeight, MergedWidth, maxTokens: 48,
+            sampling: greedy ? SamplingOptions.GreedyPreset : null);
 
-        Console.WriteLine($"MOSS-VL GGUF generation ({backendName}, {config.Text.NumLayers} layers, packed quant weights): question=\"{Question}\"");
+        Console.WriteLine($"MOSS-VL GGUF generation ({backendName}, {(greedy ? "greedy" : "sampled")}, {config.Text.NumLayers} layers, packed quant weights): question=\"{Question}\"");
         Console.WriteLine($"REPLY: {reply}");
         Assert.False(string.IsNullOrWhiteSpace(reply));
     }

@@ -462,7 +462,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
         int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default,
-        Action<int, Tensor>? layerTap = null, MultimodalRope? rope = null)
+        Action<int, Tensor>? layerTap = null, MultimodalRope? rope = null, Multimodal.CrossKvCache? crossKv = null)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -507,10 +507,26 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         else
         {
             if (_cfg.Mla is not null) throw new NotSupportedException("MultimodalRope is not supported with MLA.");
-            resident = new MultimodalRope(
-                MakeResident(backend, rope.TextCos), MakeResident(backend, rope.TextSin),
-                MakeResident(backend, rope.VisionCos), MakeResident(backend, rope.VisionSin),
-                rope.RowMask is null ? null : MakeResident(backend, rope.RowMask));
+            // Each copy is released if a later one fails; once the record exists the finally below owns them.
+            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+            try
+            {
+                textCos = MakeResident(backend, rope.TextCos);
+                textSin = MakeResident(backend, rope.TextSin);
+                visionCos = MakeResident(backend, rope.VisionCos);
+                visionSin = MakeResident(backend, rope.VisionSin);
+                rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
+                resident = new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask);
+            }
+            catch
+            {
+                textCos?.Dispose();
+                textSin?.Dispose();
+                visionCos?.Dispose();
+                visionSin?.Dispose();
+                rowMask?.Dispose();
+                throw;
+            }
             cos = resident.TextCos;
             sin = resident.TextSin;
         }
@@ -582,7 +598,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     // mllama: cross-attend the vision features. With no image present the layer is skipped (HF masks
                     // it out), so the hidden state passes through unchanged.
-                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen, resident)
+                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen, resident, crossKv, i)
                         : CopyHidden(backend, hidden);
                 }
                 else
@@ -1694,8 +1710,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         }
 
         /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features instead of the causal text K/V; used at the cross-attention layer indices, where the self-attention <see cref="Forward"/> path is bypassed.</summary>
-        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen, MultimodalRope? rope = null)
-            => _crossAttn!.Forward(backend, hidden, t, vision, visionLen, rope);
+        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen, MultimodalRope? rope = null,
+            Multimodal.CrossKvCache? kvCache = null, int layer = 0)
+            => _crossAttn!.Forward(backend, hidden, t, vision, visionLen, rope, kvCache, layer);
 
         /// <summary>Pre-sublayer norm: for pre-norm models (Llama/Qwen/Gemma) normalizes <paramref name="inp"/> into <paramref name="outp"/>; for post-norm models (OLMo-2) the sublayer reads the raw residual, so this copies through unchanged (the norm applies to the sublayer <i>output</i> instead, via PostSublayer).</summary>
         private void PreSublayer(IBackend backend, Tensor outp, Tensor inp, Tensor? norm, Tensor? bias)
