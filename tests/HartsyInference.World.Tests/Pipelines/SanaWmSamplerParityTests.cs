@@ -54,6 +54,32 @@ public sealed class SanaWmSamplerParityTests
     }
 
     [SanaWmReferenceRunsFact]
+    public void GuidanceCombine_ReproducesTheRecordedGuidedPredictionAtSteps0And1And59()
+    {
+        string run = SanaWmReferenceRunsFactAttribute.Run("A_demo_pose");
+        using SafeTensorsLoader sampler = Load(Path.Combine(run, "sampler.safetensors"));
+        foreach (int step in new[] { 0, 1, 59 })
+        {
+            float[] output = Floats(sampler.GetTensor($"dit_out_raw_step{step}"));
+            float[] recorded = Floats(sampler.GetTensor($"cfg_noise_step{step}"));
+            int half = output.Length / 2;
+            float[] guided = output[..half];
+
+            SanaWmPipeline.CombineGuidance(guided, output[half..], 5.0);
+
+            // The dump holds the guided prediction before the sampler negates it for scheduler.step.
+            int mismatched = 0;
+            for (int i = 0; i < recorded.Length; i++)
+            {
+                if (BitConverter.SingleToInt32Bits(guided[i]) != BitConverter.SingleToInt32Bits(recorded[i]))
+                    mismatched++;
+            }
+            _output.WriteLine($"cfg_noise_step{step}: {mismatched} of {recorded.Length} values differ");
+            Assert.Equal(0, mismatched);
+        }
+    }
+
+    [SanaWmReferenceRunsFact]
     public void SeedImagePreprocessing_MatchesThePilLanczosReference()
     {
         string run = SanaWmReferenceRunsFactAttribute.Run("A_demo_pose");
