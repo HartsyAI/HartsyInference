@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -43,8 +44,8 @@ internal sealed class DeepSeekV41DSparkAttention
         if (tokens > _rope.Length) throw new ArgumentOutOfRangeException(nameof(tokens), "The rope table does not reach these positions.");
 
         float[] kv = _w.Wkv.Linear(mainX, tokens, dim, hd);
-        DeepSeekV41HostMath.RmsNormRows(kv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], Range(0, tokens), hd - _settings.RopeDim, inverse: false);
+        HostMath.RmsNormRows(kv, _w.KvNorm, hd, _settings.NormEps);
+        PartialRotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], HostOps.Range(0, tokens), inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(kv, hd);
         for (int p = Math.Max(0, tokens - win); p < tokens; p++)
             kv.AsSpan(p * hd, hd).CopyTo(state.Window.AsSpan((p % win) * hd, hd));
@@ -63,20 +64,20 @@ internal sealed class DeepSeekV41DSparkAttention
 
         // the current target latent enters the window first, so the block sees the position it continues from
         float[] mainKv = _w.Wkv.Linear(mainX, 1, dim, hd);
-        DeepSeekV41HostMath.RmsNormRows(mainKv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, mainKv, [1, 1, hd], [startPos], hd - rd, inverse: false);
+        HostMath.RmsNormRows(mainKv, _w.KvNorm, hd, _settings.NormEps);
+        PartialRotary.Rotate(_backend, _rope, rd, mainKv, [1, 1, hd], [startPos], inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(mainKv, hd);
         mainKv.CopyTo(state.Window.AsSpan((startPos % win) * hd, hd));
 
-        int[] positions = Range(startPos + 1, block);
+        int[] positions = HostOps.Range(startPos + 1, block);
         float[] qr = _w.WqA.Linear(x, block, dim, _settings.QLoraRank);
-        DeepSeekV41HostMath.RmsNormRows(qr, _w.QNorm, _settings.QLoraRank, _settings.NormEps);
+        HostMath.RmsNormRows(qr, _w.QNorm, _settings.QLoraRank, _settings.NormEps);
         float[] q = _w.WqB.Linear(qr, block, _settings.QLoraRank, heads * hd);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, q, [1, block, heads, hd], positions, hd - rd, inverse: false);
+        PartialRotary.Rotate(_backend, _rope, rd, q, [1, block, heads, hd], positions, inverse: false);
 
         float[] blockKv = _w.Wkv.Linear(x, block, dim, hd);
-        DeepSeekV41HostMath.RmsNormRows(blockKv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, blockKv, [1, block, hd], positions, hd - rd, inverse: false);
+        HostMath.RmsNormRows(blockKv, _w.KvNorm, hd, _settings.NormEps);
+        PartialRotary.Rotate(_backend, _rope, rd, blockKv, [1, block, hd], positions, inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(blockKv, hd);
 
         // the window ring, then the block's latents, as upstream concatenates them; indices are the same for every query of the block
@@ -91,32 +92,20 @@ internal sealed class DeepSeekV41DSparkAttention
             for (int j = 0; j < block; j++) indices[b * k + visible + j] = win + j;
         }
 
-        using Tensor query = DeepSeekV41HostMath.Tensor(q, block, heads, hd);
+        using Tensor query = HostMath.Tensor(q, block, heads, hd);
         using Tensor output = new(new TensorShape(block, heads, hd), DType.F32);
-        using Tensor windowCodes = DeepSeekV41HostMath.Tensor(rows, win + block, hd);
-        using Tensor indexT = DeepSeekV41HostMath.Tensor(indices, block, k);
-        using Tensor sink = DeepSeekV41HostMath.Tensor(_w.Sink, heads);
+        using Tensor windowCodes = HostMath.Tensor(rows, win + block, hd);
+        using Tensor indexT = HostMath.Tensor(indices, block, k);
+        using Tensor sink = HostMath.Tensor(_w.Sink, heads);
         LatentSource window = new(LatentEncoding.F32, windowCodes, null, win + block, hd);
         _backend.SparseLatentAttention(output, query, window, LatentSource.Empty, indexT, win + block, sink, 1f / MathF.Sqrt(hd));
 
         float[] o = output.AsReadOnlySpan<float>().ToArray();
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, o, [1, block, heads, hd], positions, hd - rd, inverse: true);
+        PartialRotary.Rotate(_backend, _rope, rd, o, [1, block, heads, hd], positions, inverse: true);
         float[] grouped = new float[block * _settings.OGroups * _settings.OLoraRank];
         DeepSeekV41GroupedProjection.Apply(o, _w.WoA, block, _settings.OGroups, _settings.OLoraRank, _settings.GroupDim, grouped);
         _w.WoB.Linear(grouped, block, _settings.OGroups * _settings.OLoraRank, dim).CopyTo(y);
     }
 
-    private void RoundTrip(float[] data, int width)
-    {
-        using Tensor t = DeepSeekV41HostMath.Tensor(data, data.Length / width, width);
-        _backend.ActQuantDequantInPlace(t, LatentEncoding.Fp8E4M3Ue8m0x32);
-        t.AsReadOnlySpan<float>().CopyTo(data);
-    }
-
-    private static int[] Range(int start, int count)
-    {
-        int[] r = new int[count];
-        for (int i = 0; i < count; i++) r[i] = start + i;
-        return r;
-    }
+    private void RoundTrip(float[] data, int width) => HostOps.RoundTrip(_backend, data, width, LatentEncoding.Fp8E4M3Ue8m0x32);
 }

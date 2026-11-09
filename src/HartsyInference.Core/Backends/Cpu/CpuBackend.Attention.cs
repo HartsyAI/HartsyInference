@@ -24,10 +24,10 @@ public sealed partial class CpuBackend
 
     /// <inheritdoc />
     public void HcSplitSinkhorn(Tensor pre, Tensor post, Tensor comb, Tensor mixes, Tensor scale, Tensor bias, int hc,
-        int iters, float eps)
+        int iters, float eps, float preEps, float postMult)
     {
         ThrowIfDisposed();
-        HcReference.SplitSinkhorn(pre, post, comb, mixes, scale, bias, hc, iters, eps);
+        HcReference.SplitSinkhorn(pre, post, comb, mixes, scale, bias, hc, iters, eps, preEps, postMult);
     }
 
     /// <inheritdoc />
@@ -58,4 +58,10 @@ public sealed partial class CpuBackend
         WindowIndicesReference.Apply(indices, windowSize, seqLen, startPos);
     }
 
+    /// <inheritdoc />
+    public void Hadamard(Tensor output, Tensor input, float scale)
+    {
+        ThrowIfDisposed();
+        HadamardReference.Apply(output, input, scale);
+    }
 }

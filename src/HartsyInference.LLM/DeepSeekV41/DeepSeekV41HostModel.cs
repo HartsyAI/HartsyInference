@@ -1,4 +1,5 @@
 using HartsyInference.LLM.DeepSeekV41.Engram;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -179,7 +180,7 @@ public sealed class DeepSeekV41HostModel
         }
 
         _blocks[^1].Collapse(stream, preMix, tokens, hidden);
-        DeepSeekV41HostMath.RmsNormRows(hidden, _finalNorm, _dim, _normEps);
+        HostMath.RmsNormRows(hidden, _finalNorm, _dim, _normEps);
         state.Length += tokens;
     }
 }

@@ -15,6 +15,9 @@ public static class DualGridVoxelizer
     // Eigen skips a Householder reflection when the tail norm is at or below the smallest normal float.
     private const float HouseholderTailTolerance = 1.17549435E-38f;
 
+    // Eigen recomputes a column norm directly once its downdated estimate falls below sqrt(epsilon).
+    private const float NormDowndateThreshold = 3.4526698E-4f;
+
     private const double DegenerateSegmentLength = 1e-6;
 
     /// <summary>Voxelizes a triangle mesh over the grid <c>[gridMin, gridMax)</c> with voxel edge lengths <paramref name="voxelSize"/>.</summary>
@@ -579,12 +582,10 @@ public static class DualGridVoxelizer
         return new Vector3(x[0], x[1], x[2]);
     }
 
-    // Solves a small square system with column-pivoted Householder QR in single precision, as Eigen's
-    // colPivHouseholderQr does for the reference. Pivot k counts as zero when its remaining column norm² is below
-    // (maxColNorm0·eps)²/n·(n−k), Eigen 3.4's nonzeroPivots() rule, and the solve uses only the leading nonzero
-    // pivots, returning the basic solution (free unknowns set to zero). Gaussian elimination divides by those zero pivots and yields
-    // inf/NaN, so it cannot stand in here: axis-aligned faces produce rank-1 QEFs in exactly this situation.
-    // Rounding order is not Eigen's vectorized order, so a borderline box test can still differ by an ulp.
+    // Column-pivoted Householder QR in single precision, as Eigen 3.4 colPivHouseholderQr: column norms are downdated
+    // between steps, and pivots under Eigen's nonzeroPivots() threshold are dropped. Only the leading nonzero pivots
+    // are solved, because Gaussian elimination would divide by zero on rank-deficient QEFs.
+    // Sum order in the reflections and back-substitution can differ from Eigen by an ulp.
     internal static void SolveColPivQr(ReadOnlySpan<float> matrix, ReadOnlySpan<float> rhs, Span<float> solution)
     {
         int n = rhs.Length;
@@ -592,26 +593,27 @@ public static class DualGridVoxelizer
         Span<float> c = stackalloc float[n];
         Span<float> tau = stackalloc float[n];
         Span<int> perm = stackalloc int[n];
+        Span<float> normDirect = stackalloc float[n];
+        Span<float> normUpdated = stackalloc float[n];
         matrix.CopyTo(qr);
         rhs.CopyTo(c);
-        for (int k = 0; k < n; k++)
-        {
-            perm[k] = k;
-        }
-
-        float maxColSq0 = 0f;
+        float maxNorm = 0f;
         for (int j = 0; j < n; j++)
         {
+            perm[j] = j;
             float colSq = 0f;
             for (int r = 0; r < n; r++)
             {
                 colSq += qr[r * n + j] * qr[r * n + j];
             }
 
-            maxColSq0 = MathF.Max(maxColSq0, colSq);
+            normDirect[j] = MathF.Sqrt(colSq);
+            normUpdated[j] = normDirect[j];
+            maxNorm = MathF.Max(maxNorm, normDirect[j]);
         }
 
-        float thresholdHelper = maxColSq0 * FloatEpsilon * FloatEpsilon / n;
+        float scaledMax = maxNorm * FloatEpsilon;
+        float thresholdHelper = scaledMax * scaledMax / n;
         int nonzero = n;
 
         for (int k = 0; k < n; k++)
@@ -620,21 +622,16 @@ public static class DualGridVoxelizer
             float bestNorm = -1f;
             for (int j = k; j < n; j++)
             {
-                float norm = 0f;
-                for (int r = k; r < n; r++)
+                if (normUpdated[j] > bestNorm)
                 {
-                    norm += qr[r * n + j] * qr[r * n + j];
-                }
-
-                if (norm > bestNorm)
-                {
-                    bestNorm = norm;
+                    bestNorm = normUpdated[j];
                     pivot = j;
                 }
             }
 
-            // `<=` rather than Eigen's `<` so an all-zero matrix (threshold 0, norm 0) counts as rank 0.
-            if (nonzero == n && bestNorm <= thresholdHelper * (n - k))
+            // `<=` rather than Eigen's `<` so an all-zero matrix (threshold 0, norm 0) counts as rank 0 instead of
+            // dividing by zero.
+            if (nonzero == n && bestNorm * bestNorm <= thresholdHelper * (n - k))
             {
                 nonzero = k;
             }
@@ -647,6 +644,8 @@ public static class DualGridVoxelizer
                 }
 
                 (perm[k], perm[pivot]) = (perm[pivot], perm[k]);
+                (normUpdated[k], normUpdated[pivot]) = (normUpdated[pivot], normUpdated[k]);
+                (normDirect[k], normDirect[pivot]) = (normDirect[pivot], normDirect[k]);
             }
 
             float head = qr[k * n + k];
@@ -656,42 +655,68 @@ public static class DualGridVoxelizer
                 tailSq += qr[r * n + k] * qr[r * n + k];
             }
 
-            if (tailSq <= HouseholderTailTolerance)
+            tau[k] = 0f;
+            if (tailSq > HouseholderTailTolerance)
             {
-                tau[k] = 0f;
-                continue;
+                float beta = MathF.Sqrt(head * head + tailSq);
+                if (head >= 0f)
+                {
+                    beta = -beta;
+                }
+
+                float scale = head - beta;
+                for (int r = k + 1; r < n; r++)
+                {
+                    qr[r * n + k] /= scale;
+                }
+
+                tau[k] = (beta - head) / beta;
+                for (int j = k + 1; j < n; j++)
+                {
+                    float w = qr[k * n + j];
+                    for (int r = k + 1; r < n; r++)
+                    {
+                        w += qr[r * n + k] * qr[r * n + j];
+                    }
+
+                    float tw = tau[k] * w;
+                    qr[k * n + j] -= tw;
+                    for (int r = k + 1; r < n; r++)
+                    {
+                        qr[r * n + j] -= w * (tau[k] * qr[r * n + k]);
+                    }
+                }
+
+                qr[k * n + k] = beta;
             }
 
-            float beta = MathF.Sqrt(head * head + tailSq);
-            if (head >= 0f)
-            {
-                beta = -beta;
-            }
-
-            float scale = head - beta;
-            for (int r = k + 1; r < n; r++)
-            {
-                qr[r * n + k] /= scale;
-            }
-
-            tau[k] = (beta - head) / beta;
+            // Runs after skipped reflections too, as in Eigen.
             for (int j = k + 1; j < n; j++)
             {
-                float w = qr[k * n + j];
-                for (int r = k + 1; r < n; r++)
+                if (normUpdated[j] == 0f)
                 {
-                    w += qr[r * n + k] * qr[r * n + j];
+                    continue;
                 }
 
-                float tw = tau[k] * w;
-                qr[k * n + j] -= tw;
-                for (int r = k + 1; r < n; r++)
+                float t = MathF.Abs(qr[k * n + j]) / normUpdated[j];
+                t = MathF.Max(0f, (1f + t) * (1f - t));
+                float ratio = normUpdated[j] / normDirect[j];
+                if (t * (ratio * ratio) <= NormDowndateThreshold)
                 {
-                    qr[r * n + j] -= tw * qr[r * n + k];
+                    float tailNormSq = 0f;
+                    for (int r = k + 1; r < n; r++)
+                    {
+                        tailNormSq += qr[r * n + j] * qr[r * n + j];
+                    }
+
+                    normDirect[j] = MathF.Sqrt(tailNormSq);
+                    normUpdated[j] = normDirect[j];
+                }
+                else
+                {
+                    normUpdated[j] *= MathF.Sqrt(t);
                 }
             }
-
-            qr[k * n + k] = beta;
         }
 
         int rank = nonzero;
@@ -714,7 +739,7 @@ public static class DualGridVoxelizer
             c[k] -= tw;
             for (int r = k + 1; r < n; r++)
             {
-                c[r] -= tw * qr[r * n + k];
+                c[r] -= w * (tau[k] * qr[r * n + k]);
             }
         }
 

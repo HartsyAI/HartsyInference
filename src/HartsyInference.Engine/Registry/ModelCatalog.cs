@@ -72,6 +72,46 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>HairDeck: one character image to hair cards (with optional colours and spring-bone chains). Pinned to the Hugging Face
+    /// revision 7d2e07c5b4b22fbffa2df58d20b242db035ed69c; ModelAsset cannot name a revision, so each file's sha256 (from the repository's
+    /// MANIFEST.json) verifies the bytes. The primary asset is config.json, whose folder is the model directory. The Vision assets are
+    /// the SAM 3 and BiRefNet-matting checkpoints the preprocessing uses, with the DINOv3 encoder of the image model.
+    /// Licences: HairDeck weights Apache-2.0; SAM 3 under the SAM License (gated); DINOv3 under the DINOv3 License (Meta, custom);
+    /// BiRefNet-matting MIT (Hugging Face metadata, 2026-11-08).</summary>
+    private static CatalogEntry HairDeck() => new CatalogEntry
+    {
+        Id = "hairdeck", Modality = Modality.Mesh, DisplayName = "HairDeck (hair cards from one image)",
+        Architecture = "DINOv3 ViT-L/16 conditioning, set DiT over hair cards with a card VAE, spring-bone chain DiT",
+        Status = ModelStatus.ValidationPending, CliDrivable = true, HuggingFaceRepo = "hyz317/HairDeck",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "hyz317/HairDeck", RepoPath = "config.json", TargetSubdir = "3D/HairDeck", Role = "config",
+                Sha256 = "09e0f564364c156118e9fc1ea596a83f34f05d4d0058d18b497160bfe50ab8e8" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/image_model/model.safetensors", TargetSubdir = "3D/HairDeck/ckpt/image_model",
+                Role = "transformer", Sha256 = "7348fa7f1595a4560e836ae0db7fe2a14d2abfe7730db5665f9c976f942997be" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/color_model/model.safetensors", TargetSubdir = "3D/HairDeck/ckpt/color_model",
+                Role = "colour model", Sha256 = "47126c70c06b32fd87e5d419109fee4ba4e23363eba090e3fee00a6ccd8264cc" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/chain_model/model.safetensors", TargetSubdir = "3D/HairDeck/ckpt/chain_model",
+                Role = "chain model", Sha256 = "4d2b44ea9c9b81fb5c9973e050ffecd32b5dc13a7e47c5ca6ecf903cd83d31bf" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/card_vae/model.safetensors", TargetSubdir = "3D/HairDeck/ckpt/card_vae",
+                Role = "card VAE", Sha256 = "c19a8149ca07ea0710729475543cdc21f2bc35fbac684b21adb23671cd2c6fd8" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/card_vae/stats.json", TargetSubdir = "3D/HairDeck/ckpt/card_vae",
+                Role = "card VAE statistics", Sha256 = "a59083fbeff3151e9bbb24b029f0e520e59226adc0861706922893162dc6bd28" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "ckpt/card_vae/latent_stats_head.json", TargetSubdir = "3D/HairDeck/ckpt/card_vae",
+                Role = "latent statistics", Sha256 = "85a8470491342675c5fd2b026d060efb8c2fa1cc67a0ee2a158d5244d92f0263" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "data/token_stats_head.json", TargetSubdir = "3D/HairDeck/data",
+                Role = "token statistics", Sha256 = "c7a1babaac873afd989f25c0f2b8b2d178499df31a4b70653973be3aaab070e2" },
+            new() { Repo = "hyz317/HairDeck", RepoPath = "data/spring/chain_stats_head.json", TargetSubdir = "3D/HairDeck/data/spring",
+                Role = "chain statistics", Sha256 = "059b051ef2f3e9dd8980f95f08c3c7d067c05fcf3e705b2294beb77171f5b70b" },
+            new() { Repo = "facebook/sam3", RepoPath = "sam3.pt", TargetSubdir = "Vision/sam3", Role = "segmenter (gated)",
+                Sha256 = "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+            new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
+                Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+        },
+    };
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -691,6 +731,9 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
+            // Text / LLM — ERNIE-5.5-Flash-Base: config and catalog row only; the loader refuses it by name (Ernie5Config.RequireRunnable).
+            Ernie5Catalog.Build(),
+
             // Image / diffusion
             new CatalogEntry
             {
@@ -741,7 +784,7 @@ public static class ModelCatalog
             // OneReward: a FLUX.1 Fill [dev] fine-tune (inpaint, outpaint, object removal), so the same Fill path and the same
             // side models, plus its object-removal LoRA, applied with --lora. ComfyUI's workflow runs the fp8 file at Flux
             // guidance 30, 20 steps. Licence: CC-BY-NC-4.0 on top of FLUX.1 [dev] non-commercial. Hashes are the LFS object ids
-            // at Comfy-Org/OneReward @77a4042ca2. Not run on real weights.
+            // at Comfy-Org/OneReward @77a4042ca2.
             OneRewardFill("onereward-fill", "OneReward Fill", "flux.1-fill-dev-OneReward-transformer_bf16.safetensors",
                 "1403db15d1d182776315922334b4412ca343a26c3c0d1c77793ceda4792b20e9"),
             OneRewardFill("onereward-fill-fp8", "OneReward Fill (fp8)", "flux.1-fill-dev-OneReward-transformer_fp8.safetensors",
@@ -960,9 +1003,10 @@ public static class ModelCatalog
                 // (fixed by keeping this model's block loop at F32 — see the Forward() comment).
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "QuantStack/HunyuanImage-2.1-GGUF", RepoPath = "HunyuanImage2.1-Q4_K_M.gguf",
+                    // QuantStack's repo answers 401 without a token; calcuis's ungated Q4_K_M repack of tencent/HunyuanImage-2.1 replaces it.
+                    new() { Repo = "calcuis/hunyuanimage-gguf", RepoPath = "hunyuanimage2.1-q4_k_m.gguf",
                         TargetSubdir = "Stable-Diffusion/HunyuanImage", Role = "transformer",
-                        Sha256 = "583800deb18fa90560d15b41ca0391e79c024784117b0b0263ace02e941237e1" },
+                        Sha256 = "a7fbc97ea816f7ab78694533dfa226fc1ed046e6da2c4242e05dd39af430b6c0" },
                     SideModels.Qwen25Vl7BHunyuan,
                     SideModels.HunyuanImageVae,
                     // Run only on quoted prompt text (the glyph stream); fetched on first use when not pulled here.
@@ -2411,6 +2455,7 @@ public static class ModelCatalog
             E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
+            HairDeck(),
 
             // Interactive / world models
             E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),

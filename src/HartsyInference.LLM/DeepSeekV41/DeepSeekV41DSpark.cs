@@ -2,6 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -132,9 +134,9 @@ public sealed class DeepSeekV41DSpark
             DeepSeekV41MoeLayer ffn = new(backend, read.Matrix(f + "gate.weight", experts, dim), read.Vector(f + "gate.bias", experts), null, route,
                 new DeepSeekV41HostModelLoader.LayerExperts(cache, layer, experts), shared, (float)cfg.SwigluLimit);
 
-            DeepSeekV41HyperConnection hcAttn = new(backend, hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps, read.Matrix(l + "hc_attn_fn", mix, hc * dim),
+            HyperConnection hcAttn = new(backend, HyperConnectionConfig.DeepSeekV41(hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps), read.Matrix(l + "hc_attn_fn", mix, hc * dim),
                 read.Vector(l + "hc_attn_scale", 3), read.Vector(l + "hc_attn_base", mix));
-            DeepSeekV41HyperConnection hcFfn = new(backend, hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps, read.Matrix(l + "hc_ffn_fn", mix, hc * dim),
+            HyperConnection hcFfn = new(backend, HyperConnectionConfig.DeepSeekV41(hc, dim, cfg.HcSinkhornIters, (float)cfg.HcEps, normEps), read.Matrix(l + "hc_ffn_fn", mix, hc * dim),
                 read.Vector(l + "hc_ffn_scale", 3), read.Vector(l + "hc_ffn_base", mix));
             stages[s] = new DeepSeekV41DSparkStage(dim, hc, normEps, hcAttn, hcFfn, read.Vector(l + "attn_norm.weight", dim), read.Vector(l + "ffn_norm.weight", dim),
                 attention, ffn);
@@ -195,7 +197,7 @@ public sealed class DeepSeekV41DSpark
         float[] collapsed = new float[block * _dim];
         _stages[^1].Collapse(x, pre, block, collapsed);
         float[] normed = (float[])collapsed.Clone();
-        DeepSeekV41HostMath.RmsNormRows(normed, _finalNorm, _dim, _normEps);
+        HostMath.RmsNormRows(normed, _finalNorm, _dim, _normEps);
         float[] logits = _head.Linear(normed, block, _dim, _vocab);
 
         // greedy Markov chain: position i's logits gain the bias of the token at input i, and the argmax feeds position i+1
@@ -228,7 +230,7 @@ public sealed class DeepSeekV41DSpark
         if (tokens < 1) throw new ArgumentOutOfRangeException(nameof(tokens));
         if (mainHidden.Length != (long)tokens * _mainIn) throw new ArgumentException("mainHidden must hold tokens x 3 x Dim values.", nameof(mainHidden));
         float[] mainX = _mainProj.Linear(mainHidden, tokens, _mainIn, _dim);
-        DeepSeekV41HostMath.RmsNormRows(mainX, _mainNorm, _dim, _normEps);
+        HostMath.RmsNormRows(mainX, _mainNorm, _dim, _normEps);
         return mainX;
     }
 

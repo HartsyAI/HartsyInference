@@ -1,5 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Layers.Attention;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 
@@ -54,9 +56,55 @@ public sealed unsafe class MllamaCrossAttentionLayer
     }
 
     /// <summary>Cross-attention + gated FFN: <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query), <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features); returns <c>[1, t, hidden]</c>.</summary>
-    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen)
+    /// <param name="rope">Optional MOSS-VL tables: the query rows are rotated by <see cref="MultimodalRope.TextCos"/>, the key rows by the vision tables, and rows with a 0 <see cref="MultimodalRope.RowMask"/> contribute nothing. Null (the mllama default) applies no rotation and no row mask.</param>
+    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen, MultimodalRope? rope = null,
+        CrossKvCache? kvCache = null, int layer = 0)
     {
-        int hq = _numHeads, hkv = _numKvHeads, d = _headDim;
+        if (kvCache?.Get(layer) is { } cached) return Attend(backend, text, t, cached.K, cached.V, visionLen, rope);
+
+        (Tensor kMh, Tensor vMh) = ProjectVision(backend, vision, visionLen, rope);
+        if (kvCache is not null)
+        {
+            kvCache.Set(layer, kMh, vMh);   // the cache owns them for the rest of the request
+            return Attend(backend, text, t, kMh, vMh, visionLen, rope);
+        }
+        try
+        {
+            return Attend(backend, text, t, kMh, vMh, visionLen, rope);
+        }
+        finally
+        {
+            kMh.Dispose();
+            vMh.Dispose();
+        }
+    }
+
+    /// <summary>Projects the vision sequence to head-major keys and values: <c>k_norm(k_proj(vision))</c> rotated by the vision tables, and
+    /// <c>v_proj(vision)</c>. The caller owns both results.</summary>
+    private (Tensor K, Tensor V) ProjectVision(IBackend backend, Tensor vision, int visionLen, MultimodalRope? rope)
+    {
+        int hkv = _numKvHeads, d = _headDim;
+        Tensor k = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
+        GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: _lowVram);
+        Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
+        backend.RmsNorm(kN, k, _kNorm, _rmsEps);
+        k.Dispose();
+        if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(kN, rope.VisionCos, rope.VisionSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
+        GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
+
+        // Head-major [1, heads, seq, d] for the GQA FlashAttention.
+        Tensor kMh = new(new TensorShape(1, hkv, visionLen, d), DType.F32); backend.Permute0213(kMh, kN, visionLen, hkv, d);
+        Tensor vMh = new(new TensorShape(1, hkv, visionLen, d), DType.F32); backend.Permute0213(vMh, v, visionLen, hkv, d);
+        kN.Dispose(); v.Dispose();
+        return (kMh, vMh);
+    }
+
+    /// <summary>The query side, attention over borrowed head-major vision keys and values (bidirectional: no causal mask), and the gated
+    /// FFN. Does not dispose <paramref name="kMh"/> or <paramref name="vMh"/>.</summary>
+    private Tensor Attend(IBackend backend, Tensor text, int t, Tensor kMh, Tensor vMh, int visionLen, MultimodalRope? rope)
+    {
+        int hq = _numHeads, d = _headDim;
         TensorShape flat = new(1, t, _hidden);
 
         // --- Cross attention ---
@@ -69,27 +117,17 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor qN = new(new TensorShape(1, t, hq, d), DType.F32);
         backend.RmsNorm(qN, q, _qNorm, _rmsEps);   // q-norm over the head dim
         q.Dispose();
+        if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(qN, rope.TextCos, rope.TextSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
-        Tensor k = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
-        GenericTransformer.Project(backend, k, vision, _kW, null, lowVram: _lowVram);
-        Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
-        backend.RmsNorm(kN, k, _kNorm, _rmsEps);
-        k.Dispose();
-        Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
-        GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
-
-        // Head-major [1, heads, seq, d] for the GQA FlashAttention (bidirectional: no causal mask).
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, qN, t, hq, d);
-        Tensor kMh = new(new TensorShape(1, hkv, visionLen, d), DType.F32); backend.Permute0213(kMh, kN, visionLen, hkv, d);
-        Tensor vMh = new(new TensorShape(1, hkv, visionLen, d), DType.F32); backend.Permute0213(vMh, v, visionLen, hkv, d);
-        qN.Dispose(); kN.Dispose(); v.Dispose();
+        qN.Dispose();
 
-        Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0, new KvAttentionCall { KvLength = visionLen, Bidirectional = true });
-
-        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
-        Tensor attnOut = new(flat, DType.F32);
-        GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
-        attnFlat.Dispose();
+        // The keys and values are borrowed throughout (the kv cache or the caller disposes them). The query is consumed.
+        Tensor attnOut = rope?.ImageGroups is { } groups
+            ? GroupedAttention(backend, qMh, t, kMh, vMh, groups)
+            : ProjectMerged(backend, _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
+                new KvAttentionCall { KvLength = visionLen, Bidirectional = true }, OperandOwnership.Query), t);
+        attnOut = ApplyRowMask(backend, attnOut, rope);
 
         // Gated residual: text + tanh(attn_gate) · attnOut.
         Tensor h = new(flat, DType.F32);
@@ -100,13 +138,74 @@ public sealed unsafe class MllamaCrossAttentionLayer
         // --- Gated FFN ---
         Tensor postNorm = new(flat, DType.F32);
         backend.RmsNorm(postNorm, h, _postAttnNorm, _rmsEps);
-        Tensor mlp = SwiGlu(backend, postNorm, t);
+        Tensor mlp = ApplyRowMask(backend, SwiGlu(backend, postNorm, t), rope);
         postNorm.Dispose();
         backend.Scale(mlp, mlp, MathF.Tanh(_mlpGate));
         Tensor outp = new(flat, DType.F32);
         backend.Add(outp, h, mlp);
         h.Dispose(); mlp.Dispose();
         return outp;
+    }
+
+    /// <summary>Projects merged-head attention output <paramref name="attn"/> (disposed) to <c>[1, t, hidden]</c>; the caller owns the result.</summary>
+    private Tensor ProjectMerged(IBackend backend, Tensor attn, int t)
+    {
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, _numHeads * _headDim));
+        Tensor projected = new(new TensorShape(1, t, _hidden), DType.F32);
+        GenericTransformer.Project(backend, projected, attnFlat, _oW, null, lowVram: _lowVram);
+        attnFlat.Dispose();
+        return projected;
+    }
+
+    /// <summary>Multi-image cross-attention: each group's rows attend the vision keys of the images they see (a prefix of the sequence),
+    /// and the masked group outputs are summed. Consumes <paramref name="qMh"/>; the keys and values are borrowed.</summary>
+    private Tensor GroupedAttention(IBackend backend, Tensor qMh, int t, Tensor kMh, Tensor vMh, IReadOnlyList<CrossImageGroup> groups)
+    {
+        TensorShape flat = new(1, t, _hidden);
+        Tensor? sum = null;
+        try
+        {
+            foreach (CrossImageGroup group in groups)
+            {
+                // The query is shared by every group, so it is not consumed until the last one (the finally below).
+                Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
+                    new KvAttentionCall { KvLength = group.KvLength, Bidirectional = true }, OperandOwnership.None);
+                Tensor part = ProjectMerged(backend, attn, t);
+                Tensor masked = new(flat, DType.F32);
+                backend.Mul(masked, part, group.Select);
+                part.Dispose();
+                if (sum is null)
+                {
+                    sum = masked;
+                    continue;
+                }
+                Tensor next = new(flat, DType.F32);
+                backend.Add(next, sum, masked);
+                sum.Dispose();
+                masked.Dispose();
+                sum = next;
+            }
+            return sum ?? throw new ArgumentException("A multi-image cross-attention needs at least one group.", nameof(groups));
+        }
+        catch
+        {
+            sum?.Dispose();
+            throw;
+        }
+        finally
+        {
+            qMh.Dispose();
+        }
+    }
+
+    /// <summary>Returns <paramref name="x"/> with each row scaled by the rope's row mask, disposing <paramref name="x"/>; returns it unchanged when there is no mask.</summary>
+    private static Tensor ApplyRowMask(IBackend backend, Tensor x, MultimodalRope? rope)
+    {
+        if (rope?.RowMask is null) return x;
+        Tensor masked = new(x.Shape, DType.F32);
+        backend.Mul(masked, x, rope.RowMask);
+        x.Dispose();
+        return masked;
     }
 
     private Tensor SwiGlu(IBackend backend, Tensor x, int t)

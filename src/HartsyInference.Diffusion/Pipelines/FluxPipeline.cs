@@ -402,8 +402,10 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         int imgSeqLen = hPacked * wPacked;
         TensorShape packedShape = new TensorShape(1, imgSeqLen, 64);
 
-        FlowMatchEulerDiscreteScheduler scheduler =
-            FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen);
+        // Schnell's scheduler config is unshifted (use_dynamic_shifting=false, shift 1.0); dev shifts by sequence length.
+        FlowMatchEulerDiscreteScheduler scheduler = _config.GuidanceEmbed
+            ? FlowMatchEulerDiscreteScheduler.CreateWithDynamicShift(imgSeqLen)
+            : new FlowMatchEulerDiscreteScheduler(shift: 1.0f);
         scheduler.SetTimesteps(steps);
 
         // ── 3. Build initial packed latent ─────────────────────────────
