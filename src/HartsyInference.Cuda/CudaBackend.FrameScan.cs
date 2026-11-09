@@ -80,7 +80,8 @@ public sealed partial class CudaBackend
                 CudaMemory.CopyHostToDeviceAsync(pointers, hostPointers, (nuint)(host.Length * sizeof(ulong)), _stream.Handle);
             ulong Slot(int slot) => pointers + (ulong)(slot * count * sizeof(ulong));
 
-            _kernels.LaunchFrameScanScaleKeys(scaled, pK, pBeta, frames, spatial, heads, keyDim, _stream.Handle);
+            using (NvtxRange.PushFine("FrameDeltaScan.scaleKeys"))
+                _kernels.LaunchFrameScanScaleKeys(scaled, pK, pBeta, frames, spatial, heads, keyDim, _stream.Handle);
 
             int type = CublasApi.CUDA_R_32F;
             int compute = Compute32F(type);
@@ -88,20 +89,24 @@ public sealed partial class CudaBackend
             // Column-major views of the token-major operands: a frame's head slice [spatial, dim] (row stride heads·dim) is the
             // column-major [dim, spatial] matrix with leading dimension heads·dim.
             // gramT (row-major [Dk, Dk], gramT[j][r] = Σ_s kb[r]·k[j]); column-major that is kbᵀ·k = Kb_cm · K_cmᵀ.
-            CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_T, keyDim, keyDim, spatial, &alpha,
-                Slot(0), type, keyRow, Slot(1), type, keyRow, &zero, Slot(2), type, keyDim, count, compute,
-                CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            using (NvtxRange.PushFine("FrameDeltaScan.gram"))
+                CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_T, keyDim, keyDim, spatial, &alpha,
+                    Slot(0), type, keyRow, Slot(1), type, keyRow, &zero, Slot(2), type, keyDim, count, compute,
+                    CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
             // injection (row-major [Dk, Dv] = kbᵀ·v); column-major vᵀ·kb = V_cm · Kb_cmᵀ. A unit value is a ones row (lda 1).
-            CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_T, valueDim, keyDim, spatial, &alpha,
-                Slot(3), type, value is null ? 1 : valueRow, Slot(4), type, keyRow, &zero, Slot(5), type, valueDim, count, compute,
-                CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            using (NvtxRange.PushFine("FrameDeltaScan.injection"))
+                CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_T, valueDim, keyDim, spatial, &alpha,
+                    Slot(3), type, value is null ? 1 : valueRow, Slot(4), type, keyRow, &zero, Slot(5), type, valueDim, count, compute,
+                    CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
-            _kernels.LaunchFrameScanRecurrence(states, gramT, injection, pDecay, frames, heads, keyDim, valueDim, _stream.Handle);
+            using (NvtxRange.PushFine("FrameDeltaScan.recurrence"))
+                _kernels.LaunchFrameScanRecurrence(states, gramT, injection, pDecay, frames, heads, keyDim, valueDim, _stream.Handle);
 
             // readout (row-major [S, Dv] = q·state); column-major stateᵀ·qᵀ = State_cm · Q_cm, written in place at row stride heads·Dv.
-            CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N, valueDim, spatial, keyDim, &alpha,
-                Slot(6), type, valueDim, Slot(7), type, keyRow, &zero, Slot(8), type, valueRow, count, compute,
-                CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            using (NvtxRange.PushFine("FrameDeltaScan.readout"))
+                CublasApi.cublasGemmBatchedEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N, valueDim, spatial, keyDim, &alpha,
+                    Slot(6), type, valueDim, Slot(7), type, keyRow, &zero, Slot(8), type, valueRow, count, compute,
+                    CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

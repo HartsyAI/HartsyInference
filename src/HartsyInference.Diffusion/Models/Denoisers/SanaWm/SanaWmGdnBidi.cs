@@ -274,10 +274,7 @@ public sealed class SanaWmGdnBidi : IDisposable
         _backend.LinearWeightRows(raw, a, _qkvWeight, null, _channels, _channels);
         Tensor convolved = scratch.Track(SanaWmTemporalConv.Apply(_backend, raw, _convKernel, frames, spatial, _channels));
         scratch.Release(raw);
-        Tensor activated = NormActivate(scratch, convolved, _kNorm, tokens);
-        Tensor scaled = scratch.New(tokens, _channels);
-        _backend.Scale(scaled, activated, KeyScale(spatial));
-        return scratch.Detach(scaled);
+        return scratch.Detach(NormActivate(scratch, convolved, _kNorm, tokens, KeyScale(spatial)));
     }
 
     // q = ReLU(RMSNorm(Linear(x))), token-major [N, C].
@@ -286,18 +283,15 @@ public sealed class SanaWmGdnBidi : IDisposable
         using SanaWmScratch scratch = new();
         Tensor raw = scratch.New(tokens, _channels);
         _backend.LinearWeightRows(raw, a, _qkvWeight, null, 0, _channels);
-        return scratch.Detach(NormActivate(scratch, raw, _qNorm, tokens));
+        return scratch.Detach(NormActivate(scratch, raw, _qNorm, tokens, 1f));
     }
 
-    // Releases input; returns a tracked ReLU(RMSNorm(input)).
-    private Tensor NormActivate(SanaWmScratch scratch, Tensor input, Tensor normWeight, int tokens)
+    // Releases input; returns a tracked ReLU(RMSNorm(input))·scale, one fused op.
+    private Tensor NormActivate(SanaWmScratch scratch, Tensor input, Tensor normWeight, int tokens, float scale)
     {
-        Tensor normed = scratch.New(tokens, _channels);
-        _backend.RmsNorm(normed, input, normWeight, RmsEpsilon);
-        scratch.Release(input);
         Tensor activated = scratch.New(tokens, _channels);
-        _backend.LeakyRelu(activated, normed, 0f);
-        scratch.Release(normed);
+        _backend.RmsNormRelu(activated, input, normWeight, RmsEpsilon, scale);
+        scratch.Release(input);
         return activated;
     }
 

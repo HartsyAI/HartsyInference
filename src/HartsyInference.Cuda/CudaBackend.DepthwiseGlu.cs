@@ -9,33 +9,27 @@ namespace HartsyInference.Cuda;
 public sealed partial class CudaBackend
 {
     /// <inheritdoc cref="IBackend.DepthwiseConvGlu"/>
-    public void DepthwiseConvGlu(Tensor output, Tensor input, Tensor weight, Tensor? bias, int frames, int height, int width, int kernel)
+    public void DepthwiseConvGlu(Tensor output, Tensor input, Tensor taps, Tensor? bias, int frames, int height, int width, int kernel,
+        bool inputSilu)
     {
-        int hidden = DepthwiseConvGluReference.Validate(output, input, weight, bias, frames, height, width, kernel);
+        int hidden = DepthwiseConvGluReference.Validate(output, input, taps, bias, frames, height, width, kernel);
         using NvtxRange _nvtx = NvtxRange.Push("DepthwiseConvGlu");
         using OpScope _op = EnterOp();
         EnsureKernels();
         if (!_kernels!.HasDepthwiseGluKernels)
             throw new NotSupportedException("DepthwiseConvGlu needs depthwise_glu.ptx in the Ptx folder.");
 
-        ulong pIn = 0, pW = 0, pB = 0, pOut = 0, taps = 0;
+        ulong pIn = 0, pW = 0, pB = 0, pOut = 0;
         bool cachedOutput = false;
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
-            pW = GpuTransferHelper.CopyToDevice(weight);
+            pW = GpuTransferHelper.CopyToDevice(taps);
             pB = bias is null ? 0 : GpuTransferHelper.CopyToDevice(bias);
-            taps = CastIfNeeded(pW, weight.DType, DType.F32, (int)weight.ElementCount, out ulong tapsCast);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
-            try
-            {
-                _kernels.LaunchDepthwiseGlu(pOut, pIn, taps, pB, input.DType == DType.BF16, frames, height, width, hidden, kernel, _stream.Handle);
-            }
-            finally
-            {
-                if (tapsCast != 0) CudaMemory.FreeAsync(tapsCast, _stream.Handle);
-            }
+            _kernels.LaunchDepthwiseGlu(pOut, pIn, pW, pB, input.DType == DType.BF16, frames, height, width, hidden, kernel, inputSilu,
+                _stream.Handle);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

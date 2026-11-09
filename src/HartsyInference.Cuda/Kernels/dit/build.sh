@@ -13,6 +13,7 @@ KERNELS=(
     "frame_scan"
     "ucpe"
     "frame_conv"
+    "rms_relu"
 )
 
 # shellcheck source=../build_common.sh

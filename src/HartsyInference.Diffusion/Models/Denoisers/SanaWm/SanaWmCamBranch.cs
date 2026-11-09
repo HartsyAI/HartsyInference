@@ -148,7 +148,7 @@ public sealed class SanaWmCamBranch : IDisposable
 
             Tensor queryRaw = scratch.New(tokens, _channels);
             backend.Linear(queryRaw, projected, _queryWeight, _queryBias);
-            Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels));
+            Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels), 1f);
             query = Transform(backend, scratch, queryActivated, camera.RaysTransposed(item), camera.Cos, camera.Sin, tokens);
 
             Tensor valueRaw = scratch.New(tokens, _channels);
@@ -198,21 +198,16 @@ public sealed class SanaWmCamBranch : IDisposable
         backend.Linear(raw, a, _keyWeight!, _keyBias);
         Tensor convolved = scratch.Track(SanaWmTemporalConv.Apply(backend, raw, _convKernel!, frames, spatial, _channels));
         scratch.Release(raw);
-        Tensor activated = NormActivate(backend, scratch, convolved, _keyNorm!, new TensorShape(tokens, _channels));
-        Tensor scaled = scratch.New((long)tokens * _heads, _headDim);
-        backend.Scale(scaled, activated, keyScale);
+        Tensor scaled = NormActivate(backend, scratch, convolved, _keyNorm!, new TensorShape((long)tokens * _heads, _headDim), keyScale);
         return scratch.Detach(scaled);
     }
 
-    // Releases input; returns a tracked ReLU(RMSNorm(input)) over the full channel dim.
-    private static Tensor NormActivate(IBackend backend, SanaWmScratch scratch, Tensor input, Tensor norm, TensorShape shape)
+    // Releases input; returns a tracked ReLU(RMSNorm(input))·scale over the full channel dim, one fused op.
+    private static Tensor NormActivate(IBackend backend, SanaWmScratch scratch, Tensor input, Tensor norm, TensorShape shape, float scale)
     {
-        Tensor normed = scratch.New(shape);
-        backend.RmsNorm(normed, input, norm, NormEpsilon);
-        scratch.Release(input);
         Tensor activated = scratch.New(shape);
-        backend.LeakyRelu(activated, normed, 0f);
-        scratch.Release(normed);
+        backend.RmsNormRelu(activated, input, norm, NormEpsilon, scale);
+        scratch.Release(input);
         return activated;
     }
 

@@ -206,8 +206,10 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
     [Theory]
     [InlineData("ucpe")]
     [InlineData("frames")]
+    [InlineData("rmsrelu")]
     [InlineData("glu-f32")]
     [InlineData("glu-bf16")]
+    [InlineData("glu-bf16-vec")]
     public void FusedOps_CudaMatchHostReference(string op)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -245,6 +247,18 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
                     };
                     break;
                 }
+                case "rmsrelu":
+                {
+                    const int rows = 29, width = 2240;
+                    Tensor input = Fill([rows, width]), weight = Fill([width]);
+                    run = backend =>
+                    {
+                        using Tensor output = new(new TensorShape(rows * 20, width / 20), DType.F32);
+                        backend.RmsNormRelu(output, input, weight, 1e-5f, 0.0213f);
+                        return Read(backend, output);
+                    };
+                    break;
+                }
                 case "frames":
                 {
                     const int frames = 6, spatial = 11, channels = 96, taps = 7;
@@ -259,14 +273,17 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
                 }
                 default:
                 {
-                    DType dtype = op == "glu-bf16" ? DType.BF16 : DType.F32;
-                    const int frames = 2, height = 5, width = 7, hidden = 40;
-                    Tensor input = Fill([frames * height * width, 2 * hidden], dtype), weight = Fill([2 * hidden, 1, 3, 3], dtype);
+                    // glu-bf16-vec takes the vectorized kernel (whole 8-channel groups, whole 4-pixel runs); the others the
+                    // per-element one. The BF16 cases read SiLU'd inputs, as the FFN does.
+                    DType dtype = op.StartsWith("glu-bf16", StringComparison.Ordinal) ? DType.BF16 : DType.F32;
+                    bool inputSilu = dtype == DType.BF16;
+                    int frames = 2, height = 5, width = op == "glu-bf16-vec" ? 8 : 7, hidden = 40;
+                    Tensor input = Fill([frames * height * width, 2 * hidden], dtype), taps = Fill([3, 3, 2 * hidden]);
                     Tensor bias = Fill([2 * hidden]);
                     run = backend =>
                     {
                         using Tensor output = new(new TensorShape(frames * height * width, hidden), dtype);
-                        backend.DepthwiseConvGlu(output, input, weight, bias, frames, height, width, 3);
+                        backend.DepthwiseConvGlu(output, input, taps, bias, frames, height, width, 3, inputSilu);
                         backend.OffloadActivation(output);
                         using Tensor f32 = output.DType == DType.F32 ? new Tensor(output.Shape, DType.F32) : output.CastTo(DType.F32);
                         return output.DType == DType.F32 ? output.AsReadOnlySpan<float>().ToArray() : f32.AsReadOnlySpan<float>().ToArray();
@@ -281,7 +298,7 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
                 maxAbs = Math.Max(maxAbs, Math.Abs(cpu[i] - cuda[i]));
             _output.WriteLine($"{op}: max abs {maxAbs:E3} over {cpu.Length} values");
             // F32 kernels sum in the reference's tap order up to FMA contraction; BF16 output rounds once (2^-8 relative).
-            Assert.True(maxAbs < (op == "glu-bf16" ? 2e-2 : 1e-4), $"{op}: CUDA against host max abs {maxAbs:E3}.");
+            Assert.True(maxAbs < (op.StartsWith("glu-bf16", StringComparison.Ordinal) ? 2e-2 : 1e-4), $"{op}: CUDA against host max abs {maxAbs:E3}.");
         }
         finally
         {

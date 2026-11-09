@@ -25,7 +25,7 @@ public sealed class SanaWmGlumbTempFfn
     private readonly long _hiddenChunkElements;
     private readonly Tensor _invWeight;
     private readonly Tensor _invBias;
-    private readonly Tensor _depthWeight;
+    private readonly Tensor _depthTaps;
     private readonly Tensor _depthBias;
     private readonly Tensor _pointWeight;
     private readonly Tensor _temporalWeight;
@@ -74,7 +74,7 @@ public sealed class SanaWmGlumbTempFfn
         // The 1×1 kernels as GEMM weights; views over the borrowed tensors, so no copy. The depthwise bias is F32 for the fused op.
         _invWeight = invWeight.Reshape(new TensorShape(2L * _hidden, _channels));
         _invBias = invBias;
-        _depthWeight = depthWeight;
+        _depthTaps = TapMajor(depthWeight, 2 * _hidden);
         _depthBias = depthBias.DType == DType.F32 ? depthBias : depthBias.CastTo(DType.F32);
         _pointWeight = pointWeight.Reshape(new TensorShape(_channels, _hidden));
         _temporalWeight = temporalWeight;
@@ -85,7 +85,7 @@ public sealed class SanaWmGlumbTempFfn
 
     /// <summary>The tensors <see cref="Forward"/> reads (the GEMM views of the 1×1 kernels, not their parents), for preloading on a
     /// device backend.</summary>
-    public IEnumerable<Tensor> EnumerateWeights() => [_invWeight, _invBias, _depthWeight, _depthBias, _pointWeight, _temporalWeight];
+    public IEnumerable<Tensor> EnumerateWeights() => [_invWeight, _invBias, _depthTaps, _depthBias, _pointWeight, _temporalWeight];
 
     /// <summary>Runs the FFN on tokens <c>[B, frames·height·width, C]</c>; returns a new owned <c>[B, N, C]</c> tensor in the input dtype.</summary>
     /// <exception cref="NotSupportedException">BF16 input on a backend without BF16 support.</exception>
@@ -144,12 +144,12 @@ public sealed class SanaWmGlumbTempFfn
         Tensor gated;
         using (Tensor inverted = new(new TensorShape(pixels, 2L * _hidden), _dtype))
         {
+            // The inverted conv's SiLU is applied as the fused depthwise op reads its output.
             backend.Linear(inverted, tokens, _invWeight, _invBias);
-            backend.Silu(inverted, inverted);
             gated = new Tensor(new TensorShape(pixels, _hidden), _dtype);
             try
             {
-                backend.DepthwiseConvGlu(gated, inverted, _depthWeight, _depthBias, rows, height, width, DepthwiseKernel);
+                backend.DepthwiseConvGlu(gated, inverted, _depthTaps, _depthBias, rows, height, width, DepthwiseKernel, inputSilu: true);
             }
             catch
             {
@@ -191,6 +191,31 @@ public sealed class SanaWmGlumbTempFfn
         Tensor output = scratch.New(new TensorShape(batch, tokens, _channels), _dtype);
         backend.Transpose2D(output, residual, _channels, tokens);
         return scratch.Detach(output);
+    }
+
+    /// <summary>The depthwise kernel <c>[channels, 1, k, k]</c> (F32 or BF16) as F32 tap-major taps <c>[k, k, channels]</c>.</summary>
+    private static Tensor TapMajor(Tensor depthWeight, int channels)
+    {
+        const int area = DepthwiseKernel * DepthwiseKernel;
+        Tensor f32 = depthWeight.DType == DType.F32 ? depthWeight : depthWeight.CastTo(DType.F32);
+        try
+        {
+            Tensor taps = new(new TensorShape(DepthwiseKernel, DepthwiseKernel, channels), DType.F32);
+            ReadOnlySpan<float> source = f32.AsReadOnlySpan<float>();
+            Span<float> target = taps.AsSpan<float>();
+            for (int c = 0; c < channels; c++)
+            {
+                for (int t = 0; t < area; t++)
+                    target[t * channels + c] = source[c * area + t];
+            }
+
+            return taps;
+        }
+        finally
+        {
+            if (!ReferenceEquals(f32, depthWeight))
+                f32.Dispose();
+        }
     }
 
     private void ValidateInput(IBackend backend, Tensor x, int frames, int height, int width)
