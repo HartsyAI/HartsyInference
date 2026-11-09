@@ -18,6 +18,7 @@
     <None Include="Fixtures\LtxVideo2VaeEncoder\*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\sana_wm_s4_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\sana_wm_s1_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\sana_wm_streaming_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\sana_wm_s2_*.safetensors" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
