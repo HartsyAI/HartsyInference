@@ -1,4 +1,4 @@
-namespace HartsyInference.LLM.Transformer;
+namespace HartsyInference.LLM.Transformer.Mhc;
 
 /// <summary>Where the RMS epsilon sits in a hyper-connection's stream statistic.</summary>
 public enum RmsEpsPlacement

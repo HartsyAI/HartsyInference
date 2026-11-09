@@ -1,4 +1,5 @@
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 

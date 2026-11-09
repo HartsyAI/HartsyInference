@@ -2,8 +2,8 @@ using System.Buffers;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
-using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
