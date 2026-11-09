@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Streaming;
@@ -31,7 +32,8 @@ public static class StreamingTensors
     }
 
     /// <summary>The tensors of <paramref name="parts"/> joined along <paramref name="axis"/> as a new tensor. Every part has the
-    /// same dtype and the same extents off the axis.</summary>
+    /// same dtype and the same extents off the axis. Four-byte dtypes use the backend's <c>Concat</c>; narrower ones are
+    /// scattered into place.</summary>
     public static Tensor Concat(IBackend backend, ReadOnlySpan<Tensor> parts, int axis)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -57,7 +59,22 @@ public static class StreamingTensors
         Tensor joined = new(WithAxis(first.Shape, axis, total), first.DType);
         try
         {
-            backend.Concat(joined, parts, axis);
+            if (first.DType.SizeInBytes == sizeof(float))
+            {
+                backend.Concat(joined, parts, axis);
+            }
+            else
+            {
+                // The CPU backend's Concat copies four bytes per element whatever the dtype, which overruns a 16-bit tensor; a
+                // strided scatter is a pure move of bits for any 1, 2, 4 or 8-byte dtype.
+                long start = 0;
+                foreach (Tensor part in parts)
+                {
+                    StridedCopies.ScatterAxis(backend, joined, part, axis, start);
+                    start += part.Shape[axis];
+                }
+            }
+
             return joined;
         }
         catch
@@ -69,6 +86,65 @@ public static class StreamingTensors
 
     /// <summary>A copy of <paramref name="source"/> as a new tensor of the same shape.</summary>
     public static Tensor Clone(IBackend backend, Tensor source) => Slice(backend, source, 0, 0, source.Shape[0]);
+
+    /// <summary>A new tensor holding <paramref name="source"/> converted to <paramref name="target"/>, a copy when the dtype
+    /// already matches. F32 and BF16 convert in both directions; narrowing rounds to nearest even. A device backend casts on
+    /// the device; the CPU backend casts on the host, because the <see cref="IBackend"/> cast defaults read their input as F16
+    /// and narrow by truncation.</summary>
+    /// <exception cref="NotSupportedException">The pair of dtypes is not F32 and BF16.</exception>
+    public static Tensor CastTo(IBackend backend, Tensor source, DType target)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(source);
+        if (source.DType == target)
+            return Clone(backend, source);
+        bool narrowing = source.DType == DType.F32 && target == DType.BF16;
+        bool widening = source.DType == DType.BF16 && target == DType.F32;
+        if (!narrowing && !widening)
+            throw new NotSupportedException($"Streaming state converts between F32 and BF16 only; asked for {source.DType} to {target}.");
+        Tensor cast = new(source.Shape, target);
+        try
+        {
+            if (backend.Device.IsCpu)
+            {
+                if (narrowing)
+                    NarrowOnHost(source, cast);
+                else
+                    WidenOnHost(source, cast);
+            }
+            else if (narrowing)
+            {
+                backend.CastToBf16(cast, source);
+            }
+            else
+            {
+                backend.CastToF32(cast, source);
+            }
+
+            return cast;
+        }
+        catch
+        {
+            cast.Dispose();
+            throw;
+        }
+    }
+
+    private static void NarrowOnHost(Tensor source, Tensor destination)
+    {
+        ReadOnlySpan<float> values = source.AsReadOnlySpan<float>();
+        Span<ushort> bits = destination.AsSpan<ushort>();
+        for (int i = 0; i < values.Length; i++)
+            bits[i] = BFloat16Bits.FromFloat(values[i]);
+    }
+
+    private static void WidenOnHost(Tensor source, Tensor destination)
+    {
+        ReadOnlySpan<ushort> bits = source.AsReadOnlySpan<ushort>();
+        Span<float> values = destination.AsSpan<float>();
+        for (int i = 0; i < bits.Length; i++)
+            values[i] = BFloat16Bits.ToFloat(bits[i]);
+    }
 
     private static TensorShape WithAxis(TensorShape shape, int axis, long extent)
     {

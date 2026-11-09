@@ -8,7 +8,8 @@ namespace HartsyInference.World.Pipelines.SanaWm;
 /// <summary><see cref="ISanaWmChunkDenoiser"/> over a loaded streaming <see cref="SanaWmDit"/>. Each guidance branch in use
 /// has its own caption upload and its own <see cref="SanaWmStreamCache"/>, created on the branch's first forward; an
 /// unguided stream holds only the conditional one. Borrows the DiT and the text conditioning; disposing releases the uploads
-/// and the stream states.</summary>
+/// and the stream states. Each commit trims the backend's memory pool, so the decoder that runs next finds the memory the
+/// replaced state and the passes' transients held.</summary>
 public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
 {
     private readonly IBackend _backend;
@@ -73,6 +74,11 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
         foreach (Branch branch in _branches.Values)
             branch.Cache.Commit(latentFrames);
         CommittedFrames = checked(CommittedFrames + latentFrames);
+        // The commit just released the state the new one replaced, and the passes before it freed their transients; both sit in
+        // the allocator's pool as free blocks the driver cannot hand to anyone else. The decoder runs next and allocates from the
+        // driver: on a 12 GB card the pool held about 1.9 GB of them while the decoder was refused 110 MB. Returning them costs a
+        // re-map of whatever the next chunk's passes need again.
+        _backend.TrimMemoryPool();
     }
 
     /// <inheritdoc/>

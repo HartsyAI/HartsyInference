@@ -6,7 +6,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>The keys and values one softmax attention call of a chunk-causal stream reads: the window kept from earlier
 /// chunks, then the chunk's own. Without a window, or while it is empty (a stream's first chunk), these are the chunk's own
-/// tensors, borrowed; otherwise they are joined copies this scope owns.</summary>
+/// tensors, borrowed; otherwise they are joined copies this scope owns. The window holds its keys and values in BF16; the
+/// parts are widened to the chunk's dtype as they are joined, so the attention call sees the same F32 operands whether or not
+/// there was a window (the values are exactly the BF16 numbers the call's own narrowing would have produced).</summary>
 internal readonly struct SanaWmWindowedKeys : IDisposable
 {
     private const int KeyStream = 0, ValueStream = 1;
@@ -47,8 +49,25 @@ internal readonly struct SanaWmWindowedKeys : IDisposable
     {
         Tensor[] parts = new Tensor[window.PartCount + 1];
         int count = window.CopyParts(stream, parts);
-        parts[count] = chunk;
-        return StreamingTensors.Concat(backend, parts, window.TokenAxis);
+        Tensor?[] widened = new Tensor?[count];
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (parts[i].DType == chunk.DType)
+                    continue;
+                widened[i] = StreamingTensors.CastTo(backend, parts[i], chunk.DType);
+                parts[i] = widened[i]!;
+            }
+
+            parts[count] = chunk;
+            return StreamingTensors.Concat(backend, parts, window.TokenAxis);
+        }
+        finally
+        {
+            foreach (Tensor? copy in widened)
+                copy?.Dispose();
+        }
     }
 
     /// <inheritdoc />

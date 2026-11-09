@@ -67,7 +67,9 @@ internal static class SanaWmTemporalConv
         if (context.ElementCount != (long)contextFrames * spatial * channels)
             throw new ArgumentException($"The context must hold {contextFrames} frames of {spatial}x{channels}; got {context.Shape}.",
                 nameof(context));
-        using Tensor joined = StreamingTensors.Concat(backend, [context, input], 0);
+        // A stream keeps its tail narrower than the chunk (BF16, as upstream's cache); the convolution reads it widened.
+        using Tensor? widened = context.DType == input.DType ? null : StreamingTensors.CastTo(backend, context, input.DType);
+        using Tensor joined = StreamingTensors.Concat(backend, [widened ?? context, input], 0);
         using Tensor convolved = Apply(backend, joined, kernel, contextFrames + frames, spatial, channels);
         return SanaWmTensors.Slice(backend, convolved, (long)contextFrames * spatial * channels,
             new TensorShape((long)frames * spatial, channels));
