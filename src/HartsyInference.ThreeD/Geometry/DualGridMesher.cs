@@ -38,15 +38,6 @@ public static class DualGridMesher
         if (intersected.Length != n * 3) throw new ArgumentException("intersected must be [N*3].", nameof(intersected));
         if (splitWeight is not null && splitWeight.Length != n) throw new ArgumentException("splitWeight must be [N].", nameof(splitWeight));
 
-        float[] vertices = new float[n * 3];
-        for (int i = 0; i < n; i++)
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                vertices[i * 3 + c] = (coords[i * 3 + c] + dualVertices[i * 3 + c]) * Component(voxelSize, c) + Component(aabbMin, c);
-            }
-        }
-
         Dictionary<(int, int, int), int> index = new(n);
         for (int i = 0; i < n; i++)
         {
@@ -56,48 +47,52 @@ public static class DualGridMesher
             }
         }
 
-        List<int> quads = new();
+        float[] vertices = new float[n * 3];
+        for (int i = 0; i < n; i++)
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                vertices[i * 3 + c] = (coords[i * 3 + c] + dualVertices[i * 3 + c]) * Component(voxelSize, c) + Component(aabbMin, c);
+            }
+        }
+
+        // Each quad is split as soon as it is found, so no intermediate quad list is kept.
+        List<int> triangles = new();
+        Span<int> quad = stackalloc int[4];
         for (int i = 0; i < n; i++)
         {
             for (int axis = 0; axis < 3; axis++)
             {
                 if (!intersected[i * 3 + axis]) continue;
-                if (TryLookupQuad(coords, index, i, axis, out int q0, out int q1, out int q2, out int q3))
-                {
-                    quads.Add(q0); quads.Add(q1); quads.Add(q2); quads.Add(q3);
-                }
-            }
-        }
+                if (!TryLookupQuad(coords, index, i, axis, quad)) continue;
 
-        List<int> triangles = new(quads.Count / 4 * 6);
-        for (int q = 0; q < quads.Count; q += 4)
-        {
-            int[] quad = { quads[q], quads[q + 1], quads[q + 2], quads[q + 3] };
-            bool useSplit1 = splitWeight is not null
-                ? WeightedSplitIsOne(splitWeight, quad)
-                : AlignedSplitIsOne(vertices, quad);
-            int[] order = useSplit1 ? Split1 : Split2;
-            for (int k = 0; k < order.Length; k++) triangles.Add(quad[order[k]]);
+                bool useSplit1 = splitWeight is not null
+                    ? WeightedSplitIsOne(splitWeight, quad)
+                    : AlignedSplitIsOne(vertices, quad);
+                int[] order = useSplit1 ? Split1 : Split2;
+                for (int k = 0; k < order.Length; k++) triangles.Add(quad[order[k]]);
+            }
         }
 
         return new DualGridMesh(vertices, triangles.ToArray());
     }
 
+    // Fills the four corner indices of the quad through `axis` from `voxel`; false if any corner is unoccupied.
     private static bool TryLookupQuad(
-        int[] coords, Dictionary<(int, int, int), int> index, int voxel, int axis,
-        out int q0, out int q1, out int q2, out int q3)
+        int[] coords, Dictionary<(int, int, int), int> index, int voxel, int axis, Span<int> quad)
     {
         int[][] offsets = EdgeOffsets[axis];
         int x = coords[voxel * 3], y = coords[voxel * 3 + 1], z = coords[voxel * 3 + 2];
-        q0 = q1 = q2 = q3 = -1;
-        return index.TryGetValue((x + offsets[0][0], y + offsets[0][1], z + offsets[0][2]), out q0)
-            && index.TryGetValue((x + offsets[1][0], y + offsets[1][1], z + offsets[1][2]), out q1)
-            && index.TryGetValue((x + offsets[2][0], y + offsets[2][1], z + offsets[2][2]), out q2)
-            && index.TryGetValue((x + offsets[3][0], y + offsets[3][1], z + offsets[3][2]), out q3);
+        for (int k = 0; k < 4; k++)
+        {
+            if (!index.TryGetValue((x + offsets[k][0], y + offsets[k][1], z + offsets[k][2]), out int found)) return false;
+            quad[k] = found;
+        }
+        return true;
     }
 
     // Reference: w02 = w0*w2, w13 = w1*w3; split 1 when w02 > w13.
-    private static bool WeightedSplitIsOne(float[] w, int[] quad)
+    private static bool WeightedSplitIsOne(float[] w, ReadOnlySpan<int> quad)
     {
         float w02 = w[quad[0]] * w[quad[2]];
         float w13 = w[quad[1]] * w[quad[3]];
@@ -108,14 +103,14 @@ public static class DualGridMesher
     // split's index table. For the diagonal splits this compares a triangle with itself (split 1) and yields a zero
     // normal (split 2), so split 1 wins unless its first triangle is degenerate. TRELLIS.2 passes split weights, so
     // this path is used only when a caller omits them.
-    private static bool AlignedSplitIsOne(float[] v, int[] quad)
+    private static bool AlignedSplitIsOne(float[] v, ReadOnlySpan<int> quad)
     {
         float align0 = AlignOf(v, quad, Split1);
         float align1 = AlignOf(v, quad, Split2);
         return align0 > align1;
     }
 
-    private static float AlignOf(float[] v, int[] quad, int[] split)
+    private static float AlignOf(float[] v, ReadOnlySpan<int> quad, int[] split)
     {
         Vector3 a = Position(v, quad[split[0]]), b = Position(v, quad[split[1]]);
         Vector3 c = Position(v, quad[split[2]]), d = Position(v, quad[split[3]]);
