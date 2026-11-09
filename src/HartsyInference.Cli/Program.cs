@@ -81,6 +81,9 @@ public static class Program
             config.AddCommand<ImageCommand>("image")
                 .WithDescription("Generate an image from a prompt with a diffusion checkpoint (SDXL).")
                 .WithExample("image", "\"a fox in snow\"", "--model-path", "sdxl.safetensors", "--steps", "30");
+            config.AddCommand<RemovePeopleCommand>("remove-people")
+                .WithDescription("Remove the people under a mask with the OneReward people-removal recipe.")
+                .WithExample("remove-people", "photo.jpg", "--mask", "people.png", "-o", "out");
             config.AddCommand<TranscribeCommand>("transcribe")
                 .WithDescription("Transcribe a WAV file to text with Whisper.")
                 .WithExample("transcribe", "speech.wav", "-m", "whisper-base");
