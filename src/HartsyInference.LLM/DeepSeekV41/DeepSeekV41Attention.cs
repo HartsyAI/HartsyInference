@@ -69,7 +69,7 @@ public sealed class DeepSeekV41Attention
         float[] qr = _w.WqA.Linear(x, tokens, s.Dim, s.QLoraRank);
         HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
         float[] q = _w.WqB.Linear(qr, tokens, s.QLoraRank, heads * hd);
-        int[] positions = Range(startPos, tokens);
+        int[] positions = HostOps.Range(startPos, tokens);
         Rotate(q, [1, tokens, heads, hd], positions, inverse: false);
 
         float[] kv = _w.Wkv.Linear(x, tokens, s.Dim, hd);
@@ -199,7 +199,7 @@ public sealed class DeepSeekV41Attention
         }
 
         float[] q = ix.WqB.Linear(qr, tokens, _s.QLoraRank, nh * ihd);
-        Rotate(q, [1, tokens, nh, ihd], Range(startPos, tokens), inverse: false);
+        Rotate(q, [1, tokens, nh, ihd], HostOps.Range(startPos, tokens), inverse: false);
         RoundTrip(q, ihd, LatentEncoding.Fp4E2M1E8M0x32);
 
         int keyRows = endPos / ratio;
@@ -256,16 +256,6 @@ public sealed class DeepSeekV41Attention
 
     private void RoundTrip(float[] data, int width, LatentEncoding encoding)
     {
-        if (!_s.QuantizeLatents) return;
-        using Tensor x = HostMath.Tensor(data, data.Length / width, width);
-        _backend.ActQuantDequantInPlace(x, encoding);
-        x.AsReadOnlySpan<float>().CopyTo(data);
-    }
-
-    private static int[] Range(int start, int count)
-    {
-        int[] r = new int[count];
-        for (int i = 0; i < count; i++) r[i] = start + i;
-        return r;
+        if (_s.QuantizeLatents) HostOps.RoundTrip(_backend, data, width, encoding);
     }
 }
