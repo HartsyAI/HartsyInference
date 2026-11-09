@@ -4,8 +4,9 @@ Source snapshot: NVlabs/Sana `b3bad956` (`inference_sana_wm_streaming.py`, `gene
 `Efficient-Large-Model/SANA-WM_streaming`). This note records the upstream-to-engine map, the decisions and their reasons,
 the carried-state layouts, the numerics, the memory plan and the test handoff. Status and parity evidence belong in
 [MODEL_STATUS_WORLD.md](../Checklists/MODEL_STATUS_WORLD.md) and [PARITY_VERIFICATION.md](../Checklists/PARITY_VERIFICATION.md)
-once the weights have been run; nothing here has run on real weights or on a GPU yet. The refiner (Phase B) has been
-compared on the CPU against upstream's own code on a tiny random model; see [its section](#phase-b-the-streaming-refiner).
+once the weights have been run. Stage 1 streaming (Phase A) has been run on a 4090 against upstream's own 73-frame run
+(see [Phase A on a GPU](#phase-a-on-a-gpu)). The refiner (Phase B) has only been compared on the CPU against upstream's
+code on a tiny random model; see [its section](#phase-b-the-streaming-refiner). It has not run on a GPU or on real weights.
 
 ## What streaming is
 
@@ -209,11 +210,31 @@ Phase A (student + causal VAE decoder resident together, text and image encoders
 | FFN tails and scan states | under 0.2 GB |
 | chunk activations (3 to 4 frames of 880 tokens) | small next to stage 1's 21 frames |
 
-That is tight but plausible on 12 GB. Two levers if it does not fit: keep the softmax windows in BF16 (halves the
+That is tight but plausible on 12 GB (the 3060 run is pending; the 4090 measurement is below). Two levers if it does not fit: keep the softmax windows in BF16 (halves the
 largest item; needs the attention call to accept BF16 K/V operands) and keep the key tails in BF16 (the conv input is then
 rounded, a numerics change to measure). A second guidance branch doubles the carried state.
 
 The refiner's memory is planned in [its own section](#memory-plan-with-the-refiner).
+
+## Phase A on a GPU
+
+Reported by the parent session, 2026-11-09, on a 4090: demo_0 pose, seed 42, guidance 1.0, chunks of 4, 3 and 3 latent
+frames, stage 1 only, upstream's noise and first latent injected; a real run, not a CPU check.
+
+| Check | Result |
+|---|---|
+| all 15 upstream DiT calls replayed through one `SanaWmStreamCache`, committing after each save pass | worst cosine 0.99961, relative L2 1.8 to 2.8 %, chunks 1 and 2 as close as chunk 0 |
+| CUDA `FrameDeltaScan` with carried state against the host reference | relative L2 1.8e-4 (112-wide heads), 1.5e-5 for the denominator |
+| CLI path end to end (planner, `WorldService.Open`, `ChunkedWorldSession`, streaming decode), 73 frames | PSNR min 44.9 / mean 47.7 dB, SSIM min 0.9973 / mean 0.9981 against upstream's `decode_chunk` pixels |
+| time | chunk 0 at 12.9 s including model loads, then 2.11 s and 1.74 s per 24-frame chunk (0.86× real time); upstream 2.13 s |
+| device memory | 10.98 GiB in use, about 1 GiB of it other processes |
+
+Open, from the same report, neither blocking:
+- The softmax key/value window is stored in F32 (`[1, H, N, D]`). Attention rounds its operands to BF16 anyway, so BF16
+  storage would halve it, about 0.3 GiB per chunk of window across the five softmax blocks. It needs the attention call
+  to take BF16 K/V operands, which is not checked; do it if the 3060 run says memory is the limit.
+- `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass. Harmless at a window of two
+  chunks; worth caching the joined window across the five passes of a chunk if the window grows.
 
 ## Checkpoint conversion (parent session)
 
