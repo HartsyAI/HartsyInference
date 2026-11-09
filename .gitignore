@@ -84,6 +84,7 @@ Desktop.ini
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/MossImage/*.safetensors
 !/tests/HartsyInference.Vision.Tests/TestData/RealEsrgan/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/sana_wm_s2_*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/encoder/*.safetensors
 *.gguf
 *.ckpt
