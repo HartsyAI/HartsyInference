@@ -28,7 +28,8 @@ public sealed partial class CudaBackend
         int keyRow = heads * keyDim;
         int valueRow = heads * valueDim;
         const int f32 = sizeof(float);
-        ulong pQ = 0, pK = 0, pV = 0, pBeta = 0, pDecay = 0, pOut = 0, scaled = 0, gramT = 0, injection = 0, states = 0, ones = 0, pointers = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pBeta = 0, pDecay = 0, pOut = 0, scaled = 0, gramT = 0, injection = 0, states = 0, reverse = 0, ones = 0,
+            pointers = 0;
         bool cachedOutput = false;
         try
         {
@@ -43,6 +44,7 @@ public sealed partial class CudaBackend
             gramT = GpuTransferHelper.AllocateDevice((nuint)((long)count * keyDim * keyDim * f32));
             injection = GpuTransferHelper.AllocateDevice((nuint)((long)count * keyDim * valueDim * f32));
             states = GpuTransferHelper.AllocateDevice((nuint)((long)count * keyDim * valueDim * f32));
+            reverse = GpuTransferHelper.AllocateDevice((nuint)((long)count * keyDim * valueDim * f32));
             if (value is null)
             {
                 ones = GpuTransferHelper.AllocateDevice((nuint)(spatial * f32));
@@ -100,7 +102,7 @@ public sealed partial class CudaBackend
                     CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             using (NvtxRange.PushFine("FrameDeltaScan.recurrence"))
-                _kernels.LaunchFrameScanRecurrence(states, gramT, injection, pDecay, frames, heads, keyDim, valueDim, _stream.Handle);
+                _kernels.LaunchFrameScanRecurrence(states, reverse, gramT, injection, pDecay, frames, heads, keyDim, valueDim, _stream.Handle);
 
             // readout (row-major [S, Dv] = q·state); column-major stateᵀ·qᵀ = State_cm · Q_cm, written in place at row stride heads·Dv.
             using (NvtxRange.PushFine("FrameDeltaScan.readout"))
@@ -118,7 +120,7 @@ public sealed partial class CudaBackend
             if (pV != 0) GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pBeta);
             GpuTransferHelper.FreeDevice(pDecay);
-            foreach (ulong temp in new[] { scaled, gramT, injection, states, ones, pointers })
+            foreach (ulong temp in new[] { scaled, gramT, injection, states, reverse, ones, pointers })
             {
                 if (temp != 0) GpuTransferHelper.FreeDevice(temp);
             }
