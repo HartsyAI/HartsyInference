@@ -45,7 +45,8 @@ public sealed record SanaWmConfig
     /// <summary>Taps of the temporal depthwise convolution (<c>conv_k</c>) in GDN blocks.</summary>
     public required int ConvKernelSize { get; init; }
 
-    /// <summary>Rows of <c>pos_embed</c>, the stored position table. Its use is decided by the DiT forward.</summary>
+    /// <summary>Rows of <c>pos_embed</c>, the stored position table, or 0 when the file carries none (upstream drops it
+    /// when it loads the streaming checkpoint). The DiT positions tokens with RoPE and never reads it.</summary>
     public required int PosEmbedTokens { get; init; }
 
     /// <summary>Rows of each block's <c>scale_shift_table</c> (shift, scale and gate for attention and the FFN).</summary>
@@ -201,9 +202,13 @@ public sealed record SanaWmConfig
         Expect("t_block.1.weight", Require(shapes, "t_block.1.weight", 2), (long)modulationRows * hidden, hidden);
 
         const string posName = "pos_embed";
-        TensorShape pos = Require(shapes, posName, 3);
-        int posTokens = Dim(posName, pos, 1);
-        Expect(posName, pos, 1, posTokens, hidden);
+        int posTokens = 0;
+        if (shapes.ContainsKey(posName))
+        {
+            TensorShape pos = Require(shapes, posName, 3);
+            posTokens = Dim(posName, pos, 1);
+            Expect(posName, pos, 1, posTokens, hidden);
+        }
 
         const string finalName = "final_layer.linear.weight";
         TensorShape finalLinear = Require(shapes, finalName, 2);

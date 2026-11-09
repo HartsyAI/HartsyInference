@@ -13,14 +13,17 @@ internal static class SanaWmCamScan
 {
     /// <summary>Returns the bidirectional scan of one batch item's <paramref name="query"/>, <paramref name="key"/> and
     /// <paramref name="value"/>, F32 token-major <c>[N, H·D]</c>, as a new <c>[N, H·D]</c> tensor. <paramref name="beta"/> is
-    /// <c>[H, T, S]</c> and <paramref name="decay"/> is <c>[H, T]</c>.</summary>
+    /// <c>[H, T, S]</c> and <paramref name="decay"/> is <c>[H, T]</c>. In a chunk-causal stream the forward pass starts from
+    /// <paramref name="initialState"/> (<c>[H, D, D]</c>, the state after the earlier chunks) and <paramref name="finalState"/>
+    /// receives the state after this chunk.</summary>
     internal static Tensor Run(IBackend backend, Tensor query, Tensor key, Tensor value, Tensor beta, Tensor decay, int frames,
-        int spatial, int heads, int headDim)
+        int spatial, int heads, int headDim, Tensor? initialState = null, Tensor? finalState = null)
     {
         Tensor output = new(new TensorShape((long)frames * spatial, (long)heads * headDim), DType.F32);
         try
         {
-            backend.FrameDeltaScan(output, query, key, value, beta, decay, frames, spatial, heads, headDim, headDim);
+            backend.FrameDeltaScan(output, query, key, value, beta, decay, frames, spatial, heads, headDim, headDim, initialState,
+                finalState);
             return output;
         }
         catch

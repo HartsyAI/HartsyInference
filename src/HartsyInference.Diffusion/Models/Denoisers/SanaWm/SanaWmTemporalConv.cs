@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
@@ -51,5 +52,24 @@ internal static class SanaWmTemporalConv
             output.Dispose();
             throw;
         }
+    }
+
+    /// <summary>The chunk-causal form of <see cref="Apply"/> (upstream <c>_cached_temporal_short_conv</c>): the causal half
+    /// reads the <paramref name="contextFrames"/> frames of <paramref name="context"/> that precede the chunk, the reverse half
+    /// stays inside the chunk. That is the same symmetric filter over <c>[context ⊕ input]</c> with zero padding after the
+    /// chunk, read at the chunk's frames. A null context is a stream's first chunk: plain <see cref="Apply"/>.</summary>
+    /// <param name="context">Token rows <c>[contextFrames·spatial, C]</c> of the frames before the chunk, or null.</param>
+    internal static Tensor ApplyWithContext(IBackend backend, Tensor input, Tensor kernel, int frames, int spatial, int channels,
+        Tensor? context, int contextFrames)
+    {
+        if (context is null || contextFrames == 0)
+            return Apply(backend, input, kernel, frames, spatial, channels);
+        if (context.ElementCount != (long)contextFrames * spatial * channels)
+            throw new ArgumentException($"The context must hold {contextFrames} frames of {spatial}x{channels}; got {context.Shape}.",
+                nameof(context));
+        using Tensor joined = StreamingTensors.Concat(backend, [context, input], 0);
+        using Tensor convolved = Apply(backend, joined, kernel, contextFrames + frames, spatial, channels);
+        return SanaWmTensors.Slice(backend, convolved, (long)contextFrames * spatial * channels,
+            new TensorShape((long)frames * spatial, channels));
     }
 }

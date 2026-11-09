@@ -4,11 +4,14 @@ using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>Main branch of one SANA-WM bidirectional Gated-DeltaNet attention layer. Returns the branch before the camera
-/// sum, the output gate and the projection. The forward scan includes the current frame; the reverse scan excludes it.</summary>
+/// sum, the output gate and the projection. The forward scan includes the current frame; the reverse scan excludes it.
+/// Given a block's stream state the same layer is chunk-causal (upstream <c>CachedChunkCausalGDN</c>): the forward scans
+/// and the key convolution's causal half continue from the earlier chunks, the reverse halves stay inside the chunk.</summary>
 /// <remarks>Runs one batch item at a time. q, k and v stay token-major in F32; both scans are one
 /// <see cref="IBackend.FrameDeltaScan"/> each (the denominator over the unrotated q and k, then the numerator after rotating
 /// them in place), so the item's live set is three <c>[N, C]</c> operands and the numerator. States and accumulators are F32.</remarks>
@@ -157,8 +160,10 @@ public sealed class SanaWmGdnBidi : IDisposable
     /// <c>[H, frames, spatial]</c> and decay <c>[H, frames]</c>; the caller disposes all three.</summary>
     /// <param name="projectionInput">The same tokens in the dtype the q, k and v GEMMs read (BF16 on a device), shared with the
     /// block's other projections so the input is converted once; null projects from <paramref name="a"/>.</param>
+    /// <param name="stream">The block's carried state for a chunk-causal stream; null runs the whole clip bidirectionally.</param>
+    /// <param name="commit">Stages the state after this chunk into <paramref name="stream"/>.</param>
     internal (Tensor Output, Tensor Beta, Tensor Decay) ForwardItem(Tensor a, int frames, int spatial, Tensor ropeCos, Tensor ropeSin,
-        string profileTag = "gdn", Tensor? projectionInput = null)
+        string profileTag = "gdn", Tensor? projectionInput = null, SanaWmBlockStream? stream = null, bool commit = false)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         int tokens = checked(frames * spatial);
@@ -186,7 +191,7 @@ public sealed class SanaWmGdnBidi : IDisposable
         Tensor k, q, v;
         using (StageProfiler.Begin(_backend, profileTag, "attn.main.qkv"))
         {
-            k = scratch.Track(KeyPath(projected, frames, spatial));
+            k = scratch.Track(KeyPath(projected, frames, spatial, stream, commit));
             q = scratch.Track(QueryPath(projected, tokens));
             v = scratch.New(tokens, _channels);
             _backend.LinearWeightRows(v, projected, _qkvWeight, null, 2 * _channels, _channels);
@@ -200,10 +205,19 @@ public sealed class SanaWmGdnBidi : IDisposable
         Tensor den = scratch.New(tokens, _heads);
         using (StageProfiler.Begin(_backend, profileTag, "attn.main.scan"))
         {
-            _backend.FrameDeltaScan(den, q, k, null, beta, decayHeads, frames, spatial, _heads, _headDim, 1);
+            Tensor? nextDenominator = commit && stream is not null ? scratch.New(_heads, _headDim, 1) : null;
+            Tensor? nextNumerator = commit && stream is not null ? scratch.New(_heads, _headDim, _headDim) : null;
+            _backend.FrameDeltaScan(den, q, k, null, beta, decayHeads, frames, spatial, _heads, _headDim, 1,
+                stream?.Denominator!.Current, nextDenominator);
             RotateInPlace(k, ropeCos, ropeSin, tokens);
             RotateInPlace(q, ropeCos, ropeSin, tokens);
-            _backend.FrameDeltaScan(num, q, k, v, beta, decayHeads, frames, spatial, _heads, _headDim, _headDim);
+            _backend.FrameDeltaScan(num, q, k, v, beta, decayHeads, frames, spatial, _heads, _headDim, _headDim,
+                stream?.Numerator!.Current, nextNumerator);
+            if (nextDenominator is not null && nextNumerator is not null)
+            {
+                stream!.Denominator!.Stage(scratch.Detach(nextDenominator));
+                stream.Numerator!.Stage(scratch.Detach(nextNumerator));
+            }
         }
 
         foreach (Tensor consumed in new[] { q, k, v })
@@ -267,14 +281,19 @@ public sealed class SanaWmGdnBidi : IDisposable
         return (betaRows, decay);
     }
 
-    // k = ReLU(RMSNorm(conv(Linear(x)))) · D^-1/2 · S^-1/2, token-major [N, C].
-    private Tensor KeyPath(Tensor a, int frames, int spatial)
+    // k = ReLU(RMSNorm(conv(Linear(x)))) · D^-1/2 · S^-1/2, token-major [N, C]. In a stream the convolution's causal half reads
+    // the raw keys of the frames before the chunk, and a committing pass keeps this chunk's newest raw keys for the next one.
+    private Tensor KeyPath(Tensor a, int frames, int spatial, SanaWmBlockStream? stream, bool commit)
     {
         int tokens = frames * spatial;
         using SanaWmScratch scratch = new();
         Tensor raw = scratch.New(tokens, _channels);
         _backend.LinearWeightRows(raw, a, _qkvWeight, null, _channels, _channels);
-        Tensor convolved = scratch.Track(SanaWmTemporalConv.Apply(_backend, raw, _convKernel, frames, spatial, _channels));
+        FrameTailCache? tail = stream?.KeyTail;
+        Tensor convolved = scratch.Track(SanaWmTemporalConv.ApplyWithContext(_backend, raw, _convKernel, frames, spatial, _channels,
+            tail?.Current, tail?.HeldFrames ?? 0));
+        if (commit)
+            tail?.Stage(raw);
         scratch.Release(raw);
         return scratch.Detach(NormActivate(scratch, convolved, _kNorm, tokens, KeyScale(spatial)));
     }

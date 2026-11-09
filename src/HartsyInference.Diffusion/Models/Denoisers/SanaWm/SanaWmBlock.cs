@@ -157,11 +157,16 @@ public sealed class SanaWmBlock : IDisposable
 
     /// <summary>Runs the block on F32 tokens <c>[B, N, C]</c>, frame-major with <c>N = frames·latentHeight·latentWidth</c>, and
     /// returns a new owned F32 <c>[B, N, C]</c> tensor. <paramref name="x"/> is left untouched.</summary>
-    public Tensor Forward(Tensor x, SanaWmForwardContext context) => Run(x, context, ownsInput: false);
+    public Tensor Forward(Tensor x, SanaWmForwardContext context) => Run(x, context, ownsInput: false, null, commit: false);
 
     /// <summary><see cref="Forward"/> that takes ownership of <paramref name="x"/> and releases it once the attention residual no
     /// longer needs it, so a block stack holds one residual stream at a time. <paramref name="x"/> is disposed even on failure.</summary>
-    internal Tensor ForwardOwned(Tensor x, SanaWmForwardContext context) => Run(x, context, ownsInput: true);
+    /// <param name="stream">This block's carried state when <paramref name="x"/> is one chunk of a chunk-causal stream (batch 1):
+    /// the attention and the FFN then continue from the earlier chunks. Null runs a whole clip.</param>
+    /// <param name="commit">Stages the state after this chunk into <paramref name="stream"/>; set on the pass over the chunk's
+    /// clean latents.</param>
+    internal Tensor ForwardOwned(Tensor x, SanaWmForwardContext context, SanaWmBlockStream? stream = null, bool commit = false) =>
+        Run(x, context, ownsInput: true, stream, commit);
 
     /// <inheritdoc />
     public void Dispose()
@@ -174,7 +179,7 @@ public sealed class SanaWmBlock : IDisposable
         SanaWmTensors.DisposeAll(_owned);
     }
 
-    private Tensor Run(Tensor x, SanaWmForwardContext context, bool ownsInput)
+    private Tensor Run(Tensor x, SanaWmForwardContext context, bool ownsInput, SanaWmBlockStream? stream, bool commit)
     {
         using SanaWmScratch scratch = new();
         if (ownsInput)
@@ -190,6 +195,8 @@ public sealed class SanaWmBlock : IDisposable
         SanaWmTensors.Require(x, nameof(x), DType.F32, [batch, tokens, _channels]);
         if ((_gdnCamera is not null || _softmaxCamera is not null) && context.Camera is null)
             throw new ArgumentException("The block has a camera branch, but the context carries no camera inputs.", nameof(context));
+        if (stream is not null && batch != 1)
+            throw new ArgumentException($"A chunk-causal stream runs one batch item per forward; got batch {batch}.", nameof(x));
 
         long modulationWidth = (long)ModulationSlots * _channels;
         Tensor modulation = scratch.New((long)batch * frames, modulationWidth);
@@ -201,7 +208,7 @@ public sealed class SanaWmBlock : IDisposable
         Modulated(attentionInput, x, modulation, ShiftMsa, ScaleMsa, spatial);
         Tensor attention;
         using (StageProfiler.Begin(_backend, _profileTag, "attn"))
-            attention = scratch.Track(Attention(attentionInput, context));
+            attention = scratch.Track(Attention(attentionInput, context, stream, commit));
         scratch.Release(attentionInput);
         Tensor afterAttention = scratch.New(x.Shape);
         _backend.GatedResidualRowIndexed(afterAttention, x, attention, gateMsa, context.RowIndex);
@@ -233,7 +240,7 @@ public sealed class SanaWmBlock : IDisposable
         Modulated(ffnInput, afterCross, modulation, ShiftMlp, ScaleMlp, spatial);
         Tensor ffn;
         using (StageProfiler.Begin(_backend, _profileTag, "mlp"))
-            ffn = scratch.Track(FeedForward(ffnInput, context));
+            ffn = scratch.Track(FeedForward(ffnInput, context, stream, commit));
         scratch.Release(ffnInput);
         Tensor output = scratch.New(x.Shape);
         _backend.GatedResidualRowIndexed(output, afterCross, ffn, gateMlp, context.RowIndex);
@@ -281,12 +288,12 @@ public sealed class SanaWmBlock : IDisposable
 
     // Attention on [B·F, S, C] tokens, one batch item at a time: the main branch, the camera branch summed in, then the output
     // gate and projection. The output gate reads the attention input, as upstream's _apply_output_gate(combined, x) does.
-    private Tensor Attention(Tensor input, SanaWmForwardContext context)
+    private Tensor Attention(Tensor input, SanaWmForwardContext context, SanaWmBlockStream? stream, bool commit)
     {
         int batch = context.Batch;
         int tokens = context.Tokens;
         if (batch == 1)
-            return AttentionItem(input, context, 0);
+            return AttentionItem(input, context, 0, stream, commit);
 
         long itemElements = (long)tokens * _channels;
         using SanaWmScratch scratch = new();
@@ -296,15 +303,16 @@ public sealed class SanaWmBlock : IDisposable
             using SanaWmScratch item = new();
             Tensor a = item.Track(SanaWmTensors.Slice(_backend, input, b * itemElements,
                 new TensorShape(context.Frames, context.Spatial, _channels)));
-            Tensor projected = item.Track(AttentionItem(a, context, b));
+            Tensor projected = item.Track(AttentionItem(a, context, b, null, commit: false));
             SanaWmTensors.Write(_backend, output, projected, b * itemElements);
         }
 
         return scratch.Detach(output);
     }
 
-    // One batch item: a is F32 [F, S, C]; returns proj(branch · SiLU(output_gate(a))) as [N, C].
-    private Tensor AttentionItem(Tensor a, SanaWmForwardContext context, int item)
+    // One batch item: a is F32 [F, S, C]; returns proj(branch · SiLU(output_gate(a))) as [N, C]. With a stream the branches read
+    // the block's carried state, and a committing pass stages the state after this chunk.
+    private Tensor AttentionItem(Tensor a, SanaWmForwardContext context, int item, SanaWmBlockStream? stream, bool commit)
     {
         int frames = context.Frames;
         int spatial = context.Spatial;
@@ -320,7 +328,8 @@ public sealed class SanaWmBlock : IDisposable
         {
             Tensor main, beta, decay;
             using (StageProfiler.Begin(_backend, _profileTag, "attn.main"))
-                (main, beta, decay) = _gdn.ForwardItem(a, frames, spatial, context.RopeCos, context.RopeSin, _profileTag, projection);
+                (main, beta, decay) = _gdn.ForwardItem(a, frames, spatial, context.RopeCos, context.RopeSin, _profileTag, projection,
+                    stream, commit);
             branch = scratch.Track(main);
             scratch.Track(beta);
             scratch.Track(decay);
@@ -329,7 +338,7 @@ public sealed class SanaWmBlock : IDisposable
                 Tensor camera;
                 using (StageProfiler.Begin(_backend, _profileTag, "attn.forward_cam_branch"))
                     camera = scratch.Track(_gdnCamera.ForwardItem(_backend, a, context.Camera!, item, beta, decay, frames, spatial, _profileTag,
-                        projection));
+                        projection, stream, commit));
                 branch = Sum(scratch, main, camera);
             }
 
@@ -340,13 +349,15 @@ public sealed class SanaWmBlock : IDisposable
         {
             Tensor main;
             using (StageProfiler.Begin(_backend, _profileTag, "attn.main"))
-                main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin, projection));
+                main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin, projection,
+                    stream?.MainWindow, commit ? frames : 0));
             branch = main;
             if (_softmaxCamera is not null)
             {
                 Tensor camera;
                 using (StageProfiler.Begin(_backend, _profileTag, "attn.forward_cam_branch"))
-                    camera = scratch.Track(_softmaxCamera.ForwardItem(_backend, a, context.Camera!, item, tokens, projection));
+                    camera = scratch.Track(_softmaxCamera.ForwardItem(_backend, a, context.Camera!, item, tokens, projection,
+                        stream?.CameraWindow, commit ? frames : 0));
                 branch = Sum(scratch, main, camera);
             }
         }
@@ -456,11 +467,12 @@ public sealed class SanaWmBlock : IDisposable
     }
 
     // The modulated FFN input [B, N, C] F32 through the FFN in its dtype; returns F32 [B, N, C].
-    private Tensor FeedForward(Tensor input, SanaWmForwardContext context)
+    private Tensor FeedForward(Tensor input, SanaWmForwardContext context, SanaWmBlockStream? stream, bool commit)
     {
         using SanaWmScratch scratch = new();
         Tensor ffnInput = input.DType == _ffn.DType ? input : scratch.Track(SanaWmTensors.ToBf16(_backend, input));
-        Tensor output = scratch.Track(_ffn.Forward(_backend, ffnInput, context.Frames, context.Height, context.Width, _profileTag));
+        Tensor output = scratch.Track(_ffn.Forward(_backend, ffnInput, context.Frames, context.Height, context.Width, _profileTag,
+            stream?.FfnTail, commit));
         return output.DType == DType.F32 ? scratch.Detach(output) : SanaWmTensors.ToF32(_backend, output);
     }
 

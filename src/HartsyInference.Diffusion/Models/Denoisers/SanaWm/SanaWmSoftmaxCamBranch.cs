@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
@@ -108,7 +109,12 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
     }
 
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major with <c>tokens·C</c> elements. Returns <c>[N, C]</c>.</summary>
-    internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, int tokens, Tensor? projectionInput = null)
+    /// <param name="window">Ray-transformed keys and values of earlier chunks in a chunk-causal stream (upstream
+    /// <c>_cached_cam_branch_softmax</c>); null attends within the input only.</param>
+    /// <param name="commitUnits">Above zero, stages this chunk's keys and values into <paramref name="window"/> as that many
+    /// units (latent frames).</param>
+    internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, int tokens, Tensor? projectionInput = null,
+        RollingTokenWindow? window = null, int commitUnits = 0)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_queryWeight is null || _outputWeight is null)
@@ -123,11 +129,23 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
         Tensor vh = Heads(backend, scratch, projected, _valueWeight!, _valueBias, null, camera.RaysInverse(item), camera, tokens);
         Tensor attended = scratch.New(1, _heads, tokens, _headDim);
         // BF16 operands with F32 softmax and accumulation, as upstream's SDPA (it casts the camera q, k and v to BF16).
-        backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, kh, vh, null, MathF.Pow(_headDim, -0.5f), allowF16: false)
-            with { Numerics = AttentionNumerics.Bf16Storage });
+        using (SanaWmWindowedKeys context = SanaWmWindowedKeys.Join(backend, window, kh, vh))
+        {
+            backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, context.Keys, context.Values, null,
+                MathF.Pow(_headDim, -0.5f), allowF16: false) with { Numerics = AttentionNumerics.Bf16Storage });
+        }
+
         scratch.Release(qh);
-        scratch.Release(kh);
-        scratch.Release(vh);
+        if (window is not null && commitUnits > 0)
+        {
+            window.Stage([scratch.Detach(kh), scratch.Detach(vh)], commitUnits);
+        }
+        else
+        {
+            scratch.Release(kh);
+            scratch.Release(vh);
+        }
+
         Tensor merged = scratch.New(tokens, _channels);
         backend.Permute0213(merged, attended, _heads, tokens, _headDim);
         scratch.Release(attended);
