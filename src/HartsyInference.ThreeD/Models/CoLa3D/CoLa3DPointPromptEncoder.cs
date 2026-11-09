@@ -71,25 +71,60 @@ internal sealed class CoLa3DPointPromptEncoder
         Span<float> dst = output.AsSpan<float>();
         for (int b = 0; b < ranges.Length; b++)
         {
-            Dictionary<long, int> rowByVoxel = new();
-            for (int r = ranges[b].Start; r < ranges[b].End; r++)
-                rowByVoxel[VoxelIndex(coords[r * 4 + 1], coords[r * 4 + 2], coords[r * 4 + 3], resolution)] = r;
-
+            Dictionary<long, int> rowByVoxel = IndexVoxels(coords, ranges[b], resolution);
             for (int q = 0; q < queries; q++)
             {
                 int slot = b * queries + q;
                 if (valid is not null && !valid[slot])
                     continue;
-                int px = points[slot * 3], py = points[slot * 3 + 1], pz = points[slot * 3 + 2];
-                if ((uint)px >= (uint)resolution || (uint)py >= (uint)resolution || (uint)pz >= (uint)resolution)
-                    throw new HartsyInferenceException($"Point prompt ({px}, {py}, {pz}) of sample {b} lies outside the {resolution}³ latent grid.");
-                if (!rowByVoxel.TryGetValue(VoxelIndex(px, py, pz, resolution), out int row))
-                    throw new HartsyInferenceException($"Point prompt ({px}, {py}, {pz}) of sample {b} has no active voxel in the latent.");
+                int row = PromptRow(rowByVoxel, points, slot, b, resolution);
                 src.Slice(row * width, width).CopyTo(dst.Slice(slot * width, width));
             }
         }
 
         return output;
+    }
+
+    /// <summary>Rejects every valid prompt that lies outside the grid or on no active voxel of its sample.</summary>
+    internal static void ValidatePoints(
+        int[] coords,
+        (int Start, int End)[] ranges,
+        int[] points,
+        bool[]? valid,
+        int queries,
+        int resolution)
+    {
+        for (int b = 0; b < ranges.Length; b++)
+        {
+            Dictionary<long, int> rowByVoxel = IndexVoxels(coords, ranges[b], resolution);
+            for (int q = 0; q < queries; q++)
+            {
+                int slot = b * queries + q;
+                if (valid is not null && !valid[slot])
+                    continue;
+                PromptRow(rowByVoxel, points, slot, b, resolution);
+            }
+        }
+    }
+
+    /// <summary>Voxel index to row for the voxels <paramref name="range"/> of one sample.</summary>
+    private static Dictionary<long, int> IndexVoxels(int[] coords, (int Start, int End) range, int resolution)
+    {
+        Dictionary<long, int> rowByVoxel = new();
+        for (int r = range.Start; r < range.End; r++)
+            rowByVoxel[VoxelIndex(coords[r * 4 + 1], coords[r * 4 + 2], coords[r * 4 + 3], resolution)] = r;
+        return rowByVoxel;
+    }
+
+    /// <summary>Row of the voxel that prompt <paramref name="slot"/> of sample <paramref name="b"/> names.</summary>
+    private static int PromptRow(Dictionary<long, int> rowByVoxel, int[] points, int slot, int b, int resolution)
+    {
+        int px = points[slot * 3], py = points[slot * 3 + 1], pz = points[slot * 3 + 2];
+        if ((uint)px >= (uint)resolution || (uint)py >= (uint)resolution || (uint)pz >= (uint)resolution)
+            throw new HartsyInferenceException($"Point prompt ({px}, {py}, {pz}) of sample {b} lies outside the {resolution}³ latent grid.");
+        if (!rowByVoxel.TryGetValue(VoxelIndex(px, py, pz, resolution), out int row))
+            throw new HartsyInferenceException($"Point prompt ({px}, {py}, {pz}) of sample {b} has no active voxel in the latent.");
+        return row;
     }
 
     /// <summary><c>[cos(2πh), sin(2πh)]</c> with <c>h = (coord / resolution) · Wrᵀ</c>, the <c>LearnableFourierPE</c> layout.</summary>

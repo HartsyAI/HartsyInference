@@ -48,6 +48,45 @@ public sealed class CoLa3DBlockTests
         }
     }
 
+    [Fact]
+    public void Block_WithZeroHeadVectorsStaysFinite()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 45);
+        int c = config.HiddenDim, np = 5, nq = 3;
+        // The point-query and query-key projections feed the per-head RMS norms; zeroing them makes those head vectors zero.
+        foreach (string name in new[] { "pWriteQuery", "qWriteKv" })
+        {
+            weights[$"backbone.blocks.0.{name}.weight"].AsSpan<float>().Clear();
+            weights[$"backbone.blocks.0.{name}.bias"].AsSpan<float>().Clear();
+        }
+
+        Random random = new(46);
+        float[] p = RandomArray(random, np * c), q = RandomArray(random, nq * c);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DRopeTable pRope = CoLa3DRope.Build(CoLa3DRope.Plan(config.HeadDim), new float[np * 3], np);
+            using CoLa3DRopeTable qRope = CoLa3DRope.Build(CoLa3DRope.Plan(config.HeadDim), new float[nq * 3], nq);
+            using CoLa3DBlock block = new(weights, 0, config);
+
+            Tensor pIn = new(new TensorShape(1, np, c), DType.F32);
+            Tensor qIn = new(new TensorShape(1, nq, c), DType.F32);
+            p.AsSpan().CopyTo(pIn.AsSpan<float>());
+            q.AsSpan().CopyTo(qIn.AsSpan<float>());
+            (Tensor pOut, Tensor qOut) = block.Forward(backend, pIn, qIn, pRope, qRope, CoLa3DRope.RotaryDim(config.HeadDim));
+
+            Assert.All(pOut.AsReadOnlySpan<float>().ToArray(), value => Assert.True(float.IsFinite(value), "Non-finite point feature."));
+            Assert.All(qOut.AsReadOnlySpan<float>().ToArray(), value => Assert.True(float.IsFinite(value), "Non-finite query feature."));
+            pOut.Dispose();
+            qOut.Dispose();
+        }
+        finally
+        {
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
     private static float[] RandomArray(Random random, int n)
     {
         float[] values = new float[n];

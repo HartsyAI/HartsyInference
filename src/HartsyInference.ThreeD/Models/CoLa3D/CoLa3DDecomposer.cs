@@ -54,56 +54,71 @@ public sealed class CoLa3DDecomposer : IDisposable
     /// on the same voxels. Prompt inputs are required for the prompt query sources and rejected for <c>Fixed</c>.</summary>
     public CoLa3DOutput Forward(IBackend backend, SparseTensor latent, Tensor utonia, CoLa3DQueryPrompts? prompts = null)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latent);
         ArgumentNullException.ThrowIfNull(utonia);
         int n = latent.Count;
         ValidateInputs(latent, utonia, n);
         (int Start, int End)[] ranges = BatchRanges(latent.Coords, n);
-        int queries = ValidatePrompts(prompts, ranges.Length);
+        int queries = ValidatePrompts(prompts, latent.Coords, ranges);
+        bool[] active = ActiveMask(prompts, ranges.Length, queries);
         int width = _config.HiddenDim;
 
         Tensor latent3 = latent.Feats.Reshape(new TensorShape(1, n, _config.LatentChannels));
         Tensor utonia3 = utonia.Reshape(new TensorShape(1, n, _config.UtoniaFeatureDim));
         Tensor fused = _backbone.FuseInput(backend, latent3, utonia3);
-        Tensor queryRows = QueryRows(backend, latent, fused, ranges, prompts, queries);
-
-        Tensor points = Alloc(n, width);
-        Tensor logits = Alloc(n, queries);
-        Tensor queryFeatures = Alloc(ranges.Length, queries, width);
-        for (int b = 0; b < ranges.Length; b++)
+        Tensor? queryRows = null, points = null, logits = null, queryFeatures = null;
+        try
         {
-            (int s, int e) = ranges[b];
-            int nb = e - s;
-            int[] slots = ActiveSlots(prompts, b, queries);
-            Tensor pIn = Alloc(1, nb, width);
-            CopyRows(fused, s, nb, pIn, 0);
-            if (slots.Length == 0)
+            queryRows = QueryRows(backend, latent, fused, ranges, prompts, queries);
+            points = Alloc(n, width);
+            logits = Alloc(n, queries);
+            queryFeatures = Alloc(ranges.Length, queries, width);
+            for (int b = 0; b < ranges.Length; b++)
             {
-                Tensor pOnly = _backbone.FinalPoints(backend, pIn);
-                CopyRows(pOnly, 0, nb, points, s);
-                pOnly.Dispose();
-                continue;
+                (int s, int e) = ranges[b];
+                int nb = e - s;
+                int[] slots = ActiveSlotIndices(active, b, queries);
+                Tensor pIn = Alloc(1, nb, width);
+                CopyRows(fused, s, nb, pIn, 0);
+                if (slots.Length == 0)
+                {
+                    Tensor pOnly = _backbone.FinalPoints(backend, pIn);
+                    CopyRows(pOnly, 0, nb, points, s);
+                    pOnly.Dispose();
+                    continue;
+                }
+
+                Tensor qIn = Alloc(1, slots.Length, width);
+                GatherRows(queryRows, b * queries, slots, qIn, 0);
+                using CoLa3DRopeTable pRope = CoLa3DRope.Build(_plan, PointPositions(latent.Coords, s, nb), nb);
+                using CoLa3DRopeTable qRope = CoLa3DRope.Build(_plan, SlotPositions(prompts, b, queries, slots), slots.Length);
+                (Tensor pOut, Tensor qOut) = _backbone.Run(backend, pIn, qIn, pRope, qRope);
+                CopyRows(pOut, 0, nb, points, s);
+                ScatterRows(qOut, 0, slots, queryFeatures, b * queries);
+
+                Tensor lg = _head.Logits(backend, pOut, qOut);
+                ScatterLogits(lg, s, nb, slots, queries, logits);
+                lg.Dispose();
+                pOut.Dispose();
+                qOut.Dispose();
             }
 
-            Tensor qIn = Alloc(1, slots.Length, width);
-            GatherRows(queryRows, b * queries, slots, qIn, 0);
-            using CoLa3DRopeTable pRope = CoLa3DRope.Build(_plan, PointPositions(latent.Coords, s, nb), nb);
-            using CoLa3DRopeTable qRope = CoLa3DRope.Build(_plan, SlotPositions(prompts, b, queries, slots), slots.Length);
-            (Tensor pOut, Tensor qOut) = _backbone.Run(backend, pIn, qIn, pRope, qRope);
-            CopyRows(pOut, 0, nb, points, s);
-            ScatterRows(qOut, 0, slots, queryFeatures, b * queries);
-
-            Tensor lg = _head.Logits(backend, pOut, qOut);
-            ScatterLogits(lg, s, nb, slots, queries, logits);
-            lg.Dispose();
-            pOut.Dispose();
-            qOut.Dispose();
+            CoLa3DOutput output = new(latent.Replace(points), logits, queryFeatures, active);
+            points = null;
+            logits = null;
+            queryFeatures = null;
+            return output;
         }
-
-        queryRows.Dispose();
-        fused.Dispose();
-        return new CoLa3DOutput(latent.Replace(points), logits, queryFeatures);
+        finally
+        {
+            queryRows?.Dispose();
+            points?.Dispose();
+            logits?.Dispose();
+            queryFeatures?.Dispose();
+            fused.Dispose();
+        }
     }
 
     public void Dispose()
@@ -156,9 +171,11 @@ public sealed class CoLa3DDecomposer : IDisposable
                 $"Utonia features have shape {utonia.Shape}; expected F32 [{n}, {_config.UtoniaFeatureDim}].");
     }
 
-    /// <summary>Validates the prompt inputs for the configured source and returns the query count per sample.</summary>
-    private int ValidatePrompts(CoLa3DQueryPrompts? prompts, int batch)
+    /// <summary>Validates the prompt inputs for the configured source and returns the query count per sample. Point prompts
+    /// are checked against the latent here, so a rejected request fails before any tensor is allocated.</summary>
+    private int ValidatePrompts(CoLa3DQueryPrompts? prompts, int[] coords, (int Start, int End)[] ranges)
     {
+        int batch = ranges.Length;
         if (_config.QuerySource == CoLa3DConfig.QuerySourceKind.Fixed)
         {
             if (prompts is not null)
@@ -189,6 +206,7 @@ public sealed class CoLa3DDecomposer : IDisposable
             throw new HartsyInferenceException("PromptPoint queries take points and no masks.");
         if (prompts.Points.Length != batch * prompts.Queries * 3)
             throw new HartsyInferenceException($"Prompt points hold {prompts.Points.Length} values; expected {batch * prompts.Queries * 3}.");
+        CoLa3DPointPromptEncoder.ValidatePoints(coords, ranges, prompts.Points, prompts.Valid, prompts.Queries, _config.LatentResolution);
         return prompts.Queries;
     }
 
@@ -218,25 +236,27 @@ public sealed class CoLa3DDecomposer : IDisposable
         return ranges.ToArray();
     }
 
-    /// <summary>Slot indices that take part for sample <paramref name="b"/>; all slots when there is no valid mask.</summary>
-    private static int[] ActiveSlots(CoLa3DQueryPrompts? prompts, int b, int queries)
+    /// <summary>Slot validity flat <c>[Batch·Queries]</c>; every slot is active when the prompts carry no valid mask.</summary>
+    private static bool[] ActiveMask(CoLa3DQueryPrompts? prompts, int batch, int queries)
     {
-        if (prompts?.Valid is null)
-        {
-            int[] all = new int[queries];
-            for (int q = 0; q < queries; q++)
-                all[q] = q;
-            return all;
-        }
+        bool[]? valid = prompts?.Valid;
+        bool[] active = new bool[batch * queries];
+        for (int i = 0; i < active.Length; i++)
+            active[i] = valid is null || valid[i];
+        return active;
+    }
 
-        List<int> active = new();
+    /// <summary>Slot indices that take part for sample <paramref name="b"/>.</summary>
+    private static int[] ActiveSlotIndices(bool[] active, int b, int queries)
+    {
+        List<int> slots = new();
         for (int q = 0; q < queries; q++)
         {
-            if (prompts.Valid[b * queries + q])
-                active.Add(q);
+            if (active[b * queries + q])
+                slots.Add(q);
         }
 
-        return active.ToArray();
+        return slots.ToArray();
     }
 
     /// <summary>RoPE positions of voxels <c>[start, start + count)</c>: their <c>(x, y, z)</c> coordinates.</summary>

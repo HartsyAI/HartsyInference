@@ -9,7 +9,7 @@ namespace HartsyInference.ThreeD.Models.CoLa3D;
 internal sealed class CoLa3DBlock : IDisposable
 {
     private readonly int _heads, _headDim, _width;
-    private readonly float _scale;
+    private readonly float _scale, _headNormEps;
     private readonly Tensor _ones;
     private readonly Affine _qSelfNorm, _qReadNorm, _pReadNorm, _qFfnNorm, _pWriteNorm, _pFfnNorm;
     private readonly Dense _qSelfQkv, _qSelfOut, _qReadQuery, _pReadKv, _qReadOut, _qFfnUp, _qFfnDown;
@@ -25,6 +25,8 @@ internal sealed class CoLa3DBlock : IDisposable
         _headDim = config.HeadDim;
         _width = config.HiddenDim;
         _scale = 1f / MathF.Sqrt(_headDim);
+        // F.normalize clamps the norm at 1e-12, which is 1e-24 / D on the mean square, so a zero head stays zero.
+        _headNormEps = 1e-24f / _headDim;
         _ones = Alloc(_headDim);
         _ones.AsSpan<float>().Fill(1f);
 
@@ -53,6 +55,7 @@ internal sealed class CoLa3DBlock : IDisposable
     /// <summary>Consumes <paramref name="p"/> and <paramref name="q"/> (<c>[1, N, C]</c>) and returns the updated pair.</summary>
     internal (Tensor P, Tensor Q) Forward(IBackend backend, Tensor p, Tensor q, CoLa3DRopeTable pRope, CoLa3DRopeTable qRope, int rotaryDim)
     {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
         q = SelfAttention(backend, q, qRope, rotaryDim);
         q = ReadPoints(backend, p, q, pRope, qRope, rotaryDim);
         p = WritePoints(backend, p, q, pRope, qRope, rotaryDim);
@@ -206,7 +209,7 @@ internal sealed class CoLa3DBlock : IDisposable
     private Tensor RmsHeadNorm(IBackend backend, Tensor heads, Tensor gamma)
     {
         Tensor rms = new(heads.Shape, DType.F32);
-        backend.RmsNorm(rms, heads, _ones, 0f);
+        backend.RmsNorm(rms, heads, _ones, _headNormEps);
         heads.Dispose();
         Tensor o = new(rms.Shape, DType.F32);
         backend.AffineBroadcastLastDim(o, rms, gamma, null);
