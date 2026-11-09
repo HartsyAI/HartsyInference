@@ -393,7 +393,6 @@ public static class HairDeckRig
         dst[offset + 2] = (float)p[2];
     }
 
-    /// <summary>Writes the quaternion (x, y, z, w) of a row-major rotation matrix, normalised.</summary>
     /// <summary>Flips a key frame's quaternion to the hemisphere of the previous one (q and -q are the same rotation, but linear
     /// resampling between opposite signs takes the long way), so a clip stays continuous on every importer.</summary>
     private static void KeepQuaternionsContinuous(float[] quaternions)
@@ -416,6 +415,7 @@ public static class HairDeckRig
         }
     }
 
+    /// <summary>Writes the quaternion (x, y, z, w) of a row-major rotation matrix, normalised.</summary>
     private static void WriteQuaternion(float[] dst, int offset, double[] m)
     {
         double trace = m[0] + m[4] + m[8];
