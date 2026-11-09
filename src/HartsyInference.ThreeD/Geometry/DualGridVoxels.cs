@@ -10,10 +10,20 @@ public sealed record DualGridVoxels(int[] Coords, float[] DualVertices, bool[] I
 {
     /// <summary>
     /// Converts the absolute dual vertices to offsets within each voxel, in voxel units, as
-    /// <see cref="DualGridMesher.Extract"/> expects. Assumes the grid origin is zero, as in <see cref="DualGridVoxelizer.Voxelize"/>.
+    /// <see cref="DualGridMesher.Extract"/> expects. Pass <see cref="Vector3.Zero"/> as the origin to that call.
     /// </summary>
     public float[] ToVoxelOffsets(Vector3 voxelSize)
     {
+        if (!(voxelSize.X > 0f && voxelSize.Y > 0f && voxelSize.Z > 0f))
+        {
+            throw new ArgumentException("voxelSize must be positive on every axis.", nameof(voxelSize));
+        }
+
+        if (DualVertices.Length != Coords.Length)
+        {
+            throw new ArgumentException("DualVertices must be [N*3] to match Coords.", nameof(DualVertices));
+        }
+
         int n = Coords.Length / 3;
         float[] offsets = new float[n * 3];
         for (int i = 0; i < n; i++)

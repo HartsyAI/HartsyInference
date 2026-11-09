@@ -55,4 +55,19 @@ public sealed class DualGridVoxelizerSolverTests
         Assert.Equal(0f, solution[1]);
         Assert.Equal(0f, solution[2]);
     }
+
+    [Fact]
+    public void SolveColPivQr_PivotInRankVsNonzeroPivotsBand_KeepsSecondPivot()
+    {
+        // diag(1, 2e-7, 0): Eigen keeps two nonzero pivots, while a 3·eps cutoff on |R_11| would drop the second.
+        float[] matrix = { 1f, 0f, 0f, 0f, 2e-7f, 0f, 0f, 0f, 0f };
+        float[] rhs = { 1f, 2e-7f, 0f };
+        Span<float> solution = stackalloc float[3];
+
+        DualGridVoxelizer.SolveColPivQr(matrix, rhs, solution);
+
+        Assert.InRange(solution[0], 0.999f, 1.001f);
+        Assert.InRange(solution[1], 0.999f, 1.001f);
+        Assert.Equal(0f, solution[2]);
+    }
 }
