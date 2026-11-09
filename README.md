@@ -73,8 +73,8 @@ features remain subject to their individual
 HairDeck (`hairdeck`) turns one character image into a GLB of hair cards, with per-card colours and optional spring-bone
 chains. It runs through `hartsy 3d` and `POST /v1/native/mesh` on the CUDA and CPU backends (Vulkan is not implemented for
 HairDeck yet). Weights are from
-[`hyz317/HairDeck`](https://huggingface.co/hyz317/HairDeck) (Apache-2.0). Output is static only: rigged output and VRM
-packaging are not implemented here.
+[`hyz317/HairDeck`](https://huggingface.co/hyz317/HairDeck) (Apache-2.0). Output is static (hair cards and chain tubes) or
+rigged (the cards skinned to the spring chains, with head-motion clips). VRM packaging is not implemented.
 
 ### Setup
 
@@ -114,9 +114,9 @@ Writes `out/hairdeck-0001.glb`. Options that apply to HairDeck:
 | `--no-colors` | off | Skip the colour model; the cards then have no per-card colour |
 | `--no-chains` | off | Skip the spring-bone chains; the GLB has only `hair_cards` |
 | `-b` | `auto` | `cuda`, `vulkan` or `cpu` |
-| `--rigged` | off | Rejected in this build |
+| `--rigged` | off | Skin the cards to the spring chains and add four clips: `turn`, `nod`, `jump`, `sway`. Needs chains |
 
-Samples are fixed at one per request (`-n 1`).
+Samples are fixed at one per request (`-n 1`). Rigged output is written to the same `hairdeck-0001.glb` name.
 
 ### HTTP
 
@@ -127,7 +127,7 @@ Set either `imagePng` or `request.image`, not both.
 curl -X POST http://localhost:5000/v1/native/mesh -H "Content-Type: application/json" -d '{
   "model": "hairdeck",
   "imagePng": "<base64 PNG>",
-  "request": { "prompt": "", "seed": 0, "steps": 50, "colors": true, "chains": true }
+  "request": { "prompt": "", "seed": 0, "steps": 50, "colors": true, "chains": true, "rigged": false }
 }'
 ```
 
@@ -136,12 +136,14 @@ without writing it to disk. `POST /v1/native/mesh/stream` sends step progress as
 
 ### Output
 
-- `hair_cards`: the hair as ribbons with per-card colours (`COLOR_0`), ready for a viewer or DCC tool.
-- `spring_chains` (when chains are on): static tubes that show where the spring-bone chains run. They are not a rig.
+- `hair_cards`: the hair as ribbons, with per-card colours (`COLOR_0`) when colours are on, ready for a viewer or DCC tool.
+- `spring_chains` (when chains are on): the chain tubes. Static output shows where the chains run. Rigged output skins
+  the hair cards to them, and the file has one skin and four animations (`turn`, `nod`, `jump`, `sway`) at 60 fps.
 
 ### Limits
 
-- Verified on one demo image (`ex01`, seed 0) on CUDA (RTX 3060): the CLI and the API each wrote a 1,099,912-byte GLB.
+- Verified on one demo image (`ex01`, seed 0) on CUDA (RTX 3060): the CLI and the API each wrote a 1,099,912-byte static
+  GLB, and each wrote a 2,439,976-byte rigged GLB. All four clips move the hair (peak vertex displacement 0.19–0.30 m).
   Other demo images are not run.
 - Per-step time and peak VRAM are not measured yet.
 - Cancellation stops between sampling steps. It does not stop SAM 3, BiRefNet or DINOv3 in the middle of preprocessing.
