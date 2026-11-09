@@ -370,6 +370,55 @@ public sealed class OneShotWorldSessionTests
         Assert.Throws<ObjectDisposedException>(() => session.SendAction("forward"));
     }
 
+    [Fact]
+    public async Task Dispose_DuringTheRun_CancelsTheClipAndReleasesTheLease()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        WorldService service = new WorldService(engine);
+        ScriptedClipPipeline pipeline = new ScriptedClipPipeline((request, cancel) =>
+        {
+            // Runs until cancelled, as a sampler that checks its token between steps does.
+            cancel.WaitHandle.WaitOne(Patience);
+            cancel.ThrowIfCancellationRequested();
+            return ClipFrames(request.Plan.Frames);
+        });
+        IWorldSession session = service.OpenOneShot(pipeline, ClipPlan(4));
+        Task<List<VideoFrame>> stream = CollectAsync(session.StreamAsync(CancellationToken.None));
+        await pipeline.Started.WaitAsync(Patience);
+
+        session.Dispose();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stream.WaitAsync(Patience));
+        Assert.False(service.RunInFlight);
+        Assert.Equal(0, service.RunLedger.Outstanding);
+    }
+
+    [Fact]
+    public async Task Dispose_WhileWaitingForTheLease_NeverStartsTheRun()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        WorldService service = new WorldService(engine);
+        SemaphoreSlim gate = new SemaphoreSlim(0);
+        ScriptedClipPipeline pipeline = new ScriptedClipPipeline((request, cancel) =>
+        {
+            gate.Wait(cancel);
+            return ClipFrames(request.Plan.Frames);
+        });
+        Task<List<VideoFrame>> first = CollectAsync(service.OpenOneShot(pipeline, ClipPlan(4)).StreamAsync(CancellationToken.None));
+        await pipeline.Started.WaitAsync(Patience);
+        IWorldSession queued = service.OpenOneShot(pipeline, ClipPlan(4));
+        Task<List<VideoFrame>> waiting = CollectAsync(queued.StreamAsync(CancellationToken.None));
+        Assert.Equal(1, service.QueuedRuns);
+
+        queued.Dispose();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting.WaitAsync(Patience));
+        Assert.Equal(0, service.QueuedRuns);
+        gate.Release();
+        await first.WaitAsync(Patience);
+        Assert.Equal(1, pipeline.StartCount);
+    }
+
     /// <summary>A plan for a catalog-less batch model: any backend, default caps, and a seed frame of 2 by 2 pixels.</summary>
     private static WorldPlan ClipPlan(int frames) => WorldPlanResolver.Resolve(
         WorldTestFixtures.Spec(null, "fixture-batch"),

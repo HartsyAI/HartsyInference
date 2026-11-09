@@ -6,7 +6,8 @@ namespace HartsyInference.Engine.Services;
 
 /// <summary>An <see cref="IWorldSession"/> over a batch model. Actions are queued until the stream starts, then one run under the
 /// engine's execution lease renders the whole clip, and its frames are delivered once that run completes. A session streams once:
-/// a second enumeration throws, whether the first finished, was cancelled or failed.</summary>
+/// a second enumeration throws, whether the first finished, was cancelled or failed. Disposing the session cancels its stream:
+/// a run waiting for the lease never starts, a running clip is cancelled, and undelivered frames are dropped.</summary>
 internal sealed class OneShotWorldSession : IWorldSession
 {
     private readonly IOneShotClipPipeline _pipeline;
@@ -15,6 +16,10 @@ internal sealed class OneShotWorldSession : IWorldSession
     private readonly WorldPhaseLedger? _ledger;
     private readonly object _gate = new();
     private readonly List<string> _actions = [];
+
+    /// <summary>Cancelled by <see cref="Dispose"/>. Never disposed itself: a stream that already captured its token may still be
+    /// unwinding, and a source with no timer or wait handle holds nothing that needs releasing.</summary>
+    private readonly CancellationTokenSource _closed = new();
     private bool _streamStarted;
     private bool _disposed;
 
@@ -50,6 +55,7 @@ internal sealed class OneShotWorldSession : IWorldSession
     public async IAsyncEnumerable<VideoFrame> StreamAsync([EnumeratorCancellation] CancellationToken cancel)
     {
         string[] actions;
+        CancellationToken closed;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -60,12 +66,17 @@ internal sealed class OneShotWorldSession : IWorldSession
             }
             _streamStarted = true;
             actions = _actions.ToArray();
+            closed = _closed.Token;
         }
-        IReadOnlyList<VideoFrame> frames = await RunAsync(actions, cancel).ConfigureAwait(false);
+
+        // The caller's cancel or the session's disposal, whichever comes first, stops the stream.
+        using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancel, closed);
+        CancellationToken stop = linked.Token;
+        IReadOnlyList<VideoFrame> frames = await RunAsync(actions, stop).ConfigureAwait(false);
         for (int i = 0; i < frames.Count; i++)
         {
-            // A cancel that lands during delivery drops the rest of the clip and ends the stream as cancelled.
-            cancel.ThrowIfCancellationRequested();
+            // A cancel or disposal that lands during delivery drops the rest of the clip and ends the stream as cancelled.
+            stop.ThrowIfCancellationRequested();
             yield return frames[i];
         }
     }
@@ -110,8 +121,15 @@ internal sealed class OneShotWorldSession : IWorldSession
     {
         lock (_gate)
         {
+            if (_disposed)
+            {
+                return;
+            }
             _disposed = true;
             _actions.Clear();
         }
+        // Outside the lock: cancellation runs the stream's callbacks synchronously. A running clip still unwinds before the
+        // lease is released (RunAsync awaits it to completion).
+        _closed.Cancel();
     }
 }
