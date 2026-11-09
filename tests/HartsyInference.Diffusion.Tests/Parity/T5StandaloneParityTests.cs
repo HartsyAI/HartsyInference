@@ -1,6 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.ModelAssets.Checkpoints;
 using System.Text.Json;
