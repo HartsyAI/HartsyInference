@@ -63,6 +63,7 @@ public static class WorldPlanResolver
             Sampler = sampler,
             Refiner = request.Refiner,
             ProgressivePreview = request.ProgressivePreview,
+            SequentialCfg = request.SequentialCfg,
             Seed = seed,
             SeedDrawn = seedDrawn,
             CameraPoses = camera.Path?.Poses.Count ?? 0,
@@ -100,6 +101,10 @@ public static class WorldPlanResolver
         if (request.Refiner && !caps.SupportsRefiner)
         {
             throw new WorldPlanningException($"'{id}' has no refiner stage; the refiner option is not supported.");
+        }
+        if (request.SequentialCfg && !caps.SupportsSequentialCfg)
+        {
+            throw new WorldPlanningException($"'{id}' has no sequential classifier-free guidance path; leave SequentialCfg unset.");
         }
         if (request.ProgressivePreview && !caps.SupportsProgressivePreview)
         {

@@ -844,6 +844,7 @@ public static class GenerationDispatch
             Seed = parameters.GetInt("seed", -1),
             CameraPath = parameters.GetStringOrNull("camera"),
             Intrinsics = parameters.GetStringOrNull("intrinsics"),
+            SequentialCfg = parameters.GetBool("sequential-cfg", false),
         };
         WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);

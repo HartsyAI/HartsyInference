@@ -87,6 +87,11 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
         public bool Quiet { get; init; }
+
+        /// <summary>Run guidance as two sequential passes per step; refused by a model that does not declare it.</summary>
+        [CommandOption("--sequential-cfg")]
+        [Description("Run guidance as two sequential passes per step (only models that support it).")]
+        public bool SequentialCfg { get; init; }
     }
 
     /// <inheritdoc/>
@@ -122,6 +127,7 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         parameters.Put("actions", settings.Actions ?? "");
         PutIfSet(parameters, "camera", settings.Camera);
         PutIfSet(parameters, "intrinsics", settings.Intrinsics);
+        parameters.Put("sequential-cfg", settings.SequentialCfg ? "true" : "false");
 
         Dictionary<string, string> aux = isOasis ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
             : new Dictionary<string, string>();

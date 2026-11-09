@@ -43,6 +43,9 @@ public sealed record WorldPlan
     /// <summary>Whether partial frames stream while each one denoises.</summary>
     public bool ProgressivePreview { get; init; }
 
+    /// <summary>Whether guidance runs as two sequential passes per step rather than one batch-2 call.</summary>
+    public bool SequentialCfg { get; init; }
+
     /// <summary>The effective seed the rollout uses; a request with no seed records the one drawn for it.</summary>
     public required long Seed { get; init; }
 
@@ -94,6 +97,11 @@ public sealed record WorldPlan
             $"cameraTruncatedFrom={CameraTruncatedFrom?.ToString(CultureInfo.InvariantCulture) ?? "-"}",
             $"intrinsics={FormatIntrinsics(Intrinsics)}",
         ];
+        // Appended only when set, so the rendering of every plan that predates the flag stays byte-identical.
+        if (SequentialCfg)
+        {
+            lines.Add($"sequentialCfg={SequentialCfg}");
+        }
         foreach (string note in Notes)
         {
             lines.Add($"note={note}");

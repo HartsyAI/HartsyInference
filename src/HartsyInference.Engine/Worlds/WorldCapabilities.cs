@@ -63,4 +63,8 @@ public sealed record WorldCapabilities
     /// <summary>Whether the model yields partial frames while one is still denoising. Batch models cannot; they deliver
     /// each rollout's frames through <see cref="Requests.IWorldSession.StreamAsync"/> once it completes.</summary>
     public bool SupportsProgressivePreview { get; init; }
+
+    /// <summary>Whether a request may ask for sequential classifier-free guidance: the conditional and unconditional passes
+    /// run as two calls per step instead of one batch-2 call. No model declares it until its pipeline implements the path.</summary>
+    public bool SupportsSequentialCfg { get; init; }
 }

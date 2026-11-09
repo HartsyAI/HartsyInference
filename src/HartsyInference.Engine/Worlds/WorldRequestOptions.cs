@@ -25,6 +25,9 @@ public sealed record WorldRequestOptions
     /// <summary>Intrinsics as <c>fx,fy,cx,cy</c>; overrides the intrinsics in the camera file and needs a camera path.</summary>
     public string? Intrinsics { get; init; }
 
+    /// <summary>Runs guidance as two sequential passes per step; refused by a model that does not declare the capability.</summary>
+    public bool SequentialCfg { get; init; }
+
     /// <summary>Builds the request for <paramref name="initImage"/>, reading the camera file when one is named.</summary>
     /// <exception cref="ArgumentException">Intrinsics were given without a camera path, or do not parse.</exception>
     public WorldRequest ToRequest(ImageData initImage, VramOverrides? vram = null)
@@ -47,6 +50,7 @@ public sealed record WorldRequestOptions
             Steps = Steps ?? 0,
             Seed = Seed,
             Camera = camera,
+            SequentialCfg = SequentialCfg,
             Vram = vram,
         };
     }

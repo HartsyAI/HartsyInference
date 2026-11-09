@@ -47,6 +47,10 @@ public sealed record WorldRequest
     /// preview support accept it; frames are otherwise delivered as each rollout completes.</summary>
     public bool ProgressivePreview { get; init; }
 
+    /// <summary>Runs the conditional and unconditional guidance passes as two calls per step instead of one batch-2 call.
+    /// Only models that declare <see cref="Worlds.WorldCapabilities.SupportsSequentialCfg"/> accept it. Off by default.</summary>
+    public bool SequentialCfg { get; init; }
+
     /// <summary>Typed per-frame camera input; null for an action-driven rollout.</summary>
     public WorldCameraPath? Camera { get; init; }
 }
