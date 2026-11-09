@@ -13,6 +13,10 @@ namespace HartsyInference.Cli.Commands;
 /// <c>hartsy world -m sana-wm --image demo.png --prompt-file demo.txt (--actions "w-80,dw-40,aw-40" | --camera poses.npy)
 /// --intrinsics intrinsics.npy [--frames 161] [--steps 60] [--cfg-scale 5] [--flow-shift 9.8] [--seed 42]</c>. For a model that
 /// takes an action-script camera (SANA-WM), <c>--actions</c> is that script; for the others it is the per-frame action plan.
+/// SANA-WM streaming generates chunk by chunk and can be driven while it runs:
+/// <c>hartsy world -m sana-wm-streaming --image demo.png --prompt-file demo.txt --intrinsics fx,fy,cx,cy
+/// [--actions "w-48"] [--frames 241 | --unbounded] [--interactive]</c>. There <c>--actions</c> is the opening move, and with
+/// <c>--interactive</c> the keys <c>wasdijkl</c> toggle the held controls, space releases them and <c>q</c> ends the stream.
 /// Every option is checked by the engine's world planner before a checkpoint is loaded.
 /// Camera file format: a JSON file <c>{"poses": [[16 numbers], ...], "intrinsics": {"fx", "fy", "cx", "cy"}}</c> or a
 /// NumPy <c>.npy</c> float32/float64 array shaped (N, 16) or (N, 4, 4). Each pose is a camera-to-world matrix, row-major,
@@ -34,7 +38,7 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         /// <summary>Model id.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: oasis, diamond or sana-wm.")]
+        [Description("Model id: oasis, diamond, sana-wm or sana-wm-streaming.")]
         public string Model { get; init; } = "oasis";
 
         /// <summary>The prompt the world is seeded with.</summary>
@@ -134,6 +138,23 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("--sequential-cfg")]
         [Description("Run guidance as two sequential passes per step (only models that support it).")]
         public bool SequentialCfg { get; init; }
+
+        /// <summary>Ask for chunk-by-chunk streaming generation; refused by a model that has no streaming mode.</summary>
+        [CommandOption("--streaming")]
+        [Description("Generate chunk by chunk, delivering frames as each chunk completes (models with a streaming mode; "
+            + "sana-wm-streaming always streams).")]
+        public bool Streaming { get; init; }
+
+        /// <summary>Run a streaming session until it is stopped instead of for a frame count.</summary>
+        [CommandOption("--unbounded")]
+        [Description("Streaming: run until stopped (q in --interactive, or Ctrl+C) instead of for --frames.")]
+        public bool Unbounded { get; init; }
+
+        /// <summary>Drive a streaming session from the keyboard while it runs.</summary>
+        [CommandOption("--interactive")]
+        [Description("Streaming: steer from the keyboard while generating. wasdijkl toggle the held controls, space releases "
+            + "them, q or Esc ends the stream and saves what was generated.")]
+        public bool Interactive { get; init; }
     }
 
     /// <inheritdoc/>
@@ -202,6 +223,9 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         PutIfSet(parameters, "cfg-scale", settings.CfgScale);
         PutIfSet(parameters, "flow-shift", settings.FlowShift);
         parameters.Put("sequential-cfg", settings.SequentialCfg ? "true" : "false");
+        parameters.Put("streaming", settings.Streaming ? "true" : "false");
+        parameters.Put("unbounded", settings.Unbounded ? "true" : "false");
+        parameters.Put("interactive", settings.Interactive ? "true" : "false");
 
         Dictionary<string, string> aux = new Dictionary<string, string>();
         if (!string.IsNullOrWhiteSpace(settings.VaePath))

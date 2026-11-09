@@ -852,6 +852,9 @@ public static class GenerationDispatch
             CameraScript = scriptCamera ? actions : null,
             Intrinsics = parameters.GetStringOrNull("intrinsics"),
             SequentialCfg = parameters.GetBool("sequential-cfg", false),
+            // An unset --streaming leaves the mode to the model: a streaming-only model streams, a batch model does not.
+            Streaming = parameters.GetBool("streaming", false) || spec.Catalog?.World?.Streaming is { Only: true } ? true : null,
+            Unbounded = parameters.GetBool("unbounded", false),
         };
         WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
@@ -867,16 +870,30 @@ public static class GenerationDispatch
                 session.SendAction(actionPlan[i % actionPlan.Length]);
             }
         }
+        // A streaming session can be ended from the keyboard; what it generated up to then is still saved.
+        using CancellationTokenSource userStop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        Task? keyboard = plan.Streaming && parameters.GetBool("interactive", false) && !Console.IsInputRedirected
+            ? Task.Run(() => DriveWorldFromKeyboard(session, userStop), CancellationToken.None)
+            : null;
         try
         {
-            await foreach (VideoFrame frame in session.StreamAsync(cancel).ConfigureAwait(false))
+            await foreach (VideoFrame frame in session.StreamAsync(userStop.Token).ConfigureAwait(false))
             {
                 frames.Add(frame);
-                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = plan.Frames });
+                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = plan.Unbounded ? frames.Count : plan.Frames });
             }
+        }
+        catch (OperationCanceledException) when (userStop.IsCancellationRequested && !cancel.IsCancellationRequested && frames.Count > 0)
+        {
+            // The user ended the stream from the keyboard: keep the frames generated so far.
         }
         finally
         {
+            userStop.Cancel();
+            if (keyboard is not null)
+            {
+                await keyboard.ConfigureAwait(false);
+            }
             progress?.Finish();
         }
         GeneratedArtifact artifact = FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world",
@@ -889,6 +906,57 @@ public static class GenerationDispatch
             artifact.Meta[$"note{i + 1}"] = plan.Notes[i];
         }
         return artifact;
+    }
+
+    /// <summary>Steers a streaming world session from the keyboard until <paramref name="stop"/> is cancelled. A terminal reports
+    /// key presses but not releases, so each of <c>wasdijkl</c> toggles its control (pressing one direction of an axis releases
+    /// the opposite one), space or <c>x</c> releases everything, and <c>q</c> or Esc cancels <paramref name="stop"/>. Every change
+    /// is sent as the key set now held, which the stream applies from its next chunk.</summary>
+    private static void DriveWorldFromKeyboard(IWorldSession session, CancellationTokenSource stop)
+    {
+        const string Controls = "wasdijkl";
+        const string Opposites = "sdwaklij";
+        List<char> held = [];
+        while (!stop.IsCancellationRequested)
+        {
+            if (!Console.KeyAvailable)
+            {
+                stop.Token.WaitHandle.WaitOne(20);
+                continue;
+            }
+            ConsoleKeyInfo key = Console.ReadKey(intercept: true);
+            char pressed = char.ToLowerInvariant(key.KeyChar);
+            if (key.Key == ConsoleKey.Escape || pressed == 'q')
+            {
+                stop.Cancel();
+                return;
+            }
+            int control = Controls.IndexOf(pressed);
+            if (pressed == ' ' || pressed == 'x')
+            {
+                held.Clear();
+            }
+            else if (control >= 0)
+            {
+                if (!held.Remove(pressed))
+                {
+                    held.Remove(Opposites[control]);
+                    held.Add(pressed);
+                }
+            }
+            else
+            {
+                continue;
+            }
+            try
+            {
+                session.SendAction(held.Count == 0 ? "none" : new string(held.ToArray()));
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/>, else a per-model demo plan.</summary>

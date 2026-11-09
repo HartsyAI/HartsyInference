@@ -51,6 +51,40 @@ public static class ModelCatalog
         SupportsSequentialCfg = true,
     };
 
+    /// <summary>SANA-WM streaming (the chunk-causal distilled student, the causal LTX-2 VAE, no refiner): CUDA and BF16 only,
+    /// 16 fps, 25 or more frames on the 24n+1 grid (a first chunk of 25 frames, then 24 per chunk) or an unbounded run. The
+    /// camera is steered by live actions, with an action script as the opening move, or follows a fixed pose path; intrinsics
+    /// are required. The distilled schedule fixes the step count, and guidance defaults to 1.</summary>
+    private static WorldCapabilities SanaWmStreamingWorld => new WorldCapabilities
+    {
+        Backends = ["cuda"],
+        Precisions = ["bf16"],
+        DefaultFps = 16,
+        Fps = [16],
+        DefaultFrames = World.Pipelines.SanaWmStreamingPipeline.DefaultFrames,
+        MinFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk + 1,
+        Frames = Recipes.FrameGrid.StepPlusOne(World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk, Recipes.FrameNormalization.Reject),
+        DefaultSteps = 0,
+        CameraModes = [WorldCameraMode.PerFramePose, WorldCameraMode.ActionScript],
+        CameraScript = SanaWmCameraScript.Instance,
+        CameraRequired = true,
+        Intrinsics = WorldIntrinsicsPolicy.Required,
+        Samplers = ["self_forcing"],
+        SupportsGuidance = true,
+        SupportsFlowShift = false,
+        SupportsRefiner = false,
+        SupportsProgressivePreview = false,
+        SupportsSequentialCfg = false,
+        Streaming = new WorldStreamingCapabilities
+        {
+            Only = true,
+            FirstChunkFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk + 1,
+            ChunkFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk,
+            SupportsUnbounded = true,
+            SupportsLiveActions = true,
+        },
+    };
+
     /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
     /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
     private static IReadOnlyList<ModelAsset> SanaWmAssets =>
@@ -2512,6 +2546,8 @@ public static class ModelCatalog
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
             E("sana-wm", act, "SANA-WM (stage 1)", "2.6B GDN/softmax camera DiT + LTX-2 VAE", vp, cli: true)
                 with { World = SanaWmWorld, Assets = SanaWmAssets },
+            E("sana-wm-streaming", act, "SANA-WM streaming (stage 1)", "chunk-causal distilled GDN/softmax camera DiT + causal LTX-2 VAE",
+                vp, cli: true) with { World = SanaWmStreamingWorld },
 
             // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified
             // GgufLanguageModel/GenericTransformer GGUF pipeline chat models use). Not CLI-drivable yet: reachable

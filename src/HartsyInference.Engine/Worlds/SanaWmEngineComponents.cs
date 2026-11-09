@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Streaming;
 using HartsyInference.Engine.Features;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -15,8 +16,10 @@ namespace HartsyInference.Engine.Worlds;
 
 /// <summary>Loads SANA-WM's components from their checkpoint files, each stage in its own <see cref="WorldPhase"/>: the stage's
 /// loaders, modules and converted weights are owned by the phase, and releasing the stage releases the phase, so the next stage
-/// starts with the previous one's memory returned. A load that fails releases what it had acquired.</summary>
-internal sealed class SanaWmEngineComponents : ISanaWmComponents
+/// starts with the previous one's memory returned. A load that fails releases what it had acquired. The clip pipeline opens
+/// one stage at a time; a stream opens the text and image encoders the same way, then holds its DiT and its causal VAE
+/// decoder open together.</summary>
+internal sealed class SanaWmEngineComponents : ISanaWmComponents, ISanaWmStreamingComponents
 {
     private const string LatentsMeanKey = "latents_mean";
     private const string LatentsStdKey = "latents_std";
@@ -34,7 +37,8 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(files);
-        if (files.Architecture != WorldArchitecture.SanaWm || files.Vae is null || files.TextEncoder is null || files.Tokenizer is null)
+        bool sanaWm = files.Architecture is WorldArchitecture.SanaWm or WorldArchitecture.SanaWmStreaming;
+        if (!sanaWm || files.Vae is null || files.TextEncoder is null || files.Tokenizer is null)
             throw new ArgumentException("SANA-WM needs its DiT, VAE, text encoder and tokenizer files.", nameof(files));
         _backend = backend;
         _files = files;
@@ -90,6 +94,31 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
         decoder.LoadWeights(weights);
         phase.OwnRelease("the VAE decoder weights", () => DisposeAll(decoder.EnumerateWeights()));
         return new SanaWmLtx2VideoDecoder(_backend, decoder);
+    });
+
+    /// <inheritdoc/>
+    public SanaWmStage<ISanaWmChunkDenoiser> OpenChunkDenoiser(SanaWmTextConditioning text, TokenWindowPolicy softmaxWindow) =>
+        Open<ISanaWmChunkDenoiser>("SANA-WM streaming DiT", phase =>
+        {
+            SanaWmCheckpoint checkpoint = phase.Own(SanaWmCheckpointConverter.Load(_files.Backbone));
+            SanaWmDit dit = phase.Own(new SanaWmDit(_backend, checkpoint));
+            return phase.Own(new SanaWmDitChunkDenoiser(_backend, dit, checkpoint.Config, text, softmaxWindow));
+        });
+
+    /// <inheritdoc/>
+    public SanaWmStage<IStreamingVideoDecoder> OpenStreamingDecoder() => Open<IStreamingVideoDecoder>("SANA-WM causal VAE decoder", phase =>
+    {
+        SafeTensorsLoader loader = phase.Own(Load(_files.Vae!));
+        (float[] mean, float[] std) = Statistics(loader);
+        DType dtype = VaePrecisionHelper.PreferredVaeDtype(_backend);
+        Dictionary<string, Tensor> weights = Widened(phase, loader, "decoder.", dtype);
+        // The causal VAE keeps the bidirectional VAE's decoder layout (residual upsamplers, reflect padding) with causal convs.
+        LtxVideo2VaeDecoder decoder = new LtxVideo2VaeDecoder(latentChannels: SanaWmPipeline.LatentChannels,
+            upsampleResidual: DecoderUpsampleResidual, isCausal: true, latentsMean: mean, latentsStd: std, computeDtype: dtype,
+            spatialReflectPad: true);
+        decoder.LoadWeights(weights);
+        phase.OwnRelease("the VAE decoder weights", () => DisposeAll(decoder.EnumerateWeights()));
+        return phase.Own(new LtxVideo2StreamingDecoder(_backend, decoder));
     });
 
     private SanaWmStage<T> Open<T>(string name, Func<WorldPhase, T> load)

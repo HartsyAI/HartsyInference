@@ -46,6 +46,12 @@ public sealed record WorldPlan
     /// <summary>Whether guidance runs as two sequential passes per step rather than one batch-2 call.</summary>
     public bool SequentialCfg { get; init; }
 
+    /// <summary>Whether the session generates chunk by chunk and delivers each chunk's frames as it completes.</summary>
+    public bool Streaming { get; init; }
+
+    /// <summary>Whether a streaming session runs until it is disposed or cancelled; <see cref="Frames"/> is then 0.</summary>
+    public bool Unbounded { get; init; }
+
     /// <summary>The effective seed the rollout uses; a request with no seed records the one drawn for it.</summary>
     public required long Seed { get; init; }
 
@@ -71,8 +77,8 @@ public sealed record WorldPlan
     /// <summary>The resolved request a session is opened on: the same request with every resolved value written back.</summary>
     public required WorldRequest Request { get; init; }
 
-    /// <summary>Actions a rollout is driven with: one per frame after the seed frame.</summary>
-    public int ActionCount => Frames - 1;
+    /// <summary>Actions a rollout is driven with: one per frame after the seed frame; 0 for an unbounded stream.</summary>
+    public int ActionCount => Math.Max(0, Frames - 1);
 
     /// <summary>Presentation timestamp of a frame, in milliseconds, derived from its index and the plan's frame rate.</summary>
     public static long FrameTimestampMs(int index, int fps) => (long)Math.Round(index * 1000.0 / fps, MidpointRounding.AwayFromZero);
@@ -109,6 +115,14 @@ public sealed record WorldPlan
         if (FrameIntrinsics > 0)
         {
             lines.Add($"frameIntrinsics={FrameIntrinsics}");
+        }
+        if (Streaming)
+        {
+            lines.Add($"streaming={Streaming}");
+        }
+        if (Unbounded)
+        {
+            lines.Add($"unbounded={Unbounded}");
         }
         foreach (string note in Notes)
         {

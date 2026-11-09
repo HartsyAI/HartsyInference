@@ -53,4 +53,13 @@ public sealed record WorldRequest
 
     /// <summary>Typed per-frame camera input; null for an action-driven rollout.</summary>
     public WorldCameraPath? Camera { get; init; }
+
+    /// <summary>Whether to generate chunk by chunk, delivering each chunk's frames as it completes and steering later chunks
+    /// with the actions sent meanwhile. True asks for it, false asks for a whole-clip batch run, and null takes the model's own
+    /// mode. Only models that declare <see cref="Worlds.WorldCapabilities.Streaming"/> stream.</summary>
+    public bool? Streaming { get; init; }
+
+    /// <summary>Runs a streaming session with no frame count, until the session is disposed or cancelled. Only models that
+    /// declare <see cref="Worlds.WorldStreamingCapabilities.SupportsUnbounded"/> accept it; <see cref="Frames"/> must be unset.</summary>
+    public bool Unbounded { get; init; }
 }

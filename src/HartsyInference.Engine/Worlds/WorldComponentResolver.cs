@@ -26,8 +26,13 @@ public static class WorldComponentResolver
     private const string SanaWmTextEncoderRelative = "../text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors";
     private const string GemmaTokenizerFile = "tokenizer.model";
 
+    // SANA-WM streaming's layout: the converted DiT under sana_dit/, the causal VAE under ltx2_causal_vae/ beside it, and the
+    // stage-1 release's Gemma-2-2B, shared rather than downloaded twice.
+    private const string SanaWmCausalVaeRelative = "../ltx2_causal_vae/diffusion_pytorch_model.safetensors";
+    private const string SanaWmSharedTextEncoderRelative = "../../SanaWm/text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors";
+
     /// <summary>The world models the service can load, by catalog id.</summary>
-    public static IReadOnlyList<string> KnownIds { get; } = ["oasis", "diamond", "hunyuan-gamecraft", "sana-wm"];
+    public static IReadOnlyList<string> KnownIds { get; } = ["oasis", "diamond", "hunyuan-gamecraft", "sana-wm", "sana-wm-streaming"];
 
     /// <summary>The architecture a catalog id loads with.</summary>
     /// <exception cref="NotSupportedException">The id is not a world model this service loads; a catalog-less spec has no id
@@ -38,6 +43,7 @@ public static class WorldComponentResolver
         "diamond" => WorldArchitecture.Diamond,
         "hunyuan-gamecraft" => WorldArchitecture.HunyuanGameCraft,
         "sana-wm" => WorldArchitecture.SanaWm,
+        "sana-wm-streaming" => WorldArchitecture.SanaWmStreaming,
         _ => throw new NotSupportedException(
             $"'{catalogId ?? "(no catalog id)"}' is not a world model this engine can load; known: {string.Join(", ", KnownIds)}."),
     };
@@ -64,6 +70,17 @@ public static class WorldComponentResolver
                     Vae = AuxOrSibling(spec, VaeAuxKey, backbone, SanaWmVaeRelative, "LTX-2 VAE"),
                     TextEncoder = textEncoder,
                     Tokenizer = AuxOrSibling(spec, TokenizerAuxKey, textEncoder, GemmaTokenizerFile, "Gemma tokenizer"),
+                };
+            case WorldArchitecture.SanaWmStreaming:
+                string sharedTextEncoder = AuxOrSibling(spec, TextEncoderAuxKey, backbone, SanaWmSharedTextEncoderRelative,
+                    "Gemma-2-2B text encoder");
+                return new WorldComponents
+                {
+                    Architecture = architecture,
+                    Backbone = backbone,
+                    Vae = AuxOrSibling(spec, VaeAuxKey, backbone, SanaWmCausalVaeRelative, "causal LTX-2 VAE"),
+                    TextEncoder = sharedTextEncoder,
+                    Tokenizer = AuxOrSibling(spec, TokenizerAuxKey, sharedTextEncoder, GemmaTokenizerFile, "Gemma tokenizer"),
                 };
             case WorldArchitecture.HunyuanGameCraft:
                 return new WorldComponents
