@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -233,6 +234,32 @@ public sealed unsafe class CausalConv3d
             acc.Dispose();
         }
         return output;
+    }
+
+    /// <summary><see cref="Forward"/> for one chunk of a stream. The left context is the tail of the input the conv saw on
+    /// earlier chunks, kept in <paramref name="cache"/>; while the stream is shorter than the context, the oldest frame is
+    /// repeated, which is the replicate padding a whole-clip pass gives the first frames. The chunk's own tail is staged for the
+    /// next call. A null cache, or a conv with no temporal context, is a plain <see cref="Forward"/>.</summary>
+    /// <exception cref="InvalidOperationException">The conv is not causal: its output would depend on frames after the chunk.</exception>
+    public Tensor ForwardStreaming(IBackend backend, Tensor input, CausalStreamCache? cache)
+    {
+        if (cache is null || _padTLeft == 0)
+            return Forward(backend, input);
+        if (!_causal)
+            throw new InvalidOperationException("Only a causal convolution can run a stream a chunk at a time.");
+        FrameTailCache tail = cache.NextTail(_padTLeft);
+        using Tensor? context = tail.ReplicatePadded(_padTLeft);
+        Tensor output = Forward(backend, input, context);
+        try
+        {
+            tail.Stage(input);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Extracts temporal frame <paramref name="srcT"/> of the (conceptually) left-padded input as a <c>[B, cIn, H, W]</c> tensor, or null for an all-zero pad frame.</summary>

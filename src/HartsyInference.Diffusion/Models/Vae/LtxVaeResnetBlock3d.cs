@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -65,7 +66,8 @@ public sealed unsafe class LtxVaeResnetBlock3d
     }
 
     /// <summary>Forward over <c>[B, inC, T, H, W]</c>. <paramref name="temb"/> (<c>[4·C]</c>, B=1) is required iff the block is timestep-conditioned.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, Tensor? temb)
+    /// <param name="cache">The left context of the causal convs when <paramref name="x"/> is one chunk of a stream; null runs a whole clip.</param>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor? temb, CausalStreamCache? cache = null)
     {
         // Compute the 4 modulation vectors once (each [C]) when timestep-conditioned.
         float[]? shift1 = null, scale1 = null, shift2 = null, scale2 = null;
@@ -77,14 +79,14 @@ public sealed unsafe class LtxVaeResnetBlock3d
         Tensor h = _timestepCond ? ChannelRms(x, _inC) : ChannelRmsDevice(backend, x);
         if (_timestepCond) ApplyShiftScale(h, scale1!, shift1!);
         Silu(backend, h);
-        Tensor c1 = _conv1!.Forward(backend, h);
+        Tensor c1 = _conv1!.ForwardStreaming(backend, h, cache);
         h.Dispose();
 
         Tensor h2 = _timestepCond ? ChannelRms(c1, _outC) : ChannelRmsDevice(backend, c1);
         c1.Dispose();
         if (_timestepCond) ApplyShiftScale(h2, scale2!, shift2!);
         Silu(backend, h2);
-        Tensor c2 = _conv2!.Forward(backend, h2);
+        Tensor c2 = _conv2!.ForwardStreaming(backend, h2, cache);
         h2.Dispose();
 
         // Residual (with optional norm3 + shortcut conv).
