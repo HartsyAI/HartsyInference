@@ -12,7 +12,7 @@ public sealed class CoLa3DCheckpointLoadTests
     public void SsFlowQ8_LoadsAllTensorsAndReadsComplexRopePhasesAsRealPairs()
     {
         string path = Path.Combine(FindRepoRoot(), "Models", "CoLa3D", "ss_flow_q8.pt");
-        Assert.True(File.Exists(path), $"Integration weights missing: {path}");
+        Assert.True(File.Exists(path), $"Integration weights not found: {path}. Models/CoLa3D must exist above the test bin directory.");
 
         PytorchPickleLoader loader = new();
         loader.Load(path);

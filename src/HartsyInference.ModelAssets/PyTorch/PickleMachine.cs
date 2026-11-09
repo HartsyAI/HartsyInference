@@ -160,6 +160,7 @@ internal sealed class PickleMachine
 
     private static DType StorageDType(string name) => name switch
     {
+        // ComplexFloatStorage is read as interleaved F32 (see ViewAsReal); ComplexDoubleStorage is intentionally unsupported.
         "FloatStorage" or "ComplexFloatStorage" => DType.F32,
         "HalfStorage" => DType.F16,
         "BFloat16Storage" => DType.BF16,
