@@ -138,7 +138,7 @@ without writing it to disk. `POST /v1/native/mesh/stream` returns only the final
 
 - `hair_cards`: the hair as ribbons, with per-card colours (`COLOR_0`) when colours are on, ready for a viewer or DCC tool.
 - `spring_chains` (when chains are on): the chain tubes. Static output shows where the chains run. Rigged output skins
-  the hair cards to them, and the file has one skin and four animations (`turn`, `nod`, `jump`, `sway`) at 60 fps.
+  the hair cards and the chain tubes to the chains, and the file has one skin and four animations (`turn`, `nod`, `jump`, `sway`) at 60 fps.
 
 ### Limits
 

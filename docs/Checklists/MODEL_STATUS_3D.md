@@ -19,7 +19,7 @@ Detail in the retired 3D build plan (git history).
 
 | Model | Notes |
 |---|---|
-| **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CPU and CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
+| **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
 | **Hunyuan3D-2** | Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). ([details](#hunyuan3d-2)) |
 
 Tests: `Hunyuan3DDinoParityTests`, `Hunyuan3DVaeParityTests` (both in
