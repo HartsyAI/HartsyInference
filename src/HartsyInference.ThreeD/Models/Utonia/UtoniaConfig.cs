@@ -37,6 +37,27 @@ public sealed record UtoniaConfig
     public float RopeBase { get; init; } = 10f;
 
     /// <summary>Checks the shape and divisibility rules the modules rely on. Throws for an unusable config.</summary>
+    /// <summary>
+    /// Encoder of the CoLa3D Utonia checkpoint. Depths, widths, the 18-channel head size (from the RoPE buffer's
+    /// length) and the 2x stride per stage are read from <c>utonia.pth</c>. Curve order, patch size and RoPE base are
+    /// not stored in the weights and follow Pointcept's defaults, so they are unverified against the reference.
+    /// </summary>
+    public static UtoniaConfig Cola3DEncoder => new()
+    {
+        InChannels = 9,
+        Order = ["z", "z-trans", "hilbert", "hilbert-trans"],
+        Stride = [2, 2, 2, 2],
+        EncDepths = [3, 3, 3, 12, 3],
+        EncChannels = [54, 108, 216, 432, 576],
+        EncNumHeads = [3, 6, 12, 24, 32],
+        EncPatchSize = [1024, 1024, 1024, 1024, 1024],
+        EncoderOnly = true,
+        MlpRatio = 4.0,
+        QkvBias = true,
+        PreNorm = true,
+        LayerScaleInit = null,
+    };
+
     public void Validate()
     {
         if (InChannels <= 0)
