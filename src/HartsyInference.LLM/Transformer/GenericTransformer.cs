@@ -497,6 +497,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         // A caller-supplied MultimodalRope (MOSS-VL) replaces the position ramp: its tables are copied resident and owned here.
         Tensor cos, sin;
         MultimodalRope? resident = null;
+        bool ownsResidentVision = false;
         if (rope is null)
         {
             cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
@@ -507,16 +508,25 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         else
         {
             if (_cfg.Mla is not null) throw new NotSupportedException("MultimodalRope is not supported with MLA.");
+            // The vision tables and the cross bias are read only when a cross layer projects its keys and values. Once every cross
+            // layer holds them (each decode step of a request), they are borrowed from the caller instead of copied again.
+            bool visionRead = crossKv is null || !CrossKvComplete(crossKv);
             // Each copy is released if a later one fails; once the record exists the finally below owns them.
-            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null, crossBias = null;
             try
             {
                 textCos = MakeResident(backend, rope.TextCos);
                 textSin = MakeResident(backend, rope.TextSin);
-                visionCos = MakeResident(backend, rope.VisionCos);
-                visionSin = MakeResident(backend, rope.VisionSin);
+                if (visionRead)
+                {
+                    visionCos = MakeResident(backend, rope.VisionCos);
+                    visionSin = MakeResident(backend, rope.VisionSin);
+                }
                 rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
-                resident = new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask);
+                crossBias = rope.CrossBias is null ? null : MakeResident(backend, rope.CrossBias);
+                resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask,
+                    crossBias);
+                ownsResidentVision = visionRead;
             }
             catch
             {
@@ -525,6 +535,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 visionCos?.Dispose();
                 visionSin?.Dispose();
                 rowMask?.Dispose();
+                crossBias?.Dispose();
                 throw;
             }
             cos = resident.TextCos;
@@ -650,13 +661,25 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             {
                 resident.TextCos.Dispose();
                 resident.TextSin.Dispose();
-                resident.VisionCos.Dispose();
-                resident.VisionSin.Dispose();
+                if (ownsResidentVision)
+                {
+                    resident.VisionCos.Dispose();
+                    resident.VisionSin.Dispose();
+                }
                 resident.RowMask?.Dispose();
+                resident.CrossBias?.Dispose();
             }
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
+    }
+
+    /// <summary>True when every cross-attention layer already holds its projected keys and values for the request.</summary>
+    private bool CrossKvComplete(Multimodal.CrossKvCache kv)
+    {
+        for (int i = 0; i < _layers.Length; i++)
+            if (_cfg.IsCrossAttnLayer(i) && kv.Get(i) is null) return false;
+        return true;
     }
 
     /// <summary>Ends a forward stopped by <paramref name="cancel"/> before layer <paramref name="layer"/>: releases the

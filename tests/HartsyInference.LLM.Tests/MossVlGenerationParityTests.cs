@@ -42,7 +42,8 @@ public sealed class MossVlGenerationParityTests
         using Tensor merged = new(new TensorShape(mergedShape[0], mergedShape[1]), DType.F32);
         mergedData.AsSpan().CopyTo(merged.AsSpan<float>());
 
-        using MossVlDecodeSession session = new(decoder, config, backend, ids, merged, MergedHeight, MergedWidth, maxNewTokens: 1);
+        using MossVlDecodeSession session = new(decoder, config, backend, ids,
+            [new MossVlImageFeatures(merged, MergedHeight, MergedWidth)], maxNewTokens: 1);
         float[] prefill = session.Prefill();
         float[] step = session.Step(stepToken);
 

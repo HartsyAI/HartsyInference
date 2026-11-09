@@ -52,11 +52,32 @@ public sealed class MossVlPositionsTests
     }
 
     [Fact]
-    public void SeveralImagesAreRefused()
+    public void TwoImagesEachHideTheKeysOfTheImageAfterTheRow()
     {
+        // Two 2x2 images: each block is 4 merged tokens plus a separator, so the vision sequence has 10 columns.
         int[] twoImages = [ImageToken, 5, ImageToken];
-        Assert.Throws<HartsyInferenceException>(() =>
-            MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]));
+        MossVlPositionPlan plan = MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]);
+
+        const float masked = MossVlPositionPlan.MaskedBias;
+        int l = plan.VisionLength;
+        Assert.Equal(10, l);
+        Assert.Equal(new float[] { 1f, 1f, 1f }, plan.RowMask);
+        Assert.NotNull(plan.CrossBias);
+        float[] bias = plan.CrossBias!;
+
+        // Rows 0 and 1 are before the second placeholder: they see image 0 (columns 0-4) only.
+        Assert.Equal(new float[] { 0, 0, 0, 0, 0, masked, masked, masked, masked, masked }, bias.AsSpan(0, l).ToArray());
+        Assert.Equal(new float[] { 0, 0, 0, 0, 0, masked, masked, masked, masked, masked }, bias.AsSpan(l, l).ToArray());
+        // Row 2 is the second placeholder: it sees both images.
+        Assert.Equal(new float[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, bias.AsSpan(2 * l, l).ToArray());
+    }
+
+    [Fact]
+    public void OneImageNeedsNoCrossBias()
+    {
+        MossVlPositionPlan plan = MossVlPositions.Plan(Prompt, ImageToken, [new MossVlImage(8, 12)]);
+
+        Assert.Null(plan.CrossBias);
     }
 
     [Fact]

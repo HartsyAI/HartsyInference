@@ -9,6 +9,9 @@ namespace HartsyInference.LLM.Transformer;
 /// queries after their per-head norm. <see cref="VisionCos"/>/<see cref="VisionSin"/> are <c>[1, L, headDim]</c>: the cross-attention
 /// keys after their per-head norm. <see cref="RowMask"/> is <c>[1, T, hidden]</c> F32, each row filled with 1 where the text row sees
 /// an image and 0 where it sees none; a 0 row contributes nothing from its cross-attention and MLP sublayers. The full width lets
-/// the layer apply it with an elementwise multiply. Every tensor is borrowed: the caller owns and disposes it.
+/// the layer apply it with an elementwise multiply. <see cref="CrossBias"/> is <c>[1, 1, T, L]</c> F32, the additive score bias that
+/// hides each vision key from the text rows that do not see its image; null when every row sees every key. Every tensor is borrowed:
+/// the caller owns and disposes it.
 /// </remarks>
-public sealed record MultimodalRope(Tensor TextCos, Tensor TextSin, Tensor VisionCos, Tensor VisionSin, Tensor? RowMask);
+public sealed record MultimodalRope(Tensor TextCos, Tensor TextSin, Tensor VisionCos, Tensor VisionSin, Tensor? RowMask,
+    Tensor? CrossBias = null);

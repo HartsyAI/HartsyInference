@@ -124,7 +124,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
 
         // Only the query is consumed here: the keys and values are borrowed (the kv cache or the caller disposes them).
         Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
-            new KvAttentionCall { KvLength = visionLen, Bidirectional = true }, OperandOwnership.Query);
+            new KvAttentionCall { KvLength = visionLen, Bidirectional = true, Bias = rope?.CrossBias }, OperandOwnership.Query);
         Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
         Tensor attnOut = new(flat, DType.F32);
         GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
