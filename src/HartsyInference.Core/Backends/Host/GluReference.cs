@@ -32,6 +32,12 @@ public static unsafe class GluReference
     public static float Value(float value, in GluSpec spec)
         => spec.Activation == GluActivation.Situ ? spec.SituLinearBeta * MathF.Tanh(value / spec.SituLinearBeta) : value;
 
+    /// <summary>The gate factor under <paramref name="activation"/> with the default SiTU betas; kept for assemblies built against it.</summary>
+    public static float Gate(float gate, GluActivation activation) => Gate(gate, new GluSpec(activation, GluGateHalf.First));
+
+    /// <summary>The value factor under <paramref name="activation"/> with the default SiTU betas; kept for assemblies built against it.</summary>
+    public static float Value(float value, GluActivation activation) => Value(value, new GluSpec(activation, GluGateHalf.First));
+
     public static void Apply(Tensor output, Tensor input, in GluSpec spec)
     {
         (int inner, long rows) = GluContract.Validate(output, input, spec);
