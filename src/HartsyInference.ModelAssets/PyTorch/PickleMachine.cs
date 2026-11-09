@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.ModelAssets.PyTorch;
 
 /// <summary>A torch storage reference recovered from a pickle <c>persistent_id</c>.</summary>
-internal sealed record PickleStorage(DType DType, string Key, long NumEl);
+internal sealed record PickleStorage(DType DType, string Key, long NumEl, bool IsComplex = false);
 
 /// <summary>A tensor reconstruction recovered from <c>torch._utils._rebuild_tensor_v2</c>.</summary>
 internal sealed record PickleTensor(PickleStorage Storage, long Offset, long[] Size, long[] Stride);
@@ -115,8 +115,13 @@ internal sealed class PickleMachine
         switch (g.Name)
         {
             case "_rebuild_tensor_v2" or "_rebuild_tensor":
-                return new PickleTensor(
-                    (PickleStorage)args[0]!, ToLong(args[1]), ToLongArray(args[2]), ToLongArray(args[3]));
+            {
+                PickleStorage storage = (PickleStorage)args[0]!;
+                long offset = ToLong(args[1]);
+                long[] size = ToLongArray(args[2]);
+                long[] stride = ToLongArray(args[3]);
+                return storage.IsComplex ? ViewAsReal(storage, offset, size, stride) : new PickleTensor(storage, offset, size, stride);
+            }
             case "_rebuild_parameter":
                 return args[0]; // wraps a tensor; unwrap
             case "_rebuild_from_type_v2":
@@ -133,12 +138,29 @@ internal sealed class PickleMachine
         // ('storage', <storage_type GLOBAL>, key, location, numel)
         object?[] t = (object?[])pid!;
         PickleGlobal st = (PickleGlobal)t[1]!;
-        return new PickleStorage(StorageDType(st.Name), Str(t[2]), ToLong(t[4]));
+        bool complex = st.Name == "ComplexFloatStorage";
+        long numel = ToLong(t[4]);
+        return new PickleStorage(StorageDType(st.Name), Str(t[2]), complex ? numel * 2 : numel, complex);
+    }
+
+    /// <summary>
+    /// <c>torch.view_as_real</c> of a complex tensor: the storage is interleaved float32 (re, im) pairs, so it reads
+    /// as F32 with a trailing axis of 2. Offsets and strides are in complex elements, hence doubled.
+    /// </summary>
+    internal static PickleTensor ViewAsReal(PickleStorage storage, long offset, long[] size, long[] stride)
+    {
+        long[] viewSize = new long[size.Length + 1];
+        long[] viewStride = new long[stride.Length + 1];
+        for (int i = 0; i < size.Length; i++) viewSize[i] = size[i];
+        for (int i = 0; i < stride.Length; i++) viewStride[i] = stride[i] * 2;
+        viewSize[size.Length] = 2;
+        viewStride[stride.Length] = 1;
+        return new PickleTensor(storage with { IsComplex = false }, offset * 2, viewSize, viewStride);
     }
 
     private static DType StorageDType(string name) => name switch
     {
-        "FloatStorage" => DType.F32,
+        "FloatStorage" or "ComplexFloatStorage" => DType.F32,
         "HalfStorage" => DType.F16,
         "BFloat16Storage" => DType.BF16,
         "DoubleStorage" => DType.F64,
