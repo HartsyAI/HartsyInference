@@ -59,6 +59,14 @@ public sealed record SanaWmStreamRequest
     /// <summary>Keeps the first chunk in the softmax window for the whole stream (upstream <c>sink_token</c>).</summary>
     public bool SinkChunk { get; init; } = true;
 
+    /// <summary>Runs the refiner stage: each chunk's latents pass through the chunk-causal LTX-2 refiner before they are
+    /// decoded. The seed frame's latent is the refiner's sink and is decoded unrefined. Needs components that implement
+    /// <see cref="ISanaWmRefinerComponents"/>.</summary>
+    public bool Refine { get; init; }
+
+    /// <summary>How the refiner stage runs; read only with <see cref="Refine"/>.</summary>
+    public SanaWmRefinerSettings Refiner { get; init; } = new();
+
     /// <summary>Replaces the seeded noise of a chunk with a host F32 <c>[1, 128, T, 22, 40]</c> tensor (for parity against a
     /// recorded upstream latent); a null result draws the seeded noise. The tensor is borrowed for the call.</summary>
     public Func<int, Tensor?>? ChunkNoise { get; init; }
@@ -67,7 +75,8 @@ public sealed record SanaWmStreamRequest
     /// skipped. Borrowed; the caller keeps it.</summary>
     public Tensor? FirstLatent { get; init; }
 
-    /// <summary>Observes intermediates by name: <c>first_latent</c>, and per chunk <c>chunk{k}_noise</c> and
-    /// <c>chunk{k}_latent</c>. The tensors are borrowed for the duration of the call.</summary>
+    /// <summary>Observes intermediates by name: <c>first_latent</c>, and per chunk <c>chunk{k}_noise</c>,
+    /// <c>chunk{k}_latent</c> and, with the refiner, <c>chunk{k}_refined</c> (the latents the decoder receives). The tensors
+    /// are borrowed for the duration of the call.</summary>
     public Action<string, Tensor>? Tap { get; init; }
 }
