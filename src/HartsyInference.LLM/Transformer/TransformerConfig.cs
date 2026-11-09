@@ -126,14 +126,32 @@ public sealed record MoeConfig
     /// <summary>Number of expert groups kept per token under group-limited routing (DeepSeek-V3 <c>topk_group</c>).</summary>
     public int ExpertGroupUsedCount { get; init; }
 
-    /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1).</summary>
+    /// <summary>Multiplier applied to the routed-expert weights (DeepSeek-V3 <c>routed_scaling_factor</c>, default 1). Ignored under
+    /// <see cref="LearnedRoutedScale"/>.</summary>
     public float RoutedScalingFactor { get; init; } = 1f;
 
-    /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>): the block projects the layer input down with <c>pre_expert_proj</c>, RMS-normalizes it with <c>pre_expert_norm</c>, runs the experts there, and projects their sum back up with <c>post_expert_proj</c>. 0 (default) runs the experts at the model width.</summary>
+    /// <summary>ERNIE-5.5 split-feature routing (<c>moe_split_feature_routing</c>): a second router matrix scores every token too, and an
+    /// expert's score is the sum of its two sigmoids. Sigmoid scoring only; the device router does not take it.</summary>
+    public bool SplitFeatureRouting { get; init; }
+
+    /// <summary>ERNIE-5.5 learned routed scale (<c>routed_scaling_factor_learnable</c>): each routed weight is multiplied by a per-expert
+    /// F32 vector from the checkpoint instead of <see cref="RoutedScalingFactor"/>, which the reference then never reads.</summary>
+    public bool LearnedRoutedScale { get; init; }
+
+    /// <summary>Width the routed experts run at (Muse Spark <c>moe_hidden_size</c>, ERNIE-5.5 <c>moe_latent_size</c>): the block projects the
+    /// layer input down, runs the experts there, and projects their sum back up. The router and any shared expert read the full-width input,
+    /// and the shared expert's output joins after the exit projection. 0 (default) runs the experts at the model width.</summary>
     public int LatentSize { get; init; }
 
-    /// <summary>Epsilon of the <see cref="LatentSize"/> entry norm (<c>pre_expert_norm</c>).</summary>
+    /// <summary>Where the <see cref="LatentSize"/> block applies its latent RMSNorm; Muse Spark normalizes the expert input, ERNIE-5.5 the
+    /// expert sum.</summary>
+    public MoeLatentNorm LatentNorm { get; init; } = MoeLatentNorm.BeforeExperts;
+
+    /// <summary>Epsilon of the <see cref="LatentSize"/> norm.</summary>
     public float LatentNormEps { get; init; } = 1e-6f;
+
+    /// <summary>Checkpoint key names of the block; the default is the engine naming the existing mappers produce.</summary>
+    public MoeTensorNames Names { get; init; } = MoeTensorNames.Default;
 
     /// <summary>Muse Spark's per-expert output norm: each routed row is scaled by <c>post_expert_norm</c> and then RMS-normalized, before its routing weight applies.</summary>
     public bool PostExpertNorm { get; init; }
