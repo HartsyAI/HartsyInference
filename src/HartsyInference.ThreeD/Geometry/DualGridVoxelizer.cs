@@ -580,11 +580,12 @@ public static class DualGridVoxelizer
     }
 
     // Solves a small square system with column-pivoted Householder QR in single precision, as Eigen's
-    // colPivHouseholderQr does for the reference. Eigen treats pivots at or below n·eps·max|R_kk| as zero and returns
-    // the basic solution (free unknowns set to zero). Gaussian elimination divides by those zero pivots and yields
+    // colPivHouseholderQr does for the reference. Pivot k counts as zero when its remaining column norm² is below
+    // (maxColNorm0·eps)²/n·(n−k), Eigen 3.4's nonzeroPivots() rule, and the solve uses only the leading nonzero
+    // pivots, returning the basic solution (free unknowns set to zero). Gaussian elimination divides by those zero pivots and yields
     // inf/NaN, so it cannot stand in here: axis-aligned faces produce rank-1 QEFs in exactly this situation.
     // Rounding order is not Eigen's vectorized order, so a borderline box test can still differ by an ulp.
-    private static void SolveColPivQr(ReadOnlySpan<float> matrix, ReadOnlySpan<float> rhs, Span<float> solution)
+    internal static void SolveColPivQr(ReadOnlySpan<float> matrix, ReadOnlySpan<float> rhs, Span<float> solution)
     {
         int n = rhs.Length;
         Span<float> qr = stackalloc float[n * n];
@@ -597,6 +598,21 @@ public static class DualGridVoxelizer
         {
             perm[k] = k;
         }
+
+        float maxColSq0 = 0f;
+        for (int j = 0; j < n; j++)
+        {
+            float colSq = 0f;
+            for (int r = 0; r < n; r++)
+            {
+                colSq += qr[r * n + j] * qr[r * n + j];
+            }
+
+            maxColSq0 = MathF.Max(maxColSq0, colSq);
+        }
+
+        float thresholdHelper = maxColSq0 * FloatEpsilon * FloatEpsilon / n;
+        int nonzero = n;
 
         for (int k = 0; k < n; k++)
         {
@@ -615,6 +631,12 @@ public static class DualGridVoxelizer
                     bestNorm = norm;
                     pivot = j;
                 }
+            }
+
+            // `<=` rather than Eigen's `<` so an all-zero matrix (threshold 0, norm 0) counts as rank 0.
+            if (nonzero == n && bestNorm <= thresholdHelper * (n - k))
+            {
+                nonzero = k;
             }
 
             if (pivot != k)
@@ -672,21 +694,7 @@ public static class DualGridVoxelizer
             qr[k * n + k] = beta;
         }
 
-        float maxPivot = 0f;
-        for (int k = 0; k < n; k++)
-        {
-            maxPivot = MathF.Max(maxPivot, MathF.Abs(qr[k * n + k]));
-        }
-
-        float threshold = maxPivot * (n * FloatEpsilon);
-        int rank = 0;
-        for (int k = 0; k < n; k++)
-        {
-            if (MathF.Abs(qr[k * n + k]) > threshold)
-            {
-                rank++;
-            }
-        }
+        int rank = nonzero;
 
         solution.Clear();
         if (rank == 0)

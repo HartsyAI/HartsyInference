@@ -42,16 +42,7 @@ public sealed class DualGridVoxelizerTests
     {
         DualGridVoxels voxels = VoxelizeCube();
         int count = voxels.Coords.Length / 3;
-
-        // DualGridMesher expects offsets within each voxel; the voxelizer returns absolute positions.
-        float[] offsets = new float[count * 3];
-        for (int i = 0; i < count; i++)
-        {
-            for (int axis = 0; axis < 3; axis++)
-            {
-                offsets[i * 3 + axis] = voxels.DualVertices[i * 3 + axis] - voxels.Coords[i * 3 + axis];
-            }
-        }
+        float[] offsets = voxels.ToVoxelOffsets(UnitVoxel);
 
         DualGridMesh mesh = DualGridMesher.Extract(
             voxels.Coords, offsets, voxels.Intersected, null, Vector3.Zero, UnitVoxel);
