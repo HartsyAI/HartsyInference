@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -106,7 +107,10 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents, ISanaWmStreami
         {
             SanaWmCheckpoint checkpoint = phase.Own(SanaWmCheckpointConverter.Load(_files.Backbone));
             SanaWmDit dit = phase.Own(new SanaWmDit(_backend, checkpoint));
-            return phase.Own(new SanaWmDitChunkDenoiser(_backend, dit, checkpoint.Config, text, softmaxWindow));
+            DType? stateDType = SanaWmStreamState.Resolve(_backend, EngineKnobs.SanaWmStreamState.Value);
+            Logs.Info($"[SANA-WM] streaming state held as {(stateDType is DType narrow ? narrow.Name : "F32")} "
+                + $"(vram.sanaWmStreamState={EngineKnobs.SanaWmStreamState.Value ?? "auto"}).");
+            return phase.Own(new SanaWmDitChunkDenoiser(_backend, dit, checkpoint.Config, text, softmaxWindow, stateDType));
         });
 
     /// <inheritdoc/>

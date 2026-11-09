@@ -17,13 +17,16 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
     private readonly SanaWmConfig _config;
     private readonly SanaWmTextConditioning _text;
     private readonly TokenWindowPolicy _softmaxWindow;
+    private readonly DType? _stateDType;
     private readonly Dictionary<SanaWmGuidanceBranch, Branch> _branches = [];
     private int _disposed;
 
     /// <summary>Binds <paramref name="dit"/> to one stream's caption.</summary>
     /// <param name="softmaxWindow">How many earlier chunks the softmax blocks attend to.</param>
+    /// <param name="stateDType">The dtype the stream's softmax windows and key tails are held in (see
+    /// <see cref="SanaWmStreamState"/>); null holds them as computed.</param>
     public SanaWmDitChunkDenoiser(IBackend backend, SanaWmDit dit, SanaWmConfig config, SanaWmTextConditioning text,
-        TokenWindowPolicy softmaxWindow)
+        TokenWindowPolicy softmaxWindow, DType? stateDType = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(dit);
@@ -35,6 +38,7 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
         _config = config;
         _text = text;
         _softmaxWindow = softmaxWindow;
+        _stateDType = stateDType;
     }
 
     /// <inheritdoc/>
@@ -113,7 +117,7 @@ public sealed class SanaWmDitChunkDenoiser : ISanaWmChunkDenoiser, IDisposable
         try
         {
             mask = Upload(_text.Mask(branch));
-            cache = new SanaWmStreamCache(_backend, _config, latentHeight, latentWidth, _softmaxWindow);
+            cache = new SanaWmStreamCache(_backend, _config, latentHeight, latentWidth, _softmaxWindow, _stateDType);
             Branch created = new(text, mask, cache);
             _branches[branch] = created;
             return created;

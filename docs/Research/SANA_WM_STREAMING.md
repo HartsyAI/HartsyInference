@@ -166,10 +166,10 @@ Per DiT block and guidance branch (`SanaWmBlockStream`), at 720p (`S = 22·40 = 
 | numerator scan state | GDN (15) | F32 `[H, D, D]` | 0 `S_kv` | key-major `[Dk, Dv]`: the transpose of upstream's `(B, H, D, D)` |
 | denominator scan state | GDN | F32 `[H, D, 1]` | 1 `S_z` | from the unrotated q and k |
 | camera scan state | GDN | F32 `[H, D, D]` | 2 `cam_S_kv` | key-major, equal to upstream's layout (no transpose) |
-| key conv tail | GDN | BF16 `[3·S, C]` | 4 | raw key projection of the newest 3 frames |
-| camera key conv tail | GDN | BF16 `[3·S, C]` | 3 | raw camera key projection |
-| main K, V window | softmax (5) | BF16 `[1, H, n·S, D]` ×2 | 0, 1 | K after RoPE at its own absolute frames, V raw |
-| camera K, V window | softmax | BF16 `[1, H, n·S, D]` ×2 | 2, 3 | after the ray transform and camera RoPE |
+| key conv tail | GDN | F32 or BF16 `[3·S, C]` | 4 | raw key projection of the newest 3 frames |
+| camera key conv tail | GDN | F32 or BF16 `[3·S, C]` | 3 | raw camera key projection |
+| main K, V window | softmax (5) | F32 or BF16 `[1, H, n·S, D]` ×2 | 0, 1 | K after RoPE at its own absolute frames, V raw |
+| camera K, V window | softmax | F32 or BF16 `[1, H, n·S, D]` ×2 | 2, 3 | after the ray transform and camera RoPE |
 | FFN tail | all (20) | FFN dtype `[S, C]` | 9 | point-conv output of the newest frame |
 
 Softmax blocks are 3, 7, 11, 15 and 19 (`softmax_every_n = 4`). The default window is
@@ -186,7 +186,9 @@ plus one first-use flag per temporal upsampler (the first call drops the leading
   truncates timesteps to integers. `1000, 960, 889, 727` survive that round trip exactly.
 - The Euler step is `x + (σ − σ_next)·(−v)` in float32 on BF16-rounded `x` and `v`, rounded to BF16: the stage-1 sampler's
   arithmetic. Clean frames are skipped, which equals upstream's restore from `init_latents`.
-- Softmax K and V are held between chunks in BF16, as upstream's cache holds them (`SanaWmBlockStream.StorageDType`). A
+- Softmax K and V are held between chunks as computed (F32) or, with `vram.sanaWmStreamState` BF16 or `auto` on a small card
+  (see [Memory on a 12 GB card](#memory-on-a-12-gb-card)), in BF16 as upstream's cache holds them
+  (`SanaWmBlockStream.StorageDType`). The rest of this bullet and the next describe the BF16 mode. A
   chunk's own keys and values are used in F32 for its passes and rounded to nearest even only when they are staged. Each
   pass widens the window's parts and joins them with the chunk, so the attention call (`AttentionNumerics.Bf16Storage`,
   which narrows its F32 operands to BF16 inside) receives exactly the operands it did when the window was F32: the window's
@@ -262,16 +264,62 @@ decoder, whose allocations go to the driver. That is the direct cause of the fai
    has just released the replaced state, and the decoder runs next. Cost: the next chunk's passes re-map what they need
    again, small against a chunk's seconds. A second trim after the decode, or at a chunk's first pass, is the next step if
    the save pass itself runs short (it ended at 11904 of 11912 MiB on the 3060).
-2. **Softmax windows are held in BF16** (`RollingTokenWindow` takes a storage dtype; chunks are converted as they are
+2. **Softmax windows can be held in BF16** (`RollingTokenWindow` takes a storage dtype; chunks are converted as they are
    staged, so the F32 chunk is released at once). Steady state 7 frames × 880 tokens × 2240 channels × 4 tensors × 5 blocks:
    1.1 GB F32, 0.55 GB BF16, plus about 0.24 GB saved on the chunk staged during a save pass.
-3. **The two key tails are held in BF16** (`FrameTailCache` takes a storage dtype; only the 3 frames kept are converted):
+3. **The two key tails can be held in BF16** (`FrameTailCache` takes a storage dtype; only the 3 frames kept are converted):
    15 blocks × 2 tails × 3 frames × 880 × 2240 is 0.71 GB in F32, 0.36 GB in BF16, and about 0.18 GB less when staged.
 
 Expected: about 0.9 GB less state at steady state and about 1.3 GB less at a save pass, plus the pool slack. Nothing is
 measured; the parent reruns the 3060 and 4090 lanes. Not done: alternating residency per chunk (DiT weights on the host
 while decoding, decoder weights on the host while sampling), about 5 GB plus 2 GB of PCIe traffic per chunk; use it only if
 these are not enough.
+
+**Second 3060 run** (after the three changes above; trace `streaming-3060-vram-trace-v2.tsv`, reported by the parent). Replay
+parity unchanged (worst cosine 0.999625). The DiT's committed state fell from 1431 to 792 MiB after chunk 0's save pass
+and from 3221 to 2018 MiB after chunk 1's; device memory after chunks 0, 1 and 2 fell from 8.08, 9.36 and 10.33 GiB to
+7.55, 8.36 and 9.36. The stream still failed decoding chunk 1 (123 MB requested, 109 MB free, inside `Conv2D` under
+`CausalConv3d.Forward`'s per-tap path), with the pool at 3520 MiB reserved against 2018 used before the decode: the
+decode's own transients fill the card. The largest item left was the decoder's weights, which went from 5159 to 7157 MiB
+when it first ran: 1998 MiB for a decoder of 528.4M parameters, 1008 MiB in BF16.
+
+4. **`CausalConv3d` holds one weight form.** It built both the 5-D weight (what a native 3-D conv reads) and the kt per-tap
+   2-D slices (what the per-tap path reads) at construction, and a device backend promotes the weights a conv keeps using, so
+   a conv the native op declines held both on the device, and every conv held both on the host. The slices are now cut the
+   first time a call needs them; a conv the backend's native 3-D op has declined twice and never served releases its 5-D form
+   (host and device); a conv the native op serves never cuts slices. Two declines, not one, because the native call also
+   declines when it runs out of workspace for one geometry. A decoder therefore holds both forms for its first two calls
+   per conv (the first chunk's first two passes in a stream) and one form from then on. `EnumerateWeights` yields whichever forms exist,
+   so enumerate it after the first forward. This is shared code (the Wan, LTX-2, HunyuanVideo, Kandinsky 5 and SeedVR2 VAEs
+   build `CausalConv3d`): outputs are unchanged on the CPU, and the GPU paths each need a decode to confirm. A conv the
+   native op declined twice only because it ran out of workspace stays per-tap for the rest of the run. Expected saving about
+   1 GB of device memory at the 3060's geometry.
+
+After that the decode's own peak, about 2.5 GB above the carried state on the 3060, is the next item, then alternating
+residency.
+
+**4090 run of the BF16 state** (parent session): replay worst cosine 0.999613, end to end PSNR min 44.6 / mean 47.6 dB
+(was 44.9 / 47.7), SSIM min 0.9972: within the BF16 floor. Device peak 13.3 GB (was 14.2), committed state at the save passes
+792, 2018 and 2244 MB (was 1431, 3221, 3672). Speed: 1.89 s per chunk against 1.74 s (+9%); a pass that reads the window took
+212 to 231 ms against 170 to 185 (about +41 ms, the same in chunks 1 and 2 although chunk 2's window is larger, so it is not
+bandwidth; chunk 0, which has no state, is unchanged at about 205 ms). The widening is 70-odd cast launches, fresh pool
+allocations and joins per pass; where the 41 ms goes was not profiled.
+
+So the narrow state is a choice, not a default. **`vram.sanaWmStreamState`** (`auto`, `f32`, `bf16`; `SanaWmStreamState`)
+picks it: `auto` holds the state in BF16 on a device of 16 GiB or less, which is where F32 runs out of memory, and as
+computed (F32) on a larger one, which has the room and the speed. The 4090 therefore runs as it did before the BF16 change;
+the log line `[SANA-WM] streaming state held as …` says which was chosen.
+
+Considered and not done:
+- *Widening the window once per chunk and reusing it for the chunk's passes.* The window cannot change during a chunk, so
+  this is the obvious fix for the speed, but the cached F32 copy (1.1 GB for the windows, 0.7 GB for the tails) would sit
+  beside the committed BF16 state and the staged chunk at the save pass, 0.5 GB over the F32 design at the one point the
+  3060 had no memory (11904 of 11912 MiB). Releasing it before the save pass leaves a widen per chunk for that pass.
+- *Attention over BF16 operands without widening* (Q, the joined K and V and the output in BF16, the output widened after):
+  numerically the same cuDNN BF16 graph the F32 call runs after its internal casts, with half the join traffic, so it could
+  be faster than either. It is not verified that an attention row serves the call (the planner refuses mixed dtypes, so Q
+  and the output would have to be BF16 too), and the CPU attention does not read BF16, so it would be a second code path.
+  Worth trying if the 3060's chunk time matters; `AttentionLayer.PlansBatch` shows how to ask the planner first.
 
 Two properties worth knowing: the BF16 window values are the ones the attention call would have narrowed to anyway, so
 GPU numerics should not move beyond a rounding tie; and the 16-bit `Concat` in `StreamingTensors` is a strided scatter,
