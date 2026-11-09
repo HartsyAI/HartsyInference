@@ -10,6 +10,9 @@ KERNELS=(
     "stepcache"
     "dit_fp8emit"
     "dit_norm_act"
+    "frame_scan"
+    "ucpe"
+    "frame_conv"
 )
 
 # shellcheck source=../build_common.sh

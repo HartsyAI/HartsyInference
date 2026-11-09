@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -79,7 +80,7 @@ public sealed class SanaWmSoftmaxAttention
     }
 
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major with <c>tokens·C</c> elements. Returns <c>[N, C]</c>.</summary>
-    internal Tensor ForwardItem(Tensor a, int tokens, Tensor ropeCos, Tensor ropeSin)
+    internal Tensor ForwardItem(Tensor a, int tokens, Tensor ropeCos, Tensor ropeSin, Tensor? projectionInput = null)
     {
         if (a.DType != DType.F32 || a.ElementCount != (long)tokens * _channels)
             throw new ArgumentException($"The item input must be F32 with {tokens}x{_channels} elements; got {a.DType} {a.Shape}.", nameof(a));
@@ -87,11 +88,14 @@ public sealed class SanaWmSoftmaxAttention
         SanaWmTensors.Require(ropeSin, nameof(ropeSin), DType.F32, [tokens, _headDim]);
 
         using SanaWmScratch scratch = new();
-        Tensor qh = Heads(scratch, a, 0, _qNorm, ropeCos, ropeSin, tokens);
-        Tensor kh = Heads(scratch, a, _channels, _kNorm, ropeCos, ropeSin, tokens);
-        Tensor vh = Heads(scratch, a, 2 * _channels, null, ropeCos, ropeSin, tokens);
+        Tensor projected = projectionInput ?? a;
+        Tensor qh = Heads(scratch, projected, 0, _qNorm, ropeCos, ropeSin, tokens);
+        Tensor kh = Heads(scratch, projected, _channels, _kNorm, ropeCos, ropeSin, tokens);
+        Tensor vh = Heads(scratch, projected, 2 * _channels, null, ropeCos, ropeSin, tokens);
         Tensor attended = scratch.New(1, _heads, tokens, _headDim);
-        _backend.ScaledDotProductAttention(attended, qh, kh, vh, null, (float)(1.0 / Math.Sqrt(_headDim)));
+        using (StageProfiler.Begin(_backend, "sm", "attn.main.sdpa"))
+            _backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, kh, vh, null, (float)(1.0 / Math.Sqrt(_headDim)),
+                allowF16: false) with { Numerics = AttentionNumerics.Bf16Storage });
         scratch.Release(qh);
         scratch.Release(kh);
         scratch.Release(vh);

@@ -154,44 +154,62 @@ public sealed class SanaWmGdnBidi : IDisposable
 
     /// <summary>One batch item: <paramref name="a"/> is F32 <c>[frames, spatial, C]</c>. Returns the branch output <c>[N, C]</c>, beta
     /// <c>[H, frames, spatial]</c> and decay <c>[H, frames]</c>; the caller disposes all three.</summary>
-    internal (Tensor Output, Tensor Beta, Tensor Decay) ForwardItem(Tensor a, int frames, int spatial, Tensor ropeCos, Tensor ropeSin)
+    /// <param name="projectionInput">The same tokens in the dtype the q, k and v GEMMs read (BF16 on a device), shared with the
+    /// block's other projections so the input is converted once; null projects from <paramref name="a"/>.</param>
+    internal (Tensor Output, Tensor Beta, Tensor Decay) ForwardItem(Tensor a, int frames, int spatial, Tensor ropeCos, Tensor ropeSin,
+        string profileTag = "gdn", Tensor? projectionInput = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         int tokens = checked(frames * spatial);
         SanaWmTensors.Require(a, nameof(a), DType.F32, [frames, spatial, _channels]);
+        Tensor projected = projectionInput ?? a;
+        if (projected.ElementCount != (long)tokens * _channels)
+            throw new ArgumentException($"The projection input must hold {tokens}x{_channels} elements; got {projected.Shape}.", nameof(projectionInput));
         ValidateTables(ropeCos, ropeSin, tokens);
 
         using SanaWmScratch scratch = new();
-        (Tensor betaRows, Tensor decay) = Gates(scratch, a, frames, spatial);
-        Tensor beta = scratch.New(_heads, frames, spatial);
-        ReadOnlySpan<long> betaDims = [_heads, frames, spatial];
-        ReadOnlySpan<long> betaStrides = [spatial, (long)_heads * spatial, 1];
-        _backend.CopyStrided(beta, betaRows, StridedCopySpec.Gather(new StridedView(betaDims, betaStrides, 0)));
-        Tensor decayHeads = scratch.New(_heads, frames);
-        ReadOnlySpan<long> decayDims = [_heads, frames];
-        ReadOnlySpan<long> decayStrides = [1, _heads];
-        _backend.CopyStrided(decayHeads, decay, StridedCopySpec.Gather(new StridedView(decayDims, decayStrides, 0)));
+        Tensor betaRows, decay, beta, decayHeads;
+        using (StageProfiler.Begin(_backend, profileTag, "attn.compute_frame_gates"))
+        {
+            (betaRows, decay) = Gates(scratch, a, frames, spatial);
+            beta = scratch.New(_heads, frames, spatial);
+            ReadOnlySpan<long> betaDims = [_heads, frames, spatial];
+            ReadOnlySpan<long> betaStrides = [spatial, (long)_heads * spatial, 1];
+            _backend.CopyStrided(beta, betaRows, StridedCopySpec.Gather(new StridedView(betaDims, betaStrides, 0)));
+            decayHeads = scratch.New(_heads, frames);
+            ReadOnlySpan<long> decayDims = [_heads, frames];
+            ReadOnlySpan<long> decayStrides = [1, _heads];
+            _backend.CopyStrided(decayHeads, decay, StridedCopySpec.Gather(new StridedView(decayDims, decayStrides, 0)));
+        }
 
-        Tensor kUnrot = scratch.Track(KeyPath(a, frames, spatial));
-        Tensor kRot = scratch.Track(Rotated(kUnrot, ropeCos, ropeSin, tokens));
-        Tensor qUnrot = scratch.Track(QueryPath(a, tokens));
-        Tensor qRot = scratch.Track(Rotated(qUnrot, ropeCos, ropeSin, tokens));
-        Tensor v = scratch.New(tokens, _channels);
-        _backend.LinearWeightRows(v, a, _qkvWeight, null, 2 * _channels, _channels);
-        Tensor decayRows = scratch.New((long)frames * _heads, _headDim);
-        ReadOnlySpan<long> repeatDims = [(long)frames * _heads, _headDim];
-        ReadOnlySpan<long> repeatStrides = [1, 0];
-        _backend.CopyStrided(decayRows, decay, StridedCopySpec.Gather(new StridedView(repeatDims, repeatStrides, 0)));
+        Tensor kUnrot, kRot, qUnrot, qRot, v;
+        using (StageProfiler.Begin(_backend, profileTag, "attn.main.qkv"))
+        {
+            kUnrot = scratch.Track(KeyPath(projected, frames, spatial));
+            kRot = scratch.Track(Rotated(kUnrot, ropeCos, ropeSin, tokens));
+            qUnrot = scratch.Track(QueryPath(projected, tokens));
+            qRot = scratch.Track(Rotated(qUnrot, ropeCos, ropeSin, tokens));
+            v = scratch.New(tokens, _channels);
+            _backend.LinearWeightRows(v, projected, _qkvWeight, null, 2 * _channels, _channels);
+        }
 
+        scratch.Release(betaRows);
+        scratch.Release(decay);
+        // Numerator over the rotated q and k; denominator over the unrotated ones with a unit value.
         Tensor num = scratch.New(tokens, _channels);
         Tensor den = scratch.New(tokens, _heads);
-        ScanOperands operands = new(qUnrot, qRot, kUnrot, kRot, v, betaRows, decay, decayRows);
-        Scan(operands, frames, spatial, reverse: false, num, den);
-        Scan(operands, frames, spatial, reverse: true, num, den);
-        foreach (Tensor consumed in new[] { qUnrot, qRot, kUnrot, kRot, v, betaRows, decay, decayRows })
+        using (StageProfiler.Begin(_backend, profileTag, "attn.main.scan"))
+        {
+            _backend.FrameDeltaScan(num, qRot, kRot, v, beta, decayHeads, frames, spatial, _heads, _headDim, _headDim);
+            _backend.FrameDeltaScan(den, qUnrot, kUnrot, null, beta, decayHeads, frames, spatial, _heads, _headDim, 1);
+        }
+
+        foreach (Tensor consumed in new[] { qUnrot, qRot, kUnrot, kRot, v })
             scratch.Release(consumed);
 
-        Tensor output = Combine(scratch, num, den, tokens);
+        Tensor output;
+        using (StageProfiler.Begin(_backend, profileTag, "attn.main.combine"))
+            output = Combine(scratch, num, den, tokens);
         return (scratch.Detach(output), scratch.Detach(beta), scratch.Detach(decayHeads));
     }
 
@@ -299,108 +317,6 @@ public sealed class SanaWmGdnBidi : IDisposable
         }
     }
 
-    // One pass over the frames. Forward step t reads and writes frame t. Reverse step j reads frame T-j (the shifted source)
-    // and adds into frame T-1-j, so frame T-1 receives nothing and the state starts empty. The forward pass writes every frame of
-    // num and den; the reverse pass accumulates into them.
-    private void Scan(in ScanOperands g, int frames, int spatial, bool reverse, Tensor num, Tensor den)
-    {
-        int h = _heads;
-        int d = _headDim;
-        using SanaWmScratch state = new();
-        Tensor aState = state.Track(SanaWmTensors.Filled(new TensorShape(h, d, d), 0f));
-        Tensor zState = state.Track(SanaWmTensors.Filled(new TensorShape(h, d, 1), 0f));
-        Tensor unitTokens = state.Track(SanaWmTensors.Filled(new TensorShape(h, spatial, 1), 1f));
-
-        for (int step = reverse ? 1 : 0; step < frames; step++)
-        {
-            int src = reverse ? frames - step : step;
-            int dst = reverse ? frames - 1 - step : step;
-            using SanaWmScratch f = new();
-            Tensor k = Frame(f, g.K, src, spatial, transposed: false);
-            Tensor kRot = Frame(f, g.KRot, src, spatial, transposed: false);
-            Tensor kT = Frame(f, g.K, src, spatial, transposed: true);
-            Tensor kRotT = Frame(f, g.KRot, src, spatial, transposed: true);
-            Tensor v = Frame(f, g.V, src, spatial, transposed: false);
-            Tensor beta = f.Track(SanaWmTensors.Slice(_backend, g.BetaRows, (long)src * h * spatial, new TensorShape(h, spatial)));
-            Tensor decayRep = f.Track(SanaWmTensors.Slice(_backend, g.DecayRows, (long)src * h * d, new TensorShape(h, d)));
-            Tensor decayCol = f.Track(SanaWmTensors.Slice(_backend, g.Decay, (long)src * h, new TensorShape(h, 1)));
-
-            // Numerator state (key x value, stored transposed) and denominator state, decayed then updated.
-            Tensor aBar = f.New(h, d, d);
-            _backend.AffineBroadcastLastDim(aBar, aState, decayRep, null);
-            Tensor zBar = f.New(h, d, 1);
-            _backend.AffineBroadcastLastDim(zBar, zState, decayCol, null);
-            Tensor pred = f.New(h, spatial, d);
-            _backend.BatchedMatMul(pred, kRot, aBar);
-            Tensor residual = f.New(h, spatial, d);
-            _backend.AffineMix(residual, v, pred, 1f, -1f);
-            Tensor betaKeyA = f.New(h, d, spatial);
-            _backend.AffineBroadcastLastDim(betaKeyA, kRotT, beta, null);
-            Tensor aUpdate = f.New(h, d, d);
-            _backend.BatchedMatMul(aUpdate, betaKeyA, residual);
-            Tensor nextA = state.New(h, d, d);
-            _backend.Add(nextA, aBar, aUpdate);
-            state.Release(aState);
-            aState = nextA;
-
-            Tensor zPred = f.New(h, spatial, 1);
-            _backend.BatchedMatMul(zPred, k, zBar);
-            Tensor zResidual = f.New(h, spatial, 1);
-            _backend.AffineMix(zResidual, unitTokens, zPred, 1f, -1f);
-            Tensor betaKeyZ = f.New(h, d, spatial);
-            _backend.AffineBroadcastLastDim(betaKeyZ, kT, beta, null);
-            Tensor zUpdate = f.New(h, d, 1);
-            _backend.BatchedMatMul(zUpdate, betaKeyZ, zResidual);
-            Tensor nextZ = state.New(h, d, 1);
-            _backend.Add(nextZ, zBar, zUpdate);
-            state.Release(zState);
-            zState = nextZ;
-
-            Tensor qRot = Frame(f, g.QRot, dst, spatial, transposed: false);
-            Tensor q = Frame(f, g.Q, dst, spatial, transposed: false);
-            Tensor numFrame = f.New(h, spatial, d);
-            _backend.BatchedMatMul(numFrame, qRot, aState);
-            Tensor denFrame = f.New(h, spatial, 1);
-            _backend.BatchedMatMul(denFrame, q, zState);
-            Emit(f, num, den, numFrame, denFrame, dst, spatial, reverse);
-        }
-    }
-
-    // Frame `frame` of a token-major [N, C] operand, head-major: [H, S, D], or [H, D, S] when transposed.
-    private Tensor Frame(SanaWmScratch scratch, Tensor tokenMajor, int frame, int spatial, bool transposed)
-    {
-        long offset = (long)frame * spatial * _channels;
-        Tensor packed = transposed ? scratch.New(_heads, _headDim, spatial) : scratch.New(_heads, spatial, _headDim);
-        ReadOnlySpan<long> dims = transposed ? [_heads, _headDim, spatial] : [_heads, spatial, _headDim];
-        ReadOnlySpan<long> strides = transposed ? [_headDim, 1, _channels] : [_headDim, _channels, 1];
-        _backend.CopyStrided(packed, tokenMajor, StridedCopySpec.Gather(new StridedView(dims, strides, offset)));
-        return packed;
-    }
-
-    // The forward pass writes frame dst of num [N, C] and den [N, H] as token-major rows; the reverse pass adds into them.
-    private void Emit(SanaWmScratch scratch, Tensor num, Tensor den, Tensor numFrame, Tensor denFrame, int dst, int spatial, bool reverse)
-    {
-        long numOffset = (long)dst * spatial * _channels;
-        long denOffset = (long)dst * spatial * _heads;
-        if (reverse)
-        {
-            ReadOnlySpan<long> numDims = [_heads, spatial, _headDim];
-            ReadOnlySpan<long> numStrides = [_headDim, _channels, 1];
-            _backend.AccumulateStrided(num, numFrame, StridedCopySpec.Scatter(new StridedView(numDims, numStrides, numOffset)));
-            ReadOnlySpan<long> denDims = [_heads, spatial];
-            ReadOnlySpan<long> denStrides = [1, _heads];
-            _backend.AccumulateStrided(den, denFrame, StridedCopySpec.Scatter(new StridedView(denDims, denStrides, denOffset)));
-            return;
-        }
-
-        Tensor numRows = scratch.New(spatial, _channels);
-        _backend.Permute0213(numRows, numFrame, _heads, spatial, _headDim);
-        SanaWmTensors.Write(_backend, num, numRows, numOffset);
-        Tensor denRows = scratch.New(spatial, _heads);
-        _backend.Transpose2D(denRows, denFrame, _heads, spatial);
-        SanaWmTensors.Write(_backend, den, denRows, denOffset);
-    }
-
     // out = (num_f + num_b) / (den_f + den_b + eps): the reciprocal of each token's per-head denominator scales its head's lanes.
     private Tensor Combine(SanaWmScratch scratch, Tensor num, Tensor den, int tokens)
     {
@@ -439,7 +355,4 @@ public sealed class SanaWmGdnBidi : IDisposable
                 throw new ArgumentException($"{name} must be {string.Join("x", expected.ToArray())}; got {tensor.Shape}.", name);
         }
     }
-
-    private readonly record struct ScanOperands(Tensor Q, Tensor QRot, Tensor K, Tensor KRot, Tensor V, Tensor BetaRows, Tensor Decay,
-        Tensor DecayRows);
 }

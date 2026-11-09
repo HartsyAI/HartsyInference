@@ -39,15 +39,17 @@ internal static class SanaWmTemporalConv
     /// <summary>Convolves token-major <c>[frames·spatial, C]</c> F32 along frames; returns a new <c>[frames·spatial, C]</c> tensor.</summary>
     internal static Tensor Apply(IBackend backend, Tensor input, Tensor kernel, int frames, int spatial, int channels)
     {
-        int tokens = checked(frames * spatial);
-        using SanaWmScratch scratch = new();
-        Tensor channelFirst = scratch.New(1, channels, frames, spatial);
-        backend.Transpose2D(channelFirst, input, tokens, channels);
-        Tensor convolved = scratch.New(1, channels, frames, spatial);
-        backend.Conv2dDepthwise(convolved, channelFirst, kernel, null, 1, 1, SourceTaps - 1, 0);
-        scratch.Release(channelFirst);
-        Tensor output = scratch.New(tokens, channels);
-        backend.Transpose2D(output, convolved, channels, tokens);
-        return scratch.Detach(output);
+        Tensor output = new(new TensorShape((long)frames * spatial, channels), DType.F32);
+        try
+        {
+            // The token-major rows are convolved along the frame axis in place: no channel-first round trip.
+            backend.DepthwiseConvFrames(output, input, kernel, frames, spatial, channels, Taps, SourceTaps - 1);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
     }
 }

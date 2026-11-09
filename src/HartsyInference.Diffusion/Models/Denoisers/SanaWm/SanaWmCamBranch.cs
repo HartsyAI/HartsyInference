@@ -127,7 +127,7 @@ public sealed class SanaWmCamBranch : IDisposable
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major <c>[N, C]</c> (any shape of that size), <paramref name="beta"/>
     /// <c>[H, T, S]</c> and <paramref name="decay"/> <c>[H, T]</c>. Returns <c>out_proj_cam</c> of the scan, <c>[N, C]</c>.</summary>
     internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, Tensor beta, Tensor decay, int frames,
-        int spatial)
+        int spatial, string profileTag = "cam", Tensor? projectionInput = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_queryWeight is null || _convKernel is null)
@@ -138,27 +138,37 @@ public sealed class SanaWmCamBranch : IDisposable
         float keyScale = MathF.Pow(_headDim, -0.5f) * MathF.Pow(spatial, -0.5f);
 
         using SanaWmScratch scratch = new();
-        Tensor keyScaled = scratch.Track(ProjectKey(backend, a, keyScale, frames, spatial));
-        Tensor discounted = scratch.Track(DiscountBeta(backend, keyScaled, camera, item, beta, frames, spatial));
-        Tensor key = Transform(backend, scratch, keyScaled, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+        Tensor discounted, key, query, value;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.prep"))
+        {
+            Tensor projected = projectionInput ?? a;
+            Tensor keyScaled = scratch.Track(ProjectKey(backend, projected, keyScale, frames, spatial));
+            discounted = scratch.Track(DiscountBeta(backend, keyScaled, camera, item, beta, frames, spatial));
+            key = Transform(backend, scratch, keyScaled, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
 
-        Tensor queryRaw = scratch.New(tokens, _channels);
-        backend.Linear(queryRaw, a, _queryWeight, _queryBias);
-        Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels));
-        Tensor query = Transform(backend, scratch, queryActivated, camera.RaysTransposed(item), camera.Cos, camera.Sin, tokens);
+            Tensor queryRaw = scratch.New(tokens, _channels);
+            backend.Linear(queryRaw, projected, _queryWeight, _queryBias);
+            Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels));
+            query = Transform(backend, scratch, queryActivated, camera.RaysTransposed(item), camera.Cos, camera.Sin, tokens);
 
-        Tensor valueRaw = scratch.New(tokens, _channels);
-        backend.Linear(valueRaw, a, _valueWeight!, _valueBias);
-        Tensor value = Transform(backend, scratch, valueRaw, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+            Tensor valueRaw = scratch.New(tokens, _channels);
+            backend.Linear(valueRaw, projected, _valueWeight!, _valueBias);
+            value = Transform(backend, scratch, valueRaw, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+        }
 
-        Tensor scanned = scratch.Track(SanaWmCamScan.Run(backend, query, key, value, discounted, decay, frames, spatial, _heads, _headDim));
+        Tensor scanned;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.scan"))
+            scanned = scratch.Track(SanaWmCamScan.Run(backend, query, key, value, discounted, decay, frames, spatial, _heads, _headDim));
         scratch.Release(query);
         scratch.Release(key);
         scratch.Release(value);
         scratch.Release(discounted);
-        Tensor readout = Transform(backend, scratch, scanned, camera.Rays(item), camera.Cos, camera.NegSin, tokens);
+        Tensor readout;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.readout"))
+            readout = Transform(backend, scratch, scanned, camera.Rays(item), camera.Cos, camera.NegSin, tokens);
         Tensor output = scratch.New(tokens, _channels);
-        backend.Linear(output, readout, _outputWeight!, _outputBias);
+        using (StageProfiler.Begin(backend, profileTag, "attn.out_proj_cam"))
+            backend.Linear(output, readout, _outputWeight!, _outputBias);
         return scratch.Detach(output);
     }
 

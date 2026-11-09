@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
@@ -107,7 +108,7 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
     }
 
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major with <c>tokens·C</c> elements. Returns <c>[N, C]</c>.</summary>
-    internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, int tokens)
+    internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, int tokens, Tensor? projectionInput = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_queryWeight is null || _outputWeight is null)
@@ -116,11 +117,14 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
             throw new ArgumentException($"The item input must be F32 with {tokens}x{_channels} elements; got {a.DType} {a.Shape}.", nameof(a));
 
         using SanaWmScratch scratch = new();
-        Tensor qh = Heads(backend, scratch, a, _queryWeight, _queryBias, _queryNorm, camera.RaysTransposed(item), camera, tokens);
-        Tensor kh = Heads(backend, scratch, a, _keyWeight!, _keyBias, _keyNorm, camera.RaysInverse(item), camera, tokens);
-        Tensor vh = Heads(backend, scratch, a, _valueWeight!, _valueBias, null, camera.RaysInverse(item), camera, tokens);
+        Tensor projected = projectionInput ?? a;
+        Tensor qh = Heads(backend, scratch, projected, _queryWeight, _queryBias, _queryNorm, camera.RaysTransposed(item), camera, tokens);
+        Tensor kh = Heads(backend, scratch, projected, _keyWeight!, _keyBias, _keyNorm, camera.RaysInverse(item), camera, tokens);
+        Tensor vh = Heads(backend, scratch, projected, _valueWeight!, _valueBias, null, camera.RaysInverse(item), camera, tokens);
         Tensor attended = scratch.New(1, _heads, tokens, _headDim);
-        backend.ScaledDotProductAttention(attended, qh, kh, vh, null, MathF.Pow(_headDim, -0.5f));
+        // BF16 operands with F32 softmax and accumulation, as upstream's SDPA (it casts the camera q, k and v to BF16).
+        backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, kh, vh, null, MathF.Pow(_headDim, -0.5f), allowF16: false)
+            with { Numerics = AttentionNumerics.Bf16Storage });
         scratch.Release(qh);
         scratch.Release(kh);
         scratch.Release(vh);

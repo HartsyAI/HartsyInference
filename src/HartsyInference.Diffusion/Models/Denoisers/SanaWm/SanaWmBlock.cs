@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
@@ -46,6 +47,7 @@ public sealed class SanaWmBlock : IDisposable
     private readonly Tensor _scaleShift;
     private readonly Tensor _scaleShiftOnes;
     private readonly SanaWmGlumbTempFfn _ffn;
+    private readonly string _profileTag;
     private SanaWmCamBranch? _gdnCamera;
     private SanaWmSoftmaxCamBranch? _softmaxCamera;
     private int _disposed;
@@ -67,6 +69,7 @@ public sealed class SanaWmBlock : IDisposable
         _headDim = config.HeadDim;
         _channels = config.HiddenSize;
         bool softmax = config.IsSoftmaxBlock(index);
+        _profileTag = $"b{index:D2}.{(softmax ? "sm" : "gdn")}";
         string prefix = $"blocks.{index}.";
         Func<string, Tensor> get = key => weights[prefix + key];
         bool built = false;
@@ -177,6 +180,7 @@ public sealed class SanaWmBlock : IDisposable
         if (ownsInput)
             scratch.Track(x);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        using StageProfiler.Scope blockScope = StageProfiler.Begin(_backend, _profileTag, "block");
         ArgumentNullException.ThrowIfNull(x);
         ArgumentNullException.ThrowIfNull(context);
         int batch = context.Batch;
@@ -195,7 +199,9 @@ public sealed class SanaWmBlock : IDisposable
 
         Tensor attentionInput = scratch.New((long)batch * frames, spatial, _channels);
         Modulated(attentionInput, x, modulation, ShiftMsa, ScaleMsa, spatial);
-        Tensor attention = scratch.Track(Attention(attentionInput, context));
+        Tensor attention;
+        using (StageProfiler.Begin(_backend, _profileTag, "attn"))
+            attention = scratch.Track(Attention(attentionInput, context));
         scratch.Release(attentionInput);
         Tensor afterAttention = scratch.New(x.Shape);
         _backend.GatedResidualRowIndexed(afterAttention, x, attention, gateMsa, context.RowIndex);
@@ -206,6 +212,7 @@ public sealed class SanaWmBlock : IDisposable
         Tensor afterPlucker = afterAttention;
         if (_pluckerWeight is not null && context.Plucker is not null)
         {
+            using StageProfiler.Scope pluckerScope = StageProfiler.Begin(_backend, _profileTag, "plucker_proj");
             Tensor pluckerTokens = scratch.New(x.Shape);
             _backend.Linear(pluckerTokens, context.Plucker, _pluckerWeight, _pluckerBias);
             afterPlucker = scratch.New(x.Shape);
@@ -214,7 +221,9 @@ public sealed class SanaWmBlock : IDisposable
             scratch.Release(afterAttention);
         }
 
-        Tensor cross = scratch.Track(CrossAttention(afterPlucker, context));
+        Tensor cross;
+        using (StageProfiler.Begin(_backend, _profileTag, "cross_attn"))
+            cross = scratch.Track(CrossAttention(afterPlucker, context));
         Tensor afterCross = scratch.New(x.Shape);
         _backend.Add(afterCross, afterPlucker, cross);
         scratch.Release(cross);
@@ -222,7 +231,9 @@ public sealed class SanaWmBlock : IDisposable
 
         Tensor ffnInput = scratch.New(x.Shape);
         Modulated(ffnInput, afterCross, modulation, ShiftMlp, ScaleMlp, spatial);
-        Tensor ffn = scratch.Track(FeedForward(ffnInput, context));
+        Tensor ffn;
+        using (StageProfiler.Begin(_backend, _profileTag, "mlp"))
+            ffn = scratch.Track(FeedForward(ffnInput, context));
         scratch.Release(ffnInput);
         Tensor output = scratch.New(x.Shape);
         _backend.GatedResidualRowIndexed(output, afterCross, ffn, gateMlp, context.RowIndex);
@@ -299,16 +310,26 @@ public sealed class SanaWmBlock : IDisposable
         int spatial = context.Spatial;
         int tokens = context.Tokens;
         using SanaWmScratch scratch = new();
+        // Every projection of `a` (q, k, v, the camera's q, k, v and the output gate) reads it in the GEMM dtype; converting it
+        // once here replaces the conversion each GEMM would otherwise make. Identical arithmetic: the GEMM rounds it the same way.
+        Tensor? projection = _projWeight.DType == DType.BF16 && _backend.Capabilities.SupportsBF16
+            ? scratch.Track(SanaWmTensors.ToBf16(_backend, a))
+            : null;
         Tensor branch;
         if (_gdn is not null)
         {
-            (Tensor main, Tensor beta, Tensor decay) = _gdn.ForwardItem(a, frames, spatial, context.RopeCos, context.RopeSin);
+            Tensor main, beta, decay;
+            using (StageProfiler.Begin(_backend, _profileTag, "attn.main"))
+                (main, beta, decay) = _gdn.ForwardItem(a, frames, spatial, context.RopeCos, context.RopeSin, _profileTag, projection);
             branch = scratch.Track(main);
             scratch.Track(beta);
             scratch.Track(decay);
             if (_gdnCamera is not null)
             {
-                Tensor camera = scratch.Track(_gdnCamera.ForwardItem(_backend, a, context.Camera!, item, beta, decay, frames, spatial));
+                Tensor camera;
+                using (StageProfiler.Begin(_backend, _profileTag, "attn.forward_cam_branch"))
+                    camera = scratch.Track(_gdnCamera.ForwardItem(_backend, a, context.Camera!, item, beta, decay, frames, spatial, _profileTag,
+                        projection));
                 branch = Sum(scratch, main, camera);
             }
 
@@ -317,26 +338,35 @@ public sealed class SanaWmBlock : IDisposable
         }
         else
         {
-            Tensor main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin));
+            Tensor main;
+            using (StageProfiler.Begin(_backend, _profileTag, "attn.main"))
+                main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin, projection));
             branch = main;
             if (_softmaxCamera is not null)
             {
-                Tensor camera = scratch.Track(_softmaxCamera.ForwardItem(_backend, a, context.Camera!, item, tokens));
+                Tensor camera;
+                using (StageProfiler.Begin(_backend, _profileTag, "attn.forward_cam_branch"))
+                    camera = scratch.Track(_softmaxCamera.ForwardItem(_backend, a, context.Camera!, item, tokens, projection));
                 branch = Sum(scratch, main, camera);
             }
         }
 
-        Tensor gateLinear = scratch.New(tokens, _channels);
-        _backend.Linear(gateLinear, a, _outputGateWeight, _outputGateBias);
-        Tensor gateActivated = scratch.New(tokens, _channels);
-        _backend.Silu(gateActivated, gateLinear);
-        scratch.Release(gateLinear);
         Tensor gated = scratch.New(tokens, _channels);
-        _backend.Mul(gated, branch, gateActivated);
-        scratch.Release(branch);
-        scratch.Release(gateActivated);
+        using (StageProfiler.Begin(_backend, _profileTag, "attn.apply_output_gate"))
+        {
+            Tensor gateLinear = scratch.New(tokens, _channels);
+            _backend.Linear(gateLinear, projection ?? a, _outputGateWeight, _outputGateBias);
+            Tensor gateActivated = scratch.New(tokens, _channels);
+            _backend.Silu(gateActivated, gateLinear);
+            scratch.Release(gateLinear);
+            _backend.Mul(gated, branch, gateActivated);
+            scratch.Release(branch);
+            scratch.Release(gateActivated);
+        }
+
         Tensor projected = scratch.New(tokens, _channels);
-        _backend.Linear(projected, gated, _projWeight, _projBias);
+        using (StageProfiler.Begin(_backend, _profileTag, "attn.proj"))
+            _backend.Linear(projected, gated, _projWeight, _projBias);
         return scratch.Detach(projected);
     }
 
@@ -413,7 +443,9 @@ public sealed class SanaWmBlock : IDisposable
         _backend.Permute0213(queryHeads, queryNormed, rows, _heads, _headDim);
         scratch.Release(queryNormed);
         Tensor attended = scratch.New(1, _heads, rows, _headDim);
-        _backend.ScaledDotProductAttention(attended, queryHeads, keys, values, bias, scale);
+        // BF16 operands with F32 softmax and accumulation, as upstream's BF16 cross-attention.
+        _backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, queryHeads, keys, values, bias, scale, allowF16: false)
+            with { Numerics = AttentionNumerics.Bf16Storage });
         scratch.Release(queryHeads);
         Tensor merged = scratch.New(rows, _channels);
         _backend.Permute0213(merged, attended, _heads, rows, _headDim);
@@ -428,7 +460,7 @@ public sealed class SanaWmBlock : IDisposable
     {
         using SanaWmScratch scratch = new();
         Tensor ffnInput = input.DType == _ffn.DType ? input : scratch.Track(SanaWmTensors.ToBf16(_backend, input));
-        Tensor output = scratch.Track(_ffn.Forward(_backend, ffnInput, context.Frames, context.Height, context.Width));
+        Tensor output = scratch.Track(_ffn.Forward(_backend, ffnInput, context.Frames, context.Height, context.Width, _profileTag));
         return output.DType == DType.F32 ? scratch.Detach(output) : SanaWmTensors.ToF32(_backend, output);
     }
 
