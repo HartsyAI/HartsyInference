@@ -6,13 +6,15 @@ using HartsyInference.ThreeD.Geometry;
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
 /// <summary>
-/// Turns the raw shape-VAE decoder head into a dual-grid field. Channels 0–2 are the dual-vertex offsets (sigmoid into
-/// the voxel), 3–5 the edge intersection logits (positive means intersected), and 6 the quad split weight (softplus).
+/// Turns the raw shape-VAE decoder head into a dual-grid field, following TRELLIS.2's FlexiDualGrid decode. Channels 0–2
+/// give dual-vertex offsets <c>(1 + 2m)·sigmoid(raw) − m</c> with <c>m = 0.5</c>, relative to the voxel corner (no coordinate
+/// added). Channels 3–5 are the edge logits, kept in <see cref="DualGridField.IntersectionLogits"/>; their sign is the flag.
+/// Channel 6 is the quad split weight, <c>softplus(raw)</c>.
 /// </summary>
-/// <remarks>The split follows TRELLIS.2's FlexiDualGrid decode as recalled from upstream; it is not checked against a Python
-/// reference dump in this repository.</remarks>
 public static class ShapeVaeHead
 {
+    private const float VoxelMargin = 0.5f;
+
     /// <summary>Splits a decoder head <c>[N, 7]</c> on its coordinates <c>(batch, x, y, z)</c> into a single-batch dual-grid field.</summary>
     public static DualGridField Split(SparseTensor head)
     {
@@ -27,7 +29,8 @@ public static class ShapeVaeHead
             throw new HartsyInferenceException($"Shape VAE head coords hold {head.Coords.Length} values; expected {n} rows of 4.");
 
         int[] coords = new int[n * 3];
-        float[] dual = new float[n * 3];
+        float[] offsets = new float[n * 3];
+        float[] logits = new float[n * 3];
         bool[] intersected = new bool[n * 3];
         float[] split = new float[n];
         ReadOnlySpan<float> h = head.Feats.AsReadOnlySpan<float>();
@@ -35,16 +38,16 @@ public static class ShapeVaeHead
         {
             for (int a = 0; a < 3; a++)
             {
-                int x = head.Coords[i * 4 + 1 + a];
-                coords[i * 3 + a] = x;
-                dual[i * 3 + a] = x + Sigmoid(h[i * 7 + a]);
-                intersected[i * 3 + a] = h[i * 7 + 3 + a] > 0f;
+                coords[i * 3 + a] = head.Coords[i * 4 + 1 + a];
+                offsets[i * 3 + a] = (1f + 2f * VoxelMargin) * Sigmoid(h[i * 7 + a]) - VoxelMargin;
+                logits[i * 3 + a] = h[i * 7 + 3 + a];
+                intersected[i * 3 + a] = logits[i * 3 + a] > 0f;
             }
 
             split[i] = Softplus(h[i * 7 + 6]);
         }
 
-        return new DualGridField(new DualGridVoxels(coords, dual, intersected), split);
+        return new DualGridField(new DualGridVoxels(coords, offsets, intersected), split, logits);
     }
 
     private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));

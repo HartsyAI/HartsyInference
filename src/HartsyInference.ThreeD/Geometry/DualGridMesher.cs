@@ -24,7 +24,7 @@ public static class DualGridMesher
     private static readonly int[] Split1 = { 0, 1, 2, 0, 2, 3 };
     private static readonly int[] Split2 = { 0, 1, 3, 3, 1, 2 };
 
-    /// <summary>Extracts the mesh. <paramref name="coords"/> is <c>[N·3]</c> integer voxel coords, <paramref name="dualVertices"/> <c>[N·3]</c> offsets in [0,1]³, <paramref name="intersected"/> <c>[N·3]</c> per-axis flags.</summary>
+    /// <summary>Extracts the mesh. <paramref name="coords"/> is <c>[N·3]</c> integer voxel coords, <paramref name="dualVertices"/> <c>[N·3]</c> offsets from each voxel corner in voxel units, <paramref name="intersected"/> <c>[N·3]</c> per-axis flags.</summary>
     /// <param name="splitWeight">Per-voxel <c>[N]</c> split weights, or null to use the reference alignment test.</param>
     public static DualGridMesh Extract(
         int[] coords, float[] dualVertices, bool[] intersected, float[]? splitWeight, Vector3 aabbMin, Vector3 voxelSize)

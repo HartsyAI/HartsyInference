@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using Xunit;
@@ -10,14 +11,13 @@ namespace HartsyInference.ThreeD.Tests.Parity;
 
 /// <summary>TRELLIS.2 shape VAE (f16c32, fp32) encoder and decoder against the Python CPU reference dump. Integration lane: needs
 /// <c>HARTSY_PARITY_DIR</c> and the checkpoints under Models.</summary>
-/// <remarks>The decoder stops before the mesh step in Python, so only the head fields Python produced are compared. The
-/// vertex, intersection and quad-lerp fields are derived from the raw head with the formulas in the reference script.</remarks>
+/// <remarks>The decoder stops before the mesh step in Python. The vertex, intersection-logit and quad-lerp fields are read from
+/// the production <see cref="ShapeVaeHead.Split"/> output, not recomputed here.</remarks>
 [Trait("Category", "Integration")]
 public sealed class ShapeVaeParityTests
 {
     private const int EncoderVoxels = 48, EncoderResolution = 32, LatentVoxels = 8, LatentChannels = 32;
     private const int DecoderInputVoxels = 12, DecoderResolution = 16, DecodedVoxels = 1807, HeadChannels = 7;
-    private const float VoxelMargin = 0.5f;
     private readonly ITestOutputHelper _output;
 
     public ShapeVaeParityTests(ITestOutputHelper output)
@@ -82,10 +82,13 @@ public sealed class ShapeVaeParityTests
 
             if (decCoords.Passed)
             {
-                float[] raw = ParityCompare.GatherRows(rawFeats.AsReadOnlySpan<float>(), decOrder, HeadChannels);
-                results.Add(ParityCompare.Compare("dec_out_vertices", DeriveVertices(raw), refVertices));
-                results.Add(ParityCompare.Compare("dec_out_intersected_logits", DeriveIntersected(raw), refIntersected));
-                results.Add(ParityCompare.Compare("dec_out_quad_lerp", DeriveQuadLerp(raw), refQuadLerp));
+                DualGridField field = ShapeVaeHead.Split(head);
+                float[] logits = field.IntersectionLogits
+                    ?? throw new InvalidOperationException("ShapeVaeHead.Split did not return intersection logits.");
+                float[] offsets = ParityCompare.GatherRows(field.Voxels.DualVertices, decOrder, 3);
+                results.Add(ParityCompare.Compare("dec_out_vertices", offsets, refVertices));
+                results.Add(ParityCompare.Compare("dec_out_intersected_logits", ParityCompare.GatherRows(logits, decOrder, 3), refIntersected));
+                results.Add(ParityCompare.Compare("dec_out_quad_lerp", ParityCompare.GatherRows(field.SplitWeight, decOrder, 1), refQuadLerp));
             }
             else
             {
@@ -114,46 +117,6 @@ public sealed class ShapeVaeParityTests
             return ParityResult.Failed(name, "skipped: voxel sets differ");
         return ParityCompare.Compare(name, ParityCompare.GatherRows(feats.AsReadOnlySpan<float>(), order, width), reference);
     }
-
-    // Reference formulas: vertices = (1 + 2·margin)·sigmoid(raw[0:3]) − margin; intersected logits = raw[3:6]; quad lerp = softplus(raw[6]).
-    private static float[] DeriveVertices(float[] raw)
-    {
-        int rows = raw.Length / HeadChannels;
-        float[] vertices = new float[rows * 3];
-        for (int r = 0; r < rows; r++)
-        {
-            for (int a = 0; a < 3; a++)
-                vertices[r * 3 + a] = (1f + 2f * VoxelMargin) * Sigmoid(raw[r * HeadChannels + a]) - VoxelMargin;
-        }
-
-        return vertices;
-    }
-
-    private static float[] DeriveIntersected(float[] raw)
-    {
-        int rows = raw.Length / HeadChannels;
-        float[] logits = new float[rows * 3];
-        for (int r = 0; r < rows; r++)
-        {
-            for (int a = 0; a < 3; a++)
-                logits[r * 3 + a] = raw[r * HeadChannels + 3 + a];
-        }
-
-        return logits;
-    }
-
-    private static float[] DeriveQuadLerp(float[] raw)
-    {
-        int rows = raw.Length / HeadChannels;
-        float[] quad = new float[rows];
-        for (int r = 0; r < rows; r++)
-            quad[r] = Softplus(raw[r * HeadChannels + 6]);
-        return quad;
-    }
-
-    private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
-
-    private static float Softplus(float x) => x > 20f ? x : MathF.Log(1f + MathF.Exp(x));
 
     private static float[] ToFloats(bool[] flags)
     {

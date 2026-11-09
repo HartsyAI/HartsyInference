@@ -13,12 +13,8 @@ public sealed class DualGridMesherStage : IDualGridMesher
         ArgumentNullException.ThrowIfNull(field);
         ArgumentNullException.ThrowIfNull(grid);
         DualGridVoxels voxels = field.Voxels;
-        float[] offsets = new float[voxels.DualVertices.Length];
-        for (int i = 0; i < offsets.Length; i++)
-            offsets[i] = voxels.DualVertices[i] - voxels.Coords[i];
-
         DualGridMesh extracted = DualGridMesher.Extract(
-            voxels.Coords, offsets, voxels.Intersected, field.SplitWeight, grid.Origin, new Vector3(grid.VoxelSize));
+            voxels.Coords, voxels.DualVertices, voxels.Intersected, field.SplitWeight, grid.Origin, new Vector3(grid.VoxelSize));
         return MeshOps.ComputeVertexNormals(new Mesh { Vertices = extracted.Vertices, Indices = extracted.Triangles });
     }
 }
