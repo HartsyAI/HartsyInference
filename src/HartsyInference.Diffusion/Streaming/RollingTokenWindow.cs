@@ -9,19 +9,23 @@ namespace HartsyInference.Diffusion.Streaming;
 /// the layer joins those parts with its own chunk in one concatenation, so the window never holds a second, joined copy.</summary>
 /// <remarks>Tokens run along <c>tokenAxis</c> of every stream; a chunk's token count divided by its units is the tokens of
 /// one unit (a frame). The window owns what it holds and pins it on the backend. Appending is staged: a chunk joins the
-/// window at <see cref="Commit"/>.</remarks>
+/// window at <see cref="Commit"/>. With a <see cref="StorageDType"/> the window keeps its streams narrower than they arrive
+/// (F32 activations stored as BF16, say): each chunk is converted as it is staged, and <see cref="CopyParts"/> hands back the
+/// stored parts, which the caller widens when it joins them.</remarks>
 public sealed class RollingTokenWindow : IStreamingState
 {
     private readonly IBackend _backend;
     private readonly TokenWindowPolicy _policy;
     private readonly int _tokenAxis;
+    private readonly DType? _storage;
     private readonly List<Entry> _sink = [];
     private readonly List<Entry> _history = [];
     private Entry? _staged;
     private int _disposed;
 
     /// <summary>Creates an empty window of <paramref name="streams"/> parallel streams.</summary>
-    public RollingTokenWindow(IBackend backend, TokenWindowPolicy policy, int streams, int tokenAxis)
+    /// <param name="storageDType">The dtype every staged stream is converted to and held in; null keeps streams as staged.</param>
+    public RollingTokenWindow(IBackend backend, TokenWindowPolicy policy, int streams, int tokenAxis, DType? storageDType = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(policy);
@@ -33,7 +37,11 @@ public sealed class RollingTokenWindow : IStreamingState
         _policy = policy;
         Streams = streams;
         _tokenAxis = tokenAxis;
+        _storage = storageDType;
     }
+
+    /// <summary>The dtype the window holds its streams in, or null when it holds them as staged.</summary>
+    public DType? StorageDType => _storage;
 
     /// <summary>Parallel streams per chunk.</summary>
     public int Streams { get; }
@@ -81,10 +89,37 @@ public sealed class RollingTokenWindow : IStreamingState
             throw;
         }
 
+        try
+        {
+            Narrow(owned);
+        }
+        catch
+        {
+            foreach (Tensor? stream in owned)
+                stream?.Dispose();
+            throw;
+        }
+
         Discard();
         foreach (Tensor stream in owned)
             _backend.PinActivation(stream);
         _staged = new Entry(owned, units);
+    }
+
+    // Converts each stream to the storage dtype in place in the array, one at a time, releasing the original as soon as its
+    // copy exists so the narrower copy never coexists with more than one full-width stream.
+    private void Narrow(Tensor[] streams)
+    {
+        if (_storage is not DType storage)
+            return;
+        for (int i = 0; i < streams.Length; i++)
+        {
+            if (streams[i].DType == storage)
+                continue;
+            Tensor stored = StreamingTensors.CastTo(_backend, streams[i], storage);
+            streams[i].Dispose();
+            streams[i] = stored;
+        }
     }
 
     /// <summary>Committed chunks in the window, sink and history together: the parts <see cref="CopyParts"/> writes.</summary>

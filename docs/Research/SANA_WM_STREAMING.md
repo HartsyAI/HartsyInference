@@ -166,10 +166,10 @@ Per DiT block and guidance branch (`SanaWmBlockStream`), at 720p (`S = 22·40 = 
 | numerator scan state | GDN (15) | F32 `[H, D, D]` | 0 `S_kv` | key-major `[Dk, Dv]`: the transpose of upstream's `(B, H, D, D)` |
 | denominator scan state | GDN | F32 `[H, D, 1]` | 1 `S_z` | from the unrotated q and k |
 | camera scan state | GDN | F32 `[H, D, D]` | 2 `cam_S_kv` | key-major, equal to upstream's layout (no transpose) |
-| key conv tail | GDN | F32 `[3·S, C]` | 4 | raw key projection of the newest 3 frames |
-| camera key conv tail | GDN | F32 `[3·S, C]` | 3 | raw camera key projection |
-| main K, V window | softmax (5) | F32 `[1, H, n·S, D]` ×2 | 0, 1 | K after RoPE at its own absolute frames, V raw |
-| camera K, V window | softmax | F32 `[1, H, n·S, D]` ×2 | 2, 3 | after the ray transform and camera RoPE |
+| key conv tail | GDN | BF16 `[3·S, C]` | 4 | raw key projection of the newest 3 frames |
+| camera key conv tail | GDN | BF16 `[3·S, C]` | 3 | raw camera key projection |
+| main K, V window | softmax (5) | BF16 `[1, H, n·S, D]` ×2 | 0, 1 | K after RoPE at its own absolute frames, V raw |
+| camera K, V window | softmax | BF16 `[1, H, n·S, D]` ×2 | 2, 3 | after the ray transform and camera RoPE |
 | FFN tail | all (20) | FFN dtype `[S, C]` | 9 | point-conv output of the newest frame |
 
 Softmax blocks are 3, 7, 11, 15 and 19 (`softmax_every_n = 4`). The default window is
@@ -186,10 +186,17 @@ plus one first-use flag per temporal upsampler (the first call drops the leading
   truncates timesteps to integers. `1000, 960, 889, 727` survive that round trip exactly.
 - The Euler step is `x + (σ − σ_next)·(−v)` in float32 on BF16-rounded `x` and `v`, rounded to BF16: the stage-1 sampler's
   arithmetic. Clean frames are skipped, which equals upstream's restore from `init_latents`.
-- Softmax K and V are kept in F32 and the attention runs with `AttentionNumerics.Bf16Storage`, which rounds operands to
-  BF16 on use. Upstream stores them as BF16; the values attended are the same.
-- Scan states and conv tails are F32. Upstream's are whatever its BF16 autocast leaves them; the engine's stage-1 layers
-  already keep q, k and v in F32 between ops and are at parity that way.
+- Softmax K and V are held between chunks in BF16, as upstream's cache holds them (`SanaWmBlockStream.StorageDType`). A
+  chunk's own keys and values are used in F32 for its passes and rounded to nearest even only when they are staged. Each
+  pass widens the window's parts and joins them with the chunk, so the attention call (`AttentionNumerics.Bf16Storage`,
+  which narrows its F32 operands to BF16 inside) receives exactly the operands it did when the window was F32: the window's
+  values are BF16 numbers either way, and narrowing a BF16 number is the identity. The first chunk has no window and runs
+  as before.
+- The two key tails are held in BF16 too (upstream's slots are `[S, 3, C]` BF16) and widened where the convolution reads
+  them; only the 3 frames kept are rounded. Scan states stay F32 (they are small and recur through the whole stream), the
+  FFN tail keeps its own dtype. The engine's stage-1 layers keep q, k and v in F32 between ops and are at parity that way.
+- CPU runs differ in one respect: `IBackend.CastToBf16`'s default narrows by truncation. The streaming state avoids it
+  (`StreamingTensors.CastTo` rounds to nearest even on the CPU backend), so CPU and CUDA hold the same stored values.
 - Text cross-attention uses the additive `(1 − mask)·−10000` bias, which is upstream's own non-xformers path (the streaming
   script sets `DISABLE_XFORMERS=1`).
 - Streaming pixels are `clamp(127.5·x + 127.5, 0, 255)` truncated, in float32 (`SanaWmStream.ToRgb24`); upstream calls
@@ -210,9 +217,8 @@ Phase A (student + causal VAE decoder resident together, text and image encoders
 | FFN tails and scan states | under 0.2 GB |
 | chunk activations (3 to 4 frames of 880 tokens) | small next to stage 1's 21 frames |
 
-That is tight but plausible on 12 GB (the 3060 run is pending; the 4090 measurement is below). Two levers if it does not fit: keep the softmax windows in BF16 (halves the
-largest item; needs the attention call to accept BF16 K/V operands) and keep the key tails in BF16 (the conv input is then
-rounded, a numerics change to measure). A second guidance branch doubles the carried state.
+That was the estimate; the measurement did not fit 12 GB, see [Memory on a 12 GB card](#memory-on-a-12-gb-card). The two
+levers named here, BF16 softmax windows and BF16 key tails, are applied. A second guidance branch doubles the carried state.
 
 The refiner's memory is planned in [its own section](#memory-plan-with-the-refiner).
 
@@ -229,12 +235,47 @@ frames, stage 1 only, upstream's noise and first latent injected; a real run, no
 | time | chunk 0 at 12.9 s including model loads, then 2.11 s and 1.74 s per 24-frame chunk (0.86× real time); upstream 2.13 s |
 | device memory | 10.98 GiB in use, about 1 GiB of it other processes |
 
-Open, from the same report, neither blocking:
-- The softmax key/value window is stored in F32 (`[1, H, N, D]`). Attention rounds its operands to BF16 anyway, so BF16
-  storage would halve it, about 0.3 GiB per chunk of window across the five softmax blocks. It needs the attention call
-  to take BF16 K/V operands, which is not checked; do it if the 3060 run says memory is the limit.
-- `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass. Harmless at a window of two
-  chunks; worth caching the joined window across the five passes of a chunk if the window grows.
+Open from the same report: `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass.
+Harmless at a window of two chunks; worth caching the joined window across the five passes of a chunk if the window grows.
+(The report's other item, BF16 softmax storage, is applied; see the next section.)
+
+### Memory on a 12 GB card
+
+Reported by the parent session from `vram.trace`, 3060 (11.9 GiB, about 0.5 GiB of it the CUDA context). The per-call DiT
+replay passes there (worst cosine 0.99963, about 5.1 s per warm 3-frame chunk) but the stream, DiT plus decoder, runs out
+of memory decoding chunk 1: the decoder asked for 110 MB with 71 MB free. Upstream does not fit on the card at all.
+
+| Item (MiB) | After |
+|---|---|
+| weights: DiT 5157, causal decoder +1975 once it first runs | 7132 |
+| activations: 49 | chunk 0's denoise passes |
+| 1431 | chunk 0's save pass: the committed state of one 4-frame chunk, F32 |
+| 1989 | chunk 0 decoded: the decoder's carried cache is about 560 |
+| 3221 | chunk 1's save pass: committed and staged state coexist |
+| 3672 | chunk 2's save pass on the 4090, the steady-state peak |
+
+Pool reserved against pool used on the 4090 was 4800 against 3672 at steady state, and on the 3060 3968 against 3221 at the
+failing save pass: the allocator held 0.7 to 1.9 GiB it was not using, as free blocks the driver could not give to the
+decoder, whose allocations go to the driver. That is the direct cause of the failure; the state itself fit. Three changes:
+
+1. **The pool is trimmed at every DiT commit** (`SanaWmDitChunkDenoiser.Commit` calls `IBackend.TrimMemoryPool`). The commit
+   has just released the replaced state, and the decoder runs next. Cost: the next chunk's passes re-map what they need
+   again, small against a chunk's seconds. A second trim after the decode, or at a chunk's first pass, is the next step if
+   the save pass itself runs short (it ended at 11904 of 11912 MiB on the 3060).
+2. **Softmax windows are held in BF16** (`RollingTokenWindow` takes a storage dtype; chunks are converted as they are
+   staged, so the F32 chunk is released at once). Steady state 7 frames × 880 tokens × 2240 channels × 4 tensors × 5 blocks:
+   1.1 GB F32, 0.55 GB BF16, plus about 0.24 GB saved on the chunk staged during a save pass.
+3. **The two key tails are held in BF16** (`FrameTailCache` takes a storage dtype; only the 3 frames kept are converted):
+   15 blocks × 2 tails × 3 frames × 880 × 2240 is 0.71 GB in F32, 0.36 GB in BF16, and about 0.18 GB less when staged.
+
+Expected: about 0.9 GB less state at steady state and about 1.3 GB less at a save pass, plus the pool slack. Nothing is
+measured; the parent reruns the 3060 and 4090 lanes. Not done: alternating residency per chunk (DiT weights on the host
+while decoding, decoder weights on the host while sampling), about 5 GB plus 2 GB of PCIe traffic per chunk; use it only if
+these are not enough.
+
+Two properties worth knowing: the BF16 window values are the ones the attention call would have narrowed to anyway, so
+GPU numerics should not move beyond a rounding tie; and the 16-bit `Concat` in `StreamingTensors` is a strided scatter,
+because the CPU backend's `Concat` writes four bytes per element and corrupts the heap on a BF16 tensor.
 
 ## Checkpoint conversion (parent session)
 

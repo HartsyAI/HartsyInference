@@ -9,18 +9,22 @@ namespace HartsyInference.Diffusion.Streaming;
 /// it, so the tail is always the newest frames of the whole stream.</summary>
 /// <remarks>Frames run along <c>axis</c>, each taking <c>positionsPerFrame</c> positions: 1 for a <c>[B, C, T, H, W]</c>
 /// activation on axis 2, the tokens of a frame for frame-major token rows on axis 0. The cache copies what it keeps, so the
-/// chunk stays the caller's.</remarks>
+/// chunk stays the caller's. With a <see cref="StorageDType"/> the tail is held narrower than the chunks it is cut from; only
+/// the frames kept are converted, and <see cref="Current"/> and <see cref="ReplicatePadded"/> hand back the stored dtype.</remarks>
 public sealed class FrameTailCache : IStreamingState
 {
     private readonly StreamingTensorSlot _slot;
     private readonly IBackend _backend;
     private readonly int _axis;
     private readonly int _positionsPerFrame;
+    private readonly DType? _storage;
     private int _heldFrames;
     private int _stagedFrames;
 
     /// <summary>Creates an empty tail of up to <paramref name="tailFrames"/> frames.</summary>
-    public FrameTailCache(IBackend backend, int tailFrames, int axis, int positionsPerFrame = 1)
+    /// <param name="storageDType">The dtype the kept frames are converted to and held in (F32 and BF16 convert); null keeps the
+    /// chunk's own dtype.</param>
+    public FrameTailCache(IBackend backend, int tailFrames, int axis, int positionsPerFrame = 1, DType? storageDType = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentOutOfRangeException.ThrowIfLessThan(tailFrames, 1);
@@ -31,7 +35,11 @@ public sealed class FrameTailCache : IStreamingState
         TailFrames = tailFrames;
         _axis = axis;
         _positionsPerFrame = positionsPerFrame;
+        _storage = storageDType;
     }
+
+    /// <summary>The dtype the tail is held in, or null when it keeps the chunks' own.</summary>
+    public DType? StorageDType => _storage;
 
     /// <summary>The most frames the tail holds.</summary>
     public int TailFrames { get; }
@@ -55,8 +63,9 @@ public sealed class FrameTailCache : IStreamingState
         int frames = checked((int)(chunk.Shape[_axis] / _positionsPerFrame));
         if (frames >= TailFrames)
         {
-            _slot.Stage(StreamingTensors.Slice(_backend, chunk, _axis, (long)(frames - TailFrames) * _positionsPerFrame,
-                (long)TailFrames * _positionsPerFrame));
+            // Cut the tail before converting, so only the frames kept are cast.
+            _slot.Stage(Stored(StreamingTensors.Slice(_backend, chunk, _axis, (long)(frames - TailFrames) * _positionsPerFrame,
+                (long)TailFrames * _positionsPerFrame)));
             _stagedFrames = TailFrames;
             return;
         }
@@ -64,15 +73,36 @@ public sealed class FrameTailCache : IStreamingState
         int carried = Math.Min(TailFrames - frames, _heldFrames);
         if (carried == 0 || _slot.Current is not Tensor current)
         {
-            _slot.Stage(StreamingTensors.Clone(_backend, chunk));
+            _slot.Stage(StoredCopy(chunk));
             _stagedFrames = frames;
             return;
         }
 
         using Tensor carry = StreamingTensors.Slice(_backend, current, _axis, (long)(_heldFrames - carried) * _positionsPerFrame,
             (long)carried * _positionsPerFrame);
-        _slot.Stage(StreamingTensors.Concat(_backend, [carry, chunk], _axis));
+        using Tensor newest = StoredCopy(chunk);
+        _slot.Stage(StreamingTensors.Concat(_backend, [carry, newest], _axis));
         _stagedFrames = carried + frames;
+    }
+
+    // A copy of tensor in the storage dtype; the source is the caller's.
+    private Tensor StoredCopy(Tensor tensor) => _storage is DType storage && tensor.DType != storage
+        ? StreamingTensors.CastTo(_backend, tensor, storage)
+        : StreamingTensors.Clone(_backend, tensor);
+
+    // tensor in the storage dtype, which it takes over: a conversion replaces it, an equal dtype returns it.
+    private Tensor Stored(Tensor tensor)
+    {
+        if (_storage is not DType storage || tensor.DType == storage)
+            return tensor;
+        try
+        {
+            return StreamingTensors.CastTo(_backend, tensor, storage);
+        }
+        finally
+        {
+            tensor.Dispose();
+        }
     }
 
     /// <summary>The committed tail extended to exactly <paramref name="frames"/> frames by repeating its oldest frame in front,
