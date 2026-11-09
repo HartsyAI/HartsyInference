@@ -70,12 +70,12 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     /// <summary>Creates the transformer for the given architecture (weights loaded separately).</summary>
     public GenericTransformer(TransformerConfig cfg)
     {
+        RefuseCompressedKvLayers(cfg);
         _cfg = cfg;
         _layers = new Layer[cfg.NumLayers];
         for (int i = 0; i < cfg.NumLayers; i++) _layers[i] = new Layer(cfg);
         _usesLocalWindow = cfg.SlidingWindow > 0 && Enumerable.Range(0, cfg.NumLayers).Any(i => !cfg.IsGlobalLayer(i));
         _usesWindowOrSoftcap = _usesLocalWindow || cfg.AttnLogitSoftcap > 0f;
-        RefuseCompressedKvLayers(cfg);
     }
 
     // Compressed-KV (HCA) layers are config-selectable but not wired into this decoder yet; refusing beats running them as standard attention.

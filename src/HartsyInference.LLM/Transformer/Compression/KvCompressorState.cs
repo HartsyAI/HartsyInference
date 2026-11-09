@@ -4,7 +4,8 @@ namespace HartsyInference.LLM.Transformer.Compression;
 /// <remarks>Works per absolute position, so prefill from 0, chunked prefill and single-token decode share one path. Inputs are the
 /// already projected <c>wkv</c> and <c>wgate</c> rows. With no <paramref name="ape"/> and no <paramref name="normWeight"/> the pooling
 /// is plain per-group softmax (DeepSeek V4.1); with them it is ERNIE's HCA form: <c>score + ape[slot]</c> before the softmax, and an
-/// RMS norm with weight after it. Non-overlapping windows only.</remarks>
+/// RMS norm with weight after it. Non-overlapping windows only. Ratio 1 keeps a latent per token with no pooling and no state, so it
+/// is not handled here; create one only when <see cref="LayerAttentionKind.Pools"/> is true.</remarks>
 public sealed class KvCompressorState
 {
     private readonly float[] _kv;
