@@ -20,6 +20,7 @@ Detail in the retired 3D build plan (git history).
 | Model | Notes |
 |---|---|
 | **Hunyuan3D-2** | Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). ([details](#hunyuan3d-2)) |
+| **CoLa3D decomposer (q20)** | Implemented; parity pending [#694](https://github.com/HartsyAI/HartsyInference/pull/694). Not verified against the Python reference. |
 
 Tests: `Hunyuan3DDinoParityTests`, `Hunyuan3DVaeParityTests` (both in
 `tests/HartsyInference.ThreeD.Tests/Parity/`). The DiT-parity and generation tests were removed in
