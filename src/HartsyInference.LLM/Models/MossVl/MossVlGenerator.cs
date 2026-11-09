@@ -46,6 +46,10 @@ public sealed class MossVlDecodeSession : IDisposable
         Tensor[] merged = new Tensor[images.Count];
         for (int k = 0; k < images.Count; k++)
         {
+            // Each image's own token count must match its grid: a total that only matches in sum would misplace the separators.
+            long expected = (long)images[k].MergedHeight * images[k].MergedWidth;
+            if (images[k].MergedTokens.Shape[0] != expected)
+                throw new ArgumentException($"Image {k} has {images[k].MergedTokens.Shape[0]} merged tokens for a {images[k].MergedHeight}x{images[k].MergedWidth} grid ({expected}).", nameof(images));
             grids[k] = new MossVlImage(images[k].MergedHeight, images[k].MergedWidth);
             merged[k] = images[k].MergedTokens;
         }
@@ -146,7 +150,7 @@ public sealed class MossVlDecodeSession : IDisposable
             Vision = _promptPlan.Vision,
             VisionLength = _promptPlan.VisionLength,
             RowMask = null,
-            CrossBias = null,
+            CrossGroups = null,
         };
         try
         {

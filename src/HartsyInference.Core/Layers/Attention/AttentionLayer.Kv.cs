@@ -45,9 +45,7 @@ public sealed partial class AttentionLayer
             AttentionCall flash = AttentionCall.FromFlashAttention(attn, qMh, keys, values, call.KvLength, !call.Bidirectional,
                 call.QueryOffset, _config.EffectiveScale, call.Softcap, call.Sinks, call.SlidingWindow, call.AlibiSlopes);
             using Tensor? widened = call.Bias is null ? null : WidenToKeyRows(call.Bias, keys.Shape[2]);
-            // The flash entry carries no additive bias, so a biased call takes the dense head-major entry, which every backend serves with a bias.
-            // The dense entry reads the whole key buffer, so the bias is widened to it (see WidenToKeyRows).
-            if (call.Bias is not null) flash = flash with { Route = AttentionRoute.Dense, Mask = flash.Mask with { Bias = widened ?? call.Bias } };
+            if (call.Bias is not null) flash = flash with { Mask = flash.Mask with { Bias = widened ?? call.Bias } };
             backend.Attention(in flash);
             if (ownQ) qMh.Dispose();
             if (source is null)

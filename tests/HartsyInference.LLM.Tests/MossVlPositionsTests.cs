@@ -58,26 +58,26 @@ public sealed class MossVlPositionsTests
         int[] twoImages = [ImageToken, 5, ImageToken];
         MossVlPositionPlan plan = MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]);
 
-        const float masked = MossVlPositionPlan.MaskedBias;
-        int l = plan.VisionLength;
-        Assert.Equal(10, l);
+        Assert.Equal(10, plan.VisionLength);
         Assert.Equal(new float[] { 1f, 1f, 1f }, plan.RowMask);
-        Assert.NotNull(plan.CrossBias);
-        float[] bias = plan.CrossBias!;
+        Assert.NotNull(plan.CrossGroups);
+        IReadOnlyList<MossVlCrossGroup> groups = plan.CrossGroups!;
+        Assert.Equal(2, groups.Count);
 
-        // Rows 0 and 1 are before the second placeholder: they see image 0 (columns 0-4) only.
-        Assert.Equal(new float[] { 0, 0, 0, 0, 0, masked, masked, masked, masked, masked }, bias.AsSpan(0, l).ToArray());
-        Assert.Equal(new float[] { 0, 0, 0, 0, 0, masked, masked, masked, masked, masked }, bias.AsSpan(l, l).ToArray());
-        // Row 2 is the second placeholder: it sees both images.
-        Assert.Equal(new float[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, bias.AsSpan(2 * l, l).ToArray());
+        // Group 0: rows 0 and 1, which see image 0 only, attend the prefix through image 0 (columns 0-4).
+        Assert.Equal(5, groups[0].KvLength);
+        Assert.Equal(new float[] { 1, 1, 0 }, groups[0].RowSelect);
+        // Group 1: row 2, the second placeholder, sees both images and attends the whole sequence.
+        Assert.Equal(10, groups[1].KvLength);
+        Assert.Equal(new float[] { 0, 0, 1 }, groups[1].RowSelect);
     }
 
     [Fact]
-    public void OneImageNeedsNoCrossBias()
+    public void OneImageNeedsNoImageGroups()
     {
         MossVlPositionPlan plan = MossVlPositions.Plan(Prompt, ImageToken, [new MossVlImage(8, 12)]);
 
-        Assert.Null(plan.CrossBias);
+        Assert.Null(plan.CrossGroups);
     }
 
     [Fact]

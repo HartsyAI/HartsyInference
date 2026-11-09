@@ -9,6 +9,11 @@ namespace HartsyInference.LLM.Models.MossVl;
 /// token in the text and one separator-terminated block of merged tokens in the vision sequence.</summary>
 public readonly record struct MossVlImage(int MergedHeight, int MergedWidth);
 
+/// <summary>One group of text rows of a multi-image prompt that see the same images (see <see cref="MossVlPositionPlan.CrossGroups"/>).</summary>
+/// <param name="KvLength">The vision keys the group attends: its images' blocks and every image before them, a prefix of the sequence.</param>
+/// <param name="RowSelect">Per text row, 1 when the row is in the group, 0 otherwise.</param>
+public sealed record MossVlCrossGroup(int KvLength, float[] RowSelect);
+
 /// <summary>Multimodal positions of one MOSS-VL prompt (single frame per image), following the modeling code's
 /// <c>compute_position_ids</c> and <c>compute_vision_position_ids</c>.</summary>
 /// <remarks>
@@ -19,10 +24,6 @@ public readonly record struct MossVlImage(int MergedHeight, int MergedWidth);
 /// </remarks>
 public sealed class MossVlPositionPlan
 {
-    /// <summary>The additive score bias of a key the row does not see: far enough below any score that its softmax weight is zero,
-    /// finite so a row that sees no image still normalizes (its output is then zeroed by the row mask).</summary>
-    public const float MaskedBias = -1e9f;
-
     /// <summary>Axis-major text positions <c>[3 · T]</c> (temporal, height, width).</summary>
     public required int[] Text { get; init; }
 
@@ -35,9 +36,10 @@ public sealed class MossVlPositionPlan
     /// <summary>Per text row, 1 when the row sees an image, 0 when it sees none; null when the prompt has no image.</summary>
     public required float[]? RowMask { get; init; }
 
-    /// <summary>Row-major <c>[T · L]</c> additive score bias: 0 where a text row sees a vision key's image, <see cref="MaskedBias"/>
-    /// where it does not. Null for one image (the row mask alone is exact there) and for a prompt with no image.</summary>
-    public float[]? CrossBias { get; init; }
+    /// <summary>For a multi-image prompt, one group per image: the rows whose last visible image is that image, and the vision prefix
+    /// through it. Each group's rows attend only that prefix, so no score bias is needed. Null for one image (the row mask alone is
+    /// exact there) and for a prompt with no image.</summary>
+    public IReadOnlyList<MossVlCrossGroup>? CrossGroups { get; init; }
 }
 
 /// <summary>Builds MOSS-VL positions and the multimodal rotary tables that the decoder's cross-attention consumes.</summary>
@@ -65,7 +67,7 @@ public static class MossVlPositions
         int[] text = new int[3 * t];
         int[] vision = new int[3 * visionLength];
         int[] placeholderRow = new int[images.Length];   // the text row of each image's placeholder
-        int[] blockStart = new int[images.Length];       // the first vision column of each image's block
+        int[] blockEnd = new int[images.Length];         // one past the last vision column of each image's block
         int regularBefore = 0, shift = 0, imageIndex = 0, visionOffset = 0;
         for (int i = 0; i < t; i++)
         {
@@ -83,7 +85,6 @@ public static class MossVlPositions
             int span = Math.Max(h, w);
             for (int a = 0; a < 3; a++) text[a * t + i] = t0 + span;
             placeholderRow[k] = i;
-            blockStart[k] = visionOffset;
 
             for (int y = 0; y < h; y++)
             {
@@ -101,11 +102,12 @@ public static class MossVlPositions
             vision[2 * visionLength + sep] = t0 + span;
 
             visionOffset += h * w + 1;
+            blockEnd[k] = visionOffset;
             shift += span + 1;
         }
 
         float[]? rowMask = null;
-        float[]? crossBias = null;
+        IReadOnlyList<MossVlCrossGroup>? groups = null;
         if (images.Length > 0)
         {
             // A row sees the images whose placeholder is at or before it; it sees none before the first placeholder.
@@ -114,19 +116,24 @@ public static class MossVlPositions
         }
         if (images.Length > 1)
         {
-            crossBias = new float[t * visionLength];
-            for (int r = 0; r < t; r++)
+            // Rows are in placeholder order, so the rows that see exactly images 0..k form one contiguous run, and the
+            // vision keys they attend are the prefix through image k.
+            MossVlCrossGroup[] built = new MossVlCrossGroup[images.Length];
+            for (int k = 0; k < images.Length; k++)
             {
-                for (int k = 0; k < images.Length; k++)
+                float[] select = new float[t];
+                for (int r = 0; r < t; r++)
                 {
-                    float bias = r >= placeholderRow[k] ? 0f : MossVlPositionPlan.MaskedBias;
-                    int end = blockStart[k] + images[k].MergedHeight * images[k].MergedWidth + 1;
-                    for (int j = blockStart[k]; j < end; j++) crossBias[r * visionLength + j] = bias;
+                    int visible = 0;
+                    for (int j = 0; j < images.Length; j++) if (placeholderRow[j] <= r) visible++;
+                    if (visible == k + 1) select[r] = 1f;
                 }
+                built[k] = new MossVlCrossGroup(blockEnd[k], select);
             }
+            groups = built;
         }
 
-        return new MossVlPositionPlan { Text = text, Vision = vision, VisionLength = visionLength, RowMask = rowMask, CrossBias = crossBias };
+        return new MossVlPositionPlan { Text = text, Vision = vision, VisionLength = visionLength, RowMask = rowMask, CrossGroups = groups };
     }
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/> from a MOSS-VL configuration's text section.</summary>
@@ -146,7 +153,7 @@ public static class MossVlPositions
     }
 
     /// <summary>The rotary tables for the text rows of <paramref name="plan"/> (the whole prompt, or one decode step) over the image's vision
-    /// tables. The text tables, row mask and cross bias are built fresh; the vision tables are borrowed, so the caller keeps them alive and
+    /// tables. The text tables, row mask and image groups are built fresh; the vision tables are borrowed, so the caller keeps them alive and
     /// disposes them. Text positions match <see cref="BuildRope(MossVlPositionPlan, MossVlConfig)"/>.</summary>
     public static MossVlRope BuildRopeOverVisionTables(MossVlPositionPlan plan, MossVlConfig config, Tensor visionCos, Tensor visionSin)
     {
@@ -157,19 +164,20 @@ public static class MossVlPositions
         byte[] pairAxes = MRopePairAxes.Build([.. config.MropeSection], headDim / 2,
             config.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
         (Tensor textCos, Tensor textSin) = MRopeTable.BuildTensors(plan.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
-        Tensor? rowMask = null, crossBias = null;
+        Tensor? rowMask = null;
+        List<CrossImageGroup>? groups = null;
         try
         {
             rowMask = plan.RowMask is null ? null : BuildRowMask(plan.RowMask, t, hidden);
-            crossBias = BuildCrossBias(plan, t);
-            return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask, crossBias), ownsVision: false);
+            groups = BuildImageGroups(plan, t, hidden);
+            return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask, groups), ownsVision: false);
         }
         catch
         {
             textCos.Dispose();
             textSin.Dispose();
             rowMask?.Dispose();
-            crossBias?.Dispose();
+            DisposeGroups(groups);
             throw;
         }
     }
@@ -184,13 +192,29 @@ public static class MossVlPositions
         return rowMask;
     }
 
-    /// <summary>Copies the plan's cross bias to <c>[1, 1, T, L]</c>, or returns null when the plan has none.</summary>
-    private static Tensor? BuildCrossBias(MossVlPositionPlan plan, int t)
+    /// <summary>The plan's image groups as device-shaped <c>[1, T, hidden]</c> selections, or null when the plan has none. The caller owns
+    /// the result and disposes it with <see cref="DisposeGroups"/> if a later step fails.</summary>
+    private static List<CrossImageGroup>? BuildImageGroups(MossVlPositionPlan plan, int t, int hiddenSize)
     {
-        if (plan.CrossBias is null) return null;
-        Tensor bias = new(new TensorShape(1, 1, t, plan.VisionLength), DType.F32);
-        plan.CrossBias.AsSpan().CopyTo(bias.AsSpan<float>());
-        return bias;
+        if (plan.CrossGroups is null) return null;
+        List<CrossImageGroup> built = [];
+        try
+        {
+            foreach (MossVlCrossGroup group in plan.CrossGroups)
+                built.Add(new CrossImageGroup(group.KvLength, BuildRowMask(group.RowSelect, t, hiddenSize)));
+            return built;
+        }
+        catch
+        {
+            DisposeGroups(built);
+            throw;
+        }
+    }
+
+    private static void DisposeGroups(IEnumerable<CrossImageGroup>? groups)
+    {
+        if (groups is null) return;
+        foreach (CrossImageGroup group in groups) group.Select.Dispose();
     }
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/>: pair <c>j</c> of each row rotates by its interleaved M-RoPE axis,
@@ -207,15 +231,16 @@ public static class MossVlPositions
         (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(headDim, theta, null, maxPosition + 1);
         byte[] pairAxes = MRopePairAxes.Build(mropeSection, headDim / 2, interleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
 
-        Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null, crossBias = null;
+        Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+        List<CrossImageGroup>? groups = null;
         try
         {
             (textCos, textSin) = MRopeTable.BuildTensors(plan.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
             (visionCos, visionSin) = MRopeTable.BuildTensors(plan.Vision, plan.VisionLength, 0, plan.VisionLength, invFreq, scaling, pairAxes,
                 headDim, headDim);
             rowMask = plan.RowMask is null ? null : BuildRowMask(plan.RowMask, t, hiddenSize);
-            crossBias = BuildCrossBias(plan, t);
-            return new MossVlRope(new MultimodalRope(textCos!, textSin!, visionCos!, visionSin!, rowMask, crossBias));
+            groups = BuildImageGroups(plan, t, hiddenSize);
+            return new MossVlRope(new MultimodalRope(textCos!, textSin!, visionCos!, visionSin!, rowMask, groups));
         }
         catch
         {
@@ -224,14 +249,14 @@ public static class MossVlPositions
             visionCos?.Dispose();
             visionSin?.Dispose();
             rowMask?.Dispose();
-            crossBias?.Dispose();
+            DisposeGroups(groups);
             throw;
         }
     }
 }
 
 /// <summary>The rotary tables of one MOSS-VL forward. Dispose after the forward that reads them.</summary>
-/// <param name="rope">The tables. Text tables, the row mask and the cross bias are always owned here.</param>
+/// <param name="rope">The tables. Text tables, the row mask and the image groups are always owned here.</param>
 /// <param name="ownsVision">False when the vision tables are borrowed from a longer-lived owner (the decode session's per-image tables).</param>
 public sealed class MossVlRope(MultimodalRope rope, bool ownsVision = true) : IDisposable
 {
@@ -252,6 +277,7 @@ public sealed class MossVlRope(MultimodalRope rope, bool ownsVision = true) : ID
             Rope.VisionSin.Dispose();
         }
         Rope.RowMask?.Dispose();
-        Rope.CrossBias?.Dispose();
+        if (Rope.ImageGroups is not null)
+            foreach (CrossImageGroup group in Rope.ImageGroups) group.Select.Dispose();
     }
 }

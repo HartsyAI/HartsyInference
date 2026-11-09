@@ -512,7 +512,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             // layer holds them (each decode step of a request), they are borrowed from the caller instead of copied again.
             bool visionRead = crossKv is null || !CrossKvComplete(crossKv);
             // Each copy is released if a later one fails; once the record exists the finally below owns them.
-            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null, crossBias = null;
+            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+            List<CrossImageGroup>? groups = null;
             try
             {
                 textCos = MakeResident(backend, rope.TextCos);
@@ -523,9 +524,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     visionSin = MakeResident(backend, rope.VisionSin);
                 }
                 rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
-                crossBias = rope.CrossBias is null ? null : MakeResident(backend, rope.CrossBias);
-                resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask,
-                    crossBias);
+                if (rope.ImageGroups is not null)
+                {
+                    groups = [];
+                    foreach (CrossImageGroup group in rope.ImageGroups)
+                        groups.Add(new CrossImageGroup(group.KvLength, MakeResident(backend, group.Select)));
+                }
+                resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask, groups);
                 ownsResidentVision = visionRead;
             }
             catch
@@ -535,7 +540,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 visionCos?.Dispose();
                 visionSin?.Dispose();
                 rowMask?.Dispose();
-                crossBias?.Dispose();
+                if (groups is not null)
+                    foreach (CrossImageGroup group in groups) group.Select.Dispose();
                 throw;
             }
             cos = resident.TextCos;
@@ -667,7 +673,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     resident.VisionSin.Dispose();
                 }
                 resident.RowMask?.Dispose();
-                resident.CrossBias?.Dispose();
+                if (resident.ImageGroups is not null)
+                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select.Dispose();
             }
             cosLocal?.Dispose();
             sinLocal?.Dispose();

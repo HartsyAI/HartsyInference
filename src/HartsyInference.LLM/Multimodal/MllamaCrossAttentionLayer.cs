@@ -122,13 +122,11 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, qN, t, hq, d);
         qN.Dispose();
 
-        // Only the query is consumed here: the keys and values are borrowed (the kv cache or the caller disposes them).
-        Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
-            new KvAttentionCall { KvLength = visionLen, Bidirectional = true, Bias = rope?.CrossBias }, OperandOwnership.Query);
-        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, hq * d));
-        Tensor attnOut = new(flat, DType.F32);
-        GenericTransformer.Project(backend, attnOut, attnFlat, _oW, null, lowVram: _lowVram);
-        attnFlat.Dispose();
+        // The keys and values are borrowed throughout (the kv cache or the caller disposes them). The query is consumed.
+        Tensor attnOut = rope?.ImageGroups is { } groups
+            ? GroupedAttention(backend, qMh, t, kMh, vMh, groups)
+            : ProjectMerged(backend, _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
+                new KvAttentionCall { KvLength = visionLen, Bidirectional = true }, OperandOwnership.Query), t);
         attnOut = ApplyRowMask(backend, attnOut, rope);
 
         // Gated residual: text + tanh(attn_gate) · attnOut.
@@ -147,6 +145,57 @@ public sealed unsafe class MllamaCrossAttentionLayer
         backend.Add(outp, h, mlp);
         h.Dispose(); mlp.Dispose();
         return outp;
+    }
+
+    /// <summary>Projects merged-head attention output <paramref name="attn"/> (disposed) to <c>[1, t, hidden]</c>; the caller owns the result.</summary>
+    private Tensor ProjectMerged(IBackend backend, Tensor attn, int t)
+    {
+        Tensor attnFlat = _attn.MergeHeads(backend, attn, new TensorShape(1, t, _numHeads * _headDim));
+        Tensor projected = new(new TensorShape(1, t, _hidden), DType.F32);
+        GenericTransformer.Project(backend, projected, attnFlat, _oW, null, lowVram: _lowVram);
+        attnFlat.Dispose();
+        return projected;
+    }
+
+    /// <summary>Multi-image cross-attention: each group's rows attend the vision keys of the images they see (a prefix of the sequence),
+    /// and the masked group outputs are summed. Consumes <paramref name="qMh"/>; the keys and values are borrowed.</summary>
+    private Tensor GroupedAttention(IBackend backend, Tensor qMh, int t, Tensor kMh, Tensor vMh, IReadOnlyList<CrossImageGroup> groups)
+    {
+        TensorShape flat = new(1, t, _hidden);
+        Tensor? sum = null;
+        try
+        {
+            foreach (CrossImageGroup group in groups)
+            {
+                // The query is shared by every group, so it is not consumed until the last one (the finally below).
+                Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
+                    new KvAttentionCall { KvLength = group.KvLength, Bidirectional = true }, OperandOwnership.None);
+                Tensor part = ProjectMerged(backend, attn, t);
+                Tensor masked = new(flat, DType.F32);
+                backend.Mul(masked, part, group.Select);
+                part.Dispose();
+                if (sum is null)
+                {
+                    sum = masked;
+                    continue;
+                }
+                Tensor next = new(flat, DType.F32);
+                backend.Add(next, sum, masked);
+                sum.Dispose();
+                masked.Dispose();
+                sum = next;
+            }
+            return sum ?? throw new ArgumentException("A multi-image cross-attention needs at least one group.", nameof(groups));
+        }
+        catch
+        {
+            sum?.Dispose();
+            throw;
+        }
+        finally
+        {
+            qMh.Dispose();
+        }
     }
 
     /// <summary>Returns <paramref name="x"/> with each row scaled by the rope's row mask, disposing <paramref name="x"/>; returns it unchanged when there is no mask.</summary>
