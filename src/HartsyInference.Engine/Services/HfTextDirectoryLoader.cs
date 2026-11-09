@@ -14,8 +14,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 (host reference model), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.
-/// ERNIE-5.5 is recognised and refused by name (<see cref="Ernie5Config.RequireRunnable"/>) until the Text path has an adapter for <see cref="Ernie5Model"/>.</summary>
+/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 and ERNIE-5.5 (host reference models), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
 internal static class HfTextDirectoryLoader
 {
     /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
@@ -27,11 +26,21 @@ internal static class HfTextDirectoryLoader
     /// <summary>The options the Text path loads with; the RAM guard and the memory profile size against the same ones.</summary>
     internal static DeepSeekV41LoadOptions LoadOptions { get; } = new(MaxSequenceTokens);
 
-    /// <summary>Loads the directory onto <paramref name="backend"/> (the CPU backend: the reference model keeps its weights on the host).</summary>
+    /// <summary>The ERNIE-5.5 options the Text path loads with: layers are read and dequantized per forward, so host memory stays at one layer's F32 weights.</summary>
+    internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
+
+    /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1 or ERNIE-5.5) that <see cref="LoadHostReference"/> serves.</summary>
+    internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
+        string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
+        || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal);
+
+    /// <summary>Loads a host reference directory onto <paramref name="backend"/> (the CPU backend: the reference models keep their weights on the host).</summary>
     /// <exception cref="HartsyInferenceException">The directory's model_type is not supported, it has no usable tokenizer.json, or the checkpoint is invalid.</exception>
-    internal static DeepSeekV41TextModel Load(HfCheckpointInfo info, IBackend backend)
+    internal static IHostReferenceTextModel LoadHostReference(HfCheckpointInfo info, IBackend backend)
     {
         RequireSupported(info);
+        if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
+            return Ernie5TextModel.Load(backend, info.Root, Ernie5Options);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
@@ -72,7 +81,7 @@ internal static class HfTextDirectoryLoader
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
-        if (!stateful && !miniMax && !string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal))
+        if (!stateful && !miniMax && !IsHostReferenceFamily(info))
         {
             throw new HartsyInferenceException(
                 $"'{info.Root}' is a Hugging Face checkpoint with model_type '{info.ModelType}', which the Text path cannot load; "
