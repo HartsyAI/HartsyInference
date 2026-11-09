@@ -1539,9 +1539,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     Tensor gate = new(ff, DType.F32);
                     ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                    comb = _cfg.Activation == ActivationKind.Situ
-                        ? GatedFfn.SituGlu(backend, gate, up, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta)
-                        : GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha);
+                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha,
+                        _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta);
                 }
             }
             else

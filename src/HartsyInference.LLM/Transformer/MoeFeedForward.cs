@@ -623,17 +623,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         Tensor gate = new(ff, DType.F32);
         GenericTransformer.Project(backend, gate, x, gateW, null, _lowVram);
         Tensor comb;
-        if (_moe.Activation == ActivationKind.SwigluOai)
+        if (_moe.Activation is ActivationKind.SwigluOai or ActivationKind.Situ)
         {
-            Tensor oaiUp = new(ff, DType.F32);
-            GenericTransformer.Project(backend, oaiUp, x, upW, null, _lowVram);
-            comb = GatedFfn.SwiGlu(backend, ActivationKind.SwigluOai, gate, oaiUp, _moe.SwigluLimit, _moe.SwigluAlpha);
-        }
-        else if (_moe.Activation == ActivationKind.Situ)
-        {
-            Tensor situUp = new(ff, DType.F32);
-            GenericTransformer.Project(backend, situUp, x, upW, null, _lowVram);
-            comb = GatedFfn.SituGlu(backend, gate, situUp, _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
+            Tensor gatedUp = new(ff, DType.F32);
+            GenericTransformer.Project(backend, gatedUp, x, upW, null, _lowVram);
+            comb = GatedFfn.SwiGlu(backend, _moe.Activation, gate, gatedUp, _moe.SwigluLimit, _moe.SwigluAlpha,
+                _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
         }
         else
         {
@@ -652,13 +647,16 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         return outp;
     }
 
+    /// <summary>Whether the host expert runtime, and so expert offload, runs routed experts with <paramref name="activation"/>.</summary>
+    public static bool HostRunsExpertActivation(ActivationKind activation) => activation is ActivationKind.Silu or ActivationKind.GeluTanh;
+
     /// <summary>The host expert runtime's program for an expert activation; refuses the ones it does not run.</summary>
-    private static ExpertProgram HostExpertProgram(ActivationKind activation) => activation switch
+    private static ExpertProgram HostExpertProgram(ActivationKind activation)
     {
-        ActivationKind.Silu => ExpertProgram.Swiglu,
-        ActivationKind.GeluTanh => ExpertProgram.GeGlu,
-        _ => throw new NotSupportedException($"The host expert runtime does not run the {activation} expert activation."),
-    };
+        if (!HostRunsExpertActivation(activation))
+            throw new NotSupportedException($"The host expert runtime does not run the {activation} expert activation.");
+        return activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
+    }
 
     /// <summary>Per-token top-k expert selection + routing weights (softmax, sigmoid, or Kolibri's biased-logit
     /// selection with unbiased sigmoid weights; optional renorm).</summary>
