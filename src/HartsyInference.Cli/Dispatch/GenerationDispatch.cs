@@ -4,6 +4,7 @@ using HartsyInference.Cli.Infra;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
@@ -64,6 +65,8 @@ public static class GenerationDispatch
             Height = parameters.GetIntOrNull("height"),
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
+            FluxGuidance = parameters.GetFloatOrNull("flux-guidance"),
+            TrueCfgScale = parameters.GetFloatOrNull("true-cfg"),
             Sampler = parameters.GetStringOrNull("sampler"),
             Loras = BuildLoraStack(parameters),
             Scheduler = parameters.GetStringOrNull("scheduler"),
@@ -75,7 +78,7 @@ public static class GenerationDispatch
             // SwarmUI's own default is on (UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)), so the
             // flag turns the extras OFF rather than on.
             ModelSpecificEnhancements = !parameters.GetBool("no-model-enhancements", false),
-            Img2Img = BuildImg2Img(parameters),
+            Img2Img = BuildImg2Img(parameters, spec),
             Inpaint = BuildInpaint(parameters),
             IpAdapter = SplitPaths(parameters.GetStringOrNull("prompt-images")) is { Length: > 0 } promptPaths
                 ? new IpAdapter { PromptImages = [.. promptPaths.Select(LoadImage)] } : null,
@@ -792,10 +795,14 @@ public static class GenerationDispatch
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadImage(prompt),
+            Image = LoadMeshImage(prompt),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
+            Samples = parameters.GetInt("samples", 1),
+            Rigged = parameters.GetBool("rigged", false),
+            Colors = parameters.GetBool("no-colors", false) ? false : null,
+            Chains = parameters.GetBool("no-chains", false) ? false : null,
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -815,6 +822,7 @@ public static class GenerationDispatch
             FileBytes = result.Data,
             Extension = result.Format,
             Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
         return artifact;
@@ -1076,7 +1084,7 @@ public static class GenerationDispatch
     }
 
     /// <summary>The img2img init from <c>--init-image</c> / <c>--creativity</c> / <c>--init-image-mode</c>, or null for text-to-image.</summary>
-    private static Img2Img? BuildImg2Img(ParamState parameters)
+    private static Img2Img? BuildImg2Img(ParamState parameters, ModelSpec spec)
     {
         string? initPath = parameters.GetStringOrNull("init-image");
         if (initPath is null)
@@ -1088,6 +1096,12 @@ public static class GenerationDispatch
         if (creativity is not null)
         {
             img2img = img2img with { Creativity = creativity.Value };
+        }
+        else if (parameters.GetStringOrNull("mask") is not null && Flux1Recipe.IsFillCatalogId(spec.Catalog?.Id))
+        {
+            // A Fill model conditions on the masked image and regenerates the masked area, so a mask starts it at full denoise.
+            // Other models keep their own default: 0.6 keeps part of the masked content.
+            img2img = img2img with { Creativity = 1.0 };
         }
         return parameters.GetStringOrNull("init-image-mode") switch
         {
@@ -1294,6 +1308,19 @@ public static class GenerationDispatch
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
+    private static ImageData LoadMeshImage(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        {
+            return LoadImage(promptPath);
+        }
+
+        DecodedPng png = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
+        return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');

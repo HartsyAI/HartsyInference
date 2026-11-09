@@ -7,7 +7,13 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Models.MossVl;
 
-/// <summary>One MOSS-VL request: a prefill over the prompt and one image, then single-token decode steps. Every step reads the
+/// <summary>One image of a MOSS-VL request: its merged vision tokens from the vision tower and its merged grid.</summary>
+/// <param name="MergedTokens">The image's merged vision tokens <c>[h·w, hidden]</c> F32.</param>
+/// <param name="MergedHeight">The merged grid height (patch height divided by the merge size).</param>
+/// <param name="MergedWidth">The merged grid width.</param>
+public readonly record struct MossVlImageFeatures(Tensor MergedTokens, int MergedHeight, int MergedWidth);
+
+/// <summary>One MOSS-VL request: a prefill over the prompt and its images, then single-token decode steps. Every step reads the
 /// same vision features through the gated cross-attention layers, with the decode token's position continuing the prompt's.</summary>
 /// <remarks>Holds the KV cache, the vision tensor and its projected cross-attention keys and values; dispose it when the request ends.
 /// If a forward throws part-way, the session is faulted and refuses further calls, because its KV cache no longer matches the tokens.</remarks>
@@ -29,25 +35,37 @@ public sealed class MossVlDecodeSession : IDisposable
     private bool _faulted;
     private int _disposed;
 
-    /// <param name="mergedVision">The image's merged vision tokens <c>[h·w, hidden]</c> F32, from the vision tower.</param>
-    /// <param name="mergedHeight">The image's merged grid height (patch height divided by the merge size).</param>
-    /// <param name="mergedWidth">The image's merged grid width.</param>
+    /// <param name="images">The request's images, in the order their placeholders appear in <paramref name="promptIds"/>.</param>
     /// <param name="maxNewTokens">The most tokens the session will decode; sizes the KV cache.</param>
+    /// <exception cref="ArgumentException">No image, or a merged tensor that does not match its grid.</exception>
     public MossVlDecodeSession(MossVlTextDecoder decoder, MossVlConfig config, IBackend backend, int[] promptIds,
-        Tensor mergedVision, int mergedHeight, int mergedWidth, int maxNewTokens)
+        IReadOnlyList<MossVlImageFeatures> images, int maxNewTokens)
     {
+        if (images.Count == 0) throw new ArgumentException("A MOSS-VL session needs at least one image.", nameof(images));
+        MossVlImage[] grids = new MossVlImage[images.Count];
+        Tensor[] merged = new Tensor[images.Count];
+        for (int k = 0; k < images.Count; k++)
+        {
+            // Each image's own token count must match its grid: a total that only matches in sum would misplace the separators.
+            long expected = (long)images[k].MergedHeight * images[k].MergedWidth;
+            if (images[k].MergedTokens.Shape[0] != expected)
+                throw new ArgumentException($"Image {k} has {images[k].MergedTokens.Shape[0]} merged tokens for a {images[k].MergedHeight}x{images[k].MergedWidth} grid ({expected}).", nameof(images));
+            grids[k] = new MossVlImage(images[k].MergedHeight, images[k].MergedWidth);
+            merged[k] = images[k].MergedTokens;
+        }
+
         _decoder = decoder;
         _config = config;
         _backend = backend;
         _promptIds = promptIds;
-        _promptPlan = MossVlPositions.Plan(promptIds, config.ImageTokenId, [new MossVlImage(mergedHeight, mergedWidth)]);
-        _vision = decoder.AppendSeparator(mergedVision);
-        // The image's vision rotary tables are the same for every step, so they are built once here.
+        _promptPlan = MossVlPositions.Plan(promptIds, config.ImageTokenId, grids);
+        _vision = decoder.AppendSeparators(merged);
+        // The images' vision rotary tables are the same for every step, so they are built once here.
         Tensor? visionCos = null, visionSin = null;
         try
         {
             if (_vision.Shape[1] != _promptPlan.VisionLength)
-                throw new ArgumentException($"Vision tokens {_vision.Shape[1]} do not match the image grid ({_promptPlan.VisionLength} with separator).", nameof(mergedVision));
+                throw new ArgumentException($"Vision tokens {_vision.Shape[1]} do not match the image grids ({_promptPlan.VisionLength} with separators).", nameof(images));
             (visionCos, visionSin) = MossVlPositions.BuildVisionTables(_promptPlan, config);
             TransformerConfig text = decoder.TextConfig;
             _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim, promptIds.Length + maxNewTokens + 1);
@@ -100,7 +118,7 @@ public sealed class MossVlDecodeSession : IDisposable
         int t = _promptIds.Length;
         try
         {
-            // The image's vision tables are the session's own, borrowed here (see BuildRopeOverVisionTables).
+            // The images' vision tables are the session's own, borrowed here (see BuildRopeOverVisionTables).
             using MossVlRope rope = MossVlPositions.BuildRopeOverVisionTables(_promptPlan, _config, _visionCos, _visionSin);
             using Tensor embeds = new(new TensorShape(1, t, _decoder.TextConfig.HiddenSize), DType.F32);
             _decoder.Model.EmbedLookup(embeds, _promptIds);
@@ -124,13 +142,15 @@ public sealed class MossVlDecodeSession : IDisposable
         ThrowIfUnusable();
         if (!_prefilled) throw new InvalidOperationException("Prefill must run before a decode step.");
         int position = _nextPosition;
-        // A decode token is text: all three axes at the next position. It follows the image, so its row sees the image and needs no row mask.
+        // A decode token is text: all three axes at the next position. It follows every image, so its row sees all of them and
+        // needs neither a row mask nor a cross bias.
         MossVlPositionPlan stepPlan = new()
         {
             Text = [position, position, position],
             Vision = _promptPlan.Vision,
             VisionLength = _promptPlan.VisionLength,
             RowMask = null,
+            CrossGroups = null,
         };
         try
         {
@@ -164,20 +184,27 @@ public sealed class MossVlDecodeSession : IDisposable
     }
 }
 
-/// <summary>Greedy or sampled MOSS-VL generation for one image and one question, in the Qwen-VL ChatML layout the checkpoint's chat
-/// template uses.</summary>
+/// <summary>Greedy or sampled MOSS-VL generation for one or more images and one question, in the Qwen-VL ChatML layout the checkpoint's
+/// chat template uses.</summary>
 public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig config, ILlmTokenizer tokenizer, IBackend backend)
 {
-    /// <summary>Generates a reply to <paramref name="question"/> about the image. Sampling defaults match the other VLM generators
-    /// (<see cref="MllamaGenerator"/>). The image is required: a text-only prompt has no placeholder for the session's one image,
-    /// so the position planner rejects it.</summary>
+    private const string ImagePlaceholder = "<|vision_start|><|image_pad|><|vision_end|>";
+
+    /// <summary>Generates a reply to <paramref name="question"/> about one image. Sampling defaults match the other VLM generators
+    /// (<see cref="MllamaGenerator"/>).</summary>
     public string Generate(string question, Tensor mergedVision, int mergedHeight, int mergedWidth, int maxTokens = 64,
-        SamplingOptions? sampling = null)
+        SamplingOptions? sampling = null) =>
+        Generate(question, [new MossVlImageFeatures(mergedVision, mergedHeight, mergedWidth)], maxTokens, sampling);
+
+    /// <summary>Generates a reply to <paramref name="question"/> about <paramref name="images"/>, shown in that order before the question.
+    /// At least one image is required: a text-only prompt has no placeholder for the vision sequence.</summary>
+    /// <exception cref="ArgumentException">No image is given.</exception>
+    public string Generate(string question, IReadOnlyList<MossVlImageFeatures> images, int maxTokens = 64, SamplingOptions? sampling = null)
     {
+        if (images.Count == 0) throw new ArgumentException("MOSS-VL generation needs at least one image.", nameof(images));
         if (maxTokens <= 0) return string.Empty;
-        int[] ids = tokenizer.Encode(
-            "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>" + question + "<|im_end|>\n<|im_start|>assistant\n",
-            addSpecial: true);
+        string placeholders = string.Concat(Enumerable.Repeat(ImagePlaceholder, images.Count));
+        int[] ids = tokenizer.Encode("<|im_start|>user\n" + placeholders + question + "<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
             Temperature = 0.4f, TopP = 0.9f, RepetitionPenalty = 1.1f, Seed = 1,
@@ -186,7 +213,7 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         List<int> history = [];
         List<int> generated = [];
 
-        using MossVlDecodeSession session = new(decoder, config, backend, ids, mergedVision, mergedHeight, mergedWidth, maxTokens);
+        using MossVlDecodeSession session = new(decoder, config, backend, ids, images, maxTokens);
         int token = session.Prefill(sampler, history);
         while (!stops.Contains(token) && generated.Count < maxTokens)
         {

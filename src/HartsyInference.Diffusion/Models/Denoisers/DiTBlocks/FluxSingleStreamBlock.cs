@@ -31,6 +31,9 @@ public sealed class FluxSingleStreamBlock
 
     private AttentionLayer? _attention;
 
+    // LayerNorm epsilon on the (possibly damped) residual stream; 1e-6·R² under the F16 damp. Set in LoadWeights.
+    private float _lnEps = 1e-6f;
+
     /// <summary>Creates a FluxSingleStreamBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for Flux.1).</param>
     /// <param name="numHeads">Number of attention heads (24 for Flux.1).</param>
@@ -52,6 +55,7 @@ public sealed class FluxSingleStreamBlock
     /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe — see <see cref="ChromaF16"/>): applied to the block's single branch-output projection. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
+        _lnEps = 1e-6f * branchDamp * branchDamp;
         _modulation.LoadWeights(
             weights[$"{prefix}.norm.linear.weight"],
             weights[$"{prefix}.norm.linear.bias"]);
@@ -132,7 +136,7 @@ public sealed class FluxSingleStreamBlock
         Tensor[] mod = _modulation.Forward(backend, temb);
 
         // ── 2. LayerNorm (no affine, eps 1e-6) + modulate x*(1+scale)+shift ──
-        Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape);
+        Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape, _lnEps);
 
         // ── 3. Q/K/V projections + MLP projection (parallel) ──
         Tensor q = new Tensor(headsShape, act);
@@ -148,7 +152,8 @@ public sealed class FluxSingleStreamBlock
         // cuBLAS still accumulates in F32 internally so accuracy is preserved.
         // CPU exception: the CPU GEMM/Gelu kernels are F32-only, so the CPU path (parity tests,
         // FluxControlNet reference runs) keeps the MLP tail at the activation dtype.
-        DType mlpAct = backend.Device.IsCpu ? act : DType.F16;
+        // An F32 DiT keeps the MLP tail in F32; an F16 tail would be the last 16-bit path in it.
+        DType mlpAct = backend.Device.IsCpu || act == DType.F32 ? act : DType.F16;
         Tensor mlpInput = new Tensor(mlpShape, mlpAct);
         backend.Linear(mlpInput, modulated, _projMlpWeight!, _projMlpBias);
         modulated.Dispose();

@@ -51,6 +51,10 @@ public static class ModelVariantResolver
         {
             if (variant.HasStructuralRule && probe.HasAllKeys(variant.StructuralMarkers) && (variant.StructuralMatch?.Invoke(probe) ?? true))
             {
+                if (hinted?.FineTuneOf == variant.Id)
+                {
+                    return new ResolvedModelVariant(catalog.FamilyId, hinted, ModelVariantSource.CallerHint, $"hint '{hint}'");
+                }
                 string evidence = variant.StructuralMarkers.Count > 0
                     ? "tensor " + string.Join(", ", variant.StructuralMarkers) : "weight structure";
                 return new ResolvedModelVariant(catalog.FamilyId, variant, ModelVariantSource.Structure, evidence)

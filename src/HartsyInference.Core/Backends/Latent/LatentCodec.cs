@@ -82,7 +82,7 @@ public static class LatentCodec
         float scale;
         switch (encoding)
         {
-            case LatentEncoding.Fp8E4M3Ue8m0x32:
+            case LatentEncoding.Fp8E4M3Ue8m0x32 or LatentEncoding.Fp8E4M3Ue8m0x128:
                 scaleByte = Ue8m0Byte(MathF.Max(amax, 1e-4f), Fp8MaxInv);
                 scale = DecodeUe8m0(scaleByte);
                 for (int i = 0; i < group.Length; i++)
@@ -105,7 +105,7 @@ public static class LatentCodec
 
     /// <summary>Decodes a code produced by <see cref="QuantizeGroup"/> (before applying the scale).</summary>
     public static float DecodeCode(LatentEncoding encoding, byte code) =>
-        encoding == LatentEncoding.Fp8E4M3Ue8m0x32 ? DecodeE4M3(code) : DecodeE2M1(code);
+        LatentEncodings.IsFp8(encoding) ? DecodeE4M3(code) : DecodeE2M1(code);
 
     /// <summary>Decodes a scale byte for <paramref name="encoding"/>.</summary>
     public static float DecodeScale(LatentEncoding encoding, byte scaleByte) =>
@@ -117,7 +117,7 @@ public static class LatentCodec
     {
         int group = LatentEncodings.GroupSize(encoding);
         float scale = DecodeScale(encoding, rowScales[col / group]);
-        if (encoding == LatentEncoding.Fp8E4M3Ue8m0x32) return DecodeE4M3(rowCodes[col]) * scale;
+        if (LatentEncodings.IsFp8(encoding)) return DecodeE4M3(rowCodes[col]) * scale;
         int packed = rowCodes[col >> 1];
         return DecodeE2M1((col & 1) == 0 ? packed & 0xF : packed >> 4) * scale;
     }

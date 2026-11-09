@@ -46,6 +46,9 @@ public sealed class FluxDoubleStreamBlock
 
     private JointAttention? _attention;
 
+    // LayerNorm epsilon on the damped residual stream: 1e-6·R² (set in LoadWeights).
+    private float _lnEps = 1e-6f;
+
     /// <summary>Creates a FluxDoubleStreamBlock.</summary>
     /// <param name="hiddenSize">Model hidden dimension (3072 for Flux.1).</param>
     /// <param name="numHeads">Number of attention heads (24 for Flux.1).</param>
@@ -76,6 +79,7 @@ public sealed class FluxDoubleStreamBlock
     /// <param name="branchDamp">Residual-stream damp for the F16 activation path (the exact Chroma recipe — see <see cref="ChromaF16"/>): applied to every branch-OUTPUT projection so the token stream rides at damp scale while all branch inputs stay baseline via the scale-invariant no-affine LayerNorm. 1.0 = off.</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
+        _lnEps = 1e-6f * branchDamp * branchDamp;
         _imgModulation.LoadWeights(
             weights[$"{prefix}.norm1.linear.weight"],
             weights[$"{prefix}.norm1.linear.bias"]);
@@ -226,8 +230,8 @@ public sealed class FluxDoubleStreamBlock
         Tensor[] txtMod = _txtModulation.Forward(backend, temb);
 
         // ── 2. LayerNorm (no affine, eps 1e-6) + modulate x*(1+scale)+shift ──
-        Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
-        Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
+        Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape, _lnEps);
+        Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape, _lnEps);
 
         // ── 3-10. Joint attention over [txt, img], output projections, gated residuals ──
         AttentionCallContext joint = batch == 1
@@ -246,7 +250,7 @@ public sealed class FluxDoubleStreamBlock
         txtAttnProj.Dispose();
 
         // ── 11. Image MLP: LayerNorm + modulate + GELU MLP + gated residual ──
-        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape);
+        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape, _lnEps);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
         Tensor imgFinal = new Tensor(imgShape, act);
@@ -255,7 +259,7 @@ public sealed class FluxDoubleStreamBlock
         imgAfterAttn.Dispose();
 
         // ── 12. Text MLP: LayerNorm + modulate + GELU MLP + gated residual ──
-        Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape);
+        Tensor txtMlpModulated = DiTUtils.NormModulate(backend, txtAfterAttn, txtMod[3], txtMod[4], txtShape, _lnEps);
         Tensor txtMlpOut = _txtFfn.Forward(backend, txtMlpModulated, batch, txtSeqLen);
         txtMlpModulated.Dispose();
         Tensor txtFinal = new Tensor(txtShape, act);

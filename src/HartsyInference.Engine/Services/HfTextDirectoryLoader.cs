@@ -3,6 +3,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
+using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Models.Spark;
@@ -13,7 +14,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 (host reference model), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
+/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 (host reference model), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.
+/// ERNIE-5.5 is recognised and refused by name (<see cref="Ernie5Config.RequireRunnable"/>) until the Text path has an adapter for <see cref="Ernie5Model"/>.</summary>
 internal static class HfTextDirectoryLoader
 {
     /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
@@ -66,6 +68,8 @@ internal static class HfTextDirectoryLoader
     /// <exception cref="HartsyInferenceException">The model_type is not supported or the tokenizer is missing.</exception>
     internal static void RequireSupported(HfCheckpointInfo info)
     {
+        if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
+            Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal))
