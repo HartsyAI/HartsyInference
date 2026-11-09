@@ -41,16 +41,23 @@ public sealed class Ernie5SequenceState : IDisposable
     /// <summary>Tokens committed so far.</summary>
     public int Length { get; internal set; }
 
+    /// <summary>Set when a forward failed partway through its layers, so the caches no longer match <see cref="Length"/>.</summary>
+    internal bool Faulted { get; private set; }
+
     /// <summary>The HCA cache of layer <paramref name="layer"/>.</summary>
     internal HcaAttentionState Hca(int layer) => _hca[layer] ?? throw new InvalidOperationException($"Layer {layer} is not an HCA layer.");
 
     /// <summary>The DSA cache of layer <paramref name="layer"/>.</summary>
     internal DsaAttentionState Dsa(int layer) => _dsa[layer] ?? throw new InvalidOperationException($"Layer {layer} is not a DSA layer.");
 
+    /// <summary>Marks the caches as out of step with <see cref="Length"/>; <see cref="Reset"/> clears it.</summary>
+    internal void MarkFaulted() => Faulted = true;
+
     /// <summary>Forgets the sequence; the next forward starts at position 0.</summary>
     public void Reset()
     {
         Length = 0;
+        Faulted = false;
         foreach (HcaAttentionState? s in _hca) s?.Reset();
         foreach (DsaAttentionState? s in _dsa) s?.Reset();
     }

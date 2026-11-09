@@ -7,7 +7,7 @@ using HartsyInference.LLM.Transformer.Sparse;
 namespace HartsyInference.LLM.Transformer.Compression;
 
 /// <summary>Host reference for one heavily compressed attention (HCA) layer (vLLM-ERNIE <c>Ernie5_5HCAAttentionMixin</c> over DeepSeek V4
-/// <c>DeepseekV4Attention</c>, a <c>compress_ratios</c> entry of at least 2 with no indexer): low-rank queries, one shared key/value
+/// <c>DeepseekV4Attention</c>, a <c>compress_ratios</c> entry of at least 2 except 4 with no indexer): low-rank queries, one shared key/value
 /// row per token that is both key and value, a sliding window plus every completed compressed latent, a per-head sink, the head
 /// mix, the inverse RoPE, a grouped low-rank output with an optional sigmoid gate, and the output projection.</summary>
 /// <remarks>

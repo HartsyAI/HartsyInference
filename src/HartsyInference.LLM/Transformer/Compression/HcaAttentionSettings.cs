@@ -57,5 +57,7 @@ public sealed record HcaAttentionSettings
             throw new ArgumentException("RopeDim must be even, positive and at most HeadDim.");
         if (Heads * HeadDim % OGroups != 0) throw new ArgumentException("Heads x HeadDim must divide into OGroups.");
         if (CompressRatio < 2) throw new ArgumentException("An HCA layer pools at least 2 tokens per latent.");
+        if (CompressRatio == 4)
+            throw new ArgumentException("compress_ratio 4 needs the overlapping C4 compressor, which HcaAttention does not implement.");
     }
 }

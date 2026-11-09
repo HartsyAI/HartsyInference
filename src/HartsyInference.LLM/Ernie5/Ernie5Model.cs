@@ -139,6 +139,7 @@ public sealed class Ernie5Model : IDisposable
         ArgumentNullException.ThrowIfNull(state);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int tokens = tokenIds.Length, d = Config.HiddenSize, hc = Config.HcMult, vocab = Config.VocabSize, startPos = state.Length;
+        if (state.Faulted) throw new InvalidOperationException("An earlier Forward on this state failed partway through; call Reset() before reusing it.");
         if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
         if (startPos + tokens > state.Capacity)
             throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; {startPos + tokens} were asked for.");
@@ -146,17 +147,27 @@ public sealed class Ernie5Model : IDisposable
             if ((uint)id >= (uint)vocab) throw new ArgumentOutOfRangeException(nameof(tokenIds), id, "Token id is outside the vocabulary.");
 
         float[] stream = Embed(tokenIds, d, hc);
-        for (int i = 0; i < _layers.Length; i++)
+        bool completed = false;
+        try
         {
-            Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
-            try
+            for (int i = 0; i < _layers.Length; i++)
             {
-                layer.Forward(stream, tokens, startPos, state);
+                Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
+                try
+                {
+                    layer.Forward(stream, tokens, startPos, state);
+                }
+                finally
+                {
+                    if (!ReferenceEquals(layer, _layers[i])) layer.Dispose();
+                }
             }
-            finally
-            {
-                if (!ReferenceEquals(layer, _layers[i])) layer.Dispose();
-            }
+            completed = true;
+        }
+        finally
+        {
+            // Layers that ran already advanced their caches; Length no longer matches them.
+            if (!completed) state.MarkFaulted();
         }
         state.Length = startPos + tokens;
 
