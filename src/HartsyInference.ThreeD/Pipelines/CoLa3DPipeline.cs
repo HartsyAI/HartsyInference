@@ -27,6 +27,9 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <summary>Downsampling from the dual grid to the latent grid: the shape VAE's four 2x stages, which Utonia matches.</summary>
     public const int LatentStride = 16;
 
+    // Voxelize, encode and extract, and the split; the object count adds to these once the split is known.
+    private const int FixedSteps = 3;
+
     private readonly ISceneVoxelizer _voxelizer;
     private readonly ISparseShapeEncoder _encoder;
     private readonly IPointFeatureExtractor _features;
@@ -107,7 +110,8 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <summary>Decomposes a triangle scene mesh into object meshes.</summary>
     /// <param name="scene">Scene triangles in any world units; the grid is fitted to its largest extent.</param>
     /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>.</param>
-    /// <param name="onProgress">Reports once the scene is split into objects, then once per decoded object.</param>
+    /// <param name="onProgress">Reports the three fixed stages, then once per decoded object. TotalSteps is 3 until the
+    /// split fixes the object count.</param>
     /// <exception cref="HartsyInferenceException">The scene decomposes into no object with triangles.</exception>
     public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null)
     {
@@ -124,41 +128,36 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         DualGridVoxels voxels = _voxelizer.Voxelize(scene, grid);
         if (voxels.Coords.Length == 0)
             throw new HartsyInferenceException("Voxelizing the scene produced no occupied voxels.");
+        onProgress?.Invoke(new GenerationProgress(1, FixedSteps, ElapsedMs(started)));
 
         SparseTensor latent = _encoder.Encode(Backend, voxels, res);
-        SparseTensor features;
-        try
-        {
-            features = _features.Extract(Backend, SparseCoords.WithBatch(voxels.Coords), res);
-        }
-        catch
-        {
-            latent.Feats.Dispose();
-            throw;
-        }
-
+        SparseTensor? features = null;
         IReadOnlyList<SparseTensor> objects;
         try
         {
+            features = _features.Extract(Backend, SparseCoords.WithBatch(voxels.Coords), res);
+            onProgress?.Invoke(new GenerationProgress(2, FixedSteps, ElapsedMs(started)));
             objects = _decomposer.Decompose(Backend, latent, features);
         }
         finally
         {
+            // A cancel from onProgress or a failed stage releases what was built; Tensor.Dispose is idempotent.
             latent.Feats.Dispose();
-            features.Feats.Dispose();
+            features?.Feats.Dispose();
         }
 
         List<Mesh> meshes = [];
+        int totalSteps = FixedSteps + objects.Count;
         try
         {
-            onProgress?.Invoke(new GenerationProgress(1, 1 + objects.Count, ElapsedMs(started)));
+            onProgress?.Invoke(new GenerationProgress(FixedSteps, totalSteps, ElapsedMs(started)));
             for (int k = 0; k < objects.Count; k++)
             {
                 Mesh mesh = _mesher.Extract(_decoder.Decode(Backend, objects[k]), grid);
                 objects[k].Feats.Dispose();
                 if (mesh.TriangleCount > 0)
                     meshes.Add(mesh);
-                onProgress?.Invoke(new GenerationProgress(2 + k, 1 + objects.Count, ElapsedMs(started)));
+                onProgress?.Invoke(new GenerationProgress(FixedSteps + 1 + k, totalSteps, ElapsedMs(started)));
             }
         }
         finally

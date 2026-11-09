@@ -235,8 +235,11 @@ public static class GlbReader
             if (!TryMember(accessor, "bufferView", out JsonElement viewIndex))
                 throw new HartsyInferenceException("GLB accessor has no buffer view; sparse, Draco and meshopt accessors are not supported.");
             JsonElement view = Item(RequiredArray(root, "bufferViews"), Natural(viewIndex, "buffer view index"), "bufferView");
+            int buffer = NaturalMember(view, "buffer");
+            if (buffer != 0)
+                throw new HartsyInferenceException($"GLB buffer view reads buffer {buffer}; only the GLB binary chunk (buffer 0) is supported.");
             long viewOffset = NaturalMember(view, "byteOffset", 0);
-            long viewEnd = viewOffset + NaturalMember(view, "byteLength", bin.Length);
+            long viewEnd = viewOffset + NaturalMember(view, "byteLength");
             long stride = IntMember(view, "byteStride", elementSize);
             if (stride < elementSize)
                 throw new HartsyInferenceException($"GLB byte stride {stride} is smaller than the element size {elementSize}.");

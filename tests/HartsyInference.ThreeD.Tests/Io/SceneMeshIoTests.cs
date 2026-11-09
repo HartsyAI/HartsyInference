@@ -56,16 +56,69 @@ public sealed class SceneMeshIoTests
         Assert.Throws<HartsyInferenceException>(() => GlbReader.Parse(glb));
     }
 
+    [Fact]
+    public void GlbReader_ComposesAParentTranslationWithAChildMatrixInRowVectorOrder()
+    {
+        // The child's column-major matrix scales by 2 and offsets by (0, 5, 0); the parent offsets by (10, 0, 0).
+        // Local * parent applies the child's scale and offset before the parent's translation.
+        const string nodes = """[{"translation":[10,0,0],"children":[1]},{"mesh":0,"matrix":[2,0,0,0,0,2,0,0,0,0,2,0,0,5,0,1]}]""";
+        byte[] glb = SceneGlb(nodes, Positions, DefaultBufferViews);
+
+        Mesh mesh = GlbReader.Parse(glb);
+
+        Assert.Equal(new float[] { 10f, 5f, 0f, 12f, 5f, 0f, 10f, 7f, 0f }, mesh.Vertices);
+        Assert.Equal([0, 1, 2], mesh.Indices);
+    }
+
+    [Fact]
+    public void GlbReader_RefusesANodeReachedTwice()
+    {
+        // Node 1 is listed twice under node 0, which gives it two parents.
+        byte[] glb = SceneGlb("""[{"children":[1,1]},{"mesh":0}]""", Positions, DefaultBufferViews);
+
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => GlbReader.Parse(glb));
+
+        Assert.Contains("not a tree", ex.Message);
+    }
+
+    [Fact]
+    public void GlbReader_RefusesABufferViewThatReadsAnotherBuffer()
+    {
+        const string bufferViews = """[{"buffer":1,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}]""";
+        byte[] glb = TriangleGlb("{\"mesh\":0}", Positions, bufferViews);
+
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => GlbReader.Parse(glb));
+
+        Assert.Contains("buffer 1", ex.Message);
+    }
+
+    [Fact]
+    public void GlbReader_RequiresAByteLengthOnEveryBufferView()
+    {
+        const string bufferViews = """[{"buffer":0,"byteOffset":0},{"buffer":0,"byteOffset":36,"byteLength":12}]""";
+        byte[] glb = TriangleGlb("{\"mesh\":0}", Positions, bufferViews);
+
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => GlbReader.Parse(glb));
+
+        Assert.Contains("byteLength", ex.Message);
+    }
+
     private const string Positions = """{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}""";
 
-    // One triangle in a 48-byte buffer: three float VEC3 positions, then three uint32 indices.
-    private static byte[] TriangleGlb(string node, string position)
+    private const string DefaultBufferViews = """[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}]""";
+
+    // One triangle in a 48-byte buffer, placed by a single node.
+    private static byte[] TriangleGlb(string node, string position, string bufferViews = DefaultBufferViews) =>
+        SceneGlb($"[{node}]", position, bufferViews);
+
+    // A scene whose root is node 0; nodes is the JSON array of the node list.
+    private static byte[] SceneGlb(string nodes, string position, string bufferViews)
     {
         string json = $$"""
-            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{{node}}],
+            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":{{nodes}},
              "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
              "accessors":[{{position}},{"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}],
-             "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}],
+             "bufferViews":{{bufferViews}},
              "buffers":[{"byteLength":48}]}
             """;
         MemoryStream bin = new();

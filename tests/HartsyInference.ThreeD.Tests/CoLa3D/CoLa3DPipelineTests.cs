@@ -57,7 +57,7 @@ public sealed class CoLa3DPipelineTests
     }
 
     [Fact]
-    public void Generate_ReportsOnceAfterTheSplitAndOncePerObject()
+    public void Generate_ReportsTheFixedStagesThenOncePerObjectWithMonotonicSteps()
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
@@ -67,12 +67,17 @@ public sealed class CoLa3DPipelineTests
 
         pipeline.Generate(scene, onProgress: reports.Add);
 
-        Assert.Equal(new[] { (1, 3), (2, 3), (3, 3) }, reports.Select(p => (p.Step, p.TotalSteps)));
+        Assert.Equal(new[] { (1, 3), (2, 3), (3, 5), (4, 5), (5, 5) }, reports.Select(p => (p.Step, p.TotalSteps)));
         Assert.All(reports, p => Assert.True(p.ElapsedMs >= 0));
     }
 
-    [Fact]
-    public void Generate_PropagatesACancelRaisedFromProgress()
+    // Steps 1 and 2 come before the split, so a cancel there must stop the run as well as one after it.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public void Generate_PropagatesACancelRaisedFromProgress(int cancelAtStep)
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
@@ -81,7 +86,7 @@ public sealed class CoLa3DPipelineTests
 
         Assert.Throws<OperationCanceledException>(() => pipeline.Generate(scene, onProgress: p =>
         {
-            if (p.Step == 2)
+            if (p.Step == cancelAtStep)
                 throw new OperationCanceledException();
         }));
     }
