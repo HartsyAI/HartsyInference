@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -30,8 +32,13 @@ internal static class CoLa3DRope
     }
 
     /// <summary>Rotates <c>x [1, tokens, heads, headDim]</c> in place over the rotary channels.</summary>
-    internal static void Apply(IBackend backend, Tensor x, CoLa3DRopeTable table, int rotaryDim) =>
-        backend.ApplyRopeInterleaved(x, table.Cos, table.Sin, rotaryDim, 0);
+    internal static void Apply(IBackend backend, Tensor x, CoLa3DRopeTable table, int rotaryDim)
+    {
+        // Tokens share one [L, pairs] table across heads; the rotation runs over the token-major vectors.
+        StridedView vectors = RotaryViews.TokenMajor(x.Shape);
+        StridedView tableView = RotaryViews.SharedTable(table.Cos.Shape, 1, x.Shape[2]);
+        backend.Rotary(new RotaryCall(x, table.Cos, table.Sin, RotaryViews.Create(vectors, tableView, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryDim)));
+    }
 }
 
 /// <summary>Owned cos/sin rows <c>[1, tokens, pairs]</c> for one set of positions.</summary>
