@@ -38,6 +38,33 @@ public sealed unsafe class UtoniaAttentionTests
     }
 
     [Fact]
+    public void Forward_RowChunksMatchTheUnchunkedRunExactly()
+    {
+        CpuBackend backend = new();
+        Random rng = new(29);
+        int[] batch = Enumerable.Repeat(0, 12).Concat(Enumerable.Repeat(1, 5)).ToArray();   // mixed segment lengths: 8, 8, 5
+        int n = batch.Length;
+        float[] feat = Rand(rng, n * Channels);
+        UtoniaLinear qkv = new(backend, UtoniaTestData.Make(new long[] { 3 * Channels, Channels }, Rand(rng, 3 * Channels * Channels)),
+            UtoniaTestData.Make(new long[] { 3 * Channels }, Rand(rng, 3 * Channels)));
+        UtoniaLinear proj = new(backend, UtoniaTestData.Make(new long[] { Channels, Channels }, Rand(rng, Channels * Channels)),
+            UtoniaTestData.Make(new long[] { Channels }, Rand(rng, Channels)));
+        int[] grid = Enumerable.Range(0, n * 3).Select(_ => rng.Next(16)).ToArray();
+        UtoniaPoint point = new(UtoniaTestData.Make(new long[] { n, Channels }, feat), grid.Select(v => v * 0.01f).ToArray(), grid, batch);
+        point.Serialize(new[] { UtoniaSerialOrder.ZOrder });
+
+        float[] expected = UtoniaTestData.Read(new UtoniaSerializedAttention(backend, qkv, proj, Channels, Heads, 8, 10f, 0)
+            .Forward(point.Feat, point));
+        float[] actual = UtoniaTestData.Read(new UtoniaSerializedAttention(backend, qkv, proj, Channels, Heads, 8, 10f, 0, chunkBytes: 1)
+            .Forward(point.Feat, point));
+
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.Equal(BitConverter.SingleToInt32Bits(expected[i]), BitConverter.SingleToInt32Bits(actual[i]));
+        }
+    }
+
+    [Fact]
     public void Rope_AtOriginIsIdentity()
     {
         float[] qkv = Rand(new Random(3), 3 * Channels);

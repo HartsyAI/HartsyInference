@@ -22,7 +22,10 @@ internal sealed class UtoniaLayerNorm
     public Tensor Forward(Tensor input)
     {
         Tensor output = new(input.Shape, DType.F32);
-        _backend.LayerNorm(output, input, _weight, _bias, Epsilon);
+        Forward(input, output);
         return output;
     }
+
+    /// <summary>Writes the normalized rows into <paramref name="output"/>; used per row chunk.</summary>
+    public void Forward(Tensor input, Tensor output) => _backend.LayerNorm(output, input, _weight, _bias, Epsilon);
 }
