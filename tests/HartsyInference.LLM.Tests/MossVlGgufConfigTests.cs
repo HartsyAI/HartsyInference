@@ -38,5 +38,4 @@ public sealed class MossVlGgufConfigTests
         Assert.Equal((fromJson.ImageTokenId, fromJson.VideoTokenId, fromJson.VisionStartTokenId, fromJson.VisionEndTokenId),
             (fromGguf.ImageTokenId, fromGguf.VideoTokenId, fromGguf.VisionStartTokenId, fromGguf.VisionEndTokenId));
     }
-
 }

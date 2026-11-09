@@ -1040,7 +1040,11 @@ public sealed partial class TextService : ITextService, IDisposable
             if (string.Equals(hfCheckpoint.ModelType, LLM.Models.MossVl.MossVlConfig.ModelType, StringComparison.Ordinal))
             {
                 if (KeepsLoadedModel(slot, path, hfDirectory: true))
+                {
+                    LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
+                    LogMossVlLowVramMismatch(slot, deviceKey, request);
                     return;
+                }
                 UnloadSlot(slot);
                 LoadMossVl(slot, deviceKey, path, request);
                 return;
@@ -1053,6 +1057,7 @@ public sealed partial class TextService : ITextService, IDisposable
             LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
             LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
             LogPlacementMismatch(slot, deviceKey, request.Placement);
+            LogMossVlLowVramMismatch(slot, deviceKey, request);
             return;
         }
         string[] shardDevices = ResolveShardDevices(deviceKey);

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Imaging;
+using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Video.Encoding;
 
@@ -37,7 +38,7 @@ public sealed class FfmpegFrameSource : IVideoFrameSource, IDisposable
     public static FfmpegFrameSource FromBytes(byte[] container, string? formatHint, VideoFrameSamplingOptions options, bool paced = false,
         FfmpegProcessDecoder? decoder = null)
     {
-        string temp = Path.Combine(Path.GetTempPath(), $"hartsy-video-{Guid.NewGuid():N}.{formatHint ?? "bin"}");
+        string temp = Path.Combine(Path.GetTempPath(), $"hartsy-video-{Guid.NewGuid():N}.{FfmpegProcessDecoder.SafeExtension(formatHint)}");
         File.WriteAllBytes(temp, container);
         return new FfmpegFrameSource(temp, ownsFile: true, options, paced, decoder);
     }
@@ -64,12 +65,16 @@ public sealed class FfmpegFrameSource : IVideoFrameSource, IDisposable
             yield return new TimedRgbFrame(new RawRgbFrame(frame.ToArray(), info.Width, info.Height), pick.TimestampSeconds);
             if (next == plan.Length) yield break;
         }
+        // The container's frame count (or duration × fps) overstated the decodable frames: the tail of the plan never arrived.
+        Logs.Warning($"Video '{_path}' decoded {index} frames but the sampling plan expected {info.FrameCount}; "
+            + $"{plan.Length - next} of {plan.Length} sampled frames are missing.");
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0 || !_ownsFile) return;
-        try { File.Delete(_path); } catch (IOException) { /* a leftover temp file is harmless */ }
+        try { File.Delete(_path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* a leftover temp file is harmless */ }
     }
 }

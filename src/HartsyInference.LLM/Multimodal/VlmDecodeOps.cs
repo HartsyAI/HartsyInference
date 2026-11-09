@@ -35,28 +35,38 @@ internal static unsafe class VlmDecodeOps
         Func<int, int> step, IReadOnlySet<int> stops, int maxTokens, List<int> history, Action<string>? onDelta, CancellationToken cancel)
     {
         List<int> generated = [];
-        int emitted = 0;
+        // Streaming decodes each token once and holds back a split multi-byte character; the concatenated deltas equal a one-shot decode.
+        OutputParsing.IncrementalDetokenizer? detokenizer = onDelta is null ? null : new(tokenizer, includeSpecial: false);
+        System.Text.StringBuilder? streamed = onDelta is null ? null : new();
         int token = first;
         while (!stops.Contains(token) && generated.Count < maxTokens)
         {
             generated.Add(token);
             history.Add(token);
-            if (onDelta is not null)
+            if (detokenizer is not null)
             {
-                string text = tokenizer.Decode(generated);
-                // A token can end inside a multi-byte character; hold the piece until the character completes.
-                if (text.Length > emitted && text[^1] != '�')
+                string delta = detokenizer.Push(token);
+                if (delta.Length > 0)
                 {
-                    onDelta(text[emitted..]);
-                    emitted = text.Length;
+                    streamed!.Append(delta);
+                    onDelta!(delta);
                 }
             }
             if (generated.Count == maxTokens) break;
             cancel.ThrowIfCancellationRequested();
             token = step(token);
         }
-        string reply = tokenizer.Decode(generated);
-        if (onDelta is not null && reply.Length > emitted) onDelta(reply[emitted..]);
+        string reply;
+        if (detokenizer is not null)
+        {
+            string tail = detokenizer.Flush();
+            if (tail.Length > 0) onDelta!(tail);
+            reply = streamed!.Append(tail).ToString();
+        }
+        else
+        {
+            reply = tokenizer.Decode(generated);
+        }
         return (reply, generated.Count, !stops.Contains(token));
     }
 

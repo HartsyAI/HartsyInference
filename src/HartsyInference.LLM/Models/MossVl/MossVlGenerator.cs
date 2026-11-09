@@ -14,7 +14,7 @@ namespace HartsyInference.LLM.Models.MossVl;
 /// <param name="MergedWidth">The merged grid width.</param>
 public readonly record struct MossVlImageFeatures(Tensor MergedTokens, int MergedHeight, int MergedWidth);
 
-//// <summary>Size limits of a <see cref="MossVlDecodeSession"/>.</summary>
+/// <summary>Size limits of a <see cref="MossVlDecodeSession"/>.</summary>
 /// <param name="InitialTextCapacity">Text positions the self-attention cache starts with; it doubles as a session grows.</param>
 /// <param name="MaxTextTokens">The most text tokens a session holds before it refuses to grow.</param>
 /// <param name="MaxVisionTokens">The most vision tokens (frames and separators) the cross-attention cache holds. The model has no
@@ -278,6 +278,7 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         int[] ids = tokenizer.Encode(_protocol.OfflinePrompt(images.Count, frames.Select(f => f.TimestampSeconds).ToArray(), question),
             addSpecial: true);
         if (maxTokens <= 0) return new MossVlGeneration(string.Empty, ids.Length, 0, HitTokenLimit: true);
+        maxTokens = ClampToContext(maxTokens, ids.Length, config.Text.MaxPositionEmbeddings);
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
             Temperature = 0.4f, TopP = 0.9f, RepetitionPenalty = 1.1f, Seed = 1,
@@ -290,12 +291,23 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         MossVlImageFeatures[] vision = [.. images, .. frames.Select(f => new MossVlImageFeatures(f.MergedTokens, f.MergedHeight, f.MergedWidth))];
 
         using MossVlDecodeSession session = new(decoder, config, backend,
-            new MossVlSessionLimits(InitialTextCapacity: ids.Length + maxTokens + 1, MaxTextTokens: Math.Max(32768, ids.Length + maxTokens + 1)));
+            new MossVlSessionLimits(InitialTextCapacity: ids.Length + maxTokens + 1, MaxTextTokens: Math.Max(config.Text.MaxPositionEmbeddings, ids.Length + maxTokens + 1)));
         cancel.ThrowIfCancellationRequested();
         int first = session.ForwardSample(ids, vision, sampler, history, cancel);
         (string text, int tokens, bool hitLimit) = VlmDecodeOps.DecodeLoop(tokenizer, first,
             token => session.ForwardSample([token], [], sampler, history, cancel), stops, maxTokens, history, onDelta, cancel);
         return new MossVlGeneration(text, ids.Length, tokens, hitLimit);
+    }
+
+    /// <summary>Caps a requested reply length at what the context window leaves after the prompt. The decode session sizes its KV
+    /// cache from it up front, so an uncapped <c>max_tokens</c> would allocate gigabytes before the first step.</summary>
+    /// <exception cref="ArgumentException">The prompt alone fills the context window.</exception>
+    internal static int ClampToContext(int maxTokens, int promptTokens, int contextLength)
+    {
+        int room = contextLength - promptTokens;
+        if (room <= 0)
+            throw new ArgumentException($"The prompt is {promptTokens} tokens, which fills MOSS-VL's {contextLength}-token context.");
+        return Math.Min(maxTokens, room);
     }
 }
 

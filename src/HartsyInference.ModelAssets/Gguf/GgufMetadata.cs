@@ -60,6 +60,8 @@ public sealed class GgufMetadata
             ulong[] ulongs => ulongs.Select(u => checked((int)u)).ToArray(),
             short[] shorts => shorts.Select(s => (int)s).ToArray(),
             ushort[] ushorts => ushorts.Select(s => (int)s).ToArray(),
+            byte[] bytes => bytes.Select(b => (int)b).ToArray(),
+            sbyte[] sbytes => sbytes.Select(b => (int)b).ToArray(),
             _ => null,
         };
     }

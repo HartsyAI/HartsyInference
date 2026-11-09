@@ -9,7 +9,8 @@ namespace HartsyInference.LLM.Models.MossVl;
 
 /// <summary>A loaded MOSS-VL text side: the decoder, its config, tokenizer and image processor, from either source the model ships
 /// in. A checkpoint folder is read with its <c>config.json</c>, <c>tokenizer.json</c> and <c>preprocessor_config.json</c>. A GGUF
-/// uses those files when they sit beside it and otherwise falls back to the GGUF's own metadata and tokenizer, so a lone GGUF loads.
+/// uses those files when they sit beside it and otherwise falls back to the GGUF's own metadata and tokenizer, so a lone GGUF loads
+/// when it embeds a tokenizer. The released GGUF embeds none and needs <c>tokenizer.json</c> beside it.
 /// The vision tower lives in the Diffusion package and is loaded by the caller (see <c>MossVlVisionTower</c>).</summary>
 public sealed class MossVlModel : IDisposable
 {
@@ -44,18 +45,6 @@ public sealed class MossVlModel : IDisposable
 
     /// <summary>True when <see cref="Path"/> is a GGUF (its vision tower is inside the same file).</summary>
     public bool IsGguf { get; }
-
-    /// <summary>Whether <paramref name="path"/> is a MOSS-VL checkpoint folder (<c>model_type</c> <c>moss_vl</c>) or a GGUF whose
-    /// architecture is <c>moss_vl</c>. Reads only the config or the GGUF header.</summary>
-    public static bool IsMossVl(string path)
-    {
-        if (Directory.Exists(path))
-            return HfCheckpointDirectory.TryProbe(path) is { } info && string.Equals(info.ModelType, MossVlConfig.ModelType, StringComparison.Ordinal);
-        if (!File.Exists(path) || !path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)) return false;
-        using GgufLoader probe = new();
-        probe.Load(path);
-        return string.Equals(probe.Metadata.GetString("general.architecture"), MossVlConfig.ModelType, StringComparison.Ordinal);
-    }
 
     /// <summary>Loads the text side from <paramref name="path"/> for <see cref="MossVlLoadOptions.Backend"/>.</summary>
     /// <exception cref="HartsyInferenceException">The path is not a MOSS-VL checkpoint, or a file it needs is missing.</exception>

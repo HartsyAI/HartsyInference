@@ -118,7 +118,9 @@ public static class SmartResize
     /// [<paramref name="floorPixels"/>, <paramref name="ceilingPixels"/>]. This is MOSS-VL's <c>multi_image_max_pixels</c> and
     /// <c>video_max_pixels</c> rule: each result is that image's <c>max_pixels</c> for <see cref="Qwen2Vl"/>.</summary>
     /// <param name="sizes">Each image's original (height, width).</param>
-    /// <param name="totalBudget">The batch budget; Python truncates each share with <c>int()</c>, as here.</param>
+    /// <param name="totalBudget">The batch budget. The reference (<c>processing_moss_vl.py</c>, <c>MossVLImageProcessorFast._preprocess</c>):
+    /// <c>proportional_max_pixels = int(multi_image_max_pixels * (original_pixels / total_original_pixels))</c>, then
+    /// <c>max(…, min_pixels)</c>, then <c>min(…, max_pixels)</c>; the same truncation and clamps as here.</param>
     public static long[] ShareBudget(ReadOnlySpan<(int Height, int Width)> sizes, long totalBudget, long floorPixels, long ceilingPixels)
     {
         double total = 0;

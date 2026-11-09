@@ -16,16 +16,20 @@ internal sealed class MossVlRuntime : IDisposable
     private readonly IBackend _backend;
     private int _disposed;
 
-    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend)
+    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend, bool lowVramQuant)
     {
         Model = model;
         Tower = tower;
         _backend = backend;
+        LowVramQuant = lowVramQuant;
     }
 
     public MossVlModel Model { get; }
 
     public MossVlVisionTower Tower { get; }
+
+    /// <summary>Whether the decoder was loaded with the low-VRAM quantized Linear path.</summary>
+    public bool LowVramQuant { get; }
 
     /// <summary>Loads both halves from <paramref name="path"/> (a GGUF or a checkpoint folder) for <paramref name="backend"/> and makes
     /// their weights resident.</summary>
@@ -39,7 +43,7 @@ internal sealed class MossVlRuntime : IDisposable
             // Resident up front: without it a device backend uploads each weight on the op that first reads it.
             backend.PreloadWeightGroups(model.Decoder.Model.EnumerateWeightGroups(includeRedundantSplits: false));
             backend.PreloadWeights(tower.Encoder.EnumerateWeights());
-            return new MossVlRuntime(model, tower, backend);
+            return new MossVlRuntime(model, tower, backend, lowVramQuant);
         }
         catch
         {
@@ -96,7 +100,10 @@ internal sealed class MossVlRuntime : IDisposable
     private MossVlImageFeatures Encode(VisionPatchGrid grid, List<Tensor> owned, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
-        Tensor tokens = Tower.Encoder.Forward(_backend, grid.PixelValues, grid.GridT, grid.GridH, grid.GridW).MergedTokens;
+        Qwen3VlVisionEncoder.VisionOutput output = Tower.Encoder.Forward(_backend, grid.PixelValues, grid.GridT, grid.GridH, grid.GridW);
+        // MOSS's unified merger yields no deepstack features; dispose any a different tower config would produce.
+        foreach (Tensor d in output.DeepstackFeatures) d.Dispose();
+        Tensor tokens = output.MergedTokens;
         owned.Add(tokens);
         return new MossVlImageFeatures(tokens, grid.MergedHeight, grid.MergedWidth);
     }
