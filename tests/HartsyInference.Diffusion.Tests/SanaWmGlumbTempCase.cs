@@ -32,7 +32,7 @@ internal sealed class SanaWmGlumbTempCase : IDisposable
     private readonly SafeTensorsLoader _loader = new();
     private readonly List<Tensor> _owned = [];
 
-    private SanaWmGlumbTempCase(string fileName, SanaWmOperandMode mode)
+    private SanaWmGlumbTempCase(string fileName, SanaWmOperandMode mode, long hiddenChunkElements)
     {
         _loader.Load(Path.Combine(AppContext.BaseDirectory, "Fixtures", fileName));
         IReadOnlyDictionary<string, string> metadata = _loader.Metadata
@@ -46,7 +46,7 @@ internal sealed class SanaWmGlumbTempCase : IDisposable
         Tensor[] weights = new Tensor[WeightKeys.Length];
         for (int i = 0; i < WeightKeys.Length; i++)
             weights[i] = Operand(_loader.GetTensor(WeightKeys[i]), mode);
-        Ffn = new SanaWmGlumbTempFfn(weights[0], weights[1], weights[2], weights[3], weights[4], weights[5]);
+        Ffn = new SanaWmGlumbTempFfn(weights[0], weights[1], weights[2], weights[3], weights[4], weights[5], hiddenChunkElements);
     }
 
     public SanaWmGlumbTempFfn Ffn { get; }
@@ -62,7 +62,8 @@ internal sealed class SanaWmGlumbTempCase : IDisposable
 
     public int Width { get; }
 
-    public static SanaWmGlumbTempCase Load(string fileName, SanaWmOperandMode mode) => new(fileName, mode);
+    public static SanaWmGlumbTempCase Load(string fileName, SanaWmOperandMode mode,
+        long hiddenChunkElements = SanaWmGlumbTempFfn.DefaultHiddenChunkElements) => new(fileName, mode, hiddenChunkElements);
 
     /// <summary>Largest magnitude in the upstream output, the scale that BF16 tolerances are measured against.</summary>
     public float ExpectedScale()

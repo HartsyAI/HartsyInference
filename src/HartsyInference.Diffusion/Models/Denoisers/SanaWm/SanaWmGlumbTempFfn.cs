@@ -5,15 +5,22 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>SANA-WM GLUMBConvTemp feed-forward. Tokens <c>[B, T·H·W, C]</c> (T-major) go through a gated 2-D conv per
 /// frame, then a temporal residual <c>y + Conv2d(C, C, (3, 1))(y)</c> over T, where <c>y</c> is the point-conv output.
-/// Activations and weights share one dtype, F32 or BF16. The weights are borrowed and must outlive the FFN.</summary>
+/// Activations and conv kernels share one dtype, F32 or BF16; biases are that dtype or F32. The weights are borrowed and must
+/// outlive the FFN.</summary>
+/// <remarks>The gated conv is per frame, so it runs over chunks of frames: the hidden buffers, the largest in the block, never
+/// hold more than the chunk budget.</remarks>
 public sealed class SanaWmGlumbTempFfn
 {
+    /// <summary>Default budget of one hidden buffer, in elements: 64 MiB of BF16.</summary>
+    public const long DefaultHiddenChunkElements = 1L << 25;
+
     private const int TemporalKernel = 3;
     private const int DepthwiseKernel = 3;
 
     private readonly int _channels;
     private readonly int _hidden;
     private readonly DType _dtype;
+    private readonly long _hiddenChunkElements;
     private readonly Tensor _invWeightValue;
     private readonly Tensor _invWeightGate;
     private readonly Tensor _invBiasValue;
@@ -30,6 +37,13 @@ public sealed class SanaWmGlumbTempFfn
     /// <remarks>The inverted and depthwise halves are cut into row views, so the value and gate branches never touch a
     /// channel-split activation view.</remarks>
     public SanaWmGlumbTempFfn(Tensor invWeight, Tensor invBias, Tensor depthWeight, Tensor depthBias, Tensor pointWeight, Tensor temporalWeight)
+        : this(invWeight, invBias, depthWeight, depthBias, pointWeight, temporalWeight, DefaultHiddenChunkElements)
+    {
+    }
+
+    /// <param name="hiddenChunkElements">Largest hidden buffer, in elements; a chunk holds at least one frame whatever the budget.</param>
+    internal SanaWmGlumbTempFfn(Tensor invWeight, Tensor invBias, Tensor depthWeight, Tensor depthBias, Tensor pointWeight,
+        Tensor temporalWeight, long hiddenChunkElements)
     {
         ArgumentNullException.ThrowIfNull(invWeight);
         ArgumentNullException.ThrowIfNull(invBias);
@@ -37,21 +51,23 @@ public sealed class SanaWmGlumbTempFfn
         ArgumentNullException.ThrowIfNull(depthBias);
         ArgumentNullException.ThrowIfNull(pointWeight);
         ArgumentNullException.ThrowIfNull(temporalWeight);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(hiddenChunkElements);
 
         if (invWeight.Shape.Rank != 4 || invWeight.Shape[2] != 1 || invWeight.Shape[3] != 1 || invWeight.Shape[0] % 2 != 0)
             throw new ArgumentException($"SANA-WM FFN inverted weight must be [2H, C, 1, 1]; got {invWeight.Shape}.", nameof(invWeight));
         _channels = (int)invWeight.Shape[1];
         _hidden = (int)invWeight.Shape[0] / 2;
         _dtype = invWeight.DType;
+        _hiddenChunkElements = hiddenChunkElements;
 
         RequireShape(invBias, [2L * _hidden], nameof(invBias));
         RequireShape(depthWeight, [2L * _hidden, 1, DepthwiseKernel, DepthwiseKernel], nameof(depthWeight));
         RequireShape(depthBias, [2L * _hidden], nameof(depthBias));
         RequireShape(pointWeight, [_channels, _hidden, 1, 1], nameof(pointWeight));
         RequireShape(temporalWeight, [_channels, _channels, TemporalKernel, 1], nameof(temporalWeight));
-        RequireDtype(invBias, nameof(invBias));
+        RequireBiasDtype(invBias, nameof(invBias));
         RequireDtype(depthWeight, nameof(depthWeight));
-        RequireDtype(depthBias, nameof(depthBias));
+        RequireBiasDtype(depthBias, nameof(depthBias));
         RequireDtype(pointWeight, nameof(pointWeight));
         RequireDtype(temporalWeight, nameof(temporalWeight));
         if (_dtype != DType.F32 && _dtype != DType.BF16)
@@ -70,6 +86,15 @@ public sealed class SanaWmGlumbTempFfn
         _temporalWeight = temporalWeight;
     }
 
+    /// <summary>The activation and conv-kernel dtype.</summary>
+    public DType DType => _dtype;
+
+    /// <summary>The tensors <see cref="Forward"/> reads (the half views of the inverted and depthwise weights, not their parents),
+    /// for preloading on a device backend.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() =>
+        [_invWeightValue, _invWeightGate, _invBiasValue, _invBiasGate, _depthWeightValue, _depthWeightGate, _depthBiasValue,
+            _depthBiasGate, _pointWeight, _temporalWeight];
+
     /// <summary>Runs the FFN on tokens <c>[B, frames·height·width, C]</c>; returns a new owned <c>[B, N, C]</c> tensor in the input dtype.</summary>
     /// <exception cref="NotSupportedException">BF16 input on a backend without BF16 support.</exception>
     public Tensor Forward(IBackend backend, Tensor x, int frames, int height, int width)
@@ -81,29 +106,47 @@ public sealed class SanaWmGlumbTempFfn
         int batch = (int)x.Shape[0];
         int rows = batch * frames;
         int area = height * width;
-        Tensor output = new(new TensorShape(batch, (long)frames * area, _channels), _dtype);
-        bool completed = false;
-        try
-        {
-            // No Reshape views: CUDA binds a result to the tensor object the op was given, not to a view of it.
-            using Tensor channelFirst = new(new TensorShape(rows, _channels, height, width), _dtype);
-            backend.Transpose2D(channelFirst, x, area, _channels);
-
-            using Tensor point = SpatialPath(backend, channelFirst, rows, height, width);
-            using Tensor frameMajor = TemporalPath(backend, point, batch, frames, area);
-
-            backend.Transpose2D(output, frameMajor, _channels, area);
-            completed = true;
-            return output;
-        }
-        finally
-        {
-            if (!completed) output.Dispose();
-        }
+        using SanaWmScratch scratch = new();
+        Tensor channelFirst = scratch.New(new TensorShape(rows, _channels, height, width), _dtype);
+        backend.Transpose2D(channelFirst, x, area, _channels);
+        Tensor point = scratch.Track(SpatialPath(backend, channelFirst, rows, height, width));
+        scratch.Release(channelFirst);
+        Tensor frameMajor = scratch.Track(TemporalPath(backend, point, batch, frames, area));
+        scratch.Release(point);
+        Tensor output = scratch.New(new TensorShape(batch, (long)frames * area, _channels), _dtype);
+        backend.Transpose2D(output, frameMajor, _channels, area);
+        return scratch.Detach(output);
     }
 
-    /// <summary>Gated per-frame conv: point-conv output <c>[rows, C, H, W]</c> of <c>value · SiLU(gate)</c>.</summary>
+    /// <summary>Frames per chunk of the gated conv: as many as fit the hidden budget, at least one.</summary>
+    internal int ChunkFrames(int rows, int area) => (int)Math.Clamp(_hiddenChunkElements / ((long)_hidden * area), 1, rows);
+
+    /// <summary>Gated per-frame conv over chunks of frames: point-conv output <c>[rows, C, H, W]</c> of <c>value · SiLU(gate)</c>.</summary>
     private Tensor SpatialPath(IBackend backend, Tensor channelFirst, int rows, int height, int width)
+    {
+        int area = height * width;
+        int chunk = ChunkFrames(rows, area);
+        if (chunk >= rows)
+            return GatedPoint(backend, channelFirst, rows, height, width);
+
+        long frameElements = (long)_channels * area;
+        using SanaWmScratch scratch = new();
+        Tensor point = scratch.New(new TensorShape(rows, _channels, height, width), _dtype);
+        for (int start = 0; start < rows; start += chunk)
+        {
+            int count = Math.Min(chunk, rows - start);
+            using SanaWmScratch step = new();
+            Tensor input = step.Track(SanaWmTensors.Slice(backend, channelFirst, start * frameElements,
+                new TensorShape(count, _channels, height, width)));
+            Tensor output = step.Track(GatedPoint(backend, input, count, height, width));
+            SanaWmTensors.Write(backend, point, output, start * frameElements);
+        }
+
+        return scratch.Detach(point);
+    }
+
+    /// <summary><c>point(value · SiLU(gate))</c> for <paramref name="rows"/> frames <c>[rows, C, H, W]</c>.</summary>
+    private Tensor GatedPoint(IBackend backend, Tensor channelFirst, int rows, int height, int width)
     {
         TensorShape hiddenShape = new(rows, _hidden, height, width);
         using Tensor value = GatedBranch(backend, channelFirst, _invWeightValue, _invBiasValue, _depthWeightValue, _depthBiasValue, hiddenShape);
@@ -112,8 +155,16 @@ public sealed class SanaWmGlumbTempFfn
         backend.Mul(value, value, gate);
 
         Tensor point = new(new TensorShape(rows, _channels, height, width), _dtype);
-        backend.Conv2D(point, value, _pointWeight, null, 1, 1, 0, 0);
-        return point;
+        try
+        {
+            backend.Conv2D(point, value, _pointWeight, null, 1, 1, 0, 0);
+            return point;
+        }
+        catch
+        {
+            point.Dispose();
+            throw;
+        }
     }
 
     /// <summary>One half of the inverted and depthwise stage: <c>depthwise(SiLU(conv1x1(x)))</c>, no activation after the depthwise.
@@ -126,23 +177,33 @@ public sealed class SanaWmGlumbTempFfn
 
         // BF16 depthwise output on a BF16 input (P2): the largest intermediate stays at 2 bytes per element.
         Tensor depth = new(shape, _dtype);
-        backend.Conv2dDepthwise(depth, inverted, depthWeight, depthBias, 1, 1, DepthwiseKernel / 2, DepthwiseKernel / 2);
-        return depth;
+        try
+        {
+            backend.Conv2dDepthwise(depth, inverted, depthWeight, depthBias, 1, 1, DepthwiseKernel / 2, DepthwiseKernel / 2);
+            return depth;
+        }
+        catch
+        {
+            depth.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Temporal residual over T for each (H, W) position: <c>[B·T, C, H, W]</c> point output in, <c>[B, T, C, HW]</c> out.</summary>
     private Tensor TemporalPath(IBackend backend, Tensor point, int batch, int frames, int area)
     {
-        using Tensor timeMajor = new(new TensorShape(batch, _channels, frames, area), _dtype);
+        using SanaWmScratch scratch = new();
+        Tensor timeMajor = scratch.New(new TensorShape(batch, _channels, frames, area), _dtype);
         backend.Permute0213(timeMajor, point, frames, _channels, area);
 
-        using Tensor residual = new(new TensorShape(batch, _channels, frames, area), _dtype);
+        Tensor residual = scratch.New(new TensorShape(batch, _channels, frames, area), _dtype);
         backend.Conv2D(residual, timeMajor, _temporalWeight, null, 1, 1, TemporalKernel / 2, 0);
         backend.Add(residual, residual, timeMajor);
+        scratch.Release(timeMajor);
 
-        Tensor frameMajor = new(new TensorShape(batch, frames, _channels, area), _dtype);
+        Tensor frameMajor = scratch.New(new TensorShape(batch, frames, _channels, area), _dtype);
         backend.Permute0213(frameMajor, residual, _channels, frames, area);
-        return frameMajor;
+        return scratch.Detach(frameMajor);
     }
 
     private void ValidateInput(IBackend backend, Tensor x, int frames, int height, int width)
@@ -160,7 +221,8 @@ public sealed class SanaWmGlumbTempFfn
         if (_dtype == DType.BF16 && !backend.Capabilities.SupportsBF16)
             throw new NotSupportedException($"SANA-WM FFN BF16 activations need a BF16-capable backend; {backend.Capabilities.Name} is not.");
 
-        long largestIntermediate = (long)x.Shape[0] * frames * _hidden * height * width;
+        int area = height * width;
+        long largestIntermediate = (long)ChunkFrames((int)x.Shape[0] * frames, area) * _hidden * area;
         if (largestIntermediate > int.MaxValue)
             throw new NotSupportedException($"SANA-WM FFN intermediate of {largestIntermediate} elements exceeds the 32-bit conv index range.");
     }
@@ -180,5 +242,11 @@ public sealed class SanaWmGlumbTempFfn
     {
         if (tensor.DType != _dtype)
             throw new ArgumentException($"SANA-WM FFN {name} dtype {tensor.DType.Name} does not match the inverted weight ({_dtype.Name}).", name);
+    }
+
+    private void RequireBiasDtype(Tensor tensor, string name)
+    {
+        if (tensor.DType != _dtype && tensor.DType != DType.F32)
+            throw new ArgumentException($"SANA-WM FFN {name} dtype {tensor.DType.Name} is neither F32 nor the weight dtype ({_dtype.Name}).", name);
     }
 }

@@ -97,7 +97,7 @@ public sealed class SanaWmBlockRealWeightsTests : IClassFixture<SanaWmBlockRealW
             foreach (string key in new[] { "q_proj_cam.weight", "q_proj_cam.bias", "k_proj_cam.weight", "k_proj_cam.bias",
                 "v_proj_cam.weight", "v_proj_cam.bias", "q_norm_cam.weight", "k_norm_cam.weight", "out_proj_cam.weight",
                 "out_proj_cam.bias", "conv_k_cam.weight" })
-                cameraWeights[key] = ToF32(backend, weights["blocks.0.attn." + key], owned);
+                cameraWeights[key] = weights["blocks.0.attn." + key];
             using SanaWmCamBranch cameraBranch = new(config.NumHeads, config.HeadDim);
             cameraBranch.LoadWeights(cameraWeights);
             float[] cameraFloats = Floats(backend, camera.GetTensor("dit_camera_conditions_step0"), owned);
@@ -175,21 +175,19 @@ public sealed class SanaWmBlockRealWeightsTests : IClassFixture<SanaWmBlockRealW
                 weights["t_block.1.bias"]);
             (Tensor _, Tensor blockTime) = SanaWmConditioning.Time(backend, time, config.TimestepWidth, timesteps, scratch);
             SanaWmCaptionWeights caption = new(
-                ToF32(backend, weights["y_embedder.y_proj.fc1.weight"], owned), weights["y_embedder.y_proj.fc1.bias"],
-                ToF32(backend, weights["y_embedder.y_proj.fc2.weight"], owned), weights["y_embedder.y_proj.fc2.bias"],
+                weights["y_embedder.y_proj.fc1.weight"], weights["y_embedder.y_proj.fc1.bias"],
+                weights["y_embedder.y_proj.fc2.weight"], weights["y_embedder.y_proj.fc2.bias"],
                 weights["attention_y_norm.weight"]);
             Tensor memory = SanaWmConditioning.Caption(backend, caption, textTokens, 2, 300, scratch);
             Tensor memoryBias = SanaWmConditioning.MaskBias(backend, mask, 2, 300, scratch);
-            (Tensor cos, Tensor sin, Tensor cameraCos, Tensor cameraSin) =
-                SanaWmConditioning.Rope(backend, config.HeadDim, Frames, Height, Width, scratch);
-            Tensor pluckerWeight = ToF32(backend, weights["plucker_embedder.proj.weight"], owned)
-                .Reshape(new TensorShape([config.HiddenSize, config.PluckerChannels]));
-            Tensor plucker = SanaWmConditioning.Plucker(backend, pluckerWeight, ToF32(backend, weights["plucker_embedder.proj.bias"], owned),
-                chunkPlucker, scratch);
+            Tensor pluckerWeight = weights["plucker_embedder.proj.weight"].Reshape(new TensorShape([config.HiddenSize, config.PluckerChannels]));
+            owned.Add(pluckerWeight);
+            Tensor plucker = SanaWmConditioning.Plucker(backend, pluckerWeight, weights["plucker_embedder.proj.bias"], chunkPlucker, scratch);
 
             using SanaWmBlock block = new(backend, config, index, weights);
-            using Tensor output = block.Forward(x, memory, memoryBias, blockTime, plucker, cameraFloats, Frames, Height, Width,
-                cos, sin, cameraCos, cameraSin);
+            using SanaWmForwardContext context = SanaWmForwardContext.Create(backend, config, 2, Frames, Height, Width, blockTime, memory,
+                memoryBias, plucker, cameraFloats);
+            using Tensor output = block.Forward(x, context);
             Tensor expected = ToF32(backend, units.GetTensor(outputKey), owned);
             Report(outputKey, output.AsReadOnlySpan<float>(), expected.AsReadOnlySpan<float>());
         }
@@ -223,7 +221,7 @@ public sealed class SanaWmBlockRealWeightsTests : IClassFixture<SanaWmBlockRealW
         return loader;
     }
 
-    private static Tensor ToF32(IBackend backend, Tensor source, List<Tensor> owned) => SanaWmTensors.ToF32(backend, source, owned);
+    private static Tensor ToF32(IBackend backend, Tensor source, List<Tensor> owned) => SanaWmTensors.HostF32(source, owned);
 
     private static float[] Floats(IBackend backend, Tensor source, List<Tensor> owned)
     {

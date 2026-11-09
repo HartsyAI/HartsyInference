@@ -2,17 +2,19 @@ using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Contracts;
 using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
-// The row-index and dense-grid ops (Kernels/rows/row_index.cu) and the per-point embeddings (Kernels/point/point_ops.cu): one
-// by-value geometry parameter each, so a launch captures into a graph.
+// The row-index and dense-grid ops (Kernels/rows/row_index.cu) and the per-element and per-point ops (Kernels/point/point_ops.cu):
+// one by-value geometry parameter each, so a launch captures into a graph.
 public sealed partial class CudaKernels
 {
     private CudaModule? _rowIndexModule;
     private CudaModule? _pointOpsModule;
     private nint _gatherRowsF32, _scatterAddRowsF32, _gatherAddRowsF32, _gridScatterF32, _gridGatherF32;
     private nint _fakeQuantizeUniformF32, _fourierEmbedF32;
+    private nint _elementwiseMathF32F32, _elementwiseMathF32Bf16, _elementwiseMathBf16F32, _elementwiseMathBf16Bf16;
 
     /// <summary>Kernel parameter of the row-index kernels; mirrors <c>RowIndexGeom</c> in <c>row_index.cu</c> field for field.</summary>
     [StructLayout(LayoutKind.Sequential)]
@@ -59,6 +61,15 @@ public sealed partial class CudaKernels
         public uint IncludeInput;
     }
 
+    /// <summary>Kernel parameter of the elementwise math; mirrors <c>ElementwiseMathArgs</c> in <c>point_ops.cu</c> field for field.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ElementwiseMathArgs
+    {
+        public ulong Count;
+        public uint Function;
+        public uint Reserved;
+    }
+
     private void LoadRowIndexKernels()
     {
         _rowIndexModule = LoadOwnedModule(Ptx("row_index"));
@@ -70,6 +81,10 @@ public sealed partial class CudaKernels
         _pointOpsModule = LoadOwnedModule(Ptx("point_ops"));
         _fakeQuantizeUniformF32 = _pointOpsModule.GetFunction("fake_quantize_uniform_f32");
         _fourierEmbedF32 = _pointOpsModule.GetFunction("fourier_embed_f32");
+        _elementwiseMathF32F32 = _pointOpsModule.GetFunction("elementwise_math_f32_f32");
+        _elementwiseMathF32Bf16 = _pointOpsModule.GetFunction("elementwise_math_f32_bf16");
+        _elementwiseMathBf16F32 = _pointOpsModule.GetFunction("elementwise_math_bf16_f32");
+        _elementwiseMathBf16Bf16 = _pointOpsModule.GetFunction("elementwise_math_bf16_bf16");
     }
 
     /// <summary>Row gather: <c>output[m] = input[indices[m]]</c> over <paramref name="g"/>'s rows and width.</summary>
@@ -134,5 +149,24 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[3];
         a[0] = &outArg; a[1] = &coordsArg; a[2] = &args;
         CudaDriverApi.cuLaunchKernel(_fourierEmbedF32, Blocks(count * spec.InputDims), 1, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Elementwise <paramref name="function"/> of <paramref name="count"/> elements, reading <paramref name="inputType"/> and
+    /// writing <paramref name="outputType"/> (each F32 or BF16).</summary>
+    public unsafe void LaunchElementwiseMath(ulong output, ulong input, DType inputType, DType outputType, ElementwiseMathFunction function,
+        long count, nint stream)
+    {
+        nint kernel = (inputType == DType.BF16, outputType == DType.BF16) switch
+        {
+            (false, false) => _elementwiseMathF32F32,
+            (false, true) => _elementwiseMathF32Bf16,
+            (true, false) => _elementwiseMathBf16F32,
+            (true, true) => _elementwiseMathBf16Bf16,
+        };
+        ElementwiseMathArgs args = new() { Count = (ulong)count, Function = (uint)function };
+        ulong outArg = output, inArg = input;
+        void** a = stackalloc void*[3];
+        a[0] = &outArg; a[1] = &inArg; a[2] = &args;
+        CudaDriverApi.cuLaunchKernel(kernel, Blocks(count), 1, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

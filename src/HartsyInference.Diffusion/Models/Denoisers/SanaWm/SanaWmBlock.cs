@@ -1,18 +1,26 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>One SANA-WM DiT block in upstream order: gated attention (Gated-DeltaNet or softmax, summed with the camera
 /// branch, output gate, projection), plucker residual, ungated cross-attention over the text, then gated GLUMBConvTemp FFN.
-/// Every adaLN modulation is per frame. Weights are borrowed from the checkpoint; F32 copies are owned by the block.</summary>
+/// Every adaLN modulation is per frame.</summary>
+/// <remarks>Linear and conv weights are borrowed from the checkpoint in their stored dtype (BF16), so the GEMMs read them
+/// directly; vectors and tables are F32. The residual stream and the attention are F32. The FFN runs in BF16 on a backend
+/// with BF16 support, with the checkpoint's BF16 kernels, and in F32 elsewhere, with host F32 copies of its kernels (the CPU
+/// convolutions read F32 only). The attention runs one batch item at a time.</remarks>
 public sealed class SanaWmBlock : IDisposable
 {
     private const float LayerNormEpsilon = 1e-6f;
     private const float CrossNormEpsilon = 1e-6f;
     private const int ShiftMsa = 0, ScaleMsa = 1, GateMsa = 2, ShiftMlp = 3, ScaleMlp = 4, GateMlp = 5;
-    private const int ModulationSlots = 6;
-    private const int CameraChannels = 20;
+    private const int ModulationSlots = SanaWmConditioning.ModulationSlots;
+
+    /// <summary>Cross-attention queries per SDPA call, bounding its score buffer when the backend materializes one.</summary>
+    private const int CrossQueryChunk = 8192;
 
     private readonly IBackend _backend;
     private readonly List<Tensor> _owned = [];
@@ -36,6 +44,7 @@ public sealed class SanaWmBlock : IDisposable
     private readonly Tensor _crossQNorm;
     private readonly Tensor _crossKNorm;
     private readonly Tensor _scaleShift;
+    private readonly Tensor _scaleShiftOnes;
     private readonly SanaWmGlumbTempFfn _ffn;
     private SanaWmCamBranch? _gdnCamera;
     private SanaWmSoftmaxCamBranch? _softmaxCamera;
@@ -65,8 +74,8 @@ public sealed class SanaWmBlock : IDisposable
         {
             if (softmax)
             {
-                _softmaxAttention = new SanaWmSoftmaxAttention(backend, Owned(get("attn.qkv.weight")), get("attn.q_norm.weight"),
-                    get("attn.k_norm.weight"), _heads, _headDim);
+                _softmaxAttention = new SanaWmSoftmaxAttention(backend, get("attn.qkv.weight"), Vector(get("attn.q_norm.weight")),
+                    Vector(get("attn.k_norm.weight")), _heads, _headDim);
             }
             else
             {
@@ -88,32 +97,35 @@ public sealed class SanaWmBlock : IDisposable
             if (config.HasCameraBranch)
                 BuildCamera(prefix, weights, softmax);
 
-            _outputGateWeight = Owned(get("attn.output_gate.weight"));
-            _outputGateBias = Owned(get("attn.output_gate.bias"));
-            _projWeight = Owned(get("attn.proj.weight"));
-            _projBias = Owned(get("attn.proj.bias"));
+            _outputGateWeight = get("attn.output_gate.weight");
+            _outputGateBias = Vector(get("attn.output_gate.bias"));
+            _projWeight = get("attn.proj.weight");
+            _projBias = Vector(get("attn.proj.bias"));
             if (config.HasPluckerBranch)
             {
-                _pluckerWeight = Owned(get("plucker_proj.weight"));
-                _pluckerBias = Owned(get("plucker_proj.bias"));
+                _pluckerWeight = get("plucker_proj.weight");
+                _pluckerBias = Vector(get("plucker_proj.bias"));
             }
 
-            _crossQWeight = Owned(get("cross_attn.q_linear.weight"));
-            _crossQBias = Owned(get("cross_attn.q_linear.bias"));
-            _crossKvWeight = Owned(get("cross_attn.kv_linear.weight"));
-            _crossKvBias = Owned(get("cross_attn.kv_linear.bias"));
-            _crossProjWeight = Owned(get("cross_attn.proj.weight"));
-            _crossProjBias = Owned(get("cross_attn.proj.bias"));
-            _crossQNorm = get("cross_attn.q_norm.weight");
-            _crossKNorm = get("cross_attn.k_norm.weight");
-            _scaleShift = get("scale_shift_table");
+            _crossQWeight = get("cross_attn.q_linear.weight");
+            _crossQBias = Vector(get("cross_attn.q_linear.bias"));
+            _crossKvWeight = get("cross_attn.kv_linear.weight");
+            _crossKvBias = Vector(get("cross_attn.kv_linear.bias"));
+            _crossProjWeight = get("cross_attn.proj.weight");
+            _crossProjBias = Vector(get("cross_attn.proj.bias"));
+            _crossQNorm = Vector(get("cross_attn.q_norm.weight"));
+            _crossKNorm = Vector(get("cross_attn.k_norm.weight"));
+            _scaleShift = Vector(get("scale_shift_table"));
+            _scaleShiftOnes = Own(SanaWmTensors.Filled(new TensorShape((long)ModulationSlots * _channels), 1f));
+
+            DType ffnDtype = backend.Capabilities.SupportsBF16 ? DType.BF16 : DType.F32;
             _ffn = new SanaWmGlumbTempFfn(
-                Owned(get("mlp.inverted_conv.conv.weight")),
-                Owned(get("mlp.inverted_conv.conv.bias")),
-                Owned(get("mlp.depth_conv.conv.weight")),
-                Owned(get("mlp.depth_conv.conv.bias")),
-                Owned(get("mlp.point_conv.conv.weight")),
-                Owned(get("mlp.t_conv.weight")));
+                FfnKernel(get("mlp.inverted_conv.conv.weight"), ffnDtype),
+                Vector(get("mlp.inverted_conv.conv.bias")),
+                FfnKernel(get("mlp.depth_conv.conv.weight"), ffnDtype),
+                Vector(get("mlp.depth_conv.conv.bias")),
+                FfnKernel(get("mlp.point_conv.conv.weight"), ffnDtype),
+                FfnKernel(get("mlp.t_conv.weight"), ffnDtype));
             built = true;
         }
         finally
@@ -123,88 +135,30 @@ public sealed class SanaWmBlock : IDisposable
         }
     }
 
-    /// <summary>Runs the block on F32 tokens <c>[B, N, C]</c>, frame-major with <c>N = frames·latentHeight·latentWidth</c>.
-    /// Returns a new owned F32 <c>[B, N, C]</c> tensor.</summary>
-    /// <param name="x">Residual stream input.</param>
-    /// <param name="memory">Text tokens after the caption projection, F32 <c>[B, L, C]</c>.</param>
-    /// <param name="memoryBias">Additive cross-attention mask <c>[B, 1, 1, L]</c>, F32, or null for no padding.</param>
-    /// <param name="timeModulation">F32 <c>[B·F, 6·C]</c> from the time embedding's <c>t_block</c>, one row per frame.</param>
-    /// <param name="plucker">Projected plucker tokens <c>[B, N, C]</c> from the DiT, or null when the checkpoint has no plucker branch.</param>
-    /// <param name="cameraConditions">Per-frame camera conditions, <c>B·F·20</c> floats; required with a camera branch.</param>
-    /// <param name="ropeCos">Main 3D RoPE cosine table <c>[N, headDim]</c>, interleaved pairs.</param>
-    /// <param name="ropeSin">Main 3D RoPE sine table in the same layout.</param>
-    /// <param name="cameraCos">Per-complex RoPE cosine table <c>[N, headDim/2]</c> for the camera branch.</param>
-    /// <param name="cameraSin">Per-complex RoPE sine table <c>[N, headDim/2]</c>.</param>
-    public Tensor Forward(Tensor x, Tensor memory, Tensor? memoryBias, Tensor timeModulation, Tensor? plucker,
-        ReadOnlySpan<float> cameraConditions, int frames, int latentHeight, int latentWidth, Tensor ropeCos, Tensor ropeSin,
-        Tensor cameraCos, Tensor cameraSin)
+    /// <summary>The tensors the block reads on every forward, for preloading on a device backend.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        ArgumentNullException.ThrowIfNull(x);
-        ArgumentNullException.ThrowIfNull(memory);
-        ArgumentNullException.ThrowIfNull(timeModulation);
-        if (frames <= 0 || latentHeight <= 0 || latentWidth <= 0)
-            throw new ArgumentOutOfRangeException(nameof(frames), "Frames and latent grid must be positive.");
-        if (x.DType != DType.F32 || x.Shape.Rank != 3 || x.Shape[2] != _channels)
-            throw new ArgumentException($"x must be F32 [B, N, {_channels}]; got {x.DType} {x.Shape}.", nameof(x));
-
-        long batch = x.Shape[0];
-        int spatial = checked(latentHeight * latentWidth);
-        int tokens = checked(frames * spatial);
-        if (x.Shape[1] != tokens)
-            throw new ArgumentException($"x must hold {tokens} tokens per batch item; got {x.Shape}.", nameof(x));
-        long textTokens = memory.Shape.Rank == 3 ? memory.Shape[1] : -1;
-        SanaWmTensors.Require(memory, nameof(memory), DType.F32, [batch, textTokens, _channels]);
-        SanaWmTensors.Require(timeModulation, nameof(timeModulation), DType.F32, [batch * frames, ModulationSlots * _channels]);
-        if (memoryBias is not null)
-            SanaWmTensors.Require(memoryBias, nameof(memoryBias), DType.F32, [batch, 1, 1, textTokens]);
-        if (plucker is not null)
-            SanaWmTensors.Require(plucker, nameof(plucker), DType.F32, [batch, tokens, _channels]);
-        if ((_gdnCamera is not null || _softmaxCamera is not null)
-            && cameraConditions.Length != batch * frames * CameraChannels)
-            throw new ArgumentException($"Camera conditions must hold {batch * frames * CameraChannels} floats.", nameof(cameraConditions));
-
-        TensorShape rows = new([batch * tokens, _channels]);
-        List<Tensor> scratch = [];
-        Tensor output = new(x.Shape, DType.F32, _backend.Device);
-        bool succeeded = false;
-        try
+        IEnumerable<Tensor> attention = _gdn?.EnumerateWeights() ?? _softmaxAttention!.EnumerateWeights();
+        IEnumerable<Tensor> camera = _gdnCamera?.EnumerateWeights() ?? _softmaxCamera?.EnumerateWeights() ?? [];
+        Tensor?[] own = [_outputGateWeight, _outputGateBias, _projWeight, _projBias, _pluckerWeight, _pluckerBias, _crossQWeight,
+            _crossQBias, _crossKvWeight, _crossKvBias, _crossProjWeight, _crossProjBias, _crossQNorm, _crossKNorm, _scaleShift,
+            _scaleShiftOnes];
+        foreach (Tensor tensor in attention.Concat(camera).Concat(_ffn.EnumerateWeights()))
+            yield return tensor;
+        foreach (Tensor? tensor in own)
         {
-            Tensor modulation = ComposeModulation(scratch, timeModulation, batch * frames);
-            Tensor xRows = x.Reshape(rows);
-
-            Tensor attnInput = Modulated(scratch, LayerNorm(scratch, xRows), modulation, ShiftMsa, ScaleMsa, batch, frames, spatial);
-            Tensor attention = Attention(scratch, attnInput.Reshape(x.Shape), cameraConditions, frames, latentHeight, latentWidth,
-                ropeCos, ropeSin, cameraCos, cameraSin);
-            Tensor afterAttention = Gated(scratch, xRows, attention, modulation, GateMsa, batch, frames, spatial);
-
-            Tensor afterPlucker = afterAttention;
-            if (plucker is not null)
-            {
-                Tensor pluckerTokens = NewTensor(scratch, rows);
-                _backend.Linear(pluckerTokens, plucker.Reshape(rows), _pluckerWeight!, _pluckerBias);
-                afterPlucker = Sum(scratch, afterAttention, pluckerTokens);
-            }
-
-            Tensor cross = CrossAttention(scratch, afterPlucker, memory, memoryBias, batch, tokens, textTokens);
-            Tensor afterCross = Sum(scratch, afterPlucker, cross);
-
-            Tensor ffnInput = Modulated(scratch, LayerNorm(scratch, afterCross), modulation, ShiftMlp, ScaleMlp, batch, frames, spatial);
-            Tensor ffn = _ffn.Forward(_backend, ffnInput.Reshape(x.Shape), frames, latentHeight, latentWidth);
-            scratch.Add(ffn);
-            Tensor result = Gated(scratch, afterCross, ffn.Reshape(rows), modulation, GateMlp, batch, frames, spatial);
-
-            _backend.CopyTo(output, result.Reshape(x.Shape));
-            succeeded = true;
-            return output;
-        }
-        finally
-        {
-            if (!succeeded)
-                output.Dispose();
-            SanaWmTensors.DisposeAll(scratch);
+            if (tensor is not null)
+                yield return tensor;
         }
     }
+
+    /// <summary>Runs the block on F32 tokens <c>[B, N, C]</c>, frame-major with <c>N = frames·latentHeight·latentWidth</c>, and
+    /// returns a new owned F32 <c>[B, N, C]</c> tensor. <paramref name="x"/> is left untouched.</summary>
+    public Tensor Forward(Tensor x, SanaWmForwardContext context) => Run(x, context, ownsInput: false);
+
+    /// <summary><see cref="Forward"/> that takes ownership of <paramref name="x"/> and releases it once the attention residual no
+    /// longer needs it, so a block stack holds one residual stream at a time. <paramref name="x"/> is disposed even on failure.</summary>
+    internal Tensor ForwardOwned(Tensor x, SanaWmForwardContext context) => Run(x, context, ownsInput: true);
 
     /// <inheritdoc />
     public void Dispose()
@@ -217,7 +171,63 @@ public sealed class SanaWmBlock : IDisposable
         SanaWmTensors.DisposeAll(_owned);
     }
 
-    private Tensor Owned(Tensor source) => SanaWmTensors.ToF32(_backend, source, _owned);
+    private Tensor Run(Tensor x, SanaWmForwardContext context, bool ownsInput)
+    {
+        using SanaWmScratch scratch = new();
+        if (ownsInput)
+            scratch.Track(x);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(x);
+        ArgumentNullException.ThrowIfNull(context);
+        int batch = context.Batch;
+        int frames = context.Frames;
+        int spatial = context.Spatial;
+        int tokens = context.Tokens;
+        SanaWmTensors.Require(x, nameof(x), DType.F32, [batch, tokens, _channels]);
+        if ((_gdnCamera is not null || _softmaxCamera is not null) && context.Camera is null)
+            throw new ArgumentException("The block has a camera branch, but the context carries no camera inputs.", nameof(context));
+
+        long modulationWidth = (long)ModulationSlots * _channels;
+        Tensor modulation = scratch.New((long)batch * frames, modulationWidth);
+        _backend.AffineBroadcastLastDim(modulation, context.BlockTime, _scaleShiftOnes, _scaleShift);
+        Tensor gateMsa = Gate(scratch, modulation, GateMsa, batch * frames);
+        Tensor gateMlp = Gate(scratch, modulation, GateMlp, batch * frames);
+
+        Tensor attentionInput = scratch.New((long)batch * frames, spatial, _channels);
+        Modulated(attentionInput, x, modulation, ShiftMsa, ScaleMsa, spatial);
+        Tensor attention = scratch.Track(Attention(attentionInput, context));
+        scratch.Release(attentionInput);
+        Tensor afterAttention = scratch.New(x.Shape);
+        _backend.GatedResidualRowIndexed(afterAttention, x, attention, gateMsa, context.RowIndex);
+        scratch.Release(attention);
+        if (ownsInput)
+            scratch.Release(x);
+
+        Tensor afterPlucker = afterAttention;
+        if (_pluckerWeight is not null && context.Plucker is not null)
+        {
+            Tensor pluckerTokens = scratch.New(x.Shape);
+            _backend.Linear(pluckerTokens, context.Plucker, _pluckerWeight, _pluckerBias);
+            afterPlucker = scratch.New(x.Shape);
+            _backend.Add(afterPlucker, afterAttention, pluckerTokens);
+            scratch.Release(pluckerTokens);
+            scratch.Release(afterAttention);
+        }
+
+        Tensor cross = scratch.Track(CrossAttention(afterPlucker, context));
+        Tensor afterCross = scratch.New(x.Shape);
+        _backend.Add(afterCross, afterPlucker, cross);
+        scratch.Release(cross);
+        scratch.Release(afterPlucker);
+
+        Tensor ffnInput = scratch.New(x.Shape);
+        Modulated(ffnInput, afterCross, modulation, ShiftMlp, ScaleMlp, spatial);
+        Tensor ffn = scratch.Track(FeedForward(ffnInput, context));
+        scratch.Release(ffnInput);
+        Tensor output = scratch.New(x.Shape);
+        _backend.GatedResidualRowIndexed(output, afterCross, ffn, gateMlp, context.RowIndex);
+        return scratch.Detach(output);
+    }
 
     private void BuildCamera(string prefix, IReadOnlyDictionary<string, Tensor> weights, bool softmax)
     {
@@ -225,7 +235,7 @@ public sealed class SanaWmBlock : IDisposable
         string[] keys = ["q_proj_cam.weight", "q_proj_cam.bias", "k_proj_cam.weight", "k_proj_cam.bias", "v_proj_cam.weight",
             "v_proj_cam.bias", "q_norm_cam.weight", "k_norm_cam.weight", "out_proj_cam.weight", "out_proj_cam.bias"];
         foreach (string key in keys)
-            camera[key] = Owned(weights[prefix + "attn." + key]);
+            camera[key] = weights[prefix + "attn." + key];
 
         if (softmax)
         {
@@ -234,198 +244,216 @@ public sealed class SanaWmBlock : IDisposable
             return;
         }
 
-        camera["conv_k_cam.weight"] = Owned(weights[prefix + "attn.conv_k_cam.weight"]);
+        camera["conv_k_cam.weight"] = weights[prefix + "attn.conv_k_cam.weight"];
         _gdnCamera = new SanaWmCamBranch(_heads, _headDim);
         _gdnCamera.LoadWeights(camera);
     }
 
-    // Attention on [B, N, C] tokens: the main branch, the camera branch summed in, then the output gate and projection.
-    // The output gate reads the attention input, as upstream's _apply_output_gate(combined, x) does.
-    private Tensor Attention(List<Tensor> scratch, Tensor input, ReadOnlySpan<float> cameraConditions, int frames, int latentHeight,
-        int latentWidth, Tensor ropeCos, Tensor ropeSin, Tensor cameraCos, Tensor cameraSin)
+    // LayerNorm (no affine) of every token, then x·(1 + scale) + shift with the token's frame's slots of the packed modulation.
+    private void Modulated(Tensor output, Tensor input, Tensor modulation, int shiftSlot, int scaleSlot, int spatial)
     {
-        TensorShape rows = new([input.Shape[0] * input.Shape[1], _channels]);
-        Tensor main;
+        long width = (long)ModulationSlots * _channels;
+        ModulationSpec perFrame = ModulationSpec.Packed(modulation, width, (long)scaleSlot * _channels, (long)shiftSlot * _channels,
+            spatial, ScaleMode.OnePlus);
+        _backend.NormModulate(NormModulateCall.Rows(output, input, NormKind.LayerNorm, LayerNormEpsilon).WithModulation(perFrame));
+    }
+
+    // One slot of the packed [B·F, 6C] modulation as its own [B·F, C] table, the form the row-indexed gated residual reads.
+    private Tensor Gate(SanaWmScratch scratch, Tensor modulation, int slot, int rows)
+    {
+        Tensor gate = scratch.New(rows, _channels);
+        ReadOnlySpan<long> dims = [rows, _channels];
+        ReadOnlySpan<long> strides = [(long)ModulationSlots * _channels, 1];
+        _backend.CopyStrided(gate, modulation, StridedCopySpec.Gather(new StridedView(dims, strides, (long)slot * _channels)));
+        return gate;
+    }
+
+    // Attention on [B·F, S, C] tokens, one batch item at a time: the main branch, the camera branch summed in, then the output
+    // gate and projection. The output gate reads the attention input, as upstream's _apply_output_gate(combined, x) does.
+    private Tensor Attention(Tensor input, SanaWmForwardContext context)
+    {
+        int batch = context.Batch;
+        int tokens = context.Tokens;
+        if (batch == 1)
+            return AttentionItem(input, context, 0);
+
+        long itemElements = (long)tokens * _channels;
+        using SanaWmScratch scratch = new();
+        Tensor output = scratch.New(new TensorShape(batch, tokens, _channels));
+        for (int b = 0; b < batch; b++)
+        {
+            using SanaWmScratch item = new();
+            Tensor a = item.Track(SanaWmTensors.Slice(_backend, input, b * itemElements,
+                new TensorShape(context.Frames, context.Spatial, _channels)));
+            Tensor projected = item.Track(AttentionItem(a, context, b));
+            SanaWmTensors.Write(_backend, output, projected, b * itemElements);
+        }
+
+        return scratch.Detach(output);
+    }
+
+    // One batch item: a is F32 [F, S, C]; returns proj(branch · SiLU(output_gate(a))) as [N, C].
+    private Tensor AttentionItem(Tensor a, SanaWmForwardContext context, int item)
+    {
+        int frames = context.Frames;
+        int spatial = context.Spatial;
+        int tokens = context.Tokens;
+        using SanaWmScratch scratch = new();
+        Tensor branch;
         if (_gdn is not null)
         {
-            (Tensor gdnOutput, Tensor beta, Tensor decay) = _gdn.ForwardWithGates(input, frames, latentHeight, latentWidth, ropeCos, ropeSin);
-            scratch.Add(gdnOutput);
-            scratch.Add(beta);
-            scratch.Add(decay);
-            main = gdnOutput;
+            (Tensor main, Tensor beta, Tensor decay) = _gdn.ForwardItem(a, frames, spatial, context.RopeCos, context.RopeSin);
+            branch = scratch.Track(main);
+            scratch.Track(beta);
+            scratch.Track(decay);
             if (_gdnCamera is not null)
             {
-                Tensor camera = _gdnCamera.Forward(_backend, input, cameraConditions, frames, latentHeight, latentWidth,
-                    cameraCos, cameraSin, beta, decay);
-                scratch.Add(camera);
-                main = Sum(scratch, main, camera);
+                Tensor camera = scratch.Track(_gdnCamera.ForwardItem(_backend, a, context.Camera!, item, beta, decay, frames, spatial));
+                branch = Sum(scratch, main, camera);
             }
+
+            scratch.Release(beta);
+            scratch.Release(decay);
         }
         else
         {
-            main = _softmaxAttention!.Forward(input, frames, latentHeight, latentWidth, ropeCos, ropeSin);
-            scratch.Add(main);
+            Tensor main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin));
+            branch = main;
             if (_softmaxCamera is not null)
             {
-                Tensor camera = _softmaxCamera.Forward(_backend, input, cameraConditions, frames, latentHeight, latentWidth,
-                    cameraCos, cameraSin);
-                scratch.Add(camera);
-                main = Sum(scratch, main, camera);
+                Tensor camera = scratch.Track(_softmaxCamera.ForwardItem(_backend, a, context.Camera!, item, tokens));
+                branch = Sum(scratch, main, camera);
             }
         }
 
-        Tensor gateLinear = NewTensor(scratch, rows);
-        _backend.Linear(gateLinear, input.Reshape(rows), _outputGateWeight, _outputGateBias);
-        Tensor gateActivated = NewTensor(scratch, rows);
+        Tensor gateLinear = scratch.New(tokens, _channels);
+        _backend.Linear(gateLinear, a, _outputGateWeight, _outputGateBias);
+        Tensor gateActivated = scratch.New(tokens, _channels);
         _backend.Silu(gateActivated, gateLinear);
-        Tensor gated = NewTensor(scratch, rows);
-        _backend.Mul(gated, main.Reshape(rows), gateActivated);
-        Tensor projected = NewTensor(scratch, rows);
+        scratch.Release(gateLinear);
+        Tensor gated = scratch.New(tokens, _channels);
+        _backend.Mul(gated, branch, gateActivated);
+        scratch.Release(branch);
+        scratch.Release(gateActivated);
+        Tensor projected = scratch.New(tokens, _channels);
         _backend.Linear(projected, gated, _projWeight, _projBias);
-        return projected;
+        return scratch.Detach(projected);
     }
 
     // Text cross-attention: q from the tokens, k and v from the caption, RMSNorm over the full width before the head split,
-    // no RoPE. The mask is additive on padded caption keys and broadcasts over heads and queries.
-    private Tensor CrossAttention(List<Tensor> scratch, Tensor xRows, Tensor memory, Tensor? memoryBias, long batch, int tokens,
-        long textTokens)
+    // no RoPE. The mask is additive on padded caption keys. Queries run per batch item in chunks; each row is independent.
+    private Tensor CrossAttention(Tensor x, SanaWmForwardContext context)
     {
-        TensorShape rows = xRows.Shape;
-        TensorShape textRows = new([batch * textTokens, _channels]);
-        TensorShape queryMajor = new([batch, tokens, _heads, _headDim]);
-        TensorShape textMajor = new([batch, textTokens, _heads, _headDim]);
-        TensorShape headMajorQuery = new([batch, _heads, tokens, _headDim]);
-        TensorShape headMajorText = new([batch, _heads, textTokens, _headDim]);
-        Tensor memoryRows = memory.Reshape(textRows);
+        int batch = context.Batch;
+        int tokens = context.Tokens;
+        long textTokens = context.TextTokens;
+        float scale = MathF.Pow(_headDim, -0.5f);
+        using SanaWmScratch scratch = new();
+        Tensor keys = TextHeads(scratch, context.Memory, batch, textTokens, 0, _crossKNorm);
+        Tensor values = TextHeads(scratch, context.Memory, batch, textTokens, _channels, null);
 
-        Tensor query = NewTensor(scratch, rows);
-        _backend.Linear(query, xRows, _crossQWeight, _crossQBias);
-        Tensor queryNormed = NewTensor(scratch, rows);
+        int chunk = Math.Min(tokens, CrossQueryChunk);
+        if (batch == 1 && chunk == tokens)
+            return CrossChunk(x, keys, values, context.MemoryBias, tokens, scale);
+
+        long headElements = (long)_heads * textTokens * _headDim;
+        TensorShape headShape = new(1, _heads, textTokens, _headDim);
+        Tensor output = scratch.New(x.Shape);
+        for (int b = 0; b < batch; b++)
+        {
+            using SanaWmScratch item = new();
+            Tensor itemKeys = batch == 1 ? keys : item.Track(SanaWmTensors.Slice(_backend, keys, b * headElements, headShape));
+            Tensor itemValues = batch == 1 ? values : item.Track(SanaWmTensors.Slice(_backend, values, b * headElements, headShape));
+            Tensor? itemBias = context.MemoryBias is null || batch == 1 ? context.MemoryBias
+                : item.Track(SanaWmTensors.Slice(_backend, context.MemoryBias, b * textTokens, new TensorShape(1, 1, 1, textTokens)));
+            for (int start = 0; start < tokens; start += chunk)
+            {
+                int rows = Math.Min(chunk, tokens - start);
+                long offset = ((long)b * tokens + start) * _channels;
+                using SanaWmScratch step = new();
+                Tensor queries = step.Track(SanaWmTensors.Slice(_backend, x, offset, new TensorShape(rows, _channels)));
+                Tensor attended = step.Track(CrossChunk(queries, itemKeys, itemValues, itemBias, rows, scale));
+                SanaWmTensors.Write(_backend, output, attended, offset);
+            }
+        }
+
+        return scratch.Detach(output);
+    }
+
+    // Keys (normed) or values of the caption, head-major [B, H, L, D], from the fused kv projection.
+    private Tensor TextHeads(SanaWmScratch scratch, Tensor memory, int batch, long textTokens, int rowOffset, Tensor? norm)
+    {
+        long rows = batch * textTokens;
+        Tensor projected = scratch.New(rows, _channels);
+        _backend.LinearWeightRows(projected, memory, _crossKvWeight, _crossKvBias, rowOffset, _channels);
+        if (norm is not null)
+        {
+            Tensor normed = scratch.New(rows, _channels);
+            _backend.RmsNorm(normed, projected, norm, CrossNormEpsilon);
+            scratch.Release(projected);
+            projected = normed;
+        }
+
+        Tensor heads = scratch.New(batch, _heads, textTokens, _headDim);
+        _backend.Permute0213(heads, projected, (int)textTokens, _heads, _headDim);
+        scratch.Release(projected);
+        return heads;
+    }
+
+    // proj(SDPA(RMSNorm(q(x)), k, v)) for one batch item's rows [rows, C]; returns [rows, C].
+    private Tensor CrossChunk(Tensor x, Tensor keys, Tensor values, Tensor? bias, int rows, float scale)
+    {
+        using SanaWmScratch scratch = new();
+        Tensor query = scratch.New(rows, _channels);
+        _backend.Linear(query, x, _crossQWeight, _crossQBias);
+        Tensor queryNormed = scratch.New(rows, _channels);
         _backend.RmsNorm(queryNormed, query, _crossQNorm, CrossNormEpsilon);
-
-        Tensor key = NewTensor(scratch, textRows);
-        _backend.LinearWeightRows(key, memoryRows, _crossKvWeight, _crossKvBias, 0, _channels);
-        Tensor keyNormed = NewTensor(scratch, textRows);
-        _backend.RmsNorm(keyNormed, key, _crossKNorm, CrossNormEpsilon);
-        Tensor value = NewTensor(scratch, textRows);
-        _backend.LinearWeightRows(value, memoryRows, _crossKvWeight, _crossKvBias, _channels, _channels);
-
-        Tensor qh = NewTensor(scratch, headMajorQuery);
-        _backend.Permute0213(qh, queryNormed.Reshape(queryMajor), tokens, _heads, _headDim);
-        Tensor kh = NewTensor(scratch, headMajorText);
-        _backend.Permute0213(kh, keyNormed.Reshape(textMajor), (int)textTokens, _heads, _headDim);
-        Tensor vh = NewTensor(scratch, headMajorText);
-        _backend.Permute0213(vh, value.Reshape(textMajor), (int)textTokens, _heads, _headDim);
-
-        Tensor attended = NewTensor(scratch, headMajorQuery);
-        _backend.ScaledDotProductAttention(attended, qh, kh, vh, memoryBias, MathF.Pow(_headDim, -0.5f));
-        Tensor merged = NewTensor(scratch, rows);
-        _backend.Permute0213(merged.Reshape(queryMajor), attended, _heads, tokens, _headDim);
-
-        Tensor projected = NewTensor(scratch, rows);
+        scratch.Release(query);
+        Tensor queryHeads = scratch.New(1, _heads, rows, _headDim);
+        _backend.Permute0213(queryHeads, queryNormed, rows, _heads, _headDim);
+        scratch.Release(queryNormed);
+        Tensor attended = scratch.New(1, _heads, rows, _headDim);
+        _backend.ScaledDotProductAttention(attended, queryHeads, keys, values, bias, scale);
+        scratch.Release(queryHeads);
+        Tensor merged = scratch.New(rows, _channels);
+        _backend.Permute0213(merged, attended, _heads, rows, _headDim);
+        scratch.Release(attended);
+        Tensor projected = scratch.New(rows, _channels);
         _backend.Linear(projected, merged, _crossProjWeight, _crossProjBias);
-        return projected;
+        return scratch.Detach(projected);
     }
 
-    // [B·F·6, C] rows: slot k of frame f in batch item b is row (b·F + f)·6 + k. Scale slots hold 1 + scale, the modulate factor.
-    private Tensor ComposeModulation(List<Tensor> scratch, Tensor timeModulation, long batchFrames)
+    // The modulated FFN input [B, N, C] F32 through the FFN in its dtype; returns F32 [B, N, C].
+    private Tensor FeedForward(Tensor input, SanaWmForwardContext context)
     {
-        using Tensor timeHost = SanaWmTensors.Readback(_backend, timeModulation);
-        using Tensor tableHost = SanaWmTensors.Readback(_backend, _scaleShift);
-        using Tensor composed = new(new TensorShape([batchFrames * ModulationSlots, _channels]), DType.F32, DeviceKind.Cpu);
-        ReadOnlySpan<float> time = timeHost.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> table = tableHost.AsReadOnlySpan<float>();
-        Span<float> destination = composed.AsSpan<float>();
-        for (long row = 0; row < batchFrames; row++)
-        {
-            for (int slot = 0; slot < ModulationSlots; slot++)
-            {
-                float factor = slot == ScaleMsa || slot == ScaleMlp ? 1f : 0f;
-                long target = (row * ModulationSlots + slot) * _channels;
-                long source = row * ModulationSlots * _channels + slot * _channels;
-                for (int c = 0; c < _channels; c++)
-                    destination[(int)target + c] = table[slot * _channels + c] + time[(int)source + c] + factor;
-            }
-        }
-
-        Tensor device = SanaWmTensors.Upload(_backend, composed);
-        scratch.Add(device);
-        return device;
+        using SanaWmScratch scratch = new();
+        Tensor ffnInput = input.DType == _ffn.DType ? input : scratch.Track(SanaWmTensors.ToBf16(_backend, input));
+        Tensor output = scratch.Track(_ffn.Forward(_backend, ffnInput, context.Frames, context.Height, context.Width));
+        return output.DType == DType.F32 ? scratch.Detach(output) : SanaWmTensors.ToF32(_backend, output);
     }
 
-    // Modulate: out = in · scale + shift, per frame, with one shift and one scale vector per (batch item, frame).
-    private Tensor Modulated(List<Tensor> scratch, Tensor normed, Tensor modulation, int shiftSlot, int scaleSlot, long batch,
-        int frames, int spatial)
+    private Tensor Sum(SanaWmScratch scratch, Tensor a, Tensor b)
     {
-        Tensor output = NewTensor(scratch, normed.Shape);
-        long tokens = (long)frames * spatial;
-        for (long b = 0; b < batch; b++)
-        {
-            for (int f = 0; f < frames; f++)
-            {
-                long row = b * tokens + (long)f * spatial;
-                long modulationRow = (b * frames + f) * ModulationSlots;
-                Tensor input = Track(scratch, normed.SliceRows(row, spatial));
-                Tensor target = Track(scratch, output.SliceRows(row, spatial));
-                Tensor shift = Track(scratch, modulation.SliceRows(modulationRow + shiftSlot, 1).Reshape(new TensorShape([_channels])));
-                Tensor scale = Track(scratch, modulation.SliceRows(modulationRow + scaleSlot, 1).Reshape(new TensorShape([_channels])));
-                _backend.AffineBroadcastLastDim(target, input, scale, shift);
-            }
-        }
-
-        return output;
-    }
-
-    // Gated residual: out = residual + gate · delta, with the gate constant over each frame.
-    private Tensor Gated(List<Tensor> scratch, Tensor residual, Tensor delta, Tensor modulation, int gateSlot, long batch,
-        int frames, int spatial)
-    {
-        Tensor output = NewTensor(scratch, residual.Shape);
-        Tensor scaled = NewTensor(scratch, residual.Shape);
-        long tokens = (long)frames * spatial;
-        for (long b = 0; b < batch; b++)
-        {
-            for (int f = 0; f < frames; f++)
-            {
-                long row = b * tokens + (long)f * spatial;
-                long modulationRow = (b * frames + f) * ModulationSlots;
-                Tensor gate = Track(scratch, modulation.SliceRows(modulationRow + gateSlot, 1).Reshape(new TensorShape([_channels])));
-                Tensor deltaRows = Track(scratch, delta.SliceRows(row, spatial));
-                Tensor scaledRows = Track(scratch, scaled.SliceRows(row, spatial));
-                _backend.AffineBroadcastLastDim(scaledRows, deltaRows, gate, null);
-                Tensor residualRows = Track(scratch, residual.SliceRows(row, spatial));
-                Tensor outputRows = Track(scratch, output.SliceRows(row, spatial));
-                _backend.Add(outputRows, residualRows, scaledRows);
-            }
-        }
-
-        return output;
-    }
-
-    private Tensor LayerNorm(List<Tensor> scratch, Tensor input)
-    {
-        Tensor normed = NewTensor(scratch, input.Shape);
-        _backend.LayerNormNoAffine(normed, input, LayerNormEpsilon);
-        return normed;
-    }
-
-    private Tensor Sum(List<Tensor> scratch, Tensor a, Tensor b)
-    {
-        Tensor sum = NewTensor(scratch, a.Shape);
+        Tensor sum = scratch.New(a.Shape);
         _backend.Add(sum, a, b);
+        scratch.Release(a);
+        scratch.Release(b);
         return sum;
     }
 
-    private Tensor NewTensor(List<Tensor> scratch, TensorShape shape)
+    private Tensor Vector(Tensor source) => SanaWmTensors.HostF32(source, _owned);
+
+    // The FFN's conv kernels in its dtype: borrowed when the checkpoint already stores them so, else a host copy the block owns.
+    private Tensor FfnKernel(Tensor source, DType dtype)
     {
-        Tensor tensor = new(shape, DType.F32, _backend.Device);
-        scratch.Add(tensor);
-        return tensor;
+        if (source.DType == dtype)
+            return source;
+        return Own(source.CastTo(dtype));
     }
 
-    private static Tensor Track(List<Tensor> scratch, Tensor view)
+    private Tensor Own(Tensor tensor)
     {
-        scratch.Add(view);
-        return view;
+        _owned.Add(tensor);
+        return tensor;
     }
 }

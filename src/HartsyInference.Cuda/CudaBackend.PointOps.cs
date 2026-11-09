@@ -5,7 +5,7 @@ using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;
 
-// The per-element and per-point embeddings on the device: uniform fake quantization and the Fourier feature embedding.
+// The per-element and per-point ops on the device: uniform fake quantization, the Fourier feature embedding, exp and reciprocal.
 public sealed partial class CudaBackend
 {
     /// <inheritdoc />
@@ -58,6 +58,37 @@ public sealed partial class CudaBackend
         {
             if (!cached) GpuTransferHelper.FreeDevice(pOut);
             GpuTransferHelper.FreeDevice(pCoords);
+        }
+    }
+
+    /// <inheritdoc />
+    public void Exp(Tensor output, Tensor input) => ElementwiseMath(output, input, ElementwiseMathFunction.Exp);
+
+    /// <inheritdoc />
+    public void Reciprocal(Tensor output, Tensor input) => ElementwiseMath(output, input, ElementwiseMathFunction.Reciprocal);
+
+    private void ElementwiseMath(Tensor output, Tensor input, ElementwiseMathFunction function)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push(function == ElementwiseMathFunction.Exp ? "Exp" : "Reciprocal");
+        long count = ElementwiseMathContract.Validate(output, input, function);
+        if (count == 0) return;
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        ulong pIn = 0, pOut = 0;
+        bool cached = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchElementwiseMath(pOut, pIn, input.DType, output.DType, function, count, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
         }
     }
 }
