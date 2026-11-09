@@ -148,9 +148,12 @@ Run: `hartsy text -m moss-vl-realtime -i photo.png "What is in this image?"`. A 
 - ✅ Text decoder: layers 0–2 match at 9.8e-8 (CPU F32), 2.9e-5 (Vulkan, BF16 cast to F16), 5.0e-3 (GGUF); prefill and decode
   logits ~1e-6; tokenizer matches the HF library.
 - ✅ Multi-image prompts (per-image cross-attention groups); both images are described.
-- ✅ End to end on Vulkan through the CLI (GGUF, RTX 3060): a red disc and a blue square are named correctly; decode about 29 tok/s.
+- ✅ End to end on Vulkan through the CLI (GGUF, RTX 3060): a red disc and a blue square are named correctly; decode about 31 tok/s.
+  Video prefill (one image group per frame) after alpha.415: 16 frames 0.9 s, 32 frames 2.3–3.4 s, 64 frames 10.2 s; decode stays
+  near 31 tok/s up to 32 frames (20 tok/s at 64). The vision tower takes about 325 ms per 256×256 frame.
 - ✅ Weights load in stored precision for the backend (BF16 on CUDA, F16 on Vulkan, packed GGUF quants).
-- ❌ CUDA not run here (cuBLAS 13 missing; auto-provisioning is in review). Full BF16 generation needs about 21 GB of device memory.
+- ❌ CUDA not run here (cuBLAS 13 missing; `paths.cublasAutofetch` downloads it on first CUDA use, not yet run against the real
+  redist). Full BF16 generation needs about 21 GB of device memory; `--precision q8_0` on the BF16 folder halves that.
 - ✅ Video: `--video` (ffmpeg) or `--frames-dir`; frames sampled and sized as the reference does, one timed vision block. A moving red disc is described as moving left to right (Vulkan).
 - ✅ Appendable decode session: segments continue positions and append vision once; two segments equal one forward exactly (Vulkan).
 - ✅ Live sessions: `hartsy text --realtime --frames-dir … "question"` (or `--video`), the Engine's `OpenRealtimeAsync`, and SSE
