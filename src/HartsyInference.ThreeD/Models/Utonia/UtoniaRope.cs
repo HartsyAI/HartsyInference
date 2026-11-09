@@ -6,6 +6,18 @@ namespace HartsyInference.ThreeD.Models.Utonia;
 /// </summary>
 internal static class UtoniaRope
 {
+    /// <summary>Inverse frequencies <c>1 / ropeBase^(2j / chunk)</c> for j in <c>[0, chunk/2)</c>.</summary>
+    public static float[] InvFrequencies(int chunk, float ropeBase)
+    {
+        float[] invFreq = new float[chunk / 2];
+        for (int j = 0; j < invFreq.Length; j++)
+        {
+            invFreq[j] = 1f / MathF.Pow(ropeBase, 2f * j / chunk);
+        }
+
+        return invFreq;
+    }
+
     /// <summary>Rotates the query and key blocks of a row-major <c>[rows, 3·channels]</c> qkv buffer in place.</summary>
     /// <param name="qkv">Token rows laid out as q | k | v, each <c>channels</c> wide.</param>
     /// <param name="slotCoord">Position of each row, three floats per row.</param>
@@ -14,11 +26,7 @@ internal static class UtoniaRope
         int headDim = channels / heads;
         int chunk = headDim / 3;
         int half = chunk / 2;
-        float[] invFreq = new float[half];
-        for (int j = 0; j < half; j++)
-        {
-            invFreq[j] = 1f / MathF.Pow(ropeBase, 2f * j / chunk);
-        }
+        float[] invFreq = InvFrequencies(chunk, ropeBase);
 
         int rows = slotCoord.Length / 3;
         long rowStride = 3L * channels;
