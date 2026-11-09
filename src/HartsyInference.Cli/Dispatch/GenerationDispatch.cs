@@ -7,6 +7,7 @@ using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Worlds;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.Memory.Vram;
@@ -835,21 +836,24 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> WorldAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
-        int totalFrames = Math.Max(2, parameters.GetInt("frames", 16));
-        WorldRequest request = new WorldRequest
+        WorldRequestOptions options = new WorldRequestOptions
         {
-            Vram = ParseVramOverrides(parameters),
-            InitImage = LoadImage(prompt),
-            Steps = parameters.GetInt("steps", 10),
+            Frames = parameters.GetIntOrNull("frames"),
+            Fps = parameters.GetIntOrNull("fps"),
+            Steps = parameters.GetIntOrNull("steps"),
             Seed = parameters.GetInt("seed", -1),
+            CameraPath = parameters.GetStringOrNull("camera"),
+            Intrinsics = parameters.GetStringOrNull("intrinsics"),
         };
+        WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
+        WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
 
         string[] actionPlan = ResolveActionPlan(parameters.GetStringOrNull("actions"), spec.Catalog?.Id);
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
         List<VideoFrame> frames = new List<VideoFrame>();
-        using IWorldSession session = engine.World.Open(spec, request);
-        for (int i = 0; i < totalFrames - 1; i++)
+        using IWorldSession session = engine.World.Open(spec, plan.Request);
+        for (int i = 0; i < plan.ActionCount; i++)
         {
             session.SendAction(actionPlan[i % actionPlan.Length]);
         }
@@ -858,14 +862,18 @@ public static class GenerationDispatch
             await foreach (VideoFrame frame in session.StreamAsync(cancel).ConfigureAwait(false))
             {
                 frames.Add(frame);
-                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = totalFrames });
+                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = plan.Frames });
             }
         }
         finally
         {
             progress?.Finish();
         }
-        return FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world");
+        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world",
+            null, plan.Fps);
+        artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
+        artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
+        return artifact;
     }
 
     /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/>, else a per-model demo plan.</summary>

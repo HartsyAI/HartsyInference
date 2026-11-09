@@ -3,6 +3,8 @@ using HartsyInference.Core.Memory.Vram;
 namespace HartsyInference.Engine.Requests;
 
 /// <summary>Native interactive-world request: opens a stateful session seeded by a prompt and/or an initial frame.</summary>
+/// <remarks>Every optional field is checked against the model's <see cref="Worlds.WorldCapabilities"/> by
+/// <see cref="Worlds.WorldPlanResolver"/> before a weight is loaded. The CLI and the HTTP route both send this shape.</remarks>
 public sealed record WorldRequest
 {
     /// <summary>The seeding prompt.</summary>
@@ -19,4 +21,32 @@ public sealed record WorldRequest
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
+
+    /// <summary>Frames to roll out, counting the seed frame; null uses the model default.</summary>
+    public int? Frames { get; init; }
+
+    /// <summary>Output frame rate; null uses the model default.</summary>
+    public int? Fps { get; init; }
+
+    /// <summary>Classifier-free guidance scale; null uses the model default.</summary>
+    public double? Guidance { get; init; }
+
+    /// <summary>Flow-matching sigma shift; null uses the model default.</summary>
+    public double? FlowShift { get; init; }
+
+    /// <summary>Sampler name; null uses the model's own sampler.</summary>
+    public string? Sampler { get; init; }
+
+    /// <summary>Precision the model runs at; null uses the model's first declared precision.</summary>
+    public string? Precision { get; init; }
+
+    /// <summary>Whether to run the model's refiner stage.</summary>
+    public bool Refiner { get; init; }
+
+    /// <summary>Whether to stream partial frames while each one denoises. Only models that declare progressive
+    /// preview support accept it; frames are otherwise delivered as each rollout completes.</summary>
+    public bool ProgressivePreview { get; init; }
+
+    /// <summary>Typed per-frame camera input; null for an action-driven rollout.</summary>
+    public WorldCameraPath? Camera { get; init; }
 }

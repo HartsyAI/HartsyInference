@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Worlds;
 
 namespace HartsyInference.Engine.Registry;
 
@@ -20,6 +21,10 @@ public static class ModelCatalog
 
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
+
+    /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
+    /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
+    private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10 };
 
     /// <summary>One MOSS-Image build from Comfy-Org's export, with the side models <see cref="Recipes.Image.MossImageRecipe"/>
     /// falls back to outside an OpenMOSS folder.</summary>
@@ -2460,7 +2465,7 @@ public static class ModelCatalog
             E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),
             E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
-            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true),
+            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true) with { World = OasisWorld },
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
 
             // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified

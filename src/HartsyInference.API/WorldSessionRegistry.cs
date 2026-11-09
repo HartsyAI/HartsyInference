@@ -18,13 +18,16 @@ public sealed class WorldSessionRegistry : IDisposable
         _sweepTimer = new Timer(_ => Sweep(), null, idleTimeout, idleTimeout);
     }
 
-    /// <summary>Registers a newly-opened session and returns its id.</summary>
-    public string Register(IWorldSession session)
+    /// <summary>Registers a newly-opened session at its frame rate and returns its id.</summary>
+    public string Register(IWorldSession session, int fps)
     {
         string id = Guid.NewGuid().ToString("N");
-        _sessions[id] = new Entry(session);
+        _sessions[id] = new Entry(session, fps);
         return id;
     }
+
+    /// <summary>The frame rate a session was opened at, used to stamp each streamed frame; null when the id is unknown.</summary>
+    public int? FrameRate(string id) => _sessions.TryGetValue(id, out Entry? entry) ? entry.Fps : null;
 
     /// <summary>Looks up a session by id, touching its last-activity time so it doesn't idle-time-out mid-use. Null when the id is unknown or was already evicted/closed.</summary>
     public IWorldSession? Get(string id)
@@ -65,9 +68,10 @@ public sealed class WorldSessionRegistry : IDisposable
         _sessions.Clear();
     }
 
-    private sealed class Entry(IWorldSession session)
+    private sealed class Entry(IWorldSession session, int fps)
     {
         public IWorldSession Session { get; } = session;
+        public int Fps { get; } = fps;
         public DateTime LastActivity { get; private set; } = DateTime.UtcNow;
         public void Touch() => LastActivity = DateTime.UtcNow;
     }
