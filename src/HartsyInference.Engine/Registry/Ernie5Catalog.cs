@@ -23,9 +23,10 @@ internal static class Ernie5Catalog
                 {
                     Repo = "baidu/ERNIE-5.5-Flash-Base", Revision = "028544b2ffceea189b2d8768ed2b9d09b06f2343",
                     TargetSubdir = $"LLM/{Id}", IndexFile = "model.safetensors.index.json",
-                    FileCount = 128, TotalBytes = 288_416_689_496,
+                    FileCount = 128, TotalBytes = 288_434_400_632,
                 },
-                Notes = "Index metadata.total_size 288,416,689,496 over 128 shards. Scale tensor layout not yet inspected, so no QuantFlavor is set. "
+                Notes = "128 safetensors shards sum to 288,434,400,632 bytes (268.6 GiB) per the HF tree API; the index metadata.total_size "
+                    + "(288,416,689,496) is 17,711,136 bytes smaller and is not used. Scale tensor layout not yet inspected, so no QuantFlavor is set. "
                     + "License 'ernie-5.5-flash-base-model-license-v1.0' grants use only outside the EU, UK and South Korea, and needs separate "
                     + "authorization for commercial use above US$50M annual revenue (LICENSE 1.11, 2, 4.3, 5.3).",
             },
