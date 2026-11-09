@@ -28,9 +28,9 @@ public static class PartialRotary
             ReadOnlySpan<float> sinRow = rope.SinRow(positions[i]);
             for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
         }
-        using Tensor x = HostRowMath.F32Tensor(data, shape);
-        using Tensor c = HostRowMath.F32Tensor(cos, 1, positions.Length, half);
-        using Tensor sn = HostRowMath.F32Tensor(sin, 1, positions.Length, half);
+        using Tensor x = HostMath.Tensor(data, shape);
+        using Tensor c = HostMath.Tensor(cos, 1, positions.Length, half);
+        using Tensor sn = HostMath.Tensor(sin, 1, positions.Length, half);
         backend.Rotary(RotaryCall.TokenMajor(x, c, sn, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryDim, headDim - rotaryDim));
         x.AsReadOnlySpan<float>().CopyTo(data);
     }

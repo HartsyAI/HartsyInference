@@ -101,6 +101,6 @@ public sealed class KvCompressorState
             }
             dest[c] = acc / sum;
         }
-        if (_normWeight is not null) HostRowMath.RmsNormRows(dest, _normWeight, d, _normEps);
+        if (_normWeight is not null) HostMath.RmsNormRows(dest, _normWeight, d, _normEps);
     }
 }
