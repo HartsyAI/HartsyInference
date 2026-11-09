@@ -26,6 +26,81 @@ public sealed class SceneMeshIoTests
     }
 
     [Fact]
+    public void ObjReader_SplitsOnAnyWhitespaceAndSkipsKnownRecords()
+    {
+        Mesh mesh = ObjReader.Parse("# scene\r\nvn 0 0 1\r\nv\t0\t0\t0\r\nv 1 0 0\r\nv 0 1 0\r\nvt 0 0\r\nusemtl wood\r\nf\t1\t2\t3\r\n");
+
+        Assert.Equal(3, mesh.VertexCount);
+        Assert.Equal([0, 1, 2], mesh.Indices);
+    }
+
+    [Fact]
+    public void GlbReader_AppliesNodeTransformAndMirrorsWindingForANegativeScale()
+    {
+        byte[] glb = TriangleGlb("{\"mesh\":0,\"translation\":[10,0,0],\"scale\":[-1,1,1]}", Positions);
+
+        Mesh mesh = GlbReader.Parse(glb);
+
+        Assert.Equal(new float[] { 10f, 0f, 0f, 9f, 0f, 0f, 10f, 1f, 0f }, mesh.Vertices);
+        Assert.Equal([0, 2, 1], mesh.Indices);
+    }
+
+    [Theory]
+    [InlineData("{\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}")]
+    [InlineData("{\"bufferView\":0,\"componentType\":5126,\"count\":-1,\"type\":\"VEC3\"}")]
+    [InlineData("{\"bufferView\":7,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}")]
+    public void GlbReader_RefusesMalformedAccessorsWithADomainError(string position)
+    {
+        byte[] glb = TriangleGlb("{\"mesh\":0}", position);
+
+        Assert.Throws<HartsyInferenceException>(() => GlbReader.Parse(glb));
+    }
+
+    private const string Positions = """{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}""";
+
+    // One triangle in a 48-byte buffer: three float VEC3 positions, then three uint32 indices.
+    private static byte[] TriangleGlb(string node, string position)
+    {
+        string json = $$"""
+            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{{node}}],
+             "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
+             "accessors":[{{position}},{"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}],
+             "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":12}],
+             "buffers":[{"byteLength":48}]}
+            """;
+        MemoryStream bin = new();
+        using (BinaryWriter writer = new(bin, Encoding.UTF8, leaveOpen: true))
+        {
+            foreach (float value in new float[] { 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f })
+                writer.Write(value);
+            foreach (uint index in new uint[] { 0, 1, 2 })
+                writer.Write(index);
+        }
+        return Glb(json, bin.ToArray());
+    }
+
+    // Wraps a JSON chunk and a binary chunk in a GLB 2.0 container, padding the JSON with spaces to 4 bytes.
+    private static byte[] Glb(string json, byte[] bin)
+    {
+        byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
+        jsonBytes = [.. jsonBytes, .. new byte[(4 - jsonBytes.Length % 4) % 4].Select(_ => (byte)0x20)];
+        MemoryStream stream = new();
+        using (BinaryWriter writer = new(stream, Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(0x46546C67u);
+            writer.Write(2u);
+            writer.Write((uint)(12 + 8 + jsonBytes.Length + 8 + bin.Length));
+            writer.Write((uint)jsonBytes.Length);
+            writer.Write(0x4E4F534Au);
+            writer.Write(jsonBytes);
+            writer.Write((uint)bin.Length);
+            writer.Write(0x004E4942u);
+            writer.Write(bin);
+        }
+        return stream.ToArray();
+    }
+
+    [Fact]
     public void GlbWriter_RoundTripsSeveralMeshesWithRebasedIndices()
     {
         Mesh first = new()

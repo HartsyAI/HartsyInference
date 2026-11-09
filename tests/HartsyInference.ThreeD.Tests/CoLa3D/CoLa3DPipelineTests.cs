@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Pipelines;
@@ -41,6 +43,63 @@ public sealed class CoLa3DPipelineTests
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<ArgumentException>(() => pipeline.Generate(scene, resolution: 1000));
+    }
+
+    [Fact]
+    public void Generate_RejectsAResolutionAboveTheMaximum()
+    {
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = new(
+            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(scene, resolution: CoLa3DPipeline.MaxResolution + 16));
+    }
+
+    [Fact]
+    public void Generate_ReportsOnceAfterTheSplitAndOncePerObject()
+    {
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = new(
+            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+        List<GenerationProgress> reports = [];
+
+        pipeline.Generate(scene, onProgress: reports.Add);
+
+        Assert.Equal(new[] { (1, 3), (2, 3), (3, 3) }, reports.Select(p => (p.Step, p.TotalSteps)));
+        Assert.All(reports, p => Assert.True(p.ElapsedMs >= 0));
+    }
+
+    [Fact]
+    public void Generate_PropagatesACancelRaisedFromProgress()
+    {
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = new(
+            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+
+        Assert.Throws<OperationCanceledException>(() => pipeline.Generate(scene, onProgress: p =>
+        {
+            if (p.Step == 2)
+                throw new OperationCanceledException();
+        }));
+    }
+
+    [Fact]
+    public void Generate_ThrowsWhenNoObjectDecodesToTriangles()
+    {
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = new(
+            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new EmptyMesher(), []);
+        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+
+        Assert.Throws<HartsyInferenceException>(() => pipeline.Generate(scene));
+    }
+
+    private sealed class EmptyMesher : IDualGridMesher
+    {
+        public Mesh Extract(DualGridField field, SceneGrid grid) => new() { Vertices = [], Indices = [] };
     }
 
     private sealed class RecordingVoxelizer : ISceneVoxelizer

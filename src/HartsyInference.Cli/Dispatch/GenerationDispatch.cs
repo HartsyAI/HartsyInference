@@ -7,6 +7,7 @@ using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.Memory.Vram;
 
@@ -1295,7 +1296,7 @@ public static class GenerationDispatch
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>
     private static SceneMeshData LoadSceneMesh(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');
@@ -1303,14 +1304,10 @@ public static class GenerationDispatch
         {
             throw new FileNotFoundException($"Input scene mesh not found: {path}");
         }
-        string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
-        if (format is not ("obj" or "glb"))
-        {
-            throw new NotSupportedException($"Scene mesh '{path}' must be a .obj or .glb file.");
-        }
-        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = format };
+        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = SceneMeshReader.FormatOf(path) };
     }
 
+    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');
@@ -1321,6 +1318,7 @@ public static class GenerationDispatch
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
+
     /// <summary>The per-run VRAM override from <c>--vram-mode</c>, or null when the caller did not ask for one.</summary>
     /// <remarks>Null rather than an explicit Auto: null means "follow the engine", which is a different statement
     /// from "pin Auto" once a host has configured a backend policy.</remarks>

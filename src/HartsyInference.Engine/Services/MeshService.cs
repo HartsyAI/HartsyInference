@@ -1,4 +1,3 @@
-
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
@@ -92,8 +91,6 @@ public sealed class MeshService : IMeshService, IDisposable
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
                 });
-                if (result.Objects.Count == 0)
-                    throw new InvalidOperationException("The scene decomposed into no object geometry (try a finer grid).");
                 return new MeshResult { Data = GlbWriter.Write(result.Objects), Format = "glb" };
             },
             cancel);
@@ -167,13 +164,18 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 return cached;
             }
-            if (id != "cola3d")
-            {
-                throw new System.Diagnostics.UnreachableException($"No loader wired for scene 3D model '{id}'.");
-            }
             try
             {
-                CoLa3DPipeline pipeline = CoLa3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
+                CoLa3DPipeline pipeline;
+                if (id == "cola3d")
+                {
+                    pipeline = CoLa3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
+                }
+                else
+                {
+                    // Unreachable while MeshModelIds.SceneMesh matches these branches; a new id must get its own branch.
+                    throw new System.Diagnostics.UnreachableException($"No loader wired for scene 3D model '{id}'.");
+                }
                 _scenePipelines[spec.LocalPath] = pipeline;
                 return pipeline;
             }
