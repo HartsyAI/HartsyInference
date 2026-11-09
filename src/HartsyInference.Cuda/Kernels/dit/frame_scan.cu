@@ -35,23 +35,24 @@ __global__ void frame_scan_scale_keys_f32(
     out[idx] = beta[((unsigned long long)h * frames + t) * spatial + s] * key[idx];
 }
 
-// grid (ceil(valueDim / FRAME_SCAN_COLS), heads), block FRAME_SCAN_MAX_KEY threads; thread r owns state row r.
-// gramT[h, t] is G_t transposed ([keyDim, keyDim], gramT[j][r] = G[r][j]) so a warp's row reads coalesce.
-__global__ void frame_scan_recurrence_f32(
-    float* __restrict__ states,           // [heads, frames, keyDim, valueDim]  F_t + R_t
-    const float* __restrict__ gramT,      // [heads, frames, keyDim, keyDim]
-    const float* __restrict__ injection,  // [heads, frames, keyDim, valueDim]
-    const float* __restrict__ decay,      // [heads, frames]
-    unsigned int frames,
-    unsigned int keyDim,
+} // extern "C"
+
+#define FRAME_SCAN_JTILE 32       // Gram rows staged in shared memory per pass
+
+// Thread r owns state row r; COLS state columns per block. Per frame the transposed Gram is staged in shared memory
+// FRAME_SCAN_JTILE rows at a time (coalesced copies), so the j loop reads shared memory instead of waiting on global loads.
+template <int COLS>
+__device__ __forceinline__ void frame_scan_recurrence(float* __restrict__ states, const float* __restrict__ gramT,
+    const float* __restrict__ injection, const float* __restrict__ decay, unsigned int frames, unsigned int keyDim,
     unsigned int valueDim)
 {
-    __shared__ __align__(16) float tile[2][FRAME_SCAN_MAX_KEY][FRAME_SCAN_COLS];
+    __shared__ __align__(16) float tile[2][FRAME_SCAN_MAX_KEY][COLS];
+    __shared__ __align__(16) float gram[FRAME_SCAN_JTILE][FRAME_SCAN_MAX_KEY];
     const unsigned int h = blockIdx.y;
-    const unsigned int c0 = blockIdx.x * FRAME_SCAN_COLS;
+    const unsigned int c0 = blockIdx.x * COLS;
     const unsigned int r = threadIdx.x;
     const bool active = r < keyDim;
-    const unsigned int cols = min((unsigned int)FRAME_SCAN_COLS, valueDim - c0);
+    const unsigned int cols = min((unsigned int)COLS, valueDim - c0);
     const unsigned long long gramStride = (unsigned long long)keyDim * keyDim;
     const unsigned long long stateStride = (unsigned long long)keyDim * valueDim;
 
@@ -59,7 +60,8 @@ __global__ void frame_scan_recurrence_f32(
     {
         const bool reverse = pass == 1;
         int cur = 0;
-        for (unsigned int c = 0; c < FRAME_SCAN_COLS; c++)
+#pragma unroll
+        for (int c = 0; c < COLS; c++)
             tile[0][r][c] = 0.0f;
         __syncthreads();
 
@@ -76,34 +78,36 @@ __global__ void frame_scan_recurrence_f32(
                     stateRow[c] += tile[cur][r][c];
             }
 
-            float acc[FRAME_SCAN_COLS];
+            float acc[COLS];
 #pragma unroll
-            for (int c = 0; c < FRAME_SCAN_COLS; c++)
+            for (int c = 0; c < COLS; c++)
                 acc[c] = 0.0f;
-            if (active)
+            const float* g = gramT + ht * gramStride;
+            for (unsigned int j0 = 0; j0 < keyDim; j0 += FRAME_SCAN_JTILE)
             {
-                const float* g = gramT + ht * gramStride + r;
-                for (unsigned int j = 0; j < keyDim; j++)
+                const unsigned int rows = min((unsigned int)FRAME_SCAN_JTILE, keyDim - j0);
+                for (unsigned int jj = 0; jj < rows; jj++)
+                    if (active) gram[jj][r] = g[(unsigned long long)(j0 + jj) * keyDim + r];
+                __syncthreads();
+                if (active)
                 {
-                    float gj = g[(unsigned long long)j * keyDim];
-                    const float4* srow = reinterpret_cast<const float4*>(&tile[cur][j][0]);
-#pragma unroll
-                    for (int c4 = 0; c4 < FRAME_SCAN_COLS / 4; c4++)
+                    for (unsigned int jj = 0; jj < rows; jj++)
                     {
-                        float4 sv = srow[c4];
-                        acc[4 * c4 + 0] += gj * sv.x;
-                        acc[4 * c4 + 1] += gj * sv.y;
-                        acc[4 * c4 + 2] += gj * sv.z;
-                        acc[4 * c4 + 3] += gj * sv.w;
+                        const float gj = gram[jj][r];
+                        const float* srow = &tile[cur][j0 + jj][0];
+#pragma unroll
+                        for (int c = 0; c < COLS; c++)
+                            acc[c] += gj * srow[c];
                     }
                 }
+                __syncthreads();
             }
 
             const float d = decay[ht];
             const float* u = injection + ht * stateStride + (unsigned long long)r * valueDim + c0;
             const int nxt = cur ^ 1;
 #pragma unroll
-            for (int c = 0; c < FRAME_SCAN_COLS; c++)
+            for (int c = 0; c < COLS; c++)
             {
                 float next = 0.0f;
                 if (active && (unsigned int)c < cols)
@@ -122,6 +126,30 @@ __global__ void frame_scan_recurrence_f32(
             __syncthreads();
         }
     }
+}
+
+extern "C" {
+
+// grid (ceil(valueDim / FRAME_SCAN_COLS), heads), block FRAME_SCAN_MAX_KEY threads. Writes F_t + R_t per frame.
+// gramT[h, t] is G_t transposed ([keyDim, keyDim], gramT[j][r] = G[r][j]).
+__global__ void frame_scan_recurrence_f32(
+    float* __restrict__ states,           // [heads, frames, keyDim, valueDim]  F_t + R_t
+    const float* __restrict__ gramT,      // [heads, frames, keyDim, keyDim]
+    const float* __restrict__ injection,  // [heads, frames, keyDim, valueDim]
+    const float* __restrict__ decay,      // [heads, frames]
+    unsigned int frames,
+    unsigned int keyDim,
+    unsigned int valueDim)
+{
+    frame_scan_recurrence<FRAME_SCAN_COLS>(states, gramT, injection, decay, frames, keyDim, valueDim);
+}
+
+// valueDim == 1 (a linear-attention denominator): one state column per head, grid (1, heads).
+__global__ void frame_scan_recurrence_col_f32(float* __restrict__ states, const float* __restrict__ gramT,
+    const float* __restrict__ injection, const float* __restrict__ decay, unsigned int frames, unsigned int keyDim,
+    unsigned int valueDim)
+{
+    frame_scan_recurrence<1>(states, gramT, injection, decay, frames, keyDim, valueDim);
 }
 
 } // extern "C"

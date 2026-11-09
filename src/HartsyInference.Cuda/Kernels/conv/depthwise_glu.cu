@@ -18,7 +18,7 @@
 #define DG_VEC 8
 #define DG_RUN 4
 
-__device__ __forceinline__ float dg_silu(float v) { return v / (1.0f + __expf(-v)); }
+__device__ __forceinline__ float dg_silu(float v) { return __fdividef(v, 1.0f + __expf(-v)); }
 
 template <typename T> __device__ __forceinline__ float dg_load(const T* p);
 template <> __device__ __forceinline__ float dg_load<float>(const float* p) { return *p; }
@@ -100,6 +100,45 @@ __global__ void depthwise_glu_bf16(__nv_bfloat16* __restrict__ out, const __nv_b
     depthwise_glu<__nv_bfloat16>(out, in, taps, bias, frames, height, width, hidden, kernel, inputSilu);
 }
 
+// Accumulates one half (value or gate) of a DG_RUN-pixel run: each input column of the three input rows is loaded once and
+// added into every output of the run that reads it (up to three).
+__device__ __forceinline__ void dg_run_half(float (*acc)[DG_VEC], const __nv_bfloat16* __restrict__ in, const float* __restrict__ taps,
+    const float* bias8, unsigned long long f, unsigned int y, unsigned int x0, unsigned int height, unsigned int width,
+    unsigned int channels, unsigned int c, int inputSilu)
+{
+#pragma unroll
+    for (int i = 0; i < DG_RUN; i++)
+#pragma unroll
+        for (int k = 0; k < DG_VEC; k++) acc[i][k] = bias8[k];
+
+#pragma unroll
+    for (int ky = 0; ky < 3; ky++)
+    {
+        const int sy = (int)y + ky - 1;
+        if (sy < 0 || sy >= (int)height) continue;
+        float t[3][DG_VEC];
+#pragma unroll
+        for (int kx = 0; kx < 3; kx++) dg_taps(taps + (unsigned long long)(ky * 3 + kx) * channels + c, t[kx]);
+        const unsigned long long rowBase = (f * height + (unsigned long long)sy) * width;
+#pragma unroll
+        for (int col = 0; col < DG_RUN + 2; col++)
+        {
+            const int sx = (int)x0 + col - 1;
+            if (sx < 0 || sx >= (int)width) continue;
+            float v[DG_VEC];
+            dg_unpack(*reinterpret_cast<const uint4*>(in + (rowBase + (unsigned long long)sx) * channels + c), v, inputSilu);
+#pragma unroll
+            for (int i = 0; i < DG_RUN; i++)
+            {
+                const int kx = col - i;
+                if (kx < 0 || kx > 2) continue;
+#pragma unroll
+                for (int k = 0; k < DG_VEC; k++) acc[i][k] += t[kx][k] * v[k];
+            }
+        }
+    }
+}
+
 // grid (ceil(H/8 / blockDim.x), frames*height); thread = 8 channels of one image row, walked in runs of DG_RUN pixels.
 __global__ void depthwise_glu_bf16_vec(__nv_bfloat16* __restrict__ out, const __nv_bfloat16* __restrict__ in,
     const float* __restrict__ taps, const float* __restrict__ bias, unsigned int frames, unsigned int height,
@@ -124,48 +163,17 @@ __global__ void depthwise_glu_bf16_vec(__nv_bfloat16* __restrict__ out, const __
     for (unsigned int x0 = 0; x0 < width; x0 += DG_RUN)
     {
         float va[DG_RUN][DG_VEC], ga[DG_RUN][DG_VEC];
-#pragma unroll
-        for (int i = 0; i < DG_RUN; i++)
-#pragma unroll
-            for (int c = 0; c < DG_VEC; c++) { va[i][c] = biasV[c]; ga[i][c] = biasG[c]; }
-
-#pragma unroll
-        for (int ky = 0; ky < 3; ky++)
-        {
-            int sy = (int)y + ky - 1;
-            if (sy < 0 || sy >= (int)height) continue;
-            const unsigned long long rowBase = (f * height + (unsigned long long)sy) * width;
-#pragma unroll
-            for (int kx = 0; kx < 3; kx++)
-            {
-                float tv[DG_VEC], tg[DG_VEC];
-                const float* tap = taps + (unsigned long long)(ky * 3 + kx) * channels;
-                dg_taps(tap + c0, tv);
-                dg_taps(tap + hidden + c0, tg);
-#pragma unroll
-                for (int i = 0; i < DG_RUN; i++)
-                {
-                    int sx = (int)x0 + i + kx - 1;
-                    if (sx < 0 || sx >= (int)width) continue;
-                    const __nv_bfloat16* src = in + (rowBase + (unsigned long long)sx) * channels;
-                    float v[DG_VEC], g[DG_VEC];
-                    dg_unpack(*reinterpret_cast<const uint4*>(src + c0), v, inputSilu);
-                    dg_unpack(*reinterpret_cast<const uint4*>(src + hidden + c0), g, inputSilu);
-#pragma unroll
-                    for (int c = 0; c < DG_VEC; c++) { va[i][c] += tv[c] * v[c]; ga[i][c] += tg[c] * g[c]; }
-                }
-            }
-        }
-
+        dg_run_half(va, in, taps, biasV, f, y, x0, height, width, channels, c0, inputSilu);
+        dg_run_half(ga, in, taps, biasG, f, y, x0, height, width, channels, hidden + c0, inputSilu);
 #pragma unroll
         for (int i = 0; i < DG_RUN; i++)
         {
             uint4 packed;
             __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&packed);
 #pragma unroll
-            for (int c = 0; c < DG_VEC / 2; c++)
-                h[c] = __floats2bfloat162_rn(va[i][2 * c] * dg_silu(ga[i][2 * c]), va[i][2 * c + 1] * dg_silu(ga[i][2 * c + 1]));
-            unsigned long long pixel = (f * height + y) * width + x0 + i;
+            for (int k = 0; k < DG_VEC / 2; k++)
+                h[k] = __floats2bfloat162_rn(va[i][2 * k] * dg_silu(ga[i][2 * k]), va[i][2 * k + 1] * dg_silu(ga[i][2 * k + 1]));
+            const unsigned long long pixel = (f * height + y) * width + x0 + i;
             *reinterpret_cast<uint4*>(out + pixel * hidden + c0) = packed;
         }
     }

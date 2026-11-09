@@ -9,8 +9,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>Main branch of one SANA-WM bidirectional Gated-DeltaNet attention layer. Returns the branch before the camera
 /// sum, the output gate and the projection. The forward scan includes the current frame; the reverse scan excludes it.</summary>
-/// <remarks>Runs one batch item at a time. q, k and v stay token-major in F32 and each scan step gathers its frame head-major,
-/// so the item's live set is five <c>[N, C]</c> operands and the numerator. The states and accumulators are F32.</remarks>
+/// <remarks>Runs one batch item at a time. q, k and v stay token-major in F32; both scans are one
+/// <see cref="IBackend.FrameDeltaScan"/> each (the denominator over the unrotated q and k, then the numerator after rotating
+/// them in place), so the item's live set is three <c>[N, C]</c> operands and the numerator. States and accumulators are F32.</remarks>
 public sealed class SanaWmGdnBidi : IDisposable
 {
     private const float RmsEpsilon = 1e-5f;
@@ -182,29 +183,30 @@ public sealed class SanaWmGdnBidi : IDisposable
             _backend.CopyStrided(decayHeads, decay, StridedCopySpec.Gather(new StridedView(decayDims, decayStrides, 0)));
         }
 
-        Tensor kUnrot, kRot, qUnrot, qRot, v;
+        Tensor k, q, v;
         using (StageProfiler.Begin(_backend, profileTag, "attn.main.qkv"))
         {
-            kUnrot = scratch.Track(KeyPath(projected, frames, spatial));
-            kRot = scratch.Track(Rotated(kUnrot, ropeCos, ropeSin, tokens));
-            qUnrot = scratch.Track(QueryPath(projected, tokens));
-            qRot = scratch.Track(Rotated(qUnrot, ropeCos, ropeSin, tokens));
+            k = scratch.Track(KeyPath(projected, frames, spatial));
+            q = scratch.Track(QueryPath(projected, tokens));
             v = scratch.New(tokens, _channels);
             _backend.LinearWeightRows(v, projected, _qkvWeight, null, 2 * _channels, _channels);
         }
 
         scratch.Release(betaRows);
         scratch.Release(decay);
-        // Numerator over the rotated q and k; denominator over the unrotated ones with a unit value.
+        // The denominator scans the unrotated q and k with a unit value; then q and k are rotated in place (no copies) for the
+        // numerator, which scans them against v.
         Tensor num = scratch.New(tokens, _channels);
         Tensor den = scratch.New(tokens, _heads);
         using (StageProfiler.Begin(_backend, profileTag, "attn.main.scan"))
         {
-            _backend.FrameDeltaScan(num, qRot, kRot, v, beta, decayHeads, frames, spatial, _heads, _headDim, _headDim);
-            _backend.FrameDeltaScan(den, qUnrot, kUnrot, null, beta, decayHeads, frames, spatial, _heads, _headDim, 1);
+            _backend.FrameDeltaScan(den, q, k, null, beta, decayHeads, frames, spatial, _heads, _headDim, 1);
+            RotateInPlace(k, ropeCos, ropeSin, tokens);
+            RotateInPlace(q, ropeCos, ropeSin, tokens);
+            _backend.FrameDeltaScan(num, q, k, v, beta, decayHeads, frames, spatial, _heads, _headDim, _headDim);
         }
 
-        foreach (Tensor consumed in new[] { qUnrot, qRot, kUnrot, kRot, v })
+        foreach (Tensor consumed in new[] { q, k, v })
             scratch.Release(consumed);
 
         Tensor output;
@@ -295,21 +297,9 @@ public sealed class SanaWmGdnBidi : IDisposable
         return activated;
     }
 
-    private Tensor Rotated(Tensor source, Tensor cos, Tensor sin, int tokens)
-    {
-        Tensor rotated = SanaWmTensors.Copy(_backend, source, source.Shape);
-        try
-        {
-            _backend.Rotary(RotaryCall.Rows(rotated, cos, sin, tokens, _heads, _headDim, RotaryPairing.Interleaved,
-                RopeTableLayout.InterleavedPair));
-            return rotated;
-        }
-        catch
-        {
-            rotated.Dispose();
-            throw;
-        }
-    }
+    private void RotateInPlace(Tensor tokenMajor, Tensor cos, Tensor sin, int tokens) =>
+        _backend.Rotary(RotaryCall.Rows(tokenMajor, cos, sin, tokens, _heads, _headDim, RotaryPairing.Interleaved,
+            RopeTableLayout.InterleavedPair));
 
     // out = (num_f + num_b) / (den_f + den_b + eps): the reciprocal of each token's per-head denominator scales its head's lanes.
     private Tensor Combine(SanaWmScratch scratch, Tensor num, Tensor den, int tokens)
