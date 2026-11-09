@@ -142,12 +142,14 @@ public sealed class CoLa3DPipelineTests
     public void Generate_AcceptsAPointPromptOnTheLatentResolutionGrid()
     {
         StubDecomposer decomposer = new();
+        RecordingVoxelizer voxelizer = new();
         using CpuBackend backend = new();
-        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, new RecordingVoxelizer(), decomposer);
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, voxelizer, decomposer);
         CoLa3DPrompt prompt = new() { Queries = 1, Points = [0.5f, 0.5f, 0.5f] };
 
         pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt);
 
+        Assert.Equal(CoLa3DConfig.PointQ20.LatentResolution * CoLa3DPipeline.LatentStride, voxelizer.Resolution);
         Assert.NotNull(decomposer.Received);
         Assert.Equal(1, decomposer.Received!.Queries);
     }

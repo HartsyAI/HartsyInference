@@ -67,7 +67,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Scene points for cola3d, one per object as x,y,z in scene units (repeatable).</summary>
         [CommandOption("--prompt-point")]
-        [Description("cola3d: a point per object as x,y,z in the scene mesh's units (repeatable). Excludes --prompt-mask.")]
+        [Description("cola3d: a point per object as x,y,z in the scene mesh's units (repeatable). Runs on the 1024 grid unless --grid is set, which is slow on CPU. Excludes --prompt-mask.")]
         public string[]? PromptPoints { get; init; }
 
         /// <summary>Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).</summary>

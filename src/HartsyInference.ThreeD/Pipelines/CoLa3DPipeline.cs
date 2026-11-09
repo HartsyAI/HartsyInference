@@ -187,7 +187,7 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
 
     /// <summary>Checks the grid and the prompt against a checkpoint's architecture. Loads no weights, so it can reject a request first.</summary>
     /// <param name="config">Architecture of the checkpoint the request targets, from <see cref="CoLa3DConfig.ForQuerySource"/>.</param>
-    /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>.</param>
+    /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>, or the latent grid (1024) for a point prompt.</param>
     /// <param name="prompt">Prompt for a prompt checkpoint; null for the free one.</param>
     public static void ValidateRequest(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
     {
