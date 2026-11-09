@@ -1,5 +1,5 @@
-using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;

@@ -146,11 +146,11 @@ public static unsafe class SparseOps
         return rb;
     }
 
-    /// <summary>Average-pool downsample by <paramref name="factor"/>, returning the downsampled tensor plus the per-input-voxel group index so a paired <see cref="Upsample"/> can gather back to the input coords.</summary>
-    /// <param name="meanIncludeSelf">Divide each group sum by <c>count + 1</c> (torch <c>scatter_reduce</c> mean with <c>include_self=True</c>, as TRELLIS uses) instead of <c>count</c>.</param>
     private sealed class DownGeom { public int[] Idx = null!, Coords = null!, Counts = null!; public int M; }
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<int[], DownGeom> _downCache = new();
 
+    /// <summary>Average-pool downsample by <paramref name="factor"/>, returning the downsampled tensor plus the per-input-voxel group index so a paired <see cref="Upsample"/> can gather back to the input coords.</summary>
+    /// <param name="meanIncludeSelf">Divide each group sum by <c>count + 1</c> (torch <c>scatter_reduce</c> mean with <c>include_self=True</c>, as TRELLIS uses) instead of <c>count</c>.</param>
     public static (SparseTensor down, int[] idx) Downsample(IBackend backend, SparseTensor x, int factor, bool meanIncludeSelf)
     {
         int n = x.Count, c = x.Channels;
