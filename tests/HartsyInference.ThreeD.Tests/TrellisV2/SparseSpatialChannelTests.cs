@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using Xunit;
@@ -92,11 +93,12 @@ public sealed unsafe class SparseSpatialChannelTests
     }
 
     [Fact]
-    public void RepeatChannels_CopiesEachChannelInPlace()
+    public void RepeatInterleave_CopiesEachChannelInPlace()
     {
         using Tensor feats = Feats(new float[] { 1f, 2f }, 1, 2);
+        using Tensor repeated = new(new TensorShape(1, 6), DType.F32);
 
-        using Tensor repeated = SparseSpatialChannel.RepeatChannels(feats, 3);
+        StridedCopies.RepeatInterleave(new CpuBackend(), repeated, feats, 1, 3);
 
         Assert.Equal(new float[] { 1f, 1f, 1f, 2f, 2f, 2f }, ShapeVaeTestData.Read(repeated));
     }

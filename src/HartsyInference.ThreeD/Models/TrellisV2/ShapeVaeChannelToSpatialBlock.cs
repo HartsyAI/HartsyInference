@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 
@@ -47,7 +48,8 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
         Tensor expanded = SparseSpatialChannel.ChannelToSpatialFeats(backend, conv1.Feats, plan, _cout);
         conv1.Feats.Dispose();
         Tensor skipExpanded = SparseSpatialChannel.ChannelToSpatialFeats(backend, x.Feats, plan, _cin / children);
-        Tensor skip = SparseSpatialChannel.RepeatChannels(skipExpanded, _cout / (_cin / children));
+        Tensor skip = ShapeVaeOps.Alloc(m, _cout);
+        StridedCopies.RepeatInterleave(backend, skip, skipExpanded, 2, _cout / (_cin / children));
         skipExpanded.Dispose();
 
         Tensor normed2 = ShapeVaeOps.LayerNormNoAffine(backend, expanded, m, _cout, ShapeVaeOps.BlockNormEps);

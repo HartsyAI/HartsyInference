@@ -48,12 +48,20 @@ internal static class ShapeVaeOps
         return o;
     }
 
-    /// <summary>Checks a sparse input against a block's expectations; fails before any work is queued.</summary>
+    /// <summary>
+    /// Checks a sparse input against a block's expectations; fails before any work is queued. The sparse rulebook keys
+    /// ignore the batch index, so the input must hold a single batch.
+    /// </summary>
     internal static void RequireInput(SparseTensor x, int channels, string name)
     {
         if (x.Count == 0) throw new ArgumentException("Sparse input has no voxels.", name);
         if (x.Channels != channels) throw new ArgumentException($"Sparse input has {x.Channels} channels, expected {channels}.", name);
         if (x.Feats.DType != DType.F32) throw new NotSupportedException($"Shape VAE CPU reference runs in F32; '{name}' is {x.Feats.DType}.");
         SparseSpatialChannel.ValidateCoords(x.Coords, x.Resolution);
+        for (int i = 4; i < x.Coords.Length; i += 4)
+        {
+            if (x.Coords[i] != x.Coords[0])
+                throw new ArgumentException($"Shape VAE CPU reference supports one batch; '{name}' mixes batch indices {x.Coords[0]} and {x.Coords[i]}.", name);
+        }
     }
 }

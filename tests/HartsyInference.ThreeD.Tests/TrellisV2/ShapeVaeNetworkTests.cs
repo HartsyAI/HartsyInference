@@ -110,6 +110,22 @@ public sealed class ShapeVaeNetworkTests
     }
 
     [Fact]
+    public void Encoder_RejectsInputWithMoreThanOneBatch()
+    {
+        Random rng = new(17);
+        int[] coords = ShapeVaeTestData.RandomCoords(rng, 8, FineRes);
+        coords[4] = 1;
+        using Tensor vertices = ShapeVaeTestData.RandomFeats(rng, 8, 3, 0, 1);
+        using Tensor intersected = ShapeVaeTestData.RandomFeats(rng, 8, 3, 0, 1);
+        (Dictionary<string, Tensor> encW, _) = ShapeVaeTestData.RandomPair(ShapeVaeTestData.Encoder(), ShapeVaeTestData.Decoder(), seed: 27);
+        using ShapeVaeEncoder encoder = new(ShapeVaeTestData.Encoder(), encW);
+
+        SparseTensor v = ShapeVaeTestData.Sparse(coords, FineRes, vertices), e = ShapeVaeTestData.Sparse(coords, FineRes, intersected);
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => encoder.Encode(new CpuBackend(), v, e));
+        Assert.Contains("one batch", ex.Message);
+    }
+
+    [Fact]
     public void Decoder_RejectsLatentWithWrongChannelCount()
     {
         Random rng = new(16);
