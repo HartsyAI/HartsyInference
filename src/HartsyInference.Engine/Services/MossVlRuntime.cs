@@ -31,11 +31,13 @@ internal sealed class MossVlRuntime : IDisposable
     /// <summary>Whether the decoder was loaded with the low-VRAM quantized Linear path.</summary>
     public bool LowVramQuant { get; }
 
-    /// <summary>Loads both halves from <paramref name="path"/> (a GGUF or a checkpoint folder) for <paramref name="backend"/> and makes
-    /// their weights resident.</summary>
-    public static MossVlRuntime Load(string path, IBackend backend, bool lowVramQuant)
+    /// <summary>Loads both halves from <paramref name="path"/> (a GGUF or a checkpoint folder, plain or quantized) for
+    /// <paramref name="backend"/> and makes their weights resident.</summary>
+    /// <param name="plainPrecision">A GGUF block type a folder's plain projections are re-quantized to; null keeps them as stored.</param>
+    public static MossVlRuntime Load(string path, IBackend backend, bool lowVramQuant, DType? plainPrecision = null)
     {
-        MossVlModel model = MossVlModel.Open(path, new MossVlLoadOptions { Backend = backend, LowVramQuant = lowVramQuant });
+        MossVlModel model = MossVlModel.Open(path,
+            new MossVlLoadOptions { Backend = backend, LowVramQuant = lowVramQuant, PlainPrecision = plainPrecision });
         MossVlVisionTower? tower = null;
         try
         {

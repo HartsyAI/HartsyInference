@@ -35,6 +35,9 @@ public sealed record RealtimeVlmRequest
 
     /// <summary>Low-VRAM on-the-fly quant to load the model at, as for <see cref="TextRequest.LowVramQuant"/>.</summary>
     public string? LowVramQuant { get; init; }
+
+    /// <summary>Re-quantizes a checkpoint folder's plain projections on load, as for <see cref="TextRequest.WeightPrecision"/>.</summary>
+    public string? WeightPrecision { get; init; }
 }
 
 /// <summary>What a live session reports.</summary>

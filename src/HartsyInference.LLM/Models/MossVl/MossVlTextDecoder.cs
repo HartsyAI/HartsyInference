@@ -24,6 +24,14 @@ public sealed record MossVlLoadOptions
 
     /// <summary>Loads only layers <c>[0, LayerLimit)</c> (for layer-level parity runs); null loads the whole stack.</summary>
     public int? LayerLimit { get; init; }
+
+    /// <summary>A GGUF block type the checkpoint's plain float projections are re-quantized to (see
+    /// <see cref="DenseTextWeightPolicy.ParsePlainPrecision"/>), where the backend keeps it packed; null keeps them as stored.
+    /// Quantized projections (NF4, FP8, GPTQ, …) follow <see cref="DenseTextWeightPolicy"/> either way.</summary>
+    public DType? PlainPrecision { get; init; }
+
+    /// <summary>Where a checkpoint folder's converted weights are cached; null uses <c>_gguf-cache</c> inside the folder.</summary>
+    public string? QuantCachePath { get; init; }
 }
 
 /// <summary>MOSS-VL's text model: a <see cref="GenericTransformer"/> over the checkpoint's <c>model.language_model.*</c> weights and
@@ -84,8 +92,47 @@ public sealed class MossVlTextDecoder : IDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         ValidateLayerLimit(config, options.LayerLimit);   // before any shard is mapped, so a bad limit leaks nothing
+        if (HfQuantCheckpoint.DeclaresQuantization(checkpointDirectory) || options.PlainPrecision is not null)
+            return OpenConverted(checkpointDirectory, config, options);
         CheckpointSource source = CheckpointSource.OpenShards(HfCheckpointDirectory.WeightFiles(checkpointDirectory));
         return Build(source.Weights, source, config, options, ggufLayout: false, checkpointDirectory);
+    }
+
+    /// <summary>Bumped when the converted-weight cache's layout or policy changes.</summary>
+    internal const int CacheVersion = 1;
+
+    /// <summary>A quantized checkpoint folder (bitsandbytes NF4, compressed-tensors FP8, GPTQ, …) or a plain one with
+    /// <see cref="MossVlLoadOptions.PlainPrecision"/>: every text weight is read through <see cref="HfQuantCheckpoint"/> at the dtype
+    /// <see cref="DenseTextWeightPolicy"/> picks for the backend, with the converted ones cached once on disk.</summary>
+    private static MossVlTextDecoder OpenConverted(string directory, MossVlConfig config, MossVlLoadOptions options)
+    {
+        int layers = options.LayerLimit ?? config.Text.NumLayers;
+        bool Include(string key) =>
+            key == SeparatorKey || key == LmHeadKey || (key.StartsWith(Prefix + ".", StringComparison.Ordinal) && !IsAboveLimit(key, layers));
+        DType Target(HfQuantWeight w) => DenseTextWeightPolicy.Target(w,
+            projection: w.Shape.Rank == 2 && (IsBlockProjection(w.Name) || w.Name == LmHeadKey), options.Backend, options.PlainPrecision);
+
+        string plain = options.PlainPrecision?.Name.ToLowerInvariant() ?? "native";
+        string cachePath = options.QuantCachePath
+            ?? Path.Combine(directory, "_gguf-cache", $"moss-vl-text-{plain}-{layers}l-v{CacheVersion}.gguf");
+        Dictionary<string, object> identity = new(StringComparer.Ordinal)
+        {
+            ["hartsy.moss_vl.cache_version"] = CacheVersion,
+            ["hartsy.moss_vl.plain_precision"] = plain,
+        };
+        HfQuantCheckpoint checkpoint = HfQuantCheckpoint.Open(directory);
+        IReadOnlyDictionary<string, Tensor> weights;
+        IDisposable owner;
+        try
+        {
+            (weights, owner) = HfQuantWeightCache.Load(checkpoint, Target, cachePath, "moss_vl", "[MOSS-VL]", identity, Include);
+        }
+        catch
+        {
+            checkpoint.Dispose();
+            throw;
+        }
+        return Build(weights, owner, config, options, ggufLayout: false, directory);
     }
 
     /// <summary>Opens the text model of a MOSS-VL GGUF file (the <c>moss_vl</c> architecture, mapped by <see cref="MossVlKeyMapper"/>).</summary>

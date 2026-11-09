@@ -29,6 +29,7 @@ internal static class RealtimeDispatch
             TopP = temperature is null ? null : parameters.GetFloatOrNull("top-p"),
             Seed = parameters.GetInt("seed", -1) is int seed and >= 0 ? (ulong)seed : null,
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            WeightPrecision = parameters.GetStringOrNull("precision"),
         };
         TimeSpan idleExit = TimeSpan.FromSeconds(parameters.GetDoubleOrNull("idle-exit") ?? 3.0);
         bool showSilence = parameters.GetBool("show-silence", false);

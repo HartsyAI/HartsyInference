@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.Models.MossVl;
 
@@ -40,7 +41,12 @@ public sealed partial class TextService
             backend.CacheQuantizedWeightCasts = false;
         try
         {
-            slot.MossVl = MossVlRuntime.Load(path, backend, lowVramQuant: !string.IsNullOrEmpty(request.LowVramQuant));
+            DType? plainPrecision;
+            try { plainPrecision = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
+            catch (ArgumentException ex) { throw new HartsyInferenceException(ex.Message, ex); }
+            if (plainPrecision is not null && File.Exists(path))
+                Logs.Warning($"[TextService] WeightPrecision '{request.WeightPrecision}' applies to checkpoint folders; the GGUF loads at its own quant.");
+            slot.MossVl = MossVlRuntime.Load(path, backend, lowVramQuant: !string.IsNullOrEmpty(request.LowVramQuant), plainPrecision);
         }
         catch
         {
@@ -111,7 +117,9 @@ public sealed partial class TextService
             return;
         long shardBytes = Directory.EnumerateFiles(folder, "*.safetensors").Sum(f => new FileInfo(f).Length);
         const long MarginBytes = 4L << 30;
-        long requiredBytes = 2 * shardBytes + MarginBytes;
+        // BF16 widens 2x; a 4-bit or FP8 folder holds 4-8 bit projections that widen 4-8x, so 4x the shards bounds it.
+        long widen = ModelAssets.Checkpoints.HfQuantCheckpoint.DeclaresQuantization(folder) ? 4 : 2;
+        long requiredBytes = widen * shardBytes + MarginBytes;
         long availableBytes = availableKb * 1024;
         if (availableBytes < requiredBytes)
             throw new HartsyInferenceException(

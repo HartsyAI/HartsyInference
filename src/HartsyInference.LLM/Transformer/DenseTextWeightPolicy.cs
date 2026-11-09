@@ -1,0 +1,62 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.ModelAssets.Checkpoints;
+
+namespace HartsyInference.LLM.Transformer;
+
+/// <summary>The dtype a dense text decoder loads each Hugging Face weight at, whatever the checkpoint stores: plain float, bitsandbytes
+/// NF4, FP8 (block or per-channel), GPTQ, MXFP4/NVFP4 or MLX affine. A quantized projection becomes the GGUF block type of the same
+/// width that the backend keeps packed (4-bit sources → Q4_0, 8-bit → Q8_0), so it stays about as small as on disk; a backend
+/// without that kernel gets F16, and one with no packed kernels at all (CPU) F32.</summary>
+/// <remarks>Re-quantizing NF4 to Q4_0 is a second quantization (the NF4 values are decoded, then rounded onto Q4_0's grid), not a
+/// bit-exact repack; FP8 to Q8_0 loses less than one FP8 step. Plain float weights keep their dtype unless the caller asks for
+/// <paramref name="plainProjections"/>, which re-quantizes the plain projections too (a BF16 checkpoint, or the layers a 4-bit
+/// checkpoint left in BF16) to fit a smaller card.</remarks>
+public static class DenseTextWeightPolicy
+{
+    /// <summary>The load dtype of <paramref name="weight"/>.</summary>
+    /// <param name="projection">Whether the weight is a rank-2 projection (attention, MLP, <c>lm_head</c>); others stay float.</param>
+    /// <param name="backend">The backend that will run the model; null is a host load (F32 for anything quantized).</param>
+    /// <param name="plainProjections">A GGUF block type for plain float projections, or null to keep them as stored.</param>
+    public static DType Target(HfQuantWeight weight, bool projection, IBackend? backend, DType? plainProjections = null)
+    {
+        ArgumentNullException.ThrowIfNull(weight);
+        if (weight.Storage == HfWeightStorage.Plain)
+        {
+            return projection && plainProjections is { } requested && Packs(backend, weight, requested) ? requested : weight.StoredDType;
+        }
+        if (!projection || weight.Shape.Rank != 2)
+            return DType.F32;
+        DType packed = IsFourBit(weight) ? DType.Q4_0 : DType.Q8_0;
+        if (Packs(backend, weight, packed)) return packed;
+        // A 4-bit source on a backend that has Q8_0 but not Q4_0 still stays packed at twice the size, rather than four times as F16.
+        if (packed == DType.Q4_0 && Packs(backend, weight, DType.Q8_0)) return DType.Q8_0;
+        return backend is null or CpuBackend ? DType.F32 : DType.F16;
+    }
+
+    /// <summary>Parses a precision name for plain projections: <c>native</c> (or empty) keeps them; <c>q8_0</c>, <c>q6_k</c>,
+    /// <c>q5_k</c>, <c>q4_k</c>, <c>q4_0</c> re-quantize them.</summary>
+    /// <exception cref="ArgumentException">Any other name.</exception>
+    public static DType? ParsePlainPrecision(string? name) => name?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "native" or "default" or "bf16" => null,
+        "q8" or "q8_0" => DType.Q8_0,
+        "q6" or "q6_k" => DType.Q6_K,
+        "q5" or "q5_k" => DType.Q5_K,
+        "q4_k" or "q4_k_m" => DType.Q4_K,
+        "q4" or "q4_0" => DType.Q4_0,
+        _ => throw new ArgumentException($"Unknown weight precision '{name}'; expected native, q8_0, q6_k, q5_k, q4_k or q4_0.", nameof(name)),
+    };
+
+    private static bool Packs(IBackend? backend, HfQuantWeight weight, DType packed) =>
+        backend is not null && backend.SupportsResidentQuant(packed) && weight.Shape.Rank == 2 && weight.Shape[1] % packed.BlockElementCount == 0;
+
+    private static bool IsFourBit(HfQuantWeight weight) => weight.Storage switch
+    {
+        HfWeightStorage.Nf4 or HfWeightStorage.GptqInt4 => true,
+        HfWeightStorage.BlockRecipe => weight.Binding?.Encoding is QuantEncoding.Mxfp4E8M0 or QuantEncoding.Nvfp4 or QuantEncoding.AffineInt4,
+        _ => false,
+    };
+}
