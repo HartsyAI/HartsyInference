@@ -23,7 +23,7 @@ internal static class ParityCompare
         for (int i = 0; i < expected.Length; i++)
         {
             double a = actual[i], e = expected[i];
-            if (!double.IsFinite(a))
+            if (!double.IsFinite(a) || !double.IsFinite(e))
             {
                 failures++;
                 continue;

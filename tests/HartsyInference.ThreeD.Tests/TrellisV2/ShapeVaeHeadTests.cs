@@ -21,9 +21,9 @@ public sealed class ShapeVaeHeadTests
         feats.Dispose();
 
         Assert.Equal([2, 3, 4], field.Voxels.Coords);
-        Assert.Equal(0.9621172f, field.Voxels.DualVertices[0], 4);
-        Assert.Equal(0.5f, field.Voxels.DualVertices[1], 4);
-        Assert.Equal(-0.2615942f, field.Voxels.DualVertices[2], 4);
+        Assert.Equal(2f + 0.9621172f, field.Voxels.DualVertices[0], 4);
+        Assert.Equal(3f + 0.5f, field.Voxels.DualVertices[1], 4);
+        Assert.Equal(4f - 0.2615942f, field.Voxels.DualVertices[2], 4);
         Assert.Equal([-1f, 3f, 0.5f], field.IntersectionLogits!);
         Assert.Equal([false, true, true], field.Voxels.Intersected);
         Assert.Equal(MathF.Log(2f), field.SplitWeight[0], 4);

@@ -7,8 +7,7 @@ namespace HartsyInference.ThreeD.Models.TrellisV2;
 
 /// <summary>
 /// Turns the raw shape-VAE decoder head into a dual-grid field, following TRELLIS.2's FlexiDualGrid decode. Channels 0–2
-/// give dual-vertex offsets <c>(1 + 2m)·sigmoid(raw) − m</c> with <c>m = 0.5</c>, relative to the voxel corner (no coordinate
-/// added). Channels 3–5 are the edge logits, kept in <see cref="DualGridField.IntersectionLogits"/>; their sign is the flag.
+/// give absolute dual-vertex positions <c>coord + (1 + 2m)·sigmoid(raw) − m</c> with <c>m = 0.5</c>, in voxel units. Channels 3–5 are the edge logits, kept in <see cref="DualGridField.IntersectionLogits"/>; their sign is the flag.
 /// Channel 6 is the quad split weight, <c>softplus(raw)</c>.
 /// </summary>
 public static class ShapeVaeHead
@@ -29,7 +28,7 @@ public static class ShapeVaeHead
             throw new HartsyInferenceException($"Shape VAE head coords hold {head.Coords.Length} values; expected {n} rows of 4.");
 
         int[] coords = new int[n * 3];
-        float[] offsets = new float[n * 3];
+        float[] vertices = new float[n * 3];
         float[] logits = new float[n * 3];
         bool[] intersected = new bool[n * 3];
         float[] split = new float[n];
@@ -39,7 +38,7 @@ public static class ShapeVaeHead
             for (int a = 0; a < 3; a++)
             {
                 coords[i * 3 + a] = head.Coords[i * 4 + 1 + a];
-                offsets[i * 3 + a] = (1f + 2f * VoxelMargin) * Sigmoid(h[i * 7 + a]) - VoxelMargin;
+                vertices[i * 3 + a] = coords[i * 3 + a] + (1f + 2f * VoxelMargin) * Sigmoid(h[i * 7 + a]) - VoxelMargin;
                 logits[i * 3 + a] = h[i * 7 + 3 + a];
                 intersected[i * 3 + a] = logits[i * 3 + a] > 0f;
             }
@@ -47,7 +46,7 @@ public static class ShapeVaeHead
             split[i] = Softplus(h[i * 7 + 6]);
         }
 
-        return new DualGridField(new DualGridVoxels(coords, offsets, intersected), split, logits);
+        return new DualGridField(new DualGridVoxels(coords, vertices, intersected), split, logits);
     }
 
     private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
