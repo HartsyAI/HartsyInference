@@ -63,14 +63,14 @@ public static class VideoFrameSampling
         return [.. frames];
     }
 
-    /// <summary>One size for every sampled frame: <see cref="SmartResize.Qwen2Vl"/> per frame within <c>MaxFramePixels</c>, then the
+    /// <summary>One size for every sampled frame (<see cref="SmartResize.Qwen2VlVideo"/>): the per-frame cap <c>MaxFramePixels</c>, then the
     /// whole clip (<paramref name="frameCount"/> frames) within <c>VideoMaxPixels</c>, never below <c>MinFramePixels</c> per frame.</summary>
     public static (int Height, int Width) FrameSize(int height, int width, int frameCount, int factor, VideoFrameSamplingOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (frameCount <= 0) throw new ArgumentOutOfRangeException(nameof(frameCount), frameCount, "At least one frame is needed.");
-        long perFrameBudget = Math.Min(options.MaxFramePixels, Math.Max(options.MinFramePixels, options.VideoMaxPixels / frameCount));
-        return SmartResize.Qwen2Vl(height, width, factor, options.MinFramePixels, perFrameBudget);
+        return SmartResize.Qwen2VlVideo(frameCount, height, width, temporalFactor: 1, factor, options.MinFramePixels, options.VideoMaxPixels,
+            options.MinFramePixels, options.MaxFramePixels);
     }
 }
 

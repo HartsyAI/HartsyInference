@@ -57,17 +57,35 @@ public sealed unsafe class MllamaCrossAttentionLayer
 
     /// <summary>Cross-attention + gated FFN: <paramref name="text"/> is <c>[1, t, hidden]</c> (the decoder query), <paramref name="vision"/> is <c>[1, L, hidden]</c> (the encoded image features); returns <c>[1, t, hidden]</c>.</summary>
     /// <param name="rope">Optional MOSS-VL tables: the query rows are rotated by <see cref="MultimodalRope.TextCos"/>, the key rows by the vision tables, and rows with a 0 <see cref="MultimodalRope.RowMask"/> contribute nothing. Null (the mllama default) applies no rotation and no row mask.</param>
-    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor vision, int visionLen, MultimodalRope? rope = null,
+    /// <param name="kvCache">With a cache, <paramref name="vision"/> holds only the vision tokens this forward brings (null when it
+    /// brings none): they are projected once and appended, and the attention reads every vision token the cache holds plus them.
+    /// Without one (mllama), <paramref name="vision"/> is the whole vision sequence, projected for this call only.</param>
+    public Tensor Forward(IBackend backend, Tensor text, int t, Tensor? vision, int visionLen, MultimodalRope? rope = null,
         CrossKvCache? kvCache = null, int layer = 0)
     {
-        if (kvCache?.Get(layer) is { } cached) return Attend(backend, text, t, cached.K, cached.V, visionLen, rope);
-
-        (Tensor kMh, Tensor vMh) = ProjectVision(backend, vision, visionLen, rope);
         if (kvCache is not null)
         {
-            kvCache.Set(layer, kMh, vMh);   // the cache owns them for the rest of the request
-            return Attend(backend, text, t, kMh, vMh, visionLen, rope);
+            int newTokens = vision is null ? 0 : visionLen;
+            if (newTokens > 0)
+            {
+                (Tensor k, Tensor v) = ProjectVision(backend, vision!, newTokens, rope);
+                try
+                {
+                    kvCache.Append(backend, layer, k, v);
+                }
+                finally
+                {
+                    k.Dispose();
+                    v.Dispose();
+                }
+            }
+            (Tensor K, Tensor V) cached = kvCache.Get(layer)
+                ?? throw new InvalidOperationException($"Cross-attention layer {layer} has no vision keys: no vision was appended.");
+            return Attend(backend, text, t, cached.K, cached.V, kvCache.Length + newTokens, rope);
         }
+
+        if (vision is null) throw new ArgumentNullException(nameof(vision), "Cross-attention without a cache needs the vision sequence.");
+        (Tensor kMh, Tensor vMh) = ProjectVision(backend, vision, visionLen, rope);
         try
         {
             return Attend(backend, text, t, kMh, vMh, visionLen, rope);
@@ -89,7 +107,11 @@ public sealed unsafe class MllamaCrossAttentionLayer
         Tensor kN = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         backend.RmsNorm(kN, k, _kNorm, _rmsEps);
         k.Dispose();
-        if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(kN, rope.VisionCos, rope.VisionSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        if (rope is not null)
+        {
+            Tensor cos = rope.VisionCos ?? throw new ArgumentException("Projecting vision keys needs the vision rotary tables.", nameof(rope));
+            backend.Rotary(RotaryCall.TokenMajor(kN, cos, rope.VisionSin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
+        }
         Tensor v = new(new TensorShape(1, visionLen, hkv, d), DType.F32);
         GenericTransformer.Project(backend, v, vision, _vW, null, lowVram: _lowVram);
 

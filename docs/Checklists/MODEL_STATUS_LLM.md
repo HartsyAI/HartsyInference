@@ -151,7 +151,9 @@ Run: `hartsy text -m moss-vl-realtime -i photo.png "What is in this image?"`. A 
 - ✅ End to end on Vulkan through the CLI (GGUF, RTX 3060): a red disc and a blue square are named correctly; decode about 29 tok/s.
 - ✅ Weights load in stored precision for the backend (BF16 on CUDA, F16 on Vulkan, packed GGUF quants).
 - ❌ CUDA not run here (cuBLAS 13 missing; auto-provisioning is in review). Full BF16 generation needs about 21 GB of device memory.
-- ❌ Realtime session loop, video input, NF4/FP8 checkpoints: in progress.
+- ✅ Video: `--video` (ffmpeg) or `--frames-dir`; frames sampled and sized as the reference does, one timed vision block. A moving red disc is described as moving left to right (Vulkan).
+- ✅ Appendable decode session: segments continue positions and append vision once; two segments equal one forward exactly (Vulkan).
+- ❌ Realtime session loop, NF4/FP8 checkpoints: in progress.
 
 ## Remaining work
 

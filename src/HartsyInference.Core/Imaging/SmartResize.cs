@@ -35,6 +35,52 @@ public static class SmartResize
         return (checked((int)hBar), checked((int)wBar));
     }
 
+    /// <summary>The video form of <see cref="Qwen2Vl"/> (MOSS-VL's video processor): one size for every frame of a clip of
+    /// <paramref name="frames"/> frames. The per-frame cap applies first, then the area of the whole clip is brought inside
+    /// [<paramref name="minPixels"/>, <paramref name="maxPixels"/>], then the per-frame floor.</summary>
+    /// <exception cref="ArgumentException">Fewer frames than the temporal factor, a side below <paramref name="factor"/>, or an aspect
+    /// ratio past <see cref="MaxAspectRatio"/>.</exception>
+    public static (int Height, int Width) Qwen2VlVideo(int frames, int height, int width, int temporalFactor, int factor, long minPixels,
+        long maxPixels, long? perFrameMinPixels, long? perFrameMaxPixels)
+    {
+        if (frames < temporalFactor)
+            throw new ArgumentException($"A clip of {frames} frames is shorter than the temporal patch of {temporalFactor}.");
+        if (height < factor || width < factor)
+            throw new ArgumentException($"Video frames of {height}x{width} are smaller than the {factor}-pixel patch block.");
+        double aspect = (double)Math.Max(height, width) / Math.Min(height, width);
+        if (aspect > MaxAspectRatio)
+            throw new ArgumentException($"The video aspect ratio {aspect:G4} exceeds {MaxAspectRatio}; Qwen-VL processors refuse it.");
+        long hBar = (long)Math.Round((double)height / factor, MidpointRounding.ToEven) * factor;
+        long wBar = (long)Math.Round((double)width / factor, MidpointRounding.ToEven) * factor;
+        long tBar = (long)Math.Round((double)frames / temporalFactor, MidpointRounding.ToEven) * temporalFactor;
+
+        if (perFrameMaxPixels is { } perMax && hBar * wBar > perMax)
+        {
+            double beta = Math.Sqrt((double)height * width / perMax);
+            hBar = Math.Max(factor, (long)Math.Floor(height / beta / factor) * factor);
+            wBar = Math.Max(factor, (long)Math.Floor(width / beta / factor) * factor);
+        }
+        if (tBar * hBar * wBar > maxPixels)
+        {
+            double beta = Math.Sqrt((double)frames * height * width / maxPixels);
+            hBar = Math.Max(factor, (long)Math.Floor(height / beta / factor) * factor);
+            wBar = Math.Max(factor, (long)Math.Floor(width / beta / factor) * factor);
+        }
+        else if (tBar * hBar * wBar < minPixels)
+        {
+            double beta = Math.Sqrt(minPixels / ((double)frames * height * width));
+            hBar = (long)Math.Ceiling(height * beta / factor) * factor;
+            wBar = (long)Math.Ceiling(width * beta / factor) * factor;
+        }
+        if (perFrameMinPixels is { } perMin && hBar * wBar < perMin)
+        {
+            double beta = Math.Sqrt((double)perMin / ((double)height * width));
+            hBar = (long)Math.Ceiling(height * beta / factor) * factor;
+            wBar = (long)Math.Ceiling(width * beta / factor) * factor;
+        }
+        return (checked((int)hBar), checked((int)wBar));
+    }
+
     /// <summary>The engine's long-standing Qwen-VL variant: sides below <paramref name="factor"/> are raised to it first, and the
     /// longer side is optionally capped at <paramref name="maxSideLength"/> before snapping. Kept for the callers whose parity was
     /// measured against it (Qwen3-VL text encoders, Boogu-Image).</summary>

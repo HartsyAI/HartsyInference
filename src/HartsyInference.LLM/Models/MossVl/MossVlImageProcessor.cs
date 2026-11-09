@@ -106,11 +106,53 @@ public sealed class MossVlImageProcessor
         }
     }
 
-    /// <summary>Preprocesses one image at an explicit pixel cap (a video frame sized by <see cref="VideoFrameSampling.FrameSize"/>
-    /// passes that size's area).</summary>
+    /// <summary>Preprocesses one image at an explicit pixel cap.</summary>
     public VisionPatchGrid Preprocess(RawRgbFrame image, long maxPixels)
     {
         (int h, int w) = TargetSize(image.Height, image.Width, maxPixels);
         return _pre.Preprocess(image, h, w);
+    }
+
+    /// <summary>Preprocesses the sampled frames of one video at one shared size (<see cref="VideoFrameSampling.FrameSize"/>: the clip's
+    /// frames share <see cref="VideoFrameSamplingOptions.VideoMaxPixels"/>), each as its own temporal patch. Results are in frame order;
+    /// the caller owns them.</summary>
+    /// <exception cref="ArgumentException">The frames differ in size.</exception>
+    public VisionPatchGrid[] PreprocessVideo(IReadOnlyList<RawRgbFrame> frames, VideoFrameSamplingOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(frames);
+        if (frames.Count == 0) return [];
+        int height = frames[0].Height, width = frames[0].Width;
+        if (frames.Any(f => f.Height != height || f.Width != width))
+            throw new ArgumentException("The frames of one video must share a size.", nameof(frames));
+        (int h, int w) = VideoFrameSampling.FrameSize(height, width, frames.Count, Spec.Factor, options);
+        VisionPatchGrid[] grids = new VisionPatchGrid[frames.Count];
+        try
+        {
+            for (int i = 0; i < frames.Count; i++) grids[i] = _pre.Preprocess(frames[i], h, w);
+            return grids;
+        }
+        catch
+        {
+            foreach (VisionPatchGrid? g in grids) g?.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Reads a checkpoint's <c>video_preprocessor_config.json</c>: fps, frame bounds, the clip's pixel budget and the per-frame
+    /// bounds. Missing fields keep the released checkpoint's values.</summary>
+    public static VideoFrameSamplingOptions VideoOptionsFromJson(JsonElement root)
+    {
+        VideoFrameSamplingOptions defaults = new();
+        double fps = root.TryGetProperty("video_fps", out JsonElement f) && f.TryGetDouble(out double fv) ? fv : defaults.Fps;
+        int Int(string name, int fallback) => root.TryGetProperty(name, out JsonElement v) && v.TryGetInt32(out int i) ? i : fallback;
+        long Long(JsonElement e, string name, long fallback) => e.TryGetProperty(name, out JsonElement v) && v.TryGetInt64(out long l) ? l : fallback;
+        long min = defaults.MinFramePixels, max = defaults.MaxFramePixels;
+        if (root.TryGetProperty("size", out JsonElement size))
+        {
+            min = Long(size, "shortest_edge", min);
+            max = Long(size, "longest_edge", max);
+        }
+        return new VideoFrameSamplingOptions(fps, Int("min_frames", defaults.MinFrames), Int("max_frames", defaults.MaxFrames),
+            Long(root, "video_max_pixels", defaults.VideoMaxPixels), min, max);
     }
 }

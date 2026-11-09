@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Multimodal;
+using HartsyInference.LLM.Multimodal.Streaming;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -13,90 +14,168 @@ namespace HartsyInference.LLM.Models.MossVl;
 /// <param name="MergedWidth">The merged grid width.</param>
 public readonly record struct MossVlImageFeatures(Tensor MergedTokens, int MergedHeight, int MergedWidth);
 
-/// <summary>One MOSS-VL request: a prefill over the prompt and its images, then single-token decode steps. Every step reads the
-/// same vision features through the gated cross-attention layers, with the decode token's position continuing the prompt's.</summary>
-/// <remarks>Holds the KV cache, the vision tensor and its projected cross-attention keys and values; dispose it when the request ends.
-/// If a forward throws part-way, the session is faulted and refuses further calls, because its KV cache no longer matches the tokens.</remarks>
+//// <summary>Size limits of a <see cref="MossVlDecodeSession"/>.</summary>
+/// <param name="InitialTextCapacity">Text positions the self-attention cache starts with; it doubles as a session grows.</param>
+/// <param name="MaxTextTokens">The most text tokens a session holds before it refuses to grow.</param>
+/// <param name="MaxVisionTokens">The most vision tokens (frames and separators) the cross-attention cache holds. The model has no
+/// visual-KV window, so a session that reaches it is refused rather than silently dropping vision.</param>
+public sealed record MossVlSessionLimits(int InitialTextCapacity = 1024, int MaxTextTokens = 32768, int MaxVisionTokens = 65536);
+
+/// <summary>A MOSS-VL token stream: segments of text and images are appended one forward at a time, and the model's state (the
+/// self-attention cache, the vision keys and values of every image so far, and the next position) carries across them. A plain
+/// request is one segment (the prompt with its images) followed by one-token segments (decode steps); a video or a live session
+/// appends frames and prompts as they come.</summary>
+/// <remarks>
+/// <para>Positions follow the realtime model's <c>_compute_realtime_mrope_for_segment</c>: each segment starts where the last ended, and a
+/// row sees every image before it in the stream (<see cref="MossVlPositions.PlanSegment"/>). Each image's vision keys and values are
+/// projected once, when its segment runs, and appended to the cross-attention cache.</para>
+/// <para>A forward cancelled through its token commits nothing and the session stays usable. A forward that throws anything else
+/// faults the session, which then refuses further calls, because its caches may no longer match the tokens.</para>
+/// </remarks>
 public sealed class MossVlDecodeSession : IDisposable
 {
     private readonly MossVlTextDecoder _decoder;
     private readonly MossVlConfig _config;
     private readonly IBackend _backend;
-    private readonly int[] _promptIds;
-    private readonly MossVlPositionPlan _promptPlan;
-    private readonly Tensor _vision;
-    private readonly Tensor _visionCos;
-    private readonly Tensor _visionSin;
-    private readonly FixedKvCache _cache;
+    private readonly MossVlSessionLimits _limits;
     private readonly CrossKvCache _crossKv;
+    private FixedKvCache _cache;
     private int _cacheLength;
     private int _nextPosition;
-    private bool _prefilled;
     private bool _faulted;
     private int _disposed;
+    private (int[] Ids, MossVlImageFeatures[] Images)? _pendingPrompt;
 
-    /// <param name="images">The request's images, in the order their placeholders appear in <paramref name="promptIds"/>.</param>
-    /// <param name="maxNewTokens">The most tokens the session will decode; sizes the KV cache.</param>
-    /// <exception cref="ArgumentException">No image, or a merged tensor that does not match its grid.</exception>
-    public MossVlDecodeSession(MossVlTextDecoder decoder, MossVlConfig config, IBackend backend, int[] promptIds,
-        IReadOnlyList<MossVlImageFeatures> images, int maxNewTokens)
+    /// <summary>Creates an empty session; append segments with <see cref="Forward{T}"/>.</summary>
+    public MossVlDecodeSession(MossVlTextDecoder decoder, MossVlConfig config, IBackend backend, MossVlSessionLimits? limits = null)
     {
-        if (images.Count == 0) throw new ArgumentException("A MOSS-VL session needs at least one image.", nameof(images));
-        MossVlImage[] grids = new MossVlImage[images.Count];
-        Tensor[] merged = new Tensor[images.Count];
-        for (int k = 0; k < images.Count; k++)
-        {
-            // Each image's own token count must match its grid: a total that only matches in sum would misplace the separators.
-            long expected = (long)images[k].MergedHeight * images[k].MergedWidth;
-            if (images[k].MergedTokens.Shape[0] != expected)
-                throw new ArgumentException($"Image {k} has {images[k].MergedTokens.Shape[0]} merged tokens for a {images[k].MergedHeight}x{images[k].MergedWidth} grid ({expected}).", nameof(images));
-            grids[k] = new MossVlImage(images[k].MergedHeight, images[k].MergedWidth);
-            merged[k] = images[k].MergedTokens;
-        }
-
         _decoder = decoder;
         _config = config;
         _backend = backend;
-        _promptIds = promptIds;
-        _promptPlan = MossVlPositions.Plan(promptIds, config.ImageTokenId, grids);
-        _vision = decoder.AppendSeparators(merged);
-        // The images' vision rotary tables are the same for every step, so they are built once here.
-        Tensor? visionCos = null, visionSin = null;
+        _limits = limits ?? new MossVlSessionLimits();
+        TransformerConfig text = decoder.TextConfig;
+        _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim, Math.Max(1, _limits.InitialTextCapacity));
+        _crossKv = new CrossKvCache(text.NumLayers);
+    }
+
+    /// <summary>A one-request session: <see cref="Prefill()"/> runs <paramref name="promptIds"/> with <paramref name="images"/>, then
+    /// <see cref="Step(int)"/> decodes. The caches are sized for the prompt and <paramref name="maxNewTokens"/>.</summary>
+    /// <param name="images">The request's images, in the order their placeholders appear in <paramref name="promptIds"/>.</param>
+    /// <exception cref="ArgumentException">No image, or a merged tensor that does not match its grid.</exception>
+    public MossVlDecodeSession(MossVlTextDecoder decoder, MossVlConfig config, IBackend backend, int[] promptIds,
+        IReadOnlyList<MossVlImageFeatures> images, int maxNewTokens)
+        : this(decoder, config, backend, new MossVlSessionLimits(InitialTextCapacity: promptIds.Length + maxNewTokens + 1))
+    {
+        if (images.Count == 0)
+        {
+            Dispose();
+            throw new ArgumentException("A MOSS-VL session needs at least one image.", nameof(images));
+        }
         try
         {
-            if (_vision.Shape[1] != _promptPlan.VisionLength)
-                throw new ArgumentException($"Vision tokens {_vision.Shape[1]} do not match the image grids ({_promptPlan.VisionLength} with separators).", nameof(images));
-            (visionCos, visionSin) = MossVlPositions.BuildVisionTables(_promptPlan, config);
-            TransformerConfig text = decoder.TextConfig;
-            _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim, promptIds.Length + maxNewTokens + 1);
-            _crossKv = new CrossKvCache(text.NumLayers);
-            _visionCos = visionCos;
-            _visionSin = visionSin;
+            ValidateImages(images);
         }
         catch
         {
-            visionCos?.Dispose();
-            visionSin?.Dispose();
-            _vision.Dispose();
+            Dispose();
             throw;
+        }
+        _pendingPrompt = (promptIds, [.. images]);
+    }
+
+    /// <summary>The position the next token takes.</summary>
+    public int Position => _nextPosition;
+
+    /// <summary>Text tokens the session holds.</summary>
+    public int TextTokens => _cacheLength;
+
+    /// <summary>Vision tokens (merged tokens and separators) the session holds.</summary>
+    public int VisionTokens => _crossKv.Length;
+
+    /// <summary>Appends one segment, <paramref name="ids"/> with the <paramref name="images"/> its placeholders reference (in order), and runs
+    /// <paramref name="read"/> over the final-normed hidden state of its <c>ids.Length</c> rows.</summary>
+    /// <exception cref="ArgumentException">An empty segment, or a merged tensor that does not match its grid.</exception>
+    /// <exception cref="NotSupportedException">The segment would pass <see cref="MossVlSessionLimits"/>.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired; nothing was appended and the session is still usable.</exception>
+    public T Forward<T>(ReadOnlySpan<int> ids, IReadOnlyList<MossVlImageFeatures> images, Func<Tensor, int, T> read,
+        CancellationToken cancel = default)
+    {
+        ThrowIfUnusable();
+        if (ids.IsEmpty) throw new ArgumentException("A segment needs at least one token.", nameof(ids));
+        ValidateImages(images);
+        int t = ids.Length;
+        MossVlImage[] grids = images.Select(i => new MossVlImage(i.MergedHeight, i.MergedWidth)).ToArray();
+        MossVlPositionPlan plan = MossVlPositions.PlanSegment(ids, _config.ImageTokenId, grids, _nextPosition, _crossKv.Length);
+        if (_crossKv.Length + plan.VisionLength > _limits.MaxVisionTokens)
+            throw new NotSupportedException($"The session would hold {_crossKv.Length + plan.VisionLength} vision tokens, past its limit of "
+                + $"{_limits.MaxVisionTokens}. MOSS-VL has no visual-KV window to drop old frames; start a new session.");
+        EnsureTextCapacity(_cacheLength + t);
+
+        int[] tokens = ids.ToArray();
+        Tensor? vision = images.Count > 0 ? _decoder.AppendSeparators(images.Select(i => i.MergedTokens).ToArray()) : null;
+        try
+        {
+            using MossVlRope rope = MossVlPositions.BuildSegmentRope(plan, _config);
+            using Tensor embeds = new(new TensorShape(1, t, _decoder.TextConfig.HiddenSize), DType.F32);
+            _decoder.Model.EmbedLookup(embeds, tokens);
+            using Tensor hidden = _decoder.Model.ForwardEmbeds(_backend, embeds, t, _cacheLength, _cache, applyFinalNorm: true,
+                crossStates: vision, crossLen: plan.VisionLength, cancel: cancel, rope: rope.Rope, crossKv: _crossKv);
+            _cacheLength += t;
+            _nextPosition = plan.NextPosition;
+            // Read before the tables and vision tensor are released, so an asynchronous backend never frees them under a queued kernel.
+            return read(hidden, t);
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+        {
+            throw;   // the forward committed nothing: both caches still match the tokens
+        }
+        catch
+        {
+            _faulted = true;   // the caches may hold rows the session never counted
+            throw;
+        }
+        finally
+        {
+            vision?.Dispose();
         }
     }
 
-    /// <summary>Runs the prompt through the model and returns the logits after its last token.</summary>
-    public float[] Prefill() =>
-        RunPrefill(hidden => VlmDecodeOps.LastLogits(_backend, _decoder.Model, hidden, _promptIds.Length));
+    /// <summary>Appends a segment and returns the logits after its last token.</summary>
+    public float[] ForwardLogits(ReadOnlySpan<int> ids, IReadOnlyList<MossVlImageFeatures> images, CancellationToken cancel = default) =>
+        Forward(ids, images, (hidden, t) => VlmDecodeOps.LastLogits(_backend, _decoder.Model, hidden, t), cancel);
 
-    /// <summary>Runs the prompt and selects the first generated token with <paramref name="sampler"/>; the logits are read on the device.</summary>
-    public int Prefill(SamplerChain sampler, List<int> history) =>
-        RunPrefill(hidden => VlmDecodeOps.SampleLast(_backend, _decoder.Model, hidden, _promptIds.Length, sampler, history));
+    /// <summary>Appends a segment and samples the token after it with <paramref name="sampler"/>; the logits are read on the device.</summary>
+    public int ForwardSample(ReadOnlySpan<int> ids, IReadOnlyList<MossVlImageFeatures> images, SamplerChain sampler, List<int> history,
+        CancellationToken cancel = default) =>
+        Forward(ids, images, (hidden, t) => VlmDecodeOps.SampleLast(_backend, _decoder.Model, hidden, t, sampler, history), cancel);
+
+    /// <summary>Runs the prompt given at construction and returns the logits after its last token.</summary>
+    public float[] Prefill()
+    {
+        (int[] ids, MossVlImageFeatures[] images) = TakePrompt();
+        return ForwardLogits(ids, images);
+    }
+
+    /// <summary>Runs the prompt given at construction and selects the first generated token with <paramref name="sampler"/>.</summary>
+    public int Prefill(SamplerChain sampler, List<int> history)
+    {
+        (int[] ids, MossVlImageFeatures[] images) = TakePrompt();
+        return ForwardSample(ids, images, sampler, history);
+    }
 
     /// <summary>Decodes one token after the last one and returns the logits after it.</summary>
-    public float[] Step(int token) =>
-        RunStep(token, hidden => VlmDecodeOps.LastLogits(_backend, _decoder.Model, hidden, 1));
+    public float[] Step(int token)
+    {
+        RequirePrefilled();
+        return ForwardLogits([token], []);
+    }
 
-    /// <summary>Decodes one token after the last one and selects the next with <paramref name="sampler"/>; the logits are read on the device.</summary>
-    public int Step(int token, SamplerChain sampler, List<int> history) =>
-        RunStep(token, hidden => VlmDecodeOps.SampleLast(_backend, _decoder.Model, hidden, 1, sampler, history));
+    /// <summary>Decodes one token after the last one and selects the next with <paramref name="sampler"/>.</summary>
+    public int Step(int token, SamplerChain sampler, List<int> history)
+    {
+        RequirePrefilled();
+        return ForwardSample([token], [], sampler, history);
+    }
 
     /// <inheritdoc/>
     public void Dispose()
@@ -104,91 +183,58 @@ public sealed class MossVlDecodeSession : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _crossKv.Dispose();
         _cache.Dispose();
-        _visionCos.Dispose();
-        _visionSin.Dispose();
-        _vision.Dispose();
     }
 
-    /// <summary>Prefill forward, then <paramref name="read"/> over its hidden state. The rope tables and embeddings stay alive until the
-    /// read has returned, so an asynchronous backend cannot free them under a queued kernel.</summary>
-    private T RunPrefill<T>(Func<Tensor, T> read)
+    private (int[] Ids, MossVlImageFeatures[] Images) TakePrompt()
     {
         ThrowIfUnusable();
-        if (_prefilled) throw new InvalidOperationException("The prompt is already prefilled.");
-        int t = _promptIds.Length;
-        try
-        {
-            // The images' vision tables are the session's own, borrowed here (see BuildRopeOverVisionTables).
-            using MossVlRope rope = MossVlPositions.BuildRopeOverVisionTables(_promptPlan, _config, _visionCos, _visionSin);
-            using Tensor embeds = new(new TensorShape(1, t, _decoder.TextConfig.HiddenSize), DType.F32);
-            _decoder.Model.EmbedLookup(embeds, _promptIds);
-            using Tensor hidden = _decoder.Model.ForwardEmbeds(_backend, embeds, t, 0, _cache, applyFinalNorm: true,
-                crossStates: _vision, crossLen: _promptPlan.VisionLength, rope: rope.Rope, crossKv: _crossKv);
-            _prefilled = true;
-            _cacheLength = t;
-            _nextPosition = MaxPosition(_promptPlan.Text) + 1;
-            return read(hidden);
-        }
-        catch
-        {
-            _faulted = true;   // the cache may hold rows the session never counted
-            throw;
-        }
+        if (_pendingPrompt is not { } prompt)
+            throw new InvalidOperationException(_cacheLength > 0 ? "The prompt is already prefilled." : "This session was created without a prompt; use Forward.");
+        _pendingPrompt = null;
+        return prompt;
     }
 
-    /// <summary>One decode forward for <paramref name="token"/>, then <paramref name="read"/> over its hidden state (see <see cref="RunPrefill{T}"/>).</summary>
-    private T RunStep<T>(int token, Func<Tensor, T> read)
+    private void RequirePrefilled()
     {
-        ThrowIfUnusable();
-        if (!_prefilled) throw new InvalidOperationException("Prefill must run before a decode step.");
-        int position = _nextPosition;
-        // A decode token is text: all three axes at the next position. It follows every image, so its row sees all of them and
-        // needs neither a row mask nor a cross bias.
-        MossVlPositionPlan stepPlan = new()
+        if (_cacheLength == 0) throw new InvalidOperationException("Prefill must run before a decode step.");
+    }
+
+    /// <summary>Grows the self-attention cache (doubling, copied on the device) so it holds <paramref name="needed"/> tokens.</summary>
+    private void EnsureTextCapacity(int needed)
+    {
+        if (needed <= _cache.Capacity) return;
+        if (needed > _limits.MaxTextTokens)
+            throw new NotSupportedException($"The session would hold {needed} text tokens, past its limit of {_limits.MaxTextTokens}; start a new session.");
+        int capacity = Math.Min(_limits.MaxTextTokens, Math.Max(needed, _cache.Capacity * 2));
+        FixedKvCache grown = _cache.CopyWithCapacity(capacity);
+        _backend.Sync();   // the copy is queued on the device; the old buffers must outlive it
+        _cache.Dispose();
+        _cache = grown;
+    }
+
+    private static void ValidateImages(IReadOnlyList<MossVlImageFeatures> images)
+    {
+        for (int k = 0; k < images.Count; k++)
         {
-            Text = [position, position, position],
-            Vision = _promptPlan.Vision,
-            VisionLength = _promptPlan.VisionLength,
-            RowMask = null,
-            CrossGroups = null,
-        };
-        try
-        {
-            using MossVlRope rope = MossVlPositions.BuildRopeOverVisionTables(stepPlan, _config, _visionCos, _visionSin);
-            using Tensor embeds = new(new TensorShape(1, 1, _decoder.TextConfig.HiddenSize), DType.F32);
-            _decoder.Model.EmbedLookup(embeds, [token]);
-            using Tensor hidden = _decoder.Model.ForwardEmbeds(_backend, embeds, 1, _cacheLength, _cache, applyFinalNorm: true,
-                crossStates: _vision, crossLen: _promptPlan.VisionLength, rope: rope.Rope, crossKv: _crossKv);
-            _nextPosition++;
-            _cacheLength++;
-            return read(hidden);
-        }
-        catch
-        {
-            _faulted = true;
-            throw;
+            // Each image's own token count must match its grid: a total that only matches in sum would misplace the separators.
+            long expected = (long)images[k].MergedHeight * images[k].MergedWidth;
+            if (images[k].MergedTokens.Shape[0] != expected)
+                throw new ArgumentException($"Image {k} has {images[k].MergedTokens.Shape[0]} merged tokens for a {images[k].MergedHeight}x{images[k].MergedWidth} grid ({expected}).", nameof(images));
         }
     }
 
     private void ThrowIfUnusable()
     {
         if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(MossVlDecodeSession));
-        if (_faulted) throw new InvalidOperationException("An earlier forward failed part-way, so the KV cache no longer matches the decoded tokens; start a new session.");
-    }
-
-    private static int MaxPosition(int[] axisMajor)
-    {
-        int max = 0;
-        foreach (int p in axisMajor) max = Math.Max(max, p);
-        return max;
+        if (_faulted) throw new InvalidOperationException("An earlier forward failed part-way, so the session's caches no longer match its tokens; start a new session.");
     }
 }
 
-/// <summary>Greedy or sampled MOSS-VL generation for one or more images and one question, in the Qwen-VL ChatML layout the checkpoint's
-/// chat template uses.</summary>
+/// <summary>Greedy or sampled MOSS-VL generation for still images and a video with one question, in the layout the checkpoint's
+/// processor and chat template produce (<see cref="MossVlRealtimeProtocol.OfflinePrompt"/>).</summary>
 public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig config, ILlmTokenizer tokenizer, IBackend backend)
 {
-    private const string ImagePlaceholder = "<|vision_start|><|image_pad|><|vision_end|>";
+    private readonly MossVlRealtimeProtocol _protocol = new(config, tokenizer);
 
     /// <summary>Generates a reply to <paramref name="question"/> about one image. Sampling defaults match the other VLM generators
     /// (<see cref="MllamaGenerator"/>).</summary>
@@ -211,8 +257,26 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         Action<string>? onDelta, CancellationToken cancel)
     {
         if (images.Count == 0) throw new ArgumentException("MOSS-VL generation needs at least one image.", nameof(images));
-        string placeholders = string.Concat(Enumerable.Repeat(ImagePlaceholder, images.Count));
-        int[] ids = tokenizer.Encode("<|im_start|>user\n" + placeholders + question + "<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+        return Run(question, images, [], maxTokens, sampling, onDelta, cancel);
+    }
+
+    /// <summary>Generates a reply to <paramref name="question"/> about a video: <paramref name="frames"/> are its sampled frames in time
+    /// order, each with its timestamp, after any still <paramref name="images"/> (the processor's order).</summary>
+    /// <exception cref="ArgumentException">Neither a frame nor an image is given.</exception>
+    public MossVlGeneration GenerateVideo(string question, IReadOnlyList<VisionFrameFeatures> frames, int maxTokens, SamplingOptions? sampling,
+        Action<string>? onDelta, CancellationToken cancel, IReadOnlyList<MossVlImageFeatures>? images = null)
+    {
+        images ??= [];
+        if (frames.Count == 0 && images.Count == 0)
+            throw new ArgumentException("MOSS-VL video generation needs at least one frame.", nameof(frames));
+        return Run(question, images, frames, maxTokens, sampling, onDelta, cancel);
+    }
+
+    private MossVlGeneration Run(string question, IReadOnlyList<MossVlImageFeatures> images, IReadOnlyList<VisionFrameFeatures> frames,
+        int maxTokens, SamplingOptions? sampling, Action<string>? onDelta, CancellationToken cancel)
+    {
+        int[] ids = tokenizer.Encode(_protocol.OfflinePrompt(images.Count, frames.Select(f => f.TimestampSeconds).ToArray(), question),
+            addSpecial: true);
         if (maxTokens <= 0) return new MossVlGeneration(string.Empty, ids.Length, 0, HitTokenLimit: true);
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
@@ -222,33 +286,16 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         // The turn ends with <|im_end|> whatever the tokenizer source lists as its EOS (a GGUF's own vocabulary may name another).
         if (tokenizer.SpecialId("<|im_end|>") is int imEnd) stops.Add(imEnd);
         List<int> history = [];
-        List<int> generated = [];
-        int emitted = 0;
+        // Placeholders appear images first, then the video's frames, which is the order the session reads the features in.
+        MossVlImageFeatures[] vision = [.. images, .. frames.Select(f => new MossVlImageFeatures(f.MergedTokens, f.MergedHeight, f.MergedWidth))];
 
-        using MossVlDecodeSession session = new(decoder, config, backend, ids, images, maxTokens);
+        using MossVlDecodeSession session = new(decoder, config, backend,
+            new MossVlSessionLimits(InitialTextCapacity: ids.Length + maxTokens + 1, MaxTextTokens: Math.Max(32768, ids.Length + maxTokens + 1)));
         cancel.ThrowIfCancellationRequested();
-        int token = session.Prefill(sampler, history);
-        while (!stops.Contains(token) && generated.Count < maxTokens)
-        {
-            generated.Add(token);
-            history.Add(token);
-            if (onDelta is not null)
-            {
-                string text = tokenizer.Decode([.. generated]);
-                // A token can end inside a multi-byte character; hold the piece until the character completes.
-                if (text.Length > emitted && text[^1] != '�')
-                {
-                    onDelta(text[emitted..]);
-                    emitted = text.Length;
-                }
-            }
-            if (generated.Count == maxTokens) break;
-            cancel.ThrowIfCancellationRequested();
-            token = session.Step(token, sampler, history);
-        }
-        string reply = tokenizer.Decode([.. generated]);
-        if (onDelta is not null && reply.Length > emitted) onDelta(reply[emitted..]);
-        return new MossVlGeneration(reply, ids.Length, generated.Count, HitTokenLimit: !stops.Contains(token));
+        int first = session.ForwardSample(ids, vision, sampler, history, cancel);
+        (string text, int tokens, bool hitLimit) = VlmDecodeOps.DecodeLoop(tokenizer, first,
+            token => session.ForwardSample([token], [], sampler, history, cancel), stops, maxTokens, history, onDelta, cancel);
+        return new MossVlGeneration(text, ids.Length, tokens, hitLimit);
     }
 }
 

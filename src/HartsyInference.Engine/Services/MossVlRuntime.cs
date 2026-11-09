@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.Models.MossVl;
+using HartsyInference.LLM.Multimodal.Streaming;
 using HartsyInference.LLM.Sampling;
 
 namespace HartsyInference.Engine.Services;
@@ -51,31 +52,53 @@ internal sealed class MossVlRuntime : IDisposable
     /// <summary>Answers <paramref name="question"/> about <paramref name="images"/> (in prompt order). The images share the model's
     /// batch pixel budget, run through the tower one at a time, and feed one reply streamed through <paramref name="onDelta"/>.</summary>
     public MossVlGeneration Generate(string question, IReadOnlyList<ImageData> images, int maxTokens, SamplingOptions sampling,
-        Action<string>? onDelta, CancellationToken cancel)
+        Action<string>? onDelta, CancellationToken cancel) =>
+        Generate(question, images, video: [], videoSampling: null, maxTokens, sampling, onDelta, cancel);
+
+    /// <summary>Answers <paramref name="question"/> about still <paramref name="images"/> and a <paramref name="video"/> of timed frames
+    /// (already sampled; in time order). The images share the batch pixel budget; the video's frames share one size from
+    /// <paramref name="videoSampling"/> (the model's settings when null). Each frame runs through the tower on its own.</summary>
+    public MossVlGeneration Generate(string question, IReadOnlyList<ImageData> images, IReadOnlyList<TimedImage> video,
+        VideoFrameSamplingOptions? videoSampling, int maxTokens, SamplingOptions sampling, Action<string>? onDelta, CancellationToken cancel)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (images.Count == 0)
-            throw new Core.Exceptions.HartsyInferenceException("MOSS-VL-Realtime answers about images: attach at least one image to the user message.");
-        VisionPatchGrid[] grids = Model.Processor.PreprocessBatch(images.Select(i => new RawRgbFrame(i.Rgb, i.Width, i.Height)).ToArray());
+        if (images.Count == 0 && video.Count == 0)
+            throw new Core.Exceptions.HartsyInferenceException(
+                "MOSS-VL-Realtime answers about images and video: attach at least one image or a video to the user message.");
+        VisionPatchGrid[] stills = Model.Processor.PreprocessBatch(images.Select(i => new RawRgbFrame(i.Rgb, i.Width, i.Height)).ToArray());
+        VisionPatchGrid[] frames = [];
         List<Tensor> merged = [];
         try
         {
-            List<MossVlImageFeatures> features = new(grids.Length);
-            foreach (VisionPatchGrid grid in grids)
+            frames = Model.Processor.PreprocessVideo(video.Select(f => new RawRgbFrame(f.Image.Rgb, f.Image.Width, f.Image.Height)).ToArray(),
+                videoSampling ?? Model.VideoSampling);
+            List<MossVlImageFeatures> stillFeatures = [.. stills.Select(g => Encode(g, merged, cancel))];
+            List<VisionFrameFeatures> frameFeatures = new(frames.Length);
+            for (int i = 0; i < frames.Length; i++)
             {
-                cancel.ThrowIfCancellationRequested();
-                Tensor tokens = Tower.Encoder.Forward(_backend, grid.PixelValues, grid.GridT, grid.GridH, grid.GridW).MergedTokens;
-                merged.Add(tokens);
-                features.Add(new MossVlImageFeatures(tokens, grid.MergedHeight, grid.MergedWidth));
+                MossVlImageFeatures f = Encode(frames[i], merged, cancel);
+                frameFeatures.Add(new VisionFrameFeatures(f.MergedTokens, f.MergedHeight, f.MergedWidth, video[i].TimestampSeconds));
             }
             MossVlGenerator generator = new(Model.Decoder, Model.Config, Model.Tokenizer, _backend);
-            return generator.Generate(question, features, maxTokens, sampling, onDelta, cancel);
+            return frameFeatures.Count == 0
+                ? generator.Generate(question, stillFeatures, maxTokens, sampling, onDelta, cancel)
+                : generator.GenerateVideo(question, frameFeatures, maxTokens, sampling, onDelta, cancel, stillFeatures);
         }
         finally
         {
             foreach (Tensor t in merged) t.Dispose();
-            foreach (VisionPatchGrid g in grids) g.Dispose();
+            foreach (VisionPatchGrid g in stills) g.Dispose();
+            foreach (VisionPatchGrid g in frames) g.Dispose();
         }
+    }
+
+    /// <summary>Runs one preprocessed image or frame through the tower; the merged tokens are added to <paramref name="owned"/>.</summary>
+    private MossVlImageFeatures Encode(VisionPatchGrid grid, List<Tensor> owned, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        Tensor tokens = Tower.Encoder.Forward(_backend, grid.PixelValues, grid.GridT, grid.GridH, grid.GridW).MergedTokens;
+        owned.Add(tokens);
+        return new MossVlImageFeatures(tokens, grid.MergedHeight, grid.MergedWidth);
     }
 
     /// <inheritdoc/>

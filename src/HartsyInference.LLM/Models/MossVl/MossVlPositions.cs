@@ -40,16 +40,36 @@ public sealed class MossVlPositionPlan
     /// through it. Each group's rows attend only that prefix, so no score bias is needed. Null for one image (the row mask alone is
     /// exact there) and for a prompt with no image.</summary>
     public IReadOnlyList<MossVlCrossGroup>? CrossGroups { get; init; }
+
+    /// <summary>The position the next token after this segment takes: one past its last text position.</summary>
+    public int NextPosition { get; init; }
 }
 
 /// <summary>Builds MOSS-VL positions and the multimodal rotary tables that the decoder's cross-attention consumes.</summary>
 public static class MossVlPositions
 {
-    /// <summary>Plans positions for <paramref name="tokenIds"/>, where each occurrence of <paramref name="imageTokenId"/> is one image
-    /// in <paramref name="images"/> order.</summary>
+    /// <summary>Plans positions for a whole prompt <paramref name="tokenIds"/>, where each occurrence of <paramref name="imageTokenId"/> is one
+    /// image in <paramref name="images"/> order. Same as <see cref="PlanSegment"/> starting at position 0 with no vision before it.</summary>
     /// <exception cref="HartsyInferenceException">The placeholder count differs from the image count, or an image grid is empty.</exception>
-    public static MossVlPositionPlan Plan(ReadOnlySpan<int> tokenIds, int imageTokenId, ReadOnlySpan<MossVlImage> images)
+    public static MossVlPositionPlan Plan(ReadOnlySpan<int> tokenIds, int imageTokenId, ReadOnlySpan<MossVlImage> images) =>
+        PlanSegment(tokenIds, imageTokenId, images, startPosition: 0, priorVisionLength: 0);
+
+    /// <summary>Plans one segment of a stream that already holds <paramref name="priorVisionLength"/> vision tokens and whose next position is
+    /// <paramref name="startPosition"/>: the realtime model's <c>_compute_realtime_mrope_for_segment</c>, which is the whole-prompt rule
+    /// shifted to the segment's start.</summary>
+    /// <remarks>
+    /// <para><see cref="MossVlPositionPlan.Vision"/> and <see cref="MossVlPositionPlan.VisionLength"/> cover only this segment's images (the
+    /// tokens this forward appends). <see cref="MossVlPositionPlan.RowMask"/> and <see cref="MossVlPositionPlan.CrossGroups"/> describe the
+    /// whole stream: a row sees every earlier image, so once the stream holds an image before the segment every row sees something and the
+    /// row mask is dropped, and a group's <see cref="MossVlCrossGroup.KvLength"/> counts the prior vision too. Groups are built only when
+    /// rows differ in what they see.</para>
+    /// </remarks>
+    /// <exception cref="HartsyInferenceException">The placeholder count differs from the image count, or an image grid is empty.</exception>
+    public static MossVlPositionPlan PlanSegment(ReadOnlySpan<int> tokenIds, int imageTokenId, ReadOnlySpan<MossVlImage> images,
+        int startPosition, int priorVisionLength)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(startPosition);
+        ArgumentOutOfRangeException.ThrowIfNegative(priorVisionLength);
         int t = tokenIds.Length;
         int placeholders = 0;
         foreach (int id in tokenIds) if (id == imageTokenId) placeholders++;
@@ -68,20 +88,20 @@ public static class MossVlPositions
         int[] vision = new int[3 * visionLength];
         int[] placeholderRow = new int[images.Length];   // the text row of each image's placeholder
         int[] blockEnd = new int[images.Length];         // one past the last vision column of each image's block
-        int regularBefore = 0, shift = 0, imageIndex = 0, visionOffset = 0;
+        int cur = startPosition, imageIndex = 0, visionOffset = 0;
         for (int i = 0; i < t; i++)
         {
             if (tokenIds[i] != imageTokenId)
             {
-                for (int a = 0; a < 3; a++) text[a * t + i] = regularBefore + shift;
-                regularBefore++;
+                for (int a = 0; a < 3; a++) text[a * t + i] = cur;
+                cur++;
                 continue;
             }
 
             int k = imageIndex++;
             MossVlImage image = images[k];
             int h = image.MergedHeight, w = image.MergedWidth;
-            int t0 = regularBefore + shift;
+            int t0 = cur;
             int span = Math.Max(h, w);
             for (int a = 0; a < 3; a++) text[a * t + i] = t0 + span;
             placeholderRow[k] = i;
@@ -103,37 +123,78 @@ public static class MossVlPositions
 
             visionOffset += h * w + 1;
             blockEnd[k] = visionOffset;
-            shift += span + 1;
+            cur = t0 + span + 1;
         }
 
-        float[]? rowMask = null;
-        IReadOnlyList<MossVlCrossGroup>? groups = null;
-        if (images.Length > 0)
+        // What each row attends: the prior vision plus the blocks of this segment's images at or before it (0 = nothing yet).
+        int[] rowKv = new int[t];
+        for (int r = 0, seen = 0; r < t; r++)
         {
-            // A row sees the images whose placeholder is at or before it; it sees none before the first placeholder.
-            rowMask = new float[t];
-            for (int i = placeholderRow[0]; i < t; i++) rowMask[i] = 1f;
+            while (seen < images.Length && placeholderRow[seen] <= r) seen++;
+            rowKv[r] = priorVisionLength + (seen == 0 ? 0 : blockEnd[seen - 1]);
         }
-        if (images.Length > 1)
+        int total = priorVisionLength + visionLength;
+
+        float[]? rowMask = null;
+        if (total > 0 && rowKv.Any(kv => kv == 0))
         {
-            // Rows are in placeholder order, so the rows that see exactly images 0..k form one contiguous run, and the
-            // vision keys they attend are the prefix through image k.
-            MossVlCrossGroup[] built = new MossVlCrossGroup[images.Length];
-            for (int k = 0; k < images.Length; k++)
+            // Rows before the first image of the stream see none: their cross-attention and MLP contributions are zeroed.
+            rowMask = new float[t];
+            for (int r = 0; r < t; r++) rowMask[r] = rowKv[r] > 0 ? 1f : 0f;
+        }
+
+        IReadOnlyList<MossVlCrossGroup>? groups = null;
+        int[] distinct = rowKv.Where(kv => kv > 0).Distinct().Order().ToArray();
+        if (distinct.Length > 1 || (distinct.Length == 1 && distinct[0] != total))
+        {
+            // Rows are in stream order, so each distinct visible prefix is one contiguous run of rows attending that prefix.
+            MossVlCrossGroup[] built = new MossVlCrossGroup[distinct.Length];
+            for (int g = 0; g < distinct.Length; g++)
             {
                 float[] select = new float[t];
-                for (int r = 0; r < t; r++)
-                {
-                    int visible = 0;
-                    for (int j = 0; j < images.Length; j++) if (placeholderRow[j] <= r) visible++;
-                    if (visible == k + 1) select[r] = 1f;
-                }
-                built[k] = new MossVlCrossGroup(blockEnd[k], select);
+                for (int r = 0; r < t; r++) if (rowKv[r] == distinct[g]) select[r] = 1f;
+                built[g] = new MossVlCrossGroup(distinct[g], select);
             }
             groups = built;
         }
 
-        return new MossVlPositionPlan { Text = text, Vision = vision, VisionLength = visionLength, RowMask = rowMask, CrossGroups = groups };
+        return new MossVlPositionPlan
+        {
+            Text = text, Vision = vision, VisionLength = visionLength, RowMask = rowMask, CrossGroups = groups, NextPosition = cur,
+        };
+    }
+
+    /// <summary>The rotary tables for one segment: text tables for its rows and, when it brings images, vision tables for their tokens.
+    /// The result owns every tensor.</summary>
+    public static MossVlRope BuildSegmentRope(MossVlPositionPlan plan, MossVlConfig config)
+    {
+        int headDim = config.Text.HeadDim, hidden = config.Text.HiddenSize, t = plan.Text.Length / 3;
+        // Null scaling makes the frequencies independent of the position range, so a segment's tables match a whole-prompt build.
+        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(headDim, config.Text.RopeTheta, null, 1);
+        byte[] pairAxes = MRopePairAxes.Build([.. config.MropeSection], headDim / 2,
+            config.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+        List<CrossImageGroup>? groups = null;
+        try
+        {
+            (textCos, textSin) = MRopeTable.BuildTensors(plan.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
+            if (plan.VisionLength > 0)
+                (visionCos, visionSin) = MRopeTable.BuildTensors(plan.Vision, plan.VisionLength, 0, plan.VisionLength, invFreq, scaling,
+                    pairAxes, headDim, headDim);
+            rowMask = plan.RowMask is null ? null : BuildRowMask(plan.RowMask, t, hidden);
+            groups = BuildImageGroups(plan, t, hidden);
+            return new MossVlRope(new MultimodalRope(textCos!, textSin!, visionCos, visionSin, rowMask, groups));
+        }
+        catch
+        {
+            textCos?.Dispose();
+            textSin?.Dispose();
+            visionCos?.Dispose();
+            visionSin?.Dispose();
+            rowMask?.Dispose();
+            DisposeGroups(groups);
+            throw;
+        }
     }
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/> from a MOSS-VL configuration's text section.</summary>
@@ -273,8 +334,8 @@ public sealed class MossVlRope(MultimodalRope rope, bool ownsVision = true) : ID
         Rope.TextSin.Dispose();
         if (ownsVision)
         {
-            Rope.VisionCos.Dispose();
-            Rope.VisionSin.Dispose();
+            Rope.VisionCos?.Dispose();
+            Rope.VisionSin?.Dispose();
         }
         Rope.RowMask?.Dispose();
         if (Rope.ImageGroups is not null)

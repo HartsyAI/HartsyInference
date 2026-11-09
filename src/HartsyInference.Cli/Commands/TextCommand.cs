@@ -67,6 +67,31 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Attach an image (PNG/BMP) for vision-language models. Repeat for multiple images.")]
         public string[] Image { get; init; } = [];
 
+        /// <summary>A video file to attach, for video-capable models (decoded with ffmpeg and sampled per the model's settings).</summary>
+        [CommandOption("--video")]
+        [Description("Attach a video file for video-capable models (MOSS-VL-Realtime). Needs ffmpeg on PATH.")]
+        public string? Video { get; init; }
+
+        /// <summary>A folder of PNG/BMP frames to attach as a video, in name order, at <see cref="FrameFps"/>.</summary>
+        [CommandOption("--frames-dir")]
+        [Description("Attach a folder of PNG/BMP frames (sorted by name) as a video; no ffmpeg needed. See --frame-fps.")]
+        public string? FramesDir { get; init; }
+
+        /// <summary>Frames per second of a <see cref="FramesDir"/> video, which sets each frame's timestamp.</summary>
+        [CommandOption("--frame-fps")]
+        [Description("Frame rate of a --frames-dir video (frame i is at i / fps seconds). Default 1.")]
+        public double FrameFps { get; init; } = 1.0;
+
+        /// <summary>Frames sampled per second from a <see cref="Video"/>; unset keeps the model's setting.</summary>
+        [CommandOption("--video-fps")]
+        [Description("Frames sampled per second from --video; unset keeps the model's setting (MOSS-VL: 1).")]
+        public double? VideoFps { get; init; }
+
+        /// <summary>The most frames sampled from a <see cref="Video"/>; unset keeps the model's setting.</summary>
+        [CommandOption("--video-max-frames")]
+        [Description("Most frames sampled from --video; unset keeps the model's setting (MOSS-VL: 256).")]
+        public int? VideoMaxFrames { get; init; }
+
         /// <summary>Top-K sampling cutoff; unset uses the model default.</summary>
         [CommandOption("--top-k")]
         [Description("Top-K sampling cutoff; unset uses the model default.")]
@@ -188,6 +213,27 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             }
         }
 
+        if (settings.Video is { } videoPath && !File.Exists(videoPath))
+        {
+            AnsiConsole.MarkupLine($"[red]Video not found:[/] {videoPath}");
+            return 1;
+        }
+        if (settings.FramesDir is { } framesDir && !Directory.Exists(framesDir))
+        {
+            AnsiConsole.MarkupLine($"[red]Frames folder not found:[/] {framesDir}");
+            return 1;
+        }
+        if (settings.Video is not null && settings.FramesDir is not null)
+        {
+            AnsiConsole.MarkupLine("[red]--video and --frames-dir are mutually exclusive.[/]");
+            return 1;
+        }
+        if (settings.FrameFps <= 0)
+        {
+            AnsiConsole.MarkupLine("[red]--frame-fps must be positive.[/]");
+            return 1;
+        }
+
         float temperature = settings.Temperature;
         if (settings.GraphDecode && temperature > 0f)
         {
@@ -206,6 +252,14 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("system", system);
         if (settings.Image.Length > 0)
             parameters.Put("image", string.Join('\n', settings.Image));
+        if (settings.Video is { } video) parameters.Put("video", video);
+        if (settings.FramesDir is { } frames)
+        {
+            parameters.Put("frames-dir", frames);
+            parameters.Put("frame-fps", settings.FrameFps.ToString(CultureInfo.InvariantCulture));
+        }
+        parameters.PutIfSet("video-fps", settings.VideoFps);
+        parameters.PutIfSet("video-max-frames", settings.VideoMaxFrames);
         parameters.PutIfSet("top-k", settings.TopK);
         parameters.PutIfSet("min-p", settings.MinP);
         parameters.PutIfSet("repetition-penalty", settings.RepetitionPenalty);

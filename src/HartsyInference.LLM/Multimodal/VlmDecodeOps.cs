@@ -25,6 +25,41 @@ internal static unsafe class VlmDecodeOps
         return new ReadOnlySpan<float>((void*)logits.DataPointer, model.Config.VocabSize).ToArray();
     }
 
+    /// <summary>The decode loop every VLM reply runs after its prefill: emit until a stop token or <paramref name="maxTokens"/>, feeding each
+    /// token back through <paramref name="step"/>, streaming text through <paramref name="onDelta"/> once a character is complete, and
+    /// checking <paramref name="cancel"/> before every step.</summary>
+    /// <param name="first">The token the prefill selected.</param>
+    /// <param name="step">Runs one token and returns the next one.</param>
+    /// <returns>The reply, how many tokens it holds, and whether it stopped at the limit rather than at a stop token.</returns>
+    public static (string Text, int Tokens, bool HitLimit) DecodeLoop(ModelAssets.Tokenizers.ILlmTokenizer tokenizer, int first,
+        Func<int, int> step, IReadOnlySet<int> stops, int maxTokens, List<int> history, Action<string>? onDelta, CancellationToken cancel)
+    {
+        List<int> generated = [];
+        int emitted = 0;
+        int token = first;
+        while (!stops.Contains(token) && generated.Count < maxTokens)
+        {
+            generated.Add(token);
+            history.Add(token);
+            if (onDelta is not null)
+            {
+                string text = tokenizer.Decode(generated);
+                // A token can end inside a multi-byte character; hold the piece until the character completes.
+                if (text.Length > emitted && text[^1] != '�')
+                {
+                    onDelta(text[emitted..]);
+                    emitted = text.Length;
+                }
+            }
+            if (generated.Count == maxTokens) break;
+            cancel.ThrowIfCancellationRequested();
+            token = step(token);
+        }
+        string reply = tokenizer.Decode(generated);
+        if (onDelta is not null && reply.Length > emitted) onDelta(reply[emitted..]);
+        return (reply, generated.Count, !stops.Contains(token));
+    }
+
     /// <summary>Projects the last position to logits; the caller owns and disposes the returned tensor.</summary>
     private static Tensor ProjectLast(IBackend backend, GenericTransformer model, Tensor hidden, int t)
     {

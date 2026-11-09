@@ -11,8 +11,9 @@ namespace HartsyInference.LLM.Transformer;
 /// an image and 0 where it sees none; a 0 row contributes nothing from its cross-attention and MLP sublayers. The full width lets
 /// the layer apply it with an elementwise multiply. <see cref="ImageGroups"/>, when set, splits the cross-attention by visible image
 /// set (multi-image prompts); null means every row attends every vision key. Every tensor is borrowed: the caller owns and disposes it.
+/// The vision tables are null for a forward that brings no new vision tokens (a decode step over vision already cached).
 /// </remarks>
-public sealed record MultimodalRope(Tensor TextCos, Tensor TextSin, Tensor VisionCos, Tensor VisionSin, Tensor? RowMask,
+public sealed record MultimodalRope(Tensor TextCos, Tensor TextSin, Tensor? VisionCos, Tensor? VisionSin, Tensor? RowMask,
     IReadOnlyList<CrossImageGroup>? ImageGroups = null);
 
 /// <summary>One group of text rows that see the same images, for multi-image cross-attention.</summary>
