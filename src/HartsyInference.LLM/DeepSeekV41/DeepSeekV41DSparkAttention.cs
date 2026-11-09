@@ -45,7 +45,7 @@ internal sealed class DeepSeekV41DSparkAttention
 
         float[] kv = _w.Wkv.Linear(mainX, tokens, dim, hd);
         HostMath.RmsNormRows(kv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], Range(0, tokens), hd - _settings.RopeDim, inverse: false);
+        PartialRotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], Range(0, tokens), inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(kv, hd);
         for (int p = Math.Max(0, tokens - win); p < tokens; p++)
             kv.AsSpan(p * hd, hd).CopyTo(state.Window.AsSpan((p % win) * hd, hd));
@@ -65,7 +65,7 @@ internal sealed class DeepSeekV41DSparkAttention
         // the current target latent enters the window first, so the block sees the position it continues from
         float[] mainKv = _w.Wkv.Linear(mainX, 1, dim, hd);
         HostMath.RmsNormRows(mainKv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, mainKv, [1, 1, hd], [startPos], hd - rd, inverse: false);
+        PartialRotary.Rotate(_backend, _rope, rd, mainKv, [1, 1, hd], [startPos], inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(mainKv, hd);
         mainKv.CopyTo(state.Window.AsSpan((startPos % win) * hd, hd));
 
@@ -73,11 +73,11 @@ internal sealed class DeepSeekV41DSparkAttention
         float[] qr = _w.WqA.Linear(x, block, dim, _settings.QLoraRank);
         HostMath.RmsNormRows(qr, _w.QNorm, _settings.QLoraRank, _settings.NormEps);
         float[] q = _w.WqB.Linear(qr, block, _settings.QLoraRank, heads * hd);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, q, [1, block, heads, hd], positions, hd - rd, inverse: false);
+        PartialRotary.Rotate(_backend, _rope, rd, q, [1, block, heads, hd], positions, inverse: false);
 
         float[] blockKv = _w.Wkv.Linear(x, block, dim, hd);
         HostMath.RmsNormRows(blockKv, _w.KvNorm, hd, _settings.NormEps);
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, blockKv, [1, block, hd], positions, hd - rd, inverse: false);
+        PartialRotary.Rotate(_backend, _rope, rd, blockKv, [1, block, hd], positions, inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(blockKv, hd);
 
         // the window ring, then the block's latents, as upstream concatenates them; indices are the same for every query of the block
@@ -101,7 +101,7 @@ internal sealed class DeepSeekV41DSparkAttention
         _backend.SparseLatentAttention(output, query, window, LatentSource.Empty, indexT, win + block, sink, 1f / MathF.Sqrt(hd));
 
         float[] o = output.AsReadOnlySpan<float>().ToArray();
-        DeepSeekV41Rotary.Rotate(_backend, _rope, rd, o, [1, block, heads, hd], positions, hd - rd, inverse: true);
+        PartialRotary.Rotate(_backend, _rope, rd, o, [1, block, heads, hd], positions, inverse: true);
         float[] grouped = new float[block * _settings.OGroups * _settings.OLoraRank];
         DeepSeekV41GroupedProjection.Apply(o, _w.WoA, block, _settings.OGroups, _settings.OLoraRank, _settings.GroupDim, grouped);
         _w.WoB.Linear(grouped, block, _settings.OGroups * _settings.OLoraRank, dim).CopyTo(y);
