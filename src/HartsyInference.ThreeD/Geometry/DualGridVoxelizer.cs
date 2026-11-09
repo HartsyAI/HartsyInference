@@ -701,7 +701,7 @@ public static class DualGridVoxelizer
                 float t = MathF.Abs(qr[k * n + j]) / normUpdated[j];
                 t = MathF.Max(0f, (1f + t) * (1f - t));
                 float ratio = normUpdated[j] / normDirect[j];
-                if (t * ratio * ratio <= NormDowndateThreshold)
+                if (t * (ratio * ratio) <= NormDowndateThreshold)
                 {
                     float tailNormSq = 0f;
                     for (int r = k + 1; r < n; r++)
