@@ -185,6 +185,11 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         if (masks.Count == 0)
             throw new ArgumentException("A mask prompt names at least one object.", nameof(masks));
+        for (int i = 0; i < masks.Count; i++)
+        {
+            if (masks[i] is null || masks[i].Coverage is null)
+                throw new ArgumentException($"Mask {i} has no coverage bytes.", nameof(masks));
+        }
         int width = masks[0].Width, height = masks[0].Height;
         // Multiply in long: a plane that wraps an int could pass the length checks and then allocate a huge tensor later.
         long planeLong = (long)width * height;

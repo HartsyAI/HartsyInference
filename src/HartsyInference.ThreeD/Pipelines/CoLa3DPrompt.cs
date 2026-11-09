@@ -23,7 +23,7 @@ public sealed record CoLa3DPrompt
     /// <summary>One <c>(x, y, z)</c> per query in the scene mesh's units, flat <c>[Queries, 3]</c>; null for a mask prompt.</summary>
     public float[]? Points { get; init; }
 
-    /// <summary>The query source a checkpoint must have to take this prompt.</summary>
+    /// <summary>The query source a checkpoint must have to take this prompt. Valid only after <see cref="Validate"/>; reports <c>PromptPoint</c> when neither buffer is set.</summary>
     public CoLa3DConfig.QuerySourceKind Kind =>
         MaskCoverage is not null ? CoLa3DConfig.QuerySourceKind.PromptMask : CoLa3DConfig.QuerySourceKind.PromptPoint;
 
