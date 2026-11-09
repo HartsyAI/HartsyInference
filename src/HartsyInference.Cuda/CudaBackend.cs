@@ -1249,18 +1249,24 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Routes MHA (D∈{64,128,256}, no mask or broadcastable F32 mask) through cuDNN's fused attention, not materialized cuBLAS.</summary>
     /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; numerics.sdpaCudnn=false disables.
     /// Missing cuDNN or engine rejections fall back to the materialized paths automatically.</remarks>
-    private readonly bool _sdpaCudnn;
+    private readonly bool _sdpaCudnnRequested;
+    /// <summary>cuDNN fused attention is on: requested, and cuDNN is available. The first call resolves cuDNN, fetching it if needed.</summary>
+    private bool SdpaCudnnOn => _sdpaCudnnRequested && CudnnRuntime.EnsureAvailable() && CudnnRuntime.SupportsSdpa;
     private readonly bool _flashF16;        // numerics.flashF16: the engine's F16 flash kernel at head dim 256
     private volatile bool _flashF16Dead;    // set on the first launch failure; the session keeps cuDNN after that
 
     /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the im2col→cuBLAS GEMM path.</summary>
     /// <remarks>Standard-profile default ON; numerics.convCudnn=false disables. Failures self-disable for the session and fall back to im2col.</remarks>
-    private readonly bool _convCudnn;
+    private readonly bool _convCudnnRequested;
+    /// <summary>cuDNN convolution is on: requested, and cuDNN is available. The first call resolves cuDNN, fetching it if needed.</summary>
+    private bool ConvCudnnOn => _convCudnnRequested && CudnnRuntime.EnsureAvailable();
 
     /// <summary>Routes the audio 1D convs and transposed convs (vocoders/codecs/VITS) through cuDNN (mapped to 2D, H=1).</summary>
     /// <remarks>Includes causal/asymmetric pads via the graph API's separate PRE/POST padding attributes. Standard-profile
     /// default ON; numerics.audioConvCudnn=false restores the direct kernels exactly. Failures self-disable for the session.</remarks>
-    private readonly bool _audioConvCudnn;
+    private readonly bool _audioConvCudnnRequested;
+    /// <summary>Audio cuDNN convolution is on: requested, and cuDNN is available. The first call resolves cuDNN, fetching it if needed.</summary>
+    private bool AudioConvCudnnOn => _audioConvCudnnRequested && CudnnRuntime.EnsureAvailable();
 
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>.</summary>
     /// <remarks>FAST_TF32 for F32 operands when allowed (and <see cref="HighPrecisionGemm"/> — an explicit
@@ -1354,25 +1360,24 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // cuDNN fused flash attention: default ON — resolution failures self-disable per session (and engine
         // rejections per head-dim), falling back to the materialized paths, so machines without cuDNN lose
         // speed, never correctness.
-        // Probe cuDNN ONCE up front: locate/provision a CUDA-major-matched build, guard against a mismatch (which
-        // would hang mid-inference), and log a single clear line so a "why is it slow?" report is one log check.
-        // Every cuDNN fast path is AND-gated on availability, so a missing/mismatched cuDNN cleanly stays on the
-        // im2col+cuBLAS / custom-flash fallbacks instead of throwing per-op or hanging.
+        // Startup logs one status line and never downloads. A cuDNN fast path resolves cuDNN on its first call (SdpaCudnnOn,
+        // ConvCudnnOn, AudioConvCudnnOn): a missing build is fetched then, once, when paths.cudnnAutofetch is on. A
+        // mismatched or failed build stays off, so the call takes the im2col+cuBLAS / custom-flash fallback instead of hanging.
         CudnnRuntime.LogStatus();
-        _sdpaCudnn = CudnnRuntime.SupportsSdpa && EngineKnobs.SdpaCudnn.Value;
+        _sdpaCudnnRequested = EngineKnobs.SdpaCudnn.Value;
         _flashF16 = EngineKnobs.FlashF16.Value;
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
-        _convCudnn = CudnnRuntime.Available && EngineKnobs.ConvCudnn.Value;
+        _convCudnnRequested = EngineKnobs.ConvCudnn.Value;
         // Audio conv1d cuDNN (1D→2D, H=1, F32 output via TF32 tensor cores): default ON. The Oobleck/EnCodec
         // vocoder decoders are conv-bound — routing their forward convs through cuDNN is ~1.6-2× on ACE-Step
         // end-to-end (bigger on longer audio, where the VAE decode dominates) with corr 0.9999 vs the direct
         // kernel (same-seed A/B, verified coherent across ACE-Step/MusicGen/AudioGen). Same session-sticky
         // self-disable-on-failure contract as the 2D path, so shapes cuDNN can't serve fall back safely.
-        _audioConvCudnn = CudnnRuntime.Available && EngineKnobs.AudioConvCudnn.Value;
+        _audioConvCudnnRequested = EngineKnobs.AudioConvCudnn.Value;
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} "
+            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnnRequested} ConvCudnn={_convCudnnRequested} NativeFp8Gemm={EnableNativeFp8Gemm} "
             + $"NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
@@ -2869,10 +2874,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // matrix is a kH·kW× input-sized HBM write+read per conv, the dominant conv cost on the SDXL
         // UNet (~50 convs/step) and VAE. Anything else (F32, fp8/quant weights, scale factors) keeps
         // the im2col path; any cuDNN failure self-disables the route for the session.
-        if (_convCudnn && !_cudnnConvDead && input.DType == weight.DType && output.DType == input.DType
+        if (!_cudnnConvDead && input.DType == weight.DType && output.DType == input.DType
             && (input.DType == DType.F16 || input.DType == DType.BF16)
             && input.Fp8ScaleFactor == 1.0f && weight.Fp8ScaleFactor == 1.0f
-            && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
+            && ConvCudnnOn && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
         {
             return;
         }
@@ -3144,7 +3149,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public unsafe bool TryConv3DFrameMajor(Tensor output, Tensor paddedFrames, Tensor weight, Tensor? bias,
         int strideT, int strideH, int strideW, int padH, int padW)
     {
-        if (!_convCudnn || _cudnnConvDead || _cudnnConv3dDead) return false;
+        if (_cudnnConvDead || _cudnnConv3dDead || !ConvCudnnOn) return false;
         using NvtxRange _nvtxProf = NvtxRange.Push("Conv3D");
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -6564,8 +6569,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // Asymmetric (causal) pads ride the graph API's separate PRE/POST padding attributes, so the
         // HeartCodec/EnCodec-style left-padded convs qualify too. Output stays F32. Falls back to the direct
         // kernel on grouped convs or any cuDNN failure (session-sticky).
-        if (_audioConvCudnn && !_cudnnConvDead && groups == 1
-            && TryCudnnConv1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
+        if (!_cudnnConvDead && groups == 1
+            && AudioConvCudnnOn && TryCudnnConv1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
         {
             return;
         }
@@ -6673,8 +6678,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // weight is exactly cuDNN's dgrad filter layout [K=fwd-out, C=fwd-in, R=1, S=kernel], and the causal
         // right-crop (padRight = K − stride) maps onto the asymmetric PRE/POST paddings of the forward-conv
         // geometry. Same session-sticky fallback contract as the forward path.
-        if (_audioConvCudnn && !_cudnnConvDead && groups == 1
-            && TryCudnnConvTranspose1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
+        if (!_cudnnConvDead && groups == 1
+            && AudioConvCudnnOn && TryCudnnConvTranspose1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
         {
             return;
         }
