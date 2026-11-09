@@ -15,6 +15,9 @@ public sealed record MeshRequest
     /// <summary>Input triangle scene for scene-decomposition models (cola3d); null for image models.</summary>
     public SceneMeshData? SceneMesh { get; init; }
 
+    /// <summary>Objects to extract from <see cref="SceneMesh"/>; null runs free queries. Scene models only.</summary>
+    public SceneMeshPrompt? ScenePrompt { get; init; }
+
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 

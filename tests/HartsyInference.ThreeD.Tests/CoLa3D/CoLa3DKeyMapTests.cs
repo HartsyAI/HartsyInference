@@ -10,25 +10,25 @@ public sealed class CoLa3DKeyMapTests
     [Fact]
     public void FreeQ20Fixture_EveryKeyMapsAndMatchesConfigShape()
     {
-        AssertFixtureMaps("cola3d_free_q20_keys.txt", CoLa3DTestSupport.FreeQ20(), expectedTensors: 251);
+        AssertFixtureMaps("cola3d_free_q20_keys.txt", CoLa3DConfig.FreeQ20, expectedTensors: 251);
     }
 
     [Fact]
     public void MaskQ20Fixture_EveryKeyMapsAndMatchesConfigShape()
     {
-        AssertFixtureMaps("cola3d_mask_q20_keys.txt", CoLa3DTestSupport.MaskQ20(), expectedTensors: 273);
+        AssertFixtureMaps("cola3d_mask_q20_keys.txt", CoLa3DConfig.MaskQ20, expectedTensors: 273);
     }
 
     [Fact]
     public void PointQ20Fixture_EveryKeyMapsAndMatchesConfigShape()
     {
-        AssertFixtureMaps("cola3d_point_q20_keys.txt", CoLa3DTestSupport.PointQ20(), expectedTensors: 256);
+        AssertFixtureMaps("cola3d_point_q20_keys.txt", CoLa3DConfig.PointQ20, expectedTensors: 256);
     }
 
     [Fact]
     public void FreeQ20Fixture_MapsOntoEveryExpectedParameterExactlyOnce()
     {
-        CoLa3DConfig config = CoLa3DTestSupport.FreeQ20();
+        CoLa3DConfig config = CoLa3DConfig.FreeQ20;
         Dictionary<string, long[]> fixture = CoLa3DTestSupport.ReadFixture("cola3d_free_q20_keys.txt");
         List<string> mapped = fixture.Keys.Select(k => CoLa3DKeyMap.TryMap(k)!).ToList();
 
@@ -64,7 +64,7 @@ public sealed class CoLa3DKeyMapTests
         using Tensor stray = new(new TensorShape(4), DType.F32);
         Dictionary<string, Tensor> torch = new(StringComparer.Ordinal) { ["mask_prompt_encoder.encoder.0.weight"] = stray };
 
-        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => CoLa3DKeyMap.Remap(CoLa3DTestSupport.FreeQ20(), torch));
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => CoLa3DKeyMap.Remap(CoLa3DConfig.FreeQ20, torch));
         Assert.Contains("not used by this configuration", error.Message, StringComparison.Ordinal);
     }
 

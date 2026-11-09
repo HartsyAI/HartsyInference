@@ -59,20 +59,24 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     }
 
     /// <summary>Loads the pipeline from a Models root holding <c>CoLa3D</c>, <c>TRELLIS2-ShapeVAE</c> and <c>Utonia</c> checkpoints.</summary>
-    public static CoLa3DPipeline LoadFromPath(IBackend backend, string modelRoot)
+    /// <param name="source">Decomposer variant: free queries, mask prompts or point prompts. Each variant is its own pipeline.</param>
+    public static CoLa3DPipeline LoadFromPath(
+        IBackend backend,
+        string modelRoot,
+        CoLa3DConfig.QuerySourceKind source = CoLa3DConfig.QuerySourceKind.Fixed)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (!Directory.Exists(modelRoot))
             throw new DirectoryNotFoundException($"CoLa3D model directory not found: '{modelRoot}'.");
 
-        CoLa3DWeights weights = CoLa3DCheckpointConverter.Load(modelRoot);
+        CoLa3DWeights weights = CoLa3DCheckpointConverter.Load(modelRoot, source);
         ShapeVaeEncoderStage encoder = null!;
         ShapeVaeDecoderStage decoder = null!;
         UtoniaPointFeatureStage features = null!;
         CoLa3DObjectDecomposer decomposer = null!;
         try
         {
-            CoLa3DConfig config = CoLa3DConfig.FreeQ20;
+            CoLa3DConfig config = CoLa3DConfig.ForQuerySource(source);
             ShapeVaeConfig shape = ShapeVaeConfig.NextDcF16C32;
             encoder = new ShapeVaeEncoderStage(new ShapeVaeEncoder(shape.Encoder, weights.ShapeEncoder));
             decoder = new ShapeVaeDecoderStage(new ShapeVaeDecoder(shape.Decoder, weights.ShapeDecoder));
@@ -104,13 +108,16 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <param name="scene">Scene triangles in any world units; the grid is fitted to its largest extent.</param>
     /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>.</param>
     /// <param name="onProgress">Reports one step per stage and per decoded object.</param>
-    public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null)
+    /// <param name="prompt">Objects to decompose, as masks or points in <paramref name="scene"/>'s units. Null for free queries;
+    /// required by a prompt checkpoint and rejected by the free one. Point prompts need the 1024 grid.</param>
+    public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null, CoLa3DPrompt? prompt = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(scene);
         int res = resolution > 0 ? resolution : DefaultResolution;
         if (res % LatentStride != 0)
             throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
+        prompt?.Validate();
         SceneGrid grid = SceneGrid.Fit(scene, res);
 
         DualGridVoxels voxels = _voxelizer.Voxelize(scene, grid);
@@ -133,7 +140,8 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         IReadOnlyList<SparseTensor> objects;
         try
         {
-            objects = _decomposer.Decompose(Backend, latent, features);
+            using CoLa3DPromptInputs? inputs = prompt is null ? null : CoLa3DPromptInputs.Create(prompt, grid, latent);
+            objects = _decomposer.Decompose(Backend, latent, features, inputs?.Prompts);
         }
         finally
         {

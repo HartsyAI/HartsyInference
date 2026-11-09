@@ -27,7 +27,11 @@ public sealed class CoLa3DObjectDecomposer : IObjectDecomposer, IDisposable
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<SparseTensor> Decompose(IBackend backend, SparseTensor latent, SparseTensor features)
+    public IReadOnlyList<SparseTensor> Decompose(
+        IBackend backend,
+        SparseTensor latent,
+        SparseTensor features,
+        CoLa3DQueryPrompts? prompts = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latent);
@@ -39,7 +43,7 @@ public sealed class CoLa3DObjectDecomposer : IObjectDecomposer, IDisposable
         Tensor aligned = AlignRows(latent.Coords, features, _config.UtoniaFeatureDim);
         try
         {
-            using CoLa3DOutput output = _decomposer.Forward(backend, latent, aligned);
+            using CoLa3DOutput output = _decomposer.Forward(backend, latent, aligned, prompts);
             int parts = (int)output.MaskLogits.Shape[1];
             int[] owners = CoLa3DObjectSplit.AssignOwners(output.MaskLogits.AsReadOnlySpan<float>(), n, parts);
             List<SparseTensor> objects = [];

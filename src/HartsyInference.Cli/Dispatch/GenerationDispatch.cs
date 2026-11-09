@@ -795,6 +795,7 @@ public static class GenerationDispatch
             Vram = ParseVramOverrides(parameters),
             Image = scene ? null : LoadImage(prompt),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
@@ -1294,6 +1295,51 @@ public static class GenerationDispatch
     /// <summary>Splits a newline-joined repeatable option back into its paths; null when the option was absent.</summary>
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+    /// <summary>Reads the cola3d scene prompt from <c>--prompt-mask</c> or <c>--prompt-point</c>; null when neither is given.</summary>
+    private static SceneMeshPrompt? LoadScenePrompt(ParamState parameters)
+    {
+        string[]? maskPaths = SplitPaths(parameters.GetStringOrNull("prompt-mask"));
+        string[]? pointTexts = SplitPaths(parameters.GetStringOrNull("prompt-point"));
+        if (maskPaths is null && pointTexts is null)
+        {
+            return null;
+        }
+        if (maskPaths is not null && pointTexts is not null)
+        {
+            throw new ArgumentException("Give --prompt-mask or --prompt-point, not both.");
+        }
+        if (maskPaths is not null)
+        {
+            return new SceneMeshPrompt { Masks = maskPaths.Select(LoadPromptMask).ToList() };
+        }
+        return new SceneMeshPrompt { Points = pointTexts!.Select(ParseScenePoint).ToList() };
+    }
+
+    /// <summary>Reads one mask PNG; the red channel is the coverage.</summary>
+    private static ScenePromptMask LoadPromptMask(string path)
+    {
+        ImageData image = LoadImage(path);
+        byte[] coverage = new byte[image.Width * image.Height];
+        for (int i = 0; i < coverage.Length; i++)
+        {
+            coverage[i] = image.Rgb[i * 3];
+        }
+        return new ScenePromptMask { Coverage = coverage, Width = image.Width, Height = image.Height };
+    }
+
+    /// <summary>Parses <c>x,y,z</c> in the scene mesh's units.</summary>
+    private static ScenePoint ParseScenePoint(string text)
+    {
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length != 3 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x)
+            || !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y)
+            || !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+        {
+            throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
+        }
+        return new ScenePoint(x, y, z);
+    }
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static SceneMeshData LoadSceneMesh(string promptPath)
