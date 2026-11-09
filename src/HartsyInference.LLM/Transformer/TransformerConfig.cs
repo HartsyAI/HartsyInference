@@ -1,5 +1,6 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Rope;
+using HartsyInference.LLM.Transformer.Compression;
 
 namespace HartsyInference.LLM.Transformer;
 
@@ -398,6 +399,13 @@ public sealed record TransformerConfig
 
     /// <summary>Muse Spark: the merged attention output is multiplied elementwise by <c>sigmoid(gate_proj(x))</c>, where <c>x</c> is the attention's normalized input, before <c>o_proj</c>.</summary>
     public bool AttnOutputGate { get; init; }
+
+    /// <summary>Per-layer <c>compress_ratios</c>: 0 standard, 1 compressed KV without pooling, <c>R &gt;= 2</c> compressed KV with one pooled latent per R tokens, -2 DSA (refused). Null means every layer is standard; when set, its length must equal <see cref="NumLayers"/>.</summary>
+    public IReadOnlyList<int>? CompressRatios { get; init; }
+
+    /// <summary>The attention kind of layer <paramref name="i"/>, read from <see cref="CompressRatios"/>.</summary>
+    public LayerAttentionKind AttentionKindFor(int i) =>
+        CompressRatios is null ? LayerAttentionKind.Standard : LayerAttentionKind.FromCompressRatio(CompressRatios[i]);
 
     /// <summary>Muse Spark: the post-attention sandwich norm carries no weight (a plain RMSNorm), so the checkpoint ships no tensor for it.</summary>
     public bool PostAttnNormWeightless { get; init; }

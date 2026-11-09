@@ -70,11 +70,24 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     /// <summary>Creates the transformer for the given architecture (weights loaded separately).</summary>
     public GenericTransformer(TransformerConfig cfg)
     {
+        RefuseCompressedKvLayers(cfg);
         _cfg = cfg;
         _layers = new Layer[cfg.NumLayers];
         for (int i = 0; i < cfg.NumLayers; i++) _layers[i] = new Layer(cfg);
         _usesLocalWindow = cfg.SlidingWindow > 0 && Enumerable.Range(0, cfg.NumLayers).Any(i => !cfg.IsGlobalLayer(i));
         _usesWindowOrSoftcap = _usesLocalWindow || cfg.AttnLogitSoftcap > 0f;
+    }
+
+    // Compressed-KV (HCA) layers are config-selectable but not wired into this decoder yet; refusing beats running them as standard attention.
+    private static void RefuseCompressedKvLayers(TransformerConfig cfg)
+    {
+        if (cfg.CompressRatios is null) return;
+        if (cfg.CompressRatios.Count != cfg.NumLayers)
+            throw new ArgumentException("CompressRatios must hold one entry per layer.", nameof(cfg));
+        for (int i = 0; i < cfg.NumLayers; i++)
+            if (cfg.AttentionKindFor(i).IsCompressed)
+                throw new NotSupportedException(
+                    $"Layer {i} uses compressed-KV attention (compress_ratio {cfg.CompressRatios[i]}), which GenericTransformer does not run yet.");
     }
 
     // F32 for the host-side embedding gather and the norm/bias vectors. Dequantizes quantized GGUF tensors
