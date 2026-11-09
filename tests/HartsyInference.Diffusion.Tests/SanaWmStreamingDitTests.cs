@@ -68,6 +68,15 @@ public sealed class SanaWmStreamingDitTests : IDisposable
                 AssertClose(streamed, again, 0f, $"chunk {chunk}, repeated denoise pass");
 
             Assert.Equal(offset, cache.CommittedFrames);
+
+            // A save pass that is discarded (a cancelled chunk) leaves the cache as it was.
+            using (Tensor other = Pattern([1, config.InChannels, frames, Height, Width], -0.02f))
+                dit.ForwardChunk(other, new float[frames], text, mask, conditions, plucker, cache, commit: true).Dispose();
+            cache.Discard();
+            using (Tensor afterDiscard = dit.ForwardChunk(x, timesteps, text, mask, conditions, plucker, cache, commit: false))
+                AssertClose(streamed, afterDiscard, 0f, $"chunk {chunk}, denoise pass after a discarded save pass");
+            Assert.Equal(offset, cache.CommittedFrames);
+
             dit.ForwardChunk(x, new float[frames], text, mask, conditions, plucker, cache, commit: true).Dispose();
             cache.Commit(frames);
             offset += frames;
