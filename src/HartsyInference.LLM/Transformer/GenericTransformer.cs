@@ -546,7 +546,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     groups = [];
                     foreach (CrossImageGroup group in rope.ImageGroups)
-                        groups.Add(new CrossImageGroup(group.KvLength, MakeResident(backend, group.Select)));
+                        groups.Add(group.Select is null ? group : group with { Select = MakeResident(backend, group.Select) });
                 }
                 resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask, groups);
                 ownsResidentVision = visionRead;
@@ -559,7 +559,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 visionSin?.Dispose();
                 rowMask?.Dispose();
                 if (groups is not null)
-                    foreach (CrossImageGroup group in groups) group.Select.Dispose();
+                    foreach (CrossImageGroup group in groups) group.Select?.Dispose();
                 throw;
             }
             cos = resident.TextCos;
@@ -696,7 +696,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 }
                 resident.RowMask?.Dispose();
                 if (resident.ImageGroups is not null)
-                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select.Dispose();
+                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select?.Dispose();
             }
             cosLocal?.Dispose();
             sinLocal?.Dispose();

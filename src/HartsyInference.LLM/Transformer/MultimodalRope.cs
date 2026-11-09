@@ -19,5 +19,20 @@ public sealed record MultimodalRope(Tensor TextCos, Tensor TextSin, Tensor? Visi
 /// <summary>One group of text rows that see the same images, for multi-image cross-attention.</summary>
 /// <param name="KvLength">The vision keys the group attends: the blocks of its images and every image before them, a prefix of the sequence.</param>
 /// <param name="Select">The group's rows as <c>[1, T, hidden]</c> F32, 1 for each row in the group and 0 elsewhere. The group's
-/// attention output is multiplied by it, so the other groups' rows contribute nothing.</param>
-public sealed record CrossImageGroup(int KvLength, Tensor Select);
+/// attention output is multiplied by it, so the other groups' rows contribute nothing. Required unless the range is given; a ranged
+/// group may leave it null (with one group per video frame the masks alone would be hundreds of megabytes).</param>
+/// <param name="RowStart">When the group's rows are one contiguous range, its first row; -1 when unknown. With every group's range
+/// known, the cross layer attends each group's own rows only, instead of every row once per group.</param>
+/// <param name="RowCount">The number of rows in that range.</param>
+public sealed record CrossImageGroup(int KvLength, Tensor? Select, int RowStart = -1, int RowCount = 0)
+{
+    /// <summary>The contiguous row range of <paramref name="rowSelect"/> (1 = in the group), or (-1, 0) when the rows are not one range.</summary>
+    public static (int Start, int Count) ContiguousRange(ReadOnlySpan<float> rowSelect)
+    {
+        int first = rowSelect.IndexOfAnyExcept(0f);
+        if (first < 0) return (-1, 0);
+        int end = first;
+        while (end < rowSelect.Length && rowSelect[end] != 0f) end++;
+        return rowSelect[end..].IndexOfAnyExcept(0f) >= 0 ? (-1, 0) : (first, end - first);
+    }
+}
