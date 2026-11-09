@@ -19,7 +19,7 @@ public sealed class UtoniaCheckpointIntegrationTests
     private const string RequireEnv = "HARTSY_REQUIRE_REAL_WEIGHTS";
     private const string StateDictPrefix = "state_dict.";
 
-    // The loader keeps tensors only, so the checkpoint's config is unreadable; these match its qkv and rope shapes.
+    // The loader keeps tensors only: channels come from the qkv shapes, heads from the rope length (headDim 18).
     private static readonly RopeStages Checkpoint = new()
     {
         EncChannels = [54, 108, 216, 432, 576],

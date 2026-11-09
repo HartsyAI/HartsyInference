@@ -96,7 +96,59 @@ public sealed unsafe class Sam3Pipeline : ITextGroundedSegmenter
             TextGroundedPromptResult[] results = new TextGroundedPromptResult[prompts.Count];
             for (int p = 0; p < prompts.Count; p++)
             {
-                results[p] = SegmentPrompt(backend, vision, prompts[p], width, height);
+                string prompt = prompts[p];
+                results[p] = SegmentPrompt(backend, vision, prompt, (decoder, predictions) =>
+                    BuildResult(backend, prompt, decoder, predictions, width, height));
+            }
+
+            return results;
+        }
+        finally
+        {
+            foreach (Tensor level in vision.Features)
+            {
+                level.Dispose();
+            }
+
+            foreach (Tensor position in vision.Positions)
+            {
+                position.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Per prompt, the queries scored strictly above <paramref name="scoreFloor"/>, highest score first, with their
+    /// low-resolution mask logits (<c>MaskResolution</c> squared, row-major) before any projection to the image.</summary>
+    public IReadOnlyList<TextGroundedLogitResult> SegmentLogits(IBackend backend, Tensor image, IReadOnlyList<string> prompts, float scoreFloor)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(prompts);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (prompts.Count == 0)
+        {
+            throw new ArgumentException("At least one prompt is required.", nameof(prompts));
+        }
+
+        Tensor normalized = Sam3Preprocessor.Prepare(backend, image, _config.ImageSize);
+        Sam3VisionFeatures vision;
+        try
+        {
+            vision = _vision.Forward(backend, normalized);
+        }
+        finally
+        {
+            normalized.Dispose();
+        }
+
+        try
+        {
+            TextGroundedLogitResult[] results = new TextGroundedLogitResult[prompts.Count];
+            for (int p = 0; p < prompts.Count; p++)
+            {
+                string prompt = prompts[p];
+                results[p] = SegmentPrompt(backend, vision, prompt, (decoder, predictions) =>
+                    BuildLogits(prompt, decoder, predictions, scoreFloor));
             }
 
             return results;
@@ -129,7 +181,8 @@ public sealed unsafe class Sam3Pipeline : ITextGroundedSegmenter
         _loader.Dispose();
     }
 
-    private TextGroundedPromptResult SegmentPrompt(IBackend backend, Sam3VisionFeatures vision, string prompt, int width, int height)
+    private TResult SegmentPrompt<TResult>(IBackend backend, Sam3VisionFeatures vision, string prompt,
+        Func<Sam3DecoderOutput, Sam3InstancePredictions, TResult> build)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         int[] tokens = _tokenizer.Encode(prompt);
@@ -142,7 +195,7 @@ public sealed unsafe class Sam3Pipeline : ITextGroundedSegmenter
                 Sam3InstancePredictions predictions = _head.Forward(backend, vision, decoder);
                 try
                 {
-                    return BuildResult(backend, prompt, decoder, predictions, width, height);
+                    return build(decoder, predictions);
                 }
                 finally
                 {
@@ -197,6 +250,34 @@ public sealed unsafe class Sam3Pipeline : ITextGroundedSegmenter
         }
 
         return new TextGroundedPromptResult(prompt, width, height, instances);
+    }
+
+    private TextGroundedLogitResult BuildLogits(string prompt, Sam3DecoderOutput decoder, Sam3InstancePredictions predictions, float scoreFloor)
+    {
+        int queries = _config.NumQueries;
+        int mask = _config.MaskResolution;
+        ValidateShape(decoder.PresenceLogit, "presence logit", 1, 1);
+        ValidateShape(predictions.ClassLogits, "class logits", 1, queries);
+        ValidateShape(predictions.MaskLogits, "mask logits", 1, queries, mask, mask);
+
+        float[] classLogits = ReadF32(predictions.ClassLogits, queries);
+        float presence = ReadF32(decoder.PresenceLogit, 1)[0];
+        float[] scores = new float[queries];
+        Sam3PostProcessor.ComputeScores(classLogits, presence, scores);
+        int[] keep = Sam3PostProcessor.SelectAbove(scores, scoreFloor);
+
+        float* maskBase = (float*)predictions.MaskLogits.DataPointer;
+        long plane = (long)mask * mask;
+        TextGroundedLogit[] instances = new TextGroundedLogit[keep.Length];
+        for (int k = 0; k < keep.Length; k++)
+        {
+            int q = keep[k];
+            float[] logits = new float[plane];
+            new ReadOnlySpan<float>(maskBase + q * plane, (int)plane).CopyTo(logits);
+            instances[k] = new TextGroundedLogit(scores[q], logits);
+        }
+
+        return new TextGroundedLogitResult(prompt, mask, instances);
     }
 
     private byte[] ProjectMask(IBackend backend, float* logits, int side, int width, int height)

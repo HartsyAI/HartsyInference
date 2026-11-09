@@ -36,7 +36,7 @@ public static class GlbWriter
             bool hasNormals = mesh.Normals is { Length: > 0 } && mesh.Normals.Length == mesh.Vertices.Length;
             Layout layout = new(mesh, hasNormals, binLength) { Accessor = accessorCount };
             layouts.Add(layout);
-            binLength += layout.TotalBytes;
+            binLength = checked(binLength + layout.TotalBytes);
             accessorCount += layout.ViewCount;
         }
 

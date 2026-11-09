@@ -19,6 +19,7 @@ public sealed partial class VulkanBackend
     {
         using OpScope _op = EnterOp();
         (int inner, long rows) = GluContract.Validate(output, input, spec);
+        GluContract.RequireBakedSitu(spec, "Vulkan");
         if (rows == 0) return;
         if (input.DType == DType.BF16)
         {

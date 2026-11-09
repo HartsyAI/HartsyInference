@@ -78,11 +78,11 @@ public sealed unsafe class ShapeVaeEncoder : IDisposable
 
         for (int i = 0; i < _levels; i++)
         {
-            foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = Advance(cur, block.Forward(backend, cur));
+            foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = ShapeVaeOps.Advance(cur, block.Forward(backend, cur));
             if (i < _levels - 1)
             {
                 SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanSpatialToChannel(cur.Coords, cur.Resolution, 2);
-                cur = Advance(cur, _downs[i]!.Forward(backend, cur, plan));
+                cur = ShapeVaeOps.Advance(cur, _downs[i]!.Forward(backend, cur, plan));
             }
         }
 
@@ -120,13 +120,6 @@ public sealed unsafe class ShapeVaeEncoder : IDisposable
                 d[i * 6 + 3 + c] = e[i * 3 + c] - 0.5f;
             }
         return input;
-    }
-
-    /// <summary>Releases the previous feature buffer once its successor exists; blocks never return their input unchanged.</summary>
-    private static SparseTensor Advance(SparseTensor previous, SparseTensor next)
-    {
-        if (!ReferenceEquals(previous.Feats, next.Feats)) previous.Feats.Dispose();
-        return next;
     }
 
     public void Dispose()

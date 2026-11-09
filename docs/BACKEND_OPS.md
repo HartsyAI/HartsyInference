@@ -201,9 +201,11 @@ out[r, i] = act(gate[r, i]) · value[r, i]        gate and value the two halves 
 ```
 
 Reference: `GluReference.Apply`. Contract: `GluContract.Validate`. A `GluSpec` names the gate function (`GluActivation`:
-`Silu`, `GeluTanh`, `GeluErf`, or `Situ`, whose gate is `4 · tanh(g/4) · sigmoid(g)` and whose value side is soft-capped to
-`25 · tanh(u/25)`) and which half is the gate (`GluGateHalf.First` for `[gate | up]` projections, `Second` for
-`[value | gate]`). The presets `GluSpec.SwiGlu`, `GeGluFirst`, `GeGlu`, `GeGluErf` and `Situ` are the forms the models use.
+`Silu`, `GeluTanh`, `GeluErf`, or `Situ`, whose gate is `β · tanh(g/β) · sigmoid(g)` and whose value side is soft-capped to
+`β_lin · tanh(u/β_lin)`, with `β` and `β_lin` in `GluSpec.SituBeta` and `SituLinearBeta`, defaulting to `SituDefaults`) and
+which half is the gate (`GluGateHalf.First` for `[gate | up]` projections, `Second` for `[value | gate]`). The presets
+`GluSpec.SwiGlu`, `GeGluFirst`, `GeGlu`, `GeGluErf` and `Situ` are the forms the models use. The CUDA and Vulkan kernels
+compile in the defaults and refuse other SiTU betas.
 Input and output are F32, F16 or BF16 alike; the output's last extent is half the input's. The sigmoid takes the sign-aware
 form; the tanh GELU on CUDA keeps the fast-math `2 · sigmoid(2x) − 1` form of the kernels it replaced. `GluEmitQ8` is the same
 op with a Q8_1 sidecar of the output where a backend keeps one.

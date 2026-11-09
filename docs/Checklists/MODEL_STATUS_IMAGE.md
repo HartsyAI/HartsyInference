@@ -256,7 +256,9 @@ consumer card here can hold; whether the 8B/32B variants ship their own distills
   Two separate problems, both surfaced while gating prompt weighting. (1) The declared asset
   `QuantStack/HunyuanImage-2.1-GGUF` **no longer resolves on HuggingFace** — the API returns
   `Invalid username or password`, its answer for a repo that is gone or newly gated — so
-  `ModelCatalog.cs:632` points at nothing. (2) The safetensors build cannot be loaded at all:
+  the catalog's default pointed at nothing. **Resolved 2026-11-03:** the default now pulls
+  `calcuis/hunyuanimage-gguf`'s `hunyuanimage2.1-q4_k_m.gguf`, an ungated Q4_K_M repack of
+  `tencent/HunyuanImage-2.1`, pinned by its LFS SHA-256. (2) The safetensors build cannot be loaded at all:
   `Comfy-Org/HunyuanImage_2.1_ComfyUI`'s `hunyuanimage2.1_fp8_e4m3fn.safetensors` names its tensors
   `model.model.double_blocks.0.img_attn.norm.query_norm.scale` — a `model.model.` prefix with DOTTED
   sub-modules — while `HunyuanImageCheckpointConverter` detects the Tencent layout by the fused underscore form

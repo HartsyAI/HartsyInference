@@ -365,6 +365,14 @@ public sealed unsafe class Tensor : IDisposable
     /// Same units as <see cref="Fp8ScaleFactor"/>: real value = <c>fp8_byte_decoded * scale</c>.</remarks>
     public float Fp8InputScaleFactor { get; set; }
 
+    /// <summary>Keeps this fp8 weight off the native fp8 GEMM, which quantizes each activation to e4m3 with one per-tensor
+    /// scale. Text encoders set it: an encoder's largest activations set that scale, and the rest of the row keeps only a
+    /// few bits.</summary>
+    public bool SkipNativeFp8Gemm { get; set; }
+
+    /// <summary>Runs this weight's GEMM in true F32 instead of the 16-bit path, which casts both operands to F16.</summary>
+    public bool ForceF32Gemm { get; set; }
+
     /// <summary>Packed-quantization companions (per-row scales, ConvRot group size) when this tensor is a weight the backend consumes without dequantizing; null for dense and <c>fp8_scaled</c> weights.</summary>
     public QuantWeightInfo? QuantInfo { get; set; }
 
