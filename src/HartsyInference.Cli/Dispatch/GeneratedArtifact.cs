@@ -39,6 +39,9 @@ public sealed class GeneratedArtifact
     /// main file's stem (a layered image's <c>layer-00.png</c>, …); empty for single-file results.</summary>
     public IReadOnlyList<(string Suffix, byte[] Bytes)> Companions { get; init; } = [];
 
+    /// <summary>File-name stem to use instead of the prompt's slug, for results whose prompt is not a name (an input path); null keeps the prompt slug.</summary>
+    public string? SlugHint { get; init; }
+
     /// <summary>Free-form metadata surfaced to the user (seed, tok/s, dimensions, stop reason).</summary>
     public Dictionary<string, string> Meta { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
