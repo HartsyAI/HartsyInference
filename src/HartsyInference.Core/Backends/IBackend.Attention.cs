@@ -53,8 +53,11 @@ public partial interface IBackend
     /// <c>comb[tokens,hc,hc]</c>; see <see cref="HcReference.SplitSinkhorn"/>.</summary>
     /// <param name="scale">F32 <c>[3]</c> for pre, post and comb.</param>
     /// <param name="bias">F32 <c>[(2+hc)*hc]</c>.</param>
+    /// <param name="eps">Epsilon added to the comb Sinkhorn normalizers.</param>
+    /// <param name="preEps">Epsilon added to the sigmoid pre gates.</param>
+    /// <param name="postMult">Multiplier on the sigmoid post gates (DeepSeek-V4.1 and ERNIE-5.5 both use 2).</param>
     void HcSplitSinkhorn(Tensor pre, Tensor post, Tensor comb, Tensor mixes, Tensor scale, Tensor bias, int hc,
-        int iters, float eps) =>
+        int iters, float eps, float preEps, float postMult) =>
         throw NotSupportedPrimitive(nameof(HcSplitSinkhorn));
 
     /// <summary>Collapses the streams of <c>x[tokens,hc,dim]</c> into <c>output[tokens,dim]</c> weighted by <c>pre[tokens,hc]</c>.</summary>

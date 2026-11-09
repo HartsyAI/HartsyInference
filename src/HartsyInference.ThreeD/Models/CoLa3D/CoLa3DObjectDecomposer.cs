@@ -47,8 +47,17 @@ public sealed class CoLa3DObjectDecomposer : IObjectDecomposer, IDisposable
             int parts = (int)output.MaskLogits.Shape[1];
             int[] owners = CoLa3DObjectSplit.AssignOwners(output.MaskLogits.AsReadOnlySpan<float>(), n, parts);
             List<SparseTensor> objects = [];
-            foreach (int[] rows in CoLa3DObjectSplit.GroupRows(owners, parts))
-                objects.Add(Gather(latent, rows));
+            try
+            {
+                foreach (int[] rows in CoLa3DObjectSplit.GroupRows(owners, parts))
+                    objects.Add(Gather(latent, rows));
+            }
+            catch
+            {
+                foreach (SparseTensor part in objects)
+                    part.Feats.Dispose();
+                throw;
+            }
             return objects;
         }
         finally

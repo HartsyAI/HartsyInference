@@ -33,6 +33,8 @@ public static class GgufKeyMapperRegistry
         Register(r, new DoryKeyMapper());
         // mllama before llama: its cross_attn_* keys are a strict superset of the llama-family signature.
         Register(r, new MllamaKeyMapper());
+        // MOSS-VL before Llama: its cross_gate_* keys sit on top of the llama-family signature.
+        Register(r, new MossVlKeyMapper());
         Register(r, new LlamaKeyMapper());
         Register(r, new PassthroughKeyMapper());
         return r;

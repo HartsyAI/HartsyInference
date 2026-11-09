@@ -93,7 +93,7 @@ public static class ShapeVaeKeyMap
         Add(specs, $"{p}.bias", c);
     }
 
-    /// <summary>A submanifold sparse conv stored as <c>{p}.weight</c> in spconv's <c>[Cout, k, k, k, Cin]</c> layout.</summary>
+    /// <summary>A submanifold sparse conv whose module path is <paramref name="p"/>, stored in spconv's <c>[Cout, k, k, k, Cin]</c> layout.</summary>
     private static void AddSparseConv(List<TensorSpec> specs, string p, int cin, int cout)
     {
         Add(specs, $"{p}.weight", cout, 3, 3, 3, cin);

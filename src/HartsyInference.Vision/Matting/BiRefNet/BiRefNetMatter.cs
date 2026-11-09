@@ -37,6 +37,40 @@ public sealed class BiRefNetMatter : IDisposable
         return Postprocess(logits, width, height);
     }
 
+    /// <summary>Foreground alpha in [0, 1] at the source size, for the HairDeck preprocessing: RGB / 255 resized bilinearly to
+    /// <paramref name="inputSize"/>² without antialiasing, ImageNet normalisation, float sigmoid, bilinear back to the source size.</summary>
+    public unsafe float[] MatteFloat(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height, int inputSize)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (width <= 0 || height <= 0 || inputSize <= 0)
+            throw new ArgumentException($"Image and input sizes must be positive; got {width}x{height} at {inputSize}.");
+        if (rgb.Length < (long)width * height * 3)
+            throw new ArgumentException($"RGB buffer holds {rgb.Length} bytes; a {width}x{height} image needs {(long)width * height * 3}.", nameof(rgb));
+
+        int plane = inputSize * inputSize;
+        float[] source = new float[(long)width * height];
+        float[] resized = new float[plane];
+        using Tensor pixels = new(new TensorShape(1, 3, inputSize, inputSize), DType.F32);
+        float* op = (float*)pixels.DataPointer;
+        for (int c = 0; c < 3; c++)
+        {
+            for (int i = 0; i < source.Length; i++)
+                source[i] = rgb[i * 3 + c] / 255f;
+            Resample.BilinearPlaneF32(source, width, height, resized, inputSize, inputSize);
+            for (int i = 0; i < plane; i++)
+                op[c * plane + i] = (resized[i] - ImageNetMean[c]) / ImageNetStd[c];
+        }
+
+        using Tensor logits = _model.Forward(backend, pixels);
+        float* lp = (float*)logits.DataPointer;
+        for (int i = 0; i < plane; i++)
+            resized[i] = 1f / (1f + MathF.Exp(-lp[i]));
+
+        float[] matte = new float[(long)width * height];
+        Resample.BilinearPlaneF32(resized, inputSize, inputSize, matte, width, height);
+        return matte;
+    }
+
     /// <summary>Resize to 1024², quantize to 8 bits, scale to [0,1] and normalize per channel: <c>[1,3,1024,1024]</c>.</summary>
     internal static unsafe Tensor Preprocess(ReadOnlySpan<byte> rgb, int width, int height)
     {

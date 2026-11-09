@@ -27,6 +27,18 @@ public sealed record MeshRequest
     /// <summary>RNG seed; negative means a random seed.</summary>
     public long Seed { get; init; } = -1;
 
+    /// <summary>Number of samples (seeds Seed, Seed + 1, ...). Only HairDeck reads it; other models reject any value but 1.</summary>
+    public int Samples { get; init; } = 1;
+
+    /// <summary>HairDeck: colour the cards with the colour model. Null keeps the model default; other models reject a value.</summary>
+    public bool? Colors { get; init; }
+
+    /// <summary>HairDeck: also generate spring-bone chains. Null keeps the model default; other models reject a value.</summary>
+    public bool? Chains { get; init; }
+
+    /// <summary>HairDeck: rigged output, skinned to the spring chains with head-motion clips; needs chains (the default). Other models reject it.</summary>
+    public bool Rigged { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 

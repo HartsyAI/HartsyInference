@@ -8,9 +8,16 @@ public sealed class DualGridVoxelizerTests
 {
     private const float Tolerance = 1e-4f;
 
+    // Looser than Tolerance: boundary and plane quadrics accumulate float error across several solves.
+    private const float SolveTolerance = 1e-3f;
+
     private static readonly Vector3 UnitVoxel = Vector3.One;
+    private static readonly Vector3 AnisotropicVoxel = new(0.5f, 1f, 2f);
     private static readonly int[] GridMin = [0, 0, 0];
     private static readonly int[] GridMax = [5, 5, 5];
+
+    // Covers the tilted quad at AnisotropicVoxel: x indices reach 7, y 3, z 2.
+    private static readonly int[] AnisotropicGridMax = [10, 5, 5];
 
     // Off-center cube so no face sits exactly on a voxel boundary.
     private static readonly Vector3 CubeMin = new(1.25f, 1.25f, 1.25f);
@@ -19,22 +26,7 @@ public sealed class DualGridVoxelizerTests
     [Fact]
     public void AxisAlignedCube_EveryDualVertexLiesInsideItsVoxel()
     {
-        DualGridVoxels voxels = VoxelizeCube();
-        int count = voxels.Coords.Length / 3;
-
-        Assert.True(count > 0);
-        Assert.Equal(count * 3, voxels.DualVertices.Length);
-        Assert.Equal(count * 3, voxels.Intersected.Length);
-        for (int i = 0; i < count; i++)
-        {
-            for (int axis = 0; axis < 3; axis++)
-            {
-                float low = voxels.Coords[i * 3 + axis] * UnitVoxel.X;
-                float high = low + UnitVoxel.X;
-                float value = voxels.DualVertices[i * 3 + axis];
-                Assert.InRange(value, low - Tolerance, high + Tolerance);
-            }
-        }
+        AssertInsideVoxels(VoxelizeCube(), UnitVoxel);
     }
 
     [Fact]
@@ -60,6 +52,65 @@ public sealed class DualGridVoxelizerTests
                 DistanceToCubeSurface(point) <= UnitVoxel.X + Tolerance,
                 $"Vertex {v} at {point} is more than one voxel from the cube surface.");
         }
+    }
+
+    [Fact]
+    public void OpenSheet_BoundaryPass_PullsEdgeVoxelsOntoTheirBoundaryLines()
+    {
+        // Boundary lines are y = 1.25 and y = 3.75 (running along x), plus x = 1.25 and x = 3.75 (along y).
+        DualGridVoxels voxels = VoxelizeWith(vertices: SheetVertices(), faces: SheetFaces(), boundaryWeight: 1f);
+
+        AssertInsideVoxels(voxels, UnitVoxel);
+        int count = voxels.Coords.Length / 3;
+        int onBoundaryLine = 0;
+        for (int i = 0; i < count; i++)
+        {
+            Assert.InRange(voxels.DualVertices[i * 3 + 2], 2.5f - SolveTolerance, 2.5f + SolveTolerance);
+
+            int cy = voxels.Coords[i * 3 + 1];
+            float y = voxels.DualVertices[i * 3 + 1];
+            if (cy == 1)
+            {
+                Assert.InRange(y, 1.25f - SolveTolerance, 1.25f + SolveTolerance);
+                onBoundaryLine++;
+            }
+            else if (cy == 3)
+            {
+                Assert.InRange(y, 3.75f - SolveTolerance, 3.75f + SolveTolerance);
+                onBoundaryLine++;
+            }
+        }
+
+        Assert.True(onBoundaryLine > 0, "No edge voxel was constrained by the boundary pass.");
+    }
+
+    [Fact]
+    public void TiltedQuad_Regularization_MovesRankDeficientVoxelsAndKeepsThemOnThePlane()
+    {
+        // Without regularization the face quadrics leave the in-plane position undetermined.
+        DualGridVoxels plain = VoxelizeWith(vertices: TiltedVertices(), faces: SheetFaces(), boundaryWeight: 0f);
+        DualGridVoxels regularized = VoxelizeWith(
+            vertices: TiltedVertices(), faces: SheetFaces(), boundaryWeight: 0f, regularizationWeight: 1f);
+
+        AssertInsideVoxels(regularized, UnitVoxel);
+        AssertOnTiltedPlane(regularized);
+        Assert.True(
+            MaxAbsDifference(plain.DualVertices, regularized.DualVertices) > SolveTolerance,
+            "Regularization left every dual vertex unchanged.");
+    }
+
+    [Fact]
+    public void TiltedQuad_NonUnitVoxels_DualVerticesLieInsideTheirVoxelsAndOnThePlane()
+    {
+        DualGridVoxels voxels = VoxelizeWith(
+            vertices: TiltedVertices(),
+            faces: SheetFaces(),
+            voxelSize: AnisotropicVoxel,
+            gridMax: AnisotropicGridMax,
+            boundaryWeight: 0f);
+
+        AssertInsideVoxels(voxels, AnisotropicVoxel);
+        AssertOnTiltedPlane(voxels);
     }
 
     [Fact]
@@ -156,7 +207,10 @@ public sealed class DualGridVoxelizerTests
         int[]? faces = null,
         Vector3? voxelSize = null,
         int[]? gridMin = null,
-        int[]? gridMax = null)
+        int[]? gridMax = null,
+        float faceWeight = 1f,
+        float boundaryWeight = 1f,
+        float regularizationWeight = 0f)
     {
         return DualGridVoxelizer.Voxelize(
             vertices ?? CubeVertices(),
@@ -164,10 +218,58 @@ public sealed class DualGridVoxelizerTests
             voxelSize ?? UnitVoxel,
             gridMin ?? GridMin,
             gridMax ?? GridMax,
-            faceWeight: 1f,
-            boundaryWeight: 1f,
-            regularizationWeight: 0f);
+            faceWeight,
+            boundaryWeight,
+            regularizationWeight);
     }
+
+    private static void AssertInsideVoxels(DualGridVoxels voxels, Vector3 voxelSize)
+    {
+        int count = voxels.Coords.Length / 3;
+
+        Assert.True(count > 0);
+        Assert.Equal(count * 3, voxels.DualVertices.Length);
+        Assert.Equal(count * 3, voxels.Intersected.Length);
+        for (int i = 0; i < count; i++)
+        {
+            for (int axis = 0; axis < 3; axis++)
+            {
+                float size = AxisValue(voxelSize, axis);
+                float low = voxels.Coords[i * 3 + axis] * size;
+                Assert.InRange(voxels.DualVertices[i * 3 + axis], low - Tolerance, low + size + Tolerance);
+            }
+        }
+    }
+
+    private static void AssertOnTiltedPlane(DualGridVoxels voxels)
+    {
+        int count = voxels.DualVertices.Length / 3;
+        for (int i = 0; i < count; i++)
+        {
+            Vector3 p = new(voxels.DualVertices[i * 3], voxels.DualVertices[i * 3 + 1], voxels.DualVertices[i * 3 + 2]);
+            float distance = DistanceToTiltedPlane(p);
+            Assert.True(distance <= SolveTolerance, $"Dual vertex {i} at {p} is {distance} from the quad plane.");
+        }
+    }
+
+    private static float MaxAbsDifference(float[] a, float[] b)
+    {
+        Assert.Equal(a.Length, b.Length);
+        float max = 0f;
+        for (int i = 0; i < a.Length; i++)
+        {
+            max = MathF.Max(max, MathF.Abs(a[i] - b[i]));
+        }
+
+        return max;
+    }
+
+    private static float AxisValue(Vector3 v, int axis) => axis switch
+    {
+        0 => v.X,
+        1 => v.Y,
+        _ => v.Z,
+    };
 
     private static float[] CubeVertices() =>
     [
@@ -191,6 +293,29 @@ public sealed class DualGridVoxelizerTests
         0, 4, 7, 0, 7, 3,
         1, 2, 6, 1, 6, 5,
     ];
+
+    // Open sheet in the plane z = 2.5 over the cube footprint: two triangles, four boundary edges.
+    private static float[] SheetVertices() =>
+    [
+        1.25f, 1.25f, 2.5f,
+        3.75f, 1.25f, 2.5f,
+        3.75f, 3.75f, 2.5f,
+        1.25f, 3.75f, 2.5f,
+    ];
+
+    private static int[] SheetFaces() => [0, 1, 2, 0, 2, 3];
+
+    // Same footprint as the sheet, lifted onto the tilted plane z = 0.5x + 0.25y + 1.75.
+    private static float[] TiltedVertices() =>
+    [
+        1.25f, 1.25f, 2.6875f,
+        3.75f, 1.25f, 3.9375f,
+        3.75f, 3.75f, 4.5625f,
+        1.25f, 3.75f, 3.3125f,
+    ];
+
+    private static float DistanceToTiltedPlane(Vector3 p) =>
+        MathF.Abs(p.Z - 0.5f * p.X - 0.25f * p.Y - 1.75f) / MathF.Sqrt(1.3125f);
 
     private static float DistanceToCubeSurface(Vector3 p)
     {

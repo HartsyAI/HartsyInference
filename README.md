@@ -68,6 +68,88 @@ Plans govern compatibility, artifacts, defaults, and release gates before loadin
 features remain subject to their individual
 [release gates](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/MODEL_STATUS_VIDEO.md#minimax-h3).
 
+## HairDeck: hair cards from one image
+
+HairDeck (`hairdeck`) turns one character image into a GLB of hair cards, with per-card colours and optional spring-bone
+chains. It runs through `hartsy 3d` and `POST /v1/native/mesh` on the CUDA and CPU backends. Vulkan is rejected for HairDeck
+(its BiRefNet-matting preprocessing needs `LeakyRelu`, which the Vulkan backend does not implement). Weights are from
+[`hyz317/HairDeck`](https://huggingface.co/hyz317/HairDeck) (Apache-2.0). Output is static (hair cards and chain tubes) or
+rigged (the cards skinned to the spring chains, with head-motion clips). VRM packaging is not implemented.
+
+### Setup
+
+1. Pull the catalog assets. This fetches the HairDeck checkpoints (about 1.6 GB) and the Vision models it needs:
+
+   ```bash
+   dotnet run -c Release -f net10.0 --project src/HartsyInference.Cli -- pull hairdeck
+   ```
+
+   Assets are placed under `<paths.modelsRoot>/3D/HairDeck` and `<paths.modelsRoot>/Vision`. The default root is `Models/`
+   in the repository. Change it with `hartsy settings set paths.modelsRoot <dir>`.
+2. Two of the Vision models are gated on Hugging Face. Request access on
+   [`facebook/sam3`](https://huggingface.co/facebook/sam3) (SAM License) and
+   [`facebook/dinov3-vitl16-pretrain-lvd1689m`](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m)
+   (DINOv3 License) first. Then set `HF_TOKEN` to a token with read access before `pull`. BiRefNet-matting is MIT and
+   needs no approval.
+
+### Input
+
+- A PNG with an alpha channel uses that alpha as the person matte. Any other image (including a PNG without alpha) is
+  segmented automatically with SAM 3 and BiRefNet-matting.
+- One character per image. A request fails with a named error when the hair or face cannot be found.
+
+### CLI
+
+```bash
+dotnet run -c Release -f net10.0 --project src/HartsyInference.Cli -- \
+  3d character.png -m hairdeck -b cuda --seed 0 -o out/
+```
+
+Writes `out/hairdeck-0001.glb`. Options that apply to HairDeck:
+
+| Option | Default | Effect |
+|---|---|---|
+| `--steps` | 50 | Euler steps of the image model |
+| `--seed` | -1 (random) | RNG seed; use a fixed value to repeat a result |
+| `--no-colors` | off | Skip the colour model; the cards then have no per-card colour |
+| `--no-chains` | off | Skip the spring-bone chains; the GLB has only `hair_cards` |
+| `-b` | `auto` | `cuda` or `cpu`. `vulkan` is rejected; `auto` may pick Vulkan on some GPUs, so pass `-b cuda` or `-b cpu` |
+| `--rigged` | off | Skin the cards to the spring chains and add four clips: `turn`, `nod`, `jump`, `sway`. Needs chains |
+
+Samples are fixed at one per request (`-n 1`). Rigged output is written to the same `hairdeck-0001.glb` name.
+
+### HTTP
+
+`POST /v1/native/mesh` takes the image as a base64 PNG in `imagePng` (a `data:image/png;base64,` prefix is accepted).
+Set either `imagePng` or `request.image`, not both.
+
+```bash
+curl -X POST http://localhost:5000/v1/native/mesh -H "Content-Type: application/json" -d '{
+  "model": "hairdeck",
+  "imagePng": "<base64 PNG>",
+  "request": { "prompt": "", "seed": 0, "steps": 50, "colors": true, "chains": true, "rigged": false }
+}'
+```
+
+The response carries `data` (the GLB, base64), `format` (`glb`) and `savedPath`. Add `"save": false` to return the GLB
+without writing it to disk. `POST /v1/native/mesh/stream` returns only the final result for HairDeck; step progress is not streamed yet. Use your server's address; the example assumes the default local port, 5000.
+
+### Output
+
+- `hair_cards`: the hair as ribbons, with per-card colours (`COLOR_0`) when colours are on, ready for a viewer or DCC tool.
+- `spring_chains` (when chains are on): the chain tubes. Static output shows where the chains run. Rigged output skins
+  the hair cards and the chain tubes to the chains, and the file has one skin and four animations (`turn`, `nod`, `jump`, `sway`) at 60 fps.
+
+### Limits
+
+- Verified on one demo image (`ex01`, seed 0) on CUDA (RTX 3060): the CLI and the API each wrote a 1,099,912-byte static
+  GLB, and each wrote a 2,439,976-byte rigged GLB. All four clips move the hair (peak vertex displacement 0.19–0.30 m).
+  Other demo images are not run.
+- Per-step time and peak VRAM are not measured yet.
+- Cancellation stops between sampling steps. It does not stop SAM 3, BiRefNet or DINOv3 in the middle of preprocessing.
+- One generation runs at a time per loaded model. A request queued behind an unload gets HTTP 503 and can be retried.
+- The cuDNN fast path is not used; convolutions use the cuBLAS fallback.
+
 ## Configuration
 
 Settings live in one file, `~/.config/hartsyinference/settings.json`, and are read and written through

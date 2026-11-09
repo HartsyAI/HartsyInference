@@ -17,7 +17,8 @@ public static class MeshEndpoints
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
             try
             {
-                MeshResult result = await queue.EnqueueAsync(() => engine.Mesh.GenerateAsync(spec, req.Request, progress: null, ct), ct);
+                MeshRequest request = req.ToMeshRequest();
+                MeshResult result = await queue.EnqueueAsync(() => engine.Mesh.GenerateAsync(spec, request, progress: null, ct), ct);
                 return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)));
             }
             catch (Exception ex)
@@ -34,7 +35,8 @@ public static class MeshEndpoints
                 // Runs inside the queue's held slot — call the service directly, not through a second EnqueueAsync.
                 Progress<StepPreview> progress = new Progress<StepPreview>(p =>
                     writer.TryWrite(SseHelpers.Event("progress", StepPreviewPayload.Create(p), jsonOptions)));
-                MeshResult result = await engine.Mesh.GenerateAsync(spec, req.Request, progress, ct);
+                MeshRequest request = req.ToMeshRequest();
+                MeshResult result = await engine.Mesh.GenerateAsync(spec, request, progress, ct);
                 writer.TryWrite(SseHelpers.Event("complete",
                     WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Prompt, result.Format)), jsonOptions));
             }, ct);

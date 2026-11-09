@@ -1,12 +1,13 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Engine.Services;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, or one GLB mesh per decomposed object from a scene mesh with CoLa3D.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, one GLB mesh per decomposed object from a scene mesh with CoLa3D, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -17,10 +18,30 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb scene mesh (cola3d).")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, trellis, or cola3d.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, trellis, or cola3d.")]
+        [Description("Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.")]
         public string Model { get; init; } = "triposr";
+
+        /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
+        [CommandOption("-n|--samples")]
+        [Description("Samples to generate (hairdeck only; this build accepts 1).")]
+        public int Samples { get; init; } = 1;
+
+        /// <summary>Rigged output: skinned to the spring chains, with head-motion clips (HairDeck only; needs chains).</summary>
+        [CommandOption("--rigged")]
+        [Description("Rigged output with head-motion clips (hairdeck only; needs chains).")]
+        public bool Rigged { get; init; }
+
+        /// <summary>Skip the colour model (HairDeck only).</summary>
+        [CommandOption("--no-colors")]
+        [Description("Skip the colour model (hairdeck only).")]
+        public bool NoColors { get; init; }
+
+        /// <summary>Skip the spring-bone chains (HairDeck only).</summary>
+        [CommandOption("--no-chains")]
+        [Description("Skip the spring-bone chains (hairdeck only).")]
+        public bool NoChains { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>
         [CommandOption("--model-path")]
@@ -34,7 +55,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Marching-cubes grid resolution (0 = model default).</summary>
         [CommandOption("--grid")]
-        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16).")]
+        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256).")]
         public int Grid { get; init; }
 
         /// <summary>Mask PNGs for cola3d, one per object (repeatable); all the same size, red channel is the coverage.</summary>
@@ -49,9 +70,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("cola3d: a point per object as x,y,z in the scene mesh's units (repeatable). Excludes --prompt-mask.")]
         public string[]? PromptPoints { get; init; }
 
-        /// <summary>Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).</summary>
+        /// <summary>Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps (Hunyuan3D and TRELLIS only; 0 = default).")]
+        [Description("Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).")]
         public int Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
@@ -76,9 +97,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         if (!CommandRunner.RequireNonEmpty(settings.Input, "An input path is required (an image, or a scene mesh for cola3d).", out int exitCode))
             return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath))
+        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
+        if (spec.LocalPath is null)
         {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red].[/]");
+            string hint = MeshModelIds.SceneMesh.Contains(spec.Catalog?.Id ?? string.Empty) ? string.Empty : ", or download its catalog assets";
+            AnsiConsole.MarkupLine($"[red]A model is required via[/] [#2ea5e0]--model-path[/][red]{hint}.[/]");
             return 1;
         }
 
@@ -96,8 +119,10 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
-
-        ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
+        parameters.Put("samples", settings.Samples.ToString(CultureInfo.InvariantCulture));
+        parameters.Put("rigged", settings.Rigged ? "true" : "false");
+        parameters.Put("no-colors", settings.NoColors ? "true" : "false");
+        parameters.Put("no-chains", settings.NoChains ? "true" : "false");
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Input, parameters, settings.Backend, settings.Quiet,

@@ -58,7 +58,8 @@ public readonly record struct TextPlacementDemand(long DenseBytes, long ExpertBy
     public long TotalBytes => DenseBytes + ExpertBytes + KvBytes + PrefillBytes;
 
     /// <summary>Whether the CPU can run the routed experts in place: every expert tensor in a format the packed CPU kernels read,
-    /// with widths that fit its blocks. Offload needs it; the other placements do not.</summary>
+    /// with widths that fit its blocks, and an expert activation the host runtime runs (<c>MoeFeedForward.HostRunsExpertActivation</c>).
+    /// Offload needs it; the other placements do not.</summary>
     public bool ExpertsHostRunnable { get; init; } = true;
 
     /// <summary>Why <see cref="ExpertsHostRunnable"/> is false; null when it is true.</summary>

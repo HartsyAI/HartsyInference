@@ -63,8 +63,8 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
         {
             for (int i = 0; i < _levels; i++)
             {
-                foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = Advance(cur, block.Forward(backend, cur));
-                if (i < _levels - 1) cur = Advance(cur, _ups[i]!.Forward(backend, cur));
+                foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = ShapeVaeOps.Advance(cur, block.Forward(backend, cur));
+                if (i < _levels - 1) cur = ShapeVaeOps.Advance(cur, _ups[i]!.Forward(backend, cur));
             }
         }
         catch
@@ -80,13 +80,6 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
         Tensor head = ShapeVaeOps.Linear(backend, normed, _outputW, _outputB, m, ShapeVaeKeyMap.DecoderOutputChannels);
         normed.Dispose();
         return new SparseTensor(head, cur.Coords, cur.Resolution);
-    }
-
-    /// <summary>Releases the previous feature buffer once its successor exists; blocks never return their input unchanged.</summary>
-    private static SparseTensor Advance(SparseTensor previous, SparseTensor next)
-    {
-        if (!ReferenceEquals(previous.Feats, next.Feats)) previous.Feats.Dispose();
-        return next;
     }
 
     public void Dispose()

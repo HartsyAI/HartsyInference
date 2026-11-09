@@ -48,6 +48,13 @@ internal static class ShapeVaeOps
         return o;
     }
 
+    /// <summary>Releases the previous feature buffer once its successor exists; blocks never return their input unchanged.</summary>
+    internal static SparseTensor Advance(SparseTensor previous, SparseTensor next)
+    {
+        if (!ReferenceEquals(previous.Feats, next.Feats)) previous.Feats.Dispose();
+        return next;
+    }
+
     /// <summary>
     /// Checks a sparse input against a block's expectations; fails before any work is queued. The sparse rulebook keys
     /// ignore the batch index, so the input must hold a single batch.

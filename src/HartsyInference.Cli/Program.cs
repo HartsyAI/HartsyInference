@@ -81,6 +81,9 @@ public static class Program
             config.AddCommand<ImageCommand>("image")
                 .WithDescription("Generate an image from a prompt with a diffusion checkpoint (SDXL).")
                 .WithExample("image", "\"a fox in snow\"", "--model-path", "sdxl.safetensors", "--steps", "30");
+            config.AddCommand<RemovePeopleCommand>("remove-people")
+                .WithDescription("Remove the people under a mask with the OneReward people-removal recipe.")
+                .WithExample("remove-people", "photo.jpg", "--mask", "people.png", "-o", "out");
             config.AddCommand<TranscribeCommand>("transcribe")
                 .WithDescription("Transcribe a WAV file to text with Whisper.")
                 .WithExample("transcribe", "speech.wav", "-m", "whisper-base");
@@ -94,7 +97,7 @@ public static class Program
                 .WithDescription("Stream a WAV to the wake-word listener as if it were a voice satellite.")
                 .WithExample("wake-client", "speech.wav", "--host", "127.0.0.1", "-p", "10800");
             config.AddCommand<ThreeDCommand>("3d")
-                .WithDescription("Generate a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, or TRELLIS.")
+                .WithDescription("Generate a 3D mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, or HairDeck (hair cards); or split a scene mesh into per-object GLB meshes with CoLa3D.")
                 .WithExample("3d", "photo.png", "-m", "triposr", "--model-path", "/models/triposr");
             config.AddCommand<VisionCommand>("vision")
                 .WithDescription("Run CLIP embedding or YOLO detection on an image.")

@@ -1,5 +1,6 @@
 using System.Globalization;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
@@ -14,15 +15,30 @@ public static class ObjReader
         ArgumentNullException.ThrowIfNull(text);
         List<float> vertices = [];
         List<int> indices = [];
+        HashSet<string> skipped = [];
         foreach (string raw in text.Split('\n'))
         {
-            string line = raw.Trim();
-            if (line.StartsWith("v ", StringComparison.Ordinal))
-                vertices.AddRange(ParseVertex(line));
-            else if (line.StartsWith("f ", StringComparison.Ordinal))
-                AddFace(line, vertices.Count / 3, indices);
+            string[] tokens = raw.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length == 0 || tokens[0][0] == '#')
+                continue;
+            switch (tokens[0])
+            {
+                case "v":
+                    vertices.AddRange(ParseVertex(tokens));
+                    break;
+                case "f":
+                    AddFace(tokens, vertices.Count / 3, indices);
+                    break;
+                case "vt" or "vn" or "vp" or "g" or "o" or "s" or "usemtl" or "mtllib":
+                    break;
+                default:
+                    skipped.Add(tokens[0]);
+                    break;
+            }
         }
 
+        foreach (string keyword in skipped)
+            Logs.Warning($"OBJ records of type '{keyword}' are not read and were skipped.");
         if (indices.Count == 0)
             throw new HartsyInferenceException("OBJ scene has no faces.");
         return new Mesh { Vertices = [.. vertices], Indices = [.. indices] };
@@ -31,32 +47,30 @@ public static class ObjReader
     /// <summary>Reads and parses an OBJ file.</summary>
     public static Mesh Load(string path) => Parse(File.ReadAllText(path));
 
-    private static float[] ParseVertex(string line)
+    private static float[] ParseVertex(string[] tokens)
     {
-        string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 4)
-            throw new HartsyInferenceException($"OBJ vertex needs three coordinates: '{line}'.");
+        if (tokens.Length < 4)
+            throw new HartsyInferenceException($"OBJ vertex needs three coordinates: '{string.Join(' ', tokens)}'.");
         float[] xyz = new float[3];
         for (int a = 0; a < 3; a++)
         {
-            if (!float.TryParse(parts[a + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float value) || !float.IsFinite(value))
-                throw new HartsyInferenceException($"OBJ vertex coordinate is not a finite number: '{line}'.");
+            if (!float.TryParse(tokens[a + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out float value) || !float.IsFinite(value))
+                throw new HartsyInferenceException($"OBJ vertex coordinate is not a finite number: '{string.Join(' ', tokens)}'.");
             xyz[a] = value;
         }
         return xyz;
     }
 
-    private static void AddFace(string line, int vertexCount, List<int> indices)
+    private static void AddFace(string[] tokens, int vertexCount, List<int> indices)
     {
-        string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 4)
-            throw new HartsyInferenceException($"OBJ face needs at least three vertices: '{line}'.");
-        int first = ResolveIndex(parts[1], vertexCount);
-        for (int k = 2; k + 1 < parts.Length; k++)
+        if (tokens.Length < 4)
+            throw new HartsyInferenceException($"OBJ face needs at least three vertices: '{string.Join(' ', tokens)}'.");
+        int first = ResolveIndex(tokens[1], vertexCount);
+        for (int k = 2; k + 1 < tokens.Length; k++)
         {
             indices.Add(first);
-            indices.Add(ResolveIndex(parts[k], vertexCount));
-            indices.Add(ResolveIndex(parts[k + 1], vertexCount));
+            indices.Add(ResolveIndex(tokens[k], vertexCount));
+            indices.Add(ResolveIndex(tokens[k + 1], vertexCount));
         }
     }
 
