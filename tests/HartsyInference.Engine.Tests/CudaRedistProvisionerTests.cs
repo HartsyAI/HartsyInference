@@ -44,6 +44,29 @@ public sealed class CudaRedistProvisionerTests : IDisposable
         Assert.Equal(expected, CublasRuntime.PickMajors(driver));
 
     [Fact]
+    public void FetchSpec_RefusesAVersionForACudaMajorTheProbeNeverSearches()
+    {
+        KnobStore.Set(EngineKnobs.CublasVersion, "14.0.1.2");
+        Assert.Null(CublasRuntime.FetchSpec(driverMajor: 14));
+    }
+
+    [Fact]
+    public void AbandonedDownloadFoldersAreRemovedButALiveRunsIsKept()
+    {
+        string component = Path.Combine(_root, "cache", "cublas", "cuda13");
+        string legacy = Path.Combine(component, "download");
+        string dead = Path.Combine(component, "download-2147483646-0123456789abcdef");
+        string live = Path.Combine(component, $"download-{Environment.ProcessId}-fedcba9876543210");
+        foreach (string dir in new[] { legacy, dead, live }) Directory.CreateDirectory(dir);
+
+        CudaRedistProvisioner.RemoveAbandonedDownloads(component);
+
+        Assert.False(Directory.Exists(legacy));
+        Assert.False(Directory.Exists(dead));
+        Assert.True(Directory.Exists(live));
+    }
+
+    [Fact]
     public void Soname_FollowsThePlatformNaming()
     {
         Assert.Equal("cublas64_13.dll", CublasRuntime.Soname(13, windows: true));

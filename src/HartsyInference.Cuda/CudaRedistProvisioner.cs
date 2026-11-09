@@ -58,6 +58,7 @@ public static class CudaRedistProvisioner
         // Per run, so two processes provisioning at once (several backends starting on a fresh machine) never share an archive
         // or delete each other's extraction.
         string work = Path.Combine(Path.GetDirectoryName(libDir)!, $"download-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        RemoveAbandonedDownloads(Path.GetDirectoryName(libDir)!);
         try
         {
             Directory.CreateDirectory(libDir);
@@ -86,7 +87,41 @@ public static class CudaRedistProvisioner
         finally
         {
             try { if (Directory.Exists(work)) Directory.Delete(work, recursive: true); }
-            catch { /* a leftover download dir is harmless and is replaced on the next fetch */ }
+            catch { /* a leftover download dir is removed by the next fetch once its process has exited */ }
+        }
+    }
+
+    /// <summary>Deletes download folders a killed run left behind (the per-run <c>download-{pid}-{guid}</c> whose process is gone,
+    /// and the legacy fixed <c>download</c>). A folder of a process still running is left alone: it may be mid-fetch.</summary>
+    internal static void RemoveAbandonedDownloads(string componentDir)
+    {
+        if (!Directory.Exists(componentDir)) return;
+        foreach (string dir in Directory.EnumerateDirectories(componentDir, "download*"))
+        {
+            string name = Path.GetFileName(dir);
+            string[] parts = name.Split('-');
+            bool abandoned = name == "download"
+                || (parts.Length == 3 && int.TryParse(parts[1], out int pid) && pid != Environment.ProcessId && !IsRunning(pid));
+            if (!abandoned) continue;
+            try { Directory.Delete(dir, recursive: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* retried on the next fetch */ }
+        }
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;   // no process with that id
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 
@@ -201,7 +236,16 @@ public static class CudaRedistProvisioner
             string destination = Path.Combine(libDir, file.Name);
             string staging = destination + $".{Environment.ProcessId}.tmp";
             File.Copy(file.FullName, staging, overwrite: true);
-            File.Move(staging, destination, overwrite: true);
+            try
+            {
+                File.Move(staging, destination, overwrite: true);
+            }
+            catch
+            {
+                // On Windows the move fails while another process has the library loaded; do not leave the staged copy behind.
+                try { File.Delete(staging); } catch (IOException) { }
+                throw;
+            }
             copied++;
         }
         foreach (FileInfo link in files.Where(f => f.LinkTarget is not null))

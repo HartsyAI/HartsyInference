@@ -111,12 +111,13 @@ public static class CublasRuntime
                 string? fetched = spec is null ? null : CudaRedistProvisioner.FetchInto(spec);
                 Locate();
                 _fetchPending = false;
-                string target = Soname(Math.Clamp(_driverMajor, KnownMajors[^1], KnownMajors[0]));
+                // The fetched archive is for the spec's major, which a paths.cublasVersion override can set below the driver's.
+                string target = Soname(spec?.CudaMajor ?? Math.Clamp(_driverMajor, KnownMajors[^1], KnownMajors[0]));
                 if (!Available && fetched is null)
                     Reason = $"cuBLAS not found and the download failed (driver is CUDA {_driverMajor}); see the warning above. " +
                              $"Install the CUDA {_driverMajor} Toolkit, or set paths.cublasDir to a folder holding {target}.";
                 else if (!Available)
-                    Reason = $"cuBLAS was downloaded to {fetched} but does not load: {LoadError(Path.Combine(fetched!, target))}";
+                    Reason = $"cuBLAS was downloaded to {fetched} but was not picked up: {LoadError(Path.Combine(fetched!, target), fetched!)}";
             }
             finally
             {
@@ -127,12 +128,15 @@ public static class CublasRuntime
     }
 
     /// <summary>The native loader's own error for <paramref name="path"/>, which <c>TryLoad</c> discards.</summary>
-    private static string LoadError(string path)
+    private static string LoadError(string path, string folder)
     {
+        if (!File.Exists(path))
+            return $"{Path.GetFileName(path)} is not in {folder}";
         try
         {
+            // A load by full path resolves the library's dependencies too, so success means the search never looked here.
             NativeLibrary.Free(NativeLibrary.Load(path));
-            return "it loads on its own, so a library it depends on is missing";
+            return $"{Path.GetFileName(path)} loads by path, but the library search did not find it in {folder}";
         }
         catch (Exception ex)
         {
@@ -171,6 +175,13 @@ public static class CublasRuntime
             {
                 Logs.Warning($"[cuBLAS] paths.cublasVersion={versionOverride} is for CUDA {overrideMajor}, newer than the driver's CUDA "
                              + $"{driverMajor}; nothing was downloaded. Pick a CUDA {Math.Min(driverMajor, 13)} or older version.");
+                return null;
+            }
+            // The probe only searches the known majors, so an archive for another one would download and never load.
+            if (!KnownMajors.Contains(overrideMajor))
+            {
+                Logs.Warning($"[cuBLAS] paths.cublasVersion={versionOverride} is for CUDA {overrideMajor}, which this engine does not "
+                             + $"load (it loads CUDA {string.Join(" or ", KnownMajors)}); nothing was downloaded.");
                 return null;
             }
             major = overrideMajor;

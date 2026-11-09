@@ -98,7 +98,7 @@ public static class CudnnRuntime
         {
             Logs.Info($"[cuDNN] {Reason}");
         }
-        else if (_fetchPending)
+        else if (_fetchPending || _fetchInProgress)
         {
             Logs.Info($"[cuDNN] not installed; the matching redist for CUDA {_cudaMajor} downloads on first use by a conv or " +
                       "attention model (paths.cudnnAutofetch=false to disable). Until then those paths use the fallbacks.");
