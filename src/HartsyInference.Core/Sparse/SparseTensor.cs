@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.ThreeD.Models.Trellis;
+namespace HartsyInference.Core.Sparse;
 
 /// <summary>A TRELLIS sparse-voxel tensor: per-voxel features <see cref="Feats"/> <c>[N, C]</c> paired 1:1 with integer voxel coordinates <see cref="Coords"/> <c>[N, 4]</c> = <c>(batch, x, y, z)</c>.</summary>
 public sealed class SparseTensor
