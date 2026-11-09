@@ -96,10 +96,15 @@ public sealed class MeshService : IMeshService, IDisposable
                     TrellisImageTo3DPipeline trellis = TrellisImageTo3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(trellis, trellis.Generate);
                 }
-                else
+                else if (id == "triposr")
                 {
                     TripoSrPipeline triposr = TripoSrPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(triposr, triposr.Generate);
+                }
+                else
+                {
+                    // Unreachable while SupportedModelIds matches these branches; a new id must get its own branch.
+                    throw new System.Diagnostics.UnreachableException($"No loader wired for supported 3D model '{id}'.");
                 }
                 _pipelines[spec.LocalPath] = loaded;
                 return loaded;
