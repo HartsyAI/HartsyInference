@@ -12,6 +12,6 @@ public enum GluActivation
     /// <summary><c>0.5 · g · (1 + erf(g / √2))</c> (GeGLU with the exact GELU).</summary>
     GeluErf,
 
-    /// <summary>MOSS-Image's SiTU: the gate becomes <c>4 · tanh(g / 4) · sigmoid(g)</c> and the value is soft-capped to <c>25 · tanh(u / 25)</c>.</summary>
+    /// <summary>SiTU: the gate becomes <c>β · tanh(g / β) · sigmoid(g)</c> and the value is soft-capped to <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c>, with β and β<sub>lin</sub> from the <see cref="GluSpec"/>.</summary>
     Situ,
 }

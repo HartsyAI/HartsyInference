@@ -86,17 +86,33 @@ public sealed class MossVlTextDecoder : IDisposable
 
     /// <summary>Appends the learned vision separator to one image's merged tokens: <paramref name="merged"/> is <c>[N, hidden]</c> F32,
     /// the result <c>[1, N + 1, hidden]</c> (caller owns). The separator follows the grid, as in the modeling code's convert-to-batch.</summary>
-    public unsafe Tensor AppendSeparator(Tensor merged)
+    public Tensor AppendSeparator(Tensor merged) => AppendSeparators([merged]);
+
+    /// <summary>Appends the separator after each image's merged tokens and concatenates the blocks in prompt order: each
+    /// <paramref name="merged"/> entry is <c>[N_k, hidden]</c> F32, the result <c>[1, Σ(N_k + 1), hidden]</c> (caller owns).</summary>
+    public unsafe Tensor AppendSeparators(IReadOnlyList<Tensor> merged)
     {
         ThrowIfDisposed();
-        int n = (int)merged.Shape[0], h = TextConfig.HiddenSize;
-        if (merged.DType != DType.F32 || merged.Shape.Rank != 2 || merged.Shape[1] != h)
-            throw new ArgumentException($"Merged vision tokens must be F32 [N, {h}], got {merged.Shape} {merged.DType}.", nameof(merged));
-        Tensor output = new(new TensorShape(1, n + 1, h), DType.F32);
-        long bytes = (long)n * h * sizeof(float);
+        int h = TextConfig.HiddenSize;
+        long total = 0;
+        foreach (Tensor m in merged)
+        {
+            if (m.DType != DType.F32 || m.Shape.Rank != 2 || m.Shape[1] != h)
+                throw new ArgumentException($"Merged vision tokens must be F32 [N, {h}], got {m.Shape} {m.DType}.", nameof(merged));
+            total += m.Shape[0] + 1;
+        }
+        Tensor output = new(new TensorShape(1, total, h), DType.F32);
         float* dst = (float*)output.DataPointer;
-        Buffer.MemoryCopy((void*)merged.DataPointer, dst, bytes, bytes);
-        Buffer.MemoryCopy((void*)_separator.DataPointer, dst + (long)n * h, h * sizeof(float), h * sizeof(float));
+        long at = 0;
+        foreach (Tensor m in merged)
+        {
+            long n = m.Shape[0];
+            long bytes = n * h * sizeof(float);
+            Buffer.MemoryCopy((void*)m.DataPointer, dst + at * h, bytes, bytes);
+            at += n;
+            Buffer.MemoryCopy((void*)_separator.DataPointer, dst + at * h, h * sizeof(float), h * sizeof(float));
+            at++;
+        }
         return output;
     }
 

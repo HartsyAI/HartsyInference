@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends.Cpu.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.Engine.Placement;
@@ -35,7 +36,14 @@ public static class TextPlacementDemandReader
         GgufMetadata meta = probe.Metadata;
         string arch = meta.GetString("general.architecture") ?? "";
         TextTensorInfo[] tensors = [.. probe.Descriptors.Values.Select(static d => new TextTensorInfo(d.Name, d.DType, d.Shape.ElementCount))];
-        return FromHeader(tensors, key => ReadInteger(meta, $"{arch}.{key}"), contextTokens, includeRedundantSplits, kvF16);
+        TextPlacementDemand demand = FromHeader(tensors, key => ReadInteger(meta, $"{arch}.{key}"), contextTokens, includeRedundantSplits, kvF16);
+        ActivationKind activation = GgufConfigFactory.MoeExpertActivation(arch);
+        if (demand.ExpertBytes == 0 || !demand.ExpertsHostRunnable || MoeFeedForward.HostRunsExpertActivation(activation)) return demand;
+        return demand with
+        {
+            ExpertsHostRunnable = false,
+            ExpertsHostReason = $"the CPU expert kernels do not run its {activation} expert activation (SiLU or GELU-tanh only).",
+        };
     }
 
     /// <summary>The same reading over parsed header facts; <paramref name="archValue"/> looks up an architecture key such as

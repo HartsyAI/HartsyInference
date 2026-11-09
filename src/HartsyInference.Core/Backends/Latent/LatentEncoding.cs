@@ -14,4 +14,8 @@ public enum LatentEncoding
 
     /// <summary>FP4 e2m1 codes packed two per byte (even element low), with a UE8M0 scale byte per 32 (indexer keys).</summary>
     Fp4E2M1E8M0x32 = 3,
+
+    /// <summary>FP8 e4m3 codes, one byte each, with a UE8M0 scale byte per 128 elements (DSA indexer queries and keys).</summary>
+    /// <remarks>Host references only: no device kernel reads it, and the GPU backends refuse it by name.</remarks>
+    Fp8E4M3Ue8m0x128 = 4,
 }
