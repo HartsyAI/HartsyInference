@@ -108,7 +108,7 @@ public static unsafe class SparseOps
     }
 
     private static long Pack(int x, int y, int z) => ((long)x << 20) | ((long)y << 10) | (long)z;
-    private static Tensor IntTensor(int[] src, int m)
+    internal static Tensor IntTensor(int[] src, int m)
     {
         Tensor t = new(new TensorShape(m), DType.I32); int* p = (int*)t.DataPointer;
         for (int i = 0; i < m; i++) p[i] = src[i];
