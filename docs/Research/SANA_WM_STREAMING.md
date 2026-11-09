@@ -273,6 +273,29 @@ measured; the parent reruns the 3060 and 4090 lanes. Not done: alternating resid
 while decoding, decoder weights on the host while sampling), about 5 GB plus 2 GB of PCIe traffic per chunk; use it only if
 these are not enough.
 
+**Second 3060 run** (after the three changes above; trace `streaming-3060-vram-trace-v2.tsv`, reported by the parent). Replay
+parity unchanged (worst cosine 0.999625). The DiT's committed state fell from 1431 to 792 MiB after chunk 0's save pass
+and from 3221 to 2018 MiB after chunk 1's; device memory after chunks 0, 1 and 2 fell from 8.08, 9.36 and 10.33 GiB to
+7.55, 8.36 and 9.36. The stream still failed decoding chunk 1 (123 MB requested, 109 MB free, inside `Conv2D` under
+`CausalConv3d.Forward`'s per-tap path), with the pool at 3520 MiB reserved against 2018 used before the decode: the
+decode's own transients fill the card. The largest item left was the decoder's weights, which went from 5159 to 7157 MiB
+when it first ran: 1998 MiB for a decoder of 528.4M parameters, 1008 MiB in BF16.
+
+4. **`CausalConv3d` holds one weight form.** It built both the 5-D weight (what a native 3-D conv reads) and the kt per-tap
+   2-D slices (what the per-tap path reads) at construction, and a device backend promotes the weights a conv keeps using, so
+   a conv the native op declines held both on the device, and every conv held both on the host. The slices are now cut the
+   first time a call needs them; a conv the backend's native 3-D op has declined twice and never served releases its 5-D form
+   (host and device); a conv the native op serves never cuts slices. Two declines, not one, because the native call also
+   declines when it runs out of workspace for one geometry. A decoder therefore holds both forms for its first two calls
+   per conv (the first chunk's first two passes in a stream) and one form from then on. `EnumerateWeights` yields whichever forms exist,
+   so enumerate it after the first forward. This is shared code (the Wan, LTX-2, HunyuanVideo, Kandinsky 5 and SeedVR2 VAEs
+   build `CausalConv3d`): outputs are unchanged on the CPU, and the GPU paths each need a decode to confirm. A conv the
+   native op declined twice only because it ran out of workspace stays per-tap for the rest of the run. Expected saving about
+   1 GB of device memory at the 3060's geometry.
+
+After that the decode's own peak, about 2.5 GB above the carried state on the 3060, is the next item, then alternating
+residency.
+
 Two properties worth knowing: the BF16 window values are the ones the attention call would have narrowed to anyway, so
 GPU numerics should not move beyond a rounding tie; and the 16-bit `Concat` in `StreamingTensors` is a strided scatter,
 because the CPU backend's `Concat` writes four bytes per element and corrupts the heap on a BF16 tensor.
