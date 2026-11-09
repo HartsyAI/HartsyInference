@@ -38,7 +38,15 @@ public static class WorldEndpoints
             IWorldSession? session = registry.Get(id);
             if (session is null)
                 return SessionNotFound(id);
-            session.SendAction(req.Action);
+            try
+            {
+                session.SendAction(req.Action);
+            }
+            catch (InvalidOperationException ex) when (ex is not ObjectDisposedException)
+            {
+                // A batch session has already started its run: a late action conflicts with the session's state.
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status409Conflict, ex.Message, "invalid_request_error");
+            }
             return Results.Ok(new { accepted = true });
         });
 

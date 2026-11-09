@@ -29,6 +29,8 @@ public sealed class WorldService : IWorldService, IDisposable
     private readonly Dictionary<string, LoadedWorld> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
     private readonly Action<ModelSpec>? _onLoad;
+    private readonly WorldExecutionLease _executionLease = new();
+    private readonly WorldPhaseLedger _runLedger = new();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal WorldService(InferenceEngine engine)
@@ -55,6 +57,20 @@ public sealed class WorldService : IWorldService, IDisposable
             }
         }
     }
+
+    /// <summary>Runs waiting for the execution lease, not counting the run that holds it.</summary>
+    internal int QueuedRuns => _executionLease.Queued;
+
+    /// <summary>Whether a batch run holds the execution lease right now.</summary>
+    internal bool RunInFlight => _executionLease.IsHeld;
+
+    /// <summary>Resources the batch runs own and have not yet released. Zero between runs; anything else is a leak.</summary>
+    internal WorldPhaseLedger RunLedger => _runLedger;
+
+    /// <summary>Opens a session that renders <paramref name="plan"/>'s clip with <paramref name="pipeline"/> in one run. Every run
+    /// from this service queues behind the same execution lease.</summary>
+    internal IWorldSession OpenOneShot(IOneShotClipPipeline pipeline, WorldPlan plan) =>
+        new OneShotWorldSession(pipeline, plan, _executionLease, _runLedger);
 
     /// <inheritdoc/>
     public IWorldSession Open(ModelSpec spec, WorldRequest request)
