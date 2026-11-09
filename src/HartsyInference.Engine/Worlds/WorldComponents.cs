@@ -13,8 +13,12 @@ public sealed record WorldComponents
     /// <summary>The VAE checkpoint (aux <c>vae-path</c>).</summary>
     public string? Vae { get; init; }
 
-    /// <summary>The Llava-Llama-3-8B text-encoder checkpoint (aux <c>llava-path</c>).</summary>
+    /// <summary>The text-encoder checkpoint: Hunyuan-GameCraft's Llava-Llama-3-8B (aux <c>llava-path</c>) or SANA-WM's
+    /// Gemma-2-2B (aux <c>text-encoder-path</c>).</summary>
     public string? TextEncoder { get; init; }
+
+    /// <summary>The text encoder's tokenizer model (SANA-WM's Gemma <c>tokenizer.model</c>, aux <c>tokenizer-path</c>).</summary>
+    public string? Tokenizer { get; init; }
 
     /// <summary>The CLIP-L text-encoder checkpoint (aux <c>clip-path</c>).</summary>
     public string? ClipEncoder { get; init; }

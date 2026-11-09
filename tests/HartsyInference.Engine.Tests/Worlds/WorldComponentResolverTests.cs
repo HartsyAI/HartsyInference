@@ -81,13 +81,24 @@ public sealed class WorldComponentResolverTests
     }
 
     [Theory]
-    [InlineData("some-future-world", WorldArchitecture.Oasis)]
-    [InlineData(null, WorldArchitecture.Oasis)]
+    [InlineData("oasis", WorldArchitecture.Oasis)]
     [InlineData("DIAMOND", WorldArchitecture.Diamond)]
     [InlineData("Hunyuan-GameCraft", WorldArchitecture.HunyuanGameCraft)]
-    public void ArchitectureOf_KeepsUnknownIdsOnTheOasisLoader(string? catalogId, WorldArchitecture expected)
+    [InlineData("sana-wm", WorldArchitecture.SanaWm)]
+    public void ArchitectureOf_MapsEachKnownId(string catalogId, WorldArchitecture expected)
     {
         Assert.Equal(expected, WorldComponentResolver.ArchitectureOf(catalogId));
+    }
+
+    [Theory]
+    [InlineData("some-future-world")]
+    [InlineData(null)]
+    public void ArchitectureOf_RefusesIdsItDoesNotKnow_InsteadOfFallingBackToOasis(string? catalogId)
+    {
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => WorldComponentResolver.ArchitectureOf(catalogId));
+
+        Assert.Contains("is not a world model this engine can load", ex.Message);
+        Assert.Contains("sana-wm", ex.Message);
     }
 
     [Fact]

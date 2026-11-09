@@ -10,6 +10,10 @@ namespace HartsyInference.Vision.Codec;
 /// pre/post-processing, never on the per-step hot path.</summary>
 public static class Resample
 {
+    // PIL Resample.c: 32 − 8 − 2 fractional bits, so a sum of 8-bit pixels times unit-sum weights fits an int.
+    private const int PilPrecisionBits = 32 - 8 - 2;
+    private const int PilRounding = 1 << (PilPrecisionBits - 1);
+
     /// <summary>Resizes one row-major single-channel F32 plane.</summary>
     public static void BicubicPlane(ReadOnlySpan<float> src, int srcW, int srcH,
         Span<float> dst, int dstW, int dstH, float a, bool antialias)
@@ -147,6 +151,55 @@ public static class Resample
         }
     }
 
+    /// <summary>PIL's <c>Image.resize(..., LANCZOS)</c> for interleaved 8-bit pixels, reproduced in its integer arithmetic:
+    /// double-precision taps normalized per output pixel, converted to 22-bit fixed point, a horizontal pass rounded and clipped
+    /// to 8 bits, then the vertical pass. A pass whose size does not change is skipped, as PIL skips it.</summary>
+    public static void LanczosPil8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels, Span<byte> dst, int dstW, int dstH)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels);
+        byte[]? horizontal = null;
+        ReadOnlySpan<byte> rows = src;
+        if (dstW != srcW)
+        {
+            (int[] xStart, int[] xCount, int[] xWeights, int xTaps) = BuildPilLanczosWeights(srcW, dstW);
+            horizontal = new byte[srcH * dstW * channels];
+            for (int y = 0; y < srcH; y++)
+            {
+                ReadOnlySpan<byte> row = src.Slice(y * srcW * channels, srcW * channels);
+                for (int x = 0; x < dstW; x++)
+                {
+                    for (int c = 0; c < channels; c++)
+                    {
+                        int acc = PilRounding;
+                        for (int t = 0; t < xCount[x]; t++)
+                            acc += row[(xStart[x] + t) * channels + c] * xWeights[x * xTaps + t];
+                        horizontal[(y * dstW + x) * channels + c] = PilClip8(acc);
+                    }
+                }
+            }
+            rows = horizontal;
+        }
+        if (dstH == srcH)
+        {
+            rows.CopyTo(dst);
+            return;
+        }
+        (int[] yStart, int[] yCount, int[] yWeights, int yTaps) = BuildPilLanczosWeights(srcH, dstH);
+        for (int y = 0; y < dstH; y++)
+        {
+            for (int x = 0; x < dstW; x++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    int acc = PilRounding;
+                    for (int t = 0; t < yCount[y]; t++)
+                        acc += rows[((yStart[y] + t) * dstW + x) * channels + c] * yWeights[y * yTaps + t];
+                    dst[(y * dstW + x) * channels + c] = PilClip8(acc);
+                }
+            }
+        }
+    }
+
     /// <summary>Two-pass separable filter over interleaved 8-bit pixels: horizontal into an F32 intermediate, then vertical.</summary>
     private static void SeparableHwc8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels, Span<float> dst, int dstW, int dstH,
         (int[] Starts, int[] Counts, float[] Weights, int Taps) xw, (int[] Starts, int[] Counts, float[] Weights, int Taps) yw, bool quantizeU8)
@@ -261,6 +314,53 @@ public static class Resample
         }
         return (starts, counts, weights, taps);
     }
+
+    /// <summary>PIL <c>precompute_coeffs</c> plus <c>normalize_coeffs_8bpc</c> for its Lanczos filter: taps in double, normalized by
+    /// their sum, then scaled to <see cref="PilPrecisionBits"/>-bit fixed point rounding half away from zero.</summary>
+    private static (int[] Starts, int[] Counts, int[] Weights, int Taps) BuildPilLanczosWeights(int srcLen, int dstLen)
+    {
+        double scale = (double)srcLen / dstLen;
+        double filterScale = Math.Max(scale, 1.0);
+        double support = 3.0 * filterScale;
+        int taps = (int)Math.Ceiling(support) * 2 + 1;
+        int[] starts = new int[dstLen];
+        int[] counts = new int[dstLen];
+        int[] weights = new int[dstLen * taps];
+        double[] k = new double[taps];
+        double inverseScale = 1.0 / filterScale;
+        for (int i = 0; i < dstLen; i++)
+        {
+            double center = (i + 0.5) * scale;
+            int lo = Math.Max((int)(center - support + 0.5), 0);
+            int count = Math.Min((int)(center + support + 0.5), srcLen) - lo;
+            double sum = 0.0;
+            for (int t = 0; t < count; t++)
+            {
+                k[t] = PilLanczos((t + lo - center + 0.5) * inverseScale);
+                sum += k[t];
+            }
+            for (int t = 0; t < count; t++)
+            {
+                double w = sum != 0.0 ? k[t] / sum : k[t];
+                weights[i * taps + t] = (int)(w < 0 ? -0.5 + w * (1 << PilPrecisionBits) : 0.5 + w * (1 << PilPrecisionBits));
+            }
+            starts[i] = lo;
+            counts[i] = count;
+        }
+        return (starts, counts, weights, taps);
+    }
+
+    private static double PilLanczos(double x) => x >= -3.0 && x < 3.0 ? PilSinc(x) * PilSinc(x / 3.0) : 0.0;
+
+    private static double PilSinc(double x)
+    {
+        if (x == 0.0) return 1.0;
+        x *= Math.PI;
+        return Math.Sin(x) / x;
+    }
+
+    /// <summary>PIL <c>clip8</c>: the fixed-point sum shifted down (an arithmetic shift, so negative sums floor) and clamped.</summary>
+    private static byte PilClip8(int acc) => (byte)Math.Clamp(acc >> PilPrecisionBits, 0, 255);
 
     private static double LanczosKernel(double x)
     {
