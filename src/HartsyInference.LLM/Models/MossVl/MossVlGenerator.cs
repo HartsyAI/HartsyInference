@@ -169,7 +169,8 @@ public sealed class MossVlDecodeSession : IDisposable
 public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig config, ILlmTokenizer tokenizer, IBackend backend)
 {
     /// <summary>Generates a reply to <paramref name="question"/> about the image. Sampling defaults match the other VLM generators
-    /// (<see cref="MllamaGenerator"/>).</summary>
+    /// (<see cref="MllamaGenerator"/>). The image is required: a text-only prompt has no placeholder for the session's one image,
+    /// so the position planner rejects it.</summary>
     public string Generate(string question, Tensor mergedVision, int mergedHeight, int mergedWidth, int maxTokens = 64,
         SamplingOptions? sampling = null)
     {
