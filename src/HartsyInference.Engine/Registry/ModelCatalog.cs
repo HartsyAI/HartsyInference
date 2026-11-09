@@ -54,7 +54,8 @@ public static class ModelCatalog
     /// <summary>SANA-WM streaming (the chunk-causal distilled student, the causal LTX-2 VAE, no refiner): CUDA and BF16 only,
     /// 16 fps, 25 or more frames on the 24n+1 grid (a first chunk of 25 frames, then 24 per chunk) or an unbounded run. The
     /// camera is steered by live actions, with an action script as the opening move, or follows a fixed pose path; intrinsics
-    /// are required. The distilled schedule fixes the step count, and guidance defaults to 1.</summary>
+    /// are required. The distilled schedule fixes the step count, and guidance defaults to 1. The LTX-2 refiner stage is
+    /// optional and off unless asked for: it needs its own checkpoints and far more memory than stage 1.</summary>
     private static WorldCapabilities SanaWmStreamingWorld => new WorldCapabilities
     {
         Backends = ["cuda"],
@@ -72,7 +73,7 @@ public static class ModelCatalog
         Samplers = ["self_forcing"],
         SupportsGuidance = true,
         SupportsFlowShift = false,
-        SupportsRefiner = false,
+        SupportsRefiner = true,
         SupportsProgressivePreview = false,
         SupportsSequentialCfg = false,
         Streaming = new WorldStreamingCapabilities
@@ -2546,7 +2547,7 @@ public static class ModelCatalog
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
             E("sana-wm", act, "SANA-WM (stage 1)", "2.6B GDN/softmax camera DiT + LTX-2 VAE", vp, cli: true)
                 with { World = SanaWmWorld, Assets = SanaWmAssets },
-            E("sana-wm-streaming", act, "SANA-WM streaming (stage 1)", "chunk-causal distilled GDN/softmax camera DiT + causal LTX-2 VAE",
+            E("sana-wm-streaming", act, "SANA-WM streaming", "chunk-causal distilled GDN/softmax camera DiT + causal LTX-2 VAE, optional chunk-causal LTX-2 refiner",
                 vp, cli: true) with { World = SanaWmStreamingWorld },
 
             // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified

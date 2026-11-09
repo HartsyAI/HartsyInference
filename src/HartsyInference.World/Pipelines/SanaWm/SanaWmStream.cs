@@ -18,8 +18,11 @@ namespace HartsyInference.World.Pipelines.SanaWm;
 /// the clean chunk at timestep 0 writes the state the next chunk reads, and the causal VAE decodes the chunk's frames. The
 /// seed frame's latent is frame 0 of chunk 0 and stays fixed. Values cross every forward rounded to BF16, as upstream's
 /// BF16 sampler stores them.</summary>
-/// <remarks>Chunk 0 delivers <c>8·(T−1)+1</c> frames, the seed frame first; every later chunk delivers <c>8·T</c>. Owns the
-/// two component stages, the caption and the seed latent; disposing releases them.</remarks>
+/// <remarks><para>With a refiner, the chunk's latents after the seed frame pass through it between the DiT and the decoder
+/// (upstream's stage 1 → refiner → decode, one chunk in each); the DiT's own state keeps the unrefined latents, and the seed
+/// frame's latent, the refiner's sink, is decoded as it is.</para>
+/// <para>Chunk 0 delivers <c>8·(T−1)+1</c> frames, the seed frame first; every later chunk delivers <c>8·T</c>. Owns the
+/// component stages, the caption and the seed latent; disposing releases them.</para></remarks>
 public sealed class SanaWmStream : IChunkedWorldStream
 {
     private const int NoiseSeedStride = 0x61C88647;
@@ -33,13 +36,14 @@ public sealed class SanaWmStream : IChunkedWorldStream
     private readonly Tensor _firstLatent;
     private readonly SanaWmStage<ISanaWmChunkDenoiser> _denoiser;
     private readonly SanaWmStage<IStreamingVideoDecoder> _decoder;
+    private readonly SanaWmStage<IStreamingLatentRefiner>? _refiner;
     private readonly bool _guided;
     private bool _faulted;
     private int _disposed;
 
     internal SanaWmStream(SanaWmStreamRequest request, SelfForcingFlowSchedule schedule, ChunkPlanner planner, SanaWmStreamCamera camera,
         SanaWmTextConditioning text, Tensor firstLatent, SanaWmStage<ISanaWmChunkDenoiser> denoiser,
-        SanaWmStage<IStreamingVideoDecoder> decoder)
+        SanaWmStage<IStreamingVideoDecoder> decoder, SanaWmStage<IStreamingLatentRefiner>? refiner = null)
     {
         _request = request;
         _schedule = schedule;
@@ -49,6 +53,7 @@ public sealed class SanaWmStream : IChunkedWorldStream
         _firstLatent = firstLatent;
         _denoiser = denoiser;
         _decoder = decoder;
+        _refiner = refiner;
         _guided = request.Guidance > 1.0;
     }
 
@@ -83,8 +88,12 @@ public sealed class SanaWmStream : IChunkedWorldStream
     /// <inheritdoc/>
     public bool Completed => _planner.ChunkCount is int chunks && ChunksGenerated >= chunks;
 
-    /// <summary>Denoising forwards per chunk for one guidance branch, the state-writing pass included.</summary>
-    public int ForwardsPerChunk => _schedule.Steps + 1;
+    /// <summary>Model forwards per chunk for one guidance branch: the DiT's denoising steps and its state-writing pass, then
+    /// the refiner's passes when the stream has one.</summary>
+    public int ForwardsPerChunk => _schedule.Steps + 1 + (_refiner?.Component.PassesPerBlock ?? 0);
+
+    /// <summary>Whether the stream refines its latents before decoding them.</summary>
+    public bool Refines => _refiner is not null;
 
     /// <inheritdoc/>
     public void SendAction(string action)
@@ -112,32 +121,49 @@ public sealed class SanaWmStream : IChunkedWorldStream
             bool[] clean = new bool[span.Length];
             clean[0] = chunk == 0;
             ISanaWmChunkDenoiser denoiser = _denoiser.Component;
+            IStreamingLatentRefiner? refiner = _refiner?.Component;
+            Tensor? refined = null;
             try
             {
-                Denoise(denoiser, latents, conditions, plucker, clean, cancel, progress);
-                _request.Tap?.Invoke($"chunk{chunk}_latent", latents);
-                WriteState(denoiser, latents, conditions, plucker, progress);
-            }
-            catch
-            {
-                denoiser.Discard();
-                throw;
-            }
+                try
+                {
+                    Denoise(denoiser, latents, conditions, plucker, clean, cancel, progress);
+                    _request.Tap?.Invoke($"chunk{chunk}_latent", latents);
+                    WriteState(denoiser, latents, conditions, plucker, progress);
+                    // The refiner reads only the clean latents, so it runs before either model advances: a chunk cancelled
+                    // here leaves both where they were.
+                    if (refiner is not null)
+                        refined = Refine(refiner, latents, chunk, cancel, progress);
+                }
+                catch
+                {
+                    denoiser.Discard();
+                    refiner?.Discard();
+                    throw;
+                }
 
-            // From here the DiT stands after this chunk: a failure leaves the decoder behind it, so the stream cannot continue.
-            try
-            {
-                denoiser.Commit(span.Length);
-                IReadOnlyList<VideoFrame> frames = Decode(latents);
-                ChunksGenerated++;
-                LatentFramesGenerated += span.Length;
-                FramesGenerated += frames.Count;
-                return frames;
+                // From here the models stand after this chunk: a failure leaves the decoder behind them, so the stream
+                // cannot continue.
+                try
+                {
+                    denoiser.Commit(span.Length);
+                    if (refined is not null)
+                        refiner!.Commit();
+                    IReadOnlyList<VideoFrame> frames = Decode(refined ?? latents);
+                    ChunksGenerated++;
+                    LatentFramesGenerated += span.Length;
+                    FramesGenerated += frames.Count;
+                    return frames;
+                }
+                catch
+                {
+                    _faulted = true;
+                    throw;
+                }
             }
-            catch
+            finally
             {
-                _faulted = true;
-                throw;
+                refined?.Dispose();
             }
         }
     }
@@ -155,12 +181,19 @@ public sealed class SanaWmStream : IChunkedWorldStream
         {
             try
             {
-                _denoiser.Dispose();
+                _refiner?.Dispose();
             }
             finally
             {
-                _firstLatent.Dispose();
-                _text.Dispose();
+                try
+                {
+                    _denoiser.Dispose();
+                }
+                finally
+                {
+                    _firstLatent.Dispose();
+                    _text.Dispose();
+                }
             }
         }
     }
@@ -269,6 +302,69 @@ public sealed class SanaWmStream : IChunkedWorldStream
             conditional.Dispose();
             throw;
         }
+    }
+
+    // The chunk's latents with every frame after the refiner's sink refined: what the decoder receives. Returns null when
+    // the chunk holds nothing to refine. The refiner's state is staged, not committed.
+    private Tensor? Refine(IStreamingLatentRefiner refiner, Tensor latents, int chunk, CancellationToken cancel,
+        Action<GenerationProgress>? progress)
+    {
+        int frames = (int)latents.Shape[2];
+        // The stream's first frames are the refiner's sink: it holds them already and they pass through as they are.
+        int kept = chunk == 0 ? Math.Min(refiner.SinkFrames, frames) : 0;
+        if (chunk == 0 && kept != refiner.SinkFrames)
+            throw new InvalidOperationException($"The first chunk holds {frames} latent frames; the refiner's sink takes "
+                + $"{refiner.SinkFrames}.");
+        if (frames == kept)
+            return null;
+        cancel.ThrowIfCancellationRequested();
+        Stopwatch clock = Stopwatch.StartNew();
+        double started = 0;
+        int first = _schedule.Steps + 1;
+        using Tensor block = FrameRange(latents, kept, frames - kept);
+        using Tensor refinedBlock = refiner.Refine(block, cancel, pass =>
+        {
+            double now = clock.Elapsed.TotalMilliseconds;
+            progress?.Invoke(new GenerationProgress(first + pass, ForwardsPerChunk, now - started));
+            started = now;
+        });
+        if (refinedBlock.DType != DType.F32 || refinedBlock.Shape != block.Shape)
+            throw new InvalidOperationException($"The refiner returned {refinedBlock.DType} {refinedBlock.Shape}; expected F32 "
+                + $"{block.Shape}.");
+        Tensor joined = new(latents.Shape, DType.F32, DeviceKind.Cpu);
+        try
+        {
+            ReadOnlySpan<float> source = latents.AsReadOnlySpan<float>(), refinedValues = refinedBlock.AsReadOnlySpan<float>();
+            Span<float> destination = joined.AsSpan<float>();
+            int refinedFrames = frames - kept;
+            for (int c = 0; c < SanaWmPipeline.LatentChannels; c++)
+            {
+                source.Slice(c * frames * LatentPlane, kept * LatentPlane).CopyTo(destination.Slice(c * frames * LatentPlane));
+                refinedValues.Slice(c * refinedFrames * LatentPlane, refinedFrames * LatentPlane)
+                    .CopyTo(destination.Slice((c * frames + kept) * LatentPlane));
+            }
+
+            _request.Tap?.Invoke($"chunk{chunk}_refined", joined);
+            return joined;
+        }
+        catch
+        {
+            joined.Dispose();
+            throw;
+        }
+    }
+
+    // Frames [start, start + count) of [1, C, T, H, W] latents as a host tensor.
+    private static Tensor FrameRange(Tensor latents, int start, int count)
+    {
+        int frames = (int)latents.Shape[2];
+        Tensor range = new(new TensorShape([1, SanaWmPipeline.LatentChannels, count, SanaWmPipeline.LatentHeight, SanaWmPipeline.LatentWidth]),
+            DType.F32, DeviceKind.Cpu);
+        ReadOnlySpan<float> source = latents.AsReadOnlySpan<float>();
+        Span<float> destination = range.AsSpan<float>();
+        for (int c = 0; c < SanaWmPipeline.LatentChannels; c++)
+            source.Slice((c * frames + start) * LatentPlane, count * LatentPlane).CopyTo(destination.Slice(c * count * LatentPlane));
+        return range;
     }
 
     private IReadOnlyList<VideoFrame> Decode(Tensor latents)

@@ -157,9 +157,12 @@ public sealed unsafe class LtxVideo2Rope
 
     /// <summary>Builds video cos/sin <c>[F·H·W, cosWidth]</c> (row-major <c>(f,h,w)</c>). For the temporal-only (cross)
     /// flavor each token's single coordinate is its frame midpoint; otherwise all three axes are written.</summary>
-    public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps)
+    /// <param name="firstFrame">The latent frame index of the first frame: a chunk of a longer video is built at its own
+    /// absolute frames <c>[firstFrame, firstFrame + numFrames)</c>.</param>
+    public (Tensor Cos, Tensor Sin) BuildVideo(int numFrames, int height, int width, double fps, int firstFrame = 0)
     {
         if (_modality != Modality.Video) throw new InvalidOperationException("BuildVideo on an audio RoPE.");
+        ArgumentOutOfRangeException.ThrowIfNegative(firstFrame);
         int seq = numFrames * height * width;
         (Tensor cos, Tensor sin) = Alloc(seq);
         float* cp = (float*)cos.DataPointer;
@@ -168,7 +171,7 @@ public sealed unsafe class LtxVideo2Rope
         int sfH = _scaleFactors[1], sfW = _scaleFactors[2];
         for (int fi = 0; fi < numFrames; fi++)
         {
-            double normT = VideoTemporalNorm(fi, fps);
+            double normT = VideoTemporalNorm(firstFrame + fi, fps);
             for (int hi = 0; hi < height; hi++)
             {
                 double normH = (((double)hi + 0.5) * _patchSize * sfH) / _baseHeight;

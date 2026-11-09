@@ -852,6 +852,7 @@ public static class GenerationDispatch
             CameraScript = scriptCamera ? actions : null,
             Intrinsics = parameters.GetStringOrNull("intrinsics"),
             SequentialCfg = parameters.GetBool("sequential-cfg", false),
+            Refiner = parameters.GetBool("refiner", false),
             // An unset --streaming leaves the mode to the model: a streaming-only model streams, a batch model does not.
             Streaming = parameters.GetBool("streaming", false) || spec.Catalog?.World?.Streaming is { Only: true } ? true : null,
             Unbounded = parameters.GetBool("unbounded", false),

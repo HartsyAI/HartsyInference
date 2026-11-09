@@ -8,11 +8,12 @@ using HartsyInference.World.Pipelines.SanaWm;
 
 namespace HartsyInference.World.Pipelines;
 
-/// <summary>SANA-WM streaming generation (upstream <c>generate_streaming</c> without the refiner): the chunk-causal distilled
-/// student rolls the world out a chunk of latent frames at a time with the self-forcing sampler, and the causal LTX-2 VAE
-/// decodes each chunk as it completes, so frames are available while later chunks are still to come and the camera can be
-/// steered between chunks. <see cref="Open"/> encodes the prompt and the seed frame, one component at a time, then loads the
-/// DiT and the decoder side by side and hands back the running <see cref="SanaWmStream"/>.</summary>
+/// <summary>SANA-WM streaming generation (upstream <c>generate_streaming</c>): the chunk-causal distilled student rolls the
+/// world out a chunk of latent frames at a time with the self-forcing sampler, optionally the chunk-causal LTX-2 refiner
+/// refines each chunk, and the causal LTX-2 VAE decodes it, so frames are available while later chunks are still to come
+/// and the camera can be steered between chunks. <see cref="Open"/> encodes the prompts and the seed frame, one component
+/// at a time, then loads the DiT, the decoder and (when asked for) the refiner side by side and hands back the running
+/// <see cref="SanaWmStream"/>.</summary>
 public sealed class SanaWmStreamingPipeline
 {
     /// <summary>Latent frames per chunk after the first (upstream <c>chunk_size</c>).</summary>
@@ -49,28 +50,56 @@ public sealed class SanaWmStreamingPipeline
         SanaWmStreamCamera camera = SanaWmStreamCamera.Create(request, SanaWmPipeline.Width, SanaWmPipeline.Height);
         cancel.ThrowIfCancellationRequested();
 
+        ISanaWmRefinerComponents? refinerComponents = null;
+        if (request.Refine)
+        {
+            refinerComponents = _components as ISanaWmRefinerComponents
+                ?? throw new NotSupportedException("These SANA-WM components have no refiner stage.");
+        }
+
         SanaWmTextConditioning? text = null;
+        Tensor? refinerPrompt = null;
         Tensor? firstLatent = null;
         SanaWmStage<ISanaWmChunkDenoiser>? denoiser = null;
         SanaWmStage<IStreamingVideoDecoder>? decoder = null;
+        SanaWmStage<IStreamingLatentRefiner>? refiner = null;
         bool opened = false;
         try
         {
             text = SanaWmEncoding.EncodeText(_components.OpenTextEncoder, request.Prompt, request.NegativePrompt);
             cancel.ThrowIfCancellationRequested();
+            if (refinerComponents is not null)
+            {
+                // Gemma-3-12B is larger than everything the stream keeps resident: it loads and leaves before the DiT.
+                using (SanaWmStage<ISanaWmRefinerTextEncoder> encoder = refinerComponents.OpenRefinerTextEncoder())
+                    refinerPrompt = encoder.Component.Encode(request.Prompt);
+                cancel.ThrowIfCancellationRequested();
+            }
+
             firstLatent = FirstLatent(request);
             cancel.ThrowIfCancellationRequested();
             denoiser = _components.OpenChunkDenoiser(text, TokenWindowPolicy.RecentChunks(request.CachedChunks, request.SinkChunk));
             cancel.ThrowIfCancellationRequested();
             decoder = _components.OpenStreamingDecoder();
-            SanaWmStream stream = new(request, schedule, planner, camera, text, firstLatent, denoiser, decoder);
+            if (refinerComponents is not null)
+            {
+                // Last, so its weights are placed against what the DiT and the decoder left free. The seed frame's latent is
+                // its sink, which does not depend on the stream: captured here, ahead of the first chunk.
+                cancel.ThrowIfCancellationRequested();
+                refiner = refinerComponents.OpenRefiner(refinerPrompt!, request.Refiner);
+                refiner.Component.SetSink(firstLatent, cancel);
+            }
+
+            SanaWmStream stream = new(request, schedule, planner, camera, text, firstLatent, denoiser, decoder, refiner);
             opened = true;
             return stream;
         }
         finally
         {
+            refinerPrompt?.Dispose();
             if (!opened)
             {
+                refiner?.Dispose();
                 decoder?.Dispose();
                 denoiser?.Dispose();
                 firstLatent?.Dispose();
@@ -134,6 +163,14 @@ public sealed class SanaWmStreamingPipeline
 
         if (request.Intrinsics.Count == 0)
             throw new ArgumentException("SANA-WM needs intrinsics for its camera path.", nameof(request));
+        if (request.Refine)
+        {
+            ArgumentNullException.ThrowIfNull(request.Refiner);
+            if (request.Refiner.WindowFrames < 1 || request.Refiner.HistoryLayerStride < 1)
+                throw new ArgumentException("The refiner's window holds at least the seed frame and its layer stride is at least 1.",
+                    nameof(request));
+        }
+
         if (!double.IsFinite(request.Guidance) || request.Guidance < 0)
             throw new ArgumentException($"Guidance must be a finite non-negative scale; {request.Guidance} requested.", nameof(request));
         if (request.ImageWidth < 1 || request.ImageHeight < 1 || request.ImageRgb.Length != request.ImageWidth * request.ImageHeight * 3)

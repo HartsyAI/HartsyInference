@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Requests;
 using HartsyInference.World.Camera;
@@ -10,7 +11,8 @@ namespace HartsyInference.Engine.Worlds;
 /// <summary>The engine's streaming adapter for SANA-WM: maps a resolved <see cref="WorldPlan"/> onto a
 /// <see cref="SanaWmStreamRequest"/> and opens it through <see cref="SanaWmStreamingPipeline"/>. A plan with camera poses
 /// streams along that fixed path; otherwise the camera is live, starting with the plan's action script when it has one and
-/// then following the actions the session is sent.</summary>
+/// then following the actions the session is sent. A plan with the refiner runs the LTX-2 refiner stage, sized by the
+/// <c>vram.sanaWmRefiner*</c> settings.</summary>
 internal sealed class SanaWmStreamPipeline : IChunkedWorldPipeline
 {
     private readonly Func<ISanaWmStreamingComponents> _components;
@@ -71,8 +73,17 @@ internal sealed class SanaWmStreamPipeline : IChunkedWorldPipeline
             Frames = plan.Unbounded ? null : plan.Frames,
             Guidance = plan.Guidance ?? 1.0,
             Seed = plan.Seed,
+            Refine = plan.Refiner,
+            Refiner = new SanaWmRefinerSettings
+            {
+                WindowFrames = EngineKnobs.SanaWmRefinerWindowFrames.Value,
+                HistoryLayerStride = EngineKnobs.SanaWmRefinerLayerStride.Value,
+                Noise = injection?.RefinerNoise,
+                Tap = injection?.RefinerTap,
+            },
             FirstLatent = injection?.FirstLatent,
             ChunkNoise = injection?.ChunkNoise,
+            Tap = injection?.Tap,
         };
     }
 
