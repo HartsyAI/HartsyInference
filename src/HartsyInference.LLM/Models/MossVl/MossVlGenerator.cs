@@ -214,6 +214,7 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         string placeholders = string.Concat(Enumerable.Repeat(ImagePlaceholder, images.Count));
         int[] ids = tokenizer.Encode("<|im_start|>user\n" + placeholders + question + "<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
         if (maxTokens <= 0) return new MossVlGeneration(string.Empty, ids.Length, 0, HitTokenLimit: true);
+        maxTokens = ClampToContext(maxTokens, ids.Length, config.Text.MaxPositionEmbeddings);
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
             Temperature = 0.4f, TopP = 0.9f, RepetitionPenalty = 1.1f, Seed = 1,
@@ -249,6 +250,17 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
         string reply = tokenizer.Decode([.. generated]);
         if (onDelta is not null && reply.Length > emitted) onDelta(reply[emitted..]);
         return new MossVlGeneration(reply, ids.Length, generated.Count, HitTokenLimit: !stops.Contains(token));
+    }
+
+    /// <summary>Caps a requested reply length at what the context window leaves after the prompt. The decode session sizes its KV
+    /// cache from it up front, so an uncapped <c>max_tokens</c> would allocate gigabytes before the first step.</summary>
+    /// <exception cref="ArgumentException">The prompt alone fills the context window.</exception>
+    internal static int ClampToContext(int maxTokens, int promptTokens, int contextLength)
+    {
+        int room = contextLength - promptTokens;
+        if (room <= 0)
+            throw new ArgumentException($"The prompt is {promptTokens} tokens, which fills MOSS-VL's {contextLength}-token context.");
+        return Math.Min(maxTokens, room);
     }
 }
 

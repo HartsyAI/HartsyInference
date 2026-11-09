@@ -91,6 +91,8 @@ public sealed record MossVlConfig
             MaxPositionEmbeddings = metadata.GetInteger(P + "context_length", 32_768),
             RopeTheta = metadata.GetFloat32(P + "rope.freq_base", 1_000_000f),
             RmsNormEps = metadata.GetFloat32(P + "attention.layer_norm_rms_epsilon", 1e-6f),
+            // The GGUF records none of these three. The released checkpoint's config.json has no projection bias, an untied
+            // lm_head (output.weight is in the file) and per-head q/k RMSNorm; a sibling config.json overrides all of them.
             AttentionBias = false,
             TieWordEmbeddings = false,
             QkNorm = true,
@@ -109,6 +111,7 @@ public sealed record MossVlConfig
             NumPositionEmbeddings = Need("vision.num_position_embeddings"),
             OutHiddenSize = Need("vision.out_embedding_length"),
             DeepstackIndexes = NeedArray("vision.deepstack_indexes"),
+            // Not in the GGUF metadata; the checkpoint's vision_config.hidden_act.
             HiddenAct = "gelu_pytorch_tanh",
         };
         return new MossVlConfig

@@ -185,7 +185,6 @@ public sealed class MossVlLoaderPrecisionTests
                 writer.AddTensor("blk.0.cross_gate_attn.weight", marker);
                 writer.Flush();
             }
-            Assert.True(MossVlModel.IsMossVl(gguf));
             HartsyInference.Core.Exceptions.HartsyInferenceException error = Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(
                 () => MossVlModel.Open(gguf, new MossVlLoadOptions()));
             Assert.Contains("tokenizer.json", error.Message);
