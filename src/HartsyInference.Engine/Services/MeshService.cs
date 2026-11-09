@@ -75,7 +75,7 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 return cached;
             }
-            string id = (spec.Catalog?.Id ?? "triposr").ToLowerInvariant();
+            string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
             try
             {
                 LoadedMesh loaded;
@@ -89,10 +89,14 @@ public sealed class MeshService : IMeshService, IDisposable
                     TrellisImageTo3DPipeline trellis = TrellisImageTo3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(trellis, trellis.Generate);
                 }
-                else
+                else if (id == "triposr")
                 {
                     TripoSrPipeline triposr = TripoSrPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(triposr, triposr.Generate);
+                }
+                else
+                {
+                    throw new NotSupportedException($"3D model '{id}' has no wired pipeline yet; supported: triposr, hunyuan3d, trellis.");
                 }
                 _pipelines[spec.LocalPath] = loaded;
                 return loaded;
