@@ -13,7 +13,7 @@ internal static class UtoniaTensors
         long channels = source.Shape[1];
         Tensor indices = SparseOps.IntTensor(rows, rows.Length);
         Tensor output = new(new TensorShape(rows.Length, channels), DType.F32);
-        backend.RowGather(output, source, indices, rows.Length, (int)channels);
+        backend.GatherRows(output, source, indices);
         indices.Dispose();
         return output;
     }
