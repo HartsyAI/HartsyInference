@@ -86,7 +86,7 @@ public sealed unsafe class FLiteRope
         return (cosT, sinT);
     }
 
-    /// <summary>Builds FULL-dim cos/sin tables of shape <c>[1, T, headDim]</c> for the device <see cref="IBackend.ApplyRope"/> op (llama split-half convention). F-Lite's rotation <c>y1 = x1·c + x2·s; y2 = −x1·s + x2·c</c> equals llama's with sin negated, so the sin table is emitted NEGATED and both halves duplicate the half-dim values.</summary>
+    /// <summary>Builds FULL-dim cos/sin tables of shape <c>[1, T, headDim]</c> for the device <see cref="IBackend.Rotary"/> op (llama split-half convention). F-Lite's rotation <c>y1 = x1·c + x2·s; y2 = −x1·s + x2·c</c> equals llama's with sin negated, so the sin table is emitted NEGATED and both halves duplicate the half-dim values.</summary>
     public (Tensor cos, Tensor sin) BuildDeviceTables(int hPacked, int wPacked, int numRegisterTokens)
     {
         (Tensor cosHalf, Tensor sinHalf) = Build(hPacked, wPacked, numRegisterTokens);

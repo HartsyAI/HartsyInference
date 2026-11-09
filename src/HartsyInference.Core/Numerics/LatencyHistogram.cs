@@ -21,9 +21,6 @@ public sealed class LatencyHistogram
     private long _sumNs;
     private long _maxNs;
 
-    /// <summary>Upper bound in microseconds of each bounded bucket; the eleventh bucket has none.</summary>
-    public static ReadOnlySpan<long> UpperBoundsUs => _upperBoundsUs;
-
     /// <summary>Samples recorded since construction or the last <see cref="Reset"/>.</summary>
     public long Count => Volatile.Read(ref _count);
 
@@ -49,16 +46,6 @@ public sealed class LatencyHistogram
             _maxNs = lateNs;
         }
         Volatile.Write(ref _count, _count + 1);
-    }
-
-    /// <summary>Copies the per-bucket counts into <paramref name="destination"/>, which needs <see cref="BucketCount"/> slots.</summary>
-    public void CopyCounts(Span<long> destination)
-    {
-        if (destination.Length < BucketCount)
-        {
-            throw new ArgumentException($"destination needs {BucketCount} slots, got {destination.Length}.", nameof(destination));
-        }
-        _counts.AsSpan().CopyTo(destination);
     }
 
     /// <summary>Upper bound in microseconds of the bucket that reaches <paramref name="fraction"/> (0..1] of the samples; the maximum for the open-ended bucket, zero when empty.</summary>

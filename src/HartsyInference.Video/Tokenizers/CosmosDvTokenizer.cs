@@ -1,5 +1,5 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Codecs;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Vae;
 

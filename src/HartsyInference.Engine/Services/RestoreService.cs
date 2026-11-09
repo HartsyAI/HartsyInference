@@ -32,7 +32,7 @@ public sealed class RestoreService : IRestoreService
     private readonly SemaphoreSlim _execution = new(1, 1);
     private SeedVr2RestorePipeline? _pipeline;
     private SeedVr2Dit? _dit;
-    private readonly List<SafeTensorsLoader> _loaders = new();
+    private readonly List<IDisposable> _loaders = new();
     // F32 copies of half-precision checkpoint tensors, made only for the CPU backend (see GetOrLoadPipeline).
     private readonly List<Tensor> _castCopies = new();
     private Tensor? _posEmb;
@@ -207,9 +207,18 @@ public sealed class RestoreService : IRestoreService
             (string vaePath, string embPath) = ResolveSideAssets(spec, ditPath);
             Logs.Info($"Loading SeedVR2: dit={ditPath} vae={vaePath} emb={embPath}");
 
-            (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) =
-                SeedVr2CheckpointConverter.LoadAndConvert(ditPath);
-            _loaders.Add(ditLoader);
+            // ByteDance's official checkpoint is a PyTorch .pth; the Comfy-Org repack is safetensors. Both load to the same keys.
+            Dictionary<string, Tensor> ditWeights;
+            if (ditPath.EndsWith(".pth", StringComparison.OrdinalIgnoreCase) || ditPath.EndsWith(".pt", StringComparison.OrdinalIgnoreCase))
+            {
+                (ditWeights, IDisposable ditOwner) = SeedVr2CheckpointConverter.LoadOfficialPthAndConvert(ditPath);
+                _loaders.Add(ditOwner);
+            }
+            else
+            {
+                (ditWeights, IDisposable ditOwner) = SeedVr2CheckpointConverter.LoadAndConvert(ditPath);
+                _loaders.Add(ditOwner);
+            }
             SafeTensorsLoader vaeLoader = new();
             vaeLoader.Load(vaePath);
             _loaders.Add(vaeLoader);
@@ -385,7 +394,7 @@ public sealed class RestoreService : IRestoreService
             foreach (Tensor copy in _castCopies)
                 copy.Dispose();
             _castCopies.Clear();
-            foreach (SafeTensorsLoader loader in _loaders)
+            foreach (IDisposable loader in _loaders)
                 loader.Dispose();
             _loaders.Clear();
             _loadedPath = null;

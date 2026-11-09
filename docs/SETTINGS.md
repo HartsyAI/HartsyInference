@@ -127,8 +127,10 @@ second one beside it.
 | `Runtime` | read per generation; a per-request profile can override it |
 | `Construction` | bound when the engine or a backend is built — **restart to apply** |
 
-`settings set` and the API both say so when the setting is `Construction`. A per-request profile naming a
-`Construction` setting is rejected (400) rather than accepted and silently ignored.
+`settings set` and the API both say so when the setting is `Construction`. A per-request profile or `set` entry that
+would change a `Construction` setting from the value the engine was built with is rejected (400) rather than accepted
+and silently ignored; a pin equal to the running value is accepted, so a server started with `--profile reference` takes
+per-request `reference` profiles.
 
 One caveat worth knowing: `Runtime` is approximate. Some consumers bind a value into a `static readonly` field
 at type-initialisation, which freezes it for the process even though the scope says otherwise.

@@ -223,7 +223,7 @@ public sealed unsafe class LanceTransformer : IDisposable
         if (cached is not null) return (cached[0], cached[1]);
 
         (Tensor cos, Tensor sin) = _rope.BuildCosSin(positionIds);
-        // Re-home into owned [1, seq, headDim] tensors (the rank ApplyRopeSingle broadcasts over heads) with
+        // Re-home into owned [1, seq, headDim] tensors (the rank the rotate-half rotary (RotaryCall.TokenMajor) broadcasts over heads) with
         // stable references — the device cache is keyed by tensor identity, so a per-forward view would re-upload.
         long rows = cos.Shape[0], dim = cos.Shape[1];
         Tensor cos3 = new Tensor(new TensorShape(1, rows, dim), DType.F32);

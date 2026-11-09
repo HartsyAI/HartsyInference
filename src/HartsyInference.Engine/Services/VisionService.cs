@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Vision;
+using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Vision.Annotators;
@@ -14,6 +15,7 @@ using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.DepthAnything;
 using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Embeddings;
+using HartsyInference.Vision.Matting.BiRefNet;
 using HartsyInference.Vision.Rmbg;
 using HartsyInference.Vision.Siglip;
 using HartsyInference.Vision.Upscale;
@@ -25,6 +27,9 @@ public sealed class VisionService : IVisionService, IDisposable
 {
     /// <summary>Aux key a caller may set on <see cref="ModelSpec"/> to point at a specific SAM 2 checkpoint.</summary>
     public const string Sam2AuxKey = "sam2-path";
+
+    /// <summary>Catalog id of the BiRefNet matting checkpoint, the only model <see cref="VisionMode.Matting"/> runs.</summary>
+    public const string BiRefNetMattingId = "birefnet-matting";
 
     /// <summary>Input-space tile edge for Real-ESRGAN. 256 px in → 1024 px out per tile on x4: the 64-channel
     /// activations of one tile stay near a quarter gigabyte, and a 1024² source is 25 tiles rather than the 121 the
@@ -53,6 +58,7 @@ public sealed class VisionService : IVisionService, IDisposable
     private readonly Dictionary<string, NormalBaeModel> _normalBaeCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UperNetSegModel> _upernetCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, BriaRmbg> _rmbgCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, BiRefNetMatter> _birefnetCache = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UpscalePipeline> _upscaleCache = new(StringComparer.Ordinal);
     // All five load via PytorchPickleLoader (raw .pth/.pt), whose Dispose() also disposes its tensors — the
     // loader must stay open for as long as the cached model is used, same as _embedLoaders above.
@@ -82,6 +88,7 @@ public sealed class VisionService : IVisionService, IDisposable
                     VisionMode.Normal => Normal(spec, request),
                     VisionMode.SegMap => SegMap(spec, request),
                     VisionMode.BackgroundRemoval => BackgroundRemoval(spec, request),
+                    VisionMode.Matting => Matting(spec, request),
                     VisionMode.Upscale => Upscale(spec, request, cancel),
                     _ => throw NoModelFor(request.Mode, spec),
                 };
@@ -387,6 +394,38 @@ public sealed class VisionService : IVisionService, IDisposable
             return m;
         });
         return new RmbgBackgroundRemover(model).Alpha(Backend, image.Rgb, image.Width, image.Height);
+    }
+
+    /// <summary>BiRefNet-matting: the foreground in <see cref="VisionResult.Image"/> with straight alpha (the source RGB
+    /// untouched) and the soft matte as a float map in <see cref="VisionResult.Matte"/>. Wired for the
+    /// <c>birefnet-matting</c> catalog id only; any other matting checkpoint is refused by name.</summary>
+    private VisionResult Matting(ModelSpec spec, VisionRequest request)
+    {
+        if (spec.Catalog?.Id != BiRefNetMattingId)
+            throw NoModelFor(request.Mode, spec);
+        string path = RequirePath(spec, BiRefNetMattingId);
+        BiRefNetMatter matter = GetOrLoad(_birefnetCache, path, () =>
+        {
+            SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(path);
+            _embedLoaders.Add(loader);
+            BiRefNetMatter m = new BiRefNetMatter();
+            m.LoadWeights(BiRefNetCheckpointConverter.Convert(loader.GetAllTensors()));
+            return m;
+        });
+        ImageData image = request.Image;
+        float[] matte = matter.Matte(Backend, image.Rgb, image.Width, image.Height);
+        return new VisionResult
+        {
+            Image = new ImageData
+            {
+                Rgb = image.Rgb,
+                Width = image.Width,
+                Height = image.Height,
+                Alpha = RmbgBackgroundRemover.AlphaToBytes(matte),
+            },
+            Matte = new VisionArray(matte, image.Height, image.Width),
+        };
     }
 
     /// <summary>Real-ESRGAN: pixel-space super-resolution by the checkpoint's own factor (4 for x4plus / anime6b,
@@ -734,6 +773,7 @@ public sealed class VisionService : IVisionService, IDisposable
         _dino.Dispose();
         _clipSeg.Dispose();
         _sam2.Dispose();
+        foreach (BiRefNetMatter matter in _birefnetCache.Values) matter.Dispose();
         foreach (ClipModelLoader loader in _clipCache.Values) loader.Dispose();
         foreach (SafeTensorsLoader loader in _embedLoaders) loader.Dispose();
         foreach (PytorchPickleLoader loader in _annotatorLoaders) loader.Dispose();

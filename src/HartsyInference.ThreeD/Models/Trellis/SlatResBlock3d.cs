@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
@@ -39,7 +41,7 @@ internal sealed unsafe class SlatResBlock3d
     public SparseTensor Forward(IBackend backend, SparseTensor x, Tensor vec, ref DownState? down, (int[] idx, int[] coords, int res)? up)
     {
         // updown FIRST (per reference).
-        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
+        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2, meanIncludeSelf: true); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
         else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(backend, x, uidx, ucoords, ures); }
 
         // emb → scale,shift  (SiLU(vec) → Linear(2*out)).
@@ -54,7 +56,7 @@ internal sealed unsafe class SlatResBlock3d
         Tensor a1 = new(h1.Shape, DType.F32); backend.Silu(a1, h1); h1.Dispose();
         SparseTensor hc = SparseOps.SubmanifoldConv3dSparse(backend, x.Replace(a1), _c1Slices, _c1B); a1.Dispose();   // → [.,outCh]
 
-        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.LayerNormModulate(h2, SparseOps.As3D(hc.Feats), scale, shift, 1e-6f);
+        Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.NormModulate(NormModulateCall.Rows(h2, SparseOps.As3D(hc.Feats), NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(SparseOps.As3D(hc.Feats), scale, shift, ScaleMode.OnePlus)));
         Tensor a2 = new(h2.Shape, DType.F32); backend.Silu(a2, h2); h2.Dispose();
         SparseTensor conv2 = SparseOps.SubmanifoldConv3dSparse(backend, hc.Replace(a2), _c2Slices, _c2B); a2.Dispose();
         scale.Dispose(); shift.Dispose();

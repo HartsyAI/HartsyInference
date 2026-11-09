@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -189,7 +190,7 @@ internal static unsafe class Hunyuan3DGpuOps
     public static Tensor NormModulate(IBackend backend, Tensor x, Tensor shift, Tensor scale, TensorShape shape)
     {
         // Fused adaLN: (1+scale)·LayerNormNoAffine(x)+shift in one kernel (was LayerNormNoAffine + AddScalar + Affine).
-        Tensor outp = new(shape, x.DType); backend.LayerNormModulate(outp, x, scale, shift, 1e-6f);
+        Tensor outp = new(shape, x.DType); backend.NormModulate(NormModulateCall.Rows(outp, x, NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(x, scale, shift, ScaleMode.OnePlus)));
         return outp;
     }
 }

@@ -45,13 +45,6 @@ public sealed partial class CpuBackend
     }
 
     /// <inheritdoc />
-    public void QuantizeLatentRows(in LatentSource dest, Tensor rows, Tensor physicalRows)
-    {
-        ThrowIfDisposed();
-        LatentQuantReference.QuantizeRows(dest, rows, physicalRows);
-    }
-
-    /// <inheritdoc />
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         ThrowIfDisposed();
@@ -65,10 +58,4 @@ public sealed partial class CpuBackend
         WindowIndicesReference.Apply(indices, windowSize, seqLen, startPos);
     }
 
-    /// <inheritdoc />
-    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim, int dimOffset)
-    {
-        ThrowIfDisposed();
-        RopeInterleavedOffsetReference.Apply(x, cos, sin, rotaryDim, dimOffset);
-    }
 }

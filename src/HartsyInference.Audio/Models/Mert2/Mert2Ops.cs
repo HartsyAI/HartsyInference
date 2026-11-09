@@ -94,7 +94,7 @@ internal static unsafe class Mert2Ops
     }
 
     /// <summary>Fills the split-half RoPE tables <c>[1, tokens, headDim]</c>, each half holding the same
-    /// <c>headDim/2</c> values so <see cref="IBackend.ApplyRope"/>'s rotate-half indexing lines up.
+    /// <c>headDim/2</c> values so the <see cref="Core.Rope.RopeTableLayout.RotateHalf"/> indexing lines up.
     ///
     /// <para>The angle is accumulated in single precision on purpose. The released model builds it as a float32
     /// product of position and inverse frequency, and by token 7499 an exact angle has drifted a few times 1e-4

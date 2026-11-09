@@ -1,7 +1,11 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Decode;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
@@ -458,7 +462,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
         int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default,
-        Action<int, Tensor>? layerTap = null)
+        Action<int, Tensor>? layerTap = null, MultimodalRope? rope = null, Multimodal.CrossKvCache? crossKv = null)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -490,10 +494,42 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         int ropeTableDim = _cfg.Mla is not null ? _cfg.Mla.QkRopeHeadDim : d;
 
         // Global RoPE table (all layers when single-base; the full-attention layers under Gemma-3 dual-RoPE).
-        Tensor cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
-        Tensor sin = new(new TensorShape(1, t, ropeTableDim), DType.F32);
-        BuildRope(cos, sin, t, posStart, ropeTableDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
-        (cos, sin) = MakeRopeTableResident(backend, cos, sin);
+        // A caller-supplied MultimodalRope (MOSS-VL) replaces the position ramp: its tables are copied resident and owned here.
+        Tensor cos, sin;
+        MultimodalRope? resident = null;
+        if (rope is null)
+        {
+            cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
+            sin = new(new TensorShape(1, t, ropeTableDim), DType.F32);
+            BuildRope(cos, sin, t, posStart, ropeTableDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
+            (cos, sin) = MakeRopeTableResident(backend, cos, sin);
+        }
+        else
+        {
+            if (_cfg.Mla is not null) throw new NotSupportedException("MultimodalRope is not supported with MLA.");
+            // Each copy is released if a later one fails; once the record exists the finally below owns them.
+            Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+            try
+            {
+                textCos = MakeResident(backend, rope.TextCos);
+                textSin = MakeResident(backend, rope.TextSin);
+                visionCos = MakeResident(backend, rope.VisionCos);
+                visionSin = MakeResident(backend, rope.VisionSin);
+                rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
+                resident = new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask);
+            }
+            catch
+            {
+                textCos?.Dispose();
+                textSin?.Dispose();
+                visionCos?.Dispose();
+                visionSin?.Dispose();
+                rowMask?.Dispose();
+                throw;
+            }
+            cos = resident.TextCos;
+            sin = resident.TextSin;
+        }
         // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Gemma-4 additionally
         // narrows the local head dimension itself (HeadDimSwa) — not just the RoPE base. Built once, reused.
         Tensor? cosLocal = null, sinLocal = null;
@@ -562,7 +598,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     // mllama: cross-attend the vision features. With no image present the layer is skipped (HF masks
                     // it out), so the hidden state passes through unchanged.
-                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen)
+                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen, resident, crossKv, i)
                         : CopyHidden(backend, hidden);
                 }
                 else
@@ -605,8 +641,19 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         finally
         {
             runAhead.Dispose();
-            cos.Dispose();
-            sin.Dispose();
+            if (resident is null)
+            {
+                cos.Dispose();
+                sin.Dispose();
+            }
+            else
+            {
+                resident.TextCos.Dispose();
+                resident.TextSin.Dispose();
+                resident.VisionCos.Dispose();
+                resident.VisionSin.Dispose();
+                resident.RowMask?.Dispose();
+            }
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
@@ -1127,7 +1174,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         for (int i = 0; i < row.Length; i++) row[i] *= inv;
     }
 
-    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
+    /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <c>RotaryCall.TokenMajor</c> (shared by Qwen2/Qwen3/Llama).</summary>
     internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
 
     {
@@ -1516,7 +1563,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
                 // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
-                // GluActivate pass over the concatenated projection output.
+                // Glu pass over the concatenated projection output.
                 bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]
                     && _cfg.Activation is not (ActivationKind.Relu or ActivationKind.ReluSquared or ActivationKind.SwigluOai);
                 if (gluFusable)
@@ -1525,8 +1572,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     Tensor gateUpOut = new(new TensorShape(1, n, ffDim * 2), DType.F32);
                     Project(backend, gateUpOut, preMlp, _gateUpW!, _gateUpB, _cfg.LowVramQuant);
                     comb = new(ff, DType.F32);
-                    if (emitQ) backend.GluActivateEmitQ8(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
-                    else backend.GluActivate(comb, gateUpOut, ffDim, gelu: _cfg.Activation == ActivationKind.GeluTanh);
+                    if (emitQ) backend.GluEmitQ8(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
+                    else backend.Glu(comb, gateUpOut, new GluSpec(_cfg.Activation == ActivationKind.GeluTanh ? GluActivation.GeluTanh : GluActivation.Silu, GluGateHalf.First));
                     gateUpOut.Dispose();
                     up.Dispose();
                 }
@@ -1663,8 +1710,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         }
 
         /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features instead of the causal text K/V; used at the cross-attention layer indices, where the self-attention <see cref="Forward"/> path is bypassed.</summary>
-        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen)
-            => _crossAttn!.Forward(backend, hidden, t, vision, visionLen);
+        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen, MultimodalRope? rope = null,
+            Multimodal.CrossKvCache? kvCache = null, int layer = 0)
+            => _crossAttn!.Forward(backend, hidden, t, vision, visionLen, rope, kvCache, layer);
 
         /// <summary>Pre-sublayer norm: for pre-norm models (Llama/Qwen/Gemma) normalizes <paramref name="inp"/> into <paramref name="outp"/>; for post-norm models (OLMo-2) the sublayer reads the raw residual, so this copies through unchanged (the norm applies to the sublayer <i>output</i> instead, via PostSublayer).</summary>
         private void PreSublayer(IBackend backend, Tensor outp, Tensor inp, Tensor? norm, Tensor? bias)
@@ -1721,13 +1769,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor qNormed = new(qRaw.Shape, DType.F32);
             backend.RmsNorm(qNormed, qRaw, _idxQNorm!, _cfg.RmsNormEps);
             qRaw.Dispose();
-            backend.ApplyRopeSingle(qNormed, cos, sin, rotary);
+            backend.Rotary(RotaryCall.TokenMajor(qNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             Tensor kRaw = new(new TensorShape(1, t, 1, index.KeyLength), DType.F32);
             Project(backend, kRaw, pre, _idxKW!, null, _cfg.LowVramQuant);
             Tensor kNormed = new(kRaw.Shape, DType.F32);
             backend.RmsNorm(kNormed, kRaw, _idxKNorm!, _cfg.RmsNormEps);
             kRaw.Dispose();
-            backend.ApplyRopeSingle(kNormed, cos, sin, rotary);
+            backend.Rotary(RotaryCall.TokenMajor(kNormed, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             try
             {
                 SparseBlockIndexer.RequireBiasFits(_cfg.NumHeads, t, posStart + t);
@@ -1810,14 +1858,14 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
                     int rotaryI = _cfg.RotaryDimFor(layerIndex);
-                    backend.ApplyRopeInterleaved(q, cos, sin, rotaryI);
-                    if (k is not null) backend.ApplyRopeInterleaved(k, cos, sin, rotaryI);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryI));
+                    if (k is not null) backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, rotaryI));
                 }
                 else
                 {
                     int rotary = _cfg.RotaryDimFor(layerIndex);
-                    backend.ApplyRopeSingle(q, cos, sin, rotary);
-                    if (k is not null) backend.ApplyRopeSingle(k, cos, sin, rotary);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                    if (k is not null) backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
                 }
             }
 
@@ -1953,6 +2001,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             // KvCacheAppendDev reads tNew from Shape[2] (1 in both layouts).
             bool fullNorm = _cfg.QkNorm && _cfg.QkNormFullDim;
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
+            RotaryPairing pairing = interleaved ? RotaryPairing.Interleaved : RotaryPairing.RotateHalf;
+            // Interleaved decode tables carry identity rows past the rotated pairs, so the epilogue rotates the whole head.
+            int rotaryWidth = interleaved ? 0 : rotaryDim;
             // Gemma-4 KV-sharing: shared layers (no k/v of their own) attend an earlier donor layer's
             // cache — the donor ran earlier in this same captured step, so its cache tensors are the same
             // device buffers the capture already references. Donor pairing preserves the head dim.
@@ -1975,104 +2026,41 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     q.Dispose();
                     q = qN;
                 }
-                backend.RopeApplyDecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos);
+                backend.Rotary(RotaryCall.DecodeStep(q, cosTable, sinTable, rotaryDim, interleaved, devicePos));
             }
-            else if (!_cfg.QkNorm && !_cfg.VNorm && _qkvW is not null)
+            else if (!_cfg.VNorm && (!_cfg.QkNorm || !_cfg.UseLayerNorm) && (_qkvW is not null || _qkW is not null)
+                && (!fullNorm || (_qNorm!.ElementCount == (long)hq * d && _kNorm!.ElementCount == (long)hkv * d)))
             {
-                // Fused QKV epilogue (no QK-norm between projection and rope): the concatenated [q|k|v]
-                // projection output feeds ONE kernel that ropes q, ropes k into the cache, and copies v into
-                // the cache — replacing three slices, two ropes, and two appends (bit-identical math).
-                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0], nv = (int)_vW!.Shape[0];
-                Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
-                Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
-                pre.Dispose();
-                q = new(new TensorShape(1, hq, t, d), DType.F32);
-                backend.QkvRopeScatterDecodeStep(q, kFull, vFull, qkvOut, cosTable, sinTable,
-                    hq, hkv, d, rotaryDim, interleaved, devicePos);
-                qkvOut.Dispose();
-            }
-            else if (_cfg.QkNorm && !_cfg.QkNormFullDim && !_cfg.UseLayerNorm && !_cfg.VNorm
-                && (_qkvW is not null || _qkW is not null)
-                && EngineKnobs.QknormScatter.Value)   // kill-switch
-            {
-                // Per-head QK-norm epilogue (Qwen3/Gemma-3): ONE kernel consumes the fused projection
-                // output, per-head RMS-norms q/k, ropes, and scatters k/v into the cache — replacing
-                // three slices, two RMSNorm launches, and the rope-scatter (bit-identical reduction,
-                // see lm_qknorm_rope_scatter_f32). Full-dim norm (OLMoE), LayerNorm QK-norm (StableLM),
-                // and V-norm (Gemma-4) keep the composed path below.
+                // The projection output feeds the decode epilogue as packed: q, k, v cut from [q|k|v] or from [q|k] plus
+                // v's own projection, the RMS QK-norm (per head for Qwen3/Gemma-3, full width for OLMoE) applied inside,
+                // then the rotation and the K/V scatter. LayerNorm QK-norm (StableLM) and V-norm (Gemma-4) take the
+                // composed path below, where the norms run before the call.
                 int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
                 q = new(new TensorShape(1, hq, t, d), DType.F32);
+                QkvNormKind norm = !_cfg.QkNorm ? QkvNormKind.None : fullNorm ? QkvNormKind.FullWidth : QkvNormKind.PerHead;
+                Tensor packed;
+                Tensor? vOwn = null;
+                QkvDecodeCall call;
                 if (_qkvW is not null)
                 {
                     int nv = (int)_vW!.Shape[0];
-                    Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
-                    Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
-                    pre.Dispose();
-                    backend.QkvNormRopeScatterDecodeStep(q, kFull, vFull, qkvOut, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
-                    qkvOut.Dispose();
+                    packed = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
+                    Project(backend, packed, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
+                    call = QkvDecodeCall.Fused(q, kFull, vFull, packed, hq, hkv, d, cosTable, sinTable, rotaryWidth, pairing, devicePos);
                 }
                 else
                 {
-                    Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
-                    Project(backend, qkOut, pre, _qkW!, _qkB, _cfg.LowVramQuant);
-                    Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
-                    Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
-                    pre.Dispose();
-                    backend.QkNormRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
-                    qkOut.Dispose();
-                    v.Dispose();
+                    packed = new(new TensorShape(1, t, nq + nk), DType.F32);
+                    Project(backend, packed, pre, _qkW!, _qkB, _cfg.LowVramQuant);
+                    vOwn = new(new TensorShape(1, hkv, t, d), DType.F32);
+                    Project(backend, vOwn, pre, _vW!, _vB, _cfg.LowVramQuant);
+                    call = QkvDecodeCall.QkPlusV(q, kFull, vFull, packed, vOwn, hq, hkv, d, cosTable, sinTable, rotaryWidth, pairing, devicePos);
                 }
-            }
-            else if (!_cfg.QkNorm && !_cfg.VNorm && _qkW is not null
-                && EngineKnobs.QkScatter.Value)   // kill-switch, mirrors numerics.qkFusion
-            {
-                // Partial fusion (mixed-dtype v, no QK-norm): one [q|k] GEMV plus v's own projection feed the
-                // same rope+scatter kernel — q/k come from the concatenated buffer, v from its own tensor.
-                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
-                Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
-                Project(backend, qkOut, pre, _qkW, _qkB, _cfg.LowVramQuant);
-                Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
-                Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
                 pre.Dispose();
-                q = new(new TensorShape(1, hq, t, d), DType.F32);
-                backend.QkRopeScatterVDecodeStep(q, kFull, vFull, qkOut, v, cosTable, sinTable,
-                    hq, hkv, d, rotaryDim, interleaved, devicePos);
-                qkOut.Dispose();
-                v.Dispose();
-            }
-            else if (fullNorm && !_cfg.UseLayerNorm && !_cfg.VNorm && (_qkvW is not null || _qkW is not null)
-                && _qNorm!.ElementCount == (long)hq * d && _kNorm!.ElementCount == (long)hkv * d
-                && EngineKnobs.QknormFullScatter.Value)   // kill-switch
-            {
-                // Full-width QK-norm epilogue (OLMoE): ONE kernel norms all q heads together and all k heads together,
-                // ropes, and scatters k/v — replacing the slices, two RMSNorm rows and the rope-scatter (bit-identical,
-                // see lm_qknorm_full_rope_scatter_f32).
-                int nq = (int)_qW!.Shape[0], nk = (int)_kW!.Shape[0];
-                q = new(new TensorShape(1, hq, t, d), DType.F32);
-                if (_qkvW is not null)
-                {
-                    int nv = (int)_vW!.Shape[0];
-                    Tensor qkvOut = new(new TensorShape(1, t, nq + nk + nv), DType.F32);
-                    Project(backend, qkvOut, pre, _qkvW, _qkvB, _cfg.LowVramQuant);
-                    pre.Dispose();
-                    backend.QkNormFullRopeScatterDecodeStep(q, kFull, vFull, qkvOut, null, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
-                    qkvOut.Dispose();
-                }
-                else
-                {
-                    Tensor qkOut = new(new TensorShape(1, t, nq + nk), DType.F32);
-                    Project(backend, qkOut, pre, _qkW!, _qkB, _cfg.LowVramQuant);
-                    Tensor v = new(new TensorShape(1, hkv, t, d), DType.F32);
-                    Project(backend, v, pre, _vW!, _vB, _cfg.LowVramQuant);
-                    pre.Dispose();
-                    backend.QkNormFullRopeScatterDecodeStep(q, kFull, vFull, qkOut, v, _qNorm!, _kNorm!,
-                        _cfg.RmsNormEps, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
-                    qkOut.Dispose();
-                    v.Dispose();
-                }
+                if (norm != QkvNormKind.None) call = call.WithNorm(norm, _qNorm!, _kNorm!, _cfg.RmsNormEps);
+                backend.QkvDecodeEpilogue(in call);
+                packed.Dispose();
+                vOwn?.Dispose();
             }
             else
             {
@@ -2109,11 +2097,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     q = qN; k = kN;
                 }
 
-                // One fused rope+scatter launch (rope q → qRoped, rope k → cache, copy v → cache) replaces
-                // two ropes and two appends — the separate-source variant of the fused-QKV path above.
+                // The separate-source form of the epilogue: rotate q into qRoped, rotate k into the cache, copy v into the cache.
                 Tensor qRoped = new(new TensorShape(1, hq, t, d), DType.F32);
-                backend.RopeScatterKvDecodeStep(qRoped, kFull, vFull, q, k, v, cosTable, sinTable,
-                    hq, hkv, d, rotaryDim, interleaved, devicePos);
+                backend.QkvDecodeEpilogue(QkvDecodeCall.Separate(qRoped, kFull, vFull, q, k, v, hq, hkv, d, cosTable, sinTable, rotaryWidth, pairing, devicePos));
                 q.Dispose(); k.Dispose(); v.Dispose();
                 q = qRoped;
             }
@@ -2202,9 +2188,12 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             int d = _cfg.HeadDim;
             int rotaryDim = _cfg.RotaryDim;
             bool interleaved = _cfg.Rope == RopeStyle.Interleaved;
+            RotaryPairing pairing = interleaved ? RotaryPairing.Interleaved : RotaryPairing.RotateHalf;
+            // Interleaved decode tables carry identity rows past the rotated pairs, so the epilogue rotates the whole head.
+            int rotaryWidth = interleaved ? 0 : rotaryDim;
             TensorShape flat = new(1, b, h);
 
-            // Rows=2 → the Q8-sidecar emit self-disables inside RmsNormEmitQ8/AddRmsNormEmitQ8/GluActivateEmitQ8
+            // Rows=2 → the Q8-sidecar emit self-disables inside RmsNormEmitQ8/AddRmsNormEmitQ8/GluEmitQ8
             // (falls back to the plain fused kernels); the M=2 GEMVs quantize their own activations instead.
             Tensor pre = new(flat, DType.F32);
             PreSublayer(backend, pre, hidden, _inNorm, _normBias);
@@ -2228,8 +2217,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     Tensor qkvRow = new(new TensorShape(1, 1, nq + nk + nv), DType.F32);
                     backend.SliceRows(qkvRow, qkvOut, s);
                     Tensor qRow = new(new TensorShape(1, hq, 1, d), DType.F32);
-                    backend.QkvRopeScatterDecodeStep(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
-                        qkvRow, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    backend.QkvDecodeEpilogue(QkvDecodeCall.Fused(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
+                        qkvRow, hq, hkv, d, cosTable, sinTable, rotaryWidth, pairing, devicePos));
                     qkvRow.Dispose();
                     qRows[s] = qRow;
                 }
@@ -2262,8 +2251,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                     backend.SliceRows(kRow, k, s * hkv);
                     backend.SliceRows(vRow, v, s * hkv);
                     Tensor qRow = new(new TensorShape(1, hq, 1, d), DType.F32);
-                    backend.RopeScatterKvDecodeStep(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
-                        qIn, kRow, vRow, cosTable, sinTable, hq, hkv, d, rotaryDim, interleaved, devicePos);
+                    backend.QkvDecodeEpilogue(QkvDecodeCall.Separate(qRow, caches[s].KeyPrefix(layerIndex), caches[s].ValuePrefix(layerIndex),
+                        qIn, kRow, vRow, hq, hkv, d, cosTable, sinTable, rotaryWidth, pairing, devicePos));
                     qIn.Dispose(); kRow.Dispose(); vRow.Dispose();
                     qRows[s] = qRow;
                 }
@@ -2392,8 +2381,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             // (2i, 2i+1) with frequency i, not split-half: HF's apply_rotary_pos_emb de-interleaves before rotate_half,
             // and llama.cpp runs deepseek2 as LLAMA_ROPE_TYPE_NORM on un-permuted weights. The duplicated-half table
             // is read with stride qkRope, so its first half supplies the per-pair angles.
-            backend.ApplyRopeInterleaved(qRope, cos, sin, qkRope);
-            backend.ApplyRopeInterleaved(kRope, cos, sin, qkRope);
+            backend.Rotary(RotaryCall.TokenMajor(qRope, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, qkRope));
+            backend.Rotary(RotaryCall.TokenMajor(kRope, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, qkRope));
 
             // Move to head-major [1, heads, t, d] for the broadcast / concat / cache / attention.
             Tensor qNopeMh = new(new TensorShape(1, hq, t, qkNope), DType.F32); backend.Permute0213(qNopeMh, qNope, t, hq, qkNope);
@@ -2405,7 +2394,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
 
             // Broadcast the shared rope key across all heads.
             Tensor kRopeB = new(new TensorShape(1, hq, t, qkRope), DType.F32);
-            backend.RepeatKvHeads(kRopeB, kRopeMh, 1, hq);
+            StridedCopies.RepeatInterleave(backend, kRopeB, kRopeMh, 1, hq);
             kRopeMh.Dispose();
 
             // Assemble full per-head q/k [nope|rope] and v padded to qkHead.
@@ -2557,13 +2546,13 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             {
                 if (_cfg.Rope == RopeStyle.Interleaved)
                 {
-                    backend.ApplyRopeInterleaved(q, cos, sin, _cfg.RotaryDim);
-                    backend.ApplyRopeInterleaved(k, cos, sin, _cfg.RotaryDim);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
+                    backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPrefix, _cfg.RotaryDim));
                 }
                 else
                 {
-                    backend.ApplyRopeSingle(q, cos, sin, _cfg.RotaryDim);
-                    backend.ApplyRopeSingle(k, cos, sin, _cfg.RotaryDim);
+                    backend.Rotary(RotaryCall.TokenMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
+                    backend.Rotary(RotaryCall.TokenMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, _cfg.RotaryDim));
                 }
             }
 

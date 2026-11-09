@@ -83,9 +83,6 @@ public static class VramPolicyResolver
         };
     }
 
-    /// <summary>The tier a device with <paramref name="totalVramBytes"/> starts from under <see cref="VramTier.Auto"/>.</summary>
-    public static VramPolicy ForDevice(long totalVramBytes) => Expand(GpuVramClass.Seed(totalVramBytes));
-
     /// <summary>The next tier to try after <paramref name="tier"/> ran out of VRAM, or null when there is nothing more aggressive left.</summary>
     /// <remarks>Ordered by how much they give up, not by the enum's numeric order — <see cref="VramTier.Performance"/>
     /// is the least aggressive despite being 0, and <see cref="VramTier.Auto"/> re-enters the ladder at Balanced

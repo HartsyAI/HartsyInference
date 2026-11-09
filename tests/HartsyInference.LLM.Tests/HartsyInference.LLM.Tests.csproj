@@ -1,12 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>HartsyInference.LLM.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,17 +14,21 @@
     <PackageReference Include="coverlet.collector" />
   </ItemGroup>
 
-  <!-- The xunit VS adapter's build props are not imported in this repo's restore, so copy the adapter next to the test
-       DLL explicitly; without it `dotnet test` discovers zero tests. -->
   <ItemGroup>
-    <None Include="$(NuGetPackageRoot)xunit.runner.visualstudio/2.8.2/build/net6.0/xunit.runner.visualstudio.testadapter.dll;$(NuGetPackageRoot)xunit.runner.visualstudio/2.8.2/build/net6.0/xunit.runner.reporters.netcoreapp10.dll;$(NuGetPackageRoot)xunit.runner.visualstudio/2.8.2/build/net6.0/xunit.runner.utility.netcoreapp10.dll"
-          Condition="Exists('$(NuGetPackageRoot)xunit.runner.visualstudio/2.8.2/build/net6.0/xunit.runner.visualstudio.testadapter.dll')"
-          CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    <Using Include="Xunit" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HartsyInference.LLM\HartsyInference.LLM.csproj" />
+    <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.LLM\HartsyInference.LLM.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>
 
 </Project>
