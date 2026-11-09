@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Engine.Services;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -87,7 +88,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
         if (spec.LocalPath is null)
         {
-            AnsiConsole.MarkupLine("[red]A model is required via[/] [#2ea5e0]--model-path[/][red], or download its catalog assets.[/]");
+            string hint = MeshModelIds.SceneMesh.Contains(spec.Catalog?.Id ?? string.Empty) ? string.Empty : ", or download its catalog assets";
+            AnsiConsole.MarkupLine($"[red]A model is required via[/] [#2ea5e0]--model-path[/][red]{hint}.[/]");
             return 1;
         }
 
