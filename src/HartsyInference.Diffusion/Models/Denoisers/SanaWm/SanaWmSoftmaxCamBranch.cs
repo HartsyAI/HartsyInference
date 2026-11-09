@@ -6,7 +6,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// <summary>Camera branch of a SANA-WM softmax attention layer (upstream <c>_forward_cam_branch_softmax</c>). Q/K/V are
 /// projected from the same input, normalized, UCPE-transformed, then attended with softmax over every token. There is no
 /// temporal conv, ReLU, key scale or beta/decay gate, unlike <see cref="SanaWmCamBranch"/>. The result is
-/// <c>out_proj_cam(·)</c>, which the block sums with the main branch before the output gate.</summary>
+/// <c>out_proj_cam(·)</c>, which the block sums with the main branch before the output gate. Runs one batch item at a time.</summary>
 public sealed class SanaWmSoftmaxCamBranch : IDisposable
 {
     private const float NormEpsilon = 1e-5f;
@@ -14,6 +14,7 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
     private readonly int _heads;
     private readonly int _headDim;
     private readonly int _channels;
+    private readonly List<Tensor> _owned = [];
 
     private Tensor? _queryWeight;
     private Tensor? _queryBias;
@@ -41,10 +42,13 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
     }
 
     /// <summary>Binds <c>q_proj_cam</c>, <c>k_proj_cam</c>, <c>v_proj_cam</c>, <c>q_norm_cam</c>, <c>k_norm_cam</c> and
-    /// <c>out_proj_cam</c>. Every tensor must already be F32 and owned by the caller, which keeps them alive.</summary>
+    /// <c>out_proj_cam</c>. Matrices are borrowed in their stored dtype (F32 or BF16) and must outlive the branch; vectors become
+    /// host F32 copies when they are not F32.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        SanaWmTensors.DisposeAll(_owned);
         _queryWeight = Matrix(weights, prefix, "q_proj_cam.weight");
         _queryBias = Vector(weights, prefix, "q_proj_cam.bias");
         _keyWeight = Matrix(weights, prefix, "k_proj_cam.weight");
@@ -57,6 +61,18 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
         _outputBias = Vector(weights, prefix, "out_proj_cam.bias");
     }
 
+    /// <summary>The tensors <see cref="Forward"/> reads, for preloading on a device backend.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        Tensor?[] all = [_queryWeight, _queryBias, _keyWeight, _keyBias, _valueWeight, _valueBias, _queryNorm, _keyNorm,
+            _outputWeight, _outputBias];
+        foreach (Tensor? tensor in all)
+        {
+            if (tensor is not null)
+                yield return tensor;
+        }
+    }
+
     /// <summary>Returns <c>out_proj_cam</c> of the camera softmax, shaped <c>[B, N, C]</c> in F32. The caller owns the result.</summary>
     /// <param name="x">F32 <c>[B, N, C]</c> post-adaLN tokens, frame-major with <c>N = frames·latentHeight·latentWidth</c>.</param>
     /// <param name="cameraConditions">Per frame, 16 row-major camera-to-world floats then fx, fy, cx, cy in latent pixels.</param>
@@ -67,142 +83,101 @@ public sealed class SanaWmSoftmaxCamBranch : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(x);
-        ArgumentNullException.ThrowIfNull(cameraCos);
-        ArgumentNullException.ThrowIfNull(cameraSin);
+        if (frames <= 0 || latentHeight <= 0 || latentWidth <= 0)
+            throw new ArgumentOutOfRangeException(nameof(frames), "Frame and latent grid extents must be positive.");
+        int batch = (int)x.Shape[0];
+        int tokens = frames * latentHeight * latentWidth;
+        if (x.DType != DType.F32 || x.Shape.Rank != 3 || x.Shape[1] != tokens || x.Shape[2] != _channels)
+            throw new ArgumentException($"x must be F32 [B, {tokens}, {_channels}]; got {x.DType} {x.Shape}.", nameof(x));
+
+        using SanaWmCameraInputs camera = SanaWmCameraInputs.Create(backend, cameraCos, cameraSin, _headDim, cameraConditions, batch,
+            frames, latentHeight, latentWidth);
+        long itemElements = (long)tokens * _channels;
+        using SanaWmScratch scratch = new();
+        Tensor output = scratch.New(x.Shape);
+        for (int b = 0; b < batch; b++)
+        {
+            using SanaWmScratch item = new();
+            Tensor a = item.Track(SanaWmTensors.Slice(backend, x, b * itemElements, new TensorShape(tokens, _channels)));
+            Tensor cam = item.Track(ForwardItem(backend, a, camera, b, tokens));
+            SanaWmTensors.Write(backend, output, cam, b * itemElements);
+        }
+
+        return scratch.Detach(output);
+    }
+
+    /// <summary>One batch item: <paramref name="a"/> is F32 token-major with <c>tokens·C</c> elements. Returns <c>[N, C]</c>.</summary>
+    internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, int tokens)
+    {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_queryWeight is null || _outputWeight is null)
             throw new InvalidOperationException("LoadWeights must run before Forward.");
-        if (frames <= 0 || latentHeight <= 0 || latentWidth <= 0)
-            throw new ArgumentOutOfRangeException(nameof(frames), "Frame and latent grid extents must be positive.");
+        if (a.DType != DType.F32 || a.ElementCount != (long)tokens * _channels)
+            throw new ArgumentException($"The item input must be F32 with {tokens}x{_channels} elements; got {a.DType} {a.Shape}.", nameof(a));
 
-        int batch = (int)x.Shape[0];
-        int spatial = latentHeight * latentWidth;
-        int tokens = frames * spatial;
-        if (x.DType != DType.F32 || x.Shape.Rank != 3 || x.Shape[1] != tokens || x.Shape[2] != _channels)
-            throw new ArgumentException($"x must be F32 [B, {tokens}, {_channels}]; got {x.DType} {x.Shape}.", nameof(x));
-        if (cameraConditions.Length != batch * frames * SanaWmCamRays.ConditionWidth)
-            throw new ArgumentException(
-                $"Camera conditions must hold {batch * frames * SanaWmCamRays.ConditionWidth} floats.", nameof(cameraConditions));
-
-        TensorShape activation = new(batch, tokens, _channels);
-        TensorShape rayShape = new(batch * tokens, 4, 4);
-        using Tensor hostP = new(rayShape, DType.F32, DeviceKind.Cpu);
-        using Tensor hostPT = new(rayShape, DType.F32, DeviceKind.Cpu);
-        using Tensor hostPI = new(rayShape, DType.F32, DeviceKind.Cpu);
-        SanaWmCamRays.Build(cameraConditions, batch, frames, latentHeight, latentWidth,
-            hostP.AsSpan<float>(), hostPT.AsSpan<float>(), hostPI.AsSpan<float>());
-        using Tensor rays = SanaWmTensors.Upload(backend, hostP);
-        using Tensor raysT = SanaWmTensors.Upload(backend, hostPT);
-        using Tensor raysInv = SanaWmTensors.Upload(backend, hostPI);
-
-        (Tensor Cos, Tensor Sin) tables = SanaWmCamRope.BuildCameraTables(backend, cameraCos, cameraSin, _headDim);
-        using Tensor cos = tables.Cos;
-        using Tensor sin = tables.Sin;
-        using Tensor negSin = new(sin.Shape, DType.F32, backend.Device);
-        backend.Scale(negSin, sin, -1f);
-
-        List<Tensor> scratch = [];
-        try
-        {
-            Tensor queryRaw = Projected(backend, scratch, x, _queryWeight!, _queryBias, activation);
-            Tensor queries = Transformed(backend, scratch, Normed(backend, scratch, queryRaw, _queryNorm!, activation), raysT, cos, sin,
-                batch, tokens);
-            Tensor keyRaw = Projected(backend, scratch, x, _keyWeight!, _keyBias, activation);
-            Tensor keys = Transformed(backend, scratch, Normed(backend, scratch, keyRaw, _keyNorm!, activation), raysInv, cos, sin,
-                batch, tokens);
-            Tensor valueRaw = Projected(backend, scratch, x, _valueWeight!, _valueBias, activation);
-            Tensor values = Transformed(backend, scratch, valueRaw, raysInv, cos, sin, batch, tokens);
-
-            TensorShape tokenMajor = new(batch, tokens, _heads, _headDim);
-            TensorShape headMajor = new(batch, _heads, tokens, _headDim);
-            Tensor qh = NewTensor(backend, scratch, headMajor);
-            Tensor kh = NewTensor(backend, scratch, headMajor);
-            Tensor vh = NewTensor(backend, scratch, headMajor);
-            backend.Permute0213(qh, queries.Reshape(tokenMajor), tokens, _heads, _headDim);
-            backend.Permute0213(kh, keys.Reshape(tokenMajor), tokens, _heads, _headDim);
-            backend.Permute0213(vh, values.Reshape(tokenMajor), tokens, _heads, _headDim);
-
-            Tensor attended = NewTensor(backend, scratch, headMajor);
-            backend.ScaledDotProductAttention(attended, qh, kh, vh, null, MathF.Pow(_headDim, -0.5f));
-            Tensor merged = NewTensor(backend, scratch, activation);
-            backend.Permute0213(merged.Reshape(tokenMajor), attended, _heads, tokens, _headDim);
-
-            using Tensor readout = SanaWmCamUcpe.Apply(backend, merged, rays, cos, negSin, batch, tokens, _heads, _headDim);
-            Tensor camRaw = new(activation, DType.F32, backend.Device);
-            bool built = false;
-            try
-            {
-                backend.Linear(camRaw, readout, _outputWeight!, _outputBias);
-                built = true;
-                return camRaw;
-            }
-            finally
-            {
-                if (!built)
-                    camRaw.Dispose();
-            }
-        }
-        finally
-        {
-            SanaWmTensors.DisposeAll(scratch);
-        }
+        using SanaWmScratch scratch = new();
+        Tensor qh = Heads(backend, scratch, a, _queryWeight, _queryBias, _queryNorm, camera.RaysTransposed(item), camera, tokens);
+        Tensor kh = Heads(backend, scratch, a, _keyWeight!, _keyBias, _keyNorm, camera.RaysInverse(item), camera, tokens);
+        Tensor vh = Heads(backend, scratch, a, _valueWeight!, _valueBias, null, camera.RaysInverse(item), camera, tokens);
+        Tensor attended = scratch.New(1, _heads, tokens, _headDim);
+        backend.ScaledDotProductAttention(attended, qh, kh, vh, null, MathF.Pow(_headDim, -0.5f));
+        scratch.Release(qh);
+        scratch.Release(kh);
+        scratch.Release(vh);
+        Tensor merged = scratch.New(tokens, _channels);
+        backend.Permute0213(merged, attended, _heads, tokens, _headDim);
+        scratch.Release(attended);
+        Tensor readout = scratch.Track(SanaWmCamUcpe.Apply(backend, merged, camera.Rays(item), camera.Cos, camera.NegSin, tokens, _heads,
+            _headDim));
+        scratch.Release(merged);
+        Tensor output = scratch.New(tokens, _channels);
+        backend.Linear(output, readout, _outputWeight, _outputBias);
+        return scratch.Detach(output);
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
-        Interlocked.Exchange(ref _disposed, 1);
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        SanaWmTensors.DisposeAll(_owned);
     }
 
-    private static Tensor Projected(IBackend backend, List<Tensor> scratch, Tensor x, Tensor weight, Tensor? bias, TensorShape activation)
+    // Linear, the optional full-channel RMSNorm, the UCPE transform, then head-major [1, H, N, D].
+    private Tensor Heads(IBackend backend, SanaWmScratch scratch, Tensor a, Tensor weight, Tensor? bias, Tensor? norm, Tensor matrices,
+        SanaWmCameraInputs camera, int tokens)
     {
-        Tensor raw = NewTensor(backend, scratch, activation);
-        backend.Linear(raw, x, weight, bias);
-        return raw;
-    }
+        Tensor projected = scratch.New(tokens, _channels);
+        backend.Linear(projected, a, weight, bias);
+        if (norm is not null)
+        {
+            Tensor normed = scratch.New(tokens, _channels);
+            backend.RmsNorm(normed, projected, norm, NormEpsilon);
+            scratch.Release(projected);
+            projected = normed;
+        }
 
-    private Tensor Normed(IBackend backend, List<Tensor> scratch, Tensor input, Tensor norm, TensorShape activation)
-    {
-        Tensor normed = NewTensor(backend, scratch, activation);
-        backend.RmsNorm(normed, input, norm, NormEpsilon);
-        return normed;
-    }
-
-    private Tensor Transformed(IBackend backend, List<Tensor> scratch, Tensor input, Tensor matrices, Tensor cos, Tensor sin,
-        int batch, int tokens)
-    {
-        Tensor transformed = SanaWmCamUcpe.Apply(backend, input, matrices, cos, sin, batch, tokens, _heads, _headDim);
-        scratch.Add(transformed);
-        return transformed;
-    }
-
-    private static Tensor NewTensor(IBackend backend, List<Tensor> scratch, TensorShape shape)
-    {
-        Tensor tensor = new(shape, DType.F32, backend.Device);
-        scratch.Add(tensor);
-        return tensor;
+        Tensor transformed = scratch.Track(SanaWmCamUcpe.Apply(backend, projected, matrices, camera.Cos, camera.Sin, tokens, _heads,
+            _headDim));
+        scratch.Release(projected);
+        Tensor heads = scratch.New(1, _heads, tokens, _headDim);
+        backend.Permute0213(heads, transformed, tokens, _heads, _headDim);
+        scratch.Release(transformed);
+        return heads;
     }
 
     private Tensor Matrix(IReadOnlyDictionary<string, Tensor> weights, string prefix, string key)
     {
-        Tensor tensor = Fetch(weights, prefix, key);
-        if (tensor.Shape.Rank != 2 || tensor.Shape[0] != _channels || tensor.Shape[1] != _channels)
-            throw new ArgumentException($"{prefix}{key} must be [{_channels}, {_channels}]; got {tensor.Shape}.");
+        Tensor tensor = weights[$"{prefix}{key}"];
+        SanaWmTensors.RequireMatrix(tensor, $"{prefix}{key}", _channels, _channels);
         return tensor;
     }
 
     private Tensor Vector(IReadOnlyDictionary<string, Tensor> weights, string prefix, string key)
     {
-        Tensor tensor = Fetch(weights, prefix, key);
+        Tensor tensor = SanaWmTensors.HostF32(weights[$"{prefix}{key}"], _owned);
         if (tensor.Shape.Rank != 1 || tensor.Shape[0] != _channels)
             throw new ArgumentException($"{prefix}{key} must be [{_channels}]; got {tensor.Shape}.");
-        return tensor;
-    }
-
-    private static Tensor Fetch(IReadOnlyDictionary<string, Tensor> weights, string prefix, string key)
-    {
-        Tensor tensor = weights[$"{prefix}{key}"];
-        if (tensor.DType != DType.F32)
-            throw new ArgumentException($"{prefix}{key} must be F32; convert it before LoadWeights.");
         return tensor;
     }
 }

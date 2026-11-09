@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
@@ -6,11 +8,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// <summary>The SANA-WM stage-1 DiT (<c>SanaMSVideoCamCtrl_1600M_P1_D20</c>, flow_euler_ltx path). Patch size is 1, so the
 /// 1×1×1 embedders run as per-token linears over T-major tokens. The header's <c>pos_embed</c> is unused with
 /// <c>wan_rope</c>, so it is not loaded. Timesteps are truncated to integers before the sinusoidal embedding.</summary>
+/// <remarks>Weights are borrowed from the checkpoint in their stored dtype and preloaded on a device backend; no F32 copy of a
+/// weight matrix is made. A CFG batch runs one item at a time through the whole stack, which is sequential CFG inside one call:
+/// the same arithmetic as the joint batch, with the activation peak of a single item.</remarks>
 public sealed class SanaWmDit : IDisposable
 {
     private const float FinalNormEpsilon = 1e-6f;
-    private const int FinalShiftSlot = 0, FinalScaleSlot = 1;
-    private const int CameraChannels = 20;
+    private const int FinalShiftSlot = 0, FinalScaleSlot = 1, FinalSlots = 2;
 
     private readonly IBackend _backend;
     private readonly SanaWmConfig _config;
@@ -25,6 +29,7 @@ public sealed class SanaWmDit : IDisposable
     private readonly Tensor _finalWeight;
     private readonly Tensor _finalBias;
     private readonly Tensor _finalTable;
+    private readonly Tensor _finalTableOnes;
     private int _disposed;
 
     /// <param name="backend">Backend the DiT runs on.</param>
@@ -44,24 +49,27 @@ public sealed class SanaWmDit : IDisposable
         bool built = false;
         try
         {
-            _patchWeight = Owned(weights["x_embedder.proj.weight"]).Reshape(new TensorShape([channels, config.InChannels]));
-            _patchBias = Owned(weights["x_embedder.proj.bias"]);
-            _pluckerWeight = Owned(weights["plucker_embedder.proj.weight"]).Reshape(new TensorShape([channels, config.PluckerChannels]));
-            _pluckerBias = Owned(weights["plucker_embedder.proj.bias"]);
+            _patchWeight = Own(weights["x_embedder.proj.weight"].Reshape(new TensorShape([channels, config.InChannels])));
+            _patchBias = Vector(weights["x_embedder.proj.bias"]);
+            _pluckerWeight = Own(weights["plucker_embedder.proj.weight"].Reshape(new TensorShape([channels, config.PluckerChannels])));
+            _pluckerBias = Vector(weights["plucker_embedder.proj.bias"]);
             _time = new SanaWmTimeWeights(
-                weights["t_embedder.mlp.0.weight"], weights["t_embedder.mlp.0.bias"],
-                weights["t_embedder.mlp.2.weight"], weights["t_embedder.mlp.2.bias"],
-                weights["t_block.1.weight"], weights["t_block.1.bias"]);
+                weights["t_embedder.mlp.0.weight"], Vector(weights["t_embedder.mlp.0.bias"]),
+                weights["t_embedder.mlp.2.weight"], Vector(weights["t_embedder.mlp.2.bias"]),
+                weights["t_block.1.weight"], Vector(weights["t_block.1.bias"]));
             _caption = new SanaWmCaptionWeights(
-                Owned(weights["y_embedder.y_proj.fc1.weight"]), weights["y_embedder.y_proj.fc1.bias"],
-                Owned(weights["y_embedder.y_proj.fc2.weight"]), weights["y_embedder.y_proj.fc2.bias"],
-                weights["attention_y_norm.weight"]);
-            _finalWeight = Owned(weights["final_layer.linear.weight"]);
-            _finalBias = weights["final_layer.linear.bias"];
-            _finalTable = weights["final_layer.scale_shift_table"];
+                weights["y_embedder.y_proj.fc1.weight"], Vector(weights["y_embedder.y_proj.fc1.bias"]),
+                weights["y_embedder.y_proj.fc2.weight"], Vector(weights["y_embedder.y_proj.fc2.bias"]),
+                Vector(weights["attention_y_norm.weight"]));
+            _finalWeight = weights["final_layer.linear.weight"];
+            _finalBias = Vector(weights["final_layer.linear.bias"]);
+            _finalTable = Vector(weights["final_layer.scale_shift_table"]);
+            _finalTableOnes = Own(SanaWmTensors.Filled(new TensorShape(FinalSlots * channels), 1f));
             _blocks = new SanaWmBlock[config.Depth];
             for (int i = 0; i < _blocks.Length; i++)
                 _blocks[i] = new SanaWmBlock(backend, config, i, weights);
+            if (!backend.Device.IsCpu)
+                backend.PreloadWeights(EnumerateWeights());
             built = true;
         }
         finally
@@ -71,11 +79,25 @@ public sealed class SanaWmDit : IDisposable
         }
     }
 
+    /// <summary>Every tensor a forward reads from the checkpoint or the DiT's own parameters, each once.</summary>
+    public IEnumerable<Tensor> EnumerateWeights()
+    {
+        Tensor[] own = [_patchWeight, _patchBias, _pluckerWeight, _pluckerBias, _time.FirstWeight, _time.FirstBias, _time.SecondWeight,
+            _time.SecondBias, _time.BlockWeight, _time.BlockBias, _caption.FirstWeight, _caption.FirstBias, _caption.SecondWeight,
+            _caption.SecondBias, _caption.Norm, _finalWeight, _finalBias, _finalTable, _finalTableOnes];
+        HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
+        foreach (Tensor tensor in own.Concat(_blocks.SelectMany(block => block.EnumerateWeights())))
+        {
+            if (seen.Add(tensor))
+                yield return tensor;
+        }
+    }
+
     /// <summary>Predicts the flow velocity for one CFG batch. Returns a new F32 <c>[B, OutChannels, T, H, W]</c> tensor.</summary>
-    /// <param name="x">F32 latents <c>[B, InChannels, T, H, W]</c>.</param>
+    /// <param name="x">F32 latents <c>[B, InChannels, T, H, W]</c>. Batch 1 is the sequential-CFG form.</param>
     /// <param name="timesteps">One timestep per batch item and frame, <c>B·T</c> values in batch-major order; truncated to integers.</param>
     /// <param name="text">Caption features <c>[B, 1, L, TextWidth]</c>, F32, as the text path produces them.</param>
-    /// <param name="mask">Caption validity <c>[B, L]</c>, F32 with 1 for valid tokens and 0 for padding.</param>
+    /// <param name="mask">Caption validity <c>[B, L]</c>, F32 with 1 for valid tokens and 0 for padding; read on the host.</param>
     /// <param name="cameraConditions">Per frame, 16 camera-to-world floats then fx, fy, cx, cy: <c>B·T·20</c> floats.</param>
     /// <param name="chunkPlucker">F32 plucker features <c>[B, PluckerChannels, T, H, W]</c>.</param>
     public Tensor Forward(Tensor x, ReadOnlySpan<float> timesteps, Tensor text, Tensor mask, ReadOnlySpan<float> cameraConditions,
@@ -89,12 +111,11 @@ public sealed class SanaWmDit : IDisposable
         if (x.DType != DType.F32 || x.Shape.Rank != 5 || x.Shape[1] != _config.InChannels)
             throw new ArgumentException($"x must be F32 [B, {_config.InChannels}, T, H, W]; got {x.DType} {x.Shape}.", nameof(x));
 
-        long batch = x.Shape[0];
+        int batch = (int)x.Shape[0];
         int frames = (int)x.Shape[2];
         int height = (int)x.Shape[3];
         int width = (int)x.Shape[4];
-        int tokensPerFrame = checked(height * width);
-        int tokens = checked(frames * tokensPerFrame);
+        int tokens = checked(frames * height * width);
         long textTokens = text.Shape.Rank == 4 ? text.Shape[2] : -1;
         SanaWmTensors.Require(text, nameof(text), DType.F32, [batch, 1, textTokens, _config.TextWidth]);
         SanaWmTensors.Require(mask, nameof(mask), DType.F32, [batch, textTokens]);
@@ -102,43 +123,37 @@ public sealed class SanaWmDit : IDisposable
             [batch, _config.PluckerChannels, frames, height, width]);
         if (timesteps.Length != batch * frames)
             throw new ArgumentException($"timesteps must hold {batch * frames} values (B·T); got {timesteps.Length}.", nameof(timesteps));
-        if (cameraConditions.Length != batch * frames * CameraChannels)
-            throw new ArgumentException($"camera conditions must hold {batch * frames * CameraChannels} floats.", nameof(cameraConditions));
+        int itemConditions = frames * SanaWmCamRays.ConditionWidth;
+        if (cameraConditions.Length != batch * itemConditions)
+            throw new ArgumentException($"camera conditions must hold {batch * itemConditions} floats.", nameof(cameraConditions));
 
-        List<Tensor> scratch = [];
-        Tensor? produced = null;
-        try
+        ReadOnlySpan<float> maskValues = mask.AsReadOnlySpan<float>();
+        Grid grid = new(frames, height, width, tokens, textTokens);
+        if (batch == 1)
+            return ForwardItem(x, timesteps, text, maskValues, cameraConditions, chunkPlucker, grid);
+
+        long latentElements = (long)_config.InChannels * tokens;
+        long velocityElements = (long)_config.OutChannels * tokens;
+        long textElements = textTokens * _config.TextWidth;
+        long pluckerElements = (long)_config.PluckerChannels * tokens;
+        using SanaWmScratch scratch = new();
+        Tensor output = scratch.New(new TensorShape([batch, _config.OutChannels, frames, height, width]));
+        for (int b = 0; b < batch; b++)
         {
-            int channels = _config.HiddenSize;
-            Tensor tokenInput = SanaWmConditioning.ChannelFirstToTokens(_backend, scratch, x, _config.InChannels, tokens);
-            Tensor embedded = NewTensor(scratch, new TensorShape([batch * tokens, channels]));
-            _backend.Linear(embedded, tokenInput, _patchWeight, _patchBias);
-            Tensor plucker = SanaWmConditioning.Plucker(_backend, _pluckerWeight, _pluckerBias, chunkPlucker, scratch);
-
-            (Tensor time, Tensor blockTime) = SanaWmConditioning.Time(_backend, _time, _config.TimestepWidth, timesteps, scratch);
-            Tensor memory = SanaWmConditioning.Caption(_backend, _caption, text, batch, textTokens, scratch);
-            Tensor memoryBias = SanaWmConditioning.MaskBias(_backend, mask, batch, textTokens, scratch);
-            (Tensor cos, Tensor sin, Tensor cameraCos, Tensor cameraSin) =
-                SanaWmConditioning.Rope(_backend, _config.HeadDim, frames, height, width, scratch);
-
-            Tensor input = embedded.Reshape(new TensorShape([batch, tokens, channels]));
-            foreach (SanaWmBlock block in _blocks)
-            {
-                Tensor next = block.Forward(input, memory, memoryBias, blockTime, plucker, cameraConditions, frames, height, width,
-                    cos, sin, cameraCos, cameraSin);
-                produced?.Dispose();
-                produced = next;
-                input = next;
-            }
-
-            Tensor velocity = FinalLayer(scratch, input, time, batch, frames, tokensPerFrame);
-            return SanaWmConditioning.TokensToChannelFirst(_backend, velocity, batch, _config.OutChannels, frames, height, width);
+            using SanaWmScratch item = new();
+            Tensor itemX = item.Track(SanaWmTensors.Slice(_backend, x, b * latentElements,
+                new TensorShape([1, _config.InChannels, frames, height, width])));
+            Tensor itemText = item.Track(SanaWmTensors.Slice(_backend, text, b * textElements,
+                new TensorShape(1, 1, textTokens, _config.TextWidth)));
+            Tensor itemPlucker = item.Track(SanaWmTensors.Slice(_backend, chunkPlucker, b * pluckerElements,
+                new TensorShape([1, _config.PluckerChannels, frames, height, width])));
+            Tensor velocity = item.Track(ForwardItem(itemX, timesteps.Slice(b * frames, frames), itemText,
+                maskValues.Slice((int)(b * textTokens), (int)textTokens), cameraConditions.Slice(b * itemConditions, itemConditions),
+                itemPlucker, grid));
+            SanaWmTensors.Write(_backend, output, velocity, b * velocityElements);
         }
-        finally
-        {
-            produced?.Dispose();
-            SanaWmTensors.DisposeAll(scratch);
-        }
+
+        return scratch.Detach(output);
     }
 
     /// <inheritdoc />
@@ -155,58 +170,77 @@ public sealed class SanaWmDit : IDisposable
         SanaWmTensors.DisposeAll(_owned);
     }
 
-    private Tensor Owned(Tensor source) => SanaWmTensors.ToF32(_backend, source, _owned);
-
-    private Tensor NewTensor(List<Tensor> scratch, TensorShape shape)
+    // One batch item through the embedders, every block and the final layer; returns [1, OutChannels, T, H, W].
+    private Tensor ForwardItem(Tensor x, ReadOnlySpan<float> timesteps, Tensor text, ReadOnlySpan<float> mask,
+        ReadOnlySpan<float> cameraConditions, Tensor chunkPlucker, Grid grid)
     {
-        Tensor tensor = new(shape, DType.F32, _backend.Device);
-        scratch.Add(tensor);
+        List<Tensor> conditioning = [];
+        Tensor? hidden = null;
+        try
+        {
+            Tensor tokenInput = SanaWmConditioning.ChannelFirstToTokens(_backend, conditioning, x, _config.InChannels, grid.Tokens);
+            hidden = new Tensor(new TensorShape(1, grid.Tokens, _config.HiddenSize), DType.F32);
+            _backend.Linear(hidden, tokenInput, _patchWeight, _patchBias);
+            conditioning.Remove(tokenInput);
+            tokenInput.Dispose();
+
+            Tensor plucker = SanaWmConditioning.Plucker(_backend, _pluckerWeight, _pluckerBias, chunkPlucker, conditioning);
+            (Tensor time, Tensor blockTime) = SanaWmConditioning.Time(_backend, _time, _config.TimestepWidth, timesteps, conditioning);
+            Tensor memory = SanaWmConditioning.Caption(_backend, _caption, text, 1, grid.TextTokens, conditioning);
+            Tensor memoryBias = SanaWmConditioning.MaskBias(_backend, mask, 1, grid.TextTokens, conditioning);
+            using SanaWmForwardContext context = SanaWmForwardContext.Create(_backend, _config, 1, grid.Frames, grid.Height,
+                grid.Width, blockTime, memory, memoryBias, plucker, cameraConditions);
+
+            foreach (SanaWmBlock block in _blocks)
+            {
+                Tensor input = hidden;
+                hidden = null;
+                hidden = block.ForwardOwned(input, context);
+            }
+
+            using Tensor velocity = FinalLayer(hidden, time, grid);
+            hidden.Dispose();
+            hidden = null;
+            return SanaWmConditioning.TokensToChannelFirst(_backend, velocity, 1, _config.OutChannels, grid.Frames, grid.Height,
+                grid.Width);
+        }
+        finally
+        {
+            hidden?.Dispose();
+            SanaWmTensors.DisposeAll(conditioning);
+        }
+    }
+
+    // Final layer: LayerNorm, modulate by (table + t) per frame, then the linear to OutChannels. Returns token rows [N, out].
+    private Tensor FinalLayer(Tensor tokens, Tensor time, Grid grid)
+    {
+        int channels = _config.HiddenSize;
+        long width = (long)FinalSlots * channels;
+        using SanaWmScratch scratch = new();
+        Tensor timeSlots = scratch.New(grid.Frames, width);
+        ReadOnlySpan<long> dims = [grid.Frames, FinalSlots, channels];
+        ReadOnlySpan<long> strides = [channels, 0, 1];
+        _backend.CopyStrided(timeSlots, time, StridedCopySpec.Gather(new StridedView(dims, strides, 0)));
+        Tensor modulation = scratch.New(grid.Frames, width);
+        _backend.AffineBroadcastLastDim(modulation, timeSlots, _finalTableOnes, _finalTable);
+        scratch.Release(timeSlots);
+
+        Tensor modulated = scratch.New(grid.Tokens, channels);
+        ModulationSpec perFrame = ModulationSpec.Packed(modulation, width, (long)FinalScaleSlot * channels,
+            (long)FinalShiftSlot * channels, grid.Height * grid.Width, ScaleMode.OnePlus);
+        _backend.NormModulate(NormModulateCall.Rows(modulated, tokens, NormKind.LayerNorm, FinalNormEpsilon).WithModulation(perFrame));
+        Tensor output = scratch.New(grid.Tokens, _config.OutChannels);
+        _backend.Linear(output, modulated, _finalWeight, _finalBias);
+        return scratch.Detach(output);
+    }
+
+    private Tensor Vector(Tensor source) => SanaWmTensors.HostF32(source, _owned);
+
+    private Tensor Own(Tensor tensor)
+    {
+        _owned.Add(tensor);
         return tensor;
     }
 
-    // Final layer: LayerNorm, modulate by (table + t) per frame, then the linear to OutChannels. Returns token rows [B·N, out].
-    private Tensor FinalLayer(List<Tensor> scratch, Tensor tokens, Tensor time, long batch, int frames, int tokensPerFrame)
-    {
-        int channels = _config.HiddenSize;
-        using Tensor timeHost = SanaWmTensors.Readback(_backend, time);
-        using Tensor tableHost = SanaWmTensors.Readback(_backend, _finalTable);
-        using Tensor modulationHost = new(new TensorShape([batch * frames * 2, channels]), DType.F32, DeviceKind.Cpu);
-        ReadOnlySpan<float> timeValues = timeHost.AsReadOnlySpan<float>();
-        ReadOnlySpan<float> table = tableHost.AsReadOnlySpan<float>();
-        Span<float> destination = modulationHost.AsSpan<float>();
-        for (long row = 0; row < batch * frames; row++)
-        {
-            for (int slot = 0; slot < 2; slot++)
-            {
-                float factor = slot == FinalScaleSlot ? 1f : 0f;
-                for (int c = 0; c < channels; c++)
-                    destination[(int)((row * 2 + slot) * channels) + c] = table[slot * channels + c] + timeValues[(int)row * channels + c] + factor;
-            }
-        }
-
-        Tensor modulation = SanaWmTensors.Upload(_backend, modulationHost);
-        scratch.Add(modulation);
-        long totalTokens = batch * tokensPerFrame * frames;
-        TensorShape rows = new([totalTokens, channels]);
-        Tensor normed = NewTensor(scratch, rows);
-        _backend.LayerNormNoAffine(normed, tokens.Reshape(rows), FinalNormEpsilon);
-        Tensor modulated = NewTensor(scratch, rows);
-        for (long b = 0; b < batch; b++)
-        {
-            for (int f = 0; f < frames; f++)
-            {
-                long row = b * frames * tokensPerFrame + (long)f * tokensPerFrame;
-                long modulationRow = (b * frames + f) * 2;
-                Tensor input = normed.SliceRows(row, tokensPerFrame);
-                Tensor target = modulated.SliceRows(row, tokensPerFrame);
-                Tensor shift = modulation.SliceRows(modulationRow + FinalShiftSlot, 1).Reshape(new TensorShape([channels]));
-                Tensor scale = modulation.SliceRows(modulationRow + FinalScaleSlot, 1).Reshape(new TensorShape([channels]));
-                _backend.AffineBroadcastLastDim(target, input, scale, shift);
-            }
-        }
-
-        Tensor output = NewTensor(scratch, new TensorShape([totalTokens, _config.OutChannels]));
-        _backend.Linear(output, modulated, _finalWeight, _finalBias);
-        return output;
-    }
+    private readonly record struct Grid(int Frames, int Height, int Width, int Tokens, long TextTokens);
 }

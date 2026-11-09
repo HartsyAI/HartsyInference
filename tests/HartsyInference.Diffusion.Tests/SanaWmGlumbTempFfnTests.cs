@@ -57,6 +57,22 @@ public sealed class SanaWmGlumbTempFfnTests
     }
 
     [Fact]
+    public void Forward_ChunkedOneFrameAtATime_MatchesOneChunk()
+    {
+        IBackend backend = new CpuBackend();
+        using SanaWmGlumbTempCase whole = SanaWmGlumbTempCase.Load(FixtureT3, SanaWmOperandMode.Exact);
+        using SanaWmGlumbTempCase chunked = SanaWmGlumbTempCase.Load(FixtureT3, SanaWmOperandMode.Exact, hiddenChunkElements: 1);
+        int rows = (int)whole.Input.Shape[0] * whole.Frames;
+        Assert.Equal(rows, whole.Ffn.ChunkFrames(rows, whole.Height * whole.Width));
+        Assert.Equal(1, chunked.Ffn.ChunkFrames(rows, whole.Height * whole.Width));
+
+        using Tensor expected = whole.Ffn.Forward(backend, whole.Input, whole.Frames, whole.Height, whole.Width);
+        using Tensor actual = chunked.Ffn.Forward(backend, chunked.Input, chunked.Frames, chunked.Height, chunked.Width);
+
+        Assert.Equal(expected.AsReadOnlySpan<float>().ToArray(), actual.AsReadOnlySpan<float>().ToArray());
+    }
+
+    [Fact]
     public void Forward_Bf16Activations_OnCpuBackend_ThrowsNotSupported()
     {
         IBackend backend = new CpuBackend();

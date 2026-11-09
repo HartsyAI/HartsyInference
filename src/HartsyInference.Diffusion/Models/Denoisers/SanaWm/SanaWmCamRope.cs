@@ -32,8 +32,8 @@ public static class SanaWmCamRope
         ValidateTable(mainSin, mainColumns, nameof(mainSin));
 
         long rows = mainCos.Shape[0];
-        Tensor cos = new(new TensorShape(rows, camWidth), DType.F32, backend.Device);
-        Tensor sin = new(new TensorShape(rows, camWidth), DType.F32, backend.Device);
+        Tensor cos = new(new TensorShape(rows, camWidth), DType.F32);
+        Tensor sin = new(new TensorShape(rows, camWidth), DType.F32);
         bool built = false;
         try
         {

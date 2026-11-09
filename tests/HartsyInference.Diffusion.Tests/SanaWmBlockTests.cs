@@ -130,16 +130,14 @@ public sealed class SanaWmBlockTests : IDisposable
             if (withPlucker)
             {
                 Tensor chunk = Pattern(scratch, [1, PluckerChannels, frames, height, width], 0.05f);
-                Tensor weight = SanaWmTensors.ToF32(backend, checkpoint.Weights["plucker_embedder.proj.weight"], owned)
-                    .Reshape(new TensorShape([Channels, PluckerChannels]));
-                Tensor bias = SanaWmTensors.ToF32(backend, checkpoint.Weights["plucker_embedder.proj.bias"], owned);
-                plucker = SanaWmConditioning.Plucker(backend, weight, bias, chunk, scratch);
+                Tensor weight = checkpoint.Weights["plucker_embedder.proj.weight"].Reshape(new TensorShape([Channels, PluckerChannels]));
+                owned.Add(weight);
+                plucker = SanaWmConditioning.Plucker(backend, weight, checkpoint.Weights["plucker_embedder.proj.bias"], chunk, scratch);
             }
 
-            (Tensor cos, Tensor sin, Tensor cameraCos, Tensor cameraSin) =
-                SanaWmConditioning.Rope(backend, checkpoint.Config.HeadDim, frames, height, width, scratch);
-            float[] camera = CameraConditions(frames);
-            return block.Forward(x, memory, memoryBias, timeModulation, plucker, camera, frames, height, width, cos, sin, cameraCos, cameraSin);
+            using SanaWmForwardContext context = SanaWmForwardContext.Create(backend, checkpoint.Config, 1, frames, height, width,
+                timeModulation, memory, memoryBias, plucker, CameraConditions(frames));
+            return block.Forward(x, context);
         }
         finally
         {
