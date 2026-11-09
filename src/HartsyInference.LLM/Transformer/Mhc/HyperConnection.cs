@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.LLM.Transformer;
+namespace HartsyInference.LLM.Transformer.Mhc;
 
 /// <summary>Manifold-constrained hyper-connection (mHC) around one sublayer: derives mixing coefficients from a residual stream of
 /// <c>hc</c> copies, collapses the stream for the sublayer, and expands the sublayer output back.</summary>
@@ -132,7 +132,9 @@ public sealed class HyperConnection
     }
 
     /// <summary>Final read-out of the stream: a pre-mix from this head's own projection, then the final RMS norm.</summary>
-    /// <remarks>Used by models whose head has its own gates (ERNIE-5.5). The head has no Sinkhorn step.</remarks>
+    /// <remarks>Used by models whose head has its own gates (ERNIE-5.5). The head has no Sinkhorn step.
+    /// Unverified: the formula, including the <see cref="HyperConnectionConfig.PreEps"/> gate epsilon, has not been checked against vLLM's
+    /// <c>hc_head_fused_kernel_tilelang</c>, so it is not parity evidence. Host reference only; it allocates per call.</remarks>
     /// <param name="x">Stream, <c>[tokens, hc, dim]</c>.</param>
     /// <param name="tokens">Row count.</param>
     /// <param name="headFn">Head projection, <c>[hc, hc * dim]</c>.</param>

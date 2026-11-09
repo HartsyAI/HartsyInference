@@ -6,7 +6,9 @@ namespace HartsyInference.LLM.Transformer.Sparse;
 /// <summary>Per-token mixing of attention heads before the output projection, <c>o[h] &lt;- sum_g m[h,g] * o[g]</c> (ERNIE VHA post-mix).</summary>
 /// <remarks>The checkpoint stores the mix as a low-rank update, <c>m = I + V @ U^T</c> with <c>U, V</c> of shape <c>[heads, rank]</c>.
 /// <see cref="FoldLowRank"/> folds it into a dense <c>[heads, heads]</c> matrix once at load, as the reference's <c>fold_vha</c> does, so the
-/// forward pays one <c>heads x heads</c> product per token instead of two rank-sized ones.</remarks>
+/// forward pays one <c>heads x heads</c> product per token instead of two rank-sized ones. The orientation follows vLLM-ERNIE's
+/// <c>VHAPostMix</c>: <c>m = addmm(I, V, U^T)</c>, so <c>m[h,g] = [h == g] + sum_r V[h,r] * U[g,r]</c>, applied as <c>matmul(m, o)</c>
+/// over the head axis.</remarks>
 public static class HeadMix
 {
     /// <summary>Dense <c>m = I + V @ U^T</c>, row-major <c>[heads, heads]</c>, each element accumulated in double.</summary>

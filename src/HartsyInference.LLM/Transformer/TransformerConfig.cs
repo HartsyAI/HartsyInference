@@ -435,7 +435,7 @@ public sealed record TransformerConfig
     /// <summary>Muse Spark: the merged attention output is multiplied elementwise by <c>sigmoid(gate_proj(x))</c>, where <c>x</c> is the attention's normalized input, before <c>o_proj</c>.</summary>
     public bool AttnOutputGate { get; init; }
 
-    /// <summary>Per-layer <c>compress_ratios</c>: 0 standard, <c>R &gt;= 2</c> compressed KV with one latent per R tokens, -2 DSA sparse attention. Null means every layer is standard; when set, its length must equal <see cref="NumLayers"/>.</summary>
+    /// <summary>Per-layer <c>compress_ratios</c>: 0 standard, 1 compressed KV without pooling, <c>R &gt;= 2</c> compressed KV with one pooled latent per R tokens, -2 DSA sparse attention. Null means every layer is standard; when set, its length must equal <see cref="NumLayers"/>.</summary>
     public IReadOnlyList<int>? CompressRatios { get; init; }
 
     /// <summary>The attention kind of layer <paramref name="i"/>, read from <see cref="CompressRatios"/>.</summary>

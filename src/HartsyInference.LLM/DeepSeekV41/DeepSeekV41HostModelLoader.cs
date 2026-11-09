@@ -2,8 +2,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.DeepSeekV41.Engram;
+using HartsyInference.LLM.Transformer.Mhc;
 using HartsyInference.ModelAssets.BlockScale;
-using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 

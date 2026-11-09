@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 

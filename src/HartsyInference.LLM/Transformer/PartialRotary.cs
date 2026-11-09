@@ -9,8 +9,8 @@ namespace HartsyInference.LLM.Transformer;
 public static class PartialRotary
 {
     /// <summary>Rotates the trailing <paramref name="rotaryDim"/> values of every vector in <paramref name="data"/> (shape <paramref name="shape"/>, last dim = head width) at the given positions.</summary>
-    /// <param name="pairing">Element pairing inside the rotated slice: <see cref="RotaryPairing.Interleaved"/> pairs <c>(2i, 2i+1)</c> (GPT-J, DeepSeek), <see cref="RotaryPairing.RotateHalf"/> pairs <c>(i, i+half)</c> (NeoX).</param>
     /// <param name="inverse">Negates sin, which undoes an earlier rotation.</param>
+    /// <param name="pairing">Element pairing inside the rotated slice: <see cref="RotaryPairing.Interleaved"/> pairs <c>(2i, 2i+1)</c> (GPT-J, DeepSeek), <see cref="RotaryPairing.RotateHalf"/> pairs <c>(i, i+half)</c> (NeoX).</param>
     public static void Rotate(IBackend backend, IRopeRowSource rope, int rotaryDim, float[] data, long[] shape, int[] positions,
         bool inverse, RotaryPairing pairing = RotaryPairing.Interleaved) =>
         RotateAt(backend, rope, rotaryDim, checked((int)shape[^1]) - rotaryDim, data, shape, positions, inverse, pairing);
@@ -39,18 +39,11 @@ public static class PartialRotary
             ReadOnlySpan<float> sinRow = rope.SinRow(positions[i]);
             for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
         }
-        using Tensor x = F32Tensor(data, shape);
-        using Tensor c = F32Tensor(cos, 1, positions.Length, half);
-        using Tensor sn = F32Tensor(sin, 1, positions.Length, half);
+        using Tensor x = HostMath.Tensor(data, shape);
+        using Tensor c = HostMath.Tensor(cos, 1, positions.Length, half);
+        using Tensor sn = HostMath.Tensor(sin, 1, positions.Length, half);
         // The rows hold one angle per pair whatever the pairing, which is the InterleavedPrefix table layout.
         backend.Rotary(RotaryCall.TokenMajor(x, c, sn, pairing, RopeTableLayout.InterleavedPrefix, rotaryDim, dimOffset));
         x.AsReadOnlySpan<float>().CopyTo(data);
-    }
-
-    private static Tensor F32Tensor(ReadOnlySpan<float> values, params long[] shape)
-    {
-        Tensor t = new(new TensorShape(shape), DType.F32);
-        values.CopyTo(t.AsSpan<float>());
-        return t;
     }
 }

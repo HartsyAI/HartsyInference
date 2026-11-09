@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Compression;
 using HartsyInference.LLM.Transformer.Dsa;
+using HartsyInference.LLM.Transformer.Mhc;
 using HartsyInference.LLM.Transformer.Sparse;
 
 namespace HartsyInference.LLM.Ernie5;
@@ -255,7 +256,7 @@ internal sealed class Ernie5Layer : IDisposable
 
     /// <summary>The ERNIE hyper-connection formula for <paramref name="cfg"/>.</summary>
     public static HyperConnectionConfig HcConfig(Ernie5Config cfg) =>
-        HyperConnectionConfig.Ernie55(cfg.HcMult, cfg.HiddenSize, cfg.HcSinkhornIters, (float)cfg.HcEps, (float)cfg.RmsNormEps);
+        HyperConnectionConfig.Ernie55(cfg.HcMult, cfg.HiddenSize, cfg.HcSinkhornIters, (float)cfg.HcEps, (float)cfg.HcEps, 2f, (float)cfg.RmsNormEps);
 
     /// <summary>Row-major transpose of a <c>[rows, cols]</c> matrix.</summary>
     internal static float[] Transpose(float[] m, int rows, int cols)

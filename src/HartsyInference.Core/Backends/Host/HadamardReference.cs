@@ -11,9 +11,11 @@ public static class HadamardReference
     public static int Validate(Tensor output, Tensor input)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32) throw new NotSupportedException("Hadamard supports F32 only.");
-        if (input.Shape.Rank < 1 || output.ElementCount != input.ElementCount)
+        if (input.Shape.Rank < 1 || output.Shape.Rank < 1 || output.ElementCount != input.ElementCount)
             throw new ArgumentException($"Hadamard output has {output.ElementCount} elements, input {input.ElementCount}.");
         long width = input.Shape[input.Shape.Rank - 1];
+        if (output.Shape[output.Shape.Rank - 1] != width)
+            throw new ArgumentException($"Hadamard output rows must be {width} wide like the input; got {output.Shape}.", nameof(output));
         if (width < 1 || width > 1 << 20 || (width & (width - 1)) != 0)
             throw new ArgumentException($"Hadamard needs a power-of-two last dimension; got {width}.", nameof(input));
         return (int)width;

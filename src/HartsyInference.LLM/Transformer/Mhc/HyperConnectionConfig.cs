@@ -1,4 +1,4 @@
-namespace HartsyInference.LLM.Transformer;
+namespace HartsyInference.LLM.Transformer.Mhc;
 
 /// <summary>The formula parameters of one hyper-connection. A model difference is a field here, never a branch in <see cref="HyperConnection"/>.</summary>
 public sealed record HyperConnectionConfig
@@ -31,6 +31,7 @@ public sealed record HyperConnectionConfig
     public required RmsEpsPlacement HeadRms { get; init; }
 
     /// <summary>DeepSeek-V4.1 hyper-connection: one <c>hc_eps</c> for both gates, eps inside the sqrt, post multiplier 2.</summary>
+    /// <remarks><see cref="HeadRms"/> is unused: DeepSeek reads out through the last block's collapse and never calls <see cref="HyperConnection.Head"/>.</remarks>
     public static HyperConnectionConfig DeepSeekV41(int hc, int dim, int iters, float hcEps, float normEps) => new()
     {
         Hc = hc,
@@ -44,15 +45,18 @@ public sealed record HyperConnectionConfig
         HeadRms = RmsEpsPlacement.InsideSqrt,
     };
 
-    /// <summary>ERNIE-5.5 hyper-connection: eps outside the sqrt for the mixes (vLLM <c>mhc_kernels.py</c>), post multiplier 2.0 (<c>hc_post_alpha</c>).</summary>
-    public static HyperConnectionConfig Ernie55(int hc, int dim, int iters, float hcEps, float normEps) => new()
+    /// <summary>ERNIE-5.5 hyper-connection: eps outside the sqrt for the mixes (vLLM <c>mhc_kernels.py</c>).</summary>
+    /// <param name="sinkhornEps">Config <c>hc_sinkhorn_eps</c>.</param>
+    /// <param name="preEps">Config <c>hc_pre_eps</c>.</param>
+    /// <param name="postAlpha">Config <c>hc_post_alpha</c>; the reference model passes 2.0.</param>
+    public static HyperConnectionConfig Ernie55(int hc, int dim, int iters, float sinkhornEps, float preEps, float postAlpha, float normEps) => new()
     {
         Hc = hc,
         Dim = dim,
         SinkhornIters = iters,
-        SinkhornEps = hcEps,
-        PreEps = hcEps,
-        PostMultiplier = 2f,
+        SinkhornEps = sinkhornEps,
+        PreEps = preEps,
+        PostMultiplier = postAlpha,
         NormEps = normEps,
         MixRms = RmsEpsPlacement.OutsideSqrt,
         HeadRms = RmsEpsPlacement.InsideSqrt,

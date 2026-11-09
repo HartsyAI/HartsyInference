@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.Ernie5;
 
