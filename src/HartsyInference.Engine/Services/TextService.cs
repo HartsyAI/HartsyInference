@@ -483,6 +483,8 @@ public sealed partial class TextService : ITextService, IDisposable
         using IDisposable gate = DeviceGate.AcquireAllOrdinals(LoadGateOrdinalsFor(slot, deviceKey, spec.LocalPath), cancel);
         LoadInto(slot, deviceKey, spec, request);
         _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: slot.Backend);
+        // Refused before the route is chosen: the scheduler builds text-only input and would drop a video silently.
+        if (slot.MossVl is null) RequireNoVideo(request);
         if (slot.Scheduler is null || !ScheduledRouteAllowed(request, LastImage(request) is not null)) return null;
         slot.EnterLease();
         return slot.Scheduler;

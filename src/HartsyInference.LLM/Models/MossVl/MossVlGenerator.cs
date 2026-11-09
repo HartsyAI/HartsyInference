@@ -54,7 +54,10 @@ public sealed class MossVlDecodeSession : IDisposable
         _backend = backend;
         _limits = limits ?? new MossVlSessionLimits();
         TransformerConfig text = decoder.TextConfig;
-        _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim, Math.Max(1, _limits.InitialTextCapacity));
+        if (_limits.MaxTextTokens < 1) throw new ArgumentOutOfRangeException(nameof(limits), "MaxTextTokens must be at least 1.");
+        // Never allocate past the cap: the limit is enforced by the token count, not by how much capacity happens to be spare.
+        _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim,
+            Math.Clamp(_limits.InitialTextCapacity, 1, _limits.MaxTextTokens));
         _crossKv = new CrossKvCache(text.NumLayers);
     }
 
@@ -202,9 +205,9 @@ public sealed class MossVlDecodeSession : IDisposable
     /// <summary>Grows the self-attention cache (doubling, copied on the device) so it holds <paramref name="needed"/> tokens.</summary>
     private void EnsureTextCapacity(int needed)
     {
-        if (needed <= _cache.Capacity) return;
         if (needed > _limits.MaxTextTokens)
             throw new NotSupportedException($"The session would hold {needed} text tokens, past its limit of {_limits.MaxTextTokens}; start a new session.");
+        if (needed <= _cache.Capacity) return;
         int capacity = Math.Min(_limits.MaxTextTokens, Math.Max(needed, _cache.Capacity * 2));
         FixedKvCache grown = _cache.CopyWithCapacity(capacity);
         _backend.Sync();   // the copy is queued on the device; the old buffers must outlive it
