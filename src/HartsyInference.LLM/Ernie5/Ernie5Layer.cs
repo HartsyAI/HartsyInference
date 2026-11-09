@@ -58,7 +58,7 @@ internal sealed class Ernie5Layer : IDisposable
             else
             {
                 Dictionary<string, Tensor> moe = new(StringComparer.Ordinal);
-                foreach (string key in Ernie5WeightNames.MoeKeys(cfg, index)) moe[key] = Own(source.Read(key));
+                foreach ((string checkpoint, string engine) in Ernie5WeightNames.MoeKeys(cfg, index)) moe[engine] = Own(source.Read(checkpoint));
                 _moe = new MoeFeedForward(MoeSettings(cfg), cfg.HiddenSize, lowVram: false);
                 _moe.LoadWeights(moe, prefix);
             }
@@ -139,7 +139,6 @@ internal sealed class Ernie5Layer : IDisposable
         LatentSize = cfg.MoeLatentSize,
         LatentNorm = cfg.LatentMoeUseNorm ? MoeLatentNorm.AfterCombine : MoeLatentNorm.None,
         LatentNormEps = (float)cfg.RmsNormEps,
-        Names = MoeTensorNames.Ernie55,
     };
 
     private void RunSublayer(HyperConnection hc, Tensor norm, float[] stream, int tokens, float[] x, float[] sub, Action<float[], float[]> body)
@@ -148,7 +147,7 @@ internal sealed class Ernie5Layer : IDisposable
         float[] pre = new float[tokens * h], post = new float[tokens * h], comb = new float[tokens * h * h];
         hc.Mixes(stream, tokens, pre, post, comb);
         hc.Collapse(stream, pre, tokens, x);
-        DsaHostOps.RmsNorm(_backend, x, _cfg.HiddenSize, norm, (float)_cfg.RmsNormEps);
+        HostOps.RmsNorm(_backend, x, _cfg.HiddenSize, norm, (float)_cfg.RmsNormEps);
         body(x, sub);
         hc.Expand(sub, stream, post, comb, tokens, stream);
     }
@@ -156,7 +155,7 @@ internal sealed class Ernie5Layer : IDisposable
     private void Ffn(float[] x, int tokens, float[] y)
     {
         int d = _cfg.HiddenSize;
-        using Tensor input = DsaHostOps.F32(x, 1, tokens, d);
+        using Tensor input = HostMath.Tensor(x, 1, tokens, d);
         if (_moe is not null)
         {
             using Tensor routed = _moe.Forward(_backend, input, tokens);
@@ -232,7 +231,7 @@ internal sealed class Ernie5Layer : IDisposable
         float[] u = HostF32(source, Ernie5WeightNames.Attn(index, Ernie5WeightNames.VhaLeaves[0]));
         float[] v = HostF32(source, Ernie5WeightNames.Attn(index, Ernie5WeightNames.VhaLeaves[1]));
         float[] mix = HeadMix.FoldLowRank(u, v, heads, VhaRank, roundToBf16: true);
-        return Own(DsaHostOps.F32(mix, heads, heads));
+        return Own(HostMath.Tensor(mix, heads, heads));
     }
 
     // The checkpoint stores the mapper input-major, [hc * hidden, mixes]; the module wants [mixes, hc * hidden].
@@ -254,7 +253,8 @@ internal sealed class Ernie5Layer : IDisposable
         return new HyperConnection(backend, HcConfig(cfg), fn, scale, bias);
     }
 
-    /// <summary>The ERNIE hyper-connection formula for <paramref name="cfg"/>.</summary>
+    /// <summary>The ERNIE hyper-connection formula for <paramref name="cfg"/>. The shipped config has only <c>hc_eps</c>, so it is both the
+    /// Sinkhorn and the pre-gate epsilon, and the post scale is the reference model's 2.0.</summary>
     public static HyperConnectionConfig HcConfig(Ernie5Config cfg) =>
         HyperConnectionConfig.Ernie55(cfg.HcMult, cfg.HiddenSize, cfg.HcSinkhornIters, (float)cfg.HcEps, (float)cfg.HcEps, 2f, (float)cfg.RmsNormEps);
 

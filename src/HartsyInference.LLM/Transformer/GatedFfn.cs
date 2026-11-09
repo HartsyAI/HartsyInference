@@ -42,6 +42,7 @@ internal static class GatedFfn
         outShape.CopyDimsTo(packedDims);
         packedDims[^1] *= 2;
         Tensor packed = new(new TensorShape(packedDims), DType.F32);
+        // Packing costs a 2x copy on this unfused fallback, but keeps SiTU in the one Glu op every backend checks.
         backend.Concat(packed, [gate, up], outShape.Rank - 1);
         gate.Dispose();
         up.Dispose();
@@ -51,10 +52,13 @@ internal static class GatedFfn
         return comb;
     }
 
-    /// <summary>Returns <c>act(gate) · up</c> and disposes <paramref name="gate"/> and <paramref name="up"/>; a positive <paramref name="clampLimit"/> first clamps gate to (-inf, limit] and up to [-limit, limit].</summary>
-    public static Tensor SwiGlu(IBackend backend, ActivationKind activation, Tensor gate, Tensor up, float clampLimit = 0f, float alpha = 0f)
+    /// <summary>Returns <c>act(gate) · up</c> and disposes <paramref name="gate"/> and <paramref name="up"/>; a positive <paramref name="clampLimit"/> first clamps gate to (-inf, limit] and up to [-limit, limit].
+    /// The clamped alpha-SwiGLU reads <paramref name="alpha"/> and <paramref name="clampLimit"/>; SiTU reads the two betas.</summary>
+    public static Tensor SwiGlu(IBackend backend, ActivationKind activation, Tensor gate, Tensor up, float clampLimit, float alpha,
+        float situBeta, float situLinearBeta)
     {
         if (activation == ActivationKind.SwigluOai) return SwigluOai(backend, gate, up, alpha, clampLimit);
+        if (activation == ActivationKind.Situ) return SituGlu(backend, gate, up, situBeta, situLinearBeta);
         Tensor gateAct = new(gate.Shape, DType.F32);
         if (clampLimit > 0f)
         {

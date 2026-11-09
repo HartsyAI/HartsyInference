@@ -3,7 +3,7 @@ using HartsyInference.LLM.Transformer;
 namespace HartsyInference.LLM.Ernie5;
 
 /// <summary>ERNIE-5.5 checkpoint key names, read from the real <c>model.safetensors.index.json</c> (vLLM-ERNIE <c>ernie5_5_mapper</c> gives the
-/// module each one feeds). The latent MoE block's names are <see cref="MoeTensorNames.Ernie55"/>, so they have one source.</summary>
+/// module each one feeds).</summary>
 public static class Ernie5WeightNames
 {
     /// <summary>Suffix of an FP8 weight's block-scale companion.</summary>
@@ -85,22 +85,26 @@ public static class Ernie5WeightNames
     /// <summary>The key of a hyper-connection leaf of layer <paramref name="layer"/>.</summary>
     public static string Hc(int layer, string module, string leaf) => $"{Layer(layer)}.{module}.{leaf}";
 
-    /// <summary>Every key of the latent MoE block of layer <paramref name="layer"/>, relative names from
-    /// <see cref="MoeTensorNames.Ernie55"/>.</summary>
-    public static IEnumerable<string> MoeKeys(Ernie5Config config, int layer)
+    /// <summary>Every key of the latent MoE block of layer <paramref name="layer"/>: the checkpoint's own name (<c>block_sparse_moe.*</c>,
+    /// <c>w1</c>/<c>w3</c>/<c>w2</c> experts) and the engine name <see cref="MoeFeedForward"/> reads it under, the load-time remap MiniMax
+    /// uses too. The latent norm keeps the engine's Muse Spark name wherever <see cref="MoeConfig.LatentNorm"/> places it.</summary>
+    public static IEnumerable<(string Checkpoint, string Engine)> MoeKeys(Ernie5Config config, int layer)
     {
-        MoeTensorNames n = MoeTensorNames.Ernie55;
-        string block = $"{Layer(layer)}.{n.Block}";
-        yield return $"{block}.{n.RouterWeight}";
-        if (config.MoeSplitFeatureRouting) yield return $"{block}.{n.RouterWeight2}";
-        yield return $"{block}.{n.CorrectionBias}";
-        if (config.RoutedScalingFactorLearnable) yield return $"{block}.{n.RoutedScale}";
-        yield return $"{block}.{n.LatentDown}";
-        if (config.LatentMoeUseNorm) yield return $"{block}.{n.LatentNorm}";
-        yield return $"{block}.{n.LatentUp}";
+        string block = $"{Layer(layer)}.block_sparse_moe", mlp = $"{Layer(layer)}.mlp";
+        (string Ernie, string Engine)[] projs = [("w1", "gate_proj"), ("w3", "up_proj"), ("w2", "down_proj")];
+        yield return ($"{block}.gate.weight", $"{mlp}.gate.weight");
+        if (config.MoeSplitFeatureRouting) yield return ($"{block}.gate.weight_1", $"{mlp}.gate.weight_1");
+        yield return ($"{block}.e_score_correction_bias", $"{mlp}.gate.e_score_correction_bias");
+        if (config.RoutedScalingFactorLearnable)
+            yield return ($"{block}.gate.routed_scaling_factor_param", $"{mlp}.gate.routed_scaling_factor_param");
+        yield return ($"{block}.fc1_latent_proj.weight", $"{mlp}.pre_expert_proj.weight");
+        if (config.LatentMoeUseNorm) yield return ($"{block}.latent_norm.weight", $"{mlp}.pre_expert_norm.weight");
+        yield return ($"{block}.fc2_latent_proj.weight", $"{mlp}.post_expert_proj.weight");
         if (config.NSharedExperts > 0)
-            foreach (string proj in (string[])[n.GateProj, n.UpProj, n.DownProj]) yield return $"{block}.{n.SharedExpert}.{proj}.weight";
+            foreach ((string ernie, string engine) in projs)
+                yield return ($"{block}.shared_experts.{ernie}.weight", $"{mlp}.shared_expert.{engine}.weight");
         for (int e = 0; e < config.NRoutedExperts; e++)
-            foreach (string proj in (string[])[n.GateProj, n.UpProj, n.DownProj]) yield return $"{block}.{n.Experts}.{e}.{proj}.weight";
+            foreach ((string ernie, string engine) in projs)
+                yield return ($"{block}.experts.{e}.{ernie}.weight", $"{mlp}.experts.{e}.{engine}.weight");
     }
 }

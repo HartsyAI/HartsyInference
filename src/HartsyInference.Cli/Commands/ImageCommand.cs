@@ -72,6 +72,16 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Guidance scale (default: the model family's recommended scale; 1.0 for distilled/turbo models).")]
         public float? Cfg { get; init; }
 
+        /// <summary>Distilled guidance for a FLUX.1 Dev-family checkpoint; unset uses the variant's default.</summary>
+        [CommandOption("--flux-guidance")]
+        [Description("Distilled guidance for FLUX.1 Dev-family checkpoints (default 3.5; 30 for OneReward). Not CFG; unused by Schnell.")]
+        public float? FluxGuidance { get; init; }
+
+        /// <summary>Diffusers-style true CFG for FLUX.1; needs a negative prompt and runs a second pass per step.</summary>
+        [CommandOption("--true-cfg")]
+        [Description("True CFG for FLUX.1 (diffusers true_cfg_scale): needs --negative and runs two passes per step. Default off.")]
+        public float? TrueCfg { get; init; }
+
         /// <summary>Sampler name; unset uses the family's canonical sampler.</summary>
         [CommandOption("--sampler")]
         [Description("Sampler name, e.g. euler, ddim, dpmpp_2m, lcm (default: the model family's sampler).")]
@@ -341,6 +351,8 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         parameters.PutIfSet("height", settings.Height);
         parameters.PutIfSet("steps", settings.Steps);
         parameters.PutIfSet("cfg", settings.Cfg);
+        parameters.PutIfSet("flux-guidance", settings.FluxGuidance);
+        parameters.PutIfSet("true-cfg", settings.TrueCfg);
         parameters.PutIfSet("sampler", settings.Sampler);
         parameters.PutIfSet("scheduler", settings.Scheduler);
         parameters.PutIfSet("sigma-shift", settings.SigmaShift);

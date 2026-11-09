@@ -30,7 +30,7 @@ public static class Ernie5WeightMap
             if (layer < config.FirstKDenseReplace)
                 foreach (string leaf in Ernie5WeightNames.DenseFfnLeaves) keys.Add(Ernie5WeightNames.DenseFfn(layer, leaf));
             else
-                keys.AddRange(Ernie5WeightNames.MoeKeys(config, layer));
+                keys.AddRange(Ernie5WeightNames.MoeKeys(config, layer).Select(k => k.Checkpoint));
         }
         return keys;
     }

@@ -27,9 +27,16 @@ public sealed class HairDeckRequestMapperTests
     }
 
     [Fact]
-    public void ToOptions_RejectsRiggedOutput()
+    public void ToOptions_RejectsRiggedOutputWithoutChains()
     {
-        Assert.Throws<NotSupportedException>(() => HairDeckRequestMapper.ToOptions(new MeshRequest { Rigged = true }));
+        Assert.Throws<NotSupportedException>(() => HairDeckRequestMapper.ToOptions(new MeshRequest { Rigged = true, Chains = false }));
+    }
+
+    [Fact]
+    public void ToOptions_PassesRiggedOutputThrough()
+    {
+        HairDeckOptions options = HairDeckRequestMapper.ToOptions(new MeshRequest { Rigged = true, Seed = 0 });
+        Assert.True(options.Rigged);
     }
 
     [Fact]

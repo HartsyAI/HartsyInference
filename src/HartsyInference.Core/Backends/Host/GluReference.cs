@@ -10,7 +10,7 @@ namespace HartsyInference.Core.Backends.Host;
 /// default and the oracle every kernel is checked against.</summary>
 public static unsafe class GluReference
 {
-    /// <summary>The gate factor of <paramref name="gate"/> under <paramref name="activation"/>.</summary>
+    /// <summary>The gate factor of <paramref name="gate"/> under <paramref name="spec"/>.</summary>
     public static float Gate(float gate, in GluSpec spec)
     {
         switch (spec.Activation)
@@ -31,6 +31,12 @@ public static unsafe class GluReference
     /// <summary>The value factor under <paramref name="spec"/>: the value itself, soft-capped to <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c> for SiTU.</summary>
     public static float Value(float value, in GluSpec spec)
         => spec.Activation == GluActivation.Situ ? spec.SituLinearBeta * MathF.Tanh(value / spec.SituLinearBeta) : value;
+
+    /// <summary>The gate factor under <paramref name="activation"/> with the default SiTU betas; kept for assemblies built against it.</summary>
+    public static float Gate(float gate, GluActivation activation) => Gate(gate, new GluSpec(activation, GluGateHalf.First));
+
+    /// <summary>The value factor under <paramref name="activation"/> with the default SiTU betas; kept for assemblies built against it.</summary>
+    public static float Value(float value, GluActivation activation) => Value(value, new GluSpec(activation, GluGateHalf.First));
 
     public static void Apply(Tensor output, Tensor input, in GluSpec spec)
     {

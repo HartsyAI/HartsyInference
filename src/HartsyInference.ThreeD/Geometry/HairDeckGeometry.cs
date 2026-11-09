@@ -9,7 +9,11 @@ public static class HairDeckGeometry
     private const int RowStride = 8;
 
     /// <summary>Hair cards of <paramref name="result"/> (null when no card has a triangle); see <see cref="HairCardMesher.Build"/>.</summary>
-    public static HairCardMesh? BuildCards(HairDeckResult result, float[] hairColorSrgb)
+    public static HairCardMesh? BuildCards(HairDeckResult result, float[] hairColorSrgb) =>
+        HairCardMesher.Build(ToCards(result), hairColorSrgb);
+
+    /// <summary>The hair cards of <paramref name="result"/> that have at least three points, in the order of their mesh vertices.</summary>
+    public static List<HairCard> ToCards(HairDeckResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
         List<HairCard> cards = [];
@@ -19,11 +23,14 @@ public static class HairDeckGeometry
             if (card.Points >= MinPoints)
                 cards.Add(new HairCard(ToSequence(card), card.ShapeClass, card.Color));
         }
-        return HairCardMesher.Build(cards, hairColorSrgb);
+        return cards;
     }
 
     /// <summary>Spring chains of <paramref name="result"/> as static tubes and joint spheres; null when there are none.</summary>
-    public static Mesh? BuildChains(HairDeckResult result)
+    public static Mesh? BuildChains(HairDeckResult result) => BuildChains(result, out _);
+
+    /// <summary>As <see cref="BuildChains(HairDeckResult)"/>, and gives the index in <c>result.Chains</c> of the chain each tube vertex came from.</summary>
+    public static Mesh? BuildChains(HairDeckResult result, out int[] owners)
     {
         ArgumentNullException.ThrowIfNull(result);
         List<float[]> polylines = new(result.Chains.Count);
@@ -34,7 +41,7 @@ public static class HairDeckGeometry
                 throw new ArgumentException("A chain's joint count must match its joint array.", nameof(result));
             polylines.Add(chain.Joints.AsSpan(0, chain.JointCount * 3).ToArray());
         }
-        return ChainTubeMesher.Build(polylines);
+        return ChainTubeMesher.BuildWithOwners(polylines, out owners);
     }
 
     private static void ValidateCard(DecodedCard card)

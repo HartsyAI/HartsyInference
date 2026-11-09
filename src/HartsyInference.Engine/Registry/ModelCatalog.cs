@@ -784,7 +784,7 @@ public static class ModelCatalog
             // OneReward: a FLUX.1 Fill [dev] fine-tune (inpaint, outpaint, object removal), so the same Fill path and the same
             // side models, plus its object-removal LoRA, applied with --lora. ComfyUI's workflow runs the fp8 file at Flux
             // guidance 30, 20 steps. Licence: CC-BY-NC-4.0 on top of FLUX.1 [dev] non-commercial. Hashes are the LFS object ids
-            // at Comfy-Org/OneReward @77a4042ca2. Not run on real weights.
+            // at Comfy-Org/OneReward @77a4042ca2.
             OneRewardFill("onereward-fill", "OneReward Fill", "flux.1-fill-dev-OneReward-transformer_bf16.safetensors",
                 "1403db15d1d182776315922334b4412ca343a26c3c0d1c77793ceda4792b20e9"),
             OneRewardFill("onereward-fill-fp8", "OneReward Fill (fp8)", "flux.1-fill-dev-OneReward-transformer_fp8.safetensors",
@@ -1003,9 +1003,10 @@ public static class ModelCatalog
                 // (fixed by keeping this model's block loop at F32 — see the Forward() comment).
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "QuantStack/HunyuanImage-2.1-GGUF", RepoPath = "HunyuanImage2.1-Q4_K_M.gguf",
+                    // QuantStack's repo answers 401 without a token; calcuis's ungated Q4_K_M repack of tencent/HunyuanImage-2.1 replaces it.
+                    new() { Repo = "calcuis/hunyuanimage-gguf", RepoPath = "hunyuanimage2.1-q4_k_m.gguf",
                         TargetSubdir = "Stable-Diffusion/HunyuanImage", Role = "transformer",
-                        Sha256 = "583800deb18fa90560d15b41ca0391e79c024784117b0b0263ace02e941237e1" },
+                        Sha256 = "a7fbc97ea816f7ab78694533dfa226fc1ed046e6da2c4242e05dd39af430b6c0" },
                     SideModels.Qwen25Vl7BHunyuan,
                     SideModels.HunyuanImageVae,
                     // Run only on quoted prompt text (the glyph stream); fetched on first use when not pulled here.

@@ -18,10 +18,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="CoLa3D\Fixtures\*.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

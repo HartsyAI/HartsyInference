@@ -85,16 +85,16 @@ public sealed class HcaAttention : IDisposable
         if (startPos + tokens > _rope.Length) throw new ArgumentOutOfRangeException(nameof(startPos), "The rope table does not reach this position.");
         if (startPos == 0) state.Reset();
         int h = s.Heads, hd = s.HeadDim, rd = s.RopeDim;
-        int[] positions = DsaHostOps.Range(startPos, tokens);
+        int[] positions = HostOps.Range(startPos, tokens);
 
-        float[] qr = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.WqA, s.QLoraRank);
-        DsaHostOps.RmsNorm(_backend, qr, s.QLoraRank, _w.QNorm, s.NormEps);
-        float[] q = DsaHostOps.Project(_backend, qr, tokens, s.QLoraRank, _w.WqB, h * hd);
-        if (_headNormOnes is not null) DsaHostOps.RmsNorm(_backend, q, hd, _headNormOnes, s.NormEps);
+        float[] qr = HostOps.Project(_backend, x, tokens, s.Dim, _w.WqA, s.QLoraRank);
+        HostOps.RmsNorm(_backend, qr, s.QLoraRank, _w.QNorm, s.NormEps);
+        float[] q = HostOps.Project(_backend, qr, tokens, s.QLoraRank, _w.WqB, h * hd);
+        if (_headNormOnes is not null) HostOps.RmsNorm(_backend, q, hd, _headNormOnes, s.NormEps);
         PartialRotary.Rotate(_backend, _rope, rd, q, [1, tokens, h, hd], positions, inverse: false, s.RopePairing);
 
-        float[] kv = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.Wkv, hd);
-        DsaHostOps.RmsNorm(_backend, kv, hd, _w.KvNorm, s.NormEps);
+        float[] kv = HostOps.Project(_backend, x, tokens, s.Dim, _w.Wkv, hd);
+        HostOps.RmsNorm(_backend, kv, hd, _w.KvNorm, s.NormEps);
         PartialRotary.Rotate(_backend, _rope, rd, kv, [1, tokens, hd], positions, inverse: false, s.RopePairing);
         Compress(x, tokens, startPos, state);
 
@@ -108,8 +108,8 @@ public sealed class HcaAttention : IDisposable
         float[] z = new float[tokens * s.OGroups * s.OLoraRank];
         GroupedOutputProjection.Apply(o, _w.WoA, tokens, s.OGroups, s.OLoraRank, s.GroupDim, z);
         if (_w.OGate is { } gateWeight)
-            AttentionOutputGate.ApplySigmoid(z, DsaHostOps.Project(_backend, qr, tokens, s.QLoraRank, gateWeight, s.OGroups * s.OLoraRank));
-        DsaHostOps.Project(_backend, z, tokens, s.OGroups * s.OLoraRank, _w.WoB, s.Dim).CopyTo(y);
+            AttentionOutputGate.ApplySigmoid(z, HostOps.Project(_backend, qr, tokens, s.QLoraRank, gateWeight, s.OGroups * s.OLoraRank));
+        HostOps.Project(_backend, z, tokens, s.OGroups * s.OLoraRank, _w.WoB, s.Dim).CopyTo(y);
     }
 
     // Pools the chunk into the compressor and appends each completed latent, rotated at its group's first position.
@@ -118,8 +118,8 @@ public sealed class HcaAttention : IDisposable
         HcaAttentionSettings s = _s;
         int hd = s.HeadDim, ratio = s.CompressRatio;
         state.Compressor ??= new KvCompressorState(ratio, hd, _w.CompressorApe, _w.CompressorNorm, s.NormEps);
-        float[] kv = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.CompressorWkv, hd);
-        float[] score = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.CompressorWgate, hd);
+        float[] kv = HostOps.Project(_backend, x, tokens, s.Dim, _w.CompressorWkv, hd);
+        float[] score = HostOps.Project(_backend, x, tokens, s.Dim, _w.CompressorWgate, hd);
         float[] latent = new float[state.Compressor.MaxRows(startPos, tokens) * hd];
         int rows = state.Compressor.Pool(kv, score, tokens, startPos, latent);
         if (rows == 0) return;
@@ -147,7 +147,7 @@ public sealed class HcaAttention : IDisposable
                 ReadOnlySpan<float> row = j >= startPos ? kv.AsSpan((j - startPos) * hd, hd) : state.Window.AsSpan(j % win * hd, hd);
                 row.CopyTo(r.Slice((compressed + j - first) * hd, hd));
             }
-            using Tensor qT = DsaHostOps.F32(q.AsSpan(t * h * hd, h * hd), 1, h * hd);
+            using Tensor qT = HostMath.Tensor(q.AsSpan(t * h * hd, h * hd), 1, h * hd);
             using Tensor oT = new(new TensorShape(1, h * hd), DType.F32);
             AttentionCall call = new()
             {

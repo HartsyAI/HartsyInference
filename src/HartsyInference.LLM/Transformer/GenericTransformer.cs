@@ -515,6 +515,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         // A caller-supplied MultimodalRope (MOSS-VL) replaces the position ramp: its tables are copied resident and owned here.
         Tensor cos, sin;
         MultimodalRope? resident = null;
+        bool ownsResidentVision = false;
         if (rope is null)
         {
             cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
@@ -525,16 +526,30 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         else
         {
             if (_cfg.Mla is not null) throw new NotSupportedException("MultimodalRope is not supported with MLA.");
+            // The vision tables and the cross bias are read only when a cross layer projects its keys and values. Once every cross
+            // layer holds them (each decode step of a request), they are borrowed from the caller instead of copied again.
+            bool visionRead = crossKv is null || !CrossKvComplete(crossKv);
             // Each copy is released if a later one fails; once the record exists the finally below owns them.
             Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
+            List<CrossImageGroup>? groups = null;
             try
             {
                 textCos = MakeResident(backend, rope.TextCos);
                 textSin = MakeResident(backend, rope.TextSin);
-                visionCos = MakeResident(backend, rope.VisionCos);
-                visionSin = MakeResident(backend, rope.VisionSin);
+                if (visionRead)
+                {
+                    visionCos = MakeResident(backend, rope.VisionCos);
+                    visionSin = MakeResident(backend, rope.VisionSin);
+                }
                 rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
-                resident = new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask);
+                if (rope.ImageGroups is not null)
+                {
+                    groups = [];
+                    foreach (CrossImageGroup group in rope.ImageGroups)
+                        groups.Add(new CrossImageGroup(group.KvLength, MakeResident(backend, group.Select)));
+                }
+                resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask, groups);
+                ownsResidentVision = visionRead;
             }
             catch
             {
@@ -543,6 +558,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 visionCos?.Dispose();
                 visionSin?.Dispose();
                 rowMask?.Dispose();
+                if (groups is not null)
+                    foreach (CrossImageGroup group in groups) group.Select.Dispose();
                 throw;
             }
             cos = resident.TextCos;
@@ -668,13 +685,26 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             {
                 resident.TextCos.Dispose();
                 resident.TextSin.Dispose();
-                resident.VisionCos.Dispose();
-                resident.VisionSin.Dispose();
+                if (ownsResidentVision)
+                {
+                    resident.VisionCos.Dispose();
+                    resident.VisionSin.Dispose();
+                }
                 resident.RowMask?.Dispose();
+                if (resident.ImageGroups is not null)
+                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select.Dispose();
             }
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
+    }
+
+    /// <summary>True when every cross-attention layer already holds its projected keys and values for the request.</summary>
+    private bool CrossKvComplete(Multimodal.CrossKvCache kv)
+    {
+        for (int i = 0; i < _layers.Length; i++)
+            if (_cfg.IsCrossAttnLayer(i) && kv.Get(i) is null) return false;
+        return true;
     }
 
     /// <summary>Ends a forward stopped by <paramref name="cancel"/> before layer <paramref name="layer"/>: releases the
@@ -1578,8 +1608,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             Tensor comb;
             if (_cfg.GatedFfn)
             {
-                // Gated SwiGLU/GeGLU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
-                // exists and the activation is SiLU or GELU-tanh, the whole epilogue (2× SliceLastDim +
+                // Gated SwiGLU/GeGLU/SiTU: down(act(gate(x)) · up(x)). When the load-time fused gate|up weight
+                // exists and the activation is SiLU, GELU-tanh or SiTU, the whole epilogue (2× SliceLastDim +
                 // activation + Mul, four kernels and three intermediates) collapses into ONE fused
                 // Glu pass over the concatenated projection output.
                 bool gluFusable = _gateUpW is not null && _gateW!.Shape[0] == _upW!.Shape[0]
@@ -1600,9 +1630,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 {
                     Tensor gate = new(ff, DType.F32);
                     ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                    comb = _cfg.Activation == ActivationKind.Situ
-                        ? GatedFfn.SituGlu(backend, gate, up, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta)
-                        : GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha);
+                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up, _cfg.SwigluLimit, _cfg.SwigluAlpha,
+                        _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta);
                 }
             }
             else

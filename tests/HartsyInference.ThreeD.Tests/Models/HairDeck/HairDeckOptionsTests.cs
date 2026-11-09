@@ -28,9 +28,16 @@ public sealed class HairDeckOptionsTests
     }
 
     [Fact]
-    public void Validate_RejectsRiggedOutput()
+    public void Validate_RejectsRiggedOutputWithoutChains()
     {
-        Assert.Throws<NotSupportedException>(() => new HairDeckOptions { Rigged = true }.Validate());
+        Assert.Throws<NotSupportedException>(() => new HairDeckOptions { Rigged = true, Chains = false }.Validate());
+    }
+
+    [Fact]
+    public void Validate_AcceptsRiggedOutputWithChains()
+    {
+        HairDeckOptions options = new HairDeckOptions { Rigged = true }.Validate();
+        Assert.True(options.Rigged);
     }
 
     [Theory]

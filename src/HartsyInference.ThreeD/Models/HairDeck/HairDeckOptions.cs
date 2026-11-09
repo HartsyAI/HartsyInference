@@ -21,11 +21,12 @@ public sealed record HairDeckOptions
     /// <summary>Also generate spring-bone chains with the chain model.</summary>
     public bool Chains { get; init; } = true;
 
-    /// <summary>Rigged (VRM) output; not implemented, so only false is accepted.</summary>
+    /// <summary>Rigged output: the cards and chain tubes skinned to the spring chains, with four head-motion clips. Needs
+    /// <see cref="Chains"/>; it is a glTF rig, not VRM.</summary>
     public bool Rigged { get; init; }
 
     /// <summary>Checks the options against what this build implements. Unsupported requests fail here rather than being changed silently.</summary>
-    /// <exception cref="NotSupportedException">More than one sample, or rigged output.</exception>
+    /// <exception cref="NotSupportedException">More than one sample, or rigged output without chains.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Steps below 1 or a guidance scale that is not positive.</exception>
     public HairDeckOptions Validate()
     {
@@ -34,9 +35,9 @@ public sealed record HairDeckOptions
             throw new NotSupportedException($"HairDeck generates one sample per request in this build; {Samples} samples were requested.");
         }
 
-        if (Rigged)
+        if (Rigged && !Chains)
         {
-            throw new NotSupportedException("HairDeck rigged (VRM) output is not implemented yet.");
+            throw new NotSupportedException("HairDeck rigged output needs the spring chains; do not turn chains off with rigged output.");
         }
 
         if (Steps < 1)
