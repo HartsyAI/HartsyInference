@@ -81,6 +81,7 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>Scene decomposition: one GLB holding a mesh node per object.</summary>
     private Task<MeshResult> GenerateSceneAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
         if (request.SceneMesh is null)
         {
             throw new NotSupportedException(
@@ -213,7 +214,7 @@ public sealed class MeshService : IMeshService, IDisposable
             if (!MeshModelIds.ImageToMesh.Contains(id))
             {
                 throw new NotSupportedException(
-                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.All)}.");
+                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.All.Append(HairDeckId))}.");
             }
             try
             {
