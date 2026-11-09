@@ -103,4 +103,28 @@ public sealed class ShapeVaeTransitionBlockTests
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++) Assert.Equal(expected[i], actual[i], 5);
     }
+
+    [Fact]
+    public void ChannelToSpatial_NoPositiveSubdivisionLogits_ThrowsWithTheLevelContext()
+    {
+        // Every to_subdiv logit is negative, so the subdivision keeps no children and must fail with a clear message.
+        int[] coords = { 0, 1, 0, 1, 0, 1, 1, 1 };
+        using Tensor feats = Values(Ramp(1, 32), 2, 16);
+        Dictionary<string, Tensor> w = new()
+        {
+            ["c2s.norm1.weight"] = Fill(1f, 16),
+            ["c2s.norm1.bias"] = Zeros(16),
+            ["c2s.conv1.conv.weight"] = Zeros(64, 3, 3, 3, 16),
+            ["c2s.conv1.conv.bias"] = Zeros(64),
+            ["c2s.conv2.conv.weight"] = Zeros(8, 3, 3, 3, 8),
+            ["c2s.conv2.conv.bias"] = Fill(0.5f, 8),
+            ["c2s.to_subdiv.weight"] = Zeros(8, 16),
+            ["c2s.to_subdiv.bias"] = Fill(-1f, 8),
+        };
+        using ShapeVaeChannelToSpatialBlock block = new(w, "c2s", 16, 8);
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() =>
+            block.Forward(new CpuBackend(), ShapeVaeTestData.Sparse(coords, 2, feats)));
+        Assert.Contains("no children", error.Message);
+    }
 }

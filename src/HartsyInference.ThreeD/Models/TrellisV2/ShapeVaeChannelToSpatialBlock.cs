@@ -38,6 +38,11 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
         SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanChannelToSpatial(x.Coords, x.Resolution, 2, logits);
         logits.Dispose();
         int m = plan.Coords.Length / 4;
+        if (m == 0)
+        {
+            throw new InvalidOperationException("Channel-to-spatial subdivision kept no children: every to_subdiv logit is <= 0 at this level.");
+        }
+
 
         Tensor normed = ShapeVaeOps.LayerNorm(backend, x.Feats, _norm1W, _norm1B, n, _cin, ShapeVaeOps.BlockNormEps);
         Tensor activated = ShapeVaeOps.Silu(backend, normed, n, _cin);
