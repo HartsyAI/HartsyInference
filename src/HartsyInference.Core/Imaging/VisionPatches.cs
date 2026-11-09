@@ -37,17 +37,32 @@ public sealed record VisionPatchGrid(Tensor PixelValues, int GridT, int GridH, i
     public void Dispose() => PixelValues.Dispose();
 }
 
+/// <summary>Where an 8-bit resize rounds back onto the 0–255 grid.</summary>
+public enum U8Rounding
+{
+    /// <summary>Never: the resized values stay fractional.</summary>
+    None,
+
+    /// <summary>After each separable pass, as PIL does (its horizontal pass writes an 8-bit intermediate).</summary>
+    EachPass,
+
+    /// <summary>Once, after both passes (half-to-even, then clamped): a float resize whose result is stored as 8-bit.</summary>
+    Final,
+}
+
 /// <summary>Which separable filter resizes a frame, with the options that decide parity with a given reference.</summary>
 /// <param name="Bicubic">Keys bicubic (a = −0.5, PIL's) when true; triangle (bilinear) when false.</param>
 /// <param name="Antialias">Stretches the kernel on a downscale (PIL, torchvision <c>antialias=True</c>).</param>
-/// <param name="QuantizeU8">Rounds each pass to the 0–255 grid, as 8-bit resizes in PIL and torchvision do.</param>
-public readonly record struct ResampleOptions(bool Bicubic, bool Antialias, bool QuantizeU8)
+/// <param name="Rounding">Where the 8-bit result is rounded.</param>
+public readonly record struct ResampleOptions(bool Bicubic, bool Antialias, U8Rounding Rounding)
 {
-    /// <summary>PIL <c>BICUBIC</c> on an 8-bit image, which is what Hugging Face's fast Qwen-VL processors run.</summary>
-    public static ResampleOptions PilBicubic => new(Bicubic: true, Antialias: true, QuantizeU8: true);
+    /// <summary>PIL <c>BICUBIC</c> on an 8-bit image (rounded after each pass). Hugging Face's fast Qwen-VL processors (torchvision on a
+    /// uint8 tensor) match it: measured against them, 0.2–0.3% of values differ by one level, where rounding only once leaves 10–20%
+    /// off, some by many levels.</summary>
+    public static ResampleOptions PilBicubic => new(Bicubic: true, Antialias: true, Rounding: U8Rounding.EachPass);
 
     /// <summary>PIL <c>BILINEAR</c> on an 8-bit image.</summary>
-    public static ResampleOptions PilBilinear => new(Bicubic: false, Antialias: true, QuantizeU8: true);
+    public static ResampleOptions PilBilinear => new(Bicubic: false, Antialias: true, Rounding: U8Rounding.EachPass);
 }
 
 /// <summary>Turns RGB frames into a ViT's patch rows: resize, rescale to [0, 1], normalize, and flatten patches in
@@ -107,21 +122,26 @@ public sealed class VisionPatchPreprocessor
         if (targetHeight % _spec.Factor != 0 || targetWidth % _spec.Factor != 0)
             throw new ArgumentException($"Target {targetHeight}x{targetWidth} is not a multiple of {_spec.Factor} (patch × merge).");
         float[] hwc = new float[(long)targetHeight * targetWidth * 3];
+        bool eachPass = _resample.Rounding == U8Rounding.EachPass;
         if (_resample.Bicubic)
             Resample.BicubicHwc8(frame.Rgb.Span, frame.Width, frame.Height, 3, hwc, targetWidth, targetHeight, -0.5f,
-                _resample.Antialias, _resample.QuantizeU8);
+                _resample.Antialias, eachPass);
         else
             Resample.BilinearHwc8(frame.Rgb.Span, frame.Width, frame.Height, 3, hwc, targetWidth, targetHeight,
-                _resample.Antialias, _resample.QuantizeU8);
+                _resample.Antialias, eachPass);
+        if (_resample.Rounding == U8Rounding.Final)
+        {
+            for (long i = 0; i < hwc.LongLength; i++) hwc[i] = Math.Clamp(MathF.Round(hwc[i], MidpointRounding.ToEven), 0f, 255f);
+        }
 
         long plane = (long)targetHeight * targetWidth;
         float[] chw = new float[3 * plane];
         for (int c = 0; c < 3; c++)
         {
-            // The rescale and the normalize fold into one multiply-add, as the fast processors fuse them.
-            float scale = 1f / (255f * _std[c]);
-            float shift = -_mean[c] / _std[c];
-            for (long i = 0; i < plane; i++) chw[c * plane + i] = hwc[i * 3 + c] * scale + shift;
+            // The fast processors fuse the rescale into the normalize as (x − 255·mean) / (255·std).
+            float shift = 255f * _mean[c];
+            float scale = 255f * _std[c];
+            for (long i = 0; i < plane; i++) chw[c * plane + i] = (hwc[i * 3 + c] - shift) / scale;
         }
         return chw;
     }

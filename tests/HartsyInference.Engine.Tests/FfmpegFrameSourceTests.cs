@@ -38,7 +38,10 @@ public sealed class FfmpegFrameSourceTests
         string clip = Path.Combine(Path.GetTempPath(), $"hartsy-testsrc-{Guid.NewGuid():N}.mp4");
         using (Process gen = Process.Start(new ProcessStartInfo("ffmpeg",
                    $"-v error -f lavfi -i testsrc=duration=5:size=160x120:rate=10 -pix_fmt yuv420p \"{clip}\"") { UseShellExecute = false })!)
+        {
             await gen.WaitForExitAsync();
+            Assert.True(gen.ExitCode == 0, $"ffmpeg could not generate the test clip (exit {gen.ExitCode}).");
+        }
         try
         {
             using FfmpegFrameSource source = new(clip, new VideoFrameSamplingOptions(Fps: 1.0));

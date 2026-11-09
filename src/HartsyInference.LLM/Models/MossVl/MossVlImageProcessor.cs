@@ -63,6 +63,9 @@ public sealed class MossVlImageProcessor
             min = Long(size, "shortest_edge", min);
             max = Long(size, "longest_edge", max);
         }
+        // Qwen2-VL's processor lets top-level min_pixels / max_pixels override size.
+        min = Long(root, "min_pixels", min);
+        max = Long(root, "max_pixels", max);
         long budget = Long(root, "multi_image_max_pixels", Long(root, "video_max_pixels", DefaultBatchBudget));
         VisionPatchSpec spec = new(Int("patch_size", 16), Int("merge_size", 2), Int("temporal_patch_size", 1));
         return new MossVlImageProcessor(spec, Triple("image_mean"), Triple("image_std"), min, max, budget);
@@ -106,11 +109,16 @@ public sealed class MossVlImageProcessor
         }
     }
 
-    /// <summary>Preprocesses one image at an explicit pixel cap (a video frame sized by <see cref="VideoFrameSampling.FrameSize"/>
-    /// passes that size's area).</summary>
+    /// <summary>Preprocesses one image smart-resized under an explicit pixel cap (a still image; a video frame sized by
+    /// <see cref="VideoFrameSampling.FrameSize"/> must use <see cref="PreprocessAt"/>: smart-resize is not idempotent, so resizing
+    /// that size's area again can land one merge block smaller).</summary>
     public VisionPatchGrid Preprocess(RawRgbFrame image, long maxPixels)
     {
         (int h, int w) = TargetSize(image.Height, image.Width, maxPixels);
         return _pre.Preprocess(image, h, w);
     }
+
+    /// <summary>Preprocesses one image resized to exactly (<paramref name="targetHeight"/>, <paramref name="targetWidth"/>), which must be
+    /// multiples of the patch block.</summary>
+    public VisionPatchGrid PreprocessAt(RawRgbFrame image, int targetHeight, int targetWidth) => _pre.Preprocess(image, targetHeight, targetWidth);
 }

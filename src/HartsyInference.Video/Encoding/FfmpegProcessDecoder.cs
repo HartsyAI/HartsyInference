@@ -24,7 +24,7 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
     public async Task<Result> DecodeAsync(byte[] container, string? formatHint, int? maxFrames, int? scaleWidth,
         int? scaleHeight, CancellationToken cancel = default, bool letterbox = false, double? maxSeconds = null)
     {
-        string temp = Path.Combine(Path.GetTempPath(), $"hartsy-dec-{Guid.NewGuid():N}.{formatHint ?? "bin"}");
+        string temp = Path.Combine(Path.GetTempPath(), $"hartsy-dec-{Guid.NewGuid():N}.{SafeExtension(formatHint)}");
         await File.WriteAllBytesAsync(temp, container, cancel).ConfigureAwait(false);
         try
         {
@@ -111,7 +111,8 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
     {
         (int width, int height, double fps) = await ProbeAsync(path, cancel).ConfigureAwait(false);
         string counts = await RunProbeAsync(
-            $"-v error -select_streams v:0 -show_entries stream=nb_frames:format=duration -of default=nw=1 \"{path}\"", cancel).ConfigureAwait(false);
+            ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=nb_frames:format=duration", "-of", "default=nw=1", path],
+            cancel).ConfigureAwait(false);
         int frames = 0;
         double duration = 0;
         foreach (string line in counts.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -128,23 +129,21 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
     }
 
     /// <summary>Streams the first video stream's frames at source size as RGB24, in decode order, without holding the clip.
-    /// Each yielded buffer is reused for the next frame: copy what you keep before advancing.</summary>
+    /// Each yielded buffer is reused for the next frame: copy what you keep before advancing. Only the first video stream is
+    /// decoded (<c>-map 0:v:0</c>, matching the probe) and rotation metadata is ignored (<c>-noautorotate</c>), so every frame
+    /// has the probed <paramref name="width"/>×<paramref name="height"/>.</summary>
+    /// <exception cref="InvalidOperationException">ffmpeg exits non-zero, or its output ends inside a frame.</exception>
     public async IAsyncEnumerable<ReadOnlyMemory<byte>> StreamFramesAsync(string path, int width, int height,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancel = default)
     {
-        ProcessStartInfo psi = new()
-        {
-            FileName = _ffmpegPath,
-            Arguments = $"-v error -i \"{path}\" -f rawvideo -pix_fmt rgb24 -",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
+        ProcessStartInfo psi = NewStartInfo(_ffmpegPath,
+            ["-v", "error", "-noautorotate", "-i", path, "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]);
         using Process proc = Start(psi, _ffmpegPath);
         Task<string> stderrTask = proc.StandardError.ReadToEndAsync(cancel);
-        int frameBytes = width * height * 3;
+        int frameBytes = checked(width * height * 3);
         byte[] buffer = new byte[frameBytes];
         Stream stdout = proc.StandardOutput.BaseStream;
+        bool completed = false;
         try
         {
             while (true)
@@ -156,33 +155,67 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
                     if (read == 0) break;
                     filled += read;
                 }
-                if (filled < frameBytes) break;
+                if (filled == 0) break;
+                if (filled < frameBytes)
+                    throw new InvalidOperationException(
+                        $"ffmpeg output for '{path}' ended inside a frame ({filled} of {frameBytes} bytes); the stream size changed mid-clip?");
                 yield return buffer;
             }
             await proc.WaitForExitAsync(cancel).ConfigureAwait(false);
+            string stderr = await stderrTask.ConfigureAwait(false);
             if (proc.ExitCode != 0)
-                throw new InvalidOperationException($"ffmpeg decode exited {proc.ExitCode}: {await stderrTask.ConfigureAwait(false)}");
+                throw new InvalidOperationException($"ffmpeg decode exited {proc.ExitCode}: {stderr}");
+            completed = true;
         }
         finally
         {
             // The consumer may stop early (it has every frame it planned); do not leave ffmpeg blocked on a full pipe.
-            if (!proc.HasExited)
-            {
-                try { proc.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-            }
+            if (!completed) KillQuietly(proc);
+            // Observe the stderr reader so an early exit does not leave an unobserved faulted task behind.
+            _ = stderrTask.ContinueWith(static t => _ = t.Exception, TaskScheduler.Default);
         }
     }
 
-    private async Task<string> RunProbeAsync(string arguments, CancellationToken cancel)
+    private static void KillQuietly(Process proc)
+    {
+        try
+        {
+            if (proc.HasExited) return;
+            proc.Kill(entireProcessTree: true);
+            proc.WaitForExit(1000);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+        {
+            // Already gone, or not ours to kill: nothing left to clean up.
+        }
+    }
+
+    private static ProcessStartInfo NewStartInfo(string binary, IEnumerable<string> arguments)
     {
         ProcessStartInfo psi = new()
         {
-            FileName = _ffprobePath,
-            Arguments = arguments,
+            FileName = binary,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        // ArgumentList quotes each entry for the platform, so a path holding quotes or spaces stays one argument.
+        foreach (string argument in arguments) psi.ArgumentList.Add(argument);
+        return psi;
+    }
+
+    /// <summary>A container extension safe to put in a temp file name: ASCII letters and digits only, else <c>bin</c>.</summary>
+    internal static string SafeExtension(string? formatHint)
+    {
+        if (string.IsNullOrEmpty(formatHint) || formatHint.Length > 16) return "bin";
+        foreach (char c in formatHint)
+            if (!char.IsAsciiLetterOrDigit(c)) return "bin";
+        return formatHint;
+    }
+
+    private async Task<string> RunProbeAsync(IEnumerable<string> arguments, CancellationToken cancel)
+    {
+        ProcessStartInfo psi = NewStartInfo(_ffprobePath, arguments);
         using Process proc = Start(psi, _ffprobePath);
         string output = await proc.StandardOutput.ReadToEndAsync(cancel).ConfigureAwait(false);
         await proc.StandardError.ReadToEndAsync(cancel).ConfigureAwait(false);
@@ -192,14 +225,8 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
 
     private async Task<(int Width, int Height, double Fps)> ProbeAsync(string path, CancellationToken cancel)
     {
-        ProcessStartInfo psi = new()
-        {
-            FileName = _ffprobePath,
-            Arguments = $"-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of csv=p=0 \"{path}\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
+        ProcessStartInfo psi = NewStartInfo(_ffprobePath,
+            ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,r_frame_rate", "-of", "csv=p=0", path]);
         using Process proc = Start(psi, _ffprobePath);
         string output = (await proc.StandardOutput.ReadToEndAsync(cancel).ConfigureAwait(false)).Trim();
         string stderr = await proc.StandardError.ReadToEndAsync(cancel).ConfigureAwait(false);

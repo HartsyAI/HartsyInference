@@ -49,6 +49,8 @@ public static class VideoFrameSampling
         n = Math.Clamp(n, Math.Min(options.MinFrames, upper), Math.Max(upper, 1));
 
         List<SampledFrame> frames = new((int)n);
+        // numpy's unique() after the cast: with n ≤ total frames the step is at least 1, so consecutive indices already differ and
+        // nothing is dropped; the check keeps the rule exact if the bounds change.
         int last = -1;
         // numpy linspace(0, total-1, n): i·step with the last value pinned to the end, then astype(int32) truncates.
         double step = n == 1 ? 0 : (double)(totalFrames - 1) / (n - 1);
