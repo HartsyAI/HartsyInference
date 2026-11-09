@@ -43,14 +43,25 @@ public static class DenseWeightCasts
     {
         if (bf16.DType != DType.BF16)
             throw new ArgumentException($"'{key}' is {bf16.DType}, not BF16.", nameof(bf16));
-        ushort* src = (ushort*)bf16.DataPointer;
+        nint src = (nint)bf16.DataPointer;
         long n = bf16.ElementCount;
-        float worst = 0f;
-        for (long i = 0; i < n; i++)
+        // A parallel max over chunks: the scan otherwise adds seconds to a 19 GB BF16 load.
+        const long Chunk = 1 << 20;
+        long chunks = (n + Chunk - 1) / Chunk;
+        float[] partial = new float[chunks];
+        Parallel.For(0, chunks, c =>
         {
-            float v = MathF.Abs(BitConverter.UInt32BitsToSingle((uint)src[i] << 16));
-            if (v > worst && float.IsFinite(v)) worst = v;
-        }
+            ushort* p = (ushort*)src;
+            long end = Math.Min(n, (c + 1) * Chunk);
+            float worstHere = 0f;
+            for (long i = c * Chunk; i < end; i++)
+            {
+                float v = MathF.Abs(BitConverter.UInt32BitsToSingle((uint)p[i] << 16));
+                if (v > worstHere && float.IsFinite(v)) worstHere = v;
+            }
+            partial[c] = worstHere;
+        });
+        float worst = partial.Length == 0 ? 0f : partial.Max();
         if (worst > F16Max)
             throw new NotSupportedException(
                 $"'{key}' holds BF16 values up to {worst:G4}, beyond F16's {F16Max}, and this backend has no BF16 GEMM. "

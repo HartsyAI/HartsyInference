@@ -120,30 +120,51 @@ public sealed class MossVlLoaderPrecisionTests
     [Fact]
     public void UnpadQkv_DropsTheRotaryHalfPadOfQkAndTheHeadPadOfV()
     {
-        // 2 heads of width 4 padded to 6: q and k pad each half (2 -> 3), v pads each head (4 -> 6). Row r holds the value r.
-        const int Heads = 2, HeadDim = 4, Padded = 6, Cols = 3;
-        int rows = 3 * Heads * Padded;
-        float[] data = new float[rows * Cols];
-        for (int r = 0; r < rows; r++) for (int c = 0; c < Cols; c++) data[r * Cols + c] = r;
-        using Tensor padded = F32(data, new TensorShape(rows, Cols));
+        // 2 heads of width 4 padded to 6: q and k pad each half (2 -> 3), v pads each head (4 -> 6). A kept row r holds r + 1; padding is 0.
+        const int Heads = 2, HeadDim = 4, Cols = 3;
+        using Tensor padded = F32(PaddedRows(Cols), new TensorShape(36, Cols));
 
         using Tensor trimmed = MossVlVisionTower.UnpadQkv(padded, Heads, HeadDim);
 
         Assert.Equal(new TensorShape(3 * Heads * HeadDim, Cols), trimmed.Shape);
-        float[] kept = trimmed.AsSpan<float>().ToArray().Where((_, i) => i % Cols == 0).ToArray();
+        float[] kept = trimmed.AsSpan<float>().ToArray().Where((_, i) => i % Cols == 0).Select(v => v - 1).ToArray();
         Assert.Equal([0f, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22, 24, 25, 26, 27, 30, 31, 32, 33], kept);
+    }
+
+    [Fact]
+    public void UnpadQkv_RefusesPaddingThatIsNotZero()
+    {
+        // A converter that padded some other way leaves data where this layout expects zeros: refuse rather than load wrong features.
+        float[] rows = PaddedRows(1);
+        rows[2] = 7f;   // row 2 is padding of q's first rotary half
+        using Tensor odd = F32(rows, new TensorShape(36));
+        Assert.Throws<InvalidDataException>(() => MossVlVisionTower.UnpadQkv(odd, heads: 2, headDim: 4));
+    }
+
+    /// <summary>36 padded qkv rows (2 heads, width 4 padded to 6) of <paramref name="cols"/> columns: kept row r holds r + 1, padding 0.</summary>
+    private static float[] PaddedRows(int cols)
+    {
+        float[] data = new float[36 * cols];
+        for (int r = 0; r < 36; r++)
+        {
+            int i = r % 12;
+            bool kept = r < 24 ? i % 3 < 2 : i % 6 < 4;   // q, k: 2 of every 3 rows; v: 4 of every 6
+            for (int c = 0; c < cols; c++) data[r * cols + c] = kept ? r + 1 : 0f;
+        }
+        return data;
     }
 
     [Fact]
     public void UnpadQkv_HandlesTheBiasAndLeavesAnUnpaddedTensorAlone()
     {
-        using Tensor bias = F32(Enumerable.Range(0, 36).Select(i => (float)i).ToArray(), new TensorShape(36));
+        using Tensor bias = F32(PaddedRows(1).Select(v => v == 0 ? 0f : v - 1).ToArray(), new TensorShape(36));
         using Tensor trimmed = MossVlVisionTower.UnpadQkv(bias, heads: 2, headDim: 4);
         Assert.Equal(new TensorShape(24), trimmed.Shape);
         Assert.Equal(27f, trimmed.AsSpan<float>().ToArray()[19]);
 
         using Tensor plain = F32(new float[24], new TensorShape(24));
         Assert.Same(plain, MossVlVisionTower.UnpadQkv(plain, heads: 2, headDim: 4));
-        Assert.Throws<InvalidDataException>(() => MossVlVisionTower.UnpadQkv(F32(new float[25], new TensorShape(25)), 2, 4));
+        using Tensor bad = F32(new float[25], new TensorShape(25));
+        Assert.Throws<InvalidDataException>(() => MossVlVisionTower.UnpadQkv(bad, 2, 4));
     }
 }
