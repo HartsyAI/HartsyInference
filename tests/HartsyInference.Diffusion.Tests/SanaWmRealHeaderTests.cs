@@ -20,15 +20,18 @@ public sealed class SanaWmRealHeaderTests
         Assert.Empty(SanaWmCheckpointConverter.ValidateKeys(config, header.Tensors));
     }
 
-    /// <summary>The streaming release's DiT, converted from its pickle to safetensors, keeps the stage-1 layout: same derived
-    /// dimensions, and every expected tensor present with its expected shape.</summary>
+    /// <summary>The streaming release's DiT, converted from its pickle to safetensors, keeps the stage-1 layout: the same 871
+    /// tensors (stage 1's 872 without <c>pos_embed</c>), the same derived dimensions, and every expected shape.</summary>
     [SanaWmStreamingWeightsFact]
     public void StreamingDitHeader_KeepsTheStageOneLayout()
     {
         SafeTensorHeader header = SafeTensorHeaderReader.Read(SanaWmStreamingWeightsFactAttribute.DitPath());
 
+        // The conversion drops pos_embed, as upstream's loader does; every other dimension is stage 1's.
         SanaWmConfig config = SanaWmConfig.FromWeights(header.Tensors);
-        SanaWmConfigTests.AssertRealDitDimensions(config);
+        Assert.Equal(871, header.Tensors.Count);
+        Assert.Equal(0, config.PosEmbedTokens);
+        SanaWmConfigTests.AssertRealDitDimensions(config with { PosEmbedTokens = 484 });
         Assert.Empty(SanaWmCheckpointConverter.ValidateKeys(config, header.Tensors));
     }
 }
