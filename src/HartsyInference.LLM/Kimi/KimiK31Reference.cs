@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Gating;
 
 namespace HartsyInference.LLM.Kimi;
 
@@ -204,8 +205,8 @@ public static class KimiK31Reference
     /// <summary>
     /// The routed-expert / shared-expert activation (<c>situ</c>): <c>4·tanh(gate/4)·sigmoid(gate)</c> times
     /// <c>25·tanh(up/25)</c>. The checkpoint's <c>w1</c> is the gate and <c>w3</c> the up projection (NeMo splits
-    /// <c>x.chunk(2)</c> as gate first). This is the same scalar as <see cref="SituGluReference"/>, whose argument order
-    /// is (value, gate).
+    /// <c>x.chunk(2)</c> as gate first). The gate and value factors come from the shared
+    /// <see cref="GluReference"/> under <see cref="GluActivation.Situ"/>.
     /// </summary>
-    public static float Situ(float gate, float up) => SituGluReference.Scalar(up, gate);
+    public static float Situ(float gate, float up) => GluReference.Gate(gate, GluActivation.Situ) * GluReference.Value(up, GluActivation.Situ);
 }
