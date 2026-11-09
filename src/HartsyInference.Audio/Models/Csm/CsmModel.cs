@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Sampling;
 using HartsyInference.Audio.Streaming;
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -849,7 +850,7 @@ public sealed unsafe class CsmModel : IDisposable
     }
 
     /// <summary>Draws one codebook on the device. The guided logits <c>u + g·(c − u)</c> are built as
-    /// <c>0 + 1·(g·c + (1 − g)·u)</c> by <see cref="IBackend.CfgEulerStep"/> (the same value to rounding), and the device
+    /// <c>0 + 1·(g·c + (1 − g)·u)</c> by <see cref="IBackend.GuidedEulerStep"/> (the same value to rounding), and the device
     /// sampler's draw is written into <paramref name="token"/>.</summary>
     private static void SampleCodebook(IBackend backend, Tensor condLogits, Tensor? uncondLogits, float cfgScale, int vocab,
         float temp, int topK, float topP, ulong token, ulong rngState)
@@ -861,7 +862,7 @@ public sealed unsafe class CsmModel : IDisposable
         }
         using Tensor guided = new(new TensorShape(1, 1, vocab), DType.F32);
         backend.Fill(guided, 0f);
-        backend.CfgEulerStep(guided, condLogits, uncondLogits, cfgScale, 1f);
+        backend.GuidedEulerStep(guided, condLogits, uncondLogits, GuidedEulerSpec.Lerp(cfgScale, 1f));
         backend.SampleTopKInto(token, guided, topK, temp, topP, 0f, rngState);
     }
 

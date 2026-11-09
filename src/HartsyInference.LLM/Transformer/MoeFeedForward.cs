@@ -272,7 +272,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 Array.Fill(gateVals, 1f);
             }
             // Identity scatter folds the per-token gate in and seeds the accumulator in one device op.
-            backend.ScatterAddWeightedRows(output, shared, identity, gateVals);
+            backend.ScatterAddRows(output, shared, identity, gateVals);
             shared.Dispose();
         }
 
@@ -298,7 +298,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             backend.GatherRows(gathered, x, idx);
             Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
             gathered.Dispose();
-            backend.ScatterAddWeightedRows(output, expOut, idx, wts);
+            backend.ScatterAddRows(output, expOut, idx, wts);
             expOut.Dispose();
         }
         return output;
@@ -387,7 +387,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 backend.GatherRows(gatheredRows, x, idx);
                 Tensor expOut = RoutedExpert(backend, gatheredRows, idx.Length, ex);
                 gatheredRows.Dispose();
-                backend.ScatterAddWeightedRows(output, expOut, idx, CollectionsMarshal.AsSpan(expertWeights[ex]));
+                backend.ScatterAddRows(output, expOut, idx, CollectionsMarshal.AsSpan(expertWeights[ex]));
                 expOut.Dispose();
                 offload.Record(assignment.Placement, streamed, assignment.Rows);
             }
@@ -428,8 +428,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                     ExpertAssignment a = plan[hostPlan[j]];
                     int ex = a.Key.Expert;
                     using Tensor expOut = allOut.SliceRows(hostOffset[j], a.Rows);
-                    backend.ScatterAddWeightedRows(output, expOut, CollectionsMarshal.AsSpan(expertTokens[ex]),
-                        CollectionsMarshal.AsSpan(expertWeights[ex]));
+                    backend.ScatterAddRows(output, expOut, CollectionsMarshal.AsSpan(expertTokens[ex]), CollectionsMarshal.AsSpan(expertWeights[ex]));
                     offload.Record(ExpertPlacement.Cpu, streamed: false, a.Rows);
                 }
             }
@@ -746,7 +745,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             Tensor rawOut = new(new TensorShape(1, rows, h), DType.F32);
             expertOut.AsSpan(offset, rows * h).CopyTo(rawOut.AsSpan<float>());
             Tensor expOut = NormExpertRows(backend, rawOut);
-            backend.ScatterAddWeightedRows(output, expOut, expertTokens[ex].ToArray(), expertWeights[ex].ToArray());
+            backend.ScatterAddRows(output, expOut, expertTokens[ex].ToArray(), expertWeights[ex].ToArray());
             expOut.Dispose();
             offset += rows * h;
         }

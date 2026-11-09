@@ -12,9 +12,6 @@ public static class Exl3Format
     /// <summary>Side of one trellis tile.</summary>
     public const int TileSize = 16;
 
-    /// <summary>Weights in one tile.</summary>
-    public const int TileWeights = TileSize * TileSize;
-
     /// <summary>Width of one Hadamard block; both matrix dimensions must be a multiple of it.</summary>
     public const int HadamardBlock = 128;
 

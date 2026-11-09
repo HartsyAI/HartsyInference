@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov2;
 
@@ -392,7 +393,7 @@ public sealed unsafe class NormalBaeModel
         }
 
         /// <summary>Squeeze-excitation: global-average pool (host reduce), 1×1 reduce → SiLU → 1×1 expand
-        /// → sigmoid, channel gate applied via <c>MaskRows</c> on a <c>[C, H·W]</c> view.</summary>
+        /// → sigmoid, channel gate applied via a per-row <c>GroupScale</c> on a <c>[C, H·W]</c> view.</summary>
         private Tensor SqueezeExcite(IBackend backend, Tensor x, int h, int w)
         {
             int c = (int)x.Shape[1];
@@ -422,14 +423,14 @@ public sealed unsafe class NormalBaeModel
             backend.Sigmoid(gate, exp);
             exp.Dispose();
 
-            // Allocate the output already in the 2-D shape MaskRows writes: on CUDA, GpuTransferHelper's
+            // Allocate the output already in the 2-D shape the gate writes: on CUDA, GpuTransferHelper's
             // activation cache is keyed by the exact Tensor object the op writes into. Reshaping x.Shape
             // *after* allocating and passing that reshaped view as the output arg would register the GPU
             // write under the view's identity, orphaning the 4-D object this method returns — the caller
             // would then read that object's untouched (zeroed) host buffer. Reshape only on the way out,
             // which forces a DataPointer sync on the object the cache actually knows about.
             Tensor output2d = new(new TensorShape(c, plane), DType.F32);
-            backend.MaskRows(output2d, x.Reshape(new TensorShape(c, plane)), gate.Reshape(new TensorShape(c)));
+            backend.GroupScale(output2d, x.Reshape(new TensorShape(c, plane)), gate.Reshape(new TensorShape(c)), GroupScaleSpec.PerRow());
             gate.Dispose();
             return output2d.Reshape(x.Shape);
         }

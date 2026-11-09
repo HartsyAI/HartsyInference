@@ -1,9 +1,10 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Trellis;
 
-/// <summary>FlowEuler guidance-interval sampler for the TRELLIS sparse-structure stage: rectified-flow Euler with interval-gated CFG via <see cref="IBackend.CfgEulerStep"/>.</summary>
+/// <summary>FlowEuler guidance-interval sampler for the TRELLIS sparse-structure stage: rectified-flow Euler with interval-gated CFG via <see cref="IBackend.GuidedEulerStep"/>.</summary>
 public sealed class TrellisSparseStructureSampler
 {
     /// <summary>Denoises <paramref name="noise"/> <c>[1,8,16³]</c> to the structure latent <c>z_s</c>.</summary>
@@ -25,12 +26,12 @@ public sealed class TrellisSparseStructureSampler
             if (tc >= cfgLo && tc <= cfgHi)
             {
                 Tensor vUncond = flow.Forward(backend, x, tModel, negCond);
-                backend.CfgEulerStep(x, vCond, vUncond, 1f + cfg, delta);   // v = (1+cfg)·vCond − cfg·vUncond; x += v·delta
+                backend.GuidedEulerStep(x, vCond, vUncond, GuidedEulerSpec.Lerp(1f + cfg, delta));   // v = (1+cfg)·vCond − cfg·vUncond; x += v·delta
                 vUncond.Dispose();
             }
             else
             {
-                backend.CfgEulerStep(x, vCond, vCond, 1f, delta);   // v = vCond; x += vCond·delta
+                backend.GuidedEulerStep(x, vCond, vCond, GuidedEulerSpec.Lerp(1f, delta));   // v = vCond; x += vCond·delta
             }
             vCond.Dispose();
         }

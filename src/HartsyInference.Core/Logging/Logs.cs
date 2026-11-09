@@ -8,7 +8,7 @@ public static class Logs
     /// <summary>Minimum log level to emit. Default is <see cref="LogLevel.Info"/>.</summary>
     public static LogLevel MinLevel { get; set; } = LogLevel.Info;
 
-    /// <summary>Sets a custom logger callback. If not set, logs are written to <see cref="Console.Error"/>.</summary>
+    /// <summary>Sets a custom logger callback. If not set, logs are written to <see cref="Console.Error"/>. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static void SetLogger(Action<LogLevel, string> logger)
     {
         _logger = logger;
