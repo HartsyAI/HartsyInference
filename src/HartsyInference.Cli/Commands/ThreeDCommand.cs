@@ -27,9 +27,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Samples to generate (hairdeck only; this build accepts 1).")]
         public int Samples { get; init; } = 1;
 
-        /// <summary>Rigged (VRM) output (HairDeck only; not implemented yet).</summary>
+        /// <summary>Rigged output: skinned to the spring chains, with head-motion clips (HairDeck only; needs chains).</summary>
         [CommandOption("--rigged")]
-        [Description("Rigged output (hairdeck only; not implemented yet).")]
+        [Description("Rigged output with head-motion clips (hairdeck only; needs chains).")]
         public bool Rigged { get; init; }
 
         /// <summary>Skip the colour model (HairDeck only).</summary>
