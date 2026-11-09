@@ -49,6 +49,8 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
         LlamaStyleEncoder encoder = phase.Own(new LlamaStyleEncoder(LlamaStyleEncoderConfig.Gemma2_2B));
         encoder.LoadWeights(weights);
         phase.OwnRelease("the Gemma weight mapping", weights.Clear);
+        // Two encodes promote every projection to a resident weight, which only an explicit free returns.
+        phase.OwnRelease("the Gemma device copies", () => _backend.FreeWeights(encoder.EnumerateWeights()));
         GemmaTokenizer tokenizer = phase.Own(new GemmaTokenizer(_files.Tokenizer!));
         return new SanaWmGemmaTextEncoder(_backend, encoder, tokenizer);
     });
@@ -97,6 +99,8 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
         bool opened = false;
         try
         {
+            // Released last: freed transients stay reserved in the pool, out of reach of the next stage's weight allocations.
+            phase.OwnRelease("the device pool reservations", _backend.TrimMemoryPool);
             T component = load(phase);
             DeviceMemoryTrace.Record(_backend, name, "loaded");
             opened = true;

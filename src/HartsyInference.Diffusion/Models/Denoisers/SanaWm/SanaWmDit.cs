@@ -10,9 +10,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// <summary>The SANA-WM stage-1 DiT (<c>SanaMSVideoCamCtrl_1600M_P1_D20</c>, flow_euler_ltx path). Patch size is 1, so the
 /// 1×1×1 embedders run as per-token linears over T-major tokens. The header's <c>pos_embed</c> is unused with
 /// <c>wan_rope</c>, so it is not loaded. Timesteps are truncated to integers before the sinusoidal embedding.</summary>
-/// <remarks>Weights are borrowed from the checkpoint in their stored dtype and preloaded on a device backend; no F32 copy of a
-/// weight matrix is made. A CFG batch runs one item at a time through the whole stack, which is sequential CFG inside one call:
-/// the same arithmetic as the joint batch, with the activation peak of a single item.</remarks>
+/// <remarks>Weights are borrowed from the checkpoint in their stored dtype, preloaded on a device backend and freed from it when
+/// the DiT is disposed; no F32 copy of a weight matrix is made. A CFG batch runs one item at a time through the whole stack,
+/// which is sequential CFG inside one call: the same arithmetic as the joint batch, with the activation peak of a single
+/// item.</remarks>
 public sealed class SanaWmDit : IDisposable
 {
     private const float FinalNormEpsilon = 1e-6f;
@@ -32,6 +33,7 @@ public sealed class SanaWmDit : IDisposable
     private readonly Tensor _finalBias;
     private readonly Tensor _finalTable;
     private readonly Tensor _finalTableOnes;
+    private readonly bool _preloaded;
     private int _forwards;
     private int _disposed;
 
@@ -72,7 +74,11 @@ public sealed class SanaWmDit : IDisposable
             for (int i = 0; i < _blocks.Length; i++)
                 _blocks[i] = new SanaWmBlock(backend, config, i, weights);
             if (!backend.Device.IsCpu)
+            {
                 backend.PreloadWeights(EnumerateWeights());
+                _preloaded = true;
+            }
+
             built = true;
         }
         finally
@@ -168,6 +174,9 @@ public sealed class SanaWmDit : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        // A preloaded weight carries no tensor binding, so disposing it would leave its device copy resident.
+        if (_preloaded)
+            _backend.FreeWeights(EnumerateWeights());
         if (_blocks is not null)
         {
             foreach (SanaWmBlock? block in _blocks)
