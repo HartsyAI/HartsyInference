@@ -81,6 +81,19 @@ public sealed class RealtimeVlmSessionTests
     }
 
     [Fact]
+    public async Task ControlTokensAreReportedApartFromTheReplyText()
+    {
+        FakeTokenizer tokenizer = new();
+        int response = tokenizer.SpecialId("<|response|>")!.Value;
+        ScriptedDecoder decoder = new([response, tokenizer.Char('A'), Silence]);
+        await using RealtimeVlmSession session = new(decoder, new FakeEncoder(), Protocol, tokenizer);
+        session.Start(null, "");
+        List<RealtimeVlmEvent> events = await ReadUntil(session, x => x.Any(v => v.Kind == RealtimeVlmEventKind.Silence));
+        Assert.Equal([RealtimeVlmEventKind.Control, RealtimeVlmEventKind.Text, RealtimeVlmEventKind.Silence], events.Select(e => e.Kind).ToArray());
+        Assert.Equal(["<|response|>", "A", "<|silence|>"], events.Select(e => e.Text).ToArray());
+    }
+
+    [Fact]
     public async Task AFullFrameQueueDropsTheOldestAndReportsIt()
     {
         FakeTokenizer tokenizer = new();
@@ -207,7 +220,8 @@ public sealed class RealtimeVlmSessionTests
     private sealed class FakeTokenizer : ILlmTokenizer
     {
         private static readonly string[] Specials =
-            ["<|silence|>", "<|im_end|>", "<|im_start|>", "<|vision_start|>", "<|vision_end|>", "<|time_start|>", "<|time_end|>", "<|image_pad|>"];
+            ["<|silence|>", "<|im_end|>", "<|im_start|>", "<|vision_start|>", "<|vision_end|>", "<|time_start|>", "<|time_end|>", "<|image_pad|>",
+             "<|response|>"];
 
         public int Char(char c) => 1000 + c;
 
@@ -238,7 +252,7 @@ public sealed class RealtimeVlmSessionTests
 
         public byte[]? TokenBytes(int id, bool includeSpecial) => id switch
         {
-            >= 1 and <= 8 => includeSpecial ? Encoding.UTF8.GetBytes(Specials[id - 1]) : [],
+            >= 1 and <= 9 => includeSpecial ? Encoding.UTF8.GetBytes(Specials[id - 1]) : [],
             >= 500 and < 756 => [(byte)(id - 500)],
             >= 1000 => Encoding.UTF8.GetBytes(((char)(id - 1000)).ToString()),
             _ => [],

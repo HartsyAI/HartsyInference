@@ -14,11 +14,15 @@ public enum RealtimeVlmEventKind
     /// <summary>A user prompt was taken into the stream; the model's answer to it follows.</summary>
     RoundStart,
 
-    /// <summary>Decoded reply text.</summary>
+    /// <summary>Decoded reply text, without control tokens.</summary>
     Text,
 
     /// <summary>The model chose to stay silent (its silence token), or the protocol spliced one in before a cycle's frames.</summary>
     Silence,
+
+    /// <summary>The model emitted another control token (MOSS-VL: <c>&lt;|response|&gt;</c>); <see cref="RealtimeVlmEvent.Text"/> is its
+    /// literal. Applications decide what it means; it is not part of the reply text.</summary>
+    Control,
 
     /// <summary>Frames were dropped because the frame queue was full; <see cref="RealtimeVlmEvent.Count"/> says how many.</summary>
     FramesDropped,
@@ -28,7 +32,7 @@ public enum RealtimeVlmEventKind
 }
 
 /// <summary>One event from a <see cref="RealtimeVlmSession"/>.</summary>
-/// <param name="Text">The decoded text (with control tokens kept, so a silence reads as the model's literal token), the prompt for
+/// <param name="Text">The reply text, a control token's literal (silence included), the prompt for
 /// <see cref="RealtimeVlmEventKind.RoundStart"/>, or the error for <see cref="RealtimeVlmEventKind.Faulted"/>.</param>
 /// <param name="Count">How many frames were dropped, for <see cref="RealtimeVlmEventKind.FramesDropped"/>.</param>
 public readonly record struct RealtimeVlmEvent(RealtimeVlmEventKind Kind, string Text = "", int Count = 0);
@@ -194,7 +198,7 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
         {
             SamplerChain sampler = SamplerChain.FromOptions(_options.Sampling ?? new SamplingOptions { Greedy = true }, _tokenizer);
             List<int> history = [];
-            IncrementalDetokenizer text = new(_tokenizer, includeSpecial: true);
+            IncrementalDetokenizer text = new(_tokenizer, includeSpecial: false);
             int token = Sample(_tokenizer.Encode(opening, addSpecial: true), [], sampler, history, stop);
             Stopwatch clock = Stopwatch.StartNew();
             List<TimedRgbFrame> frames = [];
@@ -270,14 +274,26 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
         return sampler.Next(logits, history);
     }
 
-    /// <summary>Streams the text of <paramref name="token"/>: a silence token is reported as such, other text once its characters are whole.</summary>
+    /// <summary>Streams <paramref name="token"/>: reply text once its characters are whole, the silence token as a silence, and any other
+    /// control token as a control event with its literal.</summary>
     private void Emit(IncrementalDetokenizer text, int token)
     {
+        // Control tokens decode to nothing here, so the reply text stays clean; their literals come from the tokenizer.
         string delta = text.Push(token);
-        if (token == _protocol.SilenceTokenId)
-            _events.Writer.TryWrite(new RealtimeVlmEvent(RealtimeVlmEventKind.Silence, delta));
-        else if (delta.Length > 0)
+        if (delta.Length > 0)
             _events.Writer.TryWrite(new RealtimeVlmEvent(RealtimeVlmEventKind.Text, delta));
+        if (token == _protocol.SilenceTokenId)
+            _events.Writer.TryWrite(new RealtimeVlmEvent(RealtimeVlmEventKind.Silence, ControlLiteral(token) ?? string.Empty));
+        else if (delta.Length == 0 && ControlLiteral(token) is { } literal)
+            _events.Writer.TryWrite(new RealtimeVlmEvent(RealtimeVlmEventKind.Control, literal));
+    }
+
+    /// <summary>The literal of a control token (one that decodes to no text but has a written form), or null for ordinary tokens and
+    /// tokenizers that cannot report bytes.</summary>
+    private string? ControlLiteral(int token)
+    {
+        if (_tokenizer.TokenBytes(token, includeSpecial: false) is not { Length: 0 }) return null;
+        return _tokenizer.TokenBytes(token, includeSpecial: true) is { Length: > 0 } bytes ? System.Text.Encoding.UTF8.GetString(bytes) : null;
     }
 
     private void Drain(List<TimedRgbFrame> frames, List<string> prompts)
@@ -298,7 +314,7 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
             _events.Writer.TryWrite(new RealtimeVlmEvent(RealtimeVlmEventKind.RoundStart, prompt));
         }
         // The reference clears its pending output bytes when a prompt arrives.
-        if (prompts.Count > 0) text = new IncrementalDetokenizer(_tokenizer, includeSpecial: true);
+        if (prompts.Count > 0) text = new IncrementalDetokenizer(_tokenizer, includeSpecial: false);
         if (prompts.Count > 0 && frames.Count > 0 && _protocol.AfterPromptsWithFrames is { } after)
         {
             segment.Append(after);

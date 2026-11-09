@@ -152,6 +152,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        if (parameters.GetBool("realtime", false))
+            return await RealtimeDispatch.RunAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false);
         float temperature = parameters.GetFloat("temperature", 0.7f);
         List<ImageData> images = [];
         if (parameters.GetStringOrNull("image") is { Length: > 0 } imagePaths)
