@@ -43,7 +43,7 @@ public sealed class CoLa3DStageTests
     public void DualGridMesherStage_EmitsTwoTrianglesForAnIntersectedQuad()
     {
         int[] coords = [0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0];
-        float[] dual = [0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f];
+        float[] dual = [0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 1.5f, 0.5f, 1.5f, 1.5f, 0.5f, 1.5f, 0.5f];
         bool[] intersected = new bool[12];
         intersected[0] = true;
         DualGridField field = new(new DualGridVoxels(coords, dual, intersected), [1f, 1f, 1f, 1f]);

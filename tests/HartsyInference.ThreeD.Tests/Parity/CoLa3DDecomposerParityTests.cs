@@ -68,7 +68,7 @@ public sealed class CoLa3DDecomposerParityTests
                 ParityCompare.Compare("p_enriched", output.PointFeatures.Feats.AsReadOnlySpan<float>(), refPEnriched),
                 ParityCompare.Compare("query_feats", output.QueryFeatures.AsReadOnlySpan<float>(), refQueryFeats),
                 ParityCompare.Compare("mask_logits", output.MaskLogits.AsReadOnlySpan<float>(), refMaskLogits),
-                ParityCompare.Compare("temperature", temperature, refTemperature),
+                ParityCompare.Compare("temperature", temperature, refTemperature, "checkpoint value, not computed"),
             ];
             ParityCompare.Finish(results, _output);
         }

@@ -85,7 +85,14 @@ public sealed class ShapeVaeParityTests
                 DualGridField field = ShapeVaeHead.Split(head);
                 float[] logits = field.IntersectionLogits
                     ?? throw new InvalidOperationException("ShapeVaeHead.Split did not return intersection logits.");
-                float[] offsets = ParityCompare.GatherRows(field.Voxels.DualVertices, decOrder, 3);
+                float[] absolute = ParityCompare.GatherRows(field.Voxels.DualVertices, decOrder, 3);
+                float[] offsets = new float[absolute.Length];
+                for (int row = 0; row < DecodedVoxels; row++)
+                {
+                    for (int axis = 0; axis < 3; axis++)
+                        offsets[row * 3 + axis] = absolute[row * 3 + axis] - refDecCoords[row * 4 + 1 + axis];
+                }
+
                 results.Add(ParityCompare.Compare("dec_out_vertices", offsets, refVertices));
                 results.Add(ParityCompare.Compare("dec_out_intersected_logits", ParityCompare.GatherRows(logits, decOrder, 3), refIntersected));
                 results.Add(ParityCompare.Compare("dec_out_quad_lerp", ParityCompare.GatherRows(field.SplitWeight, decOrder, 1), refQuadLerp));
