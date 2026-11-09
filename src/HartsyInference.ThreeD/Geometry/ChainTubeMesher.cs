@@ -33,15 +33,21 @@ public static class ChainTubeMesher
     ];
 
     /// <summary>Meshes the joint polylines (M joints each, xyz metres) of all chains into one mesh; null when there is nothing to draw.</summary>
-    public static Mesh? Build(IReadOnlyList<float[]> chains, double radius = DefaultRadius)
+    public static Mesh? Build(IReadOnlyList<float[]> chains, double radius = DefaultRadius) => BuildWithOwners(chains, out _, radius);
+
+    /// <summary>As <see cref="Build"/>, and also gives the index (in <paramref name="chains"/>) of the chain each vertex was
+    /// meshed from, so a skin can move each tube with its own chain.</summary>
+    public static Mesh? BuildWithOwners(IReadOnlyList<float[]> chains, out int[] owners, double radius = DefaultRadius)
     {
         ArgumentNullException.ThrowIfNull(chains);
         if (!(radius > 0) || !double.IsFinite(radius))
             throw new ArgumentOutOfRangeException(nameof(radius), "The tube radius must be positive and finite.");
 
         Builder builder = new();
-        foreach (float[] chain in chains)
+        for (int c = 0; c < chains.Count; c++)
         {
+            float[] chain = chains[c];
+            builder.Owner = c;
             ArgumentNullException.ThrowIfNull(chain);
             if (chain.Length % 3 != 0)
                 throw new ArgumentException("A chain's joints must be xyz triples.", nameof(chains));
@@ -54,6 +60,7 @@ public static class ChainTubeMesher
             foreach (Vector3d joint in joints)
                 builder.AddSphere(joint, JointRadiusScale * radius);
         }
+        owners = builder.Owners;
         return builder.ToMesh();
     }
 
@@ -62,6 +69,12 @@ public static class ChainTubeMesher
         private readonly List<float> _positions = [];
         private readonly List<int> _indices = [];
         private int _vertexCount;
+        private readonly List<int> _owners = [];
+
+        /// <summary>Index of the chain whose vertices are added next.</summary>
+        public int Owner { get; set; }
+
+        public int[] Owners => _owners.ToArray();
 
         public void AddTube(Vector3d a, Vector3d b, double radius)
         {
@@ -153,6 +166,7 @@ public static class ChainTubeMesher
             _positions.Add((float)v.Y);
             _positions.Add((float)v.Z);
             _vertexCount++;
+            _owners.Add(Owner);
         }
 
         private void AddTriangle(int a, int b, int c)

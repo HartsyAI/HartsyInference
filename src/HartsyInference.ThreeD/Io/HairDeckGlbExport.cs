@@ -59,8 +59,8 @@ public static class HairDeckGlbExport
         if (cardMesh is null)
             throw new InvalidOperationException("No hair card has a triangle; there is nothing to export.");
 
-        Mesh? tubes = HairDeckGeometry.BuildChains(result);
-        HairRigResult rig = HairDeckRig.Build(cards, cardMesh.Mesh, result.Chains, tubes);
+        Mesh? tubes = HairDeckGeometry.BuildChains(result, out int[] tubeOwners);
+        HairRigResult rig = HairDeckRig.Build(cards, cardMesh.Mesh, result.Chains, tubes, tubeOwners);
 
         List<HairGlbNode> nodes =
         [

@@ -214,6 +214,43 @@ public sealed class HairRigTests
         }
     }
 
+    [Fact]
+    public void Tube_of_an_unbound_chain_stays_with_the_head()
+    {
+        (IReadOnlyList<HairCard> cards, Mesh hair) = Cards(xOffset: 0.0);
+        float[] farJoints = [1f, 0.42f, 0f, 1f, 0.36f, 0f, 1f, 0.30f, 0f];
+        float[][] polylines = [FloatChain(), farJoints];
+        Mesh tubes = ChainTubeMesher.BuildWithOwners(polylines, out int[] owners)!;
+        HairRigResult result = HairDeckRig.Build(
+            cards, hair, [new DecodedChain(FloatChain(), 4, 0.5f), new DecodedChain(farJoints, 3, 0.5f)], tubes, owners);
+
+        Assert.Equal(1, result.ChainsBound);
+        // The pivot is the mean of the card roots, as in Turn_moves_the_hair_as_the_simulation_says.
+        double[] pivot = [0.01, 0.40, 0.0];
+        SpringBoneSim.Motion turn = SpringBoneSim.GetMotion("turn");
+        int frame = SpringBoneSim.Frames - 1;
+        int checkedVertices = 0;
+        for (int v = 0; v < tubes.VertexCount; v++)
+        {
+            if (owners[v] != 1)
+            {
+                continue;
+            }
+
+            double[] rest = [tubes.Vertices[3 * v], tubes.Vertices[3 * v + 1], tubes.Vertices[3 * v + 2]];
+            double[] rigid = Rigid(rest, turn, pivot, frame);
+            double[] skinned = Skin(result.Rig, result.ChainSkin!, v, clip: 0, frame: frame + 1, tubes);
+            for (int i = 0; i < 3; i++)
+            {
+                Assert.Equal(rigid[i], skinned[i], 4);
+            }
+
+            checkedVertices++;
+        }
+
+        Assert.True(checkedVertices > 0, "The unbound chain produced no tube vertices.");
+    }
+
     private static (HairRigResult Result, Mesh Hair) BuildSample()
     {
         (IReadOnlyList<HairCard> cards, Mesh hair) = Cards(xOffset: 0.0);

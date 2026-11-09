@@ -16,7 +16,7 @@ public sealed record HairRigResult(HairGlbRig Rig, HairGlbSkin HairSkin, HairGlb
 /// Builds the rig of a HairDeck sample from its hair cards, chains and tube mesh, following the geometric skinning of
 /// HairDeck's <c>hairdeck/spring/sim.py</c> and <c>hairdeck/vrm/prep.py</c>. The pivot of the head motion is the mean of the
 /// card roots, and the face width is <see cref="ChainBinding.FaceWidth"/>; the reference takes both from the VRM body, which
-/// this export does not have. Chain tubes follow the nearest chain with full chain weight, which the reference does not do.
+/// this export does not have. A chain tube follows the chain it was meshed from; tubes of chains that bind no card stay with the head.
 /// The input must be in the head frame (y up, face toward +z, metres): the motions rotate about that frame, so a head in
 /// another frame moves wrongly.
 /// </summary>
@@ -29,20 +29,31 @@ public static class HairDeckRig
 
     /// <summary>Builds the rig; throws when no chain binds a card, since rigged output needs at least one chain.</summary>
     /// <exception cref="InvalidOperationException">No chain has two joints or binds a card.</exception>
-    public static HairRigResult Build(IReadOnlyList<HairCard> cards, Mesh hair, IReadOnlyList<DecodedChain> chains, Mesh? chainTubes)
+    /// <param name="tubeOwners">For each vertex of <paramref name="chainTubes"/>, the index in <paramref name="chains"/> of the
+    /// chain it was meshed from. Required when there are chain tubes.</param>
+    public static HairRigResult Build(IReadOnlyList<HairCard> cards, Mesh hair, IReadOnlyList<DecodedChain> chains, Mesh? chainTubes,
+        int[]? tubeOwners = null)
     {
         ArgumentNullException.ThrowIfNull(cards);
         ArgumentNullException.ThrowIfNull(hair);
         ArgumentNullException.ThrowIfNull(chains);
+        if (chainTubes is not null && (tubeOwners is null || tubeOwners.Length != chainTubes.VertexCount))
+        {
+            throw new ArgumentException("The chain tubes need one owner chain index per vertex.", nameof(tubeOwners));
+        }
 
-        // Candidate chains: cleaned joints with at least two of them, as in prep().
+        // Candidate chains: cleaned joints with at least two of them, as in prep(). candidateOf maps a chain to its candidate, or -1.
         List<double[]> candidates = [];
         List<double> stiffness = [];
-        foreach (DecodedChain chain in chains)
+        int[] candidateOf = new int[chains.Count];
+        for (int ci = 0; ci < chains.Count; ci++)
         {
+            DecodedChain chain = chains[ci];
             double[] cleaned = ChainBinding.Clean(ToDouble(chain.Joints, chain.JointCount * 3));
+            candidateOf[ci] = -1;
             if (cleaned.Length >= 6)
             {
+                candidateOf[ci] = candidates.Count;
                 candidates.Add(cleaned);
                 stiffness.Add(chain.Stiffness);
             }
@@ -150,7 +161,8 @@ public static class HairDeckRig
             }
         }
 
-        // Skin of the chain tubes: each vertex follows the nearest used chain with full chain weight.
+        // Skin of the chain tubes: a tube follows the chain it was meshed from, with full chain weight. A tube of a chain that
+        // binds no card (or has fewer than two joints) stays with the head.
         HairGlbSkin? chainSkin = null;
         if (chainTubes is not null && chainTubes.VertexCount > 0)
         {
@@ -160,21 +172,18 @@ public static class HairDeckRig
             double[] tubePoints = ToDouble(chainTubes.Vertices, tubeCount * 3);
             for (int i = 0; i < tubeCount; i++)
             {
-                double[] point = [tubePoints[3 * i], tubePoints[3 * i + 1], tubePoints[3 * i + 2]];
-                int best = -1;
-                double bestDistance = double.PositiveInfinity;
-                for (int u = 0; u < used.Count; u++)
+                int owner = tubeOwners![i];
+                int candidate = owner >= 0 && owner < chains.Count ? candidateOf[owner] : -1;
+                int u = candidate >= 0 ? remap[candidate] : -1;
+                if (u < 0)
                 {
-                    ChainBinding.Projection p = ChainBinding.Project(point, used[u])[0];
-                    if (p.Distance < bestDistance)
-                    {
-                        bestDistance = p.Distance;
-                        best = u;
-                    }
+                    SetInfluences(tubeJoints, tubeWeights, i, [(0, 1.0)]);
+                    continue;
                 }
 
-                (int segment, double unusedWeight, int segment2, double alpha) = BindVertices(point, used[best])[0];
-                SetInfluences(tubeJoints, tubeWeights, i, BlendInfluences(-1, boneBase[best], 1.0, segment, segment2, alpha));
+                double[] point = [tubePoints[3 * i], tubePoints[3 * i + 1], tubePoints[3 * i + 2]];
+                (int segment, double unusedWeight, int segment2, double alpha) = BindVertices(point, used[u])[0];
+                SetInfluences(tubeJoints, tubeWeights, i, BlendInfluences(-1, boneBase[u], 1.0, segment, segment2, alpha));
             }
 
             chainSkin = new HairGlbSkin(tubeJoints, tubeWeights);

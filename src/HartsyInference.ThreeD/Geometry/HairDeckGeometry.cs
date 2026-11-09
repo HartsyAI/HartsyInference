@@ -27,7 +27,10 @@ public static class HairDeckGeometry
     }
 
     /// <summary>Spring chains of <paramref name="result"/> as static tubes and joint spheres; null when there are none.</summary>
-    public static Mesh? BuildChains(HairDeckResult result)
+    public static Mesh? BuildChains(HairDeckResult result) => BuildChains(result, out _);
+
+    /// <summary>As <see cref="BuildChains(HairDeckResult)"/>, and gives the index in <c>result.Chains</c> of the chain each tube vertex came from.</summary>
+    public static Mesh? BuildChains(HairDeckResult result, out int[] owners)
     {
         ArgumentNullException.ThrowIfNull(result);
         List<float[]> polylines = new(result.Chains.Count);
@@ -38,7 +41,7 @@ public static class HairDeckGeometry
                 throw new ArgumentException("A chain's joint count must match its joint array.", nameof(result));
             polylines.Add(chain.Joints.AsSpan(0, chain.JointCount * 3).ToArray());
         }
-        return ChainTubeMesher.Build(polylines);
+        return ChainTubeMesher.BuildWithOwners(polylines, out owners);
     }
 
     private static void ValidateCard(DecodedCard card)
