@@ -3,9 +3,15 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Quantized GEMM and activation quantization.
+// Quantized GEMM, activation quantization, and the Hadamard rotation applied before it.
 public partial interface IBackend
 {
+    /// <summary>Walsh-Hadamard transform of each row over the last dimension (a power of two):
+    /// <c>output = scale * (input @ H)</c> with the Sylvester (natural order) <c>H</c>; see <see cref="Host.HadamardReference"/>.
+    /// F32; in place is allowed. <c>scale = 1/sqrt(width)</c> makes it orthonormal.</summary>
+    void Hadamard(Tensor output, Tensor input, float scale) =>
+        throw NotSupportedPrimitive(nameof(Hadamard));
+
     /// <summary>Fused quantized matmul: <c>output = input @ quantWeight^T (+ bias)</c>, dequantized in-kernel (Q8_0/Q4_K/Q5_K/Q6_K).</summary>
     void QuantizedMatMul(Tensor output, Tensor input, Tensor quantWeight, Tensor? bias)
         => throw new NotSupportedException(

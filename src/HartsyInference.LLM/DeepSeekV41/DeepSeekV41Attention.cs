@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Compression;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
@@ -68,12 +69,12 @@ public sealed class DeepSeekV41Attention
         float[] qr = _w.WqA.Linear(x, tokens, s.Dim, s.QLoraRank);
         HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
         float[] q = _w.WqB.Linear(qr, tokens, s.QLoraRank, heads * hd);
-        int[] positions = Range(startPos, tokens);
-        Rotate(q, [1, tokens, heads, hd], positions, hd - rd, inverse: false);
+        int[] positions = HostOps.Range(startPos, tokens);
+        Rotate(q, [1, tokens, heads, hd], positions, inverse: false);
 
         float[] kv = _w.Wkv.Linear(x, tokens, s.Dim, hd);
         HostMath.RmsNormRows(kv, _w.KvNorm, hd, s.NormEps);
-        Rotate(kv, [1, tokens, hd], positions, hd - rd, inverse: false);
+        Rotate(kv, [1, tokens, hd], positions, inverse: false);
         RoundTrip(kv, hd, LatentEncoding.Fp8E4M3Ue8m0x32);
         for (int p = Math.Max(0, tokens - win); p < tokens; p++)
             kv.AsSpan(p * hd, hd).CopyTo(state.Window.AsSpan((startPos + p) % win * hd, hd));
@@ -139,7 +140,7 @@ public sealed class DeepSeekV41Attention
             _backend.SparseLatentAttention(output, query, window, main, indexT, windowRows, sink, 1f / MathF.Sqrt(hd));
 
             float[] o = output.AsReadOnlySpan<float>().ToArray();
-            Rotate(o, [1, tokens, heads, hd], positions, hd - rd, inverse: true);
+            Rotate(o, [1, tokens, heads, hd], positions, inverse: true);
             float[] grouped = new float[tokens * s.OGroups * s.OLoraRank];
             DeepSeekV41GroupedProjection.Apply(o, _w.WoA, tokens, s.OGroups, s.OLoraRank, s.GroupDim, grouped);
             _w.WoB.Linear(grouped, tokens, s.OGroups * s.OLoraRank, s.Dim).CopyTo(y);
@@ -161,7 +162,7 @@ public sealed class DeepSeekV41Attention
             return (kv, tokens);
         }
         float[] score = c.Wgate!.Linear(x, tokens, _s.Dim, hd);
-        DeepSeekV41CompressorState pool = state.Compressor ?? throw new InvalidOperationException("A pooling layer needs compressor state.");
+        KvCompressorState pool = state.Compressor ?? throw new InvalidOperationException("A pooling layer needs compressor state.");
         float[] pooled = new float[pool.MaxRows(startPos, tokens) * hd];
         int rows = pool.Pool(kv, score, tokens, startPos, pooled);
         if (rows == 0) return (null, 0);
@@ -175,7 +176,7 @@ public sealed class DeepSeekV41Attention
     {
         int hd = _s.HeadDim, ratio = _s.CompressRatio, first = startPos / ratio;
         if ((first + rows) * hd > state.CompressKv!.Length) throw new InvalidOperationException("The compressed cache is full; allocate state for a longer sequence.");
-        Rotate(latent, [1, rows, hd], GroupPositions(first, rows, ratio), hd - _s.RopeDim, inverse: false);
+        Rotate(latent, [1, rows, hd], CompressedRopePositions.GroupStart(first, rows, ratio), inverse: false);
         RoundTrip(latent, hd, LatentEncoding.Fp4E2M1E4M3x16);
         latent.AsSpan(0, rows * hd).CopyTo(state.CompressKv.AsSpan(first * hd, rows * hd));
     }
@@ -191,14 +192,14 @@ public sealed class DeepSeekV41Attention
             int first = startPos / ratio;
             float[] k = ix.Wk!.Linear(latent, latentRows, _s.HeadDim, ihd);
             HostMath.RmsNormRows(k, ix.KNorm!, ihd, _s.NormEps);
-            Rotate(k, [1, latentRows, ihd], GroupPositions(first, latentRows, ratio), ihd - rd, inverse: false);
+            Rotate(k, [1, latentRows, ihd], CompressedRopePositions.GroupStart(first, latentRows, ratio), inverse: false);
             RoundTrip(k, ihd, LatentEncoding.Fp4E2M1E8M0x32);
             k.CopyTo(state.IndexKeys!.AsSpan(first * ihd, latentRows * ihd));
             shared.IndexKeys = state.IndexKeys;
         }
 
         float[] q = ix.WqB.Linear(qr, tokens, _s.QLoraRank, nh * ihd);
-        Rotate(q, [1, tokens, nh, ihd], Range(startPos, tokens), ihd - rd, inverse: false);
+        Rotate(q, [1, tokens, nh, ihd], HostOps.Range(startPos, tokens), inverse: false);
         RoundTrip(q, ihd, LatentEncoding.Fp4E2M1E8M0x32);
 
         int keyRows = endPos / ratio;
@@ -250,29 +251,11 @@ public sealed class DeepSeekV41Attention
     }
 
     // Rotates the trailing RopeDim slice of every vector in place; the inverse negates sin, which is how the output undoes the query's rotation.
-    private void Rotate(float[] data, long[] shape, int[] positions, int dimOffset, bool inverse) =>
-        DeepSeekV41Rotary.Rotate(_backend, _rope, _s.RopeDim, data, shape, positions, dimOffset, inverse);
+    private void Rotate(float[] data, long[] shape, int[] positions, bool inverse) =>
+        PartialRotary.Rotate(_backend, _rope, _s.RopeDim, data, shape, positions, inverse);
 
     private void RoundTrip(float[] data, int width, LatentEncoding encoding)
     {
-        if (!_s.QuantizeLatents) return;
-        using Tensor x = HostMath.Tensor(data, data.Length / width, width);
-        _backend.ActQuantDequantInPlace(x, encoding);
-        x.AsReadOnlySpan<float>().CopyTo(data);
-    }
-
-    private static int[] Range(int start, int count)
-    {
-        int[] r = new int[count];
-        for (int i = 0; i < count; i++) r[i] = start + i;
-        return r;
-    }
-
-    // A latent stands for the first token of its group.
-    private static int[] GroupPositions(int firstGroup, int count, int ratio)
-    {
-        int[] r = new int[count];
-        for (int i = 0; i < count; i++) r[i] = (firstGroup + i) * ratio;
-        return r;
+        if (_s.QuantizeLatents) HostOps.RoundTrip(_backend, data, width, encoding);
     }
 }

@@ -28,4 +28,8 @@
     <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="CoLa3D\Fixtures\*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
