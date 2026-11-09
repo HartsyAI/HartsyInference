@@ -9,6 +9,45 @@ public static class ImageDataCodec
     /// <summary>Decodes PNG bytes. Throws with the detected signature named when the format is not one we decode, because "invalid image" on a JPEG upload is a slow thing to diagnose from the client side.</summary>
     public static ImageData Decode(ReadOnlySpan<byte> encoded)
     {
+        RequirePng(encoded);
+        (byte[] rgb, int width, int height) = PngDecoder.Decode(encoded);
+        return new ImageData { Rgb = rgb, Width = width, Height = height };
+    }
+
+    /// <summary>Decodes a base64 payload, tolerating a <c>data:image/png;base64,</c> prefix since browser clients send data URIs verbatim.</summary>
+    public static ImageData DecodeBase64(string base64) => Decode(Base64Payload(base64));
+
+    /// <summary>Decodes a base64 PNG and keeps its alpha as <see cref="ImageData.Alpha"/>, so a matte-aware consumer (HairDeck) can use the mask.
+    /// An opaque PNG yields a null alpha plane.</summary>
+    public static ImageData DecodeBase64WithAlpha(string base64)
+    {
+        byte[] bytes = Base64Payload(base64);
+        RequirePng(bytes);
+        DecodedPng png = PngDecoder.DecodeWithAlpha(bytes);
+        return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
+    private static byte[] Base64Payload(string base64)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(base64);
+        string payload = base64.Trim();
+        int comma = payload.IndexOf(',');
+        if (payload.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && comma > 0)
+        {
+            payload = payload[(comma + 1)..];
+        }
+        try
+        {
+            return Convert.FromBase64String(payload);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException("Image is not valid base64.", nameof(base64), ex);
+        }
+    }
+
+    private static void RequirePng(ReadOnlySpan<byte> encoded)
+    {
         if (encoded.Length < 8)
         {
             throw new ArgumentException($"Image data is too short to identify ({encoded.Length} bytes).", nameof(encoded));
@@ -18,30 +57,6 @@ public static class ImageDataCodec
             throw new NotSupportedException(
                 $"Unsupported image format (leading bytes {Describe(encoded)}). The engine decodes PNG; re-encode the image as PNG.");
         }
-        (byte[] rgb, int width, int height) = PngDecoder.Decode(encoded);
-        return new ImageData { Rgb = rgb, Width = width, Height = height };
-    }
-
-    /// <summary>Decodes a base64 payload, tolerating a <c>data:image/png;base64,</c> prefix since browser clients send data URIs verbatim.</summary>
-    public static ImageData DecodeBase64(string base64)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(base64);
-        string payload = base64.Trim();
-        int comma = payload.IndexOf(',');
-        if (payload.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && comma > 0)
-        {
-            payload = payload[(comma + 1)..];
-        }
-        byte[] bytes;
-        try
-        {
-            bytes = Convert.FromBase64String(payload);
-        }
-        catch (FormatException ex)
-        {
-            throw new ArgumentException("Image is not valid base64.", nameof(base64), ex);
-        }
-        return Decode(bytes);
     }
 
     private static bool IsPng(ReadOnlySpan<byte> data) =>

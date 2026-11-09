@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.API.Endpoints;
@@ -62,6 +63,25 @@ public sealed class NativeMeshRequest : NativeArtifactRequest
     /// <summary>Explicit checkpoint path override; wins over catalog/HF resolution. Must be an absolute path — a relative one resolves against the server process's working directory, not anything an HTTP client can know. Rarely needed: a plain catalog id in <c>model</c> resolves correctly on its own.</summary>
     public string? ModelPath { get; set; }
 
-    /// <summary>The native mesh request, unmodified.</summary>
+    /// <summary>The native mesh request, unmodified. Its <c>Image</c> is raw RGB24; use <see cref="ImagePng"/> to send an encoded image instead.</summary>
     public required MeshRequest Request { get; set; }
+
+    /// <summary>Input image as base64 PNG (a <c>data:image/png;base64,</c> prefix is accepted), with its alpha kept as the matte HairDeck uses.
+    /// Set this or <c>Request.Image</c>, not both.</summary>
+    public string? ImagePng { get; set; }
+
+    /// <summary>The request the engine runs: <see cref="Request"/>, with <see cref="ImagePng"/> decoded into its image when it is set.</summary>
+    /// <exception cref="ArgumentException">Both <see cref="ImagePng"/> and <c>Request.Image</c> are set, or the PNG is not valid base64 or not PNG.</exception>
+    public MeshRequest ToMeshRequest()
+    {
+        if (ImagePng is null)
+        {
+            return Request;
+        }
+        if (Request.Image is not null)
+        {
+            throw new ArgumentException("Send the image as ImagePng or as Request.Image, not both.");
+        }
+        return Request with { Image = ImageDataCodec.DecodeBase64WithAlpha(ImagePng) };
+    }
 }
