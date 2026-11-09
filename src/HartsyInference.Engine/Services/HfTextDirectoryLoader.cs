@@ -14,7 +14,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 (host reference model), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
+/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 (host reference model), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.
+/// ERNIE-5.5 is recognised and refused by name (<see cref="Ernie5Config.RequireRunnable"/>) until the Text path has an adapter for <see cref="Ernie5Model"/>.</summary>
 internal static class HfTextDirectoryLoader
 {
     /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
