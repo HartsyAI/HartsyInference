@@ -199,29 +199,59 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
     /// <summary>Generates a reply to <paramref name="question"/> about <paramref name="images"/>, shown in that order before the question.
     /// At least one image is required: a text-only prompt has no placeholder for the vision sequence.</summary>
     /// <exception cref="ArgumentException">No image is given.</exception>
-    public string Generate(string question, IReadOnlyList<MossVlImageFeatures> images, int maxTokens = 64, SamplingOptions? sampling = null)
+    public string Generate(string question, IReadOnlyList<MossVlImageFeatures> images, int maxTokens = 64, SamplingOptions? sampling = null) =>
+        Generate(question, images, maxTokens, sampling, onDelta: null, CancellationToken.None).Text;
+
+    /// <summary>As <see cref="Generate(string, IReadOnlyList{MossVlImageFeatures}, int, SamplingOptions?)"/>, streaming the reply:
+    /// <paramref name="onDelta"/> receives each new piece of decoded text as soon as it ends on a whole character, and
+    /// <paramref name="cancel"/> is checked before every step.</summary>
+    /// <exception cref="ArgumentException">No image is given.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> fired; the text so far was already streamed.</exception>
+    public MossVlGeneration Generate(string question, IReadOnlyList<MossVlImageFeatures> images, int maxTokens, SamplingOptions? sampling,
+        Action<string>? onDelta, CancellationToken cancel)
     {
         if (images.Count == 0) throw new ArgumentException("MOSS-VL generation needs at least one image.", nameof(images));
-        if (maxTokens <= 0) return string.Empty;
         string placeholders = string.Concat(Enumerable.Repeat(ImagePlaceholder, images.Count));
         int[] ids = tokenizer.Encode("<|im_start|>user\n" + placeholders + question + "<|im_end|>\n<|im_start|>assistant\n", addSpecial: true);
+        if (maxTokens <= 0) return new MossVlGeneration(string.Empty, ids.Length, 0, HitTokenLimit: true);
         SamplerChain sampler = SamplerChain.FromOptions(sampling ?? new SamplingOptions
         {
             Temperature = 0.4f, TopP = 0.9f, RepetitionPenalty = 1.1f, Seed = 1,
         }, tokenizer, config.Text.VocabSize);
         HashSet<int> stops = new(tokenizer.StopIds);
+        // The turn ends with <|im_end|> whatever the tokenizer source lists as its EOS (a GGUF's own vocabulary may name another).
+        if (tokenizer.SpecialId("<|im_end|>") is int imEnd) stops.Add(imEnd);
         List<int> history = [];
         List<int> generated = [];
+        int emitted = 0;
 
         using MossVlDecodeSession session = new(decoder, config, backend, ids, images, maxTokens);
+        cancel.ThrowIfCancellationRequested();
         int token = session.Prefill(sampler, history);
         while (!stops.Contains(token) && generated.Count < maxTokens)
         {
             generated.Add(token);
             history.Add(token);
+            if (onDelta is not null)
+            {
+                string text = tokenizer.Decode([.. generated]);
+                // A token can end inside a multi-byte character; hold the piece until the character completes.
+                if (text.Length > emitted && text[^1] != '�')
+                {
+                    onDelta(text[emitted..]);
+                    emitted = text.Length;
+                }
+            }
             if (generated.Count == maxTokens) break;
+            cancel.ThrowIfCancellationRequested();
             token = session.Step(token, sampler, history);
         }
-        return tokenizer.Decode([.. generated]);
+        string reply = tokenizer.Decode([.. generated]);
+        if (onDelta is not null && reply.Length > emitted) onDelta(reply[emitted..]);
+        return new MossVlGeneration(reply, ids.Length, generated.Count, HitTokenLimit: !stops.Contains(token));
     }
 }
+
+/// <summary>One finished MOSS-VL reply.</summary>
+/// <param name="HitTokenLimit">True when generation stopped at the token limit rather than at the end of the turn.</param>
+public readonly record struct MossVlGeneration(string Text, int PromptTokens, int CompletionTokens, bool HitTokenLimit);
