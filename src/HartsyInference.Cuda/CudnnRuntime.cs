@@ -75,14 +75,12 @@ public static class CudnnRuntime
             if (!_fetchPending) return Available;
             _fetchPending = false;   // one attempt per process, successful or not
             LibDir = TryFetch(_cudaMajor);
-            if (LibDir is null)
-            {
-                _available = false;
+            // Load either way: a fetched build sits in the cache, which the loader searches first, and a failed fetch still
+            // leaves the OS library path, where a matching system install works without the download.
+            Load(_cudaMajor);
+            if (!Available && LibDir is null)
                 Reason = $"cuDNN not found and auto-fetch failed (driver is CUDA {_cudaMajor}); see the warning above. " +
                          $"Install cuDNN 9 for CUDA {_cudaMajor} or set paths.cudnnDir.";
-                return false;
-            }
-            Load(_cudaMajor);
         }
         return Available;
     }
@@ -115,9 +113,10 @@ public static class CudnnRuntime
         LibDir = ResolveExistingDir(cudaMajor);
         if (LibDir is null && EngineKnobs.CudnnAutofetch.Value && cudaMajor >= 12)
         {
-            // The download waits for the first call that needs cuDNN (EnsureAvailable), so an engine that never uses it never downloads.
-            _available = false;
-            Reason = $"cuDNN not installed for CUDA {cudaMajor}; auto-fetch is pending.";
+            // An installed cuDNN on the OS library path is usable as is, so the loader gets the first look.
+            Load(cudaMajor);
+            if (_available) return;
+            // Nothing usable: the download waits for the first call that needs cuDNN (EnsureAvailable), so an engine that never uses it never downloads.
             _fetchPending = true;
             return;
         }

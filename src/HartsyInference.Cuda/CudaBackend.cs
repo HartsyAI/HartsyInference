@@ -2874,10 +2874,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // matrix is a kH·kW× input-sized HBM write+read per conv, the dominant conv cost on the SDXL
         // UNet (~50 convs/step) and VAE. Anything else (F32, fp8/quant weights, scale factors) keeps
         // the im2col path; any cuDNN failure self-disables the route for the session.
-        if (ConvCudnnOn && !_cudnnConvDead && input.DType == weight.DType && output.DType == input.DType
+        if (!_cudnnConvDead && input.DType == weight.DType && output.DType == input.DType
             && (input.DType == DType.F16 || input.DType == DType.BF16)
             && input.Fp8ScaleFactor == 1.0f && weight.Fp8ScaleFactor == 1.0f
-            && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
+            && ConvCudnnOn && TryCudnnConv(output, input, weight, bias, batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW))
         {
             return;
         }
@@ -3149,7 +3149,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     public unsafe bool TryConv3DFrameMajor(Tensor output, Tensor paddedFrames, Tensor weight, Tensor? bias,
         int strideT, int strideH, int strideW, int padH, int padW)
     {
-        if (!ConvCudnnOn || _cudnnConvDead || _cudnnConv3dDead) return false;
+        if (_cudnnConvDead || _cudnnConv3dDead || !ConvCudnnOn) return false;
         using NvtxRange _nvtxProf = NvtxRange.Push("Conv3D");
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -6569,8 +6569,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // Asymmetric (causal) pads ride the graph API's separate PRE/POST padding attributes, so the
         // HeartCodec/EnCodec-style left-padded convs qualify too. Output stays F32. Falls back to the direct
         // kernel on grouped convs or any cuDNN failure (session-sticky).
-        if (AudioConvCudnnOn && !_cudnnConvDead && groups == 1
-            && TryCudnnConv1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
+        if (!_cudnnConvDead && groups == 1
+            && AudioConvCudnnOn && TryCudnnConv1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
         {
             return;
         }
@@ -6678,8 +6678,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // weight is exactly cuDNN's dgrad filter layout [K=fwd-out, C=fwd-in, R=1, S=kernel], and the causal
         // right-crop (padRight = K − stride) maps onto the asymmetric PRE/POST paddings of the forward-conv
         // geometry. Same session-sticky fallback contract as the forward path.
-        if (AudioConvCudnnOn && !_cudnnConvDead && groups == 1
-            && TryCudnnConvTranspose1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
+        if (!_cudnnConvDead && groups == 1
+            && AudioConvCudnnOn && TryCudnnConvTranspose1d(output, input, weight, bias, batch, cIn, cOut, tIn, tOut, kernel, stride, padLeft, padRight, dilation))
         {
             return;
         }
