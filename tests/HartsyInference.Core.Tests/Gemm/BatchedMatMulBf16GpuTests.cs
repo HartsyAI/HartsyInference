@@ -43,7 +43,8 @@ public sealed class BatchedMatMulBf16GpuTests
 
         backend.BatchedMatMul(output, a, b);
 
-        // Reading the host buffer materializes the device-side output.
+        // Materializes the device-side output to host (AsSpan takes the same EnsureCpuData path as DataPointer).
+        backend.OffloadActivation(output);
         Assert.Equal(expected, output.AsSpan<ushort>().ToArray());
     }
 
