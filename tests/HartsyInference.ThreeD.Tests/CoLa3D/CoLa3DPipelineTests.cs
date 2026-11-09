@@ -174,7 +174,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<ArgumentException>(() => pipeline.Generate(scene, resolution: CoLa3DPipeline.MaxResolution + 16));
@@ -185,7 +185,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
         List<GenerationProgress> reports = [];
 
@@ -205,7 +205,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<OperationCanceledException>(() => pipeline.Generate(scene, onProgress: p =>
@@ -220,7 +220,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new EmptyMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new EmptyMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<HartsyInferenceException>(() => pipeline.Generate(scene));
