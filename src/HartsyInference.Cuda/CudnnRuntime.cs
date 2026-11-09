@@ -74,11 +74,11 @@ public static class CudnnRuntime
         {
             if (!_fetchPending) return Available;
             _fetchPending = false;   // one attempt per process, successful or not
-            LibDir = TryFetch(_cudaMajor);
+            string? fetched = TryFetch(_cudaMajor);
+            LibDir = fetched;
             // Load either way: a fetched build sits in the cache, which the loader searches first, and a failed fetch still
             // leaves the OS library path, where a matching system install works without the download.
-            Load(_cudaMajor);
-            if (!Available && LibDir is null)
+            if (Load(_cudaMajor) && fetched is null)
                 Reason = $"cuDNN not found and auto-fetch failed (driver is CUDA {_cudaMajor}); see the warning above. " +
                          $"Install cuDNN 9 for CUDA {_cudaMajor} or set paths.cudnnDir.";
         }
@@ -111,20 +111,20 @@ public static class CudnnRuntime
         int cudaMajor = DriverCudaMajor();
         _cudaMajor = cudaMajor;
         LibDir = ResolveExistingDir(cudaMajor);
-        if (LibDir is null && EngineKnobs.CudnnAutofetch.Value && cudaMajor >= 12)
+        bool fetchable = cudaMajor >= 12 || !string.IsNullOrEmpty(EngineKnobs.CudnnUrl.Value);
+        if (LibDir is null && EngineKnobs.CudnnAutofetch.Value && fetchable)
         {
-            // An installed cuDNN on the OS library path is usable as is, so the loader gets the first look.
-            Load(cudaMajor);
-            if (_available) return;
-            // Nothing usable: the download waits for the first call that needs cuDNN (EnsureAvailable), so an engine that never uses it never downloads.
-            _fetchPending = true;
+            // The loader gets the first look: an OS-path or resolver-probe-dir install is usable without a download.
+            // Only a missing library leaves the fetch pending; a CUDA-major mismatch stays rejected.
+            if (Load(cudaMajor)) _fetchPending = true;
             return;
         }
         Load(cudaMajor);
     }
 
-    /// <summary>Loads the cuDNN in <see cref="LibDir"/> (or the OS path) and applies the CUDA-major guard. Sets <see cref="Available"/>.</summary>
-    private static void Load(int cudaMajor)
+    /// <summary>Loads the cuDNN in <see cref="LibDir"/> (or the OS path) and applies the CUDA-major guard. Sets <see cref="Available"/>.
+    /// Returns true when no cuDNN library could be found at all.</summary>
+    private static bool Load(int cudaMajor)
     {
         // Trigger a load via a CONTEXT-FREE version query (compile-time constant — cannot hang even on a mismatched
         // build, unlike a conv/handle op). A DllNotFound here means the loader couldn't find cuDNN anywhere.
@@ -134,10 +134,11 @@ public static class CudnnRuntime
         {
             _available = false;
             LibDir = null;
+            string fetchHint = EngineKnobs.CudnnAutofetch.Value ? string.Empty : "Set paths.cudnnAutofetch=true to download it, ";
             Reason = $"cuDNN not found (searched paths.cudnnDir, {CacheLibDir(cudaMajor)}, {BundledDir()}, and the OS path; " +
                      $"driver is CUDA {cudaMajor}). {ex.GetType().Name}. " +
-                     $"Set paths.cudnnAutofetch=true to download it, drop the matching cuDNN 9 libs in the cache dir, or install cuDNN system-wide.";
-            return;
+                     $"{fetchHint}drop the matching cuDNN 9 libs in the cache dir, or install cuDNN system-wide.";
+            return ex is DllNotFoundException;
         }
 
         int cudnnCudaMajor = (int)(cudartVer / 1000);
@@ -147,7 +148,7 @@ public static class CudnnRuntime
             Reason = $"cuDNN REJECTED: built for CUDA {cudnnCudaMajor} but the driver runtime is CUDA {cudaMajor} — a mismatch " +
                      $"hangs the engine mid-inference, so the fast paths stay off. Install cuDNN 9 for CUDA {cudaMajor} " +
                      $"(or set paths.cudnnDir to a matching build).";
-            return;
+            return false;
         }
 
         Version = (long)CudnnApi.cudnnGetVersion();
@@ -156,6 +157,7 @@ public static class CudnnRuntime
             : "convolution ENABLED; fused attention requires cuDNN 9.21 or newer";
         Reason = $"cuDNN {Version / 10000}.{Version / 100 % 100}.{Version % 100} (built for CUDA {cudnnCudaMajor}) " +
                  $"from {(LibDir ?? "the OS library path")} — {attentionStatus}.";
+        return false;
     }
 
     /// <summary>The first search dir (env / cache / bundled) that actually holds the cuDNN dispatcher, or null.</summary>

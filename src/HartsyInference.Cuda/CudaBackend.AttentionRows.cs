@@ -322,8 +322,8 @@ public sealed partial class CudaBackend
     /// <summary>The knob, the session, the head dim and the health of the signature the call runs under, F32 operands cast to
     /// <paramref name="castTarget"/>.</summary>
     private bool CudnnReady(in AttentionCall c, CudnnSdpa.SdpaDtype castTarget = CudnnSdpa.SdpaDtype.F16) =>
-        !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim) && SdpaCudnnOn
-        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64);
+        !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(c.QkHeadDim)
+        && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.Of(in c, castTarget), Environment.TickCount64) && SdpaCudnnOn;
 
     /// <summary>One sequence of whole tensors: all the permuting and widening rows take.</summary>
     private static bool WholeSequence(in AttentionCall c) =>
@@ -450,10 +450,10 @@ public sealed partial class CudaBackend
                         && c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null
                         && c.Query.DType == DType.F32 && c.Output.DType == DType.F32 && !f16Kv && value.DType == DType.F32
                         && _kernels is not null && _kernels.HasCausalMaskKernel
-                        && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d) && SdpaCudnnOn
+                        && !_cudnnSdpaDead && CudnnSdpa.ShapeSupported(d)
                         && _cudnnSdpaHealth.Eligible(CudnnSdpaSignature.For(DType.F32, c.Heads, c.KvHeads, d, new CudnnBias(1, 1, c.QueryTokens)),
                             Environment.TickCount64)
-                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d);
+                        && CausalMaskFits(c.QueryTokens, kvLen, c.Heads, c.KvHeads, d) && SdpaCudnnOn;
                 },
                 (in AttentionCall c) => TryCausalPrefillSdpa(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Heads, c.KvHeads,
                     c.QueryTokens, c.Positions.KvLength, c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, c.QkHeadDim, c.Scale)),
