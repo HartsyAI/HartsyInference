@@ -52,11 +52,32 @@ public sealed class MossVlPositionsTests
     }
 
     [Fact]
-    public void SeveralImagesAreRefused()
+    public void TwoImagesEachHideTheKeysOfTheImageAfterTheRow()
     {
+        // Two 2x2 images: each block is 4 merged tokens plus a separator, so the vision sequence has 10 columns.
         int[] twoImages = [ImageToken, 5, ImageToken];
-        Assert.Throws<HartsyInferenceException>(() =>
-            MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]));
+        MossVlPositionPlan plan = MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]);
+
+        Assert.Equal(10, plan.VisionLength);
+        Assert.Equal(new float[] { 1f, 1f, 1f }, plan.RowMask);
+        Assert.NotNull(plan.CrossGroups);
+        IReadOnlyList<MossVlCrossGroup> groups = plan.CrossGroups!;
+        Assert.Equal(2, groups.Count);
+
+        // Group 0: rows 0 and 1, which see image 0 only, attend the prefix through image 0 (columns 0-4).
+        Assert.Equal(5, groups[0].KvLength);
+        Assert.Equal(new float[] { 1, 1, 0 }, groups[0].RowSelect);
+        // Group 1: row 2, the second placeholder, sees both images and attends the whole sequence.
+        Assert.Equal(10, groups[1].KvLength);
+        Assert.Equal(new float[] { 0, 0, 1 }, groups[1].RowSelect);
+    }
+
+    [Fact]
+    public void OneImageNeedsNoImageGroups()
+    {
+        MossVlPositionPlan plan = MossVlPositions.Plan(Prompt, ImageToken, [new MossVlImage(8, 12)]);
+
+        Assert.Null(plan.CrossGroups);
     }
 
     [Fact]

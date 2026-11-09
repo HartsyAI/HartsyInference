@@ -21,6 +21,7 @@ Detail in the retired 3D build plan (git history).
 |---|---|
 | **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
 | **Hunyuan3D-2** | Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). ([details](#hunyuan3d-2)) |
+| **CoLa3D decomposer (q20)** | Implemented; parity pending [#694](https://github.com/HartsyAI/HartsyInference/pull/694). Not verified against the Python reference. |
 
 Tests: `Hunyuan3DDinoParityTests`, `Hunyuan3DVaeParityTests` (both in
 `tests/HartsyInference.ThreeD.Tests/Parity/`). The DiT-parity and generation tests were removed in
