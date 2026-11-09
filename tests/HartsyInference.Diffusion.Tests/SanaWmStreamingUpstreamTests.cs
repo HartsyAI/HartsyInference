@@ -74,6 +74,45 @@ public sealed class SanaWmStreamingUpstreamTests
         }
     }
 
+    /// <summary>The softmax KV window over chunks 0 to 6 against upstream's own <c>_accumulate_softmax_kv_cache</c>: before each
+    /// chunk, the frames the window lists (sink first, then history oldest first) are the frames upstream's accumulated K
+    /// holds, for 1, 2, 3 and unbounded cached chunks, with and without the sink.</summary>
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(-1, true)]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    [InlineData(2, true)]
+    [InlineData(3, false)]
+    [InlineData(3, true)]
+    public void RecentChunksWindow_KeepsWhatUpstreamAccumulates(int cachedChunks, bool sink)
+    {
+        JsonElement[] entries = [.. Fixture.Value.RootElement.GetProperty("window").EnumerateArray()
+            .Where(e => e.GetProperty("cached").GetInt32() == cachedChunks && e.GetProperty("sink").GetBoolean() == sink)
+            .OrderBy(e => e.GetProperty("chunk").GetInt32())];
+        int[] bounds = [0, 4, 7, 10, 13, 16, 19, 22];
+        using Core.Backends.Cpu.CpuBackend backend = new();
+        using RollingTokenWindow window = new(backend, TokenWindowPolicy.RecentChunks(cachedChunks, sink), streams: 1, tokenAxis: 0);
+        Core.Tensors.Tensor[] parts = new Core.Tensors.Tensor[bounds.Length];
+        Assert.Equal(bounds.Length - 1, entries.Length);
+
+        for (int chunk = 0; chunk < bounds.Length - 1; chunk++)
+        {
+            int[] expected = [.. entries[chunk].GetProperty("kept_frames").EnumerateArray().Select(e => e.GetInt32())];
+            int count = window.CopyParts(0, parts);
+            int[] actual = [.. parts.Take(count).SelectMany(p => p.AsReadOnlySpan<float>().ToArray()).Select(v => (int)v)];
+            Assert.True(expected.SequenceEqual(actual),
+                $"cached {cachedChunks}, sink {sink}, before chunk {chunk}: upstream [{string.Join(",", expected)}], ours [{string.Join(",", actual)}]");
+
+            int frames = bounds[chunk + 1] - bounds[chunk];
+            Core.Tensors.Tensor keys = new(new Core.Tensors.TensorShape(frames), Core.Tensors.DType.F32);
+            keys.AsSpan<float>().Fill(chunk);
+            window.Stage([keys], frames);
+            window.Commit();
+        }
+    }
+
     /// <summary>A whole chunk walk (four steps) with frame 0 clean: our per-frame Euler step against diffusers'
     /// <c>step(-v, t, x, per_token_timesteps)</c> on the same velocities.</summary>
     [Fact]

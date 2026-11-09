@@ -54,6 +54,29 @@ for i, t in enumerate(sched.timesteps):
     traj["velocities"].append(v.flatten().tolist())
     traj["after"].append(x.flatten().tolist())
 fixture["step"] = {"shape": [B, C, F, S], "clean_frames": [0], **traj}
+# The softmax KV window: upstream's own _accumulate_softmax_kv_cache over chunks 0..6, each chunk's saved K a tensor filled
+# with its chunk id (length = its latent frames), so the accumulated K reads back which chunks the window kept, in order.
+from diffusion.scheduler import self_forcing_flow_euler_sampler as sfs  # noqa: E402
+
+fixture["window"] = []
+for cached in (-1, 1, 2, 3):
+    for sink in (False, True):
+        bounds = [0, 4, 7, 10, 13, 16, 19, 22]
+        dummy = types.SimpleNamespace(num_model_blocks=1, num_cached_blocks=cached, sink_token=sink, _chunk_indices=bounds)
+        cache = [[[None] * sfs._NUM_CACHE_SLOTS] for _ in range(len(bounds) - 1)]
+        for c in range(len(bounds) - 1):
+            cur, accumulated, sink_num, cached_frames = sfs.SelfForcingFlowEulerCamCtrl._accumulate_softmax_kv_cache(dummy, cache, c)
+            k = cur[0][0]
+            ids = [] if k is None or c == 0 else [int(v) for v in k[0, 0, :, 0].tolist()]
+            kept = [ids[i] for i in range(len(ids)) if i == 0 or ids[i] != ids[i - 1]]
+            fixture["window"].append({"cached": cached, "sink": sink, "chunk": c, "kept_frames": ids, "kept_chunks": kept,
+                                      "sink_num": int(sink_num), "cached_frames": int(cached_frames)})
+            n = bounds[c + 1] - bounds[c]
+            saved = [None] * sfs._NUM_CACHE_SLOTS
+            saved[0] = torch.full((1, 1, n, 1), float(c))
+            saved[1] = torch.full((1, 1, n, 1), float(c))
+            saved[sfs._SLOT_TYPE_FLAG] = torch.tensor(0.0)
+            cache[c] = [saved]
 with open(out, "w") as f:
     json.dump(fixture, f)
 print("wrote", out)
