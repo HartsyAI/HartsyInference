@@ -4,7 +4,8 @@ Source snapshot: NVlabs/Sana `b3bad956` (`inference_sana_wm_streaming.py`, `gene
 `Efficient-Large-Model/SANA-WM_streaming`). This note records the upstream-to-engine map, the decisions and their reasons,
 the carried-state layouts, the numerics, the memory plan and the test handoff. Status and parity evidence belong in
 [MODEL_STATUS_WORLD.md](../Checklists/MODEL_STATUS_WORLD.md) and [PARITY_VERIFICATION.md](../Checklists/PARITY_VERIFICATION.md)
-once the weights have been run; nothing here has run on real weights or on a GPU yet.
+once the weights have been run; nothing here has run on real weights or on a GPU yet. The refiner (Phase B) has been
+compared on the CPU against upstream's own code on a tiny random model; see [its section](#phase-b-the-streaming-refiner).
 
 ## What streaming is
 
@@ -14,7 +15,7 @@ generation. Streaming (`sana-wm-streaming`) is a different checkpoint of the sam
 | Stage | Upstream | What it does per chunk |
 |---|---|---|
 | Student | `SanaMSVideoCamCtrlStreaming` + `SelfForcingFlowEulerCamCtrl` | 4 denoising forwards over the chunk's noise, then 1 forward over the clean chunk at t = 0 that writes the state the next chunk reads |
-| Refiner (Phase B) | `RefinerChunkRunner` over the LTX-2 transformer | 3 distilled steps per 3-frame block against a sliding KV window |
+| Refiner (optional) | `RefinerChunkRunner` over the LTX-2 transformer | 3 distilled steps per 3-frame block against a sliding KV window, then 1 forward at σ = 0 that captures the block's keys and values |
 | Decoder | `CausalVaeStreamingDecoder` over the causal LTX-2 VAE | decodes the chunk's latent frames, each causal conv keeping its input tail |
 
 Cadence at the defaults: latent chunks of 3 frames, the first chunk 4 (the seed frame plus 3). A latent frame is 8 pixel
@@ -48,6 +49,14 @@ makes live steering possible: the path is extended 24 frames at a time, just bef
 | the chunk generator contract | `IChunkedWorldStream` | World/Sessions |
 | CUDA-stream orchestration, progressive MP4 | `IChunkedWorldPipeline`, `ChunkedWorldSession` | Engine |
 | CLI defaults | `WorldStreamingCapabilities`, `WorldPlanResolver`, catalog `sana-wm-streaming` | Engine |
+| `RefinerChunkRunner` (noise, 3-step Euler, capture, window trim) | `IStreamingLatentRefiner`, `LtxVideo2ChunkRefiner`, `FlowRefineSchedule` | Diffusion/Streaming, Schedulers |
+| `_forward_video_only_with_rope`, `_forward_video_block` | `LtxVideo2ChunkTransformer`, `LtxVideo2VideoBlock` | Diffusion/Models/Denoisers |
+| `_streaming_self_attention` (`rf_shifted_sink` prefix, capture hooks) | `LtxVideo2PrefixSelfAttention` | Diffusion/…/DiTBlocks |
+| `_sink_kv_pre`, `_history_kv_post`, `_history_frames` | `LtxVideo2ChunkState` (`StreamingTensorSlot` pair + `RollingTokenWindow` per block) | Diffusion/Models/Denoisers |
+| `_build_rotary_emb_for_absolute_positions` | `LtxVideo2Rope.BuildVideo(…, firstFrame)`, `LtxVideo2ChunkScope` | Diffusion/…/DiTBlocks |
+| `_pack_text_embeds` + `LTX2TextConnectors` (video branch) | `LtxVideo2PackedTextConnector` | Diffusion/…/DiTBlocks |
+| `_encode_prompt` (Gemma-3-12B) | `SanaWmGemma3RefinerTextEncoder` | World |
+| `streaming_pipeline.py` stage 1 → refiner → decode | `SanaWmStream` with `ISanaWmRefinerComponents` | World |
 
 ## The reusable contracts
 
@@ -68,6 +77,11 @@ A different chunk-causal world model plugs in at four levels, lowest first.
    dedicated compute thread under the world execution lease, delivers chunks through `IWorldSession.StreamAsync` with
    back-pressure, forwards `SendAction` at any time, and releases the stream before the lease. A model declares
    `WorldCapabilities.Streaming`; the planner resolves `WorldRequest.Streaming` and `Unbounded` against it.
+
+5. **The refiner** (`IStreamingLatentRefiner`). A second stage takes the stream's sink frames once (`SetSink`) and then
+   one block of clean latents at a time (`Refine`), staging what the block adds until `Commit`. It knows nothing about the
+   first stage. `LtxVideo2ChunkRefiner` is the LTX-2 implementation; it serves any first stage that produces LTX-2 VAE
+   latents.
 
 The streaming VAE decode is model-agnostic as well: `IStreamingVideoDecoder` over any causal LTX-2 VAE, usable by an
 LTX-2 video pipeline that loads a causal decoder. `LiveCameraPath<TControls>` and `ICameraIntegrator<TControls>` carry no
@@ -194,7 +208,7 @@ That is tight but plausible on 12 GB. Two levers if it does not fit: keep the so
 largest item; needs the attention call to accept BF16 K/V operands) and keep the key tails in BF16 (the conv input is then
 rounded, a numerics change to measure). A second guidance branch doubles the carried state.
 
-Phase B adds the 18.9B-parameter LTX-2 refiner; see the Phase B section.
+The refiner's memory is planned in [its own section](#memory-plan-with-the-refiner).
 
 ## Checkpoint conversion (parent session)
 
@@ -268,9 +282,220 @@ Real-weight lane (needs the converted checkpoint and upstream dumps):
 
 ## Phase B: the streaming refiner
 
-Not built yet. Upstream's refiner is the LTX-2 19B video transformer run block by block (`RefinerChunkRunner`): per
-3-latent-frame block it re-noises the stage-1 latent to `σ_max`, runs 3 distilled Euler steps where the block attends to
-a KV prefix (a pre-RoPE sink re-rotated to sit just before the window, plus up to 10 frames of post-RoPE history), then
-one more forward captures the block's post-RoPE K/V for the history. The shared pieces above cover it: `RollingTokenWindow`
-with `TokenWindowPolicy.RecentUnits(10)` for the history, a `StreamingTensorSlot` per layer for the sink, and the same
-stage-then-commit discipline. The plan and its memory budget are recorded here when the phase lands.
+Upstream's refiner is the LTX-2.0 (19B) audio-video transformer run video-only, block by block
+(`diffusion/refiner/diffusers_ltx2_refiner.py`, `RefinerChunkRunner`). It is optional here (`--refiner`,
+`WorldRequest.Refiner`) and off by default.
+
+| Step | When | What |
+|---|---|---|
+| Sink capture | once, when the stream opens | the seed frame's latent alone at σ = 0, frame position 0; every block stages its raw key and value projections |
+| Re-noise | per block | `x = (1 − σ₀)·clean + σ₀·ε` with σ₀ = 0.909375 |
+| 3 distilled steps | per block | σ = 0.909375, 0.725, 0.421875 → 0; each forward attends the block's queries to `[sink ⊕ history ⊕ block]` |
+| History capture | per block | one forward over the refined block at σ = 0 under the same prefix; its rotated keys and values join the history |
+
+A block is the stage-1 chunk without the stream's first frame: frames `[1 + 3b, 4 + 3b)`. The seed frame's latent is the
+refiner's sink and is decoded unrefined; the DiT's own carried state keeps the unrefined latents. With the refiner a
+chunk costs 5 DiT forwards, 4 refiner forwards and the decode.
+
+### Decisions
+
+**A video-only LTX-2.0 transformer beside the dual-stream one.** `LtxVideo2Transformer` runs LTX-2.3 and 2.5: nine
+modulation rows per block, modulated and gated text cross-attention, per-modality connectors, Lightricks key names. The
+refiner checkpoint is the LTX-2.0 diffusers layout: six rows, an unmodulated ungated cross-attention, the caption
+projection inside the transformer, `norm_q`/`norm_k`. `LtxVideo2ChunkTransformer` reads that layout and only its video
+keys (1215 of 3510 tensors, 13.04B of 18.88B parameters), so the audio stream is never paged in. What the two share was
+extracted rather than copied: `LtxVideo2BlockOps` (modulation, norm-and-modulate, gated residual, FFN, output layer),
+`LtxVideo2AdaLnSingle`, the connector blocks, and `LtxVideo2Attention` now accepts either QK-norm key name. Without a
+stream state the class is the plain bidirectional video-only forward, so it is not SANA-WM specific.
+
+**One modulation per pass.** Every token of a block carries the same sigma, so the AdaLN-Single modulation is computed
+once per forward and broadcast. Upstream evaluates it per token (`[tokens, 6·4096]`); the values are the same.
+
+**Token-major keys and values.** The carried tensors are `[tokens, 4096]` rows, as the projections produce them. Joining
+the prefix is then one contiguous copy per part along axis 0, and the attention call is the token-major entry the
+dual-stream path already uses (`AttentionLayer.AttendFlat`), so no head permute runs on CUDA. Every op in the block is
+one the dual-stream path runs in production: `LinearMulti`, `RmsNormRotary` with split rows, token-major attention,
+`NormModulate`, `GatedResidualLastDim`, `LinearFused`.
+
+**The sink key is kept before the norm.** Upstream caches the sink's key after the QK norm and before the rotation, and
+re-rotates it for every block at `block_start − history_frames − sink_frames`. Keeping the raw `to_k` projection
+instead and running the fused norm-and-rotate with the sink's tables at each use gives the same key (the norm is
+deterministic) and needs no stand-alone rotation of an F16 tensor. History keys are kept after the rotation, at the
+absolute frames they were produced at, as upstream keeps them.
+
+**Refine before either model commits.** The refiner reads only the clean latents, so `SanaWmStream` runs it after the
+DiT's state-writing pass and before the commit: a chunk cancelled during refinement discards both staged states and can
+be generated again. After the commit a failure still faults the stream, as in Phase A.
+
+**The capture pass stops at the last block's projections.** Nothing reads the last block's output in a capture pass, so
+it stages its keys and values and returns. The values staged are identical; one block's attention and FFN are saved per
+block. (Upstream has this behind `SANA_WM_REFINER_CAPTURE_KV_ONLY_LAST`.)
+
+**Noise is seeded per block.** Upstream draws from a CUDA generator seeded with 42. Block `b` uses
+`seed + b·0x61C88647` here, so a block refined again after a discard reproduces. Parity runs inject upstream's noise
+(`SanaWmRefinerSettings.Noise`, `SanaWmStreamInjection.RefinerNoise`).
+
+**The refiner's prompt is encoded first and alone.** It is the raw prompt (no CHI prefix, no negative), through
+Gemma-3-12B and the LTX-2.0 connector, once, before the DiT loads; the encoder is released before anything else is
+placed. The tower is given only the prompt's own tokens: upstream left-pads to 1024 and masks the padding, and since
+the tower's rotation is relative and padding is never attended to, the hidden states are the same. The connector then
+fills the sequence to 1024 with its registers, as upstream's does.
+
+**F32 Gemma shards are rounded to BF16 at load.** The release ships Gemma-3-12B as F32 shards (47 GB of projections),
+which no supported card holds; upstream loads the tower with `torch_dtype=bfloat16`. The engine components round plain
+F32 matrices to BF16 (nearest even, the embedding table excluded) when the text encoder is a shard folder. A file that
+is already BF16, F16 or quantized passes through untouched, so the encoder's own quantization handling still owns
+those.
+
+**Weights are placed by `BlockStreamingScope`.** The refiner opens last. Its resident prefix is sized from the device
+memory the DiT and the decoder left free, minus the carried state at a full window (reserved up front, since it arrives
+over the first blocks) and `vram.sanaWmRefinerHeadroomMb`. Blocks that do not fit are streamed from the host on every
+forward. A window the device cannot hold at all is refused when the refiner opens, not several chunks in.
+
+**Sequential, not three CUDA streams.** Upstream overlaps stage 1 of chunk `k+1`, the refiner of chunk `k` and the
+decode of chunk `k−1` on three CUDA streams. The session runs them one after the other on its compute thread. The
+output is the same; overlap is a later optimization and needs backend support for concurrent streams.
+
+**Not ported.** Upstream's approximations and speed modes, all off by default there: reusing the last denoising
+forward's keys and values instead of the capture pass (`FAST_KV_CAPTURE`), the cross-attention K/V cache, FP8 storage
+of the history, NVFP4/FP8 block scaling through Transformer Engine, QKV fusion and `torch.compile`. The legacy
+single-shot refiner (`block_size=None`) is not ported either.
+
+### Carried state of the refiner
+
+Per transformer block (48), at 720p (880 tokens per frame, inner width 4096), in the block stream's activation dtype
+(F16 on CUDA with `numerics.ditF16`, the default; F32 otherwise):
+
+| State | Shape | Kept | F16 size |
+|---|---|---|---|
+| sink key, raw `to_k` projection | `[880, 4096]` | whole stream | 6.9 MiB |
+| sink value | `[880, 4096]` | whole stream | 6.9 MiB |
+| history keys, rotated at their own frames | up to `[10·880, 4096]` | newest `window − 1` frames | 68.8 MiB |
+| history values | up to `[10·880, 4096]` | newest `window − 1` frames | 68.8 MiB |
+
+Over 48 blocks: 0.64 GiB for the sink and 0.645 GiB per history frame, 7.1 GiB at the default window of 11 frames.
+Per chunk the scope also holds F32 rotation tables (`[tokens, 2048]` cos and sin: 43 MiB for a 3-frame block, 14 MiB
+per sink placement), and the stream holds the projected caption (`[1024, 4096]`).
+
+The window is `RollingTokenWindow` with `TokenWindowPolicy.RecentUnits(window − 1)`: a block that only partly fits is
+cut to its newest frames, which is upstream's token-level trim. `LtxVideo2ChunkWindow.HistoryLayerStride` keeps the
+history on every N-th block only (and the last); the others read the sink at `block_start − 1`.
+
+### Numerics of the refiner
+
+- The block stream runs in the engine's LTX-2 activation dtype (F16); upstream runs BF16. `numerics.ditF16=false` runs
+  F32 for parity work.
+- The sampler is float32 with the sigma ratio taken in double from the float32 sigmas, as upstream's Python floats are.
+  With `RoundToBf16` (the default) the noise, each velocity, each clean estimate and each stepped latent are rounded to
+  BF16, where upstream casts back to its BF16 dtype.
+- The model timestep is `σ·1000` in float32; capture passes run at 0.
+- Rotation phases are computed in double (`LtxVideo2Rope`, as for LTX-2.3); upstream computes them in float32, which is
+  up to about 1e-3 rad off in the highest-frequency lanes.
+- The text packing statistics (mean, min, max per hidden state) are computed in float32 and double; upstream computes
+  them on BF16 tensors.
+- CPU parity against upstream's own `RefinerChunkRunner`, `_forward_video_only_with_rope`, `_pack_text_embeds` and
+  diffusers 0.37.0 modules, on a tiny random model in float32 without BF16 rounding (2 heads of 16, 3 blocks, 2×3
+  latent grid, 4 blocks of 3 frames): refined latents differ by at most 3.0e-4 on values up to 11.6 for windows of 1, 5
+  and 11 frames; the text connector by 7.3e-5 on values up to 2.5; a plain forward by 2.5e-4 on values up to 9.5. The
+  fixture script and file are in the shared notes folder (`streaming-scratch-tests/refiner-parity-fixture/`).
+
+### Memory plan with the refiner
+
+Sizes from the checkpoint header and tensor shapes, in GiB; nothing is measured yet.
+
+| Item | Size |
+|---|---|
+| refiner transformer, video keys, BF16 as shipped | 24.3 (0.51 per block, 0.29 shared) |
+| the same in FP8 | about 12.2 (0.26 per block) |
+| refiner carried state, window 11, F16 | 7.1 (0.64 + 0.645 per history frame) |
+| Gemma-3-12B, release shards rounded to BF16 | 23.6 on the device, plus the same again in host memory while it is loaded |
+| Gemma-3-12B, the engine's FP8-scaled single file | about 12 |
+| text connector (`text_proj_in` 2.7 in F32, plus two blocks) | about 2.9 |
+| stage 1 (DiT and its carried state, Phase A estimate) | about 7.5 |
+
+*48 GB and up.* Everything is resident in BF16: 7.5 + 24.3 + 7.1 + 4 of headroom is about 43.
+
+*24 GB (the 4090).*
+1. Text: the BF16 tower does not fit beside its own activations. Use an FP8 Gemma-3-12B single file through
+   `--refiner-text-encoder-path` (the engine's LTX-2 side model `text_encoders/gemma_3_12B_it_fp8_scaled.safetensors`,
+   once it is confirmed to be the same checkpoint as the release's `gemma3_12b`). It loads and leaves before the DiT.
+2. Transformer: with stage 1 resident about 15.5 is free. At the defaults (window 11, 4 of headroom) about 4.4 is left
+   for blocks: 8 BF16 blocks resident and 40 streamed, 20 GiB over PCIe per forward and 4 forwards per block. That
+   runs but is slow.
+3. Levers, cheapest first: an FP8 transformer file (17 blocks resident, 7.9 GiB streamed per forward);
+   `vram.sanaWmRefinerWindowFrames=7` (state 4.5); `vram.sanaWmRefinerLayerStride=2` (state about 3.9, an
+   approximation); `vram.sanaWmRefinerHeadroomMb` lowered once the DiT's and the decoder's real transients are
+   measured. FP8 weights with a window of 7 leave about 27 blocks resident.
+
+*12 GB (the 3060).* Stage 1 only. The refiner's carried state alone does not fit beside the DiT, and the refiner
+refuses to open with that message.
+
+Compute, for scale: about 0.95 TFLOP per transformer block per forward at a full window, 182 TFLOP per 3-frame block
+(1.5 s of video). A 4090 will not run the refiner in real time even fully resident.
+
+### Files and options
+
+Release layout beside the DiT folder; each path can be overridden:
+
+```
+World/SanaWmStreaming/refiner_diffusers/transformer/diffusion_pytorch_model.safetensors   --refiner-path
+World/SanaWmStreaming/refiner_diffusers/connectors/diffusion_pytorch_model.safetensors    --refiner-connectors-path
+World/SanaWmStreaming/gemma3_12b/                 (shards, or one .safetensors)            --refiner-text-encoder-path
+World/SanaWmStreaming/gemma3_12b/tokenizer.model  (beside a single-file encoder)           --refiner-tokenizer-path
+```
+
+The files are named when the model resolves and checked only when a run asks for the refiner, so a stage-1 install
+needs none of them. Settings: `vram.sanaWmRefinerWindowFrames` (11), `vram.sanaWmRefinerLayerStride` (1),
+`vram.sanaWmRefinerHeadroomMb` (4096). Run: `hartsy world -m sana-wm-streaming … --refiner`.
+
+### Test handoff for the refiner
+
+Scratch tests the author ran on the CPU, in the shared notes folder (`streaming-scratch-tests/`):
+`Diffusion_ZzScratchRefinerParity.cs` (set `REFINER_PARITY_FIXTURE` to the fixture file),
+`World_ZzScratchStreamRefinerSmoke.cs`, `Engine_ZzScratchRefinerWiring.cs`.
+
+Unit lane (no weights, no GPU):
+
+| Component | Verify |
+|---|---|
+| `FlowRefineSchedule` | `Renoise` and `Step` against upstream's arithmetic on a small tensor, with and without BF16 rounding; the last step lands on the clean estimate; validation errors |
+| `LtxVideo2Rope.BuildVideo(firstFrame)` | equals rows `[firstFrame·H·W, …)` of a whole-clip build; frame 0's clamped coordinate |
+| `LtxVideo2ChunkWindow`, `LtxVideo2ChunkState` | history layers for strides 1, 2, 3 and offsets; sink offsets beside and without history for blocks 0 to 5 against upstream's formula; `EstimateBytes`; `CommitSink` refuses a partial capture; `Discard` and `Reset` |
+| `LtxVideo2PrefixSelfAttention` | against a host reference (RMS norm, split rotation, softmax) with and without a prefix; a capture-only pass stages what a full pass stages; a failed pass leaves the stream untouched |
+| `LtxVideo2ChunkTransformer` | the tiny-model fixture: plain forward, three window sizes; `IsVideoKey` on the real header (1215 keys); a nine-row table is refused with the LTX-2.3 message; scope and state mismatches are refused |
+| `LtxVideo2ChunkRefiner` | the fixture end to end; a repeated `Refine` before `Commit` is identical; `Commit` without a staged block throws; cancel between passes discards; seeded noise differs per block and repeats per seed |
+| `LtxVideo2PackedTextConnector` | the fixture; a prompt longer than the sequence and a length that is not a register multiple are refused |
+| `SanaWmStream` with a refiner | open order and sink at open; chunk 0 refines 3 of 4 frames and decodes the sink unrefined; commit order; cancel during refinement discards both; progress counts 9 passes; components without the refiner refuse `Refine` |
+| engine wiring | `Gemma3DecoderKey` for both exports; refiner file naming and overrides; a plan with the refiner reaches `SanaWmStreamRequest`; `sana-wm` refuses the refiner; missing refiner files fail with the aux key named |
+
+Real-weight lane:
+
+| Component | Compare against |
+|---|---|
+| text path | `DiffusersLTX2Refiner._encode_prompt` embeddings for one prompt, with the BF16 tower and with the FP8 file |
+| one transformer block, block 1 | upstream block output with the prefix of block 0 |
+| `Predict` | upstream `_forward_video_only_with_rope` velocity for each of the 3 steps of blocks 0, 1 and 4 |
+| carried state | upstream `_sink_kv_pre` (post-norm; compare after norming ours) and `_history_kv_post` after blocks 0 and 3 |
+| refiner end to end | `refine_block` outputs for a 73-frame run with upstream's noise injected |
+| stream end to end | upstream's refined video, PSNR per frame |
+
+CUDA-specific things the CPU run cannot show, in the order worth checking: F16 activations through the token-major
+attention with more keys than queries (12 320 against 2 640); `RmsNormRotary` on the sink's 880 rows with its own
+tables; `Concat` along axis 0 of F16 parts; `PinActivation` keeping the carried tensors across the DiT's and the
+decoder's work; block streaming with the carried state growing after placement; the FP8 and INT8 attention rows, if
+those knobs are on.
+
+### What the parent session needs to provide for the refiner
+
+1. The streaming repo's `refiner_diffusers/transformer` header and `config.json` and the connectors' `config.json`.
+   The code assumes they equal the bidirectional repo's (`LtxVideo2Config.V20`, connector 30×128, 2 blocks, 128
+   registers, 49 states).
+2. Whether the release's `gemma3_12b` is the same checkpoint as the engine's FP8-scaled Gemma-3-12B side model (compare
+   a few unquantized tensors, or the configs). That decides the text encoder file for 24 GB.
+3. Upstream dumps from one 73-frame run with the refiner: the refiner prompt embeddings, the per-block noise, the
+   velocity of each forward, `_sink_kv_pre`, `_history_kv_post` after each block, and each `refine_block` output.
+   Note that upstream's `_streaming_self_attention` reads `attn.to_gate_logits`, which diffusers 0.37.0's
+   `LTX2Attention` does not define; the fixture script sets it to `None`.
+4. Measurements on the 4090: resident blocks, seconds per block, and the DiT's and the decoder's peak transients (to
+   set the headroom default).
+5. An FP8 conversion of the refiner transformer's video keys, if the 4090 is to run it at a usable speed.
