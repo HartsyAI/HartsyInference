@@ -20,14 +20,15 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
     private const string LatentsMeanKey = "latents_mean";
     private const string LatentsStdKey = "latents_std";
 
-    // SANA-WM's vae/config.json: upsample_residual [true, true, true], decoder_spatial_padding_mode "reflect", decoder_causal false.
+    // vae/config.json: residual upsamplers, reflect padding, non-causal; the LTX-2 defaults (neither) do not match these weights.
     private static readonly bool[] DecoderUpsampleResidual = [true, true, true];
 
     private readonly IBackend _backend;
     private readonly WorldComponents _files;
     private readonly WorldPhaseLedger? _ledger;
 
-    /// <summary>Loads from <paramref name="files"/> onto <paramref name="backend"/>; every stage phase reports to <paramref name="ledger"/>.</summary>
+    /// <summary>Loads from <paramref name="files"/> onto <paramref name="backend"/>; every stage phase reports to
+    /// <paramref name="ledger"/>.</summary>
     public SanaWmEngineComponents(IBackend backend, WorldComponents files, WorldPhaseLedger? ledger)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -80,8 +81,9 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
         (float[] mean, float[] std) = Statistics(loader);
         DType dtype = VaePrecisionHelper.PreferredVaeDtype(_backend);
         Dictionary<string, Tensor> weights = Widened(phase, loader, "decoder.", dtype);
-        LtxVideo2VaeDecoder decoder = new LtxVideo2VaeDecoder(latentChannels: SanaWmPipeline.LatentChannels, upsampleResidual: DecoderUpsampleResidual,
-            isCausal: false, latentsMean: mean, latentsStd: std, computeDtype: dtype, spatialReflectPad: true);
+        LtxVideo2VaeDecoder decoder = new LtxVideo2VaeDecoder(latentChannels: SanaWmPipeline.LatentChannels,
+            upsampleResidual: DecoderUpsampleResidual, isCausal: false, latentsMean: mean, latentsStd: std, computeDtype: dtype,
+            spatialReflectPad: true);
         decoder.LoadWeights(weights);
         phase.OwnRelease("the VAE decoder weights", () => DisposeAll(decoder.EnumerateWeights()));
         return new SanaWmLtx2VideoDecoder(_backend, decoder);
