@@ -61,7 +61,7 @@ public sealed class DsaIndexerTests
     }
 
     [Fact]
-    public void Select_RefusesPositionsPastTheRopeTable()
+    public void AppendKeysAndSelect_RefusePositionsPastTheRopeTable()
     {
         Random rng = new(2);
         DeepSeekV41RopeTable rope = DeepSeekV41RopeTable.Build(RopeDim, 8, 8e6, null);
@@ -77,6 +77,59 @@ public sealed class DsaIndexerTests
         using Tensor keyStore = new(new TensorShape(16, HeadDim), DType.F32);
 
         Assert.Throws<ArgumentOutOfRangeException>(() => indexer.AppendKeys(Rand(rng, 4 * Dim), 4, 6, keyStore));
+
+        indexer.AppendKeys(Rand(rng, 8 * Dim), 8, 0, keyStore);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            indexer.Select(Rand(rng, Dim), Rand(rng, QLora), [8], [SparseWindowMerge.IndexerLimit(8, Window)], keyStore, out _));
+    }
+
+    [Fact]
+    public void Select_WithFp8x128RoundTrips_ReturnsValidRowsCloseToF32()
+    {
+        const int heads = 2, headDim = 128, ropeDim = 64, topK = 6, keys = 40;
+        Random rng = new(31);
+        float[] wqB = Rand(rng, heads * headDim * QLora), wk = Rand(rng, headDim * Dim), wp = Rand(rng, heads * Dim);
+        float[] x = Rand(rng, keys * Dim), qLatent = Rand(rng, keys * QLora);
+        DeepSeekV41RopeTable rope = DeepSeekV41RopeTable.Build(ropeDim, keys, 8e6, null);
+        using Tensor wqBT = Make(wqB, heads * headDim, QLora), wkT = Make(wk, headDim, Dim), wpT = Make(wp, heads, Dim);
+        using Tensor gammaT = Make(Rand(rng, headDim, 0.5f, 1f), headDim);
+        DsaIndexerWeights weights = new() { WqB = wqBT, Wk = wkT, KeyNormWeight = gammaT, WeightsProj = wpT };
+        int[] positions = [3, 4, 10, 25, 39];
+        int[] limits = positions.Select(p => SparseWindowMerge.IndexerLimit(p, Window)).ToArray();
+        float[] xq = positions.SelectMany(p => x.AsSpan(p * Dim, Dim).ToArray()).ToArray();
+        float[] ql = positions.SelectMany(p => qLatent.AsSpan(p * QLora, QLora).ToArray()).ToArray();
+
+        int[] Run(LatentEncoding encoding, out int width)
+        {
+            DsaIndexerSettings settings = new()
+            {
+                Heads = heads, HeadDim = headDim, RopeDim = ropeDim, TopK = topK, QueryEncoding = encoding, KeyEncoding = encoding,
+            };
+            using DsaIndexer indexer = new(new CpuBackend(), settings, weights, rope, Dim, QLora);
+            using Tensor keyStore = new(new TensorShape(keys, headDim), DType.F32);
+            indexer.AppendKeys(x, keys, 0, keyStore);
+            return indexer.Select(xq, ql, positions, limits, keyStore, out width);
+        }
+
+        int[] fp8 = Run(LatentEncoding.Fp8E4M3Ue8m0x128, out int width);
+        int[] f32 = Run(LatentEncoding.F32, out int f32Width);
+
+        Assert.Equal(f32Width, width);
+        int overlap = 0, total = 0;
+        for (int t = 0; t < positions.Length; t++)
+        {
+            int[] row = fp8.AsSpan(t * width, width).ToArray(), reference = f32.AsSpan(t * width, width).ToArray();
+            int valid = Math.Min(limits[t], topK);
+            for (int i = 0; i < width; i++)
+            {
+                if (i >= valid) { Assert.Equal(-1, row[i]); continue; }
+                Assert.InRange(row[i], 0, limits[t] - 1);
+                if (i > 0) Assert.True(row[i] > row[i - 1], "rows must be strictly ascending");
+            }
+            overlap += row.Take(valid).Intersect(reference.Take(valid)).Count();
+            total += valid;
+        }
+        Assert.True(overlap >= total * 8 / 10, $"FP8 x128 kept {overlap} of the {total} F32 picks.");
     }
 
     // LayerNorm(wk x) * gamma + beta, then NeoX rope on the leading RopeDim values, then the orthonormal Hadamard.
