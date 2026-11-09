@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Latent;
 
 namespace HartsyInference.Cuda;
 
@@ -18,23 +19,18 @@ public sealed partial class CudaKernels
     private nint _sparseLatentAttentionF32;
     private nint _indexerScoresF32;
     private CudaModule? _latentQuantModule;
-    private nint _latentRowWinnerInit;
-    private nint _latentRowWinnerMark;
-    private nint _latentQuantizeRowsF32;
     private nint _actQuantDequantInplaceF32;
     private CudaModule? _hcMixModule;
     private nint _hcSplitSinkhornF32;
     private nint _hcPreMixF32;
     private nint _hcPostMixF32;
     private CudaModule? _latentPositionsModule;
-    private nint _ropeInterleavedOffsetF32;
     private nint _windowIndicesI32;
 
     /// <summary>True when all four latent PTX modules loaded, so every attention primitive can run on this device.</summary>
     public bool HasAttentionKernels => _sparseLatentAttentionF32 != 0 && _indexerScoresF32 != 0 &&
-        _latentRowWinnerInit != 0 && _latentRowWinnerMark != 0 && _latentQuantizeRowsF32 != 0 &&
         _actQuantDequantInplaceF32 != 0 && _hcSplitSinkhornF32 != 0 && _hcPreMixF32 != 0 && _hcPostMixF32 != 0 &&
-        _ropeInterleavedOffsetF32 != 0 && _windowIndicesI32 != 0;
+        _windowIndicesI32 != 0;
 
     // Optional modules: absence leaves the primitives unsupported on this backend instead of failing construction.
     private void LoadAttentionKernels()
@@ -50,9 +46,6 @@ public sealed partial class CudaKernels
         if (CanLoad(quantPath))
         {
             _latentQuantModule = LoadOwnedModule(quantPath);
-            _latentRowWinnerInit = _latentQuantModule.GetFunction("latent_row_winner_init");
-            _latentRowWinnerMark = _latentQuantModule.GetFunction("latent_row_winner_mark");
-            _latentQuantizeRowsF32 = _latentQuantModule.GetFunction("latent_quantize_rows_f32");
             _actQuantDequantInplaceF32 = _latentQuantModule.GetFunction("act_quant_dequant_inplace_f32");
         }
         string hcPath = Ptx("hc_mix");
@@ -67,7 +60,6 @@ public sealed partial class CudaKernels
         if (CanLoad(positionsPath))
         {
             _latentPositionsModule = LoadOwnedModule(positionsPath);
-            _ropeInterleavedOffsetF32 = _latentPositionsModule.GetFunction("rope_interleaved_offset_f32");
             _windowIndicesI32 = _latentPositionsModule.GetFunction("window_indices_i32");
         }
     }
@@ -103,31 +95,6 @@ public sealed partial class CudaKernels
         a[0] = &sA; a[1] = &qA; a[2] = &kcA; a[3] = &ksA; a[4] = &hwA; a[5] = &clA; a[6] = &cA; a[7] = &hA;
         a[8] = &dA; a[9] = &nA; a[10] = &eA; a[11] = &scaleA;
         CudaDriverApi.cuLaunchKernel(_indexerScoresF32, (uint)((keys + 7) / 8), (uint)tokens, 1, 256, 1, 1, 0, stream, (nint)a, 0)
-            .ThrowOnError();
-    }
-
-    /// <summary>Marks the last source row for every destination row, then quantizes only the winners, so duplicated
-    /// destinations resolve deterministically to the later row. <paramref name="winner"/> holds destRows ints.</summary>
-    public unsafe void LaunchQuantizeLatentRows(ulong codes, ulong scales, ulong rows, ulong physicalRows, ulong winner,
-        int count, int dim, int destRows, LatentEncoding enc, nint stream)
-    {
-        if (_latentQuantizeRowsF32 == 0) throw new InvalidOperationException("latent_quant.ptx not present in the Ptx folder.");
-        ulong wA = winner, pA = physicalRows, cA = codes, sA = scales, rA = rows;
-        int drA = destRows, nA = count, dA = dim, eA = (int)enc;
-        void** init = stackalloc void*[2];
-        init[0] = &wA; init[1] = &drA;
-        CudaDriverApi.cuLaunchKernel(_latentRowWinnerInit, Blocks(destRows), 1, 1, BlockSize, 1, 1, 0, stream, (nint)init, 0)
-            .ThrowOnError();
-        void** mark = stackalloc void*[4];
-        mark[0] = &wA; mark[1] = &pA; mark[2] = &nA; mark[3] = &drA;
-        CudaDriverApi.cuLaunchKernel(_latentRowWinnerMark, Blocks(count), 1, 1, BlockSize, 1, 1, 0, stream, (nint)mark, 0)
-            .ThrowOnError();
-        int group = LatentEncodings.GroupSize(enc);
-        long units = (long)count * (group == 0 ? dim : dim / group);
-        void** quant = stackalloc void*[9];
-        quant[0] = &cA; quant[1] = &sA; quant[2] = &rA; quant[3] = &pA; quant[4] = &wA; quant[5] = &nA; quant[6] = &dA;
-        quant[7] = &eA; quant[8] = &drA;
-        CudaDriverApi.cuLaunchKernel(_latentQuantizeRowsF32, Blocks(units), 1, 1, BlockSize, 1, 1, 0, stream, (nint)quant, 0)
             .ThrowOnError();
     }
 
@@ -183,20 +150,6 @@ public sealed partial class CudaKernels
         a[0] = &oA; a[1] = &xA; a[2] = &rA; a[3] = &pA; a[4] = &cA; a[5] = &tA; a[6] = &hA; a[7] = &dA;
         CudaDriverApi.cuLaunchKernel(_hcPostMixF32, Blocks(tokens * hc * dim), 1, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0)
             .ThrowOnError();
-    }
-
-    /// <summary>In-place interleaved rotary of the [dimOffset, dimOffset + 2*half) slice; one thread per pair.</summary>
-    public unsafe void LaunchRopeInterleavedOffset(ulong x, ulong cos, ulong sin, long positions, int heads, int dim,
-        int half, int dimOffset, nint stream)
-    {
-        if (_ropeInterleavedOffsetF32 == 0) throw new InvalidOperationException("latent_positions.ptx not present in the Ptx folder.");
-        ulong xA = x, cA = cos, sA = sin;
-        long pA = positions;
-        int hA = heads, dA = dim, halfA = half, oA = dimOffset;
-        void** a = stackalloc void*[8];
-        a[0] = &xA; a[1] = &cA; a[2] = &sA; a[3] = &pA; a[4] = &hA; a[5] = &dA; a[6] = &halfA; a[7] = &oA;
-        CudaDriverApi.cuLaunchKernel(_ropeInterleavedOffsetF32, Blocks(positions * heads * half), 1, 1, BlockSize, 1, 1, 0,
-            stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Fills the [rows, cols] sliding-window ring slots; one thread per entry.</summary>

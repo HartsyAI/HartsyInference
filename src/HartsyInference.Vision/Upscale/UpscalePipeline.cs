@@ -1,8 +1,8 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Vision.Codec;
+using HartsyInference.Vision.Pipelines;
 
 namespace HartsyInference.Vision.Upscale;
 

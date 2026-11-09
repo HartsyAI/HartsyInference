@@ -19,6 +19,7 @@ is in the [Remaining work](#remaining-work) section below; bring-up debugging no
 | **NormalBAE** (surface normals, scannet NNET) | ✅ | Real-weight parity vs controlnet_aux `NormalBaeDetector` on a fixed 320×256 image, CPU backend (2026-07-16): **out_res1 avg err 7.9e-6**, all 14 stages ≤ 8.9e-6, e2e uint8 normal-RGB mismatch 1.5e-4. Test `NormalBaeParityTests`, oracle `dump_normalbae.py` + `diff_normalbae.py`. ([details](#normalbae)) |
 | **UperNet-Seg** (semantic segmentation, ADE20K 150-class, ConvNeXt-Small) | ✅ | Real-weight parity vs transformers `UperNetForSemanticSegmentation` (`openmmlab/upernet-convnext-small` — the diffusers-documented annotator for `control_v11p_sd15_seg`) on a real 512² image (bus.png), CPU backend (2026-07-16): all 7 tapped stages at float noise (**feat_0..3 ≤ 6.8e-7, psp_out 7.0e-7, fpn_out 1.3e-6, logits_q 5.7e-6** vs ref mean abs 15.3), **per-pixel argmax class agreement 100.000%** (0/262144; ≥99% is the documented interpolation-boundary tolerance), ADE20K palette **byte-exact** vs controlnet_aux `ade_palette()`. ([details](#upernet-seg)) |
 | **RMBG-1.4** (BriaRMBG / ISNet — background removal) | ✅ | Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). ([details](#rmbg-14)) |
+| **BiRefNet-matting** (`ZhengPeng7/BiRefNet-matting`, Swin-L; trimap-free alpha matte) | ✅ (CPU) | Real-weight parity vs the upstream PyTorch code at revision `eccde0a8…`, sha256-verified weights, CPU backend (2026-11-07): `BiRefNetMattingParityTests` passes at logits maxAbs < 0.05 / corr > 0.9999, preprocess maxAbs < 0.1, and the 8-bit matte within 2 LSB with ≤ 0.1 % of pixels off by more than 1 LSB (exact figures not logged). Licence: MIT (`ZhengPeng7/BiRefNet-matting` Hugging Face metadata, 2026-11-08). Catalog stays ValidationPending until a GPU run. Files: `src/HartsyInference.Vision/Matting/BiRefNet/`. |
 | **ArcFace IR-50** (InsightFace w600k_r50, face embedding) + **FaceAlignment** | ✅ | Real-weight parity vs onnxruntime on buffalo_l `w600k_r50.onnx` (2026-07-16): **512-d embedding cosine 1.000000, maxAbs ≤ 6.4e-6** on random + 2 real portrait crops; per-stage stem/layer1–4/emb all corr 1.0 (`ArcFaceParityTests` in `tests/HartsyInference.Vision.Tests/Parity/`, env `ARCFACE_WEIGHTS`/`ARCFACE_REF`; the per-stage debug test was removed 2026-08-06). ([details](#arcface-ir-50)) |
 
 ## Detection / segmentation — real-weight verified (✅, 2026-07-17)
@@ -52,11 +53,11 @@ Python step outside the engine. See `src/HartsyInference.Cli/Infra/ModelCatalog.
 | Model | Status | Notes |
 |---|---|---|
 | **Real-ESRGAN** (x4plus, x2plus, x4plus-anime-6B — RRDBNet super-resolution) | ✅ x4plus / ⚠️ x2plus, anime-6B | x4plus matches BasicSR on real weights (2026-11-03, CPU: network max \|Δ\| 1.7e-6, every output byte identical, untiled). Seeded x4 and x2 fixtures pin the network, the x2 reflect pad and unshuffle in the CPU lane. x2plus and anime-6B have only the 2026-09-09 real-weight CPU smoke (expected sizes, sharper than bilinear); tiled output is not compared. ([details](#real-esrgan)) |
+| **DINOv3 ViT-L/16** (448 px encoder: RoPE, 4 storage tokens, LayerScale, GELU MLP) | 🔬 encoder only | Real-weight encoder parity on the pinned `facebook/dinov3-vitl16-pretrain-lvd1689m` (2026-11-07, CPU FP32): peak-relative error ≤1.4e-6 at every stage (final norm: max abs 2.2e-5, rms 5.6e-7). No consumer in this change (HairDeck conditioning and GPU paths are not built). ViT-S/B are config-only. Weights are under the DINOv3 License (Meta, custom; not MIT or Apache). See [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). |
 
 ## Deferred (❌)
 
-**DINOv3** (needs encoder RoPE support — preset added but dimensionally-only), **EVA-CLIP** (EVA-02 vision
-tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), AM-RADIO.
+**EVA-CLIP** (EVA-02 vision tower: RoPE + SwiGLU + sub-LN — preset added, blocked on tower support), AM-RADIO.
 *(Done 2026-07-17, moved out of deferred: YOLO-seg head validated; SigLIP 2 + MetaCLIP presets are drop-ins;
 GPU-native MaxPool2D + depthwise-Conv kernels shipped with CUDA PTX + GPU-parity gate.)*
 See the [Remaining work](#remaining-work) section for the stretch list. **Segmentation ControlNet
@@ -77,7 +78,7 @@ Grounding DINO, YOLO-Face, YOLO-seg, SigLIP 2) are omitted.
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
 
 ### Deferred stretch models
-- [ ] DINOv3 (encoder RoPE support).
+- [x] DINOv3 ViT-L/16 encoder with RoPE at 448 px (encoder parity in the table above; consumers still open).
 - [ ] EVA-CLIP / EVA-02 vision tower (RoPE + SwiGLU + sub-LN).
 - [ ] AM-RADIO; MetaCLIP presets already exist (recorded above).
 
@@ -115,7 +116,7 @@ Real-weight parity vs transformers `UperNetForSemanticSegmentation` (`openmmlab/
 
 ### RMBG-1.4
 
-Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full U²-Net-style nested-U (`conv_in` + 6 encoder + 5 decoder RSU blocks + `side1`) at 1024²; mask **maxAbs 2.9e-6, corr 1.00000000** vs the upstream model (test `RmbgParityTests`, oracle `dump_rmbg.py`). Clean chair segmentation confirmed visually. **BatchNorm folded into the conv at load; dilated convs realized as zero-inflated 3×3 kernels** (no dilation kernel needed); host bilinear-2× upsample (CUDA has no `UpsampleBilinear2D`). `RmbgBackgroundRemover` (preprocess + alpha + gray-0.5 composite) is the pure-C# replacement for the Python `rembg` step the **image→3D pipelines** (TripoSR / Hunyuan3D) need — see PHASE_11 §6. Since alpha.56 `VisionMode.BackgroundRemoval` also returns the matte as `ImageData.Alpha` (8-bit, straight), so consumers that want a cutout rather than the gray composite get one from the same forward pass. Since alpha.65 `ImageRequest.RemoveBackground` drives the same net as an image-generation post step (`BackgroundRemovalStage`, after the refiner and segment passes) and returns the matte as `ImageResult.Alpha` over untouched RGB — that is what Swarm's Remove Background param maps to. Files: `src/HartsyInference.Vision/Rmbg/`.
+Real-weight `briaai/RMBG-1.4` foreground mask on the RTX 4090 (2026-07-01). Full U²-Net-style nested-U (`conv_in` + 6 encoder + 5 decoder RSU blocks + `side1`) at 1024²; mask **maxAbs 2.9e-6, corr 1.00000000** vs the upstream model (test `RmbgParityTests`, oracle `dump_rmbg.py`). Clean chair segmentation confirmed visually. **BatchNorm folded into the conv at load; dilated convs realized as zero-inflated 3×3 kernels** (no dilation kernel needed); host bilinear-2× upsample (no backend op exists for it). `RmbgBackgroundRemover` (preprocess + alpha + gray-0.5 composite) is the pure-C# replacement for the Python `rembg` step the **image→3D pipelines** (TripoSR / Hunyuan3D) need — see PHASE_11 §6. Since alpha.56 `VisionMode.BackgroundRemoval` also returns the matte as `ImageData.Alpha` (8-bit, straight), so consumers that want a cutout rather than the gray composite get one from the same forward pass. Since alpha.65 `ImageRequest.RemoveBackground` drives the same net as an image-generation post step (`BackgroundRemovalStage`, after the refiner and segment passes) and returns the matte as `ImageResult.Alpha` over untouched RGB — that is what Swarm's Remove Background param maps to. Files: `src/HartsyInference.Vision/Rmbg/`.
 
 ### Real-ESRGAN
 

@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>Formats narrower than F32 an attention kernel may store operands in and multiply with.</summary>
 [Flags]

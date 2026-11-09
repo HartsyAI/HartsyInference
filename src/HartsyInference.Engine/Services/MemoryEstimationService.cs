@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Host;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Dispatch;

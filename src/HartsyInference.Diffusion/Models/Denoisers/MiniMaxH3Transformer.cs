@@ -1,9 +1,14 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Gating;
+using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.MiniMaxH3;
@@ -755,8 +760,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
-                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
+                backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             }
 
             ProbeV(v, prefix);
@@ -821,8 +826,8 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             if (cos is not null && sin is not null)
             {
                 int rotary = MiniMaxH3Rope.RotaryDim(_config.RopeInvFreqLen);
-                backend.ApplyRopeSingleHeadMajor(q, cos, sin, rotary);
-                backend.ApplyRopeSingleHeadMajor(k, cos, sin, rotary);
+                backend.Rotary(RotaryCall.HeadMajor(q, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
+                backend.Rotary(RotaryCall.HeadMajor(k, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rotary));
             }
 
             Tensor attention = new Tensor(headed, DType.F32);
@@ -906,7 +911,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                     using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
                     backend.SliceRows(cosChunk, cos, r0);
                     backend.SliceRows(sinChunk, sin, r0);
-                    backend.ApplyRopeSingleHeadMajor(kc, cosChunk, sinChunk, rot);
+                    backend.Rotary(RotaryCall.HeadMajor(kc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot));
                 }
                 // k/v land straight in their full buffers and the chunk dies here; holding them in lists to Concat
                 // afterwards kept a SECOND full-size copy of each alive at the pass boundary (peak 5x seq*inner*F32
@@ -940,7 +945,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                         using Tensor sinChunk = new Tensor(new TensorShape(c, sin!.Shape[sin.Shape.Rank - 1]), DType.F32);
                         backend.SliceRows(cosChunk, cos, r0);
                         backend.SliceRows(sinChunk, sin, r0);
-                        backend.ApplyRopeSingleHeadMajor(qc, cosChunk, sinChunk, rot2);
+                        backend.Rotary(RotaryCall.HeadMajor(qc, cosChunk, sinChunk, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, rot2));
                     }
                     using Tensor attnChunk = new Tensor(new TensorShape(1, heads, c, hd), DType.F32);
                     backend.ScaledDotProductAttention(attnChunk, qc, kFull, vFull, null, 1f / MathF.Sqrt(hd));
@@ -966,7 +971,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     }
 
     /// <summary>Gated MLP: fc1 emits the packed gate/up pair, SwiGLU folds it, fc2 projects back. The gate/up pair
-    /// stays F32 — GluActivate has an F32 and a BF16 kernel but no F16 one — so only fc2's result rejoins the
+    /// stays F32 — the gated FFN ran as F32 or BF16 here, never F16 — so only fc2's result rejoins the
     /// stream at the body dtype.</summary>
     private Tensor Mlp(IBackend backend, Tensor x, string prefix)
     {
@@ -974,7 +979,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         Tensor gateUp = new Tensor(new TensorShape(seq, ffn * 2), DType.F32);
         backend.Linear(gateUp, x, Require($"{prefix}.fc1.weight"), Optional($"{prefix}.fc1.bias"));
         Tensor act = new Tensor(new TensorShape(seq, ffn), DType.F32);
-        backend.GluActivate(act, gateUp, ffn, gelu: false);
+        backend.Glu(act, gateUp, GluSpec.SwiGlu);
         gateUp.Dispose();
         Tensor outT = new Tensor(x.Shape, BodyDType);
         backend.Linear(outT, act, Require($"{prefix}.fc2.weight"), Optional($"{prefix}.fc2.bias"));
@@ -1008,7 +1013,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
                 using Tensor gateUpChunk = new Tensor(new TensorShape(c, ffn * 2), DType.F32);
                 backend.Linear(gateUpChunk, xChunk, fc1W, fc1B);
                 using Tensor actChunk = new Tensor(new TensorShape(c, ffn), DType.F32);
-                backend.GluActivate(actChunk, gateUpChunk, ffn, gelu: false);
+                backend.Glu(actChunk, gateUpChunk, GluSpec.SwiGlu);
                 using Tensor outChunk = new Tensor(WithFirstDim(x.Shape, c), BodyDType);
                 backend.Linear(outChunk, actChunk, fc2W, fc2B);
                 backend.ScatterRowsGeneric(outT, outChunk, r0);
@@ -1070,7 +1075,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             fp8.Dispose();
         }
         Tensor outT = new Tensor(h.Shape, h.DType);
-        backend.AffineBroadcastRowIndexed(outT, h, scale, shift, modIndex);
+        backend.NormModulate(NormModulateCall.Rows(outT, h, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(h, scale, shift, modIndex, ScaleMode.OnePlus)));
         return outT;
     }
 
@@ -1151,7 +1156,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             else
             {
                 using Tensor indices = TimestepIndexTensor(targetTimestepRows);
-                backend.AffineBroadcastRowIndexed(modulated, slice, scale, shift, indices);
+                backend.NormModulate(NormModulateCall.Rows(modulated, slice, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(slice, scale, shift, indices, ScaleMode.OnePlus)));
             }
         }
         Tensor weight = weightOverride ?? Require($"{prefix}.weight");

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
 

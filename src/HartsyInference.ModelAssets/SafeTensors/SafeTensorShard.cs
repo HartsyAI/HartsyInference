@@ -1,5 +1,5 @@
 using HartsyInference.Core.IO;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.ModelAssets.SafeTensors;
 

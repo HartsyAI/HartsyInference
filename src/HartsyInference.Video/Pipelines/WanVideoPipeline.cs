@@ -1,7 +1,7 @@
 using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -13,6 +13,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Core.Memory.Vram.Streaming;
 
 namespace HartsyInference.Video.Pipelines;
 
@@ -798,7 +799,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Logs.Warning("Wan-Video V2V pipeline is first-run-validation pending — numerics unverified vs the reference checkpoint.");
         // V2V is the one Wan loop whose update rule IS a plain flow Euler (LancePipelineCommon.EulerCfgStep,
         // z -= v·dt over the UniPC sigma grid), so it looks convertible — but it is deliberately not converted.
-        // That step is a HOST-side scalar loop, where EulerSampler's step is the Backend.CfgEulerStep device op:
+        // That step is a HOST-side scalar loop, where EulerSampler's step is the Backend.GuidedEulerStep device op:
         // swapping it changes the default path's op sequence and its residency (three "LOAD-BEARING for VaeDevice"
         // sites below rely on the latents being host-current when the loop ends). It is also a documented stand-in
         // — the VALIDATION-PENDING note above says this loop becomes UniPC once the partial-trajectory start is

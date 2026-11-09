@@ -131,6 +131,26 @@ IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M by known-block test only, no small published file).
 | **GenericTransformer** (Qwen2/Qwen3/Llama-3) | ✅ | Parity tests; backs the text encoders + native LLM. Llama-3 RoPE NTK-by-parts validated. |
 | **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Diff tests present (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`); Pile-T5 == UMT5 (per-layer rel-attn-bias). |
 
+## MOSS-VL-Realtime — in progress (🔧, not runnable yet)
+
+OpenMOSS 48-layer VLM with 12 gated cross-attention layers, a Qwen3-VL-style ViT with deepstack taps, and a realtime
+streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCHITECTURE.md). Weights:
+`OpenMOSS-Team/MOSS-VL-Realtime-SGLANG` (BF16, 22.7 GB, Apache-2.0, not gated), placed at
+`Models/LLM/moss-vl-realtime/`; the five shards match their LFS sha256.
+
+- ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
+- ✅ Vision tower with deepstack merger: relative parity 2.7e-6 against a numpy transcription on the real weights (grid 1×16×24).
+- ✅ Cross-attention query and key RoPE and the row mask, as an optional `MultimodalRope` (mllama default unchanged).
+- ✅ Text model (`Models/MossVl/MossVlTextDecoder`): `GenericTransformer` over `model.language_model.*` and `lm_head`, plus the
+  vision separator; single-image positions with interleaved M-RoPE (`MossVlPositions`).
+- ✅ Text parity on the real weights, layers 0–2 (self, self, gated cross): the cross layer's own delta matches the numpy
+  transcription at relative 5e-7. The gates are about 1e-2, so the delta is checked directly; a missing query rotation fails it.
+- ✅ Logits and KV-cached decode (`MossVlDecodeSession`): prefill and one decode step match the reference at relative ~1e-6, and the greedy token agrees (`MossVlGenerationParityTests`).
+- ✅ Tokenizer: the chat template encodes to the HF `tokenizers` ids through the shared `tokenizer.json` loader (`MossVlTokenizerTests`).
+- ✅ Generator (`MossVlGenerator.Generate`): sampling loop on the shared `SamplerChain`, same defaults as `MllamaGenerator`.
+- ❌ Multi-image cross-attention masks (refused with an error). Image preprocessing and vision-tower wiring belong to Engine composition.
+- ❌ Realtime session loop, CUDA/Vulkan kernels, full 48-layer run. The full F32 text model needs about 42 GB, more than this machine's 40 GB of RAM, so a full-model run needs streamed or BF16 weights first. No real generation has run.
+
 ## Remaining work
 
 Distilled from the retired PHASE_12_LANGUAGE / LLM_MODEL_COVERAGE / LLM_CLI_CATALOG_HANDOFF /
@@ -142,6 +162,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Architecture coverage frontier
 - [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
+- [ ] ERNIE-5.5-Flash-Base (`ernie-5.5-flash-base`, 288 GB FP8, `model_type` `ernie5_5_moe`): structural only. `Ernie5Config`
+  reads the real `config.json` and the loader refuses it by name. Missing: SiTU-GLU, hybrid compressed attention with the DSA
+  indexer, mHC, latent MoE, grouped output projection, MTP. Reference code is in `baidu/vLLM-ERNIE`
+  (`src/vllm_ernie/models/ernie5_5/`). No real-weight run. License excludes the EU, UK and South Korea.
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
   it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).
 
@@ -151,7 +175,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   and an `ITextStreamFilter` installed through `EngineOptions.TextStreamFilterFactory` can emit `NativeToolCall`
   chunks and stop generation as `StopReason.ToolCall`. The engine itself parses nothing; `ForceToolId` is not
   implemented.
-- Parsing lives in the opt-in `HartsyInference.Tools` package (alpha.222): `ToolCalling.Install(EngineOptions)` plugs a
+- Parsing lives in Engine's opt-in `ToolCalling` namespace (a separate package until alpha.402): `ToolCallParsing.Install(EngineOptions)` plugs a
   per-format parser (Hermes/Qwen, Llama-3, Gemma 4, Mistral) into the seam, `ToolRegistry`/`ToolSchema.FromDelegate`
   describe tools, `ToolLoop` runs dispatch → `TextRole.Tool` → re-run. See [TOOL_CALLING.md](../Research/TOOL_CALLING.md).
   Trap: in every local GGUF the markers (`<tool_call>`, `<|python_tag|>`, `[TOOL_CALLS]`, Gemma's `<|tool_call>` and

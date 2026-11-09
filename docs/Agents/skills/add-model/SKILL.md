@@ -5,69 +5,87 @@ description: Add a newly released model (image, video, audio, LLM, vision, 3D) t
 
 # Add a model
 
-The goal is **full feature support, verified on real weights, in the engine and in the SwarmUI extension** — not a
-text-to-image smoke test. A model is not done while any feature the official release or ComfyUI supports is silently
-missing. Each one is either implemented and verified, or refused with a clear error and recorded in the status row.
+<goal>
+Deliver full feature support, verified on real weights, in both the engine and the SwarmUI extension. A text-to-image
+smoke test is not enough. Treat the model as unfinished while any feature that the official release or ComfyUI supports
+is missing. Each such feature is either implemented and verified, or refused with a clear error and recorded in the
+status row.
+</goal>
 
-Read first, once: `AGENTS.md`, `docs/CODE_STYLE.md`, `docs/Agents/AGENTS.md` (shipping, shared design rules, shared
-statics), `docs/Agents/ADD_MODEL.md`, `docs/Agents/ENGINE_PATTERNS.md`, and the relevant `docs/Checklists/MODEL_STATUS_*.md`.
-This skill orders the work; those documents own the rules.
+<reading>
+Read these once, at the start: `AGENTS.md`, `docs/CODE_STYLE.md`, `docs/Agents/AGENTS.md` (shipping, shared design rules,
+shared statics), `docs/Agents/ADD_MODEL.md`, `docs/Agents/ENGINE_PATTERNS.md`, and the relevant
+`docs/Checklists/MODEL_STATUS_*.md`. This skill sets the order of the work. Those documents own the rules.
+</reading>
 
-## Rules that bite (check before every phase)
+<rules_that_bite>
+Check these before every phase. Each one exists because it has already caused a failure.
 
-- **Author is kalebbroo alone.** No co-author, session or tool-attribution trailer in commits, PR bodies or the changelog,
-  whatever a tool's default says.
-- **Generations run through SwarmUI**, never standalone `dotnet test`/CLI gens for verification (the engine-through-Swarm
-  path is what users run). CLI/API checks come after, for byte-identity.
-- **GPUs are shared.** 4090 lock `/tmp/claude-1000/gpu4090.lock`, 3060 lock `/tmp/claude-1000/vk_3060.lock`. Take the lock first, then
-  wait for the 10-minute quiet window with `tests/swarm-quiet-window.sh` (global queue, foreign GPU processes, restarts and
-  AudioLab/LLM activity, not just the journal's "requested N image" lines) before a restart or timed batch. After a timed batch run `tests/swarm-quiet-window.sh --verify-since <UTC start of the batch>` (exit 4 means redo the batch) and sample `nvidia-smi` during it for foreign GPU processes, which the script cannot see afterwards; discard any affected run. Your own Swarm requests count toward the verify: compare its `requested` lines with what you sent. Another agent's `tests/regression-ab.sh` stops the live Swarm per run and restores it: if Swarm is
-  down, check `ps` for it before starting it. Never evict or restart Swarm mid-gen. Index 0/1 is reversed between engine,
-  `CUDA_VISIBLE_DEVICES` and `nvidia-smi` (see memory notes); confirm the device from the engine log line.
-- **Models live on the RAID** (`/mnt/model-storage/Models`). Look there first. Download through the Swarm API
-  (`POST /API/ModelBrowserStartDownload` with `{session_id,url,type,name}`; types Stable-Diffusion, Clip, VAE, LoRA,
-  ControlNet, LLM, Audio; `name` has no extension or subfolders; poll `ModelBrowserListDownloads`). Ask the user before any
-  download and state file name, source and size. Gated repo: look for an ungated repack (Comfy-Org, Kijai, city96) before
-  escalating. Record sha256 (Hugging Face LFS oid from `https://huggingface.co/api/models/<repo>/tree/main/<dir>`).
-- **No installs outside the project/venv.** Python for baselines goes in a venv under the scratchpad. No system packages.
-- **Real-weight facts beat reading.** Read the checkpoint header (safetensors JSON header via `python3 -I`) before trusting
-  any config constant: layer counts, injection layers, FFN widths, key naming layout (ComfyUI-native vs diffusers; a
-  repack can differ from the "same" VAE — the Comfy-Org FLUX.2 VAE needed a key remap).
-- **Sessions:** `start_session` only works from a message typed in the desktop app (not Remote Control). Subagents work
-  anywhere; brief them to run foreground with timeouts, use unique scratchpad prefixes, never touch the live Swarm tree or
-  the GPUs, and verify what they report.
-- **Licence:** record it (catalog entry, docs, extension README). Non-commercial weights stay flagged everywhere.
+- **Author is kalebbroo alone.** Leave co-author, session and tool-attribution trailers out of commits, PR bodies and the
+  changelog, whatever a tool's default is.
+- **Verify through SwarmUI.** Run generations through SwarmUI, not through standalone `dotnet test` or CLI generations.
+  The engine-through-Swarm path is the one users run. Run the CLI and API checks afterwards, to confirm byte identity.
+- **Share the GPUs.** The 4090 lock is `/tmp/claude-1000/gpu4090.lock` and the 3060 lock is `/tmp/claude-1000/vk_3060.lock`.
+  Take the lock first. Then wait for the 10-minute quiet window with `tests/swarm-quiet-window.sh`, which checks the global
+  queue, foreign GPU processes, restarts and AudioLab or LLM activity, not only the journal's "requested N image" lines.
+  Do this before any restart or timed batch. After a timed batch, run `tests/swarm-quiet-window.sh --verify-since <UTC start
+  of the batch>`. Exit code 4 means you must redo the batch. Sample `nvidia-smi` during the batch too, because the script
+  cannot see foreign GPU processes afterwards. Discard any affected run. Count your own Swarm requests toward the verify by
+  comparing its `requested` lines with what you sent. If another agent's `tests/regression-ab.sh` stops the live Swarm for
+  a run, it restores Swarm afterwards. If Swarm is down, check `ps` before you start it. Do not evict or restart Swarm in the
+  middle of a generation. The device index 0 and 1 mapping is reversed between the engine, `CUDA_VISIBLE_DEVICES` and
+  `nvidia-smi`, so confirm the device from the engine log line (see the memory notes).
+- **Look for models on the RAID first** (`/mnt/model-storage/Models`). To download, use the Swarm API:
+  `POST /API/ModelBrowserStartDownload` with `{session_id,url,type,name}`. Types are Stable-Diffusion, Clip, VAE, LoRA,
+  ControlNet, LLM and Audio. `name` has no extension and no subfolders. Poll `ModelBrowserListDownloads`. Ask the user
+  before any download, and state the file name, source and size. If the repo is gated, look for an ungated repack
+  (Comfy-Org, Kijai or city96) before escalating. Record the sha256 from the Hugging Face LFS oid, found at
+  `https://huggingface.co/api/models/<repo>/tree/main/<dir>`.
+- **Install only inside the project or a venv.** Put Python baselines in a venv under the scratchpad. Do not install system
+  packages.
+- **Trust the real weights over the docs.** Read the checkpoint header (the safetensors JSON header, via `python3 -I`)
+  before you trust any config constant. Check layer counts, injection layers, FFN widths and the key naming layout
+  (ComfyUI-native or diffusers). A repack can differ from the "same" VAE: the Comfy-Org FLUX.2 VAE needed a key remap.
+- **Sessions.** `start_session` works only from a message typed in the desktop app, not from Remote Control. Subagents work
+  anywhere. Brief them to run in the foreground with timeouts, to use unique scratchpad prefixes, and to stay away from the
+  live Swarm tree and the GPUs. Verify what they report before you rely on it.
+- **Licence.** Record the licence in the catalog entry, the docs and the extension README. Keep non-commercial weights
+  flagged everywhere they appear.
+</rules_that_bite>
 
-## Phase 1 — Research dossier
+## Phase 1: Research dossier
 
-Write `docs/Research/<MODEL>_ARCHITECTURE.md` (and keep it current). Use WebFetch/WebSearch and `gh`; cite URLs and commit
-SHAs. Cover:
+Write `docs/Research/<MODEL>_ARCHITECTURE.md`, and keep it current. Use WebFetch, WebSearch and `gh`. Cite URLs and commit
+SHAs. Cover these six points:
 
-1. **Release inventory:** every checkpoint and variant (base/dev, turbo/distilled, edit, control, inpaint, lite, quantized),
-   sizes, dtypes, licence, gating, official Hugging Face and GitHub repos, paper, diffusers pipeline class, and
-   Comfy-Org/Kijai/city96 repacks and quants (bf16, fp8, int8 ConvRot, nvfp4, GGUF) with sha256.
-2. **Official parameters** from the model card and reference code: steps, guidance, resolution rules (multiple-of, ~MP),
-   sampler/scheduler/shift, prediction type, noise/timestep convention, text encoder and layers tapped, VAE, prompt
-   format/template (JSON captions, chat template, system prompt), negative-prompt behaviour, max reference images.
-3. **Feature matrix** (one row per feature, columns: official release / ComfyUI / diffusers / SwarmUI core / engine today /
-   plan): text-to-image, img2img, inpaint/mask, instruction edit, multi-reference, ControlNet/control modes, IP-adapter /
-   image prompt, LoRA (format, key naming, trainers), refiner, regional prompts, in-image text rendering, styles,
-   upscale/expand/outpaint, video/audio equivalents (T2V, I2V, audio-reference, streaming). Mark cloud-only features
-   (partner nodes) as out of scope but listed.
-4. **ComfyUI support:** pin a commit; read `comfy/ldm/<model>`, `comfy/text_encoders`, `comfy/supported_models.py`,
-   `comfy/model_base.py`, `comfy/model_sampling.py`, `comfy_extras/nodes_<model>.py`, templates and docs.comfy.org. ComfyUI
-   is the authoritative implementation for the Comfy-Org checkpoint layout. Note every constant it hardcodes.
-5. **SwarmUI core support:** does core already detect the checkpoint (architecture / compat class id, e.g. `fibo-2`)? Look
-   at what `ListModels` reports for the file and the core `T2IModelClassSorter` / compat classes.
-6. **Existing engine support:** grep `ModelCatalog.cs`, `RecipeRegistry`, `docs/Checklists/MODEL_STATUS*.md`,
-   `docs/Research/`, and the extension's `Generation/ModelSupport.cs`. Another family may already cover it.
+1. **Release inventory.** List every checkpoint and variant: base or dev, turbo or distilled, edit, control, inpaint, lite,
+   and quantized. Include sizes, dtypes, licence, gating, the official Hugging Face and GitHub repos, the paper, the
+   diffusers pipeline class, and the Comfy-Org, Kijai and city96 repacks and quants (bf16, fp8, int8 ConvRot, nvfp4, GGUF)
+   with their sha256 values.
+2. **Official parameters** from the model card and the reference code: steps, guidance, resolution rules (multiple-of and
+   approximate megapixels), sampler, scheduler and shift, prediction type, the noise and timestep convention, the text
+   encoder and the layers it taps, the VAE, the prompt format (JSON captions, chat template, system prompt), negative prompt
+   behaviour, and the maximum number of reference images.
+3. **Feature matrix.** Write one row per feature. Columns are official release, ComfyUI, diffusers, SwarmUI core, engine
+   today and plan. Features include text-to-image, img2img, inpaint and mask, instruction edit, multi-reference,
+   ControlNet and control modes, IP-adapter or image prompt, LoRA (format, key naming, trainers), refiner, regional prompts,
+   in-image text rendering, styles, upscale, expand and outpaint, and the video and audio equivalents (T2V, I2V,
+   audio reference, streaming). Mark cloud-only features (partner nodes) as out of scope, but still list them.
+4. **ComfyUI support.** Pin a commit. Read `comfy/ldm/<model>`, `comfy/text_encoders`, `comfy/supported_models.py`,
+   `comfy/model_base.py`, `comfy/model_sampling.py`, `comfy_extras/nodes_<model>.py`, the templates and docs.comfy.org.
+   ComfyUI is the authoritative implementation for the Comfy-Org checkpoint layout. Note every constant it hard-codes.
+5. **SwarmUI core support.** Find out whether core already detects the checkpoint, through its architecture or compat class
+   id (for example `fibo-2`). Check what `ListModels` reports for the file, and the core `T2IModelClassSorter` and compat
+   classes.
+6. **Existing engine support.** Grep `ModelCatalog.cs`, `RecipeRegistry`, `docs/Checklists/MODEL_STATUS*.md`, `docs/Research/`,
+   and the extension's `Generation/ModelSupport.cs`. Another family may already cover the model.
 
 End the dossier with the open questions that only real weights or a GPU can answer.
 
-## Phase 2 — Reuse map (wire in, do not rewrite)
+## Phase 2: Reuse map (wire in, do not rewrite)
 
-For each feature in the matrix, name the existing code to reuse and the sibling recipe to copy. Confirm each exists with
-grep before relying on it (names move). Starting points:
+For each feature in the matrix, name the existing code to reuse and the sibling recipe to copy. Confirm each one with grep
+before you rely on it, because names move. These are the starting points:
 
 | Need | Look at |
 |---|---|
@@ -75,131 +93,155 @@ grep before relying on it (names move). Starting points:
 | Pipelines: img2img, inpaint, masks, refs | `Img2ImgSetup.Prepare`, `ReferenceImageResolver`/`ReferenceImagePolicy`, `Flux3RecipePipeline`, `ZImageRecipePipeline` |
 | Schedulers, CFG, noise | `SchedulerFactory`, `FlowMatchEulerDiscreteScheduler`, `CfgHelper`, `SeedGenerator` |
 | DiT blocks, RoPE, attention | `Diffusion/Models/Denoisers/DiTBlocks` (`ZImageBlock`, `ZImageRope`, `SegmentModulation`, `TokenSegmentLayout`), `Core/Layers/Attention`, `DiTUtils` |
-| Text encoders | `LlamaStyleEncoder` (Qwen3/Qwen3-VL taps), `VisionPlaceholderPrompt` + `VisionTokenSplice` for image tokens, tokenizers under `ModelAssets/Tokenizers` |
-| VAEs | `Flux2VaeComponents` (+`ToDiffusersLayout`), `VaeDecoder/Encoder`, `Flux2LatentOps` (patchify/BN), tiled decode |
-| Quantization | `QuantizedWeightPolicy`, `Int8ConvRotCodec`, `Nvfp4ResidentCodec`, `ComfyQuantDescriptor`, `CheckpointQuantizer`, `docs/Research/QUANTIZATION_COMFY_FORMATS.md`, how Qwen-Image 2.1 / LTX-2 / LlamaStyleEncoder consume them |
-| LoRA | `ModelAssets/Lora/LoraStack`, `ImageFeatures.Lora`, how Z-Image/Flux merge stacks |
+| Text encoders | `LlamaStyleEncoder` (Qwen3 and Qwen3-VL taps), `VisionPlaceholderPrompt` + `VisionTokenSplice` for image tokens, tokenizers under `ModelAssets/Tokenizers` |
+| VAEs | `Flux2VaeComponents` (+`ToDiffusersLayout`), `VaeDecoder/Encoder`, `Flux2LatentOps` (patchify and BN), tiled decode |
+| Quantization | `QuantizedWeightPolicy`, `Int8ConvRotCodec`, `Nvfp4ResidentCodec`, `ComfyQuantDescriptor`, `CheckpointQuantizer`, `docs/Research/QUANTIZATION_COMFY_FORMATS.md`, and how Qwen-Image 2.1, LTX-2 and `LlamaStyleEncoder` consume them |
+| LoRA | `ModelAssets/Lora/LoraStack`, `ImageFeatures.Lora`, and how Z-Image and Flux merge stacks |
 | Checkpoint conversion | `CheckpointConvertUtils` (key remaps, fused-QKV splits), `ComponentLoader`, `CheckpointSource` |
 | Side models, downloads | `SideModels.cs`, `ModelCatalog.cs`, `ModelFileLocator`, `ModelDownloader` |
-| ControlNet / IP-adapter | existing `ImageFeatures.ControlNet/IpAdapter` recipes |
+| ControlNet and IP-adapter | the existing `ImageFeatures.ControlNet` and `ImageFeatures.IpAdapter` recipes |
 
-Produce a short plan: what is new code (usually the denoiser block, text template, conversion, recipe glue) versus reused.
+Write a short plan that separates new code (usually the denoiser block, the text template, the conversion and the recipe
+glue) from reused code.
 
-## Phase 3 — Baseline from the official implementation
+## Phase 3: Baseline from the official implementation
 
-Establish ground truth **before** porting, on the same GPU and weights, so every later claim has a reference.
+Establish ground truth before you port, on the same GPU and the same weights. Every later claim then has a reference.
 
-1. Venv under the scratchpad; install the official package at a pinned commit (diffusers main / the model's repo). Run the
-   official inference at official settings, fixed seed, the prompt set below, same resolution. Record: output images,
-   per-step ms, total seconds, peak VRAM (`torch.cuda.max_memory_allocated`), library versions, dtype/precision.
-2. Run **ComfyUI at the pinned commit** (the bench install is `/mnt/model-storage/Models/bench-comfy/ComfyUI`; update it to the
-   needed commit, run it on a spare port, not through Swarm) with the **same precision and quant** (bf16 vs bf16, fp8 vs fp8
-   with `--fp8_e4m3fn-unet --fast fp8_matrix_mult`). Record the same numbers. Never compare our fp8 to Comfy's bf16.
-3. Save parity artifacts: sigma schedule, the text-encoder outputs for the prompt, the seeded latent, the first denoise
-   step's velocity/output, the final latents.
-4. **Prompt set** (≥6): a simple subject, a complex scene, text-in-image, a person, a prompt in the model's native
-   structured format, and for edit models a source image with an instruction, a masked edit and multi-reference. Look at
-   every output and write what you see; a model "works" only when output matches the prompt.
-5. Quality reference: keep official outputs next to ours in the PR evidence.
+1. Create a venv under the scratchpad, and install the official package at a pinned commit (diffusers main, or the model's
+   own repo). Run the official inference at official settings, with a fixed seed, the prompt set below, and the same
+   resolution. Record the output images, per-step ms, total seconds, peak VRAM (`torch.cuda.max_memory_allocated`), library
+   versions, and dtype and precision.
+2. Run ComfyUI at the pinned commit. The bench install is `/mnt/model-storage/Models/bench-comfy/ComfyUI`, so update it to
+   the needed commit. Run it on a spare port, not through Swarm. Use the same precision and quant: bf16 against bf16, and
+   fp8 against fp8 with `--fp8_e4m3fn-unet --fast fp8_matrix_mult`. Record the same numbers. Never compare our fp8 output
+   with Comfy's bf16 output.
+3. Save parity artifacts: the sigma schedule, the text-encoder outputs for the prompt, the seeded latent, the first denoise
+   step's velocity or output, and the final latents.
+4. Build a prompt set of at least six prompts. Include a simple subject, a complex scene, text in the image, a person, and a
+   prompt in the model's native structured format. For edit models, add a source image with an instruction, a masked edit,
+   and a multi-reference case. Look at every output and write down what you see. A model works only when its output
+   matches the prompt.
+5. Keep the official outputs next to ours in the PR evidence, as the quality reference.
 
-If the official code cannot run here (VRAM, gated weights), say so and use ComfyUI as the baseline; if neither runs, mark
-parity as unverified in the status row — never claim it.
+If the official code cannot run here (VRAM, gated weights), say so and use ComfyUI as the baseline. If neither runs, mark
+parity as unverified in the status row, and do not claim it.
 
-## Phase 4 — Implement (stacked, reviewable PRs)
+## Phase 4: Implement (stacked, reviewable PRs)
 
-Draft PR early, push as soon as commits exist, check `git branch --show-current` before each commit (shared checkout; use a
-worktree). Suggested stack, each PR tested and bisectable:
+Open a draft PR early and push as soon as commits exist. Run `git branch --show-current` before each commit, because the
+checkout is shared. Use a worktree. Each PR in the suggested stack is tested and can be bisected:
 
-1. Config from real headers (`FromWeights`), key layout, conversion; tiny-config fixture + a Python transcription of the
-   reference forward for CPU parity (state that it shares our reading of the reference).
-2. Text conditioning (tokenizer, template, encoder taps, normalisation) vs the saved reference tensors.
-3. Denoiser: blocks, RoPE, modulation; one-step parity vs reference velocity.
-4. Pipeline + scheduler + VAE; recipe, variants (base/turbo/edit), catalog, side models with sha256, SamplingCapabilities.
-5. One PR per feature in the matrix: img2img/inpaint, reference/edit, ControlNet, IP-adapter, LoRA, refiner, regional,
-   text rendering, quant builds. Reuse shared helpers; hoist generic code, parameterized, instead of per-model copies.
-6. Refusals: anything unimplemented throws a clear `NotSupportedException` naming the feature (never silently ignored).
+1. Config read from the real headers (`FromWeights`), key layout and conversion. Include a tiny-config fixture and a Python
+   transcription of the reference forward, for CPU parity. State that the transcription shares our reading of the reference.
+2. Text conditioning (tokenizer, template, encoder taps, normalisation), checked against the saved reference tensors.
+3. Denoiser: blocks, RoPE and modulation, with one-step parity against the reference velocity.
+4. Pipeline, scheduler and VAE. Then the recipe, the variants (base, turbo, edit), the catalog, side models with sha256, and
+   `SamplingCapabilities`.
+5. One PR per feature in the matrix: img2img and inpaint, reference and edit, ControlNet, IP-adapter, LoRA, refiner, regional
+   prompts, text rendering, and quant builds. Reuse shared helpers. Hoist generic code into one parameterized helper rather
+   than writing per-model copies.
+6. Refusals: any feature that is not implemented throws a clear `NotSupportedException` that names the feature. It is never
+   silently ignored.
 
-Engine conventions: pure C#, `IBackend` only, zero GC on hot paths, owned-tensor disposal (leaks hide in position-id and
-temporary tensors), no per-model env switches, version bump once per stacked batch on its last PR (`CHANGELOG.md` section +
-`Directory.Build.props`; earlier src/ merges in the batch ride along with that bump, per the owner's rule and AGENTS.md "a small change ships with the next bump"), resolve review conflicts by merging `origin/main` (interface contracts move: re-check
-`IRecipePipeline` and `ImageEffectiveSettings` after every merge).
+Engine conventions: pure C#, `IBackend` only, zero GC on hot paths, and owned-tensor disposal (leaks hide in position-id and
+temporary tensors). Use no per-model environment switches. Bump the version once per stacked batch, on its last PR:
+add a `CHANGELOG.md` section and update `Directory.Build.props`. Earlier `src/` merges in the batch ride along with that
+bump, per the owner's rule and the AGENTS.md note that a small change ships with the next bump. When review conflicts
+appear, resolve them by merging `origin/main`. Interface contracts move, so re-check `IRecipePipeline` and
+`ImageEffectiveSettings` after every merge.
 
-## Phase 5 — Verify on real weights through SwarmUI
+## Phase 5: Verify on real weights through SwarmUI
 
-1. Header check on the real checkpoint (config constants vs `FromWeights`), then deploy the build:
-   - Pack/build the engine, then run the live Swarm extension against it with the env route (no csproj edits):
-     `dotnet build src/HartsyInference.Cli -c Release -f net8.0`, remove
-     `<Swarm>/src/bin/extensions/SwarmExtensionSwarmUI-HartsyInference-Backend` and the extension `obj/`,
-     `systemctl --user set-environment UseLocalHartsy=true HartsyRepo=<engine worktree>`, restart the unit.
-   - **Restart race:** `systemctl --user restart swarmui` can start the new instance before the old one releases
-     `Data/.swarmui.lock` (exit 3, unit parked `failed`). Stop, wait for the port to close, `reset-failed`, then `start`.
-   - md5 the deployed `HartsyInference.Engine.dll` against the build. Swarm API calls need POST; get a session with
-     `/API/GetNewSession`; generate with `/API/GenerateText2Image`; take model names from `ListModels`.
-   - Afterwards revert every temporary change (applied extension diffs, the `UseLocalHartsy`/`HartsyRepo` environment) and
-     restart Swarm back onto its normal build, unless the user keeps it.
-2. Run the whole prompt set via Swarm. **Look at every image** (Read the PNG) and judge it against the prompt and the official
-   baseline; send the best ones to the user (`SendUserFile`).
-3. Parity: text bundles, one denoise step, sigma schedule, final image (SSIM + eyes) vs the Phase 3 artifacts; stop at the first
-   mismatch and bisect before touching tolerances.
-4. Speed/VRAM table: per-step ms, total, peak VRAM, load time; ours vs official Python vs ComfyUI, **same GPU and precision**,
-   engine-internal log times as well as API wall clock. State absolute numbers with the external baseline.
-5. Regression-check flagships after any deploy (Krea2-Turbo, Z-Image-Turbo, engine-internal times) and run the affected
-   model tests; shared code is load-bearing.
-6. Consumer check, per modality, with the same settings through both the CLI and the HTTP API: identical bytes for image
-   (`hartsy image -m <id> ...`, `POST /v1/images/generations`); for other modalities use the matching command and route
-   (`hartsy video|music|speak|transcribe|text|vision|3d|world`, see `src/HartsyInference.Cli/Commands` and
-   `docs/Agents/AGENTS.md` routing) and compare what that modality deterministically produces. Image is the worked example in
-   this skill; the phases themselves apply to every modality.
-7. Record in `docs/Checklists/MODEL_STATUS_<MODALITY>.md` and `PARITY_VERIFICATION.md`: exact checkpoint sha256, baseline
-   commits, GPU, precision, tolerances, evidence, limits. Say exactly what was and was not verified.
+1. Check the header of the real checkpoint against the config constants in `FromWeights`. Then deploy the build:
+   - Build the engine, then run the live Swarm extension against it through the environment route, with no csproj edits.
+     Run `dotnet build src/HartsyInference.Cli -c Release -f net8.0`. Remove
+     `<Swarm>/src/bin/extensions/SwarmExtensionSwarmUI-HartsyInference-Backend` and the extension `obj/`. Then run
+     `systemctl --user set-environment UseLocalHartsy=true HartsyRepo=<engine worktree>` and restart the unit.
+   - **Restart race.** `systemctl --user restart swarmui` can start the new instance before the old one releases
+     `Data/.swarmui.lock`. The result is exit code 3, and the unit parks in `failed`. To avoid this, stop the unit, wait for
+     the port to close, run `reset-failed`, and then `start`.
+   - Compare the md5 of the deployed `HartsyInference.Engine.dll` with the build. Swarm API calls must use POST. Get a session
+     from `/API/GetNewSession`, generate with `/API/GenerateText2Image`, and take the model names from `ListModels`.
+   - Afterwards, revert every temporary change: the applied extension diffs and the `UseLocalHartsy` and `HartsyRepo`
+     environment variables. Restart Swarm on its normal build, unless the user asks to keep the test build.
+2. Run the whole prompt set through Swarm. Read every PNG yourself, and judge each image against its prompt and the official
+   baseline. Send the best ones to the user with `SendUserFile`.
+3. Check parity: text bundles, one denoise step, the sigma schedule, and the final image (SSIM and eyes) against the Phase 3
+   artifacts. Stop at the first mismatch and bisect it before you touch any tolerance.
+4. Build a speed and VRAM table: per-step ms, total time, peak VRAM and load time, for ours, the official Python run and
+   ComfyUI. Use the same GPU and precision for all three. Include both the engine-internal log times and the API wall clock.
+   Give absolute numbers with the external baseline.
+5. After any deploy, regression-check the flagship models (Krea2-Turbo, Z-Image-Turbo, engine-internal times) and run the
+   tests for the affected models. Shared code is load-bearing.
+6. Check each modality's consumer through the CLI and the HTTP API, with the same settings, and confirm identical bytes. For
+   images, use `hartsy image -m <id> ...` and `POST /v1/images/generations`. For other modalities, use the matching command
+   and route (`hartsy video|music|speak|transcribe|text|vision|3d|world`; see `src/HartsyInference.Cli/Commands` and the
+   routing in `docs/Agents/AGENTS.md`). Compare what that modality deterministically produces. The image case is the worked
+   example in this skill. The phases apply to every modality.
+7. Record the results in `docs/Checklists/MODEL_STATUS_<MODALITY>.md` and `PARITY_VERIFICATION.md`: the exact checkpoint
+   sha256, the baseline commits, the GPU, the precision, the tolerances, the evidence and the limits. State exactly what was
+   and was not verified.
 
-## Phase 6 — SwarmUI extension
+## Phase 6: SwarmUI extension
 
-Repo: `HartsyAI/SwarmUI-HartsyInference-Backend` (live copy: `<Swarm>/src/Extensions/SwarmUI-HartsyInference-Backend`). Work in
-a **separate clone** on a branch; never edit the live tree except the temporary apply-and-revert test below.
+The repo is `HartsyAI/SwarmUI-HartsyInference-Backend`. The live copy is at `<Swarm>/src/Extensions/SwarmUI-HartsyInference-Backend`.
+Work in a separate clone on a branch. Edit the live tree only for the temporary apply-and-revert test described below.
 
-1. Find how existing recipe models are mapped (`Generation/ModelSupport.cs`: Swarm architecture/compat class id → engine family id;
-   `Kind`), parameter groups, defaults read from the engine recipe catalog, `docs/`, README model list and licence note.
+1. Find how existing recipe models are mapped in `Generation/ModelSupport.cs`: Swarm architecture or compat class id to
+   engine family id, and `Kind`. Also find the parameter groups, the defaults read from the engine recipe catalog, `docs/`,
+   the README model list and the licence note.
 2. Add the mapping and every parameter the model needs: reference-image inputs, mask, edit instruction, control inputs, LoRA,
-   resolution rules, per-variant defaults (turbo vs base), refusing unsupported Swarm params with clear text. Surface licences.
-3. The extension builds against the **published** engine (`HartsyInference` `*-*` from nuget.org): do not reference unpublished
-   types; note in the PR which engine version it needs.
-4. Test: with the user's approval apply the diff to the live extension tree, restart (see Phase 5), run T2I plus each feature
-   through the Swarm UI/API, then revert.
-5. Draft PR with what changed, what was verified, the engine-version dependency.
+   resolution rules, and per-variant defaults (turbo against base). Refuse unsupported Swarm parameters with clear text. Show
+   the licences.
+3. The extension builds against the published engine (`HartsyInference` `*-*` from nuget.org). Do not reference unpublished
+   types. Name the engine version the extension needs in the PR.
+4. Test: with the user's approval, apply the diff to the live extension tree and restart as described in Phase 5. Run T2I and
+   each feature through the Swarm UI or API. Then revert.
+5. Open a draft PR. It should say what changed, what was verified, and which engine version it depends on.
 
-Other consumers: CLI model aliases/help, API docs, `docs/Checklists/MODEL_STATUS_*`, AudioLab only for audio models.
+Other consumers: CLI model aliases and help, API docs, `docs/Checklists/MODEL_STATUS_*`, and AudioLab, but only for audio models.
 
-## Phase 7 — PRs and report
+## Phase 7: PRs and report
 
-- Engine PR stack and the extension PR, all drafts, bodies in plain language: what changed, evidence table (images, parity
-  numbers, speed vs baselines, VRAM), what is unverified, licence, links between PRs. Follow `docs/Agents/AGENTS.md`
-  "Shipping a change": CPU lane + area tests, `claude-code-review` / Codex review, resolve every thread on all three comment
-  surfaces, merge one PR at a time once every check is green.
-- Final answer to the user: feature matrix with status per feature, images shown, speed table with baselines, open items as
-  concrete work items (not "nice to have"), and a short TL;DR.
+- Open the engine PR stack and the extension PR, all as drafts. Write each body in plain language. It covers what changed,
+  an evidence table (images, parity numbers, speed against baselines, VRAM), what is still unverified, the licence, and links
+  between the PRs. Follow "Shipping a change" in `docs/Agents/AGENTS.md`: the CPU lane and area tests, the `claude-code-review`
+  and Codex reviews, resolving every thread on all three comment surfaces, and merging one PR at a time once every check is
+  green.
+- Give the user a final answer with the feature matrix and a status for each feature, the images, the speed table with its
+  baselines, and the open items as concrete work items rather than vague "nice to have" notes. End with a short TL;DR.
 
 ## Other modalities
 
-The phases hold for every modality; the worked details above (prompt set, SSIM, image viewing, T2I Swarm calls) are the image
-case. Swap them as follows, and record the choice in the dossier:
+The phases apply to every modality. The details above (prompt set, SSIM, image viewing, Swarm T2I calls) are the image case.
+For other modalities, swap in the following, and record the choice in the dossier:
 
-| Modality | Prompt/input set | Baseline and parity | What "looks right" means |
+| Modality | Prompt or input set | Baseline and parity | What "looks right" means |
 |---|---|---|---|
-| Video | text, image-to-video, first/last frame, audio if supported; short and long clips | official or ComfyUI run, per-step ms, peak VRAM, first-step output | view extracted frames and check motion, temporal consistency, prompt match |
-| Audio (TTS/music/FX) | short, long, multilingual, reference-voice or style inputs | official run; Whisper WER for speech, spectrogram/loudness for music | listen-equivalent checks: WER, duration, spectral sanity; never trust a silent or clipped file |
-| LLM / VLM | chat prompts, long context, tool or vision inputs | reference logits / greedy token parity on fixed prompts, tokens/s | coherent, correct answers; compare first-token logits against the reference before judging text |
-| Vision (detect/segment/depth/face) | labelled images | official metric on a small labelled set (mAP, IoU, MAE) | overlay the output on the input and look at it |
-| 3D | single image, multi-view, text | official mesh/render, vertex counts, time | render and view turntable frames; check for defects the metric misses |
+| Video | text, image-to-video, first and last frame, audio if supported; short and long clips | official or ComfyUI run, per-step ms, peak VRAM, first-step output | view extracted frames; check motion, temporal consistency and prompt match |
+| Audio (TTS, music, FX) | short, long, multilingual, reference-voice or style inputs | official run; Whisper WER for speech, spectrogram and loudness for music | listen-equivalent checks: WER, duration, spectral sanity. Never trust a silent or clipped file |
+| LLM or VLM | chat prompts, long context, tool or vision inputs | reference logits or greedy token parity on fixed prompts, tokens per second | coherent, correct answers. Compare first-token logits against the reference before you judge the text |
+| Vision (detect, segment, depth, face) | labelled images | official metric on a small labelled set (mAP, IoU, MAE) | overlay the output on the input and look at it |
+| 3D | single image, multi-view, text | official mesh or render, vertex counts, time | render and view turntable frames. Check for defects the metric misses |
 
-Swarm verification: use the modality's route in the extension (images through `GenerateText2Image`; audio through the AudioLab
-websocket/API; others per `docs/Agents/AGENTS.md`), and say plainly if a modality has no Swarm route yet.
+For Swarm verification, use the modality's route in the extension: images through `GenerateText2Image`, audio through the
+AudioLab websocket or API, and the others as `docs/Agents/AGENTS.md` describes. If a modality has no Swarm route yet, say so
+plainly.
 
 ## Common traps
 
-SDPA mask silently dropped; reshape-as-output zeros; fp8/ConvRot key remaps; F16 cast of BF16 weights (overflow, NaN SDPA);
-host loops on hot paths; position/ID tensors never disposed; "silent return" xUnit tests that pass without running (gate
-real-weight tests, label skips); `Directory.Build.props`/changelog conflicts on every merge; stale test bins after merges
-(AccessViolation); native extension rebuild keyed on git HEAD (delete the build dir); `UpdateAndRestart` "No changes found"
-after a manual pull (pass `force:true`); `pkill -f` kills your own shell (kill by PID); a repack's VAE/encoder key layout
-differing from the diffusers one; samplers/negative prompts a distilled model ignores (refuse or document, do not map).
+- An SDPA mask is silently dropped.
+- A reshape used as output gives zeros.
+- fp8 and ConvRot key remaps go wrong.
+- Casting BF16 weights to F16 overflows and produces NaN in SDPA.
+- Host loops end up on hot paths.
+- Position and ID tensors are never disposed.
+- "Silent return" xUnit tests pass without running. Gate real-weight tests, and label their skips.
+- `Directory.Build.props` and changelog conflicts appear on every merge.
+- Stale test binaries after merges cause AccessViolation.
+- The native extension rebuild is keyed on git HEAD, so delete the build directory to force it.
+- `UpdateAndRestart` reports "No changes found" after a manual pull. Pass `force:true`.
+- `pkill -f` kills your own shell. Kill by PID instead.
+- A repack's VAE or encoder key layout can differ from the diffusers one.
+- A distilled model ignores some samplers and negative prompts. Refuse them or document them. Do not map them.

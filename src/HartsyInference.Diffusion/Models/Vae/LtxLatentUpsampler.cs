@@ -1,5 +1,6 @@
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
@@ -102,7 +103,7 @@ public sealed unsafe class LtxLatentUpsampler
         x.Dispose();
         Tap?.Invoke("up_conv", projected);
         x = new Tensor(new TensorShape([b, MidChannels, f, (long)h * r, (long)w * r]), DType.F32);
-        backend.PixelShuffle2d(x, projected, r);
+        PixelShuffles.DepthToSpace(backend, x, projected, ShuffleSpec.ChannelsFirst((int)b, (int)f, (int)h, (int)w, MidChannels, 1, r, r, ChannelOrder.CTHW));
         projected.Dispose();
         Tap?.Invoke("up_shuffle", x);
 

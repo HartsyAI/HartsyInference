@@ -1,4 +1,3 @@
-using HartsyInference.Core.Schedulers;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Schedulers;

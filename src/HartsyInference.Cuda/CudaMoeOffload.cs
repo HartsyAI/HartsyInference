@@ -1,7 +1,7 @@
+using HartsyInference.Core.Backends.Cpu.Moe;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Moe.Residency;
 using HartsyInference.Core.Tensors;
-using HartsyInference.Cpu.Moe;
 
 namespace HartsyInference.Cuda;
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Routing;
 
 namespace HartsyInference.Core.Moe;
 
@@ -64,17 +65,4 @@ public sealed record RouterDescriptor(
     /// </summary>
     public bool CanLowerToBackend => NumExperts <= MoeRouteArgs.MaxExperts && BiasSpace == SelectionBiasSpace.Score;
 
-    /// <remarks>
-    /// Every scoring function produces non-negative scores (softmax, sigmoid, sqrt-softplus), so the masked-group value
-    /// of 0 always ranks below a kept group. A future scoring function that can go negative must revisit this.
-    /// </remarks>
-    /// <summary>Backend routing arguments for the given phase.</summary>
-    /// <exception cref="InvalidOperationException">The router is wider than the backend kernel supports; routing stays on the host.</exception>
-    public MoeRouteArgs ToRouteArgs(bool prefill)
-    {
-        if (!CanLowerToBackend)
-            throw new InvalidOperationException($"{NumExperts} experts exceed the backend router limit of {MoeRouteArgs.MaxExperts}.");
-        return new MoeRouteArgs(NumExperts, prefill ? TopKPrefill : TopKDecode, Scoring, GroupCount, GroupsKept,
-            MaskedGroupValue: 0f, Renormalize: Renormalize, RenormEpsilon: RenormEpsilon, Scale: Scale, LogitDivisor: LogitDivisor);
-    }
 }

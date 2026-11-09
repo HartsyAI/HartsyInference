@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
     <RootNamespace>HartsyInference.ThreeD.Tests</RootNamespace>
   </PropertyGroup>
 
@@ -10,14 +11,21 @@
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="coverlet.collector" />
-    <ProjectReference Include="..\..\src\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
-    <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Fixtures\Attention\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
 </Project>

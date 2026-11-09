@@ -1,7 +1,7 @@
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -333,7 +333,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         int txtSeqLen = (int)condContext.Shape[1];
 
         // Drain-free fast path (plain t2i / img2img): the latent stays device-resident across the whole loop
-        // and CFG combine + Euler run as ONE in-place device op (CfgEulerStep: uncond-anchored CFG then
+        // and CFG combine + Euler run as ONE in-place device op (GuidedEulerStep: uncond-anchored CFG then
         // z += v·dt; gw=1 degenerates to the plain Euler step). Masked inpaint keeps the host branch — it
         // must read/rebuild the latent on the host every step. The CFG pair runs through ForwardPaired
         // (one modulation-table build per step, and — default-on — the per-generation step CUDA graph).
@@ -366,7 +366,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         }
 
         // Step-graph mode: route the latent through the transformer's FIXED buffer so the captured graph's
-        // baked address stays valid across steps (CfgEulerStep updates it in place at the same address).
+        // baked address stays valid across steps (GuidedEulerStep updates it in place at the same address).
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read directly —
         // previews and the final unpack go through SnapshotGraphLatent. DiT sharding excludes the graph:
         // ForwardSharded issues work on two backends and never goes through ForwardPaired's capture path.

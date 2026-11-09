@@ -1,9 +1,10 @@
+using HartsyInference.Core.Backends.Guidance;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
@@ -15,6 +16,7 @@ using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
+using HartsyInference.Core.Memory.Vram.Streaming;
 
 namespace HartsyInference.Diffusion.Pipelines;
 
@@ -769,7 +771,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
         // Drain-free fast path (plain t2i / img2img, the Chroma/Krea2 pattern): the latent stays
         // device-resident across the whole loop and the (true-)CFG combine + Euler step run as ONE in-place
-        // device op (CfgEulerStep: v = g·pos + (1−g)·neg, then z += v·dt; g=1 degenerates to plain Euler) —
+        // device op (GuidedEulerStep: v = g·pos + (1−g)·neg, then z += v·dt; g=1 degenerates to plain Euler) —
         // no per-step D2H of the velocity + H2D re-upload of the latent. Tools/Kontext (host-side per-step
         // concats), regional bias, masked inpaint (host blend), and the opt-in stats scans keep the host
         // branch, which is unchanged.
@@ -862,7 +864,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
                     Backend, packedLatent, condStream, sigma,
                     clipPooled!, guidanceScale, condTxtSeqLen, hPacked, wPacked);
                 // Euler stays OUTSIDE the capture: in-place on the fixed latent the graph reads next step.
-                Backend.CfgEulerStep(packedLatent, velocity, velocity, 1.0f, scheduler.Dt(i));
+                Backend.GuidedEulerStep(packedLatent, velocity, velocity, GuidedEulerSpec.Lerp(1.0f, scheduler.Dt(i)));
                 if (callerOwns) velocity.Dispose();
             }
             else if (drainFree)

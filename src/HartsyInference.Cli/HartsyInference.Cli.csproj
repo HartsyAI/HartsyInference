@@ -31,7 +31,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />
     <ProjectReference Include="..\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
     <ProjectReference Include="..\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />

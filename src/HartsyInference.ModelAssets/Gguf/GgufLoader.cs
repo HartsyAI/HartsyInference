@@ -1,4 +1,4 @@
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.Gguf;

@@ -7,7 +7,6 @@ using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Engine.HuggingFace;
-using HartsyInference.Core.Memory;
 using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
@@ -16,6 +15,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Variants;
+using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Engine.Recipes.Image;
 

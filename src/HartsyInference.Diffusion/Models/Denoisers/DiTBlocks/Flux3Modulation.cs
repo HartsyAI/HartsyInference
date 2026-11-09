@@ -1,11 +1,12 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
 /// <summary>The shift/scale/gate a FLUX.3 block applies. Uniform modulation holds <c>[1, D]</c> rows; span
 /// modulation holds one table row per conditioning mode plus an I32 <c>[S]</c> row index naming each token's mode,
-/// consumed by <see cref="IBackend.AffineBroadcastRowIndexed"/> without materializing per-token rows.</summary>
+/// consumed by a row-indexed <see cref="IBackend.NormModulate"/> without materializing per-token rows.</summary>
 public sealed class Flux3Modulation : IDisposable
 {
     private int _disposed;
@@ -67,12 +68,12 @@ public sealed class Flux3Modulation : IDisposable
         Tensor output = new Tensor(x.Shape, x.DType);
         if (RowIndex is null)
         {
-            backend.LayerNormModulate(output, x, Scale, Shift, eps);
+            backend.NormModulate(NormModulateCall.Rows(output, x, NormKind.LayerNorm, eps).WithModulation(ModulationSpec.Broadcast(x, Scale, Shift, ScaleMode.OnePlus)));
             return output;
         }
         Tensor normed = new Tensor(x.Shape, x.DType);
         backend.LayerNormNoAffine(normed, x, eps);
-        backend.AffineBroadcastRowIndexed(output, normed, Scale, Shift, RowIndex);
+        backend.NormModulate(NormModulateCall.Rows(output, normed, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(normed, Scale, Shift, RowIndex, ScaleMode.OnePlus)));
         normed.Dispose();
         return output;
     }

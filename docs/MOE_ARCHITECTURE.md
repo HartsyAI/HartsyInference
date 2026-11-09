@@ -96,7 +96,7 @@ QK-norm, RoPE and KV scatter are one kernel, and the attention combine writes th
 bit-identical to the launches they replace. On an RTX 3060 OLMoE-1B-7B Q4_K_M runs 205 kernels per token instead of 326.
 
 Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`,
-`numerics.lmNormFast`, `numerics.lmNormWide`, `numerics.decodeResidualFold`, `numerics.qknormFullScatter`,
+`numerics.lmNormFast`, `numerics.lmNormWide`, `numerics.decodeResidualFold`, `numerics.qkvDecodeFused`,
 `numerics.attnCombineQ8`. `vram.kvF16` works with graph decode and is F16 by default for text models on CUDA (`vram.textKvF16`, unset = automatic; `false` keeps F32); cache writes saturate at the F16 maximum.
 
 ## Capabilities
@@ -125,13 +125,10 @@ therefore greedy output. Validation therefore requires, in order of strictness:
 
 ## Reference path
 
-`Core.Moe.SparseFfnReference` executes a routed layer on the host in F32 from its descriptor. It composes the backend
-op contracts (`MoeReference.Route`, `BuildDispatch`, `Combine`) and runs each expert through `ExpertProgramReference`,
-a scalar implementation of the program. Backend expert kernels are to be checked against it; no backend kernel check
-exists yet. Parity with the production `MoeFeedForward` is covered for softmax routing and for grouped sigmoid routing
-with a selection bias. Token-kind routing is supported through the alternate bias. Shared experts, flat logit-space
-selection (production `SigmoidLogitAdd`), and routers wider than `MoeRouteArgs.MaxExperts` are rejected explicitly
-until covered.
+`Core.Moe.ExpertProgramReference` is the scalar F32 execution of an `ExpertProgram`: the CPU backend's host runner uses
+it, and it is the oracle every backend expert kernel is checked against. The routing primitives have their own host
+references (`MoeReference.Route`, `BuildDispatch`, `Combine`), which the CPU backend runs directly and CUDA is tested
+against. No backend expert-kernel check exists yet.
 
 ## Open items at this layer
 

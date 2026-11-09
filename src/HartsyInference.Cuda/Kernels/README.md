@@ -1,7 +1,8 @@
 # CUDA kernel sources
 
 The CUDA C++ (`.cu`) source for this package's GPU kernels, organized by domain
-(`attention/`, `conv/`, `dequant/`, `dit/`, `lm/`, `vision/`, `wan/`, `audio/`). These compile to PTX,
+(`attention/`, `audio/`, `conv/`, `dequant/`, `dit/`, `gating/`, `guidance/`, `latent/`, `layout/`, `lm/`, `moe/`, `norm/`,
+`point/`, `rotary/`, `rows/`, `vision/`, `wan/`). These compile to PTX,
 and the **shipped, packaged artifacts live in [`../Ptx/`](../Ptx)** — the `.csproj` packs `Ptx/*.ptx` into
 the NuGet and the runtime loads them from `BaseDirectory/Ptx` (never embedded resources).
 

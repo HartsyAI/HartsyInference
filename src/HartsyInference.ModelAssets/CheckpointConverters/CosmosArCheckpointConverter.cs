@@ -57,7 +57,8 @@ public static class CosmosArCheckpointConverter
     private static string ApplyRenames(string key)
     {
         foreach ((string from, string to) in Renames)
-            if (from != to && key.EndsWith(from, StringComparison.Ordinal))
+            // Match whole key segments only: a bare suffix match turns tok_embeddings.weight into tok_tok_embeddings.weight.
+            if (from != to && (key == from || key.EndsWith("." + from, StringComparison.Ordinal)))
                 return key.Substring(0, key.Length - from.Length) + to;
         // Whole-key renames (embedding aliases).
         foreach ((string from, string to) in Renames)

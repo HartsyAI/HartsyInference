@@ -9,7 +9,7 @@ using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.Vision.Codec;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Cli.Dispatch;
 
@@ -795,10 +795,14 @@ public static class GenerationDispatch
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadImage(prompt),
+            Image = LoadMeshImage(prompt),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
+            Samples = parameters.GetInt("samples", 1),
+            Rigged = parameters.GetBool("rigged", false),
+            Colors = parameters.GetBool("no-colors", false) ? false : null,
+            Chains = parameters.GetBool("no-chains", false) ? false : null,
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -818,6 +822,7 @@ public static class GenerationDispatch
             FileBytes = result.Data,
             Extension = result.Format,
             Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
         return artifact;
@@ -1303,6 +1308,19 @@ public static class GenerationDispatch
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
+    private static ImageData LoadMeshImage(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        {
+            return LoadImage(promptPath);
+        }
+
+        DecodedPng png = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
+        return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');

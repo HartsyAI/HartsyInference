@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -189,7 +190,7 @@ public sealed unsafe class LtxVideoBlock
     }
 
     // Per-token variant of Modulation: builds 6 x [2, dim] tables instead of 6 x [1, dim] vectors — row 0 = the
-    // conditioned (t=0) embedding, row 1 = the denoising (t=t_cur) embedding, so AffineBroadcastRowIndexed/
+    // conditioned (t=0) embedding, row 1 = the denoising (t=t_cur) embedding, so the row-indexed NormModulate/
     // GatedResidualRowIndexed can look up the right row per token via modIndex. Same GPU-resident SliceRows/
     // GatedResidualLastDim build as Modulation, plus one Concat per slot to stack the two rows.
     private (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) Modulation2Row(IBackend backend, Tensor temb, Tensor temb0)
@@ -216,11 +217,11 @@ public sealed unsafe class LtxVideoBlock
     }
 
     // out[r] = x[r]·(1+scaleTable[modIndex[r]]) + shiftTable[modIndex[r]] — per-token version of ApplyShiftScale.
-    // scaleTable is the RAW (no +1) table; AffineBroadcastRowIndexed applies the +1 internally (see its own doc).
+    // scaleTable is the RAW (no +1) table; the OnePlus scale mode applies the +1 inside the op.
     private Tensor ApplyShiftScaleRowIndexed(IBackend backend, Tensor x, Tensor scaleTable, Tensor shiftTable, Tensor modIndex, int s)
     {
         Tensor o = new Tensor(new TensorShape(s, _dim), DType.F32);
-        backend.AffineBroadcastRowIndexed(o, x, scaleTable, shiftTable, modIndex);
+        backend.NormModulate(NormModulateCall.Rows(o, x, NormKind.None, 0f).WithModulation(ModulationSpec.RowIndexed(x, scaleTable, shiftTable, modIndex, ScaleMode.OnePlus)));
         x.Dispose();
         return o;
     }

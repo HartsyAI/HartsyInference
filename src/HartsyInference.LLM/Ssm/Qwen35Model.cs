@@ -1,4 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Moe;
@@ -468,7 +471,7 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         return outv;
     }
 
-    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a SliceTimeRange over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (ApplyRopeSingle's contract); the tiny relabel copies stay on-device.</summary>
+    /// <summary>Device-side seq=1 attention step: replaces the host q|gate de-interleave (a per-layer D2H/H2D round-trip) with a strided time-axis slice over the [1,hq,2,hd]-shaped fused projection, and the per-layer host rope-table rebuild with the shared per-token table. Rope runs on [1,1,H,hd]-labeled copies (the rotate-half rotary (RotaryCall.TokenMajor)'s contract); the tiny relabel copies stay on-device.</summary>
     private Tensor BlockAttnDeviceStep(IBackend backend, Tensor hIn, int i, Tensor stepCos, Tensor stepSin)
     {
         int d = DModel, hq = NumHeads, hkv = NumKvHeads, hd = AttnHeadDim;
@@ -479,13 +482,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.RmsNormEmitQ8(xn, hIn, W($"{p}.attn_norm.weight"), Eps);
 
         // Fused [query | gate] projection, shaped [1, hq, 2, hd] so the per-head de-interleave is a
-        // device SliceTimeRange (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
+        // device time-axis slice (each head's row is [q(hd) | g(hd)] = two time-steps of width hd).
         Tensor qgFull = new(new TensorShape(1, hq, 2, hd), DType.F32);
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
         Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
         Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.SliceTimeRange(qHm, qgFull, 0, 1);
-        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        StridedCopies.SliceAxis(backend, qHm, qgFull, 2, 0, 1);
+        StridedCopies.SliceAxis(backend, gateHm, qgFull, 2, 1, 1);
         qgFull.Dispose();
 
         Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);
@@ -504,13 +507,13 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
         Tensor qRope = new(new TensorShape(1, 1, hq, hd), DType.F32);
         backend.CopyTo(qRope, qN);
-        backend.ApplyRopeSingle(qRope, stepCos, stepSin, RotaryDim);
+        backend.Rotary(RotaryCall.TokenMajor(qRope, stepCos, stepSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
         Tensor qMh = qN;                      // reuse the head-major tensor as the rope destination
         backend.CopyTo(qMh, qRope);
         qRope.Dispose();
         Tensor kRope = new(new TensorShape(1, 1, hkv, hd), DType.F32);
         backend.CopyTo(kRope, kN);
-        backend.ApplyRopeSingle(kRope, stepCos, stepSin, RotaryDim);
+        backend.Rotary(RotaryCall.TokenMajor(kRope, stepCos, stepSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
         Tensor kMh = kN;
         backend.CopyTo(kMh, kRope);
         kRope.Dispose();
@@ -579,16 +582,16 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
 
         if (ropeCos is not null)
         {
-            backend.ApplyRopeSingle(qN, ropeCos, ropeSin!, RotaryDim);
-            backend.ApplyRopeSingle(kN, ropeCos, ropeSin!, RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(qN, ropeCos, ropeSin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(kN, ropeCos, ropeSin!, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
         }
         else
         {
             Tensor cos = new(new TensorShape(1, seq, hd), DType.F32);
             Tensor sin = new(new TensorShape(1, seq, hd), DType.F32);
             BuildRope(cos, sin, seq, _pos, hd, RotaryDim, RopeTheta);
-            backend.ApplyRopeSingle(qN, cos, sin, RotaryDim);
-            backend.ApplyRopeSingle(kN, cos, sin, RotaryDim);
+            backend.Rotary(RotaryCall.TokenMajor(qN, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
+            backend.Rotary(RotaryCall.TokenMajor(kN, cos, sin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, RotaryDim));
             cos.Dispose(); sin.Dispose();
         }
 
@@ -732,8 +735,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.Linear(qgFull, xn, W($"{p}.attn_q.weight"), null);
         Tensor qHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
         Tensor gateHm = new(new TensorShape(1, hq, 1, hd), DType.F32);
-        backend.SliceTimeRange(qHm, qgFull, 0, 1);
-        backend.SliceTimeRange(gateHm, qgFull, 1, 1);
+        StridedCopies.SliceAxis(backend, qHm, qgFull, 2, 0, 1);
+        StridedCopies.SliceAxis(backend, gateHm, qgFull, 2, 1, 1);
         qgFull.Dispose();
 
         Tensor k = new(new TensorShape(1, hkv, 1, hd), DType.F32);
@@ -749,8 +752,8 @@ public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGra
         backend.RmsNorm(kMh, k, W($"{p}.attn_k_norm.weight"), Eps);
         k.Dispose();
 
-        backend.RopeApplyDecodeStep(qMh, cosTable, sinTable, RotaryDim, interleaved: false, devicePos);
-        backend.RopeApplyDecodeStep(kMh, cosTable, sinTable, RotaryDim, interleaved: false, devicePos);
+        backend.Rotary(RotaryCall.DecodeStep(qMh, cosTable, sinTable, RotaryDim, false, devicePos));
+        backend.Rotary(RotaryCall.DecodeStep(kMh, cosTable, sinTable, RotaryDim, false, devicePos));
 
         Tensor kFull = _kvCache.KeyPrefix(i);
         Tensor vFull = _kvCache.ValuePrefix(i);

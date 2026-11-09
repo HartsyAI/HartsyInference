@@ -1,5 +1,5 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Variants;

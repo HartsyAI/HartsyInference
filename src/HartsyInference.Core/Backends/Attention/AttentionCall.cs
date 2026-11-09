@@ -1,6 +1,6 @@
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>The legacy entry point a call came through. A pinned call is planned over that entry's rows only, so a
 /// migrated call keeps the kernel it had until its own bounded A/B moves it.</summary>
@@ -172,6 +172,18 @@ public readonly record struct AttentionCall
             Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = AttentionNumerics.FromLegacy(allowF16),
             Route = kvHeads == heads ? AttentionRoute.TokenMajor : AttentionRoute.TokenMajorGqa,
         };
+
+    /// <summary>Checks a legacy <c>kvGroup</c> against the operands it describes: the call derives <see cref="KvGroup"/> as
+    /// <c>Hq / Hkv</c>, so the raw value a caller passes must agree with the shapes (0 and below read as 1). Returns the group.</summary>
+    /// <exception cref="ArgumentException">The operands are not rank-4 head-major tensors with <c>Hq = kvGroup × Hkv</c>.</exception>
+    public static int ValidateFlashGroup(Tensor query, Tensor key, int kvGroup)
+    {
+        int group = kvGroup <= 0 ? 1 : kvGroup;
+        if (query.Shape.Rank != 4 || key.Shape.Rank != 4 || key.Shape[1] <= 0 || query.Shape[1] != (long)group * key.Shape[1])
+            throw new ArgumentException(
+                $"FlashAttention needs [B,Hq,S,D] operands with Hq = kvGroup × Hkv; got Q={query.Shape}, K={key.Shape}, kvGroup={kvGroup}.");
+        return group;
+    }
 
     /// <summary>A <c>FlashAttention</c> call: head-major Q/O, a head-major K/V cache whose first <paramref name="kvLen"/>
     /// rows are valid, query row 0 at <paramref name="qOffset"/>.</summary>

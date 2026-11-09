@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using HartsyInference.Audio.Frontends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Audio;
 

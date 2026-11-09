@@ -1,10 +1,12 @@
 # Shared architecture and task routing
 
-Read with [code style](../CODE_STYLE.md); load only the linked sections a task needs.
+Read this with [code style](../CODE_STYLE.md). Load only the linked sections your task needs.
 
-## Task Routing
+## Task routing
 
-Read the file matching your task before starting. A task spanning two (add a model *and* write its kernel) loads both.
+<task_routing>
+Read the file that matches your task before you start. A task that spans two areas, such as adding a model and writing
+its kernel, loads both files.
 
 | Task | File |
 |---|---|
@@ -14,95 +16,105 @@ Read the file matching your task before starting. A task spanning two (add a mod
 | GPU math, SIMD/PTX/SPIR-V kernels, performance | `KERNEL.md` |
 | Research a topic before implementing | `RESEARCH.md` |
 | Cleanup, doc upkeep, NuGet packaging | `CLEANUP.md` |
+</task_routing>
 
 ## Shipping a change
 
-Author is `kalebbroo <kalebbroo@gmail.com>` alone: no co-author, session, or tool-attribution trailers in any
-commit message or PR body, and none in the changelog.
+<shipping>
+The author is `kalebbroo <kalebbroo@gmail.com>`, alone. Leave out co-author, session and tool-attribution trailers from
+commit messages, PR bodies and the changelog.
 
-1. Branch and **push as soon as commits exist** — unpushed non-`main` branches get reaped. Check
-   `git branch --show-current` before every commit; the checkout is shared with other agents and a commit
-   landing on someone else's branch is rescued with a cherry-pick, never by rewriting theirs.
-2. Open a **draft PR** early, before the work is finished.
-3. Finish implementation and all testing against it:
-   - Run the CPU lane and the tests covering the changed area; see [testing](../CODE_STYLE.md#testing) for the
-     trait filters. A docs-only change needs a link and claim check instead.
-   - GPU suites run one at a time, never alongside another suite, benchmark, or generation — concurrent runs
-     manufacture contention failures that bury real ones. Record failures by test name, not count.
-   - A CUDA/Vulkan change runs the whole `Category=GpuIntegration` category for the affected backends, not the
-     tests it appears to touch: a dispatch-gate change runs on every weight of that dtype.
-   - Anything that can move output or speed needs a real-generation A/B: `origin/main` built fresh (PTX
-     included) against the branch, interleaved on the same seeds, reporting wall clock, per-step ms, VRAM and
-     SSIM or raw-pixel digest per pair, via `tests/regression-ab.sh`. State up front whether the expectation
-     is identical (refactor) or bounded (numerics change, with a floor and a reason). Table goes in the PR body.
-     CUDA picks the F32 attention route and tile height (and MiniMax-H3 its chunk rows) from free VRAM, so a change
-     that only frees memory earlier can move bits on a card near the line: before calling an identity failure a bug,
-     rerun both arms with `vram.sdpaForceTiled=true`, `numerics.sdpaTile=256` and `vram.h3ChunkRows=1000000` pinned.
-4. Final pass: comment/doc cleanup. Bump only for a new feature or a large bug fix: then add a `## alpha.N` section
-   in `CHANGELOG.md` and the matching `Directory.Build.props` `VersionSuffix` bump, one per PR. Small changes,
-   docs-only ones included, skip both. A merge to `main` that touches `src/` publishes whatever version is already
-   set, so a small change ships with the next bump and its changelog section.
-5. Mark ready for review. `claude-code-review.yml` reviews on open, on each push and on ready; the Codex
-   connector reviews independently. A Codex usage-limit note means no review happened — comment
-   `@claude review pr` on the PR and wait for `claude[bot]`.
-6. Resolve every comment. Reviews and comments are different API objects, so check all three surfaces:
+Work through these steps in order:
+
+1. **Branch, then push as soon as you have commits.** Unpushed non-`main` branches get reaped. The checkout is shared
+   with other agents, so run `git branch --show-current` before every commit. If a commit lands on someone else's
+   branch, rescue it with a cherry-pick. Never rewrite their branch.
+2. **Open a draft PR early**, before the work is finished, so reviewers and the bots can see progress.
+3. **Finish the implementation and test it against the PR.**
+   - Run the CPU lane and the tests that cover the changed area. The trait filters are in [testing](../CODE_STYLE.md#testing).
+     A docs-only change needs a link and claim check instead.
+   - Run GPU suites one at a time. Never run one alongside another suite, a benchmark or a generation: concurrent runs
+     create contention failures that bury real ones. Record failures by test name, not by count.
+   - For a CUDA or Vulkan change, run the whole `Category=GpuIntegration` category for the affected backends, not only
+     the tests the change seems to touch. A dispatch-gate change must run on every weight of that dtype.
+   - Anything that can change output or speed needs a real-generation A/B. Build `origin/main` fresh (PTX included)
+     and the branch, then run them interleaved on the same seeds with `tests/regression-ab.sh`. Report wall clock,
+     per-step ms, VRAM, and SSIM or a raw-pixel digest for each pair. State before you run it whether the expectation
+     is identical (a refactor) or bounded (a numerics change, with a floor and a reason). Put the table in the PR body.
+     CUDA picks the F32 attention route and tile height (and MiniMax-H3 its chunk rows) from free VRAM. A change that
+     frees memory earlier can therefore move bits on a card near the threshold. Before you call an identity failure a
+     bug, rerun both arms with `vram.sdpaForceTiled=true`, `numerics.sdpaTile=256` and `vram.h3ChunkRows=1000000` pinned.
+4. **Final pass.** Clean up comments and docs. Bump the version only for a new feature or a large bug fix. Such a bump
+   needs a `## alpha.N` section in `CHANGELOG.md` and the matching `VersionSuffix` in `Directory.Build.props`, one bump
+   per PR. Small changes, docs-only ones included, skip both. A merge to `main` that touches `src/` publishes whatever
+   version is already set, so a small change ships with the next bump and its changelog section.
+5. **Mark the PR ready for review.** `claude-code-review.yml` reviews on open, on each push and on ready. The Codex
+   connector reviews separately. If Codex reports a usage limit, no review happened: comment `@claude review pr` on the
+   PR and wait for `claude[bot]`.
+6. **Resolve every comment.** Reviews and comments are separate API objects, so check all three surfaces:
+
    ```bash
    gh api --paginate repos/HartsyAI/HartsyInference/issues/<N>/comments --jq '.[]|"\(.user.login) \(.created_at)"'
    gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/reviews  --jq '.[]|"\(.user.login) \(.state)"'
    gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/comments --jq '.[]|"\(.path):\(.line)"'
    ```
-   Reply per thread, then resolve it with the GraphQL `resolveReviewThread` mutation — `gh pr` has no resolve verb.
-7. Merge once CI is green and every thread is resolved, one PR at a time: each merge stale-dates the
-   others' version bump and changelog insert, and a single push carrying several merges publishes only the
-   top version.
 
-Report in plain language. Keep answers terse, skip restating what the diff already shows, and close a long
-answer or a research session with a short plain-English TL;DR.
+   Reply to each thread, then resolve it with the GraphQL `resolveReviewThread` mutation. `gh pr` has no resolve command.
+7. **Merge one PR at a time**, once CI is green and every thread is resolved. Each merge makes the others' version bump
+   and changelog insert stale. A single push that carries several merges publishes only the top version.
 
-## Shared Design Rules
+Report in plain language. Keep answers short, do not restate what the diff already shows, and close a long answer or a
+research session with a short plain-English TL;DR.
+</shipping>
 
-These apply to ALL agents; specialized files only add task-specific rules.
+## Shared design rules
 
-**Pure C# runtime and model implementation** — no Python/C++ inference wrappers, ONNX Runtime, or managed GPU
-frameworks. Vendor driver/compute-library P/Invoke, CUDA sources compiled to PTX, and offline Python reference
-tools are existing boundaries.
+<design_rules>
+These apply to every agent. Specialist files add only task-specific rules.
 
-**Eager model execution** — backend CUDA graph capture/replay is a backend optimization, not a model graph.
+**Pure C# runtime and model implementation.** Do not add Python or C++ inference wrappers, ONNX Runtime, or managed GPU
+frameworks; the engine stays native. The existing boundaries are vendor driver and compute-library P/Invoke, CUDA
+sources compiled to PTX, and offline Python reference tools.
 
-**Zero GC on hot paths** — no managed allocations during inference. `NativeMemory.AlignedAlloc(byteCount, 64)`;
-`ArrayPool<T>.Shared` for managed metadata only. (`TensorPool` still has no production call site — adopt or
-retire it, see ROADMAP; do not cite it as established practice.)
+**Eager model execution.** Backend CUDA graph capture and replay is a backend optimization. It is not a model graph.
 
-**IBackend abstraction** — model code never calls CPU/CUDA/Vulkan directly. Each backend delegates to static kernels.
+**No GC on hot paths.** Allocate no managed memory during inference. Use `NativeMemory.AlignedAlloc(byteCount, 64)` for
+tensor storage, and `ArrayPool<T>.Shared` only for managed metadata. `TensorPool` has no production call site yet, so
+adopt it or retire it (see ROADMAP). Do not cite it as established practice.
 
-**Package boundaries** — one folder per NuGet package under `src/`; dependencies run one way
-(`Core` ← modality packages ← `Engine` ← CLI/API/extension). No CUDA/Vulkan in CPU-only packages — GPU code lives
-behind `IBackend`. When unsure, match the package a sibling model or feature already lives in.
+**Backends behind `IBackend`.** Model code never calls CPU, CUDA or Vulkan directly. Each backend delegates to static
+kernels.
 
-**Reuse before writing anything.** The backend is modular so models share it. Before adding ANY helper, inline or
-shared, grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`,
-`Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics below. A `[1,C,T]↔[1,T,C]` layout
-transpose is `backend.Transpose2D(out, in, d1, d2)`, never a hand-rolled loop.
+**Package boundaries.** Each NuGet package gets one folder under `src/`. Dependencies run one way:
+`Core` ← modality packages ← `Engine` ← CLI, API and extension. Keep CUDA and Vulkan out of the CPU-only packages; GPU
+code sits behind `IBackend`. When you are unsure where code belongs, match the package a sibling model or feature
+already uses.
+
+**Reuse before writing anything.** The backend is modular so that models share it. Before you add any helper, inline or
+shared, search for an existing primitive. Check the `IBackend` operations first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`,
+`Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, and others), then the shared statics below. For example, a
+`[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)`, not a hand-written loop.
 
 | Package | Shared statics |
 |---|---|
-| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines, `Runtime/MonotonicClock` (monotonic ns + absolute-deadline sleep), `Runtime/RealtimeScheduling` (`TryEnterFifo`, `TryPinToCpu`), `Runtime/SpscRing<T>` (lock-free single-producer/single-consumer ring), `Numerics/LatencyHistogram` (fixed µs buckets, p50/p99/max), `CpuParallel.InlineScope` (thread-local "never fan out"), `Rope/` RoPE tables (`RopeFrequencyPlan` per-axis or sectioned (M-RoPE) frequencies, `MultiAxisRopeTables` pairs/rows/tensors from positions, `RopeTableExpander` for the rotate-half and interleaved layouts, `RopeTableCache` device rows per backend, or host-staged rows for callers without one, with leases; `MRopePositions` / `MRopePairAxes` / `MRopeTable` for Qwen-VL multimodal RoPE) — a model owns only its position rules |
+| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines, `Runtime/MonotonicClock` (monotonic ns + absolute-deadline sleep), `Runtime/RealtimeScheduling` (`TryEnterFifo`, `TryPinToCpu`), `Runtime/SpscRing<T>` (lock-free single-producer/single-consumer ring), `Numerics/LatencyHistogram` (fixed µs buckets, p50/p99/max), `CpuParallel.InlineScope` (thread-local "never fan out"), `Rope/` RoPE tables (`RopeFrequencyPlan` per-axis or sectioned (M-RoPE) frequencies, `MultiAxisRopeTables` pairs/rows/tensors from positions, `RopeTableExpander` for the rotate-half and interleaved layouts, `RopeTableCache` device rows per backend, or host-staged rows for callers without one, with leases; `MRopePositions` / `MRopePairAxes` / `MRopeTable` for Qwen-VL multimodal RoPE). A model owns only its position rules. |
 | `Diffusion` | `DiTUtils` (denoiser blocks), `CfgHelper` (`SliceBatchElement`, `ApplyCfg`, `ConcatLastDim`), `DtypeCastHelper` (backend-routed, source-disposing casts), `Img2ImgSetup.Prepare`, `Schedulers/SchedulerFactory.Create`, `NoiseSchedule`, `VaeOps`/`MageVaeOps`, `WeightBytes`; in-context references: `TokenSegmentLayout` + `SegmentModulation` (per-segment adaLN), `ReferenceKvCache` (prepass keys/values appended each step, through an `IKvRewrite` on the shared `AttentionLayer`), `Flux2ReferenceEncoder`, `ReferenceCachePolicy` |
 | `ModelAssets` | `CheckpointConvertUtils` (key remaps, quant-aware QKV splits), `VisionPlaceholderPrompt` + `VisionTokenSplice` (Qwen-VL image placeholders and their embedding splice) |
 | `Engine` | `ReferenceImageResolver` + `ReferenceImagePolicy` (an edit request's references, sized for the VAE and the vision tower) |
 | `Audio` | `WhisperOps.ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `Dsp/NsfVocoderDsp` (NSF source, STFT/iSTFT head, pad, scale), `Dsp/DeterministicRng`, `Streaming/SentenceChunkedSynthesis` (sentence streaming over any whole-utterance synth; Piper and Kokoro use it), `Frontends/SentenceSplitter` + `StreamingSentenceSplitter` + `SplitClauses`, `Frontends/SpokenTextNormalizer`, `Io/G711` (μ-law/A-law), `Models/Wake/IVadModel` |
 
-Pick by ownership, not by name: `TensorCasts` is host-side, `DtypeCastHelper` routes through the backend and
-disposes its source. New shared code stays generic: when two or more callers need an operation, hoist ONE helper
-**parameterized by the differences** — a few extra parameters or a `switch` beats a dozen near-identical methods.
-Adding a model includes auditing it against models already built and folding the shared parts; re-run the
-affected models' tests afterwards, because shared code is load-bearing.
+Choose a shared helper by ownership, not by name. `TensorCasts` works on the host, while `DtypeCastHelper` routes through
+the backend and disposes its source. Keep new shared code generic. When two or more callers need the same operation,
+write one helper parameterized by the differences: a few extra parameters or a `switch` beats a dozen near-identical
+methods. When you add a model, audit it against the models already built and fold the shared parts into common code.
+Re-run the affected models' tests afterwards, because shared code is load-bearing.
+</design_rules>
 
-## Engine Patterns
+## Engine patterns
 
-Tensor ownership, CUDA launch/PTX, config, streaming, error handling, video planning, GPU weight and activation
-management, and diffusion pipeline conventions live in [ENGINE_PATTERNS.md](ENGINE_PATTERNS.md). Read it when
-touching engine, backend or pipeline code; the rules above stand on their own for everything else.
+Tensor ownership, CUDA launch and PTX, config, streaming, error handling, video planning, GPU weight and activation
+management, and diffusion pipeline conventions are in [ENGINE_PATTERNS.md](ENGINE_PATTERNS.md). Read it when you touch
+engine, backend or pipeline code. The design rules above stand on their own for everything else.
 
-Ownership in one line: `Tensor` is owned and disposed by its creator, `TensorView` and `TensorRef` are borrowed
-and must never outlive the storage behind them.
+Ownership in one line: the creator owns and disposes a `Tensor`. A `TensorView` or `TensorRef` is borrowed and must never
+outlive the storage behind it.

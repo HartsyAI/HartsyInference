@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Auk;
 
-/// <summary>Builds the duplicated-pair cos/sin tables that <c>IBackend.WanRopeInterleaved</c> consumes from an explicit inv_freq vector.</summary>
+/// <summary>Builds the duplicated-pair cos/sin tables that <c>RotaryCall.Rows</c> consumes from an explicit inv_freq vector.</summary>
 public static unsafe class AukRope
 {
     /// <summary>The closed-form x_transformers inv_freq, <c>theta^(-2i/headDim)</c>; AuK checkpoints ship their own bf16-rounded buffer instead.</summary>

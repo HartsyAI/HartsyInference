@@ -1,6 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -335,7 +335,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         // Sampler selection (2026-08-20). HiDream is flow-matching, so it had no user-selectable sampler at all before
         // this. The predictor hands back the RAW cond/uncond pair — the fused device op applies uncond-anchored CFG at
-        // the real scale, exactly as the direct CfgEulerStep call did — and everything family-specific (the quad
+        // the real scale, exactly as the direct GuidedEulerStep call did — and everything family-specific (the quad
         // conditioning stack, the inter-forward Sync, the step-cache gates) stays inside the closure.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "HiDream",
             startsFromNoisedInit: startStep > 0);

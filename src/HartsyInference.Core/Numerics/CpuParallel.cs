@@ -55,9 +55,6 @@ public static class CpuParallel
     [ThreadStatic]
     private static bool _inline;
 
-    /// <summary>True while the calling thread is inside an <see cref="InlineScope"/>.</summary>
-    public static bool IsInline => _inline;
-
     /// <summary>Enters a scope in which <see cref="For"/> runs every item on the calling thread, whatever the knob says.</summary>
     /// <remarks>For a thread with a deadline of its own — a real-time audio thread — that must never hand work to the
     /// pool and wait for it back. Dispose restores the previous state, so scopes nest.</remarks>

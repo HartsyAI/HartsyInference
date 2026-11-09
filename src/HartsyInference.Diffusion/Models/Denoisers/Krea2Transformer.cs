@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -38,7 +39,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
 
     // ── Step-graph state (numerics.ditGraph; see ForwardPatched) ──────────────────────────────────────────
     // The captured graph bakes device addresses, so every per-step-varying boundary lives in a FIXED buffer
-    // owned here: the patchified latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep and
+    // owned here: the patchified latent (_latentFixed, updated in-place by the pipeline's GuidedEulerStep and
     // refreshed per gen via PrepareGraphLatent), the timestep modulation (_tembFixed/_tembModFixed, refreshed
     // per step via CopyInto), and the velocity output (_graphVelocity, written by a captured CopyInto as the
     // graph's last op — a pre-capture NORMAL buffer, so it is safely disposable, unlike graph-owned memory).

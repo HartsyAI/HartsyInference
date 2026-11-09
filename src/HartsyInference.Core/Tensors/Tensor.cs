@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Core.Tensors;
@@ -40,6 +40,10 @@ public sealed unsafe class Tensor : IDisposable
 
     /// <summary>Backend-set callback: frees GPU pointer without D2H copy. Invoked on Dispose when GPU data was never synced to CPU.</summary>
     internal Action? _gpuDisposeCallback;
+
+    /// <summary>True when the host buffer holds the current bytes: no device copy is waiting to be read back, so reading
+    /// <see cref="DataPointer"/> costs no synchronization. A contract validates host-built index operands only in this state.</summary>
+    public bool HostBytesCurrent => _gpuSyncCallback is null;
 
     /// <summary>Key identifying which backend context owns <see cref="_gpuDisposeCallback"/>.</summary>
     /// <remarks>The CUDA primary-context handle (one per device) the callback frees against. Set by the backend
