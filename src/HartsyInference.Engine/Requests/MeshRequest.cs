@@ -30,7 +30,7 @@ public sealed record MeshRequest
     /// <summary>HairDeck: also generate spring-bone chains. Null keeps the model default; other models reject a value.</summary>
     public bool? Chains { get; init; }
 
-    /// <summary>HairDeck: rigged (VRM) output, which is not implemented; a request for it fails. Other models reject it.</summary>
+    /// <summary>HairDeck: rigged output, skinned to the spring chains with head-motion clips; needs chains (the default). Other models reject it.</summary>
     public bool Rigged { get; init; }
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
