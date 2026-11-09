@@ -46,6 +46,17 @@ public sealed class DenseTextWeightPolicyTests
     }
 
     [Fact]
+    public void AFourBitSourcePrefersQ4KWhereItFitsAndAnExplicitTargetWins()
+    {
+        IBackend vulkanLike = PackingBackend.Create(DType.Q4_0, DType.Q4_K, DType.Q8_0);
+        HfQuantWeight nf4 = Weight(HfWeightStorage.Nf4, DType.U8);
+        Assert.Equal(DType.Q4_K, DenseTextWeightPolicy.Target(nf4, true, vulkanLike));
+        // A row that is not whole 256-value super-blocks falls back to Q4_0.
+        Assert.Equal(DType.Q4_0, DenseTextWeightPolicy.Target(Weight(HfWeightStorage.Nf4, DType.U8, cols: 4096 + 32), true, vulkanLike));
+        Assert.Equal(DType.Q8_0, DenseTextWeightPolicy.Target(nf4, true, vulkanLike, quantizedProjections: DType.Q8_0));
+    }
+
+    [Fact]
     public void AFourBitSourceFallsBackToQ8BeforeWideningWhenQ4IsMissing()
     {
         IBackend q8Only = PackingBackend.Create(DType.Q8_0);

@@ -30,6 +30,19 @@ public sealed class MossVlQuantCheckpointTests
         return Math.Sqrt(err / norm);
     }
 
+    /// <summary>Least-squares slope of <paramref name="actual"/> on <paramref name="reference"/>, and the mean of their difference.</summary>
+    private static (double Slope, double MeanOffset) Fit(ReadOnlySpan<float> actual, ReadOnlySpan<float> reference)
+    {
+        double xy = 0, xx = 0, diff = 0;
+        for (int i = 0; i < reference.Length; i++)
+        {
+            xy += (double)actual[i] * reference[i];
+            xx += (double)reference[i] * reference[i];
+            diff += actual[i] - reference[i];
+        }
+        return (xy / xx, diff / reference.Length);
+    }
+
     [RealWeightsFact(Nf4Variable)]
     public void Nf4IndexesEveryQuantizedProjectionAndKeepsTheSkippedModulesPlain()
     {
@@ -54,6 +67,29 @@ public sealed class MossVlQuantCheckpointTests
         Assert.Equal(252, counts[HfWeightStorage.Fp8Channel]);
         Assert.DoesNotContain(fp8.Weights.Keys, k => k.EndsWith("weight_scale", StringComparison.Ordinal));
         Assert.Equal(HfWeightStorage.Plain, fp8.Weights["model.language_model.layers.6.mlp.up_proj.weight"].Storage);
+    }
+
+    /// <summary>Every NF4 projection, decoded and re-quantized to Q4_0 as the loader does, against its BF16 original: none may stray
+    /// far beyond the format's error (a wrong shape or row order would). Slow: decodes all 240 projections.</summary>
+    [Trait("Category", "Slow")]
+    [RealWeightsFact(Bf16Variable, Nf4Variable)]
+    public void EveryNf4ProjectionRequantizesCloseToItsBf16Original()
+    {
+        using HfQuantCheckpoint bf16 = HfQuantCheckpoint.Open(Dir(Bf16Variable));
+        using HfQuantCheckpoint nf4 = HfQuantCheckpoint.Open(Dir(Nf4Variable));
+        List<(string Name, double Error)> errors = [];
+        foreach (HfQuantWeight w in nf4.Weights.Values.Where(w => w.Storage == HfWeightStorage.Nf4).OrderBy(w => w.Name, StringComparer.Ordinal))
+        {
+            using Tensor reference = bf16.DequantizeF32(w.Name);
+            using Tensor q4 = nf4.Produce(w.Name, DType.Q4_0);
+            using Tensor q4F32 = ModelAssets.Gguf.GgufDequantizer.Dequantize(q4, DType.F32);
+            Assert.Equal(reference.Shape, w.Shape);
+            errors.Add((w.Name, RelativeRms(q4F32.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>())));
+        }
+        foreach ((string name, double error) in errors.OrderByDescending(e => e.Error).Take(8))
+            Console.WriteLine($"{name}: {error:F4}");
+        Console.WriteLine($"median {errors.OrderBy(e => e.Error).ElementAt(errors.Count / 2).Error:F4} over {errors.Count}");
+        Assert.All(errors, e => Assert.InRange(e.Error, 0, 0.25));
     }
 
     [RealWeightsFact(Bf16Variable, Nf4Variable, Fp8Variable)]
@@ -81,6 +117,11 @@ public sealed class MossVlQuantCheckpointTests
             using Tensor q8F32 = ModelAssets.Gguf.GgufDequantizer.Dequantize(q8, DType.F32);
             double q8Error = RelativeRms(q8F32.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
             Console.WriteLine($"{name}: NF4 rel RMS {nf4Error:F4}, NF4→Q4_0 {q4Error:F4}, NF4→Q4_K {q4kError:F4}, FP8 {fp8Error:F4}, FP8→Q8_0 {q8Error:F4}");
+            (double slope, double meanBias) = Fit(fromNf4.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
+            (double fp8Slope, double fp8Bias) = Fit(fromFp8.AsReadOnlySpan<float>(), reference.AsReadOnlySpan<float>());
+            Console.WriteLine($"{name}: NF4 slope {slope:F5}, mean offset {meanBias:E3}; FP8 slope {fp8Slope:F5}, mean offset {fp8Bias:E3}");
+            // A decode with a wrong scale or offset shows up as a slope away from 1 or a mean offset; noise does not.
+            Assert.InRange(slope, 0.97, 1.03);
             Assert.InRange(q4kError, 0, 0.20);
             Assert.InRange(q8Error, 0, 0.05);
             // NF4 at block 64 sits near 10% relative RMS; the Q4_0 repack adds its own rounding; FP8 E4M3 per channel near 3%.

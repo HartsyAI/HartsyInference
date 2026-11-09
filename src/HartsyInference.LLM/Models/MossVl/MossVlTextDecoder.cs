@@ -30,6 +30,10 @@ public sealed record MossVlLoadOptions
     /// Quantized projections (NF4, FP8, GPTQ, …) follow <see cref="DenseTextWeightPolicy"/> either way.</summary>
     public DType? PlainPrecision { get; init; }
 
+    /// <summary>A GGUF block type quantized projections (NF4, FP8, GPTQ, …) load as, instead of the width-matched default
+    /// (<see cref="DenseTextWeightPolicy"/>); null uses the default.</summary>
+    public DType? QuantizedPrecision { get; init; }
+
     /// <summary>Where a checkpoint folder's converted weights are cached; null uses <c>_gguf-cache</c> inside the folder.</summary>
     public string? QuantCachePath { get; init; }
 }
@@ -110,15 +114,18 @@ public sealed class MossVlTextDecoder : IDisposable
         bool Include(string key) =>
             key == SeparatorKey || key == LmHeadKey || (key.StartsWith(Prefix + ".", StringComparison.Ordinal) && !IsAboveLimit(key, layers));
         DType Target(HfQuantWeight w) => DenseTextWeightPolicy.Target(w,
-            projection: w.Shape.Rank == 2 && (IsBlockProjection(w.Name) || w.Name == LmHeadKey), options.Backend, options.PlainPrecision);
+            projection: w.Shape.Rank == 2 && (IsBlockProjection(w.Name) || w.Name == LmHeadKey), options.Backend, options.PlainPrecision,
+            options.QuantizedPrecision);
 
         string plain = options.PlainPrecision?.Name.ToLowerInvariant() ?? "native";
+        string quantized = options.QuantizedPrecision?.Name.ToLowerInvariant() ?? "auto";
         string cachePath = options.QuantCachePath
-            ?? Path.Combine(directory, "_gguf-cache", $"moss-vl-text-{plain}-{layers}l-v{CacheVersion}.gguf");
+            ?? Path.Combine(directory, "_gguf-cache", $"moss-vl-text-{plain}-{quantized}-{layers}l-v{CacheVersion}.gguf");
         Dictionary<string, object> identity = new(StringComparer.Ordinal)
         {
             ["hartsy.moss_vl.cache_version"] = CacheVersion,
             ["hartsy.moss_vl.plain_precision"] = plain,
+            ["hartsy.moss_vl.quantized_precision"] = quantized,
         };
         HfQuantCheckpoint checkpoint = HfQuantCheckpoint.Open(directory);
         IReadOnlyDictionary<string, Tensor> weights;

@@ -8,10 +8,12 @@ namespace HartsyInference.LLM.Transformer;
 
 /// <summary>The dtype a dense text decoder loads each Hugging Face weight at, whatever the checkpoint stores: plain float, bitsandbytes
 /// NF4, FP8 (block or per-channel), GPTQ, MXFP4/NVFP4 or MLX affine. A quantized projection becomes the GGUF block type of the same
-/// width that the backend keeps packed (4-bit sources → Q4_0, 8-bit → Q8_0), so it stays about as small as on disk; a backend
-/// without that kernel gets F16, and one with no packed kernels at all (CPU) F32.</summary>
-/// <remarks>Re-quantizing NF4 to Q4_0 is a second quantization (the NF4 values are decoded, then rounded onto Q4_0's grid), not a
-/// bit-exact repack; FP8 to Q8_0 loses less than one FP8 step. Plain float weights keep their dtype unless the caller asks for
+/// width that the backend keeps packed (4-bit sources → Q4_K, else Q4_0; 8-bit → Q8_0), so it stays about as small as on disk; a
+/// backend without that kernel gets F16, and one with no packed kernels at all (CPU) F32.</summary>
+/// <remarks>Re-quantizing NF4 is a second quantization (the NF4 values are decoded, then rounded onto the GGUF grid), not a
+/// bit-exact repack. Measured on MOSS-VL: per weight, NF4 is 9.3% relative RMS from BF16, 12.9% after Q4_0 and 12.2% after Q4_K,
+/// but through the stack Q4_0 let a few outlier activations run away (the reply was garbage) where Q4_K held. FP8 to Q8_0 loses
+/// less than one FP8 step. Plain float weights keep their dtype unless the caller asks for
 /// <paramref name="plainProjections"/>, which re-quantizes the plain projections too (a BF16 checkpoint, or the layers a 4-bit
 /// checkpoint left in BF16) to fit a smaller card.</remarks>
 public static class DenseTextWeightPolicy
@@ -20,7 +22,10 @@ public static class DenseTextWeightPolicy
     /// <param name="projection">Whether the weight is a rank-2 projection (attention, MLP, <c>lm_head</c>); others stay float.</param>
     /// <param name="backend">The backend that will run the model; null is a host load (F32 for anything quantized).</param>
     /// <param name="plainProjections">A GGUF block type for plain float projections, or null to keep them as stored.</param>
-    public static DType Target(HfQuantWeight weight, bool projection, IBackend? backend, DType? plainProjections = null)
+    /// <param name="quantizedProjections">A GGUF block type for quantized projections instead of the width-matched default; a wider
+    /// one (Q5_K, Q6_K, Q8_0) keeps a 4-bit source closer to its own values, since re-quantizing to Q4_0 adds a second 4-bit rounding.</param>
+    public static DType Target(HfQuantWeight weight, bool projection, IBackend? backend, DType? plainProjections = null,
+        DType? quantizedProjections = null)
     {
         ArgumentNullException.ThrowIfNull(weight);
         if (weight.Storage == HfWeightStorage.Plain)
@@ -29,6 +34,11 @@ public static class DenseTextWeightPolicy
         }
         if (!projection || weight.Shape.Rank != 2)
             return DType.F32;
+        if (quantizedProjections is { } chosen && Packs(backend, weight, chosen))
+            return chosen;
+        // A 4-bit source becomes Q4_K where it fits: its per-sub-block scale and minimum follow the source's own block scales more
+        // closely than Q4_0's single scale, which matters for the few large weights that drive a model's outlier activations.
+        if (IsFourBit(weight) && Packs(backend, weight, DType.Q4_K)) return DType.Q4_K;
         DType packed = IsFourBit(weight) ? DType.Q4_0 : DType.Q8_0;
         if (Packs(backend, weight, packed)) return packed;
         // A 4-bit source on a backend that has Q8_0 but not Q4_0 still stays packed at twice the size, rather than four times as F16.

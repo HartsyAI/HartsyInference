@@ -77,11 +77,20 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
 Done since the first snapshot: cross-attention query/key RoPE, the deepstack merger, multi-image prompts, raw-pixel
 preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI route (`hartsy text -m moss-vl-realtime -i …`).
 
-1. Realtime session loop: frame and prompt queues, `<|silence|>` idling, interruption by appending a new turn, and cross-KV that
-   grows per frame. Not built yet.
+1. Realtime session loop: done. `RealtimeVlmSession` (generic, `LLM/Multimodal/Streaming`) follows the reference
+   `_real_time_sample`: frames and prompts are spliced in after each token, `<|silence|>` idles with a 20 ms poll, a cycle with
+   prompts and frames gets a spliced `<|silence|>`, and a prompt appends a new turn (the stream never truncates). The reference has
+   no visual-KV window; a session that reaches its vision cap is refused by name. Engine `OpenRealtimeAsync`, CLI `--realtime`,
+   and SSE routes under `/v1/native/realtime/sessions`.
 2. Video input: done. Offline video uses one timed vision block per the processor; frames are sized by the reference video
-   smart-resize. The appendable `MossVlDecodeSession` (segments, growing `CrossKvCache`) is in place for the realtime loop.
-3. NF4 (bitsandbytes) and FP8 (compressed-tensors, per-channel BF16 scales) checkpoints are not loaded yet.
+   smart-resize.
+3. NF4 (bitsandbytes double-quant) and FP8 (compressed-tensors per-channel) checkpoints: done. They load through
+   `HfQuantCheckpoint` and a one-time GGUF cache, NF4 as Q4_K and FP8 as Q8_0 where the backend keeps those packed
+   (`DenseTextWeightPolicy`). Against the BF16 checkpoint, NF4 decodes at 9.3% relative RMS (12.2% after Q4_K) and FP8 at 2.7%
+   (2.7% after Q8_0). NF4 as Q4_0 (12.9%) was tried first and produced garbage: hidden-state drift against the F16 stack reached
+   18% by layer 16 (Q4_K: 1.8%), driven by the stack's large outlier activations. `--precision` (a GGUF type) re-quantizes the BF16
+   projections a release leaves unquantized; with it both releases run on a 12 GB card (NF4 + q8_0: 28.8 tok/s, FP8 + q4_k:
+   9.7 tok/s on Vulkan).
 4. CUDA has not run here: cuBLAS 13 is missing (auto-provisioning is in review). Full BF16 generation needs about 21 GB of
    device memory; the 12 GB RTX 3060 runs the GGUF.
 5. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:

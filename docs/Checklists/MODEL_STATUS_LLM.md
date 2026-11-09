@@ -153,7 +153,22 @@ Run: `hartsy text -m moss-vl-realtime -i photo.png "What is in this image?"`. A 
 - ❌ CUDA not run here (cuBLAS 13 missing; auto-provisioning is in review). Full BF16 generation needs about 21 GB of device memory.
 - ✅ Video: `--video` (ffmpeg) or `--frames-dir`; frames sampled and sized as the reference does, one timed vision block. A moving red disc is described as moving left to right (Vulkan).
 - ✅ Appendable decode session: segments continue positions and append vision once; two segments equal one forward exactly (Vulkan).
-- ❌ Realtime session loop, NF4/FP8 checkpoints: in progress.
+- ✅ Live sessions: `hartsy text --realtime --frames-dir … "question"` (or `--video`), the Engine's `OpenRealtimeAsync`, and SSE
+  routes under `/v1/native/realtime/sessions`. On Vulkan, frames of a red disc with "What color is the circle?" give "The circle is
+  red."; a frame folder replayed at 1 fps answers "Red" as each frame arrives.
+- ✅ NF4 and FP8 releases (`OpenMOSS-Team/MOSS-VL-Realtime-NF4`, `-FP8`) load from their folders: NF4 → Q4_K, FP8 → Q8_0 where the
+  backend keeps them packed, converted once into `_gguf-cache`. Decoded weights against BF16: NF4 9.3% relative RMS (12.2% after
+  Q4_K), FP8 2.7% (2.7% after Q8_0). `--precision` re-quantizes the BF16 projections a release leaves unquantized. On Vulkan
+  (12 GB), both name the red circle and blue square:
+
+  | Release | `--precision` | decode |
+  |---|---|---|
+  | NF4 | q8_0 | 28.8 tok/s |
+  | NF4 | (none, BF16 layers as F16) | 6.4 tok/s (over the card's memory) |
+  | FP8 | q4_k | 9.7 tok/s |
+  | FP8 | q6_k | 3.8 tok/s |
+
+  NF4 as Q4_0 produced garbage: the second 4-bit rounding let outlier activations run away within 16 layers; Q4_K held.
 
 ## Remaining work
 

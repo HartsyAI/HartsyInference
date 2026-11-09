@@ -73,8 +73,51 @@ public sealed class MossVlVisionTower : IDisposable
         using (JsonDocument doc = JsonDocument.Parse(File.ReadAllText(configPath)))
             config = ConfigFromJson(doc.RootElement.GetProperty("vision_config"));
 
+        if (HfQuantCheckpoint.DeclaresQuantization(checkpointDirectory))
+            return OpenQuantized(checkpointDirectory, config, backend);
         CheckpointSource source = CheckpointSource.OpenShards(HfCheckpointDirectory.WeightFiles(checkpointDirectory));
         return Build(source.Weights, source, config, backend, ggufLayout: false, checkpointDirectory);
+    }
+
+    /// <summary>A quantized release (NF4, FP8, …): only the tower's own <c>model.visual.*</c> weights are read, through
+    /// <see cref="HfQuantCheckpoint"/>, so the text model's quant companions are never touched. Plain weights are borrowed; any the
+    /// release quantized are decoded to F32 here and cast for the backend by <see cref="Build"/>.</summary>
+    private static MossVlVisionTower OpenQuantized(string checkpointDirectory, Qwen3VlVisionConfig config, IBackend? backend)
+    {
+        HfQuantCheckpoint checkpoint = HfQuantCheckpoint.Open(checkpointDirectory);
+        Owners owner = new(checkpoint);
+        try
+        {
+            Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
+            foreach (HfQuantWeight w in checkpoint.Weights.Values.Where(w => w.Name.StartsWith(Prefix, StringComparison.Ordinal)))
+            {
+                Tensor t = w.Storage == HfWeightStorage.Plain ? checkpoint.Borrow(w.Name) : checkpoint.DequantizeF32(w.Name);
+                owner.Add(t);
+                weights[w.Name] = t;
+            }
+            return Build(weights, owner, config, backend, ggufLayout: false, checkpointDirectory);
+        }
+        catch
+        {
+            owner.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The checkpoint and the tensors read from it, released together (tensors first).</summary>
+    private sealed class Owners(IDisposable checkpoint) : IDisposable
+    {
+        private readonly List<Tensor> _tensors = [];
+        private int _disposed;
+
+        public void Add(Tensor tensor) => _tensors.Add(tensor);
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            foreach (Tensor t in _tensors) t.Dispose();
+            checkpoint.Dispose();
+        }
     }
 
     /// <summary>Opens the vision tower a MOSS-VL GGUF carries beside its text blocks (<c>v.*</c> and <c>mm.*</c>, mapped to
