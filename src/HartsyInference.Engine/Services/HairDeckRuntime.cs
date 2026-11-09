@@ -70,6 +70,9 @@ internal sealed class HairDeckRuntime : IDisposable
         }
     }
 
+    /// <summary>True once <see cref="Dispose"/> has started. A request that won the gate after this must not run.</summary>
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -78,19 +81,30 @@ internal sealed class HairDeckRuntime : IDisposable
             return;
         }
 
-        // Wait for a generation in progress: the models must not be freed under it. Nothing releases the gate after this.
+        // Wait for a generation in progress: the models must not be freed under it. The gate is released again once the
+        // models are gone, so a request queued on it wakes, sees IsDisposed and gives up instead of blocking forever.
         Gate.Wait();
-        Model.Dispose();
-        _matter.Dispose();
-        _matteWeights.Dispose();
-        _segmenter.Dispose();
+        try
+        {
+            Model.Dispose();
+            _matter.Dispose();
+            _matteWeights.Dispose();
+            _segmenter.Dispose();
+        }
+        finally
+        {
+            Gate.Release();
+        }
     }
 
     private static void RequireFile(string path)
     {
         if (!File.Exists(path))
         {
-            throw new FileNotFoundException($"HairDeck needs the Vision checkpoint '{path}' (the catalog's SAM 3 and BiRefNet-matting assets).", path);
+            throw new FileNotFoundException(
+                $"HairDeck needs the Vision checkpoint '{path}' (the catalog's SAM 3, BiRefNet-matting and DINOv3 assets). "
+                + "Vision checkpoints are read from the Models/Vision folder under the models root.",
+                path);
         }
     }
 }
