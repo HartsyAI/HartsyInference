@@ -2,11 +2,11 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.LLM.Transformer.Dsa;
+namespace HartsyInference.LLM.Transformer;
 
-/// <summary>Backend calls over host F32 arrays for the DSA host reference: each wraps the array in a tensor, runs one
+/// <summary>Backend calls over host F32 arrays for the reference transformer modules: each wraps the array in a tensor, runs one
 /// <see cref="IBackend"/> op and copies the result back.</summary>
-internal static class DsaHostOps
+internal static class HostOps
 {
     /// <summary><c>y = x @ weight^T</c> through <see cref="IBackend.Linear"/>.</summary>
     public static float[] Project(IBackend backend, ReadOnlySpan<float> x, int rows, int inDim, Tensor weight, int outDim)
@@ -27,14 +27,12 @@ internal static class DsaHostOps
         output.AsReadOnlySpan<float>().CopyTo(data);
     }
 
-    /// <summary>LayerNorm of each <paramref name="width"/>-wide row in place; a null bias is zero.</summary>
-    public static void LayerNorm(IBackend backend, Span<float> data, int width, Tensor weight, Tensor? bias, float eps)
+    /// <summary>LayerNorm of each <paramref name="width"/>-wide row in place.</summary>
+    public static void LayerNorm(IBackend backend, Span<float> data, int width, Tensor weight, Tensor bias, float eps)
     {
         using Tensor input = HostMath.Tensor(data, data.Length / width, width);
         using Tensor output = new(input.Shape, DType.F32);
-        using Tensor? zeros = bias is null ? new Tensor(new TensorShape(width), DType.F32) : null;
-        zeros?.AsSpan<float>().Clear();
-        backend.LayerNorm(output, input, weight, bias ?? zeros!, eps);
+        backend.LayerNorm(output, input, weight, bias, eps);
         output.AsReadOnlySpan<float>().CopyTo(data);
     }
 

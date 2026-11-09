@@ -37,6 +37,7 @@ public sealed class DsaAttention : IDisposable
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(rope);
+        ArgumentNullException.ThrowIfNull(indexerRope);
         settings.Validate();
         if (rope.HalfDim * 2 != settings.QkRopeDim) throw new ArgumentException("The rope table width must equal QkRopeDim.", nameof(rope));
         int h = settings.Heads, qkv = settings.QkNopeDim + settings.VDim;
@@ -65,6 +66,8 @@ public sealed class DsaAttention : IDisposable
 
     /// <summary>Runs the layer over <paramref name="tokens"/> rows at positions <c>startPos ..</c> and writes <c>[tokens, Dim]</c> to
     /// <paramref name="y"/>. Any chunk length works; a call at position 0 starts a new sequence, any other must continue the state.</summary>
+    /// <remarks>The indexer scores each chunk as one F32 <c>[tokens, startPos + tokens]</c> buffer (<see cref="DsaIndexer.Select"/>), so a
+    /// long prompt should be prefilled in bounded chunks.</remarks>
     /// <param name="x">Normalized hidden states, <c>[tokens, Dim]</c>.</param>
     public void Forward(ReadOnlySpan<float> x, int tokens, int startPos, DsaAttentionState state, Span<float> y)
     {
@@ -79,22 +82,22 @@ public sealed class DsaAttention : IDisposable
         Tensor valueExpand = _valueExpand!;
         if (startPos == 0) state.Reset();
         int h = s.Heads, kvr = s.KvLoraRank, rd = s.QkRopeDim, latent = s.LatentDim, endPos = startPos + tokens;
-        int[] positions = DsaHostOps.Range(startPos, tokens);
+        int[] positions = HostOps.Range(startPos, tokens);
 
-        float[] qLatent = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.QA, s.QLoraRank);
-        DsaHostOps.RmsNorm(_backend, qLatent, s.QLoraRank, _w.QANorm, s.NormEps);
-        float[] q = DsaHostOps.Project(_backend, qLatent, tokens, s.QLoraRank, _w.QB, h * s.QkHeadDim);
+        float[] qLatent = HostOps.Project(_backend, x, tokens, s.Dim, _w.QA, s.QLoraRank);
+        HostOps.RmsNorm(_backend, qLatent, s.QLoraRank, _w.QANorm, s.NormEps);
+        float[] q = HostOps.Project(_backend, qLatent, tokens, s.QLoraRank, _w.QB, h * s.QkHeadDim);
         PartialRotary.Rotate(_backend, _rope, rd, q, [1, tokens, h, s.QkHeadDim], positions, inverse: false, s.RopePairing);
 
         // the latent row is [RMS-normed latent | rotated shared key], cached at its position
-        float[] kv = DsaHostOps.Project(_backend, x, tokens, s.Dim, _w.KvA, latent);
+        float[] kv = HostOps.Project(_backend, x, tokens, s.Dim, _w.KvA, latent);
         float[] kvLatent = new float[tokens * kvr], keyPe = new float[tokens * rd];
         for (int t = 0; t < tokens; t++)
         {
             kv.AsSpan(t * latent, kvr).CopyTo(kvLatent.AsSpan(t * kvr, kvr));
             kv.AsSpan(t * latent + kvr, rd).CopyTo(keyPe.AsSpan(t * rd, rd));
         }
-        DsaHostOps.RmsNorm(_backend, kvLatent, kvr, _w.KvANorm, s.NormEps);
+        HostOps.RmsNorm(_backend, kvLatent, kvr, _w.KvANorm, s.NormEps);
         PartialRotary.Rotate(_backend, _rope, rd, keyPe, [1, tokens, rd], positions, inverse: false, s.RopePairing);
         Span<float> cache = state.Latent.AsSpan<float>();
         for (int t = 0; t < tokens; t++)
@@ -114,8 +117,8 @@ public sealed class DsaAttention : IDisposable
         float[] o = ExpandValues(latentOut, tokens, valueExpand);
 
         if (_w.OGate is { } gateWeight)
-            AttentionOutputGate.ApplySigmoid(o, DsaHostOps.Project(_backend, qLatent, tokens, s.QLoraRank, gateWeight, h * s.VDim));
-        DsaHostOps.Project(_backend, o, tokens, h * s.VDim, _w.WoB, s.Dim).CopyTo(y);
+            AttentionOutputGate.ApplySigmoid(o, HostOps.Project(_backend, qLatent, tokens, s.QLoraRank, gateWeight, h * s.VDim));
+        HostOps.Project(_backend, o, tokens, h * s.VDim, _w.WoB, s.Dim).CopyTo(y);
     }
 
     // [tokens, heads, QkHeadDim] queries to [tokens, heads, LatentDim]: the no-position part times each head's key rows, then the rotated part.
@@ -229,5 +232,6 @@ public sealed class DsaAttention : IDisposable
     {
         Interlocked.Exchange(ref _keyAbsorb, null)?.Dispose();
         Interlocked.Exchange(ref _valueExpand, null)?.Dispose();
+        _indexer.Dispose();
     }
 }

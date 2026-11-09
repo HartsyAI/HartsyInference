@@ -16,7 +16,7 @@ namespace HartsyInference.LLM.Transformer.Dsa;
 /// <para>UNVERIFIED: the ReLU. The scoring kernel (DeepGEMM <c>fp8_mqa_logits</c>) is not in the reference sources; the ReLU is taken
 /// from vLLM's comment on that kernel and from the DeepSeek V3.2 indexer it serves. No ERNIE checkpoint run has confirmed it.</para>
 /// </remarks>
-public sealed class DsaIndexer
+public sealed class DsaIndexer : IDisposable
 {
     private readonly IBackend _backend;
     private readonly DsaIndexerSettings _s;
@@ -24,6 +24,7 @@ public sealed class DsaIndexer
     private readonly IRopeRowSource _rope;
     private readonly int _dim;
     private readonly int _qLoraRank;
+    private Tensor? _ownedZeroBias;
 
     /// <param name="backend">Runs the projections, norms, rotations, Hadamard, round trips and scores.</param>
     /// <param name="settings">Indexer shape and numerics.</param>
@@ -50,6 +51,11 @@ public sealed class DsaIndexer
         _rope = rope;
         _dim = dim;
         _qLoraRank = qLoraRank;
+        if (weights.KeyNormBias is null)
+        {
+            _ownedZeroBias = new Tensor(new TensorShape(settings.HeadDim), DType.F32);
+            _ownedZeroBias.AsSpan<float>().Clear();
+        }
     }
 
     /// <summary>The settings the indexer was built with.</summary>
@@ -64,11 +70,13 @@ public sealed class DsaIndexer
         int hd = _s.HeadDim;
         if (keyStore.DType != DType.F32 || keyStore.Shape.Rank != 2 || keyStore.Shape[1] != hd || startPos + tokens > keyStore.Shape[0])
             throw new ArgumentException("keyStore must be F32 [capacity, HeadDim] with room for these positions.", nameof(keyStore));
-        float[] k = DsaHostOps.Project(_backend, x, tokens, _dim, _w.Wk, hd);
-        DsaHostOps.LayerNorm(_backend, k, hd, _w.KeyNormWeight, _w.KeyNormBias, _s.KeyNormEps);
-        Rotate(k, [1, tokens, hd], DsaHostOps.Range(startPos, tokens));
-        if (_s.Hadamard) DsaHostOps.Hadamard(_backend, k, hd);
-        DsaHostOps.RoundTrip(_backend, k, hd, _s.KeyEncoding);
+        RequireRope(startPos + tokens);
+        Tensor bias = _w.KeyNormBias ?? _ownedZeroBias ?? throw new ObjectDisposedException(nameof(DsaIndexer));
+        float[] k = HostOps.Project(_backend, x, tokens, _dim, _w.Wk, hd);
+        HostOps.LayerNorm(_backend, k, hd, _w.KeyNormWeight, bias, _s.KeyNormEps);
+        Rotate(k, [1, tokens, hd], HostOps.Range(startPos, tokens));
+        if (_s.Hadamard) HostOps.Hadamard(_backend, k, hd);
+        HostOps.RoundTrip(_backend, k, hd, _s.KeyEncoding);
         k.CopyTo(keyStore.AsSpan<float>().Slice(startPos * hd, tokens * hd));
     }
 
@@ -80,23 +88,27 @@ public sealed class DsaIndexer
     /// <param name="keyStore">The keys written by <see cref="AppendKeys"/>; at least <c>max(limits)</c> rows are read.</param>
     /// <param name="width">Receives the row width, <c>min(TopK, max(limits))</c>; 0 when no query may score any key.</param>
     /// <returns><c>[tokens, width]</c> ascending key positions; each row's first <c>min(limits[t], TopK)</c> are valid, the rest -1.</returns>
+    /// <remarks>The scores are one F32 <c>[tokens, max(limits)]</c> buffer, so memory grows with chunk length times context
+    /// (about 4 GB for a 32k-token chunk at 32k context). Callers should prefill in bounded chunks.</remarks>
     public int[] Select(ReadOnlySpan<float> x, ReadOnlySpan<float> qLatent, ReadOnlySpan<int> positions, ReadOnlySpan<int> limits, Tensor keyStore,
         out int width)
     {
         int tokens = positions.Length, nh = _s.Heads, hd = _s.HeadDim;
         if (limits.Length != tokens) throw new ArgumentException("limits must hold one entry per query.", nameof(limits));
-        int keyRows = 0;
+        int keyRows = 0, lastPos = -1;
         foreach (int l in limits) keyRows = Math.Max(keyRows, l);
+        foreach (int p in positions) lastPos = Math.Max(lastPos, p);
+        RequireRope(lastPos + 1);
         if (keyRows > keyStore.Shape[0]) throw new ArgumentException("A limit reaches past the key store.", nameof(limits));
         width = Math.Min(_s.TopK, keyRows);
         if (keyRows == 0) return [];
 
-        float[] q = DsaHostOps.Project(_backend, qLatent, tokens, _qLoraRank, _w.WqB, nh * hd);
+        float[] q = HostOps.Project(_backend, qLatent, tokens, _qLoraRank, _w.WqB, nh * hd);
         Rotate(q, [1, tokens, nh, hd], positions.ToArray());
-        if (_s.Hadamard) DsaHostOps.Hadamard(_backend, q, hd);
-        DsaHostOps.RoundTrip(_backend, q, hd, _s.QueryEncoding);
+        if (_s.Hadamard) HostOps.Hadamard(_backend, q, hd);
+        HostOps.RoundTrip(_backend, q, hd, _s.QueryEncoding);
 
-        float[] weights = DsaHostOps.Project(_backend, x, tokens, _dim, _w.WeightsProj, nh);
+        float[] weights = HostOps.Project(_backend, x, tokens, _dim, _w.WeightsProj, nh);
         float weightScale = 1f / MathF.Sqrt(hd) / MathF.Sqrt(nh);
         for (int i = 0; i < weights.Length; i++) weights[i] *= weightScale;
 
@@ -114,11 +126,20 @@ public sealed class DsaIndexer
         return picked;
     }
 
+    private void RequireRope(int endPos)
+    {
+        if (endPos > _rope.Length)
+            throw new ArgumentOutOfRangeException(nameof(endPos), $"The indexer rope table covers {_rope.Length} positions; position {endPos - 1} was asked for.");
+    }
+
     private void Rotate(float[] data, long[] shape, int[] positions)
     {
         if (_s.RopeLeading) PartialRotary.RotateLeading(_backend, _rope, _s.RopeDim, data, shape, positions, inverse: false, _s.RopePairing);
         else PartialRotary.Rotate(_backend, _rope, _s.RopeDim, data, shape, positions, inverse: false, _s.RopePairing);
     }
+
+    /// <inheritdoc />
+    public void Dispose() => Interlocked.Exchange(ref _ownedZeroBias, null)?.Dispose();
 
     internal static void RequireShape(Tensor w, int rows, int cols, string name)
     {

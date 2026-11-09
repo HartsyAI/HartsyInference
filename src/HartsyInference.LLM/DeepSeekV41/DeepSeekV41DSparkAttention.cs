@@ -45,7 +45,7 @@ internal sealed class DeepSeekV41DSparkAttention
 
         float[] kv = _w.Wkv.Linear(mainX, tokens, dim, hd);
         HostMath.RmsNormRows(kv, _w.KvNorm, hd, _settings.NormEps);
-        PartialRotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], Range(0, tokens), inverse: false);
+        PartialRotary.Rotate(_backend, _rope, _settings.RopeDim, kv, [1, tokens, hd], HostOps.Range(0, tokens), inverse: false);
         if (_settings.QuantizeLatents) RoundTrip(kv, hd);
         for (int p = Math.Max(0, tokens - win); p < tokens; p++)
             kv.AsSpan(p * hd, hd).CopyTo(state.Window.AsSpan((p % win) * hd, hd));
@@ -69,7 +69,7 @@ internal sealed class DeepSeekV41DSparkAttention
         if (_settings.QuantizeLatents) RoundTrip(mainKv, hd);
         mainKv.CopyTo(state.Window.AsSpan((startPos % win) * hd, hd));
 
-        int[] positions = Range(startPos + 1, block);
+        int[] positions = HostOps.Range(startPos + 1, block);
         float[] qr = _w.WqA.Linear(x, block, dim, _settings.QLoraRank);
         HostMath.RmsNormRows(qr, _w.QNorm, _settings.QLoraRank, _settings.NormEps);
         float[] q = _w.WqB.Linear(qr, block, _settings.QLoraRank, heads * hd);
@@ -107,17 +107,5 @@ internal sealed class DeepSeekV41DSparkAttention
         _w.WoB.Linear(grouped, block, _settings.OGroups * _settings.OLoraRank, dim).CopyTo(y);
     }
 
-    private void RoundTrip(float[] data, int width)
-    {
-        using Tensor t = HostMath.Tensor(data, data.Length / width, width);
-        _backend.ActQuantDequantInPlace(t, LatentEncoding.Fp8E4M3Ue8m0x32);
-        t.AsReadOnlySpan<float>().CopyTo(data);
-    }
-
-    private static int[] Range(int start, int count)
-    {
-        int[] r = new int[count];
-        for (int i = 0; i < count; i++) r[i] = start + i;
-        return r;
-    }
+    private void RoundTrip(float[] data, int width) => HostOps.RoundTrip(_backend, data, width, LatentEncoding.Fp8E4M3Ue8m0x32);
 }
