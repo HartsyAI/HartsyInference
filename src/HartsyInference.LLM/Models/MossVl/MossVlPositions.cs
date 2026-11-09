@@ -109,6 +109,52 @@ public static class MossVlPositions
     public static MossVlRope BuildRope(MossVlPositionPlan plan, MossVlConfig config) =>
         BuildRope(plan, config.Text.HeadDim, config.Text.RopeTheta, [.. config.MropeSection], config.MropeInterleaved, config.Text.HiddenSize);
 
+    /// <summary>The vision rotary tables for the image in <paramref name="plan"/>. They depend only on the image, so a decode session
+    /// builds them once and borrows them into every step (<see cref="BuildDecodeRope"/>). The result owns its tensors.</summary>
+    public static (Tensor Cos, Tensor Sin) BuildVisionTables(MossVlPositionPlan plan, MossVlConfig config)
+    {
+        int headDim = config.Text.HeadDim;
+        // Null scaling makes the frequencies independent of the position range, so the tables match a per-step build exactly.
+        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(headDim, config.Text.RopeTheta, null, 1);
+        byte[] pairAxes = MRopePairAxes.Build([.. config.MropeSection], headDim / 2,
+            config.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        return MRopeTable.BuildTensors(plan.Vision, plan.VisionLength, 0, plan.VisionLength, invFreq, scaling, pairAxes, headDim, headDim);
+    }
+
+    /// <summary>The rotary tables of one decode step: the step's text row and row mask are built fresh, and the image's vision tables
+    /// are borrowed (the caller keeps them alive and disposes them). Positions match <see cref="BuildRope(MossVlPositionPlan, MossVlConfig)"/>.</summary>
+    public static MossVlRope BuildDecodeRope(MossVlPositionPlan step, MossVlConfig config, Tensor visionCos, Tensor visionSin)
+    {
+        int headDim = config.Text.HeadDim, hidden = config.Text.HiddenSize, t = step.Text.Length / 3;
+        int maxPosition = 0;
+        foreach (int p in step.Text) maxPosition = Math.Max(maxPosition, p);
+        (double[] invFreq, double scaling) = RopeFrequencyBuilder.Build(headDim, config.Text.RopeTheta, null, maxPosition + 1);
+        byte[] pairAxes = MRopePairAxes.Build([.. config.MropeSection], headDim / 2,
+            config.MropeInterleaved ? MRopeLayout.Interleaved : MRopeLayout.Sectioned);
+        (Tensor textCos, Tensor textSin) = MRopeTable.BuildTensors(step.Text, t, 0, t, invFreq, scaling, pairAxes, headDim, headDim);
+        try
+        {
+            Tensor? rowMask = step.RowMask is null ? null : BuildRowMask(step.RowMask, t, hidden);
+            return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask), ownsVision: false);
+        }
+        catch
+        {
+            textCos.Dispose();
+            textSin.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Expands a per-row mask to <c>[1, T, hiddenSize]</c>, each row filled with its value.</summary>
+    private static Tensor BuildRowMask(float[] rows, int t, int hiddenSize)
+    {
+        Tensor rowMask = new(new TensorShape(1, t, hiddenSize), DType.F32);
+        Span<float> dst = rowMask.AsSpan<float>();
+        for (int r = 0; r < t; r++)
+            dst.Slice(r * hiddenSize, hiddenSize).Fill(rows[r]);
+        return rowMask;
+    }
+
     /// <summary>Builds the rotary tables for <paramref name="plan"/>: pair <c>j</c> of each row rotates by its interleaved M-RoPE axis,
     /// as the modeling code's <c>apply_interleaved_mrope</c> does. The row mask is expanded to <c>[1, T, hiddenSize]</c> so the
     /// cross-attention layers can apply it with one elementwise multiply. The result owns its tensors.</summary>
@@ -130,14 +176,7 @@ public static class MossVlPositions
                 invFreq, scaling, pairAxes, headDim, headDim);
             try
             {
-                Tensor? rowMask = null;
-                if (plan.RowMask is not null)
-                {
-                    rowMask = new Tensor(new TensorShape(1, t, hiddenSize), DType.F32);
-                    Span<float> dst = rowMask.AsSpan<float>();
-                    for (int r = 0; r < t; r++)
-                        dst.Slice(r * hiddenSize, hiddenSize).Fill(plan.RowMask[r]);
-                }
+                Tensor? rowMask = plan.RowMask is null ? null : BuildRowMask(plan.RowMask, t, hiddenSize);
                 return new MossVlRope(new MultimodalRope(textCos, textSin, visionCos, visionSin, rowMask));
             }
             catch
@@ -157,7 +196,9 @@ public static class MossVlPositions
 }
 
 /// <summary>The rotary tables of one MOSS-VL forward. Dispose after the forward that reads them.</summary>
-public sealed class MossVlRope(MultimodalRope rope) : IDisposable
+/// <param name="rope">The tables. Text tables and the row mask are always owned here.</param>
+/// <param name="ownsVision">False when the vision tables are borrowed from a longer-lived owner (the decode session's per-image tables).</param>
+public sealed class MossVlRope(MultimodalRope rope, bool ownsVision = true) : IDisposable
 {
     private int _disposed;
 
@@ -170,8 +211,11 @@ public sealed class MossVlRope(MultimodalRope rope) : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         Rope.TextCos.Dispose();
         Rope.TextSin.Dispose();
-        Rope.VisionCos.Dispose();
-        Rope.VisionSin.Dispose();
+        if (ownsVision)
+        {
+            Rope.VisionCos.Dispose();
+            Rope.VisionSin.Dispose();
+        }
         Rope.RowMask?.Dispose();
     }
 }

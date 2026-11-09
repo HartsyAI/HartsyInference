@@ -18,6 +18,8 @@ public sealed class MossVlDecodeSession : IDisposable
     private readonly int[] _promptIds;
     private readonly MossVlPositionPlan _promptPlan;
     private readonly Tensor _vision;
+    private readonly Tensor _visionCos;
+    private readonly Tensor _visionSin;
     private readonly FixedKvCache _cache;
     private int _cacheLength;
     private int _nextPosition;
@@ -37,15 +39,22 @@ public sealed class MossVlDecodeSession : IDisposable
         _promptIds = promptIds;
         _promptPlan = MossVlPositions.Plan(promptIds, config.ImageTokenId, [new MossVlImage(mergedHeight, mergedWidth)]);
         _vision = decoder.AppendSeparator(mergedVision);
+        // The image's vision rotary tables are the same for every step, so they are built once here.
+        Tensor? visionCos = null, visionSin = null;
         try
         {
             if (_vision.Shape[1] != _promptPlan.VisionLength)
                 throw new ArgumentException($"Vision tokens {_vision.Shape[1]} do not match the image grid ({_promptPlan.VisionLength} with separator).", nameof(mergedVision));
+            (visionCos, visionSin) = MossVlPositions.BuildVisionTables(_promptPlan, config);
             TransformerConfig text = decoder.TextConfig;
             _cache = new FixedKvCache(text.NumLayers, 1, text.NumKvHeads, text.HeadDim, promptIds.Length + maxNewTokens + 1);
+            _visionCos = visionCos;
+            _visionSin = visionSin;
         }
         catch
         {
+            visionCos?.Dispose();
+            visionSin?.Dispose();
             _vision.Dispose();
             throw;
         }
@@ -82,7 +91,7 @@ public sealed class MossVlDecodeSession : IDisposable
             VisionLength = _promptPlan.VisionLength,
             RowMask = [1f],
         };
-        using MossVlRope rope = MossVlPositions.BuildRope(stepPlan, _config);
+        using MossVlRope rope = MossVlPositions.BuildDecodeRope(stepPlan, _config, _visionCos, _visionSin);
         using Tensor embeds = new(new TensorShape(1, 1, _decoder.TextConfig.HiddenSize), DType.F32);
         _decoder.Model.EmbedLookup(embeds, [token]);
         using Tensor hidden = _decoder.Model.ForwardEmbeds(_backend, embeds, 1, _cacheLength, _cache, applyFinalNorm: true,
@@ -96,6 +105,8 @@ public sealed class MossVlDecodeSession : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _cache.Dispose();
+        _visionCos.Dispose();
+        _visionSin.Dispose();
         _vision.Dispose();
     }
 
@@ -121,6 +132,7 @@ public sealed class MossVlGenerator(MossVlTextDecoder decoder, MossVlConfig conf
     public string Generate(string question, Tensor mergedVision, int mergedHeight, int mergedWidth, int maxTokens = 64,
         SamplingOptions? sampling = null)
     {
+        if (maxTokens <= 0) return string.Empty;
         int[] ids = tokenizer.Encode(
             "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>" + question + "<|im_end|>\n<|im_start|>assistant\n",
             addSpecial: true);
