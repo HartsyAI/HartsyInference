@@ -81,6 +81,7 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyStyle/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Flux3/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/sana_wm_s1_*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Fibo2/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/MossImage/*.safetensors
 !/tests/HartsyInference.Vision.Tests/TestData/RealEsrgan/*.safetensors
