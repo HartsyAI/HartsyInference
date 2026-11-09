@@ -38,7 +38,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         private readonly Tensor[] _owned;
         private int _disposed;
 
-        public ForwardConstants(Tensor causalMask, Tensor? localMask, Tensor globalCos, Tensor globalSin, Tensor? localCos, Tensor? localSin)
+        public ForwardConstants(Tensor causalMask, Tensor? localMask, Tensor globalCos, Tensor globalSin, Tensor? localCos, Tensor? localSin,
+            int attendedKeys)
         {
             CausalMask = causalMask;
             LocalMask = localMask;
@@ -46,6 +47,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             GlobalSin = globalSin;
             LocalCos = localCos;
             LocalSin = localSin;
+            AttendedKeys = attendedKeys;
             List<Tensor> owned = [causalMask, globalCos, globalSin];
             if (localMask is not null) owned.Add(localMask);
             if (localCos is not null) owned.AddRange([localCos, localSin!]);
@@ -61,6 +63,10 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         public Tensor GlobalSin { get; }
         public Tensor? LocalCos { get; }
         public Tensor? LocalSin { get; }
+
+        /// <summary>Key length every row of the request attends, the shared valid length of a padded batch; the
+        /// soft-capped flash path takes it as one scalar.</summary>
+        public int AttendedKeys { get; }
 
         public void Dispose()
         {
@@ -83,10 +89,12 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
     public LlamaStyleEncoder(LlamaStyleEncoderConfig config)
     {
+        if (!(config.AttentionLogitSoftcap >= 0f))
+            throw new ArgumentOutOfRangeException(nameof(config), config.AttentionLogitSoftcap, "Attention soft-cap must be zero or positive.");
         _config = config;
         _blocks = new LlamaBlock[config.NumLayers];
         for (int i = 0; i < config.NumLayers; i++)
-            _blocks[i] = new LlamaBlock(config);
+            _blocks[i] = new LlamaBlock(config, IsSlidingLayer(i) ? config.SlidingWindow : 0);
     }
 
     /// <summary>Number of transformer blocks. Useful for callers that want to request a specific HF-indexed hidden state via <see cref="EncodeMultiLayer"/> (e.g., Z-Image needs <c>NumLayers - 1</c> for diffusers' <c>hidden_states[-2]</c>).</summary>
@@ -173,7 +181,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers; i++)
             {
                 (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
-                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen);
+                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen, constants.AttendedKeys);
                 Tensor previous = hidden;
                 hidden = next;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous layer activation");
@@ -183,16 +191,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             // distilled for Flux.2 Dev. In that case return the last block's raw output.
             if (_config.HasFinalNorm)
             {
-                Tensor output = new(new TensorShape(batch, seqLen, _config.HiddenSize), DType.F32);
-                try
-                {
-                    backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
-                }
-                catch
-                {
-                    TextEncoderTensorHelpers.DisposeBestEffort(output, "final norm output after failure");
-                    throw;
-                }
+                Tensor output = ApplyFinalNorm(backend, hidden, batch, seqLen);
                 Tensor previous = hidden;
                 hidden = null;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "pre-final-norm activation");
@@ -263,7 +262,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers; i++)
             {
                 Tensor next = _blocks[i].Forward(
-                    backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen);
+                    backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen, constants.AttendedKeys);
                 Tensor previous = hidden;
                 hidden = next;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous M-RoPE layer activation");
@@ -273,9 +272,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
             if (_config.HasFinalNorm)
             {
-                Tensor output = new(new TensorShape(1, seqLen, H), DType.F32);
-                try { backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps); }
-                catch { TextEncoderTensorHelpers.DisposeBestEffort(output, "M-RoPE final norm output after failure"); throw; }
+                Tensor output = ApplyFinalNorm(backend, hidden, 1, seqLen);
                 Tensor previous = hidden;
                 hidden = null;
                 TextEncoderTensorHelpers.DisposeBestEffort(previous, "M-RoPE pre-final-norm activation");
@@ -342,7 +339,8 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             }
             for (int i = 0; i < _config.NumLayers && request < taps; i++)
             {
-                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen);
+                Tensor next = _blocks[i].Forward(
+                    backend, hidden, MaskForLayer(i, constants), constants.GlobalCos, constants.GlobalSin, seqLen, constants.AttendedKeys);
                 Tensor previous = hidden;
                 hidden = next;
                 if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer M-RoPE activation");
@@ -434,7 +432,41 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
     /// <summary><see cref="EncodeMultiLayer(IBackend, int[][], int[], bool)"/> for one right-padded prompt whose padding is
     /// masked as keys and placed at its own rotary position (see <see cref="TextEncoderPadding"/>).</summary>
     public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout,
-        TextEncoderPadding? padding)
+        TextEncoderPadding? padding) =>
+        EncodeMultiLayer(backend, tokenIds, layerIndices, interleavedLayout, padding, normalizeFinalOutput: false);
+
+    /// <summary><see cref="EncodeMultiLayer(IBackend, int[][], int[], bool, TextEncoderPadding?)"/>, optionally returning the
+    /// post-final-RMSNorm hidden state (HuggingFace <c>last_hidden_state</c>) as the last tap. Requires the final layer,
+    /// <see cref="NumLayers"/>, to be the last entry of <paramref name="layerIndices"/>.</summary>
+    public Tensor EncodeMultiLayer(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout,
+        TextEncoderPadding? padding, bool normalizeFinalOutput)
+    {
+        ThrowIfDisposed();
+        if (padding is not { } layout)
+            return EncodeMultiLayerCore(backend, tokenIds, layerIndices, interleavedLayout, null, 1, normalizeFinalOutput);
+
+        (int batch, int seqLen) = ValidateTokenBatch(tokenIds);
+        ValidatePadding(layout, batch, seqLen);
+        return EncodeMultiLayerCore(backend, tokenIds, layerIndices, interleavedLayout, [layout.ValidLength],
+            layout.PaddedPosition, normalizeFinalOutput);
+    }
+
+    /// <summary>Encodes a right-padded batch with one valid length per row. Row <c>b</c> is causal over its first
+    /// <c>validLengths[b]</c> tokens and no token attends a padding key; padding rows take rotary position 1, as in
+    /// transformers 4.57 (see <see cref="TextEncoderPadding"/>). A batch whose rows share one valid length attends
+    /// through the same mask as a single padded prompt. Output is <c>[B, seqLen, K · hidden]</c> as
+    /// <see cref="EncodeMultiLayer(IBackend, int[][], int[], bool)"/>.</summary>
+    /// <param name="normalizeFinalOutput">Replaces the final tap with the post-final-RMSNorm state; see the overload above.</param>
+    public Tensor EncodeMultiLayerRightPadded(IBackend backend, int[][] tokenIds, int[] layerIndices, int[] validLengths,
+        bool normalizeFinalOutput = false)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(validLengths);
+        return EncodeMultiLayerCore(backend, tokenIds, layerIndices, interleavedLayout: false, validLengths, 1, normalizeFinalOutput);
+    }
+
+    private Tensor EncodeMultiLayerCore(IBackend backend, int[][] tokenIds, int[] layerIndices, bool interleavedLayout,
+        int[]? validLengths, int paddedPosition, bool normalizeFinalOutput)
     {
         ThrowIfDisposed();
         if (layerIndices is null || layerIndices.Length == 0)
@@ -454,15 +486,16 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         if (seqLen > _config.MaxPositionEmbeddings)
             throw new InvalidOperationException(
                 $"Prompt length {seqLen} exceeds MaxPositionEmbeddings ({_config.MaxPositionEmbeddings}).");
-        ValidatePadding(padding, batch, seqLen);
+        if (validLengths is not null) ValidateRowLengths(validLengths, batch, seqLen, paddedPosition);
+        if (normalizeFinalOutput) ValidateNormalizedRequest(layerIndices);
 
-        EnsureRopeTable(Math.Max(seqLen, (padding?.PaddedPosition ?? 0) + 1));
+        EnsureRopeTable(validLengths is null ? seqLen : Math.Max(seqLen, paddedPosition + 1));
 
         Tensor? hidden = null;
         bool hiddenIsCaptured = false;
         List<Tensor> captures = new(K);
         using ForwardConstants constants = PrepareForwardConstants(
-            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal, padding);
+            backend, batch, seqLen, _ropeCos!, _ropeSin!, _ropeCosLocal, _ropeSinLocal, validLengths, paddedPosition);
         try
         {
             hidden = TextEncoderTensorHelpers.EmbeddingLookup(backend, tokenIds, batch, seqLen,
@@ -482,7 +515,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             for (int i = 0; i < _config.NumLayers && requestIdx < K; i++)
             {
                 (Tensor rcos, Tensor rsin) = RopeForLayer(i, constants);
-                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen);
+                Tensor next = _blocks[i].Forward(backend, hidden, MaskForLayer(i, constants), rcos, rsin, seqLen, constants.AttendedKeys);
                 Tensor previous = hidden;
                 hidden = next;
                 if (!hiddenIsCaptured) TextEncoderTensorHelpers.DisposeBestEffort(previous, "previous multi-layer activation");
@@ -501,6 +534,16 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
             if (captures.Count != K)
                 throw new InvalidOperationException($"Captured {captures.Count} of {K} requested Llama hidden states.");
+
+            if (normalizeFinalOutput)
+            {
+                // The final tap is the last block's output, which is still `hidden`; the capture list now owns the normed copy.
+                Tensor raw = captures[K - 1];
+                captures[K - 1] = ApplyFinalNorm(backend, raw, batch, seqLen);
+                TextEncoderTensorHelpers.DisposeBestEffort(raw, "raw final hidden state");
+                hidden = null;
+                hiddenIsCaptured = false;
+            }
 
             if (K == 1)
             {
@@ -565,6 +608,64 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             throw new ArgumentOutOfRangeException(nameof(padding), layout.PaddedPosition, "Padded position is outside the rotary table.");
     }
 
+    private void ValidateRowLengths(int[] validLengths, int batch, int seqLen, int paddedPosition)
+    {
+        if (validLengths.Length != batch)
+            throw new ArgumentException($"Valid lengths hold {validLengths.Length} rows for a batch of {batch}.", nameof(validLengths));
+        for (int b = 0; b < batch; b++)
+        {
+            if (validLengths[b] < 1 || validLengths[b] > seqLen)
+                throw new ArgumentOutOfRangeException(nameof(validLengths), validLengths[b],
+                    $"Valid length of row {b} must be in [1, {seqLen}].");
+        }
+        if (paddedPosition < 0 || paddedPosition >= _config.MaxPositionEmbeddings)
+            throw new ArgumentOutOfRangeException(nameof(paddedPosition), paddedPosition, "Padded position is outside the rotary table.");
+    }
+
+    private void ValidateNormalizedRequest(int[] layerIndices)
+    {
+        if (!_config.HasFinalNorm)
+            throw new InvalidOperationException("Normalized output needs the checkpoint's final RMSNorm, which this config does not have.");
+        if (layerIndices[^1] != _config.NumLayers)
+            throw new ArgumentException(
+                $"Normalized output takes the final layer ({_config.NumLayers}) as the last requested layer.", nameof(layerIndices));
+    }
+
+    /// <summary>Applies the checkpoint's final RMSNorm to a <c>[batch, seqLen, hidden]</c> activation and returns a new tensor.
+    /// The caller keeps ownership of <paramref name="hidden"/>.</summary>
+    private Tensor ApplyFinalNorm(IBackend backend, Tensor hidden, int batch, int seqLen)
+    {
+        Tensor output = new(new TensorShape(batch, seqLen, _config.HiddenSize), DType.F32);
+        try
+        {
+            backend.RmsNorm(output, hidden, _finalNormWeight!, _config.RmsNormEps);
+        }
+        catch
+        {
+            TextEncoderTensorHelpers.DisposeBestEffort(output, "final norm output after failure");
+            throw;
+        }
+        return output;
+    }
+
+    /// <summary>The valid length every row of a request shares: <paramref name="seqLen"/> when unpadded, -1 when rows differ.</summary>
+    private static int SharedValidLength(int[]? validLengths, int seqLen)
+    {
+        if (validLengths is null) return seqLen;
+        int shared = validLengths[0];
+        for (int b = 1; b < validLengths.Length; b++)
+        {
+            if (validLengths[b] != shared) return -1;
+        }
+        return shared;
+    }
+
+    /// <summary>One request-wide mask when every row shares a valid length, otherwise one mask block per row.</summary>
+    private static Tensor BuildRequestMask(int seqLen, int window, int shared, int[]? validLengths) =>
+        shared >= 0
+            ? TextEncoderTensorHelpers.BuildCausalMask(seqLen, window, shared)
+            : TextEncoderTensorHelpers.BuildKeyPaddedCausalMask(validLengths!, seqLen, window);
+
     private (int Batch, int Sequence) ValidateTokenBatch(int[][] tokenIds)
     {
         (int batch, int seqLen) = TextEncoderTensorHelpers.ValidateTokenBatch(tokenIds, _config.VocabSize);
@@ -591,20 +692,28 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         float[] globalSin,
         float[]? localCos = null,
         float[]? localSin = null,
-        TextEncoderPadding? padding = null)
+        int[]? validLengths = null,
+        int paddedPosition = 1)
     {
-        if (padding is TextEncoderPadding layout)
+        int shared = SharedValidLength(validLengths, seqLen);
+        // FlashAttention takes one key length per call, so soft-capped rows must share it: the key length is then exact
+        // for every row, and a padding row's rotary position is gathered below like any other.
+        if (shared < 0 && _config.AttentionLogitSoftcap > 0f)
+            throw new NotSupportedException(
+                "Soft-capped attention runs through FlashAttention, which takes one valid key length per call; "
+                + "rows of a right-padded batch must share one valid length.");
+        if (validLengths is not null)
         {
             int half = _config.HeadDim / 2;
-            globalCos = TextEncoderTensorHelpers.GatherRopeRows(globalCos, half, seqLen, layout.PositionOf);
-            globalSin = TextEncoderTensorHelpers.GatherRopeRows(globalSin, half, seqLen, layout.PositionOf);
+            globalCos = TextEncoderTensorHelpers.GatherPaddedRopeRows(globalCos, half, seqLen, validLengths, paddedPosition);
+            globalSin = TextEncoderTensorHelpers.GatherPaddedRopeRows(globalSin, half, seqLen, validLengths, paddedPosition);
             if (localCos is not null && localSin is not null)
             {
-                localCos = TextEncoderTensorHelpers.GatherRopeRows(localCos, half, seqLen, layout.PositionOf);
-                localSin = TextEncoderTensorHelpers.GatherRopeRows(localSin, half, seqLen, layout.PositionOf);
+                localCos = TextEncoderTensorHelpers.GatherPaddedRopeRows(localCos, half, seqLen, validLengths, paddedPosition);
+                localSin = TextEncoderTensorHelpers.GatherPaddedRopeRows(localSin, half, seqLen, validLengths, paddedPosition);
             }
         }
-        int keyLimit = padding?.ValidLength ?? int.MaxValue;
+        bool rowsPerBatch = validLengths is not null;
         Tensor? mask = null;
         Tensor? localMask = null;
         Tensor? gCos = null;
@@ -613,25 +722,24 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         Tensor? lSin = null;
         try
         {
-            mask = TextEncoderTensorHelpers.MakeResidentCopy(
-                backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, int.MaxValue, keyLimit));
+            mask = TextEncoderTensorHelpers.MakeResidentCopy(backend, BuildRequestMask(seqLen, int.MaxValue, shared, validLengths));
             if (seqLen > _config.SlidingWindow && Enumerable.Range(0, _config.NumLayers).Any(IsSlidingLayer))
                 localMask = TextEncoderTensorHelpers.MakeResidentCopy(
-                    backend, TextEncoderTensorHelpers.BuildCausalMask(seqLen, _config.SlidingWindow, keyLimit));
+                    backend, BuildRequestMask(seqLen, _config.SlidingWindow, shared, validLengths));
             gCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
-                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim));
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalCos, batch, seqLen, _config.HeadDim, rowsPerBatch));
             gSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
-                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalSin, batch, seqLen, _config.HeadDim));
+                TextEncoderTensorHelpers.BuildFullWidthRopeTable(globalSin, batch, seqLen, _config.HeadDim, rowsPerBatch));
             if (localCos is not null || localSin is not null)
             {
                 if (localCos is null || localSin is null)
                     throw new ArgumentException("Local RoPE cosine and sine tables must either both be supplied or both be absent.");
                 lCos = TextEncoderTensorHelpers.MakeResidentCopy(backend,
-                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localCos, batch, seqLen, _config.HeadDim));
+                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localCos, batch, seqLen, _config.HeadDim, rowsPerBatch));
                 lSin = TextEncoderTensorHelpers.MakeResidentCopy(backend,
-                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim));
+                    TextEncoderTensorHelpers.BuildFullWidthRopeTable(localSin, batch, seqLen, _config.HeadDim, rowsPerBatch));
             }
-            return new ForwardConstants(mask, localMask, gCos, gSin, lCos, lSin);
+            return new ForwardConstants(mask, localMask, gCos, gSin, lCos, lSin, shared >= 0 ? shared : seqLen);
         }
         catch
         {
@@ -776,7 +884,15 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         private Tensor? _upProj;
         private Tensor? _downProj;
 
-        public LlamaBlock(LlamaStyleEncoderConfig config) { _config = config; }
+        // Sliding-window size of this layer, 0 for full attention. Only the soft-capped path reads it; the dense path
+        // takes the windowed mask instead.
+        private readonly int _slidingWindow;
+
+        public LlamaBlock(LlamaStyleEncoderConfig config, int slidingWindow)
+        {
+            _config = config;
+            _slidingWindow = slidingWindow;
+        }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
         {
@@ -850,7 +966,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         }
 
         public Tensor Forward(IBackend backend, Tensor hidden, Tensor causalMask,
-            Tensor ropeCos, Tensor ropeSin, int seqLen)
+            Tensor ropeCos, Tensor ropeSin, int seqLen, int attendedKeys)
         {
             int batch = (int)hidden.Shape[0];
             int H = _config.HiddenSize;
@@ -918,32 +1034,43 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
             backend.Rotary(RotaryCall.HeadMajor(qMh, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, D));
             backend.Rotary(RotaryCall.HeadMajor(kMh, ropeCos, ropeSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf, D));
 
-            // 6. GQA: repeat KV from Hkv heads to Hq heads (KvGroupSize copies of each head).
-            Tensor kRepeated = kMh;
-            Tensor vRepeated = vMh;
-            if (Hkv != Hq)
+            // 6. Causal attention. Soft-capping needs the fused kernel, since the dense SDPA entry has no logit term.
+            float scale = 1.0f / MathF.Sqrt(D);
+            Tensor attnOut = new Tensor(qMhShape, DType.F32);
+            if (_config.AttentionLogitSoftcap > 0f)
             {
-                kRepeated = new Tensor(qMhShape, DType.F32);
-                vRepeated = new Tensor(qMhShape, DType.F32);
-                StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
-                StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
+                backend.FlashAttention(attnOut, qMh, kMh, vMh, attendedKeys, _config.KvGroupSize, causal: true, qOffset: 0,
+                    scale, softcap: _config.AttentionLogitSoftcap, slidingWindow: _slidingWindow);
+                qMh.Dispose();
                 kMh.Dispose();
                 vMh.Dispose();
             }
-
-            // 7. Causal SDPA.
-            float scale = 1.0f / MathF.Sqrt(D);
-            Tensor attnOut = new Tensor(qMhShape, DType.F32);
-            backend.ScaledDotProductAttention(attnOut, qMh, kRepeated, vRepeated, causalMask, scale);
-            if (TeProbe && !_probedDetail)
+            else
             {
-                ProbeAbsmax("blk0 qRoped", qMh);
-                ProbeAbsmax("blk0 attnOut", attnOut);
-                ProbeAbsmax("blk0 mask", causalMask);
+                // GQA: repeat KV from Hkv heads to Hq heads (KvGroupSize copies of each head).
+                Tensor kRepeated = kMh;
+                Tensor vRepeated = vMh;
+                if (Hkv != Hq)
+                {
+                    kRepeated = new Tensor(qMhShape, DType.F32);
+                    vRepeated = new Tensor(qMhShape, DType.F32);
+                    StridedCopies.RepeatInterleave(backend, kRepeated, kMh, 1, _config.KvGroupSize);
+                    StridedCopies.RepeatInterleave(backend, vRepeated, vMh, 1, _config.KvGroupSize);
+                    kMh.Dispose();
+                    vMh.Dispose();
+                }
+
+                backend.ScaledDotProductAttention(attnOut, qMh, kRepeated, vRepeated, causalMask, scale);
+                if (TeProbe && !_probedDetail)
+                {
+                    ProbeAbsmax("blk0 qRoped", qMh);
+                    ProbeAbsmax("blk0 attnOut", attnOut);
+                    ProbeAbsmax("blk0 mask", causalMask);
+                }
+                qMh.Dispose();
+                kRepeated.Dispose();
+                vRepeated.Dispose();
             }
-            qMh.Dispose();
-            kRepeated.Dispose();
-            vRepeated.Dispose();
 
             // 8. Reshape multi-head back to flat [B, S, Qd], then o_proj.
             Tensor attnFlat = new Tensor(qShape, DType.F32);
