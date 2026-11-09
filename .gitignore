@@ -85,6 +85,7 @@ Desktop.ini
 !/tests/HartsyInference.Vision.Tests/TestData/RealEsrgan/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/*.safetensors
 !/tests/HartsyInference.Diffusion.Tests/Fixtures/Qwen35Vl/encoder/*.safetensors
+!/tests/HartsyInference.Diffusion.Tests/Fixtures/LtxVideo2VaeEncoder/*.safetensors
 *.gguf
 *.ckpt
 *.pt
