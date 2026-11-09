@@ -650,7 +650,7 @@ public static class ModelCatalog
                 // UnsupportedModelException naming the declared arch instead — a wrong-architecture GGUF is still
                 // unusable, but no longer an opaque crash. (2) PARTIALLY FIXED 2026-07-22 (follow-up session): the
                 // CORRECT-architecture checkpoint's incoherent output was ONE real bug — a missing partial-rotary
-                // guard in the interleaved/GPT-J RoPE path (ApplyRopeInterleaved / lm_rope_interleaved_f32); glm4
+                // guard in the interleaved/GPT-J RoPE path (now the interleaved RotaryCall factories); glm4
                 // rotates only the first headDim/2 dims per HF/llama.cpp source but the kernel rotated the FULL
                 // headDim. Fixed (kernel + launcher + CudaBackend + IBackend default + both GenericTransformer
                 // call sites; regression test in RopeInterleavedPartialRotaryTests.cs) and confirmed via real
@@ -1904,6 +1904,19 @@ public static class ModelCatalog
                         Sha256 = "ae1e99fcefd534ed978cdeb8326f08030c96e28b7a81ffcbc98a857c84d14be1" },
                 },
             },
+            // DINOv3 ViT-L/16 is under the DINOv3 License (Meta, custom; not MIT or Apache-2.0) and gated on the hub.
+            // The 448 px conditioning configuration loads through Dinov2Preset.FromDinov3Weights; no CLI or VisionService path yet.
+            new CatalogEntry
+            {
+                Id = "dinov3-vitl16", Modality = vis, DisplayName = "DINOv3 ViT-L/16 (pretrain)",
+                Architecture = "ViT-L/16 with RoPE, 4 storage tokens, LayerScale, GELU MLP", Status = vp, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/Dinov3", Role = "transformer",
+                        Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+                },
+            },
             // YOLO8/11: raw Ultralytics .pt is a full pickled nn.Module object graph (not a flat state_dict) —
             // the engine's safe-subset pickle VM can't resolve it, and no pre-folded ungated safetensors mirror
             // was found on HF. CliDrivable stays false until either a pickle-VM extension or a found mirror
@@ -1958,6 +1971,21 @@ public static class ModelCatalog
                     new() { Repo = "facebook/sam2-hiera-tiny", RepoPath = "sam2_hiera_tiny.pt",
                         TargetSubdir = "sam2", Role = "transformer",
                         Sha256 = "65b50056e05bcb13694174f51bb6da89c894b57b75ccdf0ba6352c597c5d1125" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Upstream facebook/sam3 @ 0570b3a5be9c4e694f23d85232fb55f4a6f1f7fc is gated (SAM License, license_name
+                // sam-license). Non-gated mirror: ModelScope facebook/sam3 @ f8ee5d16d5c30d0e87b1d22cbd358ce97761df56, file
+                // sam3.pt. The mirror file's checksum is not yet compared with the upstream sha256 below; the downloader
+                // currently reads only Hugging Face repos, so the Repo below is the gated upstream and needs a token.
+                Id = "sam3", Modality = vis, DisplayName = "SAM 3 (text-grounded)", Architecture = "ViT (RoPE, windowed) + CLIP text tower + DETR-style detector + mask head", Status = st,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "facebook/sam3", RepoPath = "sam3.pt",
+                        TargetSubdir = "sam3", Role = "transformer",
+                        Sha256 = "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e" },
                 },
             },
             // "RetinaFace" was never actually built — the real, real-weight-verified face detector is a
@@ -2044,6 +2072,21 @@ public static class ModelCatalog
                         Sha256 = "46ef7fe46f2ae284d8f1aaa24bfa5fca5ef25a34e2c7caa890a0029eb100e87f" },
                 },
             },
+            // BiRefNet-matting (trimap-free alpha matte). Pinned upstream revision eccde0a8cbdce7ac5fecfeb06340fe7b949e85d9;
+            // the sha256 verifies the bytes, since ModelAsset cannot name a revision. The model card declares MIT, but the
+            // repo ships no LICENSE file at that revision, so the weights' license is unverified.
+            new CatalogEntry
+            {
+                Id = "birefnet-matting", Modality = vis, DisplayName = "BiRefNet-matting (general foreground matting, Swin-L)",
+                Architecture = "Swin-L encoder + BiRefNet dual-scale decoder (deformable ASPP, gradient gates)", Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors",
+                        TargetSubdir = "Vision/BiRefNet-matting", Role = "transformer",
+                        Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+                },
+            },
 
             // Real-ESRGAN pixel-space super-resolution. The official release files live on GitHub, not HuggingFace;
             // these repos mirror them byte-for-byte — x4plus is the copy the ControlNet annotator bundle carries
@@ -2085,44 +2128,141 @@ public static class ModelCatalog
                 },
             },
 
-            // Restoration (SeedVR2). numz/SeedVR2_comfyUI ships the original state-dict keys verbatim, so
-            // the converter loads its fp16 files directly. The frozen positive embedding is the upstream
-            // ByteDance-Seed/SeedVR2-3B pos_emb.pt (a bare BF16 [58,5120] tensor, public, shared by 3B and 7B);
-            // RestoreService reads that pickle directly, so no converted copy needs hosting.
+            // Restoration (SeedVR2). Every variant that loads is listed, and the Restore Model choice runs the one picked.
+            // Comfy-Org's repacks are the defaults: ComfyUI's own files, with the numz keys plus two conditioning tensors
+            // the converter drops. numz's original fp16 files stay selectable. mxfp8 and nvfp4 widen to F16 at load, so they
+            // run as the fp16 file does. int8 is not listed: the converter does not read its ConvRot layout yet.
+            // The 7B mxfp8 and nvfp4 entries are not file-verified: they take the converter path the 3B files verified.
+            // Every variant reads the shared VAE and embedding.
+            // The default is ByteDance's official checkpoint: the Comfy-Org repack below is fp16 but not the same weights, and
+            // scores 0.746 on the reference gate, against 0.9995 for this file. The engine casts it to fp16 on load.
             new CatalogEntry
             {
-                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (video/image restoration)",
+                Id = "seedvr2-3b", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (ByteDance official)",
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
-                Assets = new ModelAsset[]
-                {
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer",
-                        Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae",
-                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
-                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
-                },
+                Assets =
+                [
+                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "seedvr2_ema_3b.pth",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "6bcc5ac59447e97b100477480aebb01be2ec724c8340bb83faae21f64848604b" },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
             },
             new CatalogEntry
             {
-                Id = "seedvr2-7b", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (video/image restoration)",
+                Id = "seedvr2-3b-comfy", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp16 repack)",
                 Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
                 CliDrivable = true,
-                Assets = new ModelAsset[]
-                {
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp16.safetensors", "98669fd2c06df5eca88baf68cd5c478775c8e61fc110e598c52b350145ea2660"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org fp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_fp8_e4m3fn.safetensors", "a0226eaa2c3e6f47ae5ce83225120f16479da890ced1a3bc32b1a14619787914"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_mxfp8.safetensors", "768623e3bfb1752b4d0668782751b5fead58b1bcb153f0b5e03a423095630297"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_3b_nvfp4.safetensors", "c8dea38b04d43295621726e2cd371c0d2d001006169c113aea17950f2cb2e295"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-3b-numz", Modality = Modality.Restore, DisplayName = "SeedVR2-3B (numz original fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets =
+                [
+                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_3b_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", Role = "transformer",
+                        Sha256 = "2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304" },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_fp16.safetensors", "2742ca6fee63bc5cc1773f426dd4b07b78cad27f51c9ea5cd42b035e6b592252"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org fp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_fp8_e4m3fn.safetensors", "5065e77d647dd553d9090a81e20d6de590d931a61df79d785e008433926ee418"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_fp16.safetensors", "70823bca54b9c24eeb56e1c452697c7c2a430867e58db0e376c6e260f3a4489d"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-fp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org fp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_fp8_e4m3fn.safetensors", "7602c5f70868d28e7730035e4e9d745b05d661c8f0a7eb758e63f9c8603596ef"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_mxfp8.safetensors", "b40804f47910d96c5089c728cc7ec8b57b956750eabb6397dc4e6e697477263d"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_nvfp4.safetensors", "cc4af1a7bd5377066496f393555478323e806fa21163bdbe3409451aface9b93"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-mxfp8", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org mxfp8)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_mxfp8.safetensors", "0d621ec1561a11ca9b5f432ec6d4e09b263b61f4b83b0280552c8b4add030ec3"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-sharp-nvfp4", Modality = Modality.Restore, DisplayName = "SeedVR2-7B sharp (Comfy-Org nvfp4)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets = SeedVr2Variants.ComfyOrg("seedvr2_7b_sharp_nvfp4.safetensors", "80d57af7722f5a5bd4c01d2ab2688f2bf05e552e59d3d3287257de709db10397"),
+            },
+            new CatalogEntry
+            {
+                Id = "seedvr2-7b-numz", Modality = Modality.Restore, DisplayName = "SeedVR2-7B (numz original fp16)",
+                Architecture = "NaDiT (windowed MM-DiT) + s8c16t4 causal video VAE, one-step", Status = vp,
+                CliDrivable = true,
+                Assets =
+                [
+                    // Installs from the previous catalog saved this file under its numz name.
                     new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "seedvr2_ema_7b_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "transformer" },
-                    new() { Repo = "numz/SeedVR2_comfyUI", RepoPath = "ema_vae_fp16.safetensors",
-                        TargetSubdir = "Video/SeedVr2", Role = "vae",
-                        Sha256 = "20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1" },
-                    new() { Repo = "ByteDance-Seed/SeedVR2-3B", RepoPath = "pos_emb.pt",
-                        TargetSubdir = "Video/SeedVr2", Role = "embeddings",
-                        Sha256 = "fa07a14844314772266b66c3b95deb0027696d8fe7065721263db5176f45d799" },
-                },
+                        TargetSubdir = "Stable-Diffusion/SeedVR2", TargetName = "seedvr2_7b_dit_f16.safetensors",
+                        LegacyTargetNames = ["seedvr2_ema_7b_fp16.safetensors"], Role = "transformer",
+                        Sha256 = "7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a" },
+                    SeedVr2Variants.Vae(),
+                    SeedVr2Variants.Embeddings(),
+                ],
             },
 
             // Video

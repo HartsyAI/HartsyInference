@@ -53,39 +53,20 @@ public static class Resample
         Span<float> dst, int dstW, int dstH, float a, bool antialias, bool quantizeU8 = false)
     {
         ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels);
-        (int[] xStart, int[] xCount, float[] xWeights, int xTaps) = BuildWeights(srcW, dstW, a, antialias);
-        (int[] yStart, int[] yCount, float[] yWeights, int yTaps) = BuildWeights(srcH, dstH, a, antialias);
+        SeparableHwc8(src, srcW, srcH, channels, dst, dstW, dstH,
+            BuildWeights(srcW, dstW, a, antialias), BuildWeights(srcH, dstH, a, antialias), quantizeU8);
+    }
 
-        float[] tmp = new float[(long)srcH * dstW * channels];
-        for (int y = 0; y < srcH; y++)
-        {
-            ReadOnlySpan<byte> row = src.Slice(y * srcW * channels, srcW * channels);
-            for (int x = 0; x < dstW; x++)
-            {
-                int lo = xStart[x];
-                for (int c = 0; c < channels; c++)
-                {
-                    float acc = 0f;
-                    for (int t = 0; t < xCount[x]; t++)
-                        acc += xWeights[x * xTaps + t] * row[(lo + t) * channels + c];
-                    tmp[((long)y * dstW + x) * channels + c] = quantizeU8 ? QuantU8(acc) : acc;
-                }
-            }
-        }
-        for (int y = 0; y < dstH; y++)
-        {
-            int lo = yStart[y];
-            for (int x = 0; x < dstW; x++)
-            {
-                for (int c = 0; c < channels; c++)
-                {
-                    float acc = 0f;
-                    for (int t = 0; t < yCount[y]; t++)
-                        acc += yWeights[y * yTaps + t] * tmp[((long)(lo + t) * dstW + x) * channels + c];
-                    dst[(y * dstW + x) * channels + c] = quantizeU8 ? QuantU8(acc) : acc;
-                }
-            }
-        }
+    /// <summary>Separable triangle (bilinear) resize of interleaved 8-bit pixels with PIL <c>BILINEAR</c> semantics,
+    /// which is what torchvision <c>Resize</c> applies to PIL images: antialiased (kernel stretched by the downscale
+    /// factor) when <paramref name="antialias"/> is set, half-pixel centers, border taps clipped and renormalized.
+    /// <paramref name="quantizeU8"/> rounds each pass to the 0–255 grid as PIL does.</summary>
+    public static void BilinearHwc8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels,
+        Span<float> dst, int dstW, int dstH, bool antialias, bool quantizeU8 = false)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels);
+        SeparableHwc8(src, srcW, srcH, channels, dst, dstW, dstH,
+            BuildWeights(srcW, dstW, 1.0, TriangleKernel, antialias), BuildWeights(srcH, dstH, 1.0, TriangleKernel, antialias), quantizeU8);
     }
 
     /// <summary>Separable radius-3 Lanczos resize for interleaved 8-bit pixels. The tap geometry follows PIL's
@@ -126,18 +107,61 @@ public static class Resample
         }
     }
 
+    /// <summary>Two-pass separable filter over interleaved 8-bit pixels: horizontal into an F32 intermediate, then vertical.</summary>
+    private static void SeparableHwc8(ReadOnlySpan<byte> src, int srcW, int srcH, int channels, Span<float> dst, int dstW, int dstH,
+        (int[] Starts, int[] Counts, float[] Weights, int Taps) xw, (int[] Starts, int[] Counts, float[] Weights, int Taps) yw, bool quantizeU8)
+    {
+        (int[] xStart, int[] xCount, float[] xWeights, int xTaps) = xw;
+        (int[] yStart, int[] yCount, float[] yWeights, int yTaps) = yw;
+        float[] tmp = new float[(long)srcH * dstW * channels];
+        for (int y = 0; y < srcH; y++)
+        {
+            ReadOnlySpan<byte> row = src.Slice(y * srcW * channels, srcW * channels);
+            for (int x = 0; x < dstW; x++)
+            {
+                int lo = xStart[x];
+                for (int c = 0; c < channels; c++)
+                {
+                    float acc = 0f;
+                    for (int t = 0; t < xCount[x]; t++)
+                        acc += xWeights[x * xTaps + t] * row[(lo + t) * channels + c];
+                    tmp[((long)y * dstW + x) * channels + c] = quantizeU8 ? QuantU8(acc) : acc;
+                }
+            }
+        }
+        for (int y = 0; y < dstH; y++)
+        {
+            int lo = yStart[y];
+            for (int x = 0; x < dstW; x++)
+            {
+                for (int c = 0; c < channels; c++)
+                {
+                    float acc = 0f;
+                    for (int t = 0; t < yCount[y]; t++)
+                        acc += yWeights[y * yTaps + t] * tmp[((long)(lo + t) * dstW + x) * channels + c];
+                    dst[(y * dstW + x) * channels + c] = quantizeU8 ? QuantU8(acc) : acc;
+                }
+            }
+        }
+    }
+
     /// <summary>Round-to-nearest onto the 0–255 grid (PIL's <c>clip8</c>).</summary>
     private static float QuantU8(float v) => Math.Clamp(MathF.Round(v), 0f, 255f);
+
+    /// <summary>Per-destination-index filter taps for the bicubic kernel (support radius 2).</summary>
+    private static (int[] Starts, int[] Counts, float[] Weights, int Taps) BuildWeights(int srcLen, int dstLen, float a, bool antialias) =>
+        BuildWeights(srcLen, dstLen, 2.0, x => CubicKernel(x, a), antialias);
 
     /// <summary>Per-destination-index filter taps: clipped start index, in-range tap count, and normalized
     /// kernel weights. With antialiasing the kernel is stretched by the downscale factor
     /// (<c>filterScale = max(src/dst, 1)</c>) so it acts as a proper low-pass prefilter. Border windows are
     /// clipped to <c>[0, srcLen)</c> and renormalized over the surviving taps (PIL semantics).</summary>
-    private static (int[] Starts, int[] Counts, float[] Weights, int Taps) BuildWeights(int srcLen, int dstLen, float a, bool antialias)
+    private static (int[] Starts, int[] Counts, float[] Weights, int Taps) BuildWeights(
+        int srcLen, int dstLen, double supportRadius, Func<double, double> kernel, bool antialias)
     {
         double scale = (double)srcLen / dstLen;
         double filterScale = antialias ? Math.Max(scale, 1.0) : 1.0;
-        double support = 2.0 * filterScale;
+        double support = supportRadius * filterScale;
         int taps = (int)Math.Ceiling(support) * 2 + 1;
         int[] starts = new int[dstLen];
         int[] counts = new int[dstLen];
@@ -153,7 +177,7 @@ public static class Resample
             double sum = 0.0;
             for (int t = 0; t < hi - lo; t++)
             {
-                double w = CubicKernel((lo + t + 0.5 - center) / filterScale, a);
+                double w = kernel((lo + t + 0.5 - center) / filterScale);
                 weights[i * taps + t] = (float)w;
                 sum += w;
             }
@@ -216,6 +240,9 @@ public static class Resample
         if (x < 2.0) return a * (x * x * x - 5.0 * x * x + 8.0 * x - 4.0);
         return 0.0;
     }
+
+    /// <summary>Triangle (bilinear) kernel (zero outside |x| ≥ 1).</summary>
+    private static double TriangleKernel(double x) => Math.Max(0.0, 1.0 - Math.Abs(x));
 
     private static void ValidateArgs(int srcLen, int srcW, int srcH, int dstLen, int dstW, int dstH, int channels)
     {

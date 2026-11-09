@@ -7,7 +7,6 @@ using HartsyInference.Audio.Preprocessing;
 using F5SwaySamplingScheduler = HartsyInference.Audio.Models.F5Tts.F5SwaySamplingScheduler;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 

@@ -1,4 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -242,7 +245,7 @@ public sealed unsafe class BooguImageDoubleBlock
     /// <summary>Joint cross-attention. Returns the attention output split into <c>(instruct[B,capLen,H], image[B,imgLen,H])</c>
     /// after all projections (per-stream out + parent to_out). GPU-resident: per-stream Q/K/V Linear into
     /// <c>[B, S, H, D]</c> heads-layout tensors, RMSNorm QK-norm over the head dim, joint <c>Concat</c> on the sequence
-    /// axis, device RoPE pre-permute, <c>Permute0213</c> to <c>[B, H, S, D]</c>, GQA <c>RepeatKvHeads</c>, SDPA,
+    /// axis, device RoPE pre-permute, <c>Permute0213</c> to <c>[B, H, S, D]</c>, GQA <c>StridedCopies.RepeatInterleave</c>, SDPA,
     /// permute back, and <c>SliceRows</c> splits.</summary>
     private (Tensor instruct, Tensor image) JointAttention(IBackend backend, Tensor imgN1, Tensor insN1,
         Tensor ropeCos, Tensor ropeSin, int capLen, int batch, int imgLen, int insLen)
@@ -341,8 +344,8 @@ public sealed unsafe class BooguImageDoubleBlock
 
         // Device RoPE on the pre-permute [1, S, H, D] layout (rotation is per (s, h) vector — permute-order
         // independent, bit-equivalent to the old post-permute host loop).
-        backend.WanRopeInterleaved(qFlat, ropeCos, ropeSin, seqLen, _numQHeads, _headDim);
-        backend.WanRopeInterleaved(kFlat, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim);
+        backend.Rotary(RotaryCall.Rows(qFlat, ropeCos, ropeSin, seqLen, _numQHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
+        backend.Rotary(RotaryCall.Rows(kFlat, ropeCos, ropeSin, seqLen, _numKvHeads, _headDim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
 
         Tensor qMh = new Tensor(new TensorShape(batch, _numQHeads, seqLen, _headDim), DType.F32);
         backend.Permute0213(qMh, qFlat, seqLen, _numQHeads, _headDim);
@@ -370,11 +373,11 @@ public sealed unsafe class BooguImageDoubleBlock
 
     /// <summary>GQA K/V head repeat to Q head count on the GPU (<c>[B, Hkv, S, D]</c> → <c>[B, Hq, S, D]</c>). When the
     /// group is 1 the input is already at full head count, so it is returned as a device-to-device copy via
-    /// <c>RepeatKvHeads</c> (group 1).</summary>
+    /// <c>StridedCopies.RepeatInterleave</c> (group 1).</summary>
     private Tensor RepeatKv(IBackend backend, Tensor kvMh, int batch, int seqLen)
     {
         Tensor output = new Tensor(new TensorShape(batch, _numKvHeads * _kvGroup, seqLen, _headDim), DType.F32);
-        backend.RepeatKvHeads(output, kvMh, _numKvHeads, _kvGroup);
+        StridedCopies.RepeatInterleave(backend, output, kvMh, 1, _kvGroup);
         return output;
     }
 
