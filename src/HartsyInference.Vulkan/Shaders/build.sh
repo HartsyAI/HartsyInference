@@ -159,6 +159,8 @@ SINGLE_KERNELS=(
     sparse_latent_attention
     indexer_scores
     act_quant_dequant
+    hadamard
+    fp8_block_linear
     build_window_indices
     ssm_conv_split_prefill
     ssm_l2norm_rows

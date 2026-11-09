@@ -5,6 +5,7 @@ THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
     "rotary"
+    "hadamard"
 )
 
 # shellcheck source=../build_common.sh
