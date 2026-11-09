@@ -72,7 +72,7 @@ features remain subject to their individual
 
 HairDeck (`hairdeck`) turns one character image into a GLB of hair cards, with per-card colours and optional spring-bone
 chains. It runs through `hartsy 3d` and `POST /v1/native/mesh` on the CUDA and CPU backends. Vulkan is rejected for HairDeck
-(its image model needs `LeakyRelu`, which the Vulkan backend lacks). Weights are from
+(its BiRefNet-matting preprocessing needs `LeakyRelu`, which the Vulkan backend does not implement). Weights are from
 [`hyz317/HairDeck`](https://huggingface.co/hyz317/HairDeck) (Apache-2.0). Output is static only: rigged output and VRM
 packaging are not implemented here.
 

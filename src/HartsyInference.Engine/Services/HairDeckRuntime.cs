@@ -46,7 +46,7 @@ internal sealed class HairDeckRuntime : IDisposable
         if (backend is HartsyInference.Vulkan.VulkanBackend)
         {
             throw new NotSupportedException(
-                "HairDeck does not run on Vulkan yet (the image model needs LeakyRelu, which the Vulkan backend lacks). Use -b cuda or -b cpu.");
+                "HairDeck does not run on Vulkan yet: its preprocessing (BiRefNet-matting) needs LeakyRelu, which the Vulkan backend does not implement. Use -b cuda or -b cpu.");
         }
 
         string sam3Path = Path.Combine(visionRoot, "sam3", Sam3FileName);
