@@ -26,6 +26,9 @@ public static class CompatEndpoints
     /// total a request could repeat one until it decoded to gigabytes.</summary>
     internal const long MaxRequestImageBytes = 4L * MaxImageBytes;
 
+    /// <summary>Largest decoded video one <c>video_url</c> part may carry. The clip is decoded with ffmpeg on the server and only its sampled frames are kept.</summary>
+    internal const int MaxVideoBytes = 128 * 1024 * 1024;
+
     /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that field's doc comment for why this isn't a real per-model timestamp.</summary>
     private static readonly long s_processStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
@@ -402,6 +405,7 @@ public static class CompatEndpoints
     {
         budget ??= new ImageBudget();
         List<NativeImageData> images = [];
+        VideoClip? video = null;
         StringBuilder text = new();
         foreach (ChatContentPart part in m.Content?.Parts ?? Array.Empty<ChatContentPart>())
         {
@@ -413,14 +417,21 @@ public static class CompatEndpoints
                 budget.Take(image);
                 images.Add(image);
             }
+            else if (part.Type == "video_url")
+            {
+                if (video is not null)
+                    throw new HartsyInferenceException("A message carries at most one 'video_url' part.");
+                video = DecodeVideoUrl(part.VideoUrl);
+            }
             else
-                throw new HartsyInferenceException($"Content part type '{part.Type}' is not supported; use 'text' or 'image_url'.");
+                throw new HartsyInferenceException($"Content part type '{part.Type}' is not supported; use 'text', 'image_url' or 'video_url'.");
         }
         return new TextMessage
         {
             Role = ParseRole(m.Role),
             Content = m.Content?.Text ?? text.ToString(),
             Images = images.Count > 0 ? images : null,
+            Video = video,
             ToolCalls = m.ToolCalls is { Count: > 0 } ? [.. m.ToolCalls.Select(ToNativeToolCall)] : null,
             ToolCallId = m.ToolCallId,
             Name = m.Name,
@@ -461,6 +472,32 @@ public static class CompatEndpoints
         {
             // The codec's refusals (not a PNG, a corrupt PNG) are the caller's to fix, so they are a 400.
             throw new HartsyInferenceException($"Image data could not be decoded: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>Decodes a <c>data:video/&lt;type&gt;;base64,</c> URI into a clip for the engine's video path. A remote URL is refused, since the server
+    /// does not fetch media, and so is a payload over <see cref="MaxVideoBytes"/>. The container type comes from the MIME subtype
+    /// (<c>video/mp4</c> → <c>mp4</c>); ffmpeg probes the bytes, so it is only a hint.</summary>
+    internal static VideoClip DecodeVideoUrl(string? url)
+    {
+        const string prefix = "data:";
+        if (url is null || !url.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            throw new HartsyInferenceException("Video URLs must be data: URIs; the server does not fetch remote videos.");
+        int comma = url.IndexOf(',');
+        if (comma < 0 || !url[..comma].EndsWith(";base64", StringComparison.OrdinalIgnoreCase))
+            throw new HartsyInferenceException("Video data URIs must be base64-encoded: data:video/<type>;base64,<data>.");
+        long decodedBytes = (long)(url.Length - comma - 1) / 4 * 3;
+        if (decodedBytes > MaxVideoBytes)
+            throw new HartsyInferenceException($"Video data decodes to about {decodedBytes} bytes, over the {MaxVideoBytes}-byte (128 MiB) limit.");
+        string mime = url[prefix.Length..comma][..^";base64".Length];
+        string? format = mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? mime["video/".Length..] : null;
+        try
+        {
+            return new VideoClip { Data = Convert.FromBase64String(url[(comma + 1)..].Trim()), Format = format };
+        }
+        catch (FormatException ex)
+        {
+            throw new HartsyInferenceException("Video data is not valid base64.", ex);
         }
     }
 

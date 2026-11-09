@@ -52,6 +52,7 @@ public static class HartsyInferenceServiceExtensions
             new InferenceQueue(options.MaxLongRunningConcurrency, options.MaxLongRunningQueueDepth));
 
         services.AddSingleton(new WorldSessionRegistry(TimeSpan.FromMinutes(options.WorldSessionIdleTimeoutMinutes)));
+        services.AddSingleton(new RealtimeSessionRegistry(TimeSpan.FromMinutes(options.RealtimeSessionIdleTimeoutMinutes)));
 
         // The wake listener is a peer of the HTTP surface, not a route: satellites hold one long-lived TCP
         // connection each rather than making requests. It deliberately bypasses InferenceQueue — see WakeWorker.
@@ -292,6 +293,7 @@ public static class HartsyInferenceServiceExtensions
         app.MapRecipeEndpoints();
         app.MapRestoreEndpoints();
         app.MapWorldEndpoints();
+        app.MapRealtimeEndpoints();
         app.MapCompatEndpoints();
 
         // Observability/discovery surface. Neither is a liveness/readiness probe, so both stay behind the same
