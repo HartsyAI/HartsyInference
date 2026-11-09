@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
@@ -102,6 +103,43 @@ public sealed class SanaWmGdnBidi : IDisposable
     /// <param name="ropeCos">Cos table <c>[N, headDim]</c> in interleaved-pair layout.</param>
     /// <param name="ropeSin">Sin table in the same layout; with <paramref name="ropeCos"/> it is the complex table <c>cos + i sin</c>.</param>
     public Tensor Forward(Tensor x, int frames, int latentHeight, int latentWidth, Tensor ropeCos, Tensor ropeSin)
+        => Run(x, frames, latentHeight, latentWidth, ropeCos, ropeSin, beta: null, decay: null);
+
+    /// <summary>Main-branch output plus the frame gates the camera branch shares: beta <c>[B, H, T, S]</c> and decay
+    /// <c>[B, H, T]</c>, both F32 and head-major. The caller disposes all three tensors.</summary>
+    public (Tensor Output, Tensor Beta, Tensor Decay) ForwardWithGates(Tensor x, int frames, int latentHeight, int latentWidth,
+        Tensor ropeCos, Tensor ropeSin)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(x);
+        if (x.Shape.Rank != 3 || frames <= 0 || latentHeight <= 0 || latentWidth <= 0)
+        {
+            throw new ArgumentException("x must be [B, N, C] and the latent grid must be positive.", nameof(x));
+        }
+
+        int batch = (int)x.Shape[0];
+        int tokensPerFrame = checked(latentHeight * latentWidth);
+        Tensor beta = new(new TensorShape([batch, _heads, frames, tokensPerFrame]), DType.F32, _backend.Device);
+        Tensor decay = new(new TensorShape([batch, _heads, frames]), DType.F32, _backend.Device);
+        bool succeeded = false;
+        try
+        {
+            Tensor output = Run(x, frames, latentHeight, latentWidth, ropeCos, ropeSin, beta, decay);
+            succeeded = true;
+            return (output, beta, decay);
+        }
+        finally
+        {
+            if (!succeeded)
+            {
+                beta.Dispose();
+                decay.Dispose();
+            }
+        }
+    }
+
+    private Tensor Run(Tensor x, int frames, int latentHeight, int latentWidth, Tensor ropeCos, Tensor ropeSin, Tensor? beta,
+        Tensor? decay)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(x);
@@ -144,7 +182,7 @@ public sealed class SanaWmGdnBidi : IDisposable
             {
                 Tensor xb = Track(scratch, inputRows.SliceRows((long)b * tokens, tokens));
                 Tensor ob = Track(scratch, outputRows.SliceRows((long)b * tokens, tokens));
-                ForwardBatch(xb, ob, ropeCos, ropeSin, frames, tokensPerFrame, scratch);
+                ForwardBatch(xb, ob, ropeCos, ropeSin, frames, tokensPerFrame, scratch, beta, decay, b);
             }
 
             succeeded = true;
@@ -176,7 +214,8 @@ public sealed class SanaWmGdnBidi : IDisposable
         ReleaseOwned();
     }
 
-    private void ForwardBatch(Tensor xb, Tensor ob, Tensor cos, Tensor sin, int frames, int s, List<Tensor> scratch)
+    private void ForwardBatch(Tensor xb, Tensor ob, Tensor cos, Tensor sin, int frames, int s, List<Tensor> scratch,
+        Tensor? betaOut, Tensor? decayOut, int batchIndex)
     {
         int n = frames * s;
         Tensor q = NewScratch(scratch, [n, _channels]);
@@ -185,6 +224,10 @@ public sealed class SanaWmGdnBidi : IDisposable
         _backend.LinearWeightRows(v, xb, _qkvWeight, null, 2 * _channels, _channels);
         Tensor kConv = KConv(xb, frames, s, scratch);
         (Tensor beta, Tensor decayCol, Tensor decayRep) = Gates(xb, frames, s, scratch);
+        if (betaOut is not null && decayOut is not null)
+        {
+            ExportGates(betaOut, decayOut, batchIndex, frames, s, beta, decayCol, scratch);
+        }
 
         Tensor qUnrot = NormActivate(q, _qNorm, 1f, n, scratch);
         Tensor kUnrot = NormActivate(kConv, _kNorm, KeyScale(s), n, scratch);
@@ -213,6 +256,25 @@ public sealed class SanaWmGdnBidi : IDisposable
         Scan(g, frames, s, false, numF, denF, scratch);
         Scan(g, frames, s, true, numB, denB, scratch);
         Combine(numF, denF, numB, denB, ob, frames, s, scratch);
+    }
+
+    // Gates leave the scan frame-major ([T·H, ·]); the camera branch reads them head-major ([H, T, ·]) per batch item.
+    private void ExportGates(Tensor betaOut, Tensor decayOut, int batchIndex, int frames, int s, Tensor beta, Tensor decay,
+        List<Tensor> scratch)
+    {
+        long batch = betaOut.Shape[0];
+        long headFrames = (long)_heads * frames;
+        Tensor betaRows = Track(scratch, betaOut.Reshape(new TensorShape([batch * headFrames, s])));
+        Tensor betaSlice = Track(scratch, betaRows.SliceRows((long)batchIndex * headFrames, headFrames));
+        ReadOnlySpan<long> betaDims = [_heads, frames, s];
+        ReadOnlySpan<long> betaStrides = [s, (long)_heads * s, 1];
+        _backend.CopyStrided(betaSlice, beta, StridedCopySpec.Gather(new StridedView(betaDims, betaStrides, 0)));
+
+        Tensor decayRows = Track(scratch, decayOut.Reshape(new TensorShape([batch * _heads, frames])));
+        Tensor decaySlice = Track(scratch, decayRows.SliceRows((long)batchIndex * _heads, _heads));
+        ReadOnlySpan<long> decayDims = [_heads, frames];
+        ReadOnlySpan<long> decayStrides = [1, _heads];
+        _backend.CopyStrided(decaySlice, decay, StridedCopySpec.Gather(new StridedView(decayDims, decayStrides, 0)));
     }
 
     // Bidirectional depthwise temporal conv on K. The seven taps are views of a zero-padded K, so the

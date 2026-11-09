@@ -15,7 +15,9 @@ public static class SanaWmCheckpointConverter
 {
     /// <summary>Loads and validates a SANA-WM DiT file. Every key must match the header-derived layout.</summary>
     /// <exception cref="HartsyInferenceException">The file is not safetensors, or its keys, shapes or dtypes do not match the layout.</exception>
-    public static SanaWmCheckpoint Load(string path)
+    /// <param name="include">Optional filter on upstream key names. Every key is still validated against the header; only
+    /// the tensors it accepts are copied, so a test can load one block without the whole 10.65 GB file.</param>
+    public static SanaWmCheckpoint Load(string path, Func<string, bool>? include = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         using SafeTensorsLoader loader = new();
@@ -33,7 +35,10 @@ public static class SanaWmCheckpointConverter
         try
         {
             foreach (SanaWmTensorSpec spec in ExpectedTensors(config))
-                weights.Add(spec.Name, CopyAs(loader.GetTensor(spec.Name), spec.DType));
+            {
+                if (include is null || include(spec.Name))
+                    weights.Add(spec.Name, CopyAs(loader.GetTensor(spec.Name), spec.DType));
+            }
         }
         catch
         {
