@@ -27,6 +27,8 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <summary>Downsampling from the dual grid to the latent grid: the shape VAE's four 2x stages, which Utonia matches.</summary>
     public const int LatentStride = 16;
 
+    private readonly CoLa3DConfig _config;
+
     // Voxelize, encode and extract, and the split; the object count adds to these once the split is known.
     private const int FixedSteps = 3;
 
@@ -38,9 +40,11 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     private readonly IDualGridMesher _mesher;
     private readonly List<IDisposable> _owned;
 
+    /// <param name="config">Architecture the decomposer was built with; prompts are checked against it before any stage runs.</param>
     /// <param name="owned">Disposables the pipeline releases with itself: the weight sets and any stage it was given that holds weights.</param>
     public CoLa3DPipeline(
         IBackend backend,
+        CoLa3DConfig config,
         ISceneVoxelizer voxelizer,
         ISparseShapeEncoder encoder,
         IPointFeatureExtractor features,
@@ -49,6 +53,7 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         IDualGridMesher mesher,
         IEnumerable<IDisposable> owned) : base(backend)
     {
+        ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(voxelizer);
         ArgumentNullException.ThrowIfNull(encoder);
         ArgumentNullException.ThrowIfNull(features);
@@ -56,6 +61,7 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         ArgumentNullException.ThrowIfNull(decoder);
         ArgumentNullException.ThrowIfNull(mesher);
         ArgumentNullException.ThrowIfNull(owned);
+        _config = config;
         _voxelizer = voxelizer;
         _encoder = encoder;
         _features = features;
@@ -66,20 +72,25 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     }
 
     /// <summary>Loads the pipeline from a Models root holding <c>CoLa3D</c>, <c>TRELLIS2-ShapeVAE</c> and <c>Utonia</c> checkpoints.</summary>
-    public static CoLa3DPipeline LoadFromPath(IBackend backend, string modelRoot)
+    /// <param name="source">Decomposer variant: free queries, mask prompts or point prompts. Each variant is its own pipeline.</param>
+    public static CoLa3DPipeline LoadFromPath(
+        IBackend backend,
+        string modelRoot,
+        CoLa3DConfig.QuerySourceKind source = CoLa3DConfig.QuerySourceKind.Fixed)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (!Directory.Exists(modelRoot))
             throw new DirectoryNotFoundException($"CoLa3D model directory not found: '{modelRoot}'.");
 
-        CoLa3DWeights weights = CoLa3DCheckpointConverter.Load(modelRoot);
+        CoLa3DWeights weights = CoLa3DCheckpointConverter.Load(modelRoot, source);
+        CoLa3DConfig config = null!;
         ShapeVaeEncoderStage encoder = null!;
         ShapeVaeDecoderStage decoder = null!;
         UtoniaPointFeatureStage features = null!;
         CoLa3DObjectDecomposer decomposer = null!;
         try
         {
-            CoLa3DConfig config = CoLa3DConfig.FreeQ20;
+            config = CoLa3DConfig.ForQuerySource(source);
             ShapeVaeConfig shape = ShapeVaeConfig.NextDcF16C32;
             encoder = new ShapeVaeEncoderStage(new ShapeVaeEncoder(shape.Encoder, weights.ShapeEncoder));
             decoder = new ShapeVaeDecoderStage(new ShapeVaeDecoder(shape.Decoder, weights.ShapeDecoder));
@@ -98,6 +109,7 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
 
         return new CoLa3DPipeline(
             backend,
+            config,
             new DualGridSceneVoxelizer(),
             encoder,
             features,
@@ -112,16 +124,16 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
     /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>.</param>
     /// <param name="onProgress">Reports the three fixed stages, then once per decoded object. TotalSteps is 3 until the
     /// split fixes the object count.</param>
+    /// <param name="prompt">Objects to decompose, as masks or points in <paramref name="scene"/>'s units. Null for free queries;
+    /// required by a prompt checkpoint and rejected by the free one. Point prompts need the 1024 grid, which they use when
+    /// <paramref name="resolution"/> is 0.</param>
     /// <exception cref="HartsyInferenceException">The scene decomposes into no object with triangles.</exception>
-    public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null)
+    public CoLa3DResult Generate(Mesh scene, int resolution = 0, Action<GenerationProgress>? onProgress = null, CoLa3DPrompt? prompt = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(scene);
-        int res = resolution > 0 ? resolution : DefaultResolution;
-        if (res % LatentStride != 0)
-            throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
-        if (res > MaxResolution)
-            throw new ArgumentException($"Grid resolution {res} exceeds the maximum of {MaxResolution}.", nameof(resolution));
+        ValidateRequest(_config, resolution, prompt);
+        int res = ResolveResolution(_config, resolution, prompt);
         long started = MonotonicClock.NowNs();
         SceneGrid grid = SceneGrid.Fit(scene, res);
 
@@ -135,9 +147,10 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         IReadOnlyList<SparseTensor> objects;
         try
         {
+            using CoLa3DPromptInputs? inputs = prompt is null ? null : CoLa3DPromptInputs.Create(prompt, grid, latent);
             features = _features.Extract(Backend, SparseCoords.WithBatch(voxels.Coords), res);
             onProgress?.Invoke(new GenerationProgress(2, FixedSteps, ElapsedMs(started)));
-            objects = _decomposer.Decompose(Backend, latent, features);
+            objects = _decomposer.Decompose(Backend, latent, features, inputs?.Prompts);
         }
         finally
         {
@@ -170,6 +183,57 @@ public sealed class CoLa3DPipeline : ThreeDPipelineBase
         if (meshes.Count == 0)
             throw new HartsyInferenceException("The scene decomposed into no object geometry (try a finer grid).");
         return new CoLa3DResult { Objects = meshes };
+    }
+
+    /// <summary>Checks the grid and the prompt against a checkpoint's architecture. Loads no weights, so it can reject a request first.</summary>
+    /// <param name="config">Architecture of the checkpoint the request targets, from <see cref="CoLa3DConfig.ForQuerySource"/>.</param>
+    /// <param name="resolution">Dual-grid voxels per axis (a multiple of 16); 0 uses <see cref="DefaultResolution"/>, or the latent grid (1024) for a point prompt.</param>
+    /// <param name="prompt">Prompt for a prompt checkpoint; null for the free one.</param>
+    public static void ValidateRequest(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        int res = ResolveResolution(config, resolution, prompt);
+        if (res % LatentStride != 0)
+            throw new ArgumentException($"Grid resolution {res} must be a multiple of {LatentStride}.", nameof(resolution));
+        if (res > MaxResolution)
+            throw new ArgumentException($"Grid resolution {res} exceeds the maximum of {MaxResolution}.", nameof(resolution));
+        prompt?.Validate();
+        if (prompt is null)
+        {
+            if (config.QuerySource != CoLa3DConfig.QuerySourceKind.Fixed)
+                throw new ArgumentException($"This checkpoint takes {config.QuerySource} queries and requires a prompt.", nameof(prompt));
+            return;
+        }
+
+        if (config.QuerySource == CoLa3DConfig.QuerySourceKind.Fixed)
+            throw new ArgumentException("This checkpoint takes free queries; pass no prompt.", nameof(prompt));
+        if (prompt.Kind != config.QuerySource)
+        {
+            throw new ArgumentException(
+                $"This checkpoint takes {config.QuerySource} queries; the prompt gives {prompt.Kind}.", nameof(prompt));
+        }
+
+        if (prompt.Queries > config.MaxParts)
+        {
+            throw new ArgumentException(
+                $"The prompt names {prompt.Queries} objects; this checkpoint takes at most {config.MaxParts}.", nameof(prompt));
+        }
+
+        if (prompt.Kind == CoLa3DConfig.QuerySourceKind.PromptPoint && res / LatentStride != config.LatentResolution)
+        {
+            int grid = config.LatentResolution * LatentStride;
+            throw new ArgumentException(
+                $"Point prompts index a {config.LatentResolution}^3 latent, so the grid must be {grid}; this request uses {res}.",
+                nameof(prompt));
+        }
+    }
+
+    /// <summary>The grid a request runs on: the caller's, else the latent grid a point prompt indexes, else <see cref="DefaultResolution"/>.</summary>
+    private static int ResolveResolution(CoLa3DConfig config, int resolution, CoLa3DPrompt? prompt)
+    {
+        if (resolution > 0)
+            return resolution;
+        return prompt?.Kind == CoLa3DConfig.QuerySourceKind.PromptPoint ? config.LatentResolution * LatentStride : DefaultResolution;
     }
 
     private static double ElapsedMs(long startedNs) => (MonotonicClock.NowNs() - startedNs) / 1e6;

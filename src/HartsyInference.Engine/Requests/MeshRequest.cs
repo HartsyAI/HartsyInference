@@ -15,10 +15,13 @@ public sealed record MeshRequest
     /// <summary>Input triangle scene for scene-decomposition models (cola3d); null for image models.</summary>
     public SceneMeshData? SceneMesh { get; init; }
 
+    /// <summary>Objects to extract from <see cref="SceneMesh"/>; null runs free queries. Scene models only.</summary>
+    public SceneMeshPrompt? ScenePrompt { get; init; }
+
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
-    /// <summary>Grid / voxel resolution; 0 uses the model default.</summary>
+    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt).</summary>
     public int GridResolution { get; init; }
 
     /// <summary>RNG seed; negative means a random seed.</summary>

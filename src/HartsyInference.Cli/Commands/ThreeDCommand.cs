@@ -55,8 +55,20 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Marching-cubes grid resolution (0 = model default).</summary>
         [CommandOption("--grid")]
-        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256).")]
+        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256, or 1024 with --prompt-point).")]
         public int Grid { get; init; }
+
+        /// <summary>Mask PNGs for cola3d, one per object (repeatable); all the same size, red channel is the coverage.</summary>
+        [CommandOption("--prompt-mask")]
+        [Description(
+            "cola3d: a mask PNG per object, all the same size (repeatable). Red channel is the coverage. The view must match "
+            + "the checkpoint's training view, which is not verified yet. Excludes --prompt-point.")]
+        public string[]? PromptMasks { get; init; }
+
+        /// <summary>Scene points for cola3d, one per object as x,y,z in scene units (repeatable).</summary>
+        [CommandOption("--prompt-point")]
+        [Description("cola3d: a point per object as x,y,z in the scene mesh's units (repeatable). Runs on the 1024 grid unless --grid is set, which is slow on CPU. Excludes --prompt-mask.")]
+        public string[]? PromptPoints { get; init; }
 
         /// <summary>Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).</summary>
         [CommandOption("--steps")]
@@ -93,7 +105,17 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             return 1;
         }
 
+        if (settings.PromptMasks is { Length: > 0 } && settings.PromptPoints is { Length: > 0 })
+        {
+            AnsiConsole.MarkupLine("[red]Give[/] [#2ea5e0]--prompt-mask[/] [red]or[/] [#2ea5e0]--prompt-point[/][red], not both.[/]");
+            return 1;
+        }
+
         ParamState parameters = new ParamState(Modality.Mesh) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
+        if (settings.PromptMasks is { Length: > 0 })
+            parameters.Put("prompt-mask", string.Join('\n', settings.PromptMasks));
+        if (settings.PromptPoints is { Length: > 0 })
+            parameters.Put("prompt-point", string.Join('\n', settings.PromptPoints));
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));

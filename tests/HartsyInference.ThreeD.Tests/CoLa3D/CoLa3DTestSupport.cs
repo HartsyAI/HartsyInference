@@ -7,26 +7,6 @@ namespace HartsyInference.ThreeD.Tests.CoLa3D;
 /// <summary>Configs, synthetic weights and fixture readers shared by the CoLa3D tests.</summary>
 internal static class CoLa3DTestSupport
 {
-    /// <summary>The architecture of <c>cola3d_free_q20.pt</c>, read from <c>configs/train/cola3d/free_q20.json</c>.</summary>
-    internal static CoLa3DConfig FreeQ20() => CoLa3DConfig.FreeQ20;
-
-    /// <summary>The architecture of <c>cola3d_mask_q20.pt</c>.</summary>
-    internal static CoLa3DConfig MaskQ20() => FreeQ20() with
-    {
-        QuerySource = CoLa3DConfig.QuerySourceKind.PromptMask,
-        MaskEncoder = CoLa3DConfig.MaskEncoderKind.CnnCenterPe,
-        MaskEncoderHidden = 128,
-        MaskPePerAxis = 128,
-    };
-
-    /// <summary>The architecture of <c>cola3d_point_q20.pt</c>.</summary>
-    internal static CoLa3DConfig PointQ20() => FreeQ20() with
-    {
-        QuerySource = CoLa3DConfig.QuerySourceKind.PromptPoint,
-        PointFeatureSource = CoLa3DConfig.PointFeatureSourceKind.LatentUtonia,
-        PointFourierFeatures = 64,
-    };
-
     /// <summary>A small configuration that exercises every code path: head dim 8 (one identity RoPE pair), two blocks.</summary>
     internal static CoLa3DConfig Tiny(CoLa3DConfig.QuerySourceKind source) => new()
     {

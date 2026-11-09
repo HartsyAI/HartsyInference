@@ -6,26 +6,27 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using Xunit;
 
 namespace HartsyInference.ThreeD.Tests.CoLa3D;
 
-/// <summary>Checks the pipeline's orchestration with stub stages: resolution default, one mesh per object, and disposal.</summary>
+/// <summary>Checks the pipeline's orchestration with stub stages: resolution default, one mesh per object, prompt checks, and disposal.</summary>
 public sealed class CoLa3DPipelineTests
 {
+    private const string TriangleScene = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+
     [Fact]
     public void Generate_RunsEveryStageAndReturnsOneMeshPerObjectAtTheDefaultResolution()
     {
         RecordingVoxelizer voxelizer = new();
         RecordingDisposable owned = new();
         using CpuBackend backend = new();
-        using CoLa3DPipeline pipeline = new(
-            backend, voxelizer, new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), [owned]);
-        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.FreeQ20, voxelizer, new StubDecomposer(), [owned]);
 
-        CoLa3DResult result = pipeline.Generate(scene);
+        CoLa3DResult result = pipeline.Generate(ObjReader.Parse(TriangleScene));
 
         Assert.Equal(CoLa3DPipeline.DefaultResolution, voxelizer.Resolution);
         Assert.Equal(2, result.Objects.Count);
@@ -38,11 +39,136 @@ public sealed class CoLa3DPipelineTests
     public void Generate_RejectsAResolutionThatIsNotAMultipleOfTheLatentStride()
     {
         using CpuBackend backend = new();
-        using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
-        Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.FreeQ20, new RecordingVoxelizer(), new StubDecomposer());
 
-        Assert.Throws<ArgumentException>(() => pipeline.Generate(scene, resolution: 1000));
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene), resolution: 1000));
+    }
+
+    [Fact]
+    public void Generate_PassesFreeQueriesWithoutPromptInputs()
+    {
+        StubDecomposer decomposer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.FreeQ20, new RecordingVoxelizer(), decomposer);
+
+        pipeline.Generate(ObjReader.Parse(TriangleScene));
+
+        Assert.True(decomposer.WasCalled);
+        Assert.Null(decomposer.Received);
+    }
+
+    [Fact]
+    public void Generate_HandsAMaskPromptToTheDecomposer()
+    {
+        StubDecomposer decomposer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.MaskQ20, new RecordingVoxelizer(), decomposer);
+        CoLa3DPrompt prompt = new() { Queries = 2, MaskCoverage = CoverageOf(2, 3, 3), MaskHeight = 3, MaskWidth = 3 };
+
+        pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt);
+
+        Assert.NotNull(decomposer.Received);
+        Assert.Equal(2, decomposer.Received!.Queries);
+        Assert.Equal(new TensorShape(1, 2, 3, 3), decomposer.Received.Masks!.Shape);
+    }
+
+    [Fact]
+    public void Generate_RejectsAPromptThatGivesMasksAndPoints()
+    {
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.MaskQ20, new RecordingVoxelizer(), new StubDecomposer());
+        CoLa3DPrompt prompt = new()
+        {
+            Queries = 1,
+            MaskCoverage = CoverageOf(1, 3, 3),
+            MaskHeight = 3,
+            MaskWidth = 3,
+            Points = [0f, 0f, 0f],
+        };
+
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt));
+    }
+
+    [Fact]
+    public void Generate_RejectsAMaskPromptOnAFreeCheckpointBeforeVoxelizing()
+    {
+        RecordingVoxelizer voxelizer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.FreeQ20, voxelizer, new StubDecomposer());
+        CoLa3DPrompt prompt = new() { Queries = 1, MaskCoverage = CoverageOf(1, 2, 2), MaskHeight = 2, MaskWidth = 2 };
+
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt));
+        Assert.False(voxelizer.Called);
+    }
+
+    [Fact]
+    public void Generate_RejectsAPromptCheckpointRunWithoutAPromptBeforeVoxelizing()
+    {
+        RecordingVoxelizer voxelizer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, voxelizer, new StubDecomposer());
+
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene)));
+        Assert.False(voxelizer.Called);
+    }
+
+    [Fact]
+    public void Generate_RejectsMoreObjectsThanTheCheckpointTakesBeforeVoxelizing()
+    {
+        RecordingVoxelizer voxelizer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.MaskQ20, voxelizer, new StubDecomposer());
+        int queries = CoLa3DConfig.MaskQ20.MaxParts + 1;
+        CoLa3DPrompt prompt = new() { Queries = queries, MaskCoverage = CoverageOf(queries, 1, 1), MaskHeight = 1, MaskWidth = 1 };
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt));
+        Assert.Contains("at most 20", error.Message, StringComparison.Ordinal);
+        Assert.False(voxelizer.Called);
+    }
+
+    [Fact]
+    public void Generate_RejectsAPointPromptOnAGridThatIsNotTheLatentResolutionBeforeVoxelizing()
+    {
+        RecordingVoxelizer voxelizer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, voxelizer, new StubDecomposer());
+        CoLa3DPrompt prompt = new() { Queries = 1, Points = [0.5f, 0.5f, 0.5f] };
+
+        Assert.Throws<ArgumentException>(() => pipeline.Generate(ObjReader.Parse(TriangleScene), resolution: 512, prompt: prompt));
+        Assert.False(voxelizer.Called);
+    }
+
+    [Fact]
+    public void Generate_AcceptsAPointPromptOnTheLatentResolutionGrid()
+    {
+        StubDecomposer decomposer = new();
+        RecordingVoxelizer voxelizer = new();
+        using CpuBackend backend = new();
+        using CoLa3DPipeline pipeline = NewPipeline(backend, CoLa3DConfig.PointQ20, voxelizer, decomposer);
+        CoLa3DPrompt prompt = new() { Queries = 1, Points = [0.5f, 0.5f, 0.5f] };
+
+        pipeline.Generate(ObjReader.Parse(TriangleScene), prompt: prompt);
+
+        Assert.Equal(CoLa3DConfig.PointQ20.LatentResolution * CoLa3DPipeline.LatentStride, voxelizer.Resolution);
+        Assert.NotNull(decomposer.Received);
+        Assert.Equal(1, decomposer.Received!.Queries);
+    }
+
+    // Builds a pipeline over the stub stages; only the config, voxelizer and decomposer vary between tests.
+    private static CoLa3DPipeline NewPipeline(
+        IBackend backend,
+        CoLa3DConfig config,
+        ISceneVoxelizer voxelizer,
+        IObjectDecomposer decomposer,
+        IEnumerable<IDisposable>? owned = null) =>
+        new(backend, config, voxelizer, new StubEncoder(), new StubFeatures(), decomposer, new StubDecoder(), new StubMesher(), owned ?? []);
+
+    // Mask coverage of `queries` planes, each `height` x `width` and fully covered, so every query is non-empty.
+    private static byte[] CoverageOf(int queries, int height, int width)
+    {
+        byte[] coverage = new byte[queries * height * width];
+        Array.Fill(coverage, (byte)255);
+        return coverage;
     }
 
     [Fact]
@@ -50,7 +176,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<ArgumentException>(() => pipeline.Generate(scene, resolution: CoLa3DPipeline.MaxResolution + 16));
@@ -61,7 +187,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
         List<GenerationProgress> reports = [];
 
@@ -81,7 +207,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new StubMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<OperationCanceledException>(() => pipeline.Generate(scene, onProgress: p =>
@@ -96,7 +222,7 @@ public sealed class CoLa3DPipelineTests
     {
         using CpuBackend backend = new();
         using CoLa3DPipeline pipeline = new(
-            backend, new RecordingVoxelizer(), new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new EmptyMesher(), []);
+            backend, CoLa3DConfig.ForQuerySource(CoLa3DConfig.QuerySourceKind.Fixed), new RecordingVoxelizer(),new StubEncoder(), new StubFeatures(), new StubDecomposer(), new StubDecoder(), new EmptyMesher(), []);
         Mesh scene = ObjReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
 
         Assert.Throws<HartsyInferenceException>(() => pipeline.Generate(scene));
@@ -111,8 +237,11 @@ public sealed class CoLa3DPipelineTests
     {
         public int Resolution { get; private set; }
 
+        public bool Called { get; private set; }
+
         public DualGridVoxels Voxelize(Mesh scene, SceneGrid grid)
         {
+            Called = true;
             Resolution = grid.Resolution;
             return new DualGridVoxels([0, 0, 0, 1, 0, 0], [0.5f, 0.5f, 0.5f, 1.5f, 0.5f, 0.5f], new bool[6]);
         }
@@ -132,11 +261,24 @@ public sealed class CoLa3DPipelineTests
 
     private sealed class StubDecomposer : IObjectDecomposer
     {
-        public IReadOnlyList<SparseTensor> Decompose(IBackend backend, SparseTensor latent, SparseTensor features) =>
-        [
-            new SparseTensor(new Tensor(new TensorShape(1, 4), DType.F32), [0, 0, 0, 0], latent.Resolution),
-            new SparseTensor(new Tensor(new TensorShape(1, 4), DType.F32), [0, 0, 1, 0], latent.Resolution),
-        ];
+        public CoLa3DQueryPrompts? Received { get; private set; }
+
+        public bool WasCalled { get; private set; }
+
+        public IReadOnlyList<SparseTensor> Decompose(
+            IBackend backend,
+            SparseTensor latent,
+            SparseTensor features,
+            CoLa3DQueryPrompts? prompts = null)
+        {
+            WasCalled = true;
+            Received = prompts;
+            return
+            [
+                new SparseTensor(new Tensor(new TensorShape(1, 4), DType.F32), [0, 0, 0, 0], latent.Resolution),
+                new SparseTensor(new Tensor(new TensorShape(1, 4), DType.F32), [0, 0, 1, 0], latent.Resolution),
+            ];
+        }
     }
 
     private sealed class StubDecoder : ISparseShapeDecoder

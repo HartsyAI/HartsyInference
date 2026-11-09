@@ -7,15 +7,13 @@ using HartsyInference.ThreeD.Models.Utonia;
 namespace HartsyInference.ThreeD.Models.CoLa3D;
 
 /// <summary>
-/// Loads the CoLa3D scene pipeline from a Models root. Expects <c>CoLa3D/cola3d_free_q20.pt</c>,
-/// <c>TRELLIS2-ShapeVAE/shape_{enc,dec}_next_dc_f16c32_fp16.safetensors</c> and <c>Utonia/utonia.pth</c> beneath it.
-/// Pickle checkpoints go through <see cref="PytorchPickleLoader"/>, which reads tensors without executing pickled code.
+/// Loads the CoLa3D scene pipeline from a Models root. Expects one decomposer under <c>CoLa3D/</c> (see
+/// <see cref="DecomposerFileName"/>), <c>TRELLIS2-ShapeVAE/shape_{enc,dec}_next_dc_f16c32_fp16.safetensors</c> and
+/// <c>Utonia/utonia.pth</c> beneath it. Pickle checkpoints go through <see cref="PytorchPickleLoader"/>, which reads tensors
+/// without executing pickled code.
 /// </summary>
 public static class CoLa3DCheckpointConverter
 {
-    /// <summary>Decomposer checkpoint (free queries, q20).</summary>
-    public const string DecomposerFile = "cola3d_free_q20.pt";
-
     /// <summary>Shape VAE encoder checkpoint.</summary>
     public const string ShapeEncoderFile = "shape_enc_next_dc_f16c32_fp16.safetensors";
 
@@ -30,20 +28,32 @@ public static class CoLa3DCheckpointConverter
     private const string UtoniaDir = "Utonia";
     private const string StateDictPrefix = "state_dict.";
 
-    /// <summary>Loads and converts all three weight sets. Throws when a file is missing or a checkpoint does not match its key map.</summary>
-    public static CoLa3DWeights Load(string modelRoot)
+    /// <summary>The q20 decomposer checkpoint for a query source: free, mask or point.</summary>
+    public static string DecomposerFileName(CoLa3DConfig.QuerySourceKind source) => source switch
+    {
+        CoLa3DConfig.QuerySourceKind.Fixed => "cola3d_free_q20.pt",
+        CoLa3DConfig.QuerySourceKind.PromptMask => "cola3d_mask_q20.pt",
+        CoLa3DConfig.QuerySourceKind.PromptPoint => "cola3d_point_q20.pt",
+        _ => throw new ArgumentOutOfRangeException(nameof(source), source, "Unknown query source."),
+    };
+
+    /// <summary>Loads and converts all three weight sets for one decomposer variant. Throws when a file is missing or a
+    /// checkpoint does not match its key map.</summary>
+    public static CoLa3DWeights Load(string modelRoot, CoLa3DConfig.QuerySourceKind source = CoLa3DConfig.QuerySourceKind.Fixed)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelRoot);
+        string decomposerFile = DecomposerFileName(source);
         List<IDisposable> loaders = [];
         bool built = false;
         try
         {
             PytorchPickleLoader decomposerLoader = new();
             loaders.Add(decomposerLoader);
-            decomposerLoader.Load(Locate(modelRoot, DecomposerDir, DecomposerFile), recursiveFlatten: true);
+            decomposerLoader.Load(Locate(modelRoot, DecomposerDir, decomposerFile), recursiveFlatten: true);
             if (decomposerLoader.SkippedTensorCount != 0)
-                throw new HartsyInferenceException($"{DecomposerFile} skipped {decomposerLoader.SkippedTensorCount} tensors.");
-            Dictionary<string, Tensor> decomposer = CoLa3DKeyMap.Remap(CoLa3DConfig.FreeQ20, decomposerLoader.GetAllTensors());
+                throw new HartsyInferenceException($"{decomposerFile} skipped {decomposerLoader.SkippedTensorCount} tensors.");
+            Dictionary<string, Tensor> decomposer = CoLa3DKeyMap.Remap(
+                CoLa3DConfig.ForQuerySource(source), decomposerLoader.GetAllTensors());
 
             SafeTensorsLoader encoderLoader = new();
             loaders.Add(encoderLoader);

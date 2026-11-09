@@ -4,6 +4,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
+using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
 using HartsyInference.ThreeD.Pipelines;
@@ -36,6 +37,8 @@ public sealed class MeshService : IMeshService, IDisposable
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
 
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
         if (request.Image is null)
         {
             throw new NotSupportedException(
@@ -90,18 +93,24 @@ public sealed class MeshService : IMeshService, IDisposable
         if (request.Image is not null)
             throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
         SceneMeshData sceneMesh = request.SceneMesh;
+        CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : ToCoLa3DPrompt(request.ScenePrompt);
+        CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
+        // Rejects the request before the checkpoint loads; the pipeline checks it again on Generate.
+        CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                CoLa3DPipeline pipeline = GetOrLoadScene(spec, id);
+                CoLa3DPipeline pipeline = GetOrLoadScene(spec, id, source);
                 Mesh scene = SceneMeshReader.Read(sceneMesh.Data, sceneMesh.Format);
                 CoLa3DResult result = pipeline.Generate(scene, request.GridResolution, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-                });
+                }, prompt);
+                if (result.Objects.Count == 0)
+                    throw new InvalidOperationException("The scene decomposed into no object geometry (try a finer grid).");
                 return new MeshResult { Data = GlbWriter.Write(result.Objects), Format = "glb" };
             },
             cancel);
@@ -250,33 +259,78 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
-    /// <summary>Loads (or returns the cached) scene pipeline for <paramref name="spec"/>.</summary>
-    private CoLa3DPipeline GetOrLoadScene(ModelSpec spec, string id)
+    /// <summary>Converts the wire prompt to the pipeline's prompt, checking that exactly one kind is given.</summary>
+    private static CoLa3DPrompt ToCoLa3DPrompt(SceneMeshPrompt prompt)
+    {
+        if ((prompt.Masks is null) == (prompt.Points is null))
+            throw new ArgumentException("A scene prompt gives masks or points, not both and not neither.", nameof(prompt));
+        return prompt.Masks is null ? PointPrompt(prompt.Points!) : MaskPrompt(prompt.Masks);
+    }
+
+    private static CoLa3DPrompt PointPrompt(IReadOnlyList<ScenePoint> points)
+    {
+        float[] flat = new float[points.Count * 3];
+        for (int i = 0; i < points.Count; i++)
+        {
+            flat[i * 3] = points[i].X;
+            flat[i * 3 + 1] = points[i].Y;
+            flat[i * 3 + 2] = points[i].Z;
+        }
+
+        return new CoLa3DPrompt { Queries = points.Count, Points = flat };
+    }
+
+    private static CoLa3DPrompt MaskPrompt(IReadOnlyList<ScenePromptMask> masks)
+    {
+        if (masks.Count == 0)
+            throw new ArgumentException("A mask prompt names at least one object.", nameof(masks));
+        for (int i = 0; i < masks.Count; i++)
+        {
+            if (masks[i] is null || masks[i].Coverage is null)
+                throw new ArgumentException($"Mask {i} has no coverage bytes.", nameof(masks));
+        }
+        int width = masks[0].Width, height = masks[0].Height;
+        // Multiply in long: a plane that wraps an int could pass the length checks and then allocate a huge tensor later.
+        long planeLong = (long)width * height;
+        if (planeLong < 0 || planeLong > int.MaxValue / masks.Count)
+        {
+            throw new ArgumentException(
+                $"Mask prompt sizes are out of range: {masks.Count} masks of {width}x{height} must fit one {int.MaxValue}-byte buffer.",
+                nameof(masks));
+        }
+
+        int plane = (int)planeLong;
+        byte[] coverage = new byte[masks.Count * plane];
+        for (int i = 0; i < masks.Count; i++)
+        {
+            ScenePromptMask mask = masks[i];
+            if (mask.Width != width || mask.Height != height || mask.Coverage.Length != plane)
+                throw new ArgumentException($"Mask {i} must be {width}x{height} with {plane} coverage bytes.", nameof(masks));
+            mask.Coverage.CopyTo(coverage, i * plane);
+        }
+
+        return new CoLa3DPrompt { Queries = masks.Count, MaskCoverage = coverage, MaskHeight = height, MaskWidth = width };
+    }
+
+    /// <summary>Loads (or returns the cached) scene pipeline for <paramref name="spec"/> and decomposer variant.</summary>
+    private CoLa3DPipeline GetOrLoadScene(ModelSpec spec, string id, CoLa3DConfig.QuerySourceKind source)
     {
         if (spec.LocalPath is null)
         {
             throw new FileNotFoundException(
                 $"No checkpoint found for 3D model '{spec.Requested}'. Supply its model directory as the local path.");
         }
+        string key = $"{spec.LocalPath}|{source}";
         lock (_gate)
         {
-            if (_scenePipelines.TryGetValue(spec.LocalPath, out CoLa3DPipeline? cached))
+            if (_scenePipelines.TryGetValue(key, out CoLa3DPipeline? cached))
             {
                 return cached;
             }
             try
             {
-                CoLa3DPipeline pipeline;
-                if (id == "cola3d")
-                {
-                    pipeline = CoLa3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
-                }
-                else
-                {
-                    // Unreachable while MeshModelIds.SceneMesh matches these branches; a new id must get its own branch.
-                    throw new System.Diagnostics.UnreachableException($"No loader wired for scene 3D model '{id}'.");
-                }
-                _scenePipelines[spec.LocalPath] = pipeline;
+                CoLa3DPipeline pipeline = CoLa3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath, source);
+                _scenePipelines[key] = pipeline;
                 return pipeline;
             }
             catch (Exception ex)
