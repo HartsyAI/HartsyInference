@@ -15,8 +15,11 @@ namespace HartsyInference.Cli.Commands;
 /// takes an action-script camera (SANA-WM), <c>--actions</c> is that script; for the others it is the per-frame action plan.
 /// SANA-WM streaming generates chunk by chunk and can be driven while it runs:
 /// <c>hartsy world -m sana-wm-streaming --image demo.png --prompt-file demo.txt --intrinsics fx,fy,cx,cy
-/// [--actions "w-48"] [--frames 241 | --unbounded] [--interactive]</c>. There <c>--actions</c> is the opening move, and with
+/// [--actions "w-48"] [--frames 241 | --unbounded] [--interactive] [--refiner]</c>. There <c>--actions</c> is the opening move, and with
 /// <c>--interactive</c> the keys <c>wasdijkl</c> toggle the held controls, space releases them and <c>q</c> ends the stream.
+/// <c>--refiner</c> passes each chunk through the LTX-2 refiner before it is decoded; its files default to the streaming
+/// release's layout beside the DiT folder (<c>refiner_diffusers/</c>, <c>gemma3_12b/</c>) and its memory use is set by the
+/// <c>vram.sanaWmRefiner*</c> settings.
 /// Every option is checked by the engine's world planner before a checkpoint is loaded.
 /// Camera file format: a JSON file <c>{"poses": [[16 numbers], ...], "intrinsics": {"fx", "fy", "cx", "cy"}}</c> or a
 /// NumPy <c>.npy</c> float32/float64 array shaped (N, 16) or (N, 4, 4). Each pose is a camera-to-world matrix, row-major,
@@ -65,6 +68,32 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("--text-encoder-path")]
         [Description("SANA-WM: Gemma-2-2B .safetensors (default: text_encoder/gemma-2-2b-it/ beside the DiT folder).")]
         public string? TextEncoderPath { get; init; }
+
+        /// <summary>Runs the model's refiner stage; refused by a model without one.</summary>
+        [CommandOption("--refiner")]
+        [Description("Run the model's refiner stage (sana-wm-streaming: the chunk-causal LTX-2 refiner; needs its checkpoints "
+            + "and far more VRAM than stage 1).")]
+        public bool Refiner { get; init; }
+
+        /// <summary>Override of the refiner transformer checkpoint.</summary>
+        [CommandOption("--refiner-path")]
+        [Description("Refiner transformer .safetensors (default: refiner_diffusers/transformer/ beside the DiT folder).")]
+        public string? RefinerPath { get; init; }
+
+        /// <summary>Override of the refiner's text connectors checkpoint.</summary>
+        [CommandOption("--refiner-connectors-path")]
+        [Description("Refiner text connectors .safetensors (default: refiner_diffusers/connectors/ beside the DiT folder).")]
+        public string? RefinerConnectorsPath { get; init; }
+
+        /// <summary>Override of the refiner's Gemma-3-12B text encoder: a file or a folder of shards.</summary>
+        [CommandOption("--refiner-text-encoder-path")]
+        [Description("Refiner Gemma-3-12B text encoder: one .safetensors or a folder of shards (default: gemma3_12b/ beside the DiT folder).")]
+        public string? RefinerTextEncoderPath { get; init; }
+
+        /// <summary>Override of the refiner text encoder's tokenizer model.</summary>
+        [CommandOption("--refiner-tokenizer-path")]
+        [Description("Refiner text encoder tokenizer.model (default: beside the refiner text encoder).")]
+        public string? RefinerTokenizerPath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
@@ -226,12 +255,21 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         parameters.Put("streaming", settings.Streaming ? "true" : "false");
         parameters.Put("unbounded", settings.Unbounded ? "true" : "false");
         parameters.Put("interactive", settings.Interactive ? "true" : "false");
+        parameters.Put("refiner", settings.Refiner ? "true" : "false");
 
         Dictionary<string, string> aux = new Dictionary<string, string>();
         if (!string.IsNullOrWhiteSpace(settings.VaePath))
             aux[WorldComponentResolver.VaeAuxKey] = settings.VaePath;
         if (!string.IsNullOrWhiteSpace(settings.TextEncoderPath))
             aux[WorldComponentResolver.TextEncoderAuxKey] = settings.TextEncoderPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerPath))
+            aux[WorldComponentResolver.RefinerAuxKey] = settings.RefinerPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerConnectorsPath))
+            aux[WorldComponentResolver.RefinerConnectorsAuxKey] = settings.RefinerConnectorsPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerTextEncoderPath))
+            aux[WorldComponentResolver.RefinerTextEncoderAuxKey] = settings.RefinerTextEncoderPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerTokenizerPath))
+            aux[WorldComponentResolver.RefinerTokenizerAuxKey] = settings.RefinerTokenizerPath;
         ModelSpec spec = baseSpec with { Aux = aux };
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 

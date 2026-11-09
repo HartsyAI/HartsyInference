@@ -22,4 +22,25 @@ public sealed record WorldComponents
 
     /// <summary>The CLIP-L text-encoder checkpoint (aux <c>clip-path</c>).</summary>
     public string? ClipEncoder { get; init; }
+
+    /// <summary>Where the model's optional refiner stage lives; null for a model without one.</summary>
+    public WorldRefinerFiles? Refiner { get; init; }
+}
+
+/// <summary>The files of a world model's refiner stage. They are named when the model is resolved but not required to exist
+/// until a run asks for the refiner, so a stage-1-only install resolves without them.</summary>
+public sealed record WorldRefinerFiles
+{
+    /// <summary>The refiner transformer checkpoint (aux <c>refiner-path</c>).</summary>
+    public required string Transformer { get; init; }
+
+    /// <summary>The refiner's text connectors checkpoint (aux <c>refiner-connectors-path</c>).</summary>
+    public required string Connectors { get; init; }
+
+    /// <summary>The refiner's text encoder: one safetensors file, or a folder of <c>model-*-of-*.safetensors</c> shards
+    /// (aux <c>refiner-text-encoder-path</c>).</summary>
+    public required string TextEncoder { get; init; }
+
+    /// <summary>The refiner text encoder's tokenizer model (aux <c>refiner-tokenizer-path</c>).</summary>
+    public required string Tokenizer { get; init; }
 }

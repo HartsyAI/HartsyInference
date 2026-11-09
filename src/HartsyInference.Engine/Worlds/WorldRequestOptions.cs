@@ -41,6 +41,9 @@ public sealed record WorldRequestOptions
     /// <summary>Runs guidance as two sequential passes per step; refused by a model that does not declare the capability.</summary>
     public bool SequentialCfg { get; init; }
 
+    /// <summary>Runs the model's refiner stage; refused by a model that does not declare one.</summary>
+    public bool Refiner { get; init; }
+
     /// <summary>Asks for chunk-by-chunk streaming (true) or a whole-clip batch run (false); null takes the model's own mode.</summary>
     public bool? Streaming { get; init; }
 
@@ -90,6 +93,7 @@ public sealed record WorldRequestOptions
             Seed = Seed,
             Camera = camera,
             SequentialCfg = SequentialCfg,
+            Refiner = Refiner,
             Streaming = Streaming,
             Unbounded = Unbounded,
             Vram = vram,

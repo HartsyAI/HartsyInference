@@ -21,6 +21,18 @@ public static class WorldComponentResolver
     /// <summary>Aux key that points at SANA-WM's Gemma <c>tokenizer.model</c>.</summary>
     public const string TokenizerAuxKey = "tokenizer-path";
 
+    /// <summary>Aux key that points at SANA-WM streaming's refiner transformer checkpoint.</summary>
+    public const string RefinerAuxKey = "refiner-path";
+
+    /// <summary>Aux key that points at the refiner's text connectors checkpoint.</summary>
+    public const string RefinerConnectorsAuxKey = "refiner-connectors-path";
+
+    /// <summary>Aux key that points at the refiner's Gemma-3-12B text encoder: a safetensors file or a folder of shards.</summary>
+    public const string RefinerTextEncoderAuxKey = "refiner-text-encoder-path";
+
+    /// <summary>Aux key that points at the refiner text encoder's <c>tokenizer.model</c>.</summary>
+    public const string RefinerTokenizerAuxKey = "refiner-tokenizer-path";
+
     // SANA-WM's release layout: the DiT under dit/, with vae/ and text_encoder/gemma-2-2b-it/ beside it.
     private const string SanaWmVaeRelative = "../vae/diffusion_pytorch_model.safetensors";
     private const string SanaWmTextEncoderRelative = "../text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors";
@@ -30,6 +42,12 @@ public static class WorldComponentResolver
     // stage-1 release's Gemma-2-2B, shared rather than downloaded twice.
     private const string SanaWmCausalVaeRelative = "../ltx2_causal_vae/diffusion_pytorch_model.safetensors";
     private const string SanaWmSharedTextEncoderRelative = "../../SanaWm/text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors";
+
+    // The streaming release's refiner: the diffusers LTX-2 transformer and text connectors under refiner_diffusers/, and
+    // Gemma-3-12B as a folder of shards with its tokenizer.
+    private const string SanaWmRefinerTransformerRelative = "../refiner_diffusers/transformer/diffusion_pytorch_model.safetensors";
+    private const string SanaWmRefinerConnectorsRelative = "../refiner_diffusers/connectors/diffusion_pytorch_model.safetensors";
+    private const string SanaWmRefinerTextEncoderRelative = "../gemma3_12b";
 
     /// <summary>The world models the service can load, by catalog id.</summary>
     public static IReadOnlyList<string> KnownIds { get; } = ["oasis", "diamond", "hunyuan-gamecraft", "sana-wm", "sana-wm-streaming"];
@@ -81,6 +99,7 @@ public static class WorldComponentResolver
                     Vae = AuxOrSibling(spec, VaeAuxKey, backbone, SanaWmCausalVaeRelative, "causal LTX-2 VAE"),
                     TextEncoder = sharedTextEncoder,
                     Tokenizer = AuxOrSibling(spec, TokenizerAuxKey, sharedTextEncoder, GemmaTokenizerFile, "Gemma tokenizer"),
+                    Refiner = SanaWmRefiner(spec, backbone),
                 };
             case WorldArchitecture.HunyuanGameCraft:
                 return new WorldComponents
@@ -102,6 +121,29 @@ public static class WorldComponentResolver
                 throw new NotSupportedException($"The {architecture} architecture has no component resolution.");
         }
     }
+
+    // Names the refiner's files without requiring them: a stream without the refiner never reads them.
+    private static WorldRefinerFiles SanaWmRefiner(ModelSpec spec, string backbone)
+    {
+        string textEncoder = AuxOrRelative(spec, RefinerTextEncoderAuxKey, backbone, SanaWmRefinerTextEncoderRelative);
+        // A single-file encoder keeps its tokenizer beside it; a folder of shards keeps it inside.
+        bool singleFile = textEncoder.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase);
+        string tokenizerFolder = singleFile ? Path.GetDirectoryName(textEncoder) ?? "." : textEncoder;
+        return new WorldRefinerFiles
+        {
+            Transformer = AuxOrRelative(spec, RefinerAuxKey, backbone, SanaWmRefinerTransformerRelative),
+            Connectors = AuxOrRelative(spec, RefinerConnectorsAuxKey, backbone, SanaWmRefinerConnectorsRelative),
+            TextEncoder = textEncoder,
+            Tokenizer = spec.Aux.TryGetValue(RefinerTokenizerAuxKey, out string? tokenizer)
+                ? tokenizer
+                : Path.Combine(tokenizerFolder, GemmaTokenizerFile),
+        };
+    }
+
+    private static string AuxOrRelative(ModelSpec spec, string key, string anchor, string relative) =>
+        spec.Aux.TryGetValue(key, out string? aux)
+            ? aux
+            : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(anchor) ?? ".", relative));
 
     /// <summary>The aux path for <paramref name="key"/>, else <paramref name="relative"/> resolved against the folder of
     /// <paramref name="anchor"/>. The file must exist.</summary>

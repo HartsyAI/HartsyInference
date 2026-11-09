@@ -71,6 +71,29 @@ public static partial class EngineKnobs
     public static readonly Knob<long> Ltx25VaeChunkMb =
         Long("vram.ltx25VaeChunkMb", 0L, KnobScope.Construction, KnobDomain.Vram, "Pins the LTX-2.5 diffusion decoder's temporal-chunk workspace in MB instead of sizing the plan off free VRAM.");
 
+    /// <summary>Latent frames the SANA-WM streaming refiner's attention window holds, the seed frame included.</summary>
+    /// <remarks>11 is upstream's <c>--refiner_kv_max_frames</c> and the trained setup. The window's keys and values are the
+    /// refiner's largest carried state (about 0.69 GB per frame at 720p in F16), so a smaller window is the first memory
+    /// lever; below 4 (the seed frame plus one chunk) the decoded video flickers at chunk boundaries.</remarks>
+    public static readonly Knob<int> SanaWmRefinerWindowFrames =
+        Int("vram.sanaWmRefinerWindowFrames", 11, KnobScope.Runtime, KnobDomain.Vram,
+            "Latent frames the SANA-WM streaming refiner's attention window holds, the seed frame included (default 11, upstream's kv_max_frames).",
+            v => v >= 1 ? v : 11);
+
+    /// <summary>Keeps the SANA-WM streaming refiner's sliding history on every N-th transformer block only (and the last).</summary>
+    /// <remarks>1 keeps it on every block, as trained. A larger stride divides the history's memory by about that much and is
+    /// an approximation (upstream <c>SANA_WM_REFINER_HISTORY_LAYER_STRIDE</c>).</remarks>
+    public static readonly Knob<int> SanaWmRefinerLayerStride =
+        Int("vram.sanaWmRefinerLayerStride", 1, KnobScope.Runtime, KnobDomain.Vram,
+            "Keeps the SANA-WM streaming refiner's sliding history on every N-th transformer block only (default 1: every block).",
+            v => v >= 1 ? v : 1);
+
+    /// <summary>Device memory in MB the SANA-WM streaming refiner's block weights leave free beyond its own attention window.</summary>
+    /// <remarks>Covers the refiner's activations and the per-chunk transients of the DiT and the VAE decoder that share the
+    /// device with it. Blocks that do not fit beside it are streamed from the host on every forward.</remarks>
+    public static readonly Knob<long> SanaWmRefinerHeadroomMb =
+        Long("vram.sanaWmRefinerHeadroomMb", 4096L, KnobScope.Runtime, KnobDomain.Vram, "Device memory in MB the SANA-WM streaming refiner's block weights leave free beyond its attention window: its activations and the DiT's and VAE decoder's per-chunk transients.");
+
     /// <summary>Activation/workspace headroom in MB (default 3072) the LTX-2 denoise loop reserves before weight placement.</summary>
     public static readonly Knob<long> Ltx2HeadroomMb =
         Long("vram.ltx2HeadroomMb", 3072L, KnobScope.Runtime, KnobDomain.Vram, "Activation/workspace headroom in MB (default 3072) the LTX-2 denoise loop reserves before weight placement.");
