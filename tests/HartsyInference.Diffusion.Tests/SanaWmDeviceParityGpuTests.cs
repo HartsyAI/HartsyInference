@@ -194,6 +194,29 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
             _output.WriteLine($"FrameDeltaScan valueDim {valueDim}: relative L2 {relative:E3} (TF32 GEMMs)");
             Compare($"FrameDeltaScan valueDim {valueDim}", (cpu, cuda));
             Assert.True(relative < 5e-3, $"FrameDeltaScan relative L2 {relative:E3} against the host reference.");
+
+            // Streaming: the same scan started from a carried forward state, also writing the state it ends in.
+            Tensor initial = Fill([heads, keyDim, valueDim], () => ((float)random.NextDouble() * 2f - 1f) * 0.05f);
+            float[] RunCarried(IBackend backend)
+            {
+                using Tensor output = new(new TensorShape(tokens, heads * valueDim), DType.F32);
+                using Tensor final = new(new TensorShape(heads, keyDim, valueDim), DType.F32);
+                backend.FrameDeltaScan(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim, initial, final);
+                return [.. Read(backend, output), .. Read(backend, final)];
+            }
+
+            (float[] cpuCarried, float[] cudaCarried) = RunOnBoth(RunCarried);
+            double carriedError = 0, carriedNorm = 0;
+            for (int i = 0; i < cpuCarried.Length; i++)
+            {
+                carriedError += (double)(cpuCarried[i] - cudaCarried[i]) * (cpuCarried[i] - cudaCarried[i]);
+                carriedNorm += (double)cpuCarried[i] * cpuCarried[i];
+            }
+
+            double carriedRelative = Math.Sqrt(carriedError / Math.Max(carriedNorm, double.Epsilon));
+            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}, carried state: relative L2 {carriedRelative:E3}");
+            Assert.False(cpuCarried.AsSpan(0, cpu.Length).SequenceEqual(cpu), "The carried state did not change the scan.");
+            Assert.True(carriedRelative < 5e-3, $"Carried-state FrameDeltaScan relative L2 {carriedRelative:E3} against the host reference.");
         }
         finally
         {
