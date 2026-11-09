@@ -4,7 +4,7 @@ using System.Text;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>Operand dtypes a kernel row serves.</summary>
 [Flags]

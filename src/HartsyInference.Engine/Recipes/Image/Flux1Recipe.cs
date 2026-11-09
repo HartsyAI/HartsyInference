@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -51,6 +51,20 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 
     /// <summary>The catalog ids of the Fill transformers this recipe runs.</summary>
     internal static readonly string[] FillCatalogIds = ["flux1-fill", "onereward-fill", "onereward-fill-fp8"];
+
+    /// <summary>The distilled guidance of the Dev family.</summary>
+    internal const float DevGuidance = 3.5f;
+
+    /// <summary>The OneReward fine-tune's reference distilled guidance, from ComfyUI's OneReward template.</summary>
+    internal const float OneRewardGuidance = 30f;
+
+    /// <summary>Whether a catalog id runs a Fill transformer, whose masks regenerate the masked area.</summary>
+    public static bool IsFillCatalogId(string? catalogId) =>
+        catalogId is not null && FillCatalogIds.Contains(catalogId, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The distilled guidance a checkpoint of <paramref name="variant"/> runs at unless the request names one.</summary>
+    internal static float DistilledGuidanceFor(ModelVariant? variant) =>
+        variant?.Id == Flux1Variants.OneReward.Id ? OneRewardGuidance : DevGuidance;
 
     /// <summary>Flux.1 Dev's official sampling settings: 28 steps at distilled guidance 3.5, 1024x1024; a Schnell checkpoint narrows this to 4 steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 3.5f, Width = 1024, Height = 1024 };
@@ -202,7 +216,8 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             ClipTokenizer clipTok = new ClipTokenizer();
             T5Tokenizer t5Tok = new T5Tokenizer(maxLength: hasGuidance ? 512 : 256);
             Logs.Info($"[Flux1Recipe] Flux.1 ready (Dev={hasGuidance}).");
-            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend);
+            return new Flux1RecipePipeline(pipeline, clipTok, t5Tok, hasGuidance, loaders, loraStack, context.Backend,
+                devGuidance: DistilledGuidanceFor(context.ResolveVariant(Flux1Variants.Catalog).Variant));
         }
         catch (Exception ex)
         {

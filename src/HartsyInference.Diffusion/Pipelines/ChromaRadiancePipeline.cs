@@ -1,7 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -329,13 +330,13 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
 
         // Drain-free fast path (plain t2i / img2img): the pixel sample stays device-resident across the whole
         // loop — x0→velocity conversion runs as device elementwise ops and CFG combine + Euler is ONE in-place
-        // CfgEulerStep (cond-anchored CFG maps onto the uncond-anchored kernel via guidance = cfg + 1). Masked
+        // GuidedEulerStep (cond-anchored CFG maps onto the uncond-anchored kernel via guidance = cfg + 1). Masked
         // inpaint keeps the host branch — it must read/rebuild the sample on the host every step.
         bool drainFree = !isMaskedInpaint;
 
         // Sampler selection (2026-08-20). Chroma Radiance is flow-matching, so it had no user-selectable sampler at
         // all before this. The predictor converts each x0 pass to velocity and hands the RAW pair back, so the
-        // sampler integrates in the same velocity domain the direct CfgEulerStep call used.
+        // sampler integrates in the same velocity domain the direct GuidedEulerStep call used.
         ISampler sampler = FlowMatchSampling.Resolve(request.Scheduler, scheduler, seed, "Chroma Radiance",
             startsFromNoisedInit: startStep > 0);
         bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);

@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 

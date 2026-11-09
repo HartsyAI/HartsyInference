@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
 
@@ -278,8 +279,8 @@ public sealed unsafe class Lumina2Block
             int groupSize = _numHeads / _numKvHeads;
             kFull = new Tensor(qMhShape, DType.F32);
             vFull = new Tensor(qMhShape, DType.F32);
-            RepeatKvHeads(kFull, kMh, batch, _numKvHeads, groupSize, seqLen, _headDim);
-            RepeatKvHeads(vFull, vMh, batch, _numKvHeads, groupSize, seqLen, _headDim);
+            StridedCopies.RepeatInterleave(backend, kFull, kMh, 1, groupSize);
+            StridedCopies.RepeatInterleave(backend, vFull, vMh, 1, groupSize);
             kMh.Dispose();
             vMh.Dispose();
         }
@@ -493,24 +494,4 @@ public sealed unsafe class Lumina2Block
         }
     }
 
-    /// <summary>GQA expand: replicate each KV head <paramref name="groupSize"/> times across Q-head positions. <c>[B, Hkv, S, D] -&gt; [B, Hkv*groupSize=Hq, S, D]</c>.</summary>
-    private static void RepeatKvHeads(Tensor output, Tensor input, int batch, int kvHeads, int groupSize, int seqLen, int headDim)
-    {
-        float* inPtr = (float*)input.DataPointer;
-        float* outPtr = (float*)output.DataPointer;
-        long perHead = (long)seqLen * headDim;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int h = 0; h < kvHeads; h++)
-            {
-                long srcOff = ((long)b * kvHeads + h) * perHead;
-                for (int g = 0; g < groupSize; g++)
-                {
-                    int qHead = h * groupSize + g;
-                    long dstOff = ((long)b * (kvHeads * groupSize) + qHead) * perHead;
-                    Buffer.MemoryCopy(inPtr + srcOff, outPtr + dstOff, perHead * sizeof(float), perHead * sizeof(float));
-                }
-            }
-        }
-    }
 }

@@ -44,7 +44,7 @@ public static class ModelFolders
         Override(folder) ?? folder.DefaultName;
 
     /// <summary>Maps one folder name (a catalog name, a default name, or any spelling of either, ignoring case) to its
-    /// name on disk; a name that is not a model folder comes back unchanged.</summary>
+    /// name on disk; a name that is not a model folder comes back unchanged. Public for host applications; see docs/HOST_INTEGRATION.md.</summary>
     public static string MapName(string name) =>
         Find(name) is { } folder ? Physical(folder) : name;
 

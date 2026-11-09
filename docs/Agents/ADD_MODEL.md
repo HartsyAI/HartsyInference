@@ -1,19 +1,45 @@
 # Add a model
 
-For a newly released model, run the end-to-end [add-model skill](skills/add-model/SKILL.md): research, reuse map, official-Python and ComfyUI baselines, full feature support, real-weight verification through SwarmUI, and the engine and extension PRs. Install it for Claude with `mkdir -p ~/.claude/skills/add-model && cp docs/Agents/skills/add-model/SKILL.md ~/.claude/skills/add-model/`. The steps below are the engine rules it relies on.
+Use this file when a model is new to the engine. For a newly released model, run the end-to-end
+[add-model skill](skills/add-model/SKILL.md). It covers research, the reuse map, official-Python and ComfyUI baselines,
+full feature support, real-weight verification through SwarmUI, and the engine and extension PRs. To install it for
+Claude, run `mkdir -p ~/.claude/skills/add-model && cp docs/Agents/skills/add-model/SKILL.md ~/.claude/skills/add-model/`.
+The steps below are the engine rules that the skill depends on.
 
-1. Read the relevant architecture reference and modality status; search TROUBLESHOOTING for the family/operation.
-2. Map shapes, dtypes, masks, prediction type and ownership at every boundary. Inspect checkpoint keys/metadata before designing conversion; repack once at load time.
-3. Use the sibling package and IBackend/shared operations. Engine owns registration, catalog, loading and consumer dispatch; video must use the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
-4. Declare the recipe's complete `Defaults` (and a video family's `Constraints` frame grid) from SwarmUI's documented defaults, commenting any deviation; the registry validator and `RecipeLedgerTests` pick the recipe up automatically. See [recipe contract](ENGINE_PATTERNS.md#recipe-contract).
-5. If builds share the architecture but not the contract (base/edit, turbo/distilled), declare a variant catalog; see [model variants](ENGINE_PATTERNS.md#model-variants). Map each SwarmUI class id and `modelspec.architecture` value before reaching for filename tokens.
-6. Validate components with saved reference noise/embeddings, then real weights, generated output and the intended consumer. Matching seeds does not match RNG implementations.
-7. Record exact checkpoint, reference version, inputs, dtype/backend, tolerances and evidence in the canonical status/parity docs.
+Work through these steps in order. Each one produces evidence the next one uses.
 
-Use the safe-subset pickle parser; never execute checkpoint pickle. Preserve configuration/tokenizer metadata and report quantization loss. Choose precision per family from validated behavior, not a universal Q8/F16 prescription.
+1. Read the architecture reference and modality status for the model. Search [troubleshooting](../Checklists/TROUBLESHOOTING.md)
+   for its family and operation.
+2. Map shapes, dtypes, masks, prediction type and ownership at every boundary. Inspect the checkpoint keys and metadata
+   before you design the conversion, and repack once at load time.
+3. Build on the sibling package and the shared `IBackend` operations. The engine owns registration, the catalog, loading
+   and consumer dispatch. Video models must follow the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
+4. Declare the recipe's complete `Defaults` (and, for a video family, its `Constraints` frame grid), taken from SwarmUI's
+   documented defaults. Comment any deviation. The registry validator and `RecipeLedgerTests` pick the recipe up
+   automatically. See the [recipe contract](ENGINE_PATTERNS.md#recipe-contract).
+5. If builds share an architecture but not a contract (base and edit, or turbo and distilled), declare a variant catalog.
+   See [model variants](ENGINE_PATTERNS.md#model-variants). Map each SwarmUI class id and `modelspec.architecture` value
+   before you reach for filename tokens.
+6. Validate components in this order: saved reference noise and embeddings, then real weights, then generated output,
+   then the intended consumer. Matching seeds does not mean matching RNG implementations.
+7. Record the exact checkpoint, reference version, inputs, dtype and backend, tolerances and evidence in the canonical
+   status and parity documents.
 
-Keep synthetic tests labeled SyntheticSmoke. Real-weight/GPU/network tests keep their resource categories and gates even after verification; a clean skip is not a pass. Follow [test filtering](../CODE_STYLE.md).
+Parse checkpoints with the safe-subset pickle parser. Never execute checkpoint pickle. Keep configuration and tokenizer
+metadata, and report any quantization loss. Choose precision per family from validated behaviour, not from a fixed
+Q8 or F16 default.
 
-Bisect numerical differences before changing tolerances. Typical FP32 diagnostic scales are elementwise 1e-7, normalization 1e-6, GEMM 1e-5, attention 1e-4 and full denoiser 1e-3; these are starting points, not universal acceptance criteria. Finite tensors alone do not establish useful output.
+Label synthetic tests `SyntheticSmoke`. Keep the resource categories and gates on real-weight, GPU and network tests even
+after they pass. A skipped test is not a passing test. Follow [test filtering](../CODE_STYLE.md#testing).
 
-Common traps: legacy diffusers attention_head_dim can mean head count; absent Shape dimensions return zero; gated activations split the last dimension; CLIP final normalization and timestep ordering matter; BF16/F16 storage must not be read as float pointers.
+Bisect a numerical difference before you change a tolerance. Typical FP32 diagnostic scales are 1e-7 for elementwise
+operations, 1e-6 for normalization, 1e-5 for GEMM, 1e-4 for attention and 1e-3 for the full denoiser. These are starting
+points, not acceptance criteria. Finite tensors alone do not show that the output is useful.
+
+Common traps:
+
+- In legacy diffusers configs, `attention_head_dim` can mean a head count.
+- An absent Shape dimension returns zero.
+- Gated activations split the last dimension.
+- CLIP final normalization and timestep ordering both affect output.
+- BF16 or F16 storage must not be read as float pointers.

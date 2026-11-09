@@ -5,7 +5,6 @@ using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.QwenOmni;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
-using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 

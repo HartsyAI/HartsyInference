@@ -21,6 +21,7 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
     private readonly VisionBlock[] _blocks;
     private readonly Merger _merger;
     private readonly Merger[] _deepstackMergers;
+    private readonly UnifiedMerger? _unified;
 
     private Tensor? _patchEmbedWeight, _patchEmbedBias;
     private Tensor? _posEmbedWeight;
@@ -44,7 +45,8 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         for (int i = 0; i < config.Depth; i++)
             _blocks[i] = new VisionBlock(config);
         _merger = new Merger(config, postShuffleNorm: false);
-        _deepstackMergers = new Merger[config.DeepstackVisualIndexes.Length];
+        _unified = config.UnifiedDeepstackMerger ? new UnifiedMerger(config) : null;
+        _deepstackMergers = new Merger[_unified is null ? config.DeepstackVisualIndexes.Length : 0];
         for (int i = 0; i < _deepstackMergers.Length; i++)
             _deepstackMergers[i] = new Merger(config, postShuffleNorm: true);
     }
@@ -58,6 +60,11 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         _posEmbedWeight = TensorCasts.EnsureF32(w["pos_embed.weight"]);
 
         for (int i = 0; i < _blocks.Length; i++) _blocks[i].LoadWeights(w, $"blocks.{i}");
+        if (_unified is not null)
+        {
+            _unified.LoadWeights(w, "merger");
+            return;
+        }
         _merger.LoadWeights(w, "merger");
         for (int i = 0; i < _deepstackMergers.Length; i++)
             _deepstackMergers[i].LoadWeights(w, $"deepstack_merger_list.{i}");
@@ -72,6 +79,7 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         foreach (VisionBlock b in _blocks) foreach (Tensor t in b.EnumerateWeights()) yield return t;
         foreach (Tensor t in _merger.EnumerateWeights()) yield return t;
         foreach (Merger m in _deepstackMergers) foreach (Tensor t in m.EnumerateWeights()) yield return t;
+        if (_unified is not null) foreach (Tensor t in _unified.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Runs the vision tower on preprocessed patches <c>[numPatches, patchEmbedInDim]</c> with grid
@@ -93,21 +101,42 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         // 3. 2D RoPE table (split-half), per token in merge-block order.
         (float[] ropeCos, float[] ropeSin) = BuildVisionRope(gridT, gridH, gridW);
 
-        // 4. blocks + deepstack taps.
+        // 4. blocks + deepstack taps. A unified merger keeps each raw tap alive as one of its input streams.
         Tensor hidden3d = h0;
+        bool hiddenIsTap = false;
         Tensor[] deepstack = new Tensor[_deepstackMergers.Length];
+        Tensor[]? rawTaps = _unified is null ? null : new Tensor[_config.DeepstackVisualIndexes.Length];
         for (int i = 0; i < _blocks.Length; i++)
         {
             Tensor next = _blocks[i].Forward(backend, hidden3d, ropeCos, ropeSin, seq);
-            hidden3d.Dispose();
+            if (!hiddenIsTap) hidden3d.Dispose();
             hidden3d = next;
+            hiddenIsTap = false;
             int tapPos = Array.IndexOf(_config.DeepstackVisualIndexes, i);
-            if (tapPos >= 0)
+            if (tapPos < 0) continue;
+            if (rawTaps is not null)
+            {
+                rawTaps[tapPos] = next;
+                hiddenIsTap = true;
+            }
+            else
+            {
                 deepstack[tapPos] = _deepstackMergers[tapPos].Forward(backend, hidden3d, seq, merge);
+            }
         }
 
-        Tensor merged = _merger.Forward(backend, hidden3d, seq, merge);
-        hidden3d.Dispose();
+        Tensor merged;
+        if (_unified is not null)
+        {
+            Tensor[] streams = [hidden3d, .. rawTaps!];
+            merged = _unified.Forward(backend, streams, seq, merge);
+            foreach (Tensor tap in rawTaps!) tap.Dispose();
+        }
+        else
+        {
+            merged = _merger.Forward(backend, hidden3d, seq, merge);
+        }
+        if (!hiddenIsTap) hidden3d.Dispose();
 
         return new VisionOutput
         {
@@ -359,6 +388,87 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
     }
 
     // ── patch merger (final + deepstack post-shuffle variants) ──
+    /// <summary>MOSS-VL's merger. Each stream (the last block, then the raw taps in index order) gets its own
+    /// LayerNorm per token; the normalized streams are concatenated per token, four consecutive tokens form one merge
+    /// block, and one exact-GELU MLP projects each block. Host-staged like <see cref="Merger"/>.</summary>
+    private sealed unsafe class UnifiedMerger
+    {
+        private readonly Qwen3VlVisionConfig _c;
+        private readonly int _streams;
+        private readonly Tensor?[] _normW, _normB;
+        private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
+
+        public UnifiedMerger(Qwen3VlVisionConfig c)
+        {
+            _c = c;
+            _streams = 1 + c.DeepstackVisualIndexes.Length;
+            _normW = new Tensor?[_streams];
+            _normB = new Tensor?[_streams];
+        }
+
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
+        {
+            for (int s = 0; s < _streams; s++)
+            {
+                _normW[s] = TensorCasts.EnsureF32(w[$"{p}.norms.{s}.weight"]);
+                _normB[s] = TensorCasts.EnsureF32(w[$"{p}.norms.{s}.bias"]);
+            }
+            _fc1W = w[$"{p}.linear_fc1.weight"]; _fc1B = w[$"{p}.linear_fc1.bias"];
+            _fc2W = w[$"{p}.linear_fc2.weight"]; _fc2B = w[$"{p}.linear_fc2.bias"];
+        }
+
+        public IEnumerable<Tensor> EnumerateWeights()
+        {
+            foreach (Tensor? t in _normW.Concat(_normB).Append(_fc1W).Append(_fc1B).Append(_fc2W).Append(_fc2B))
+                if (t is not null) yield return t;
+        }
+
+        /// <summary>Merges the <c>[seq, H]</c> streams into <c>[seq / merge², OutHiddenSize]</c>.</summary>
+        public Tensor Forward(IBackend backend, Tensor[] streams, int seq, int merge)
+        {
+            if (streams.Length != _streams)
+                throw new ArgumentException($"The unified merger takes {_streams} streams; got {streams.Length}.", nameof(streams));
+            int hidden = _c.HiddenSize;
+            int numMerged = seq / (merge * merge);
+            int perToken = hidden * _streams;
+            int mergedDim = perToken * merge * merge;
+
+            // Row-major [seq, perToken] and [numMerged, mergedDim] are the same bytes, so the concatenation is written
+            // straight into the grouped layout.
+            Tensor grouped = new Tensor(new TensorShape(1, numMerged, mergedDim), DType.F32);
+            Tensor normed = new Tensor(new TensorShape(1, seq, hidden), DType.F32);
+            float* dst = (float*)grouped.DataPointer;
+            long rowBytes = (long)hidden * sizeof(float);
+            for (int s = 0; s < _streams; s++)
+            {
+                backend.LayerNorm(normed, streams[s], _normW[s]!, _normB[s]!, _c.NormEps);
+                float* src = (float*)normed.DataPointer;
+                for (int t = 0; t < seq; t++)
+                    Buffer.MemoryCopy(src + (long)t * hidden, dst + (long)t * perToken + (long)s * hidden, rowBytes, rowBytes);
+            }
+            normed.Dispose();
+
+            Tensor fc1 = new Tensor(new TensorShape(1, numMerged, mergedDim), DType.F32);
+            backend.Linear(fc1, grouped, _fc1W!, _fc1B);
+            grouped.Dispose();
+            Tensor act = new Tensor(new TensorShape(1, numMerged, mergedDim), DType.F32);
+            if (_c.MergerExactGelu)
+                backend.GeluErf(act, fc1);
+            else
+                backend.Gelu(act, fc1);
+            fc1.Dispose();
+            Tensor proj = new Tensor(new TensorShape(1, numMerged, _c.OutHiddenSize), DType.F32);
+            backend.Linear(proj, act, _fc2W!, _fc2B);
+            act.Dispose();
+
+            Tensor outp = new Tensor(new TensorShape(numMerged, _c.OutHiddenSize), DType.F32);
+            long bytes = (long)numMerged * _c.OutHiddenSize * sizeof(float);
+            Buffer.MemoryCopy((void*)proj.DataPointer, (void*)outp.DataPointer, bytes, bytes);
+            proj.Dispose();
+            return outp;
+        }
+    }
+
     private sealed unsafe class Merger
     {
         private readonly Qwen3VlVisionConfig _c;

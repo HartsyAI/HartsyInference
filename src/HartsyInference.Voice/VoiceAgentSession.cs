@@ -2,13 +2,13 @@ using System.Threading.Channels;
 using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
-using HartsyInference.Cpu;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
-using HartsyInference.Tools;
+using HartsyInference.Engine.ToolCalling;
 using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Turns;
 

@@ -47,7 +47,8 @@ extern "C" __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_f32(
     int renormalize,
     float renormEps,
     float scale,
-    float logitDivisor)
+    float logitDivisor,
+    float* __restrict__ dense)
 {
     __shared__ float raw[ROUTE_MAX_E];
     __shared__ float sel[ROUTE_MAX_E];
@@ -197,6 +198,12 @@ extern "C" __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_f32(
     }
     __syncthreads();
     const float denom = __fadd_rn(wsumShared, renormEps);
+    if (dense != 0)
+    {
+        // The dense table holds the token's weight at each selected expert and zero elsewhere.
+        for (int e = tid; e < numExperts; e += ROUTE_THREADS) dense[(long long)t * numExperts + e] = 0.0f;
+        __syncthreads();
+    }
     for (int kk = tid; kk < topK; kk += ROUTE_THREADS)
     {
         float w = raw[pick[kk]];
@@ -204,6 +211,7 @@ extern "C" __global__ void __launch_bounds__(ROUTE_THREADS) moe_route_f32(
         w = __fmul_rn(w, scale);
         topkIdx[(long long)t * topK + kk] = pick[kk];
         topkWeight[(long long)t * topK + kk] = w;
+        if (dense != 0) dense[(long long)t * numExperts + pick[kk]] = w;
     }
 }
 

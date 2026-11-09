@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
@@ -16,70 +17,6 @@ public sealed partial class VulkanBackend
 
     /// <summary>Widest key head <c>ssm_delta_prefill</c> holds (<see cref="DeltaScanLocal"/> × its MAX_COLS of 4).</summary>
     private const int DeltaScanMaxKeyDim = 256;
-
-    /// <inheritdoc/>
-    public void SituGlu(Tensor output, Tensor input)
-    {
-        using OpScope _op = EnterOp();
-        (int inner, long rows) = SituGluReference.Validate(output, input);
-        long total = rows * inner;
-        if (total == 0)
-            return;
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * input.DType.SizeInBytes));
-        try
-        {
-            VulkanKernel k = GetKernel("situ_glu" + DtypeSuffix(input.DType), storageBufferCount: 2, _default1DSpec);
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)inner);
-            pc.U32(checked((uint)total));
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc.Written, GroupCount(total, LocalX1D));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan SituGlu dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
-
-    /// <inheritdoc/>
-    public void RmsNormModulate(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? shift, float eps)
-    {
-        using OpScope _op = EnterOp();
-        (int dim, long rows, long rowsPerBatch) = RmsNormModulateReference.Validate(output, input, weight, scale, shift);
-        if (rows == 0)
-            return;
-        string suffix = input.DType == output.DType ? DtypeSuffix(input.DType) : DtypeSuffix(input.DType) + DtypeSuffix(output.DType);
-        VulkanBuffer inBuf = GetBuffer(input);
-        VulkanBuffer wBuf = GetBuffer(weight);
-        VulkanBuffer scaleBuf = GetBuffer(scale);
-        VulkanBuffer shiftBuf = shift is null ? scaleBuf : GetBuffer(shift);   // never read when hasShift is 0
-        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * output.DType.SizeInBytes));
-        try
-        {
-            VulkanKernel k = GetKernel("rms_norm_modulate" + suffix, storageBufferCount: 5, RowSpec(NormRowLocal));
-            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)dim);
-            pc.U32(checked((uint)rows));
-            pc.U32(checked((uint)rowsPerBatch));
-            pc.F32(eps);
-            pc.U32(shift is null ? 0u : 1u);
-            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, scaleBuf.Handle, shiftBuf.Handle, outBuf.Handle };
-            Dispatch(k, bufs, pc.Written, checked((uint)rows));
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan RmsNormModulate dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-    }
 
     /// <inheritdoc/>
     public void SsmConvSplitPrefill(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,

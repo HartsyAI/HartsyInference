@@ -29,8 +29,18 @@ public static class Flux1Variants
         StructuralMatch = probe => !HasGuidanceEmbedder(probe) && HasTransformer(probe),
     };
 
+    /// <summary>The OneReward fine-tune of FLUX.1 Fill. Its weights carry the Dev guidance embedder, so it has no structural rule of
+    /// its own: the caller's catalog id selects it, and it runs at its reference guidance of 30 rather than Dev's 3.5.</summary>
+    public static ModelVariant OneReward { get; } = new ModelVariant
+    {
+        Id = "onereward",
+        DisplayName = "OneReward (FLUX.1 Fill fine-tune)",
+        HintAliases = ["onereward-fill", "onereward-fill-fp8"],
+        FineTuneOf = Dev.Id,
+    };
+
     /// <summary>The catalog <see cref="Flux1Recipe"/> declares.</summary>
-    public static ModelVariantCatalog Catalog { get; } = new ModelVariantCatalog("flux1", Dev, [Dev, Schnell]);
+    public static ModelVariantCatalog Catalog { get; } = new ModelVariantCatalog("flux1", Dev, [Dev, Schnell, OneReward]);
 
     /// <summary>True when the converter would emit a guidance embedder: a BFL checkpoint (<c>double_blocks</c>, optionally
     /// under <c>model.diffusion_model.</c>) whose <c>guidance_in</c> has an in- or out-layer, or a diffusers checkpoint

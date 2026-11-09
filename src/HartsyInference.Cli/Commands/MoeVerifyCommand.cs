@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.ModelAssets.MoePack;
 using Spectre.Console;
 using Spectre.Console.Cli;

@@ -1,7 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Vae;
@@ -151,7 +152,7 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
                 // naming no sampler runs the same update the host `EulerCfgStep(latent, v, v, 1f, t − tsteps[k+1])` did.
                 sampler.Step(Backend, latent, predictor, k);
 
-                // The step now lands on the DEVICE (CfgEulerStep is in-place and leaves the latent GPU-resident), while
+                // The step now lands on the DEVICE (GuidedEulerStep is in-place and leaves the latent GPU-resident), while
                 // the FreeActivations sweep below reclaims device buffers WITHOUT a D2H sync-back — and the post-loop
                 // DecodeLatent reads the latent on the host. Materialize it here so neither can lose the step. Costs
                 // nothing net: the pre-sampler loop kept the latent host-side and D2H'd the velocity instead.

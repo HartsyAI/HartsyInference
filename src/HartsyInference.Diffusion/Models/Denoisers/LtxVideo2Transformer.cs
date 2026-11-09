@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
+using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -53,7 +54,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     // eager; a bigger GPU (or vram.ltx2HeadroomMb=0 at a small geometry) holds all 48 resident and captures.
     // The per-step timestep tables (8 block-modulation + embV/embA) build OUTSIDE the capture into the fixed buffers
     // below; the latents live in the pipeline's device-Euler'd videoLat/audioLat; velocities land in fixed buffers
-    // consumed by the pipeline's device CfgEulerStep (no host read → no snapshot needed). ──
+    // consumed by the pipeline's device GuidedEulerStep (no host read → no snapshot needed). ──
     private Tensor? _gTVideo, _gTAudio, _gTPromptV, _gTPromptA, _gTCaVss, _gTCaAss, _gTCaVGate, _gTCaAGate, _gEmbV, _gEmbA;
     private Tensor? _gVCondV, _gVCondA, _gVUncondV, _gVUncondA;   // the 4 fixed velocity outputs
     private long _graphSig = long.MinValue;
@@ -611,7 +612,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         backend.AddScalar(scale1p, scale1, 1f);
         scale1.Dispose();
         // LayerNormNoAffine and AffineBroadcastLastDim both reject a mixed input/output pair, so these follow the
-        // stream; the final proj_out writes F32 because the pipeline's CfgEulerStep is F32-only.
+        // stream; the final proj_out writes F32 because the pipeline's GuidedEulerStep is F32-only.
         Tensor normed = new Tensor(new TensorShape(s, dim), hidden.DType);
         // The reference hardcodes norm_out at 1e-6 independent of norm_eps (transformer_ltx2.py:1313).
         backend.LayerNormNoAffine(normed, hidden, 1e-6f);

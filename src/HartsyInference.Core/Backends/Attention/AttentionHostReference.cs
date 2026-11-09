@@ -1,7 +1,7 @@
 using System.Buffers;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>docs/ATTENTION_CONTRACT.md computed on the host from strided operands of any storage dtype: the default
 /// <see cref="IBackend.Attention"/> for a backend without kernel rows. It reads tensors through

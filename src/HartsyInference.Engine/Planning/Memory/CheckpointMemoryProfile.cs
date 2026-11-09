@@ -34,7 +34,7 @@ internal sealed class CheckpointMemoryProfile
     private const long TextEncodeActivationBytes = 512L << 20;
 
     /// <summary>Blocks resident while streaming: the active block plus the default prefetch window.</summary>
-    private const int StreamWindowBlocks = Core.MemoryManagement.BlockStreamingOptions.DefaultPrefetchAhead + 1;
+    private const int StreamWindowBlocks = Core.Memory.Vram.Streaming.BlockStreamingOptions.DefaultPrefetchAhead + 1;
 
     private static readonly ConcurrentDictionary<ProfileKey, Lazy<CheckpointMemoryProfile>> Cache = new();
 

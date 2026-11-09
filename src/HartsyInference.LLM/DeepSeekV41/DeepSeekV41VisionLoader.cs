@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.DeepSeekV41;
@@ -65,10 +66,10 @@ public static class DeepSeekV41VisionLoader
         {
             Require(key);
             float[] values = DeepSeekV41ExpertLoader.ReadMatrix(key, checkpoint.GetWeight(key), checkpoint.GetQuant(key), rows, cols);
-            return Keep(DeepSeekV41HostMath.Tensor(values, rows, cols));
+            return Keep(HostMath.Tensor(values, rows, cols));
         }
 
-        public Tensor Vector(string key, long length) => Keep(DeepSeekV41HostMath.Tensor(Values(key, length), length));
+        public Tensor Vector(string key, long length) => Keep(HostMath.Tensor(Values(key, length), length));
 
         public float[] Values(string key, long length)
         {

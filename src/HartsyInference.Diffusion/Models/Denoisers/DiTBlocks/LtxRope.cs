@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Rotary;
+using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -88,10 +90,10 @@ public sealed unsafe class LtxRope
         if ((int)x.Shape[1] != _dim)
             throw new ArgumentException($"x dim {x.Shape[1]} != rope dim {_dim}.", nameof(x));
         // Interleaved-pair rotation over the full inner dim (heads=1, headDim=dim). cos/sin use the duplicated-pair
-        // layout (cos[2j]==cos[2j+1]), which is exactly what wan_rope_interleaved reads (coff = s·dim + 2i, same
+        // layout (cos[2j]==cos[2j+1]), which is exactly what the generic rotary kernel reads (coff = s·dim + 2i, same
         // rotation), so RoPE runs GPU-resident via the backend kernel instead of a host DataPointer loop. The host
         // loop had to D2H the [S,dim] Q/K, mutate on the CPU, then the next device op re-uploaded them — a big-tensor
         // cache miss per attention that was the #1 LTX-0.9 GPU cost (H2D_MISS_BIG in the sync profile).
-        backend.WanRopeInterleaved(x, cos, sin, seq, 1, _dim);
+        backend.Rotary(RotaryCall.Rows(x, cos, sin, seq, 1, _dim, RotaryPairing.Interleaved, RopeTableLayout.InterleavedPair));
     }
 }

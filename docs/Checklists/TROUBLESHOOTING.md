@@ -170,7 +170,7 @@ no bug, any more than one bad seed was proof there was one.
 - **YaRN RoPE needs HF's dimension-index ramp + `attention_factor` mscale** (Lens: 1.3466×), not a
   wavelength ramp.
 - **Phi head_dim=96** (non-power-of-two) hit an infinite CUDA fallback recursion; pad the flash-attn
-  block to next power of two, and extract the CPU reference to `AttentionReference` so the GPU fallback
+  block to next power of two, and extract the CPU reference to `FlashAttentionKernels` so the GPU fallback
   can't re-dispatch into itself. **Phi-4-mini fused-QKV split** must use real `head_dim=128`, not
   `rope.dimension_count=96` (they coincided on Phi-3.5, hiding the bug).
 
@@ -715,7 +715,7 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   through one shared `DispatchFlashAttention` helper. Supports causal masking, GQA (query head `h` reads
   kv head `h/(hq/hkv)`), a sliding window, and (a separate `HAS_MASK=1`-compiled module, same convention
   as `snake`'s `USE_BETA`) an optional additive `[Sq,Skv]` mask broadcast across batch/head. Does NOT
-  support softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to `AttentionReference`'s
+  support softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class) — those fall through to `FlashAttentionKernels`'s
   CPU reference, a documented scope boundary (none of these appear at Wan-video scale, so it doesn't
   block the OOM fix). Sets `FlashDecodeSupported => true`, unblocking Zonos onto the GPU-resident path.
   Measured (RTX 4090): the exact previously-unrunnable shape (B=1,H=24,S=16384,D=128) now completes in

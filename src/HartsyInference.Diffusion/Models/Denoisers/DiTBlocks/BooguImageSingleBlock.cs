@@ -141,7 +141,7 @@ public sealed unsafe class BooguImageSingleBlock
 
     /// <summary>Table-driven forward: rotates Q/K with the caller-supplied precomputed device <c>(cos, sin)</c>
     /// RoPE tables (<c>[S, headDim]</c> duplicated-pair layout from <see cref="OmniGen2Rope.ExpandToDeviceTables"/>).
-    /// The rotation runs pre-permute via <c>IBackend.WanRopeInterleaved</c> — bit-equivalent to the old host
+    /// The rotation runs pre-permute via <c>RotaryCall.Rows</c> — bit-equivalent to the old host
     /// <see cref="OmniGen2Rope.Apply"/> minus its per-block D2H drain + re-upload of Q and K. B=1 only (the
     /// transformer's contract). Caller owns <paramref name="hidden"/>; a new output tensor is returned.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden, Tensor ropeCos, Tensor ropeSin, Tensor? temb)

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Gguf;
 

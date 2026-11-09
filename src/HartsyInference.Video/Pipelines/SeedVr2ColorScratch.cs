@@ -1,4 +1,4 @@
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Memory.Host;
 
 namespace HartsyInference.Video.Pipelines;
 

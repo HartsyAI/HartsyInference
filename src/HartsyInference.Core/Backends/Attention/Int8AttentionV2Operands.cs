@@ -1,4 +1,4 @@
-namespace HartsyInference.Core.Backends;
+namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>INT8 attention v2's stats pass and quant launch for one call: the bytes, scales and means its attention
 /// kernel reads, in logical layouts (the kernel's physical layouts permute them). A GPU's buffers can be copied in.</summary>

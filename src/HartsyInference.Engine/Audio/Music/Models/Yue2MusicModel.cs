@@ -4,7 +4,7 @@ using HartsyInference.Audio.Models.Music;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
-using HartsyInference.Core.Memory;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;

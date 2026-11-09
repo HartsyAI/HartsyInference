@@ -130,7 +130,7 @@ extern "C" __global__ void convrot_quant_rowwise_f16(
 }
 
 // ── …with LTX-2's per-head output gate folded into the load ─────────────────
-// `ltx2_head_gate_f16` scales an attention output in place — a full read AND write of a [seq, heads*headDim]
+// The per-head group gate scales an attention output in place — a full read AND write of a [seq, heads*headDim]
 // tensor (81.8 MB per call at LTX-2.5's video shape) whose only consumer is the to_out projection, which then
 // reads the very same tensor again to quantize it. Applying the gate as this kernel loads deletes that pass
 // outright.

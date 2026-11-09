@@ -225,6 +225,5 @@ The planner reproduces these until the row that owns each is rewritten.
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
 - Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
   a per-batch one.
-- `AttentionReference.FlashAttention` adds ALiBi before the softcap; the orders differ only when a call sets both.
 - `FlashAttention` runs on the host on Vulkan when the call has a softcap, sinks, ALiBi or a head dim above 128, and on
   CUDA when the head dim is above 1024.

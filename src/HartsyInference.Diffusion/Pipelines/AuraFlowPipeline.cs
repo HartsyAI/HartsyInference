@@ -1,8 +1,9 @@
+using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Diffusion.Sampling;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
-using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -249,7 +250,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // Drain-free packed path (plain t2i/img2img): the latent lives in patch-token space on the
         // device for the whole loop — patchify once, dual-pass ForwardTokens per step, in-place
-        // device CfgEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
+        // device GuidedEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
         // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
         // numerics.auraflowPacked=false is the kill-switch (A/B against the reference loop).
         bool fusedLoop = !isMaskedInpaint && EngineKnobs.AuraflowPacked.Value;
@@ -327,7 +328,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
                 if (emitPreview)
                 {
                     Tensor previewLatent = new Tensor(latentShape, DType.F32);
-                    Backend.UnpatchifyTokens(previewLatent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+                    PixelShuffles.UnpatchifyTokens(Backend, previewLatent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
                     try
                     {
                         onProgress!.Invoke(new GenerationProgress(i + 1, steps, stepSw.Elapsed.TotalMilliseconds)
@@ -345,7 +346,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             }
 
             latent = new Tensor(latentShape, DType.F32);
-            Backend.UnpatchifyTokens(latent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
+            PixelShuffles.UnpatchifyTokens(Backend, latent, latentTokens, _config.OutChannels, gridH, gridW, _config.PatchSize, innerChannelFastest: false);
             latentTokens.Dispose();
             // Host-materialize for the tiled-VAE fallback's host slicing (and any host consumer).
             Backend.Sync();

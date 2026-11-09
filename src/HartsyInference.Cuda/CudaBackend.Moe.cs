@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
-using HartsyInference.Gpu;
+using HartsyInference.Core.Backends.Gpu;
+using HartsyInference.Core.Backends.Routing;
+using HartsyInference.Core.Backends.Host;
 
 namespace HartsyInference.Cuda;
 
@@ -41,16 +43,16 @@ public sealed partial class CudaBackend
 
     /// <inheritdoc />
     public void MoeRoute(Tensor topkIdx, Tensor topkWeight, Tensor logits, in MoeRouteArgs args,
-        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null)
+        Tensor? bias = null, Tensor? altBias = null, Tensor? tokenKinds = null, Tensor? dense = null)
     {
         using NvtxRange _nvtx = NvtxRange.Push("MoeRoute");
-        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds);
+        MoeReference.ValidateRoute(topkIdx, topkWeight, logits, args, bias, altBias, tokenKinds, dense);
         using OpScope _op = EnterOp();
         EnsureKernels();
         RequireMoeKernels();
         int tokens = (int)(logits.ElementCount / args.NumExperts);
-        ulong pL = 0, pB = 0, pA = 0, pK = 0, pIdx = 0, pW = 0;
-        bool cachedIdx = false, cachedW = false;
+        ulong pL = 0, pB = 0, pA = 0, pK = 0, pIdx = 0, pW = 0, pD = 0;
+        bool cachedIdx = false, cachedW = false, cachedD = false;
         try
         {
             pL = GpuTransferHelper.CopyToDevice(logits);
@@ -60,16 +62,24 @@ public sealed partial class CudaBackend
             nuint idxBytes = GpuTransferHelper.ByteSize(topkIdx), wBytes = GpuTransferHelper.ByteSize(topkWeight);
             pIdx = GpuTransferHelper.AllocateDevice(idxBytes);
             pW = GpuTransferHelper.AllocateDevice(wBytes);
-            _kernels!.LaunchMoeRoute(pIdx, pW, pL, pB, pA, pK, tokens, args, _stream.Handle);
+            nuint denseBytes = dense is null ? 0 : GpuTransferHelper.ByteSize(dense);
+            if (dense is not null) pD = GpuTransferHelper.AllocateDevice(denseBytes);
+            _kernels!.LaunchMoeRoute(pIdx, pW, pL, pB, pA, pK, tokens, args, _stream.Handle, pD);
             GpuTransferHelper.CacheActivation(topkIdx, pIdx, idxBytes);
             cachedIdx = true;
             GpuTransferHelper.CacheActivation(topkWeight, pW, wBytes);
             cachedW = true;
+            if (dense is not null)
+            {
+                GpuTransferHelper.CacheActivation(dense, pD, denseBytes);
+                cachedD = true;
+            }
         }
         finally
         {
             if (!cachedIdx) GpuTransferHelper.FreeDevice(pIdx);
             if (!cachedW) GpuTransferHelper.FreeDevice(pW);
+            if (!cachedD) GpuTransferHelper.FreeDevice(pD);
             GpuTransferHelper.FreeDevice(pL);
             if (pB != 0) GpuTransferHelper.FreeDevice(pB);
             if (pA != 0) GpuTransferHelper.FreeDevice(pA);
@@ -147,41 +157,6 @@ public sealed partial class CudaBackend
             GpuTransferHelper.FreeDevice(pX);
             GpuTransferHelper.FreeDevice(pSlot);
             GpuTransferHelper.FreeDevice(pW);
-        }
-    }
-
-    /// <inheritdoc />
-    public void TopKLastDim(Tensor values, Tensor indices, Tensor input, int k, Tensor? validLengths = null,
-        bool sortByIndex = false)
-    {
-        using NvtxRange _nvtx = NvtxRange.Push("TopKLastDim");
-        TopKReference.Validate(values, indices, input, k, validLengths);
-        if (k > CudaKernels.TopKMaxK)
-            throw new NotSupportedException($"CUDA TopKLastDim supports k up to {CudaKernels.TopKMaxK}; got {k}.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        if (!_kernels!.HasTopKKernel) throw new NotSupportedException("lm_topk_f32.ptx is not available on this device.");
-        int n = (int)input.Shape[input.Shape.Rank - 1];
-        int rows = (int)(input.ElementCount / n);
-        ulong pX = 0, pLen = 0, pV = 0, pI = 0;
-        bool cachedV = false, cachedI = false;
-        try
-        {
-            pX = GpuTransferHelper.CopyToDevice(input);
-            if (validLengths is not null) pLen = GpuTransferHelper.CopyToDevice(validLengths);
-            nuint vBytes = GpuTransferHelper.ByteSize(values), iBytes = GpuTransferHelper.ByteSize(indices);
-            pV = GpuTransferHelper.AllocateDevice(vBytes);
-            pI = GpuTransferHelper.AllocateDevice(iBytes);
-            _kernels.LaunchTopKLastDim(pV, pI, pX, pLen, rows, n, k, sortByIndex, _stream.Handle);
-            GpuTransferHelper.CacheActivation(values, pV, vBytes); cachedV = true;
-            GpuTransferHelper.CacheActivation(indices, pI, iBytes); cachedI = true;
-        }
-        finally
-        {
-            if (!cachedV) GpuTransferHelper.FreeDevice(pV);
-            if (!cachedI) GpuTransferHelper.FreeDevice(pI);
-            GpuTransferHelper.FreeDevice(pX);
-            if (pLen != 0) GpuTransferHelper.FreeDevice(pLen);
         }
     }
 
