@@ -29,6 +29,16 @@ public static class GroupedOutputProjection
     public static void ApplyRows(ReadOnlySpan<float> x, ReadOnlySpan<float> weightRows, int firstRow, int count, int tokens, int groups, int rank,
         int groupDim, Span<float> dest)
     {
+        if (tokens < 0 || groups < 1 || rank < 1 || groupDim < 1)
+            throw new ArgumentOutOfRangeException(nameof(tokens), "Shape arguments must be positive.");
+        if (firstRow < 0 || count < 0 || (long)firstRow + count > (long)groups * rank)
+            throw new ArgumentOutOfRangeException(nameof(count), "Rows [firstRow, firstRow + count) must lie within groups x rank.");
+        if (weightRows.Length < (long)count * groupDim)
+            throw new ArgumentException("weightRows must hold count x groupDim values.", nameof(weightRows));
+        if (x.Length < (long)tokens * groups * groupDim)
+            throw new ArgumentException("x must hold tokens x groups x groupDim values.", nameof(x));
+        if (dest.Length < (long)tokens * groups * rank)
+            throw new ArgumentException("dest must hold tokens x groups x rank values.", nameof(dest));
         for (int r = 0; r < count; r++)
         {
             int g = (firstRow + r) / rank, o = (firstRow + r) % rank;

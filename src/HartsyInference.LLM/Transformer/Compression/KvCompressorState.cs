@@ -24,7 +24,7 @@ public sealed class KvCompressorState
     /// <param name="headDim">Latent width.</param>
     /// <param name="ape">Learned positional bias per slot, <c>[ratio, headDim]</c>; null for none.</param>
     /// <param name="normWeight">Output RMS norm weight, <c>[headDim]</c>, applied to each completed latent; null leaves the latent raw.</param>
-    /// <param name="normEps">RMS norm epsilon; read only when <paramref name="normWeight"/> is set.</param>
+    /// <param name="normEps">RMS norm epsilon; must be positive when <paramref name="normWeight"/> is set.</param>
     /// <param name="overlap">Overlapping windows. Only non-overlapping pooling is implemented; true is refused.</param>
     public KvCompressorState(int ratio, int headDim, float[]? ape = null, float[]? normWeight = null, float normEps = 0f, bool overlap = false)
     {
@@ -35,6 +35,8 @@ public sealed class KvCompressorState
             throw new ArgumentException("ape must hold ratio x headDim values.", nameof(ape));
         if (normWeight is not null && normWeight.Length != headDim)
             throw new ArgumentException("normWeight must hold headDim values.", nameof(normWeight));
+        if (normWeight is not null && !(normEps > 0f))
+            throw new ArgumentOutOfRangeException(nameof(normEps), normEps, "normEps must be positive when normWeight is set.");
         Ratio = ratio;
         HeadDim = headDim;
         _ape = ape;
@@ -98,10 +100,6 @@ public sealed class KvCompressorState
             }
             dest[c] = acc / sum;
         }
-        if (_normWeight is null) return;
-        float sq = 0f;
-        for (int c = 0; c < d; c++) sq += dest[c] * dest[c];
-        float scale = 1f / MathF.Sqrt(sq / d + _normEps);
-        for (int c = 0; c < d; c++) dest[c] = _normWeight[c] * (dest[c] * scale);
+        if (_normWeight is not null) HostRowMath.RmsNormRows(dest, _normWeight, d, _normEps);
     }
 }
