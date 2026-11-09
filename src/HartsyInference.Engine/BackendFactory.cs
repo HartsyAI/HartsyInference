@@ -102,6 +102,9 @@ public static class BackendFactory
             return s;
         Volatile.Write(ref _cudaBelowBaselineReason, null);
         int ordinal = TryParseOrdinal(selector, out int parsed, out _) ? parsed : 0;
+        // A driver-only machine has no cuBLAS: fetch it once here (only for a card the kernels can run on), or auto would
+        // never pick CUDA. No-op when cuBLAS is installed, paths.cublasAutofetch is off, or there is no NVIDIA GPU.
+        if (CudaMeetsKernelBaseline(ordinal)) CudaContext.EnsureProvisioned();
         if (CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0 && CudaMeetsKernelBaseline(ordinal))
         {
             return "cuda";
@@ -207,6 +210,7 @@ public static class BackendFactory
 
     private static bool RunCudaProbe(int ordinal, out string? reason)
     {
+        if (CudaMeetsKernelBaseline(ordinal)) CudaContext.EnsureProvisioned();
         if (!CudaContext.IsAvailable())
         {
             reason = CudaContext.LastUnavailableReason ?? "CUDA is not available.";
@@ -545,11 +549,13 @@ public static class BackendFactory
             return;
         }
         int ordinal = ParseOrdinal(selector);
+        CudaContext.EnsureProvisioned();   // an explicit CUDA selector: fetch a missing cuBLAS now, not mid-generation
         int count = CudaContext.IsAvailable() ? CudaContext.GetDeviceCount() : 0;
         if (count == 0)
         {
             throw new ArgumentException(
-                $"Backend selector '{selector}' requires CUDA, but no CUDA driver/device is available on this machine.",
+                $"Backend selector '{selector}' requires CUDA, but no CUDA driver/device is available on this machine: "
+                + $"{CudaContext.LastUnavailableReason ?? "no reason reported"}",
                 nameof(selector));
         }
         if (ordinal >= count)
@@ -572,6 +578,7 @@ public static class BackendFactory
         {
             return 0;
         }
+        CudaContext.EnsureProvisioned();
         int count = CudaContext.IsAvailable() ? CudaContext.GetDeviceCount() : 0;
         if (ordinal >= count)
         {

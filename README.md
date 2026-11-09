@@ -164,7 +164,13 @@ where a kernel ships one), a compatible driver, and
 required CUDA userspace libraries. Turing cards (sm_75, such as the RTX 2060 SUPER) cannot run the shipped
 baseline: several kernels use `cp.async` or sm_80 bf16 instructions. The CUDA backend still constructs there with
 only the kernels built for that architecture, and `auto` selects Vulkan; use an Ampere-or-newer GPU for CUDA runs.
-Optional cuDNN paths have additional library requirements.
+
+The CUDA Toolkit is not required. When cuBLAS is missing, the first CUDA backend (or `auto` on a supported card) downloads
+NVIDIA's cuBLAS redist for the driver's CUDA version once, about 0.4 GB on Windows and 0.9 GB on Linux, into
+`~/.cache/hartsyinference/cublas/`. cuDNN is fetched the same way, about 1 GB, the first time a convolution or attention
+path asks for it. Settings: `paths.cublasAutofetch` and `paths.cudnnAutofetch` turn the downloads off;
+`paths.cublasDir`/`paths.cudnnDir` point at an existing install; `paths.cublasUrl`/`paths.cudnnUrl` take a mirror URL or a
+local archive.
 Vulkan requires a compatible runtime and the features queried by the backend; AMD/Intel hardware
 validation remains open. CPU has no GPU dependency.
 
