@@ -19,10 +19,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["s2c.norm1.weight"] = Fill(1f, 8),
             ["s2c.norm1.bias"] = Zeros(8),
-            ["s2c.conv1.conv.weight"] = Zeros(2, 3, 3, 3, 8),
-            ["s2c.conv1.conv.bias"] = Zeros(2),
-            ["s2c.conv2.conv.weight"] = Zeros(16, 3, 3, 3, 16),
-            ["s2c.conv2.conv.bias"] = Fill(0.5f, 16),
+            ["s2c.conv1.weight"] = Zeros(2, 3, 3, 3, 8),
+            ["s2c.conv1.bias"] = Zeros(2),
+            ["s2c.conv2.weight"] = Zeros(16, 3, 3, 3, 16),
+            ["s2c.conv2.bias"] = Fill(0.5f, 16),
         };
         using ShapeVaeSpatialToChannelBlock block = new(w, "s2c", 8, 16);
         SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanSpatialToChannel(coords, 4, 2);
@@ -53,10 +53,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["c2s.norm1.weight"] = Fill(1f, 16),
             ["c2s.norm1.bias"] = Zeros(16),
-            ["c2s.conv1.conv.weight"] = Zeros(64, 3, 3, 3, 16),
-            ["c2s.conv1.conv.bias"] = Zeros(64),
-            ["c2s.conv2.conv.weight"] = Zeros(8, 3, 3, 3, 8),
-            ["c2s.conv2.conv.bias"] = Fill(0.5f, 8),
+            ["c2s.conv1.weight"] = Zeros(64, 3, 3, 3, 16),
+            ["c2s.conv1.bias"] = Zeros(64),
+            ["c2s.conv2.weight"] = Zeros(8, 3, 3, 3, 8),
+            ["c2s.conv2.bias"] = Fill(0.5f, 8),
             ["c2s.to_subdiv.weight"] = Zeros(8, 16),
             ["c2s.to_subdiv.bias"] = Values(subdivBias, 8),
         };
@@ -73,6 +73,71 @@ public sealed class ShapeVaeTransitionBlockTests
             17.5f, 17.5f, 17.5f, 17.5f, 18.5f, 18.5f, 18.5f, 18.5f,
         };
         AssertClose(expected, ShapeVaeTestData.Read(output.Feats));
+    }
+
+    [Fact]
+    public void ChannelToSpatial_CentreTapMainPathMatchesClosedForm()
+    {
+        // conv1 and conv2 are identity on the centre tap, so the output is closed form: child 0 carries
+        // SiLU(LN(x))[0..7] through conv2's no-affine norm and SiLU, and the skip repeats x[0..1] four times.
+        int[] coords = { 0, 1, 0, 1, 0, 1, 1, 1 };
+        float[] input = Ramp(1, 32);
+        using Tensor feats = Values(input, 2, 16);
+        float[] subdivBias = { 1f, -1f, -1f, -1f, -1f, -1f, -1f, -1f };
+        Dictionary<string, Tensor> w = new()
+        {
+            ["c2s.norm1.weight"] = Fill(1f, 16),
+            ["c2s.norm1.bias"] = Zeros(16),
+            ["c2s.conv1.weight"] = CentreTap(64, 16),
+            ["c2s.conv1.bias"] = Zeros(64),
+            ["c2s.conv2.weight"] = CentreTap(8, 8),
+            ["c2s.conv2.bias"] = Zeros(8),
+            ["c2s.to_subdiv.weight"] = Zeros(8, 16),
+            ["c2s.to_subdiv.bias"] = Values(subdivBias, 8),
+        };
+        using ShapeVaeChannelToSpatialBlock block = new(w, "c2s", 16, 8);
+
+        SparseTensor output = block.Forward(new CpuBackend(), ShapeVaeTestData.Sparse(coords, 2, feats));
+
+        float[] expected = new float[16];
+        for (int parent = 0; parent < 2; parent++)
+        {
+            double[] row = new double[16];
+            for (int c = 0; c < 16; c++) row[c] = input[parent * 16 + c];
+            double[] activated = Silu(Normalize(row));
+            double[] child = Silu(Normalize(activated.AsSpan(0, 8)));
+            for (int c = 0; c < 8; c++)
+                expected[parent * 8 + c] = (float)(child[c] + input[parent * 16 + c / 4]);
+        }
+        AssertClose(expected, ShapeVaeTestData.Read(output.Feats));
+    }
+
+    /// <summary>Identity on the centre tap of a 3x3x3 kernel: <c>[Cout, 3, 3, 3, Cin]</c> with <c>w[o, 1, 1, 1, o] = 1</c>.</summary>
+    private static Tensor CentreTap(int cout, int cin)
+    {
+        Tensor t = Zeros(cout, 3, 3, 3, cin);
+        Span<float> s = t.AsSpan<float>();
+        for (int o = 0; o < Math.Min(cout, cin); o++) s[(((o * 3 + 1) * 3 + 1) * 3 + 1) * cin + o] = 1f;
+        return t;
+    }
+
+    private static double[] Normalize(ReadOnlySpan<double> x)
+    {
+        double mean = 0, variance = 0;
+        foreach (double v in x) mean += v;
+        mean /= x.Length;
+        foreach (double v in x) variance += (v - mean) * (v - mean);
+        variance /= x.Length;
+        double[] y = new double[x.Length];
+        for (int i = 0; i < y.Length; i++) y[i] = (x[i] - mean) / Math.Sqrt(variance + 1e-6);
+        return y;
+    }
+
+    private static double[] Silu(double[] x)
+    {
+        double[] y = new double[x.Length];
+        for (int i = 0; i < y.Length; i++) y[i] = x[i] / (1 + Math.Exp(-x[i]));
+        return y;
     }
 
     private static float[] Ramp(float start, int count)
@@ -114,10 +179,10 @@ public sealed class ShapeVaeTransitionBlockTests
         {
             ["c2s.norm1.weight"] = Fill(1f, 16),
             ["c2s.norm1.bias"] = Zeros(16),
-            ["c2s.conv1.conv.weight"] = Zeros(64, 3, 3, 3, 16),
-            ["c2s.conv1.conv.bias"] = Zeros(64),
-            ["c2s.conv2.conv.weight"] = Zeros(8, 3, 3, 3, 8),
-            ["c2s.conv2.conv.bias"] = Fill(0.5f, 8),
+            ["c2s.conv1.weight"] = Zeros(64, 3, 3, 3, 16),
+            ["c2s.conv1.bias"] = Zeros(64),
+            ["c2s.conv2.weight"] = Zeros(8, 3, 3, 3, 8),
+            ["c2s.conv2.bias"] = Fill(0.5f, 8),
             ["c2s.to_subdiv.weight"] = Zeros(8, 16),
             ["c2s.to_subdiv.bias"] = Fill(-1f, 8),
         };

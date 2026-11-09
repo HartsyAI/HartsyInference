@@ -22,10 +22,10 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
         _cout = cout;
         _norm1W = w[$"{p}.norm1.weight"];
         _norm1B = w[$"{p}.norm1.bias"];
-        _conv1Slices = SparseOps.ConvWeightSlices(w[$"{p}.conv1.conv.weight"]);
-        _conv1B = w[$"{p}.conv1.conv.bias"];
-        _conv2Slices = SparseOps.ConvWeightSlices(w[$"{p}.conv2.conv.weight"]);
-        _conv2B = w[$"{p}.conv2.conv.bias"];
+        _conv1Slices = SparseOps.ConvWeightSlices(w[$"{p}.conv1.weight"]);
+        _conv1B = w[$"{p}.conv1.bias"];
+        _conv2Slices = SparseOps.ConvWeightSlices(w[$"{p}.conv2.weight"]);
+        _conv2B = w[$"{p}.conv2.bias"];
         _subdivW = w[$"{p}.to_subdiv.weight"];
         _subdivB = w[$"{p}.to_subdiv.bias"];
     }

@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Tests.TrellisV2;
 public sealed class ShapeVaeKeyMapTests
 {
     [Theory]
-    [InlineData("blocks.1.0.conv.conv.weight", "Blocks[1][0].Conv.Conv.Weight")]
+    [InlineData("blocks.1.0.conv.weight", "Blocks[1][0].Conv.Weight")]
     [InlineData("blocks.2.4.to_subdiv.bias", "Blocks[2][4].ToSubdiv.Bias")]
     [InlineData("input_layer.weight", "InputLayer.Weight")]
     [InlineData("blocks.0.1.mlp.2.weight", "Blocks[0][1].Mlp[2].Weight")]
@@ -40,6 +40,23 @@ public sealed class ShapeVaeKeyMapTests
         ShapeVaeConfig shipped = ShapeVaeConfig.NextDcF16C32;
         Assert.Equal(4 + 8 * 32 + 6 * 4, ShapeVaeKeyMap.Encoder(shipped.Encoder).Count);
         Assert.Equal(4 + 8 * 32 + 8 * 4, ShapeVaeKeyMap.Decoder(shipped.Decoder).Count);
+    }
+
+    [Fact]
+    public void ShippedEncoder_MatchesCheckpointHeader()
+    {
+        // Key names and shapes from the shipped shape_enc_next_dc_f16c32_fp16.safetensors JSON header (284 tensors).
+        Dictionary<string, long[]> specs = ShapeVaeKeyMap.Encoder(ShapeVaeConfig.NextDcF16C32.Encoder)
+            .ToDictionary(s => s.CheckpointKey, s => s.Shape);
+        Assert.Equal(284, specs.Count);
+        Assert.Equal(new long[] { 64, 6 }, specs["input_layer.weight"]);
+        Assert.Equal(new long[] { 64, 1024 }, specs["to_latent.weight"]);
+        Assert.Equal(new long[] { 64 }, specs["blocks.0.0.norm1.weight"]);
+        Assert.Equal(new long[] { 16, 3, 3, 3, 64 }, specs["blocks.0.0.conv1.weight"]);
+        Assert.Equal(new long[] { 128, 3, 3, 3, 128 }, specs["blocks.0.0.conv2.weight"]);
+        Assert.Equal(new long[] { 128, 3, 3, 3, 128 }, specs["blocks.1.0.conv.weight"]);
+        Assert.Equal(new long[] { 512, 128 }, specs["blocks.1.0.mlp.0.weight"]);
+        Assert.Equal(new long[] { 32, 3, 3, 3, 128 }, specs["blocks.1.4.conv1.weight"]);
     }
 
     [Fact]

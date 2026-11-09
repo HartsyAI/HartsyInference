@@ -17,8 +17,8 @@ internal sealed class ShapeVaeConvNeXtBlock : IDisposable
         _channels = channels;
         _normW = w[$"{p}.norm.weight"];
         _normB = w[$"{p}.norm.bias"];
-        _convSlices = SparseOps.ConvWeightSlices(w[$"{p}.conv.conv.weight"]);
-        _convB = w[$"{p}.conv.conv.bias"];
+        _convSlices = SparseOps.ConvWeightSlices(w[$"{p}.conv.weight"]);
+        _convB = w[$"{p}.conv.bias"];
         _mlp0W = w[$"{p}.mlp.0.weight"];
         _mlp0B = w[$"{p}.mlp.0.bias"];
         _mlp2W = w[$"{p}.mlp.2.weight"];
