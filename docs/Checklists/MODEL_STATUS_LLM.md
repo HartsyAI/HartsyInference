@@ -142,10 +142,12 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Architecture coverage frontier
 - [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
-- [ ] ERNIE-5.5-Flash-Base (`ernie-5.5-flash-base`, 288 GB FP8, `model_type` `ernie5_5_moe`): structural only. `Ernie5Config`
-  reads the real `config.json` and the loader refuses it by name. Missing: SiTU-GLU, hybrid compressed attention with the DSA
-  indexer, mHC, latent MoE, grouped output projection, MTP. Reference code is in `baidu/vLLM-ERNIE`
-  (`src/vllm_ernie/models/ernie5_5/`). No real-weight run. License excludes the EU, UK and South Korea.
+- [ ] ERNIE-5.5-Flash-Base (`ernie-5.5-flash-base`, 288 GB FP8, `model_type` `ernie5_5_moe`): structural. `Ernie5Model` is a CPU
+  host reference of the whole forward (37 HCA + 6 DSA layers, mHC, SiTU dense and latent MoE, multimax head) and maps every
+  non-MTP key of the real index; it has run only on a tiny random checkpoint. The Text path still refuses it by name
+  (`Ernie5Config.RequireRunnable`): no tokenizer, chat template or generation adapter. Missing: MTP, device kernels, a
+  real-weight run and parity. Reference code is in `baidu/vLLM-ERNIE` (`src/vllm_ernie/models/ernie5_5/`). License excludes
+  the EU, UK and South Korea.
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
   it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).
 
