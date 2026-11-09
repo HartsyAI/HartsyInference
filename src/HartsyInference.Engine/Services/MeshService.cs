@@ -97,6 +97,8 @@ public sealed class MeshService : IMeshService, IDisposable
     private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, CancellationToken cancel)
     {
         HairDeckSourceImage source = HairDeckSourceImage.Create(request.Image!.Rgb, request.Image.Alpha, request.Image.Width, request.Image.Height);
+        // A request cancelled while it queued for the gate must not start SAM 3 and BiRefNet.
+        cancel.ThrowIfCancellationRequested();
         HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
         foreach (string note in prep.Notes)
         {
