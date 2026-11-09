@@ -39,9 +39,14 @@ public static class WorldComponentResolver
     private const string GemmaTokenizerFile = "tokenizer.model";
 
     // SANA-WM streaming's layout: the converted DiT under sana_dit/, the causal VAE under ltx2_causal_vae/ beside it, and the
-    // stage-1 release's Gemma-2-2B, shared rather than downloaded twice.
+    // stage-1 release's Gemma-2-2B, shared rather than downloaded twice. The streaming release sits beside the stage-1
+    // release (World/SanaWmStreaming next to World/SanaWm) or inside it (World/SanaWm/streaming).
     private const string SanaWmCausalVaeRelative = "../ltx2_causal_vae/diffusion_pytorch_model.safetensors";
-    private const string SanaWmSharedTextEncoderRelative = "../../SanaWm/text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors";
+    private static readonly string[] SanaWmSharedTextEncoderRelatives =
+    [
+        "../../SanaWm/text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors",
+        "../../text_encoder/gemma-2-2b-it/gemma-2-2b-it.safetensors",
+    ];
 
     // The streaming release's refiner: the diffusers LTX-2 transformer and text connectors under refiner_diffusers/, and
     // Gemma-3-12B as a folder of shards with its tokenizer.
@@ -90,7 +95,7 @@ public static class WorldComponentResolver
                     Tokenizer = AuxOrSibling(spec, TokenizerAuxKey, textEncoder, GemmaTokenizerFile, "Gemma tokenizer"),
                 };
             case WorldArchitecture.SanaWmStreaming:
-                string sharedTextEncoder = AuxOrSibling(spec, TextEncoderAuxKey, backbone, SanaWmSharedTextEncoderRelative,
+                string sharedTextEncoder = AuxOrSibling(spec, TextEncoderAuxKey, backbone, FirstExisting(backbone, SanaWmSharedTextEncoderRelatives),
                     "Gemma-2-2B text encoder");
                 return new WorldComponents
                 {
@@ -138,6 +143,19 @@ public static class WorldComponentResolver
                 ? tokenizer
                 : Path.Combine(tokenizerFolder, GemmaTokenizerFile),
         };
+    }
+
+    // The first of relatives that exists beside anchor, else the first: the layout the error message then names.
+    private static string FirstExisting(string anchor, string[] relatives)
+    {
+        string folder = Path.GetDirectoryName(anchor) ?? ".";
+        foreach (string relative in relatives)
+        {
+            if (File.Exists(Path.GetFullPath(Path.Combine(folder, relative))))
+                return relative;
+        }
+
+        return relatives[0];
     }
 
     private static string AuxOrRelative(ModelSpec spec, string key, string anchor, string relative) =>

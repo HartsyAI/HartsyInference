@@ -107,6 +107,11 @@ gained one pointer argument and nothing else changed.
 `DepthwiseConvFrames`, and drops the context frames. The FFN's temporal conv is handled the same way with one frame of
 context.
 
+**Tails carry across chunks shorter than the tail.** Upstream's key-conv cache keeps the last `K − 1` input frames of the
+current chunk only, and its slicing assumes a full cache, so upstream does not run chunks shorter than 3 frames.
+`FrameTailCache` keeps the newest frames across chunk boundaries instead, which is the causal continuation and is what
+upstream's VAE `feat_cache` does. The two agree for every chunk of 3 frames or more, which includes the default plan.
+
 **Staged writes, one commit per chunk.** Upstream mutates its cache during the save pass. Staging costs nothing extra and
 means a chunk cancelled during denoising or during the save pass leaves the stream exactly at the previous chunk
 (`SanaWmStream.GenerateChunk` can simply be called again). After the commit the stream decodes; a failure there marks the
@@ -226,6 +231,9 @@ World/SanaWmStreaming/ltx2_causal_vae/diffusion_pytorch_model.safetensors
 World/SanaWm/text_encoder/gemma-2-2b-it/{gemma-2-2b-it.safetensors, tokenizer.model}   (shared with stage 1)
 ```
 
+The streaming release may also sit inside the stage-1 release (`World/SanaWm/streaming/sana_dit/…`); the shared text
+encoder is then found at `World/SanaWm/text_encoder/…` the same way.
+
 The catalog entry has no `Assets` yet: the DiT has no safetensors upstream, so the model path is explicit until a converted
 file is hosted.
 
@@ -271,7 +279,8 @@ Real-weight lane (needs the converted checkpoint and upstream dumps):
 
 ## What the parent session needs to provide
 
-1. The streaming checkpoint header (key, shape, dtype) after conversion, to confirm the layout assumption.
+1. ~~The streaming checkpoint header (key, shape, dtype) after conversion, to confirm the layout assumption.~~ Received
+   2026-11-09: the converted header is the stage-1 layout exactly, without `pos_embed`, every tensor BF16.
 2. `ltx2_causal_vae/config.json`: the decoder is assumed to be the bidirectional VAE's decoder with
    `decoder_causal: true` (`upsample_residual` all true, reflect padding, `scaling_factor` 1.0). If any of that differs,
    `SanaWmEngineComponents.OpenStreamingDecoder` is the one place to change.
