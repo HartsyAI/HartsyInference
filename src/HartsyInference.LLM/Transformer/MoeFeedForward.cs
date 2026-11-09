@@ -395,8 +395,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             // 3. Host experts, computed while the device runs, then combined one expert at a time.
             if (hostExperts > 0)
             {
-                if (_moe.Activation == ActivationKind.SwigluOai) throw new NotSupportedException("Expert offload does not run the clamped alpha-SwiGLU.");
-                ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
+                ExpertProgram program = HostExpertProgram(_moe.Activation);
                 int[] hostPlan = _offHostPlan;
                 int[] hostOffset = _offHostOffset;
                 int k = 0, rowAt = 0;
@@ -473,7 +472,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private bool DeviceRoutedShapeOk()
     {
         // Group-limited and logit-biased routing keep the host router.
-        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd || _moe.Activation == ActivationKind.SwigluOai) return false;
+        // The device expert kernels take only the SiLU or tanh-GELU gate, so every other activation runs the generic path.
+        if (_moe.ExpertGroupCount > 0 || _moe.Scoring == MoeScoring.SigmoidLogitAdd) return false;
+        if (_moe.Activation is not (ActivationKind.Silu or ActivationKind.GeluTanh)) return false;
         if (_moe.NumExperts > MoeRouteArgs.MaxExperts || _moe.NumExpertsPerTok > _moe.NumExperts) return false;
         if (_gateW.Length != _moe.NumExperts || _upW.Length != _moe.NumExperts || _downW.Length != _moe.NumExperts) return false;
         DType gateType = _gateW[0].DType, downType = _downW[0].DType;
@@ -611,11 +612,16 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             GenericTransformer.Project(backend, oaiUp, x, upW, null, _lowVram);
             comb = GatedFfn.SwiGlu(backend, ActivationKind.SwigluOai, gate, oaiUp, _moe.SwigluLimit, _moe.SwigluAlpha);
         }
+        else if (_moe.Activation == ActivationKind.Situ)
+        {
+            Tensor situUp = new(ff, DType.F32);
+            GenericTransformer.Project(backend, situUp, x, upW, null, _lowVram);
+            comb = GatedFfn.SituGlu(backend, gate, situUp, _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
+        }
         else
         {
             Tensor act = new(ff, DType.F32);
-            if (_moe.Activation == ActivationKind.GeluTanh) backend.Gelu(act, gate);
-            else backend.Silu(act, gate);
+            GatedFfn.Activate(backend, _moe.Activation, act, gate);
             gate.Dispose();
             Tensor up = new(ff, DType.F32);
             GenericTransformer.Project(backend, up, x, upW, null, _lowVram);
@@ -628,6 +634,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         comb.Dispose();
         return outp;
     }
+
+    /// <summary>The host expert runtime's program for an expert activation; refuses the ones it does not run.</summary>
+    private static ExpertProgram HostExpertProgram(ActivationKind activation) => activation switch
+    {
+        ActivationKind.Silu => ExpertProgram.Swiglu,
+        ActivationKind.GeluTanh => ExpertProgram.GeGlu,
+        _ => throw new NotSupportedException($"The host expert runtime does not run the {activation} expert activation."),
+    };
 
     /// <summary>Per-token top-k expert selection + routing weights (softmax, sigmoid, or Kolibri's biased-logit
     /// selection with unbiased sigmoid weights; optional renorm).</summary>
@@ -732,8 +746,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
 
         float[] expertOut = new float[gathered.Length];
-        if (_moe.Activation == ActivationKind.SwigluOai) throw new NotSupportedException("The host expert runtime does not run the clamped alpha-SwiGLU.");
-        ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
+        ExpertProgram program = HostExpertProgram(_moe.Activation);
         HeterogeneousExpertExecutor.Execute(program, plan.AsSpan(0, distinct), gathered, h, expertOut, ResolveHostWeights, device: null);
 
         // Combine exactly as the direct path: one weighted scatter-add per expert, rows in the router's token order.

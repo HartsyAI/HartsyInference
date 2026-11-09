@@ -4,7 +4,10 @@ namespace HartsyInference.Core.Backends.Gating;
 /// two halves in the order <see cref="Gate"/> says.</summary>
 /// <param name="Activation">The gate function.</param>
 /// <param name="Gate">Which half is the gate.</param>
-public readonly record struct GluSpec(GluActivation Activation, GluGateHalf Gate)
+/// <param name="SituBeta">SiTU gate soft-cap β; read only for <see cref="GluActivation.Situ"/>.</param>
+/// <param name="SituLinearBeta">SiTU value soft-cap β<sub>lin</sub>; read only for <see cref="GluActivation.Situ"/>.</param>
+public readonly record struct GluSpec(GluActivation Activation, GluGateHalf Gate, float SituBeta = SituDefaults.Beta,
+    float SituLinearBeta = SituDefaults.LinearBeta)
 {
     /// <summary>SwiGLU over <c>[gate | up]</c>.</summary>
     public static GluSpec SwiGlu => new(GluActivation.Silu, GluGateHalf.First);

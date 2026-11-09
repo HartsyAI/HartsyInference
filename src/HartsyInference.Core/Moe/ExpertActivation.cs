@@ -14,4 +14,7 @@ public enum ExpertActivation
 
     /// <summary>Squared ReLU gate.</summary>
     ReluSquared,
+
+    /// <summary>SiTU-GLU gate (ERNIE-5.5). Descriptor only: the host and device expert kernels refuse it.</summary>
+    Situ,
 }

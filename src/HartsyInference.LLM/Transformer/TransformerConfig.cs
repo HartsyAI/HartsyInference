@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Gating;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Rope;
 using HartsyInference.LLM.Transformer.Compression;
@@ -31,6 +32,10 @@ public enum ActivationKind
 
     /// <summary>Clamped alpha-SwiGLU (MiniMax-M3): <c>(clamp(up, ±limit) + 1) · g · sigmoid(alpha · g)</c> with <c>g = min(gate, limit)</c>; alpha and limit come from the config.</summary>
     SwigluOai,
+
+    /// <summary>SiTU-GLU (ERNIE-5.5, MOSS-Image): gate <c>β · tanh(g / β) · sigmoid(g)</c> over the first half, value soft-capped to
+    /// <c>β<sub>lin</sub> · tanh(u / β<sub>lin</sub>)</c> over the second; β and β<sub>lin</sub> come from the config. Gated FFNs only.</summary>
+    Situ,
 }
 
 /// <summary>Block-max "lightning indexer" of MiniMax Sparse Attention: per query and per KV group it scores every key with a small dot-product branch, max-pools the scores over blocks of keys and keeps its top-k blocks after boosting the local ones, which count against k.</summary>
@@ -105,6 +110,12 @@ public sealed record MoeConfig
 
     /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/>.</summary>
     public float SwigluLimit { get; init; }
+
+    /// <summary>SiTU gate soft-cap β of <see cref="ActivationKind.Situ"/> (config <c>activation_situ_beta</c>); the default is ERNIE-5.5's shipped value.</summary>
+    public float ActivationSituBeta { get; init; } = SituDefaults.Beta;
+
+    /// <summary>SiTU value soft-cap β<sub>lin</sub> of <see cref="ActivationKind.Situ"/> (config <c>activation_situ_linear_beta</c>); the default is ERNIE-5.5's shipped value.</summary>
+    public float ActivationSituLinearBeta { get; init; } = SituDefaults.LinearBeta;
 
     /// <summary>Layers <c>[0, FirstDenseLayers)</c> stay dense; the rest are MoE (DeepSeek <c>first_k_dense_replace</c>); 0 (default) makes every layer MoE.</summary>
     public int FirstDenseLayers { get; init; }
@@ -225,6 +236,12 @@ public sealed record TransformerConfig
 
     /// <summary>Clamp bound of <see cref="ActivationKind.SwigluOai"/> in the dense FFN.</summary>
     public float SwigluLimit { get; init; }
+
+    /// <summary>SiTU gate soft-cap β (config <c>activation_situ_beta</c>). The default is the value ERNIE-5.5 ships and MOSS-Image hard-codes.</summary>
+    public float ActivationSituBeta { get; init; } = SituDefaults.Beta;
+
+    /// <summary>SiTU value soft-cap β<sub>lin</sub> (config <c>activation_situ_linear_beta</c>). The default is the value ERNIE-5.5 ships and MOSS-Image hard-codes.</summary>
+    public float ActivationSituLinearBeta { get; init; } = SituDefaults.LinearBeta;
 
     /// <summary>MiniMax Sparse Attention indexer, present on every layer that carries indexer weights; null for dense attention.</summary>
     public IndexerConfig? Indexer { get; init; }
