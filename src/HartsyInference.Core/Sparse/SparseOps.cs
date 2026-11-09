@@ -107,8 +107,8 @@ public static unsafe class SparseOps
         return feats.Reshape(new TensorShape(1, (int)(feats.ElementCount / c), c));
     }
 
-    private static long Pack(int x, int y, int z) => ((long)x << 20) | ((long)y << 10) | (long)z;
-    private static Tensor IntTensor(int[] src, int m)
+    /// <summary>Copies the first <paramref name="m"/> host indices into a new I32 tensor.</summary>
+    public static Tensor IntTensor(int[] src, int m)
     {
         Tensor t = new(new TensorShape(m), DType.I32); int* p = (int*)t.DataPointer;
         for (int i = 0; i < m; i++) p[i] = src[i];
@@ -125,8 +125,9 @@ public static unsafe class SparseOps
     private static (int[] inIdx, int[] outIdx)[] GetRulebook(int[] coords, int n)
     {
         if (_rulebookCache.TryGetValue(coords, out (int[] inIdx, int[] outIdx)[]? cached)) return cached;
-        Dictionary<long, int> hash = new(n);
-        for (int i = 0; i < n; i++) hash[Pack(coords[i * 4 + 1], coords[i * 4 + 2], coords[i * 4 + 3])] = i;
+        // Keyed on the full (batch, x, y, z): neighbours never match across batch items or wrap past a packed field.
+        Dictionary<(int, int, int, int), int> hash = new(n);
+        for (int i = 0; i < n; i++) hash[(coords[i * 4], coords[i * 4 + 1], coords[i * 4 + 2], coords[i * 4 + 3])] = i;
         (int[] inIdx, int[] outIdx)[] rb = new (int[], int[])[27];
         int[] inBuf = new int[n], outBuf = new int[n];
         for (int kd = 0; kd < 3; kd++)
@@ -138,7 +139,7 @@ public static unsafe class SparseOps
                     {
                         int nx = coords[o * 4 + 1] + dx, ny = coords[o * 4 + 2] + dy, nz = coords[o * 4 + 3] + dz;
                         if (nx < 0 || ny < 0 || nz < 0) continue;
-                        if (hash.TryGetValue(Pack(nx, ny, nz), out int ni)) { inBuf[m] = ni; outBuf[m] = o; m++; }
+                        if (hash.TryGetValue((coords[o * 4], nx, ny, nz), out int ni)) { inBuf[m] = ni; outBuf[m] = o; m++; }
                     }
                     rb[(kd * 3 + kh) * 3 + kw] = (inBuf[..m], outBuf[..m]);
                 }
