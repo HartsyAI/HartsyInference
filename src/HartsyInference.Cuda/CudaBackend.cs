@@ -2760,11 +2760,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16/F8 dtypes.</summary>
+    /// <summary>Batched matrix multiply via cuBLAS strided batched GEMM. Supports mixed F32/F16/BF16/F8 dtypes; see <c>CublasGemmPlan</c> for the output dtypes.</summary>
     public unsafe void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
         LowRankAdjunctGemm.RefuseAdjunct(a, "CudaBackend.BatchedMatMul");
         LowRankAdjunctGemm.RefuseAdjunct(b, "CudaBackend.BatchedMatMul");
+        CublasGemmPlan plan = CublasGemmPlan.Resolve(a.DType, b.DType, output.DType, HighPrecisionGemm, EnableFp8F32Gemm, EnableFp8F16Gemm);
         using NvtxRange _nvtx = NvtxRange.Push("BatchedMatMul");
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -2793,13 +2794,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             float alpha = a.Fp8ScaleFactor * b.Fp8ScaleFactor;
             float beta = 0.0f;
 
-            // Joint dtype resolution — see ResolveGemmDtype(a, b) docs.
-            DType gemmDtype = ResolveGemmDtype(a.DType, b.DType);
+            DType gemmDtype = plan.GemmDtype;
             ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
             ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
             int gemmType = CublasApi.DataTypeOf(gemmDtype);
-            int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
+            int cType = CublasApi.DataTypeOf(plan.OutputDtype);
 
             CublasApi.cublasGemmStridedBatchedEx(
                 _cublasHandle,
@@ -7249,38 +7249,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>cublasGemmEx COMPUTE_32F does not support F32×F32→F16, so when an F16 activation feeds an F16 output
     /// and the weight happens to be F32, the F32 weight must cast down to F16 — F16 also gets Tensor Core
     /// acceleration on Ampere+.</remarks>
-    private DType ResolveGemmDtype(DType a, DType b)
-    {
-        // FP8 forces a 16-bit GEMM (Ampere has fast Tensor Cores in F16/BF16, not F32). Pick:
-        //  - BF16 when the other operand is F32 — BF16 has F32's full dynamic range, so the
-        //    F32→16-bit activation cast cannot produce ±Inf even when SwiGLU's `gated`
-        //    intermediate momentarily exceeds 65504 in F32. F16 *would* overflow there
-        //    (Z-Image L0 ffnOut had INF=9024 at step 1 of CUDA bring-up before this fix).
-        //  - F16 otherwise — keeps the existing F16 fast path that Flux/SDXL FP8 paths rely on
-        //    when their activations are already F16 (and therefore in-range).
-        if (a.IsFp8 || b.IsFp8)
-        {
-            // F16 (10-bit mantissa) is more accurate than BF16 (7-bit) for the activation cast; BF16 is the default only
-            // because SwiGLU MLPs can momentarily exceed F16's 65504. For GELU-FFN models (Wan) F16 is safe AND needed:
-            // over a deep DiT (40 layers) + CFG, BF16's coarser mantissa lets a small per-step velocity bias compound
-            // into a diverging trajectory. numerics.fp8F16 opts the fp8 path into F16.
-            if (EnableFp8F32Gemm) return DType.F32;
-            if (EnableFp8F16Gemm) return DType.F16;
-            return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
-        }
-        // GGUF quants always dequantize to F16 (or BF16 if the other operand is F32). The
-        // dequant kernels emit F16 directly; routing through F32 would force an extra F16→F32
-        // cast pass for no benefit. Same precedence rule as FP8 above.
-        if (a.IsQuantized || b.IsQuantized)
-        {
-            return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
-        }
-        if (a == DType.F16 || b == DType.F16) return DType.F16;
-        if (HighPrecisionGemm && (a == DType.BF16 || b == DType.BF16) && (a == DType.F32 || b == DType.F32))
-            return DType.F32;
-        if (a == DType.BF16 || b == DType.BF16) return DType.BF16;
-        return a == DType.F32 || b == DType.F32 ? DType.F32 : a;
-    }
+    private DType ResolveGemmDtype(DType a, DType b) =>
+        CublasGemmPlan.ResolveGemmDtype(a, b, HighPrecisionGemm, EnableFp8F32Gemm, EnableFp8F16Gemm);
 
     /// <summary>Ensures a GPU buffer of <paramref name="srcDtype"/> is available in <paramref name="dstDtype"/>, casting only if needed.</summary>
     /// <remarks>Returns the existing pointer if no cast is needed, or allocates + casts and writes the new dptr to
