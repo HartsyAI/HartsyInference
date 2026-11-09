@@ -14,6 +14,10 @@ namespace HartsyInference.Engine.Services;
 public sealed class MeshService : IMeshService, IDisposable
 {
     private const string HairDeckId = "hairdeck";
+
+    /// <summary>Catalog ids with a wired image-to-3D pipeline; anything else is rejected before loading.</summary>
+    private static readonly string[] SupportedModelIds = { "triposr", "hunyuan3d", "trellis" };
+
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
@@ -84,7 +88,7 @@ public sealed class MeshService : IMeshService, IDisposable
         {
             if (runtime.IsDisposed)
             {
-                throw new ObjectDisposedException(nameof(HairDeckRuntime), "The HairDeck model was unloaded while this request was queued.");
+                throw new ModelUnloadedException("The HairDeck model was unloaded while this request was queued; retry the request.");
             }
             return RunHairDeck(runtime, options, request, cancel);
         }
@@ -168,7 +172,11 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 return cached;
             }
-            string id = (spec.Catalog?.Id ?? "triposr").ToLowerInvariant();
+            string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+            if (!SupportedModelIds.Contains(id))
+            {
+                throw new NotSupportedException($"3D model '{id}' has no wired pipeline yet; supported: {string.Join(", ", SupportedModelIds)}.");
+            }
             try
             {
                 LoadedMesh loaded;
@@ -182,10 +190,15 @@ public sealed class MeshService : IMeshService, IDisposable
                     TrellisImageTo3DPipeline trellis = TrellisImageTo3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(trellis, trellis.Generate);
                 }
-                else
+                else if (id == "triposr")
                 {
                     TripoSrPipeline triposr = TripoSrPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
                     loaded = new LoadedMesh(triposr, triposr.Generate);
+                }
+                else
+                {
+                    // Unreachable while SupportedModelIds matches these branches; a new id must get its own branch.
+                    throw new System.Diagnostics.UnreachableException($"No loader wired for supported 3D model '{id}'.");
                 }
                 _pipelines[spec.LocalPath] = loaded;
                 return loaded;

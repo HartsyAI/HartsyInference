@@ -2,9 +2,9 @@ using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
-namespace HartsyInference.ThreeD.Models.Trellis;
+namespace HartsyInference.Core.Sparse;
 
-/// <summary>Sparse-voxel ops for TRELLIS stage 2, implemented without a sparse library: submanifold conv via scatter→dense <see cref="IBackend.Conv3d"/>→gather, and downsample via average-pool over <c>coord/factor</c> groups.</summary>
+/// <summary>Generic sparse-voxel ops (submanifold conv, average-pool downsample, nearest upsample) over <see cref="SparseTensor"/>, with no sparse library: convolution is a rulebook of gather → GEMM → scatter-add, or a dense scatter/<see cref="IBackend.Conv3d"/>/gather formulation kept for parity.</summary>
 public static unsafe class SparseOps
 {
     /// <summary>Reorders an spconv conv weight <c>[Cout, kD, kH, kW, Cin]</c> → <c>[Cout, Cin, kD, kH, kW]</c> (the <see cref="IBackend.Conv3d"/> layout), one-time at load.</summary>
@@ -141,11 +141,12 @@ public static unsafe class SparseOps
         return rb;
     }
 
-    /// <summary>Average-pool downsample by <paramref name="factor"/>, returning the downsampled tensor plus the per-input-voxel group index so a paired <see cref="Upsample"/> can gather back to the input coords.</summary>
     private sealed class DownGeom { public int[] Idx = null!, Coords = null!, Counts = null!; public int M; }
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<int[], DownGeom> _downCache = new();
 
-    public static (SparseTensor down, int[] idx) Downsample(IBackend backend, SparseTensor x, int factor)
+    /// <summary>Average-pool downsample by <paramref name="factor"/>, returning the downsampled tensor plus the per-input-voxel group index so a paired <see cref="Upsample"/> can gather back to the input coords.</summary>
+    /// <param name="meanIncludeSelf">Divide each group sum by <c>count + 1</c> (torch <c>scatter_reduce</c> mean with <c>include_self=True</c>, as TRELLIS uses) instead of <c>count</c>.</param>
+    public static (SparseTensor down, int[] idx) Downsample(IBackend backend, SparseTensor x, int factor, bool meanIncludeSelf)
     {
         int n = x.Count, c = x.Channels;
         // The downsample MAPPING (group index per voxel, deduped coords, group sizes) is geometry — constant across
@@ -184,9 +185,8 @@ public static unsafe class SparseOps
             int ni = g.Idx[i];
             for (int ch = 0; ch < c; ch++) of[(long)ni * c + ch] += f[(long)i * c + ch];
         }
-        // TRELLIS uses torch.scatter_reduce(reduce='mean') with the DEFAULT include_self=True — the zero-initialized
-        // "self" is included in the mean, so the divisor is count+1 (not count).
-        for (int ni = 0; ni < m; ni++) { float inv = 1f / (g.Counts[ni] + 1); for (int ch = 0; ch < c; ch++) of[(long)ni * c + ch] *= inv; }
+        int self = meanIncludeSelf ? 1 : 0;
+        for (int ni = 0; ni < m; ni++) { float inv = 1f / (g.Counts[ni] + self); for (int ch = 0; ch < c; ch++) of[(long)ni * c + ch] *= inv; }
         return (new SparseTensor(outFeats, g.Coords, x.Resolution / factor), g.Idx);
     }
 

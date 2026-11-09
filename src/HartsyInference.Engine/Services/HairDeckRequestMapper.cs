@@ -13,7 +13,7 @@ internal static class HairDeckRequestMapper
     public const double DefaultCfg = 2.0;
 
     /// <summary>The HairDeck options of a request; a negative request seed draws a random one.</summary>
-    /// <exception cref="NotSupportedException">The request asks for more than one sample, or for rigged output without chains.</exception>
+    /// <exception cref="NotSupportedException">The request asks for more than one sample, or for rigged output (not implemented).</exception>
     public static HairDeckOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
