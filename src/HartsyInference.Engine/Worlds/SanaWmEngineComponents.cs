@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -97,14 +98,29 @@ internal sealed class SanaWmEngineComponents : ISanaWmComponents
         try
         {
             T component = load(phase);
+            DeviceMemoryTrace.Record(_backend, name, "loaded");
             opened = true;
-            return new SanaWmStage<T>(component, phase.Release);
+            return new SanaWmStage<T>(component, () => Release(name, phase));
         }
         finally
         {
             if (!opened)
                 phase.Release();
         }
+    }
+
+    private void Release(string name, WorldPhase phase)
+    {
+        try
+        {
+            DeviceMemoryTrace.Record(_backend, name, "done");
+        }
+        finally
+        {
+            phase.Release();
+        }
+
+        DeviceMemoryTrace.Record(_backend, name, "released");
     }
 
     private static SafeTensorsLoader Load(string path)

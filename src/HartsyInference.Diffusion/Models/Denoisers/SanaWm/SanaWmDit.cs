@@ -1,6 +1,8 @@
+using System.Globalization;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Norm;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
@@ -30,6 +32,7 @@ public sealed class SanaWmDit : IDisposable
     private readonly Tensor _finalBias;
     private readonly Tensor _finalTable;
     private readonly Tensor _finalTableOnes;
+    private int _forwards;
     private int _disposed;
 
     /// <param name="backend">Backend the DiT runs on.</param>
@@ -129,8 +132,12 @@ public sealed class SanaWmDit : IDisposable
 
         ReadOnlySpan<float> maskValues = mask.AsReadOnlySpan<float>();
         Grid grid = new(frames, height, width, tokens, textTokens);
+        int forward = ++_forwards;
         if (batch == 1)
-            return ForwardItem(x, timesteps, text, maskValues, cameraConditions, chunkPlucker, grid);
+        {
+            return ForwardItem(x, timesteps, text, maskValues, cameraConditions, chunkPlucker, grid, TraceLabel(forward, 0),
+                forward == 1);
+        }
 
         long latentElements = (long)_config.InChannels * tokens;
         long velocityElements = (long)_config.OutChannels * tokens;
@@ -149,7 +156,7 @@ public sealed class SanaWmDit : IDisposable
                 new TensorShape([1, _config.PluckerChannels, frames, height, width])));
             Tensor velocity = item.Track(ForwardItem(itemX, timesteps.Slice(b * frames, frames), itemText,
                 maskValues.Slice((int)(b * textTokens), (int)textTokens), cameraConditions.Slice(b * itemConditions, itemConditions),
-                itemPlucker, grid));
+                itemPlucker, grid, TraceLabel(forward, b), forward == 1));
             SanaWmTensors.Write(_backend, output, velocity, b * velocityElements);
         }
 
@@ -170,10 +177,12 @@ public sealed class SanaWmDit : IDisposable
         SanaWmTensors.DisposeAll(_owned);
     }
 
-    // One batch item through the embedders, every block and the final layer; returns [1, OutChannels, T, H, W].
+    // One batch item through the embedders, every block and the final layer; returns [1, OutChannels, T, H, W]. A non-null trace
+    // label records device memory after the item, and also after the context and each block when traceBlocks is set.
     private Tensor ForwardItem(Tensor x, ReadOnlySpan<float> timesteps, Tensor text, ReadOnlySpan<float> mask,
-        ReadOnlySpan<float> cameraConditions, Tensor chunkPlucker, Grid grid)
+        ReadOnlySpan<float> cameraConditions, Tensor chunkPlucker, Grid grid, string? trace, bool traceBlocks)
     {
+        traceBlocks &= trace is not null;
         List<Tensor> conditioning = [];
         Tensor? hidden = null;
         try
@@ -190,17 +199,23 @@ public sealed class SanaWmDit : IDisposable
             Tensor memoryBias = SanaWmConditioning.MaskBias(_backend, mask, 1, grid.TextTokens, conditioning);
             using SanaWmForwardContext context = SanaWmForwardContext.Create(_backend, _config, 1, grid.Frames, grid.Height,
                 grid.Width, blockTime, memory, memoryBias, plucker, cameraConditions);
+            if (traceBlocks)
+                DeviceMemoryTrace.Record(_backend, trace!, "context");
 
-            foreach (SanaWmBlock block in _blocks)
+            for (int i = 0; i < _blocks.Length; i++)
             {
                 Tensor input = hidden;
                 hidden = null;
-                hidden = block.ForwardOwned(input, context);
+                hidden = _blocks[i].ForwardOwned(input, context);
+                if (traceBlocks)
+                    DeviceMemoryTrace.Record(_backend, trace + " block", i);
             }
 
             using Tensor velocity = FinalLayer(hidden, time, grid);
             hidden.Dispose();
             hidden = null;
+            if (trace is not null)
+                DeviceMemoryTrace.Record(_backend, trace, "done");
             return SanaWmConditioning.TokensToChannelFirst(_backend, velocity, 1, _config.OutChannels, grid.Frames, grid.Height,
                 grid.Width);
         }
@@ -233,6 +248,11 @@ public sealed class SanaWmDit : IDisposable
         _backend.Linear(output, modulated, _finalWeight, _finalBias);
         return scratch.Detach(output);
     }
+
+    // The device-memory trace label of one batch item of one forward, or null when the trace is off.
+    private static string? TraceLabel(int forward, int item) => DeviceMemoryTrace.Enabled
+        ? string.Create(CultureInfo.InvariantCulture, $"sana-wm dit forward {forward} item {item}")
+        : null;
 
     private Tensor Vector(Tensor source) => SanaWmTensors.HostF32(source, _owned);
 

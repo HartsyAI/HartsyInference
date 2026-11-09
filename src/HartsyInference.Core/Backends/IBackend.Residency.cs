@@ -69,6 +69,14 @@ public partial interface IBackend
     /// kept every non-CUDA backend's callers on their smallest path forever.</remarks>
     long FreeMemoryBytes() => GetVramInfo().FreeBytes;
 
+    /// <summary>Device memory as the driver, the allocator pool and the residency cache see it, for diagnostics. The default
+    /// knows only <see cref="GetVramInfo"/> and reports -1 for the rest.</summary>
+    DeviceMemoryUsage GetDeviceMemoryUsage()
+    {
+        (long free, long total) = GetVramInfo();
+        return new DeviceMemoryUsage(free, total, -1, -1, -1, -1);
+    }
+
     /// <summary>Pre-uploads weights into the weight cache so ops avoid re-uploading; pair with <see cref="FreeWeights"/>.</summary>
     void PreloadWeights(IEnumerable<Tensor> weights) { }
 

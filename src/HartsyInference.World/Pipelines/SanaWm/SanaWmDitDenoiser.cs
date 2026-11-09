@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 using HartsyInference.World.Camera;
@@ -15,6 +16,7 @@ public sealed class SanaWmDitDenoiser : ISanaWmDenoiser, IDisposable
     private readonly SanaWmTextConditioning _text;
     private readonly SanaWmCameraConditioning _camera;
     private readonly Dictionary<int, BranchInputs> _inputs = [];
+    private int _calls;
     private int _disposed;
 
     /// <summary>Binds <paramref name="dit"/> to one run's conditioning.</summary>
@@ -42,12 +44,26 @@ public sealed class SanaWmDitDenoiser : ISanaWmDenoiser, IDisposable
             throw new ArgumentException($"Latents {latents.Shape} must hold one batch item per branch ({branches.Length}).", nameof(latents));
 
         BranchInputs inputs = Inputs(branches);
-        using Tensor x = Upload(latents);
-        using Tensor velocity = _dit.Forward(x, timesteps, inputs.Text, inputs.Mask, inputs.Conditions, inputs.Plucker);
-        Tensor host = new(velocity.Shape, DType.F32, DeviceKind.Cpu);
+        Tensor host;
+        using (Tensor x = Upload(latents))
+        using (Tensor velocity = _dit.Forward(x, timesteps, inputs.Text, inputs.Mask, inputs.Conditions, inputs.Plucker))
+        {
+            host = new(velocity.Shape, DType.F32, DeviceKind.Cpu);
+            try
+            {
+                _backend.CopyTo(host, velocity);
+            }
+            catch
+            {
+                host.Dispose();
+                throw;
+            }
+        }
+
+        _calls++;
         try
         {
-            _backend.CopyTo(host, velocity);
+            DeviceMemoryTrace.Record(_backend, "sana-wm denoise call", _calls);
             return host;
         }
         catch
