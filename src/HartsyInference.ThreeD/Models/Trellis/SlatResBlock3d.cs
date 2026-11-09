@@ -1,3 +1,4 @@
+using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -39,7 +40,7 @@ internal sealed unsafe class SlatResBlock3d
     public SparseTensor Forward(IBackend backend, SparseTensor x, Tensor vec, ref DownState? down, (int[] idx, int[] coords, int res)? up)
     {
         // updown FIRST (per reference).
-        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
+        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2, meanIncludeSelf: true); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
         else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(backend, x, uidx, ucoords, ures); }
 
         // emb → scale,shift  (SiLU(vec) → Linear(2*out)).
