@@ -736,8 +736,11 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         int batch = (int)packedLatent.Shape[0];
         // An armed step cache is per-step-variable topology (block count run varies with drift) — a captured
         // graph bakes one fixed sequence of launches and can't replay that (same exclusion as ZImageTransformer).
+        // A streamed DiT (BeforeBlockForward set by the block-streaming controller) uploads each block on its own stream
+        // during the forward. Capture cannot record that work (CUDA_ERROR_STREAM_CAPTURE_ISOLATION), and the eager
+        // fallback then crashes on a 12 GB card, so a streamed DiT runs eager.
         bool graphMode = DitStepGraph.EnabledDefaultOn && backend.StepGraphSupported && !_graphDead
-            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed) && stepCache is null;
+            && batch == 1 && ReferenceEquals(packedLatent, _latentFixed) && stepCache is null && BeforeBlockForward is null;
         if (!graphMode)
             return (Forward(backend, packedLatent, t5Embeddings, sigma, clipPooled, guidanceScale,
                 txtSeqLen, hPacked, wPacked, stepCache: stepCache), true);
