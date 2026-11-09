@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Transformer.Mhc;
 
