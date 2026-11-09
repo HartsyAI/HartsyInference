@@ -41,3 +41,16 @@ no-prompt output is therefore not the reference's object geometry. This predates
    claiming parity.
 3. CPU cost is unmeasured. Real object latents at the 1024 grid can have far more voxels than the 12-voxel parity case,
    and the decoder is 474M parameters in F32 (about 1.9 GB in memory after load).
+
+## Prompt inputs: not verified
+
+No Python reference for the prompt paths is in this repository, so these are not checked against it:
+
+- Mask view. The camera, image size and framing the mask checkpoints were trained on are unknown here. Masks are read
+  as coverage at the size given, with no camera or resize applied. They are only meaningful if rendered from the
+  training view.
+- Mask size. Masks are used at full size, so memory scales with mask area times query count. Whether the reference
+  resizes masks is unknown.
+- Point snap. `CoLa3DPromptInputs` snaps a point to the nearest occupied latent voxel by L1 distance, with the first
+  row winning ties. The reference's metric is unknown.
+- Mask channel. Only the red channel is read. A mask stored in alpha is not supported.

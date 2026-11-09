@@ -4,7 +4,8 @@ namespace HartsyInference.Engine.Requests;
 /// the scene's units. Give exactly one of <see cref="Masks"/> and <see cref="Points"/>.</summary>
 public sealed record SceneMeshPrompt
 {
-    /// <summary>One mask per object, all the same size, from a single view. Selects the prompt-mask checkpoint.</summary>
+    /// <summary>One mask per object, all the same size, from a single view. Selects the prompt-mask checkpoint. The camera,
+    /// image size and framing the checkpoint expects are not verified yet (see docs/Research/COLA3D_GEOMETRY_DECODER.md).</summary>
     public IReadOnlyList<ScenePromptMask>? Masks { get; init; }
 
     /// <summary>One point per object, in the scene mesh's units. Selects the prompt-point checkpoint.</summary>

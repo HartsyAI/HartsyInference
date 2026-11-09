@@ -129,7 +129,30 @@ public sealed class CoLa3DPromptTests
         CoLa3DPrompt shortMask = new() { Queries = 2, MaskCoverage = new byte[4], MaskHeight = 2, MaskWidth = 2 };
         Assert.Throws<ArgumentException>(() => shortMask.Validate());
         Assert.Throws<ArgumentException>(() => new CoLa3DPrompt { Queries = 2, Points = [0f, 0f, 0f] }.Validate());
-        Assert.Throws<HartsyInferenceException>(() => new CoLa3DPrompt { Queries = 1, Points = [float.NaN, 0f, 0f] }.Validate());
+        Assert.Throws<ArgumentException>(() => new CoLa3DPrompt { Queries = 1, Points = [float.NaN, 0f, 0f] }.Validate());
+    }
+
+    [Fact]
+    public void Validate_RejectsAnEmptyMaskBecauseItHasNoCentroid()
+    {
+        // Query 1 is all zero; query 0 has coverage, so the check must look per query, not per prompt.
+        byte[] coverage = [255, 0, 0, 0, 0, 0, 0, 0];
+        CoLa3DPrompt prompt = new() { Queries = 2, MaskCoverage = coverage, MaskHeight = 2, MaskWidth = 2 };
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => prompt.Validate());
+        Assert.Contains("Mask 1 has no coverage", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validate_NamesTheDimensionThatIsNotPositive()
+    {
+        ArgumentOutOfRangeException width = Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CoLa3DPrompt { Queries = 1, MaskCoverage = new byte[0], MaskHeight = 2, MaskWidth = 0 }.Validate());
+        Assert.Equal("MaskWidth", width.ParamName);
+
+        ArgumentOutOfRangeException height = Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CoLa3DPrompt { Queries = 1, MaskCoverage = new byte[0], MaskHeight = 0, MaskWidth = 2 }.Validate());
+        Assert.Equal("MaskHeight", height.ParamName);
     }
 
     // A 1024 dual grid over unit voxels from the origin: a point at 40.5 lies in dual voxel 40.

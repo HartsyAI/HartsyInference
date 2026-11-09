@@ -15,8 +15,8 @@ git preserves removed history.
 | Cross-cutting open work | [Checklists/ROADMAP.md](Checklists/ROADMAP.md) |
 | Comfy-Org repo rollout: pinned inventory, phases, target and current state per repo | [Checklists/COMFY_ORG_ROLLOUT.md](Checklists/COMFY_ORG_ROLLOUT.md) |
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
-| CoLa3D geometry decoder: key groups, relation to the shape VAE decoder, open decode questions | [Research/COLA3D_GEOMETRY_DECODER.md](Research/COLA3D_GEOMETRY_DECODER.md) |
 | DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md) |
+| CoLa3D geometry decoder and prompt inputs: key groups, shape VAE relation, unverified prompt conventions | [Research/COLA3D_GEOMETRY_DECODER.md](Research/COLA3D_GEOMETRY_DECODER.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |

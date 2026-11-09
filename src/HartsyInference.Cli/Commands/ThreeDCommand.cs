@@ -39,7 +39,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Mask PNGs for cola3d, one per object (repeatable); all the same size, red channel is the coverage.</summary>
         [CommandOption("--prompt-mask")]
-        [Description("cola3d: a mask PNG per object, all the same size (repeatable). Red channel is the coverage. Excludes --prompt-point.")]
+        [Description(
+            "cola3d: a mask PNG per object, all the same size (repeatable). Red channel is the coverage. The view must match "
+            + "the checkpoint's training view, which is not verified yet. Excludes --prompt-point.")]
         public string[]? PromptMasks { get; init; }
 
         /// <summary>Scene points for cola3d, one per object as x,y,z in scene units (repeatable).</summary>

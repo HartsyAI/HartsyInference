@@ -1,5 +1,3 @@
-using HartsyInference.Core.Exceptions;
-
 namespace HartsyInference.ThreeD.Pipelines;
 
 /// <summary>
@@ -32,11 +30,21 @@ public sealed record CoLa3DPrompt
             throw new ArgumentException("A prompt gives masks or points, not both and not neither.", nameof(Points));
         if (MaskCoverage is not null)
         {
-            if (MaskHeight < 1 || MaskWidth < 1)
-                throw new ArgumentOutOfRangeException(nameof(MaskHeight), MaskHeight, "Mask dimensions must be positive.");
-            long expected = (long)Queries * MaskHeight * MaskWidth;
+            if (MaskHeight < 1)
+                throw new ArgumentOutOfRangeException(nameof(MaskHeight), MaskHeight, "Mask height must be positive.");
+            if (MaskWidth < 1)
+                throw new ArgumentOutOfRangeException(nameof(MaskWidth), MaskWidth, "Mask width must be positive.");
+            int plane = MaskHeight * MaskWidth;
+            long expected = (long)Queries * plane;
             if (MaskCoverage.LongLength != expected)
                 throw new ArgumentException($"Mask coverage holds {MaskCoverage.Length} bytes; expected {expected}.", nameof(MaskCoverage));
+            // An empty mask has no centroid, so the decomposer would place its query at the origin.
+            for (int q = 0; q < Queries; q++)
+            {
+                if (MaskCoverage.AsSpan(q * plane, plane).IndexOfAnyExcept((byte)0) < 0)
+                    throw new ArgumentException($"Mask {q} has no coverage; every object needs a non-empty mask.", nameof(MaskCoverage));
+            }
+
             return;
         }
 
@@ -45,7 +53,7 @@ public sealed record CoLa3DPrompt
         foreach (float value in Points)
         {
             if (!float.IsFinite(value))
-                throw new HartsyInferenceException("Prompt points must be finite.");
+                throw new ArgumentException("Prompt points must be finite.", nameof(Points));
         }
     }
 }
