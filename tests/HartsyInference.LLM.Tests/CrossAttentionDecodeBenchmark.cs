@@ -31,13 +31,17 @@ public sealed class CrossAttentionDecodeBenchmark
             device.KvCacheAppend(k, kHost, 0);
             device.KvCacheAppend(v, vHost, 0);
             const int Reps = 100;
-            for (int i = -5; i < Reps; i++)
+            const int Warmup = 5;
+            for (int i = 0; i < Warmup + Reps; i++)
             {
-                if (i == 0) backend.Sync();
+                if (i == Warmup)
+                {
+                    backend.Sync();
+                    StartClock();
+                }
                 using Tensor q = Random(rng, 1, 32, 1, 128);
                 using Tensor o = attn.AttendOverKvHeadMajor(backend, q, k, v, null, 0, 0,
                     new KvAttentionCall { KvLength = keys, Bidirectional = true }, OperandOwnership.None);
-                if (i == 0) StartClock();
             }
             backend.Sync();
             string? route = typeof(VulkanBackend).GetProperty("LastAttentionRoute",

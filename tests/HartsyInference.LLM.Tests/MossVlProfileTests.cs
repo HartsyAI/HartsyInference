@@ -84,9 +84,12 @@ public sealed class MossVlProfileTests
         }
         // Decode attends every frame through 12 cross layers; up to 32 frames of 65 tokens that is a small read next to the 48-layer
         // GEMVs. Longer streams are reported, not asserted (64 frames measured 20 tok/s on the RTX 3060).
-        (int Frames, double PrefillMs, double TokS) last = rows.LastOrDefault(r => r.Frames <= 32);
-        if (last.Frames > 1)
-            Assert.True(last.TokS > rows[0].TokS * 0.85,
-                $"Decode slowed from {rows[0].TokS:F1} to {last.TokS:F1} tok/s between 1 and {last.Frames} frames.");
+        List<(int Frames, double PrefillMs, double TokS)> asserted = [.. rows.Where(r => r.Frames <= 32).OrderBy(r => r.Frames)];
+        if (asserted.Count > 1)
+        {
+            (int Frames, double PrefillMs, double TokS) first = asserted[0], last = asserted[^1];
+            Assert.True(last.TokS > first.TokS * 0.85,
+                $"Decode slowed from {first.TokS:F1} tok/s at {first.Frames} frames to {last.TokS:F1} tok/s at {last.Frames} frames.");
+        }
     }
 }
