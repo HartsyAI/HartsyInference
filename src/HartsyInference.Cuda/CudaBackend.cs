@@ -9006,6 +9006,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     }
 
     /// <inheritdoc/>
+    /// <remarks>Weight bytes include the cached dtype casts. The pool figures are the device's default pool, which every
+    /// backend on the device shares.</remarks>
+    public DeviceMemoryUsage GetDeviceMemoryUsage()
+    {
+        using OpScope _op = EnterOp();
+        (long free, long total) = CudaMemory.GetMemInfo();
+        (long reserved, long used) = GetMemPoolUsage();
+        return new DeviceMemoryUsage(free, total, reserved, used, _transferState.CachedBytes, _transferState.ActivationBytes);
+    }
+
+    /// <inheritdoc/>
     public void ResetOpProfile() => NvtxRange.ResetProfile();
 
     /// <inheritdoc/>
