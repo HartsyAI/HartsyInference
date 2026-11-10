@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Imaging;
 using HartsyInference.ThreeD.Pipelines.Requests;
-using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 

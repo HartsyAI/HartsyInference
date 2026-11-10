@@ -1,7 +1,7 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
-using HartsyInference.Vision.Codec;
 using HartsyInference.Vision.Dinov2;
 using HartsyInference.Vision.Dinov3;
 

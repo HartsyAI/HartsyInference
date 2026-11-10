@@ -73,7 +73,7 @@ Upstream's sparse path computes a population std and its dense path an unbiased 
 
 ## Memory and time observations
 
-See the PR body for the measured run. The structure and shape flows are 1.3B parameters each; at F32 a flow is 5.2 GB, so each is read from disk
+Measured on an RTX 3060 (12 GB): the 512 type took about 95 s of step time, the 1024 cascade about 23 minutes (its first high-resolution step 12 minutes, the rest 25 to 52 s), with GPU memory at 11.7 GB (2.8 GB of it other processes) and 13.7 GB resident. The structure and shape flows are 1.3B parameters each; at F32 a flow is 5.2 GB, so each is read from disk
 for its stage and released. Attention runs through `IBackend.ScaledDotProductAttention` on head-major tensors, never a materialized N x N matrix.
 
 ## Licences (from the sources read; not legal advice)
