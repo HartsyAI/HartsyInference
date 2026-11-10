@@ -41,14 +41,18 @@ public sealed class SanaWmStreamingEndToEndGpuTests(ITestOutputHelper output)
         JsonElement assets = root.GetProperty("assets");
         int[] bounds = [.. root.GetProperty("chunk_bounds").EnumerateArray().Select(e => e.GetInt32())];
         (byte[] rgb, int width, int height) = PngDecoder.DecodeFromFile(assets.GetProperty("image").GetString()!);
+        // A run driven by an action script streams through the live camera path (the script queued into the stream, one set
+        // of intrinsics), as `hartsy world --actions` does; a pose run follows the recorded camera file.
+        bool actionRun = root.TryGetProperty("camera_source", out JsonElement source) && source.GetString() == "action";
         WorldRequestOptions options = new()
         {
             Prompt = root.GetProperty("prompt").GetString()!,
             Frames = root.GetProperty("num_frames").GetInt32(),
             Guidance = root.GetProperty("cfg_scale").GetDouble(),
             Seed = root.GetProperty("seed").GetInt64(),
-            CameraPath = assets.GetProperty("pose").GetString(),
-            Intrinsics = assets.GetProperty("intrinsics").GetString(),
+            CameraPath = actionRun ? null : assets.GetProperty("pose").GetString(),
+            CameraScript = actionRun ? root.GetProperty("action").GetString() : null,
+            Intrinsics = actionRun ? root.GetProperty("intrinsics_px").GetString() : assets.GetProperty("intrinsics").GetString(),
         };
         WorldRequest request = options.ToRequest(new ImageData { Rgb = rgb, Width = width, Height = height });
         ModelSpec spec = ModelResolver.Resolve("sana-wm-streaming", SanaWmStreamingEndToEndFactAttribute.DitPath(), Modality.World);
