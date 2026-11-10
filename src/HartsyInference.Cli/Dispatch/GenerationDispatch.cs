@@ -201,6 +201,7 @@ public static class GenerationDispatch
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            WeightPrecision = parameters.GetStringOrNull("precision"),
             AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
             Placement = parameters.GetStringOrNull("placement"),
         };

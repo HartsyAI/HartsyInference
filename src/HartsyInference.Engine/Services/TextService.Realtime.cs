@@ -25,7 +25,10 @@ public sealed partial class TextService
         await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
         try
         {
-            TextRequest load = new() { Messages = [], Device = request.Device, LowVramQuant = request.LowVramQuant };
+            TextRequest load = new()
+            {
+                Messages = [], Device = request.Device, LowVramQuant = request.LowVramQuant, WeightPrecision = request.WeightPrecision,
+            };
             await Task.Run(() =>
             {
                 if (slot.HasLeases && ReplacesLoadedModel(slot, spec.LocalPath) && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))

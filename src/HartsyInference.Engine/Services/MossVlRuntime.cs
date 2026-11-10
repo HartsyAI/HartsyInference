@@ -16,13 +16,17 @@ internal sealed class MossVlRuntime : IDisposable
     private readonly IBackend _backend;
     private int _disposed;
 
-    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend, bool lowVramQuant)
+    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend, bool lowVramQuant, DType? plainPrecision)
     {
         Model = model;
         Tower = tower;
         _backend = backend;
         LowVramQuant = lowVramQuant;
+        PlainPrecision = plainPrecision;
     }
+
+    /// <summary>The block type the folder's plain projections were re-quantized to at load; null for as stored (and for a GGUF).</summary>
+    public DType? PlainPrecision { get; }
 
     public MossVlModel Model { get; }
 
@@ -31,11 +35,13 @@ internal sealed class MossVlRuntime : IDisposable
     /// <summary>Whether the decoder was loaded with the low-VRAM quantized Linear path.</summary>
     public bool LowVramQuant { get; }
 
-    /// <summary>Loads both halves from <paramref name="path"/> (a GGUF or a checkpoint folder) for <paramref name="backend"/> and makes
-    /// their weights resident.</summary>
-    public static MossVlRuntime Load(string path, IBackend backend, bool lowVramQuant)
+    /// <summary>Loads both halves from <paramref name="path"/> (a GGUF or a checkpoint folder, plain or quantized) for
+    /// <paramref name="backend"/> and makes their weights resident.</summary>
+    /// <param name="plainPrecision">A GGUF block type a folder's plain projections are re-quantized to; null keeps them as stored.</param>
+    public static MossVlRuntime Load(string path, IBackend backend, bool lowVramQuant, DType? plainPrecision = null)
     {
-        MossVlModel model = MossVlModel.Open(path, new MossVlLoadOptions { Backend = backend, LowVramQuant = lowVramQuant });
+        MossVlModel model = MossVlModel.Open(path,
+            new MossVlLoadOptions { Backend = backend, LowVramQuant = lowVramQuant, PlainPrecision = plainPrecision });
         MossVlVisionTower? tower = null;
         try
         {
@@ -43,7 +49,7 @@ internal sealed class MossVlRuntime : IDisposable
             // Resident up front: without it a device backend uploads each weight on the op that first reads it.
             backend.PreloadWeightGroups(model.Decoder.Model.EnumerateWeightGroups(includeRedundantSplits: false));
             backend.PreloadWeights(tower.Encoder.EnumerateWeights());
-            return new MossVlRuntime(model, tower, backend, lowVramQuant);
+            return new MossVlRuntime(model, tower, backend, lowVramQuant, model.IsGguf ? null : plainPrecision);
         }
         catch
         {
