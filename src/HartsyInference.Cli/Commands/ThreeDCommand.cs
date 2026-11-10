@@ -7,20 +7,20 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, one GLB mesh per decomposed object from a scene mesh with CoLa3D, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
     public sealed class Settings : CommandSettings
     {
-        /// <summary>Path to the input: a PNG image, or a .obj/.glb scene mesh for cola3d.</summary>
+        /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d and unirig.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb scene mesh (cola3d).")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb mesh (cola3d, unirig).")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, trellis, cola3d, unirig, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d, trellis, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
@@ -94,13 +94,13 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Input, "An input path is required (an image, or a scene mesh for cola3d).", out int exitCode))
+        if (!CommandRunner.RequireNonEmpty(settings.Input, "An input path is required (an image, or a mesh for cola3d and unirig).", out int exitCode))
             return exitCode;
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Mesh);
         if (spec.LocalPath is null)
         {
-            string hint = MeshModelIds.SceneMesh.Contains(spec.Catalog?.Id ?? string.Empty) ? string.Empty : ", or download its catalog assets";
+            string hint = MeshModelIds.SceneMesh.Contains(spec.Catalog?.Id ?? string.Empty) || MeshModelIds.RigMesh.Contains(spec.Catalog?.Id ?? string.Empty) ? string.Empty : ", or download its catalog assets";
             AnsiConsole.MarkupLine($"[red]A model is required via[/] [#2ea5e0]--model-path[/][red]{hint}.[/]");
             return 1;
         }

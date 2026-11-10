@@ -13,7 +13,8 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 namespace HartsyInference.Engine.Services;
 
 /// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS) turn an image into GLB (mesh) or PLY (splat); the scene model
-/// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object. Loaded pipelines are cached per checkpoint for the
+/// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
+/// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
@@ -22,6 +23,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, UniRigPipeline> _rigPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
 
@@ -36,6 +38,8 @@ public sealed class MeshService : IMeshService, IDisposable
         string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.RigMesh.Contains(id))
+            return GenerateRiggedAsync(spec, id, request, progress, cancel);
 
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
@@ -114,6 +118,67 @@ public sealed class MeshService : IMeshService, IDisposable
                 return new MeshResult { Data = GlbWriter.Write(result.Objects), Format = "glb" };
             },
             cancel);
+    }
+
+    /// <summary>Rigging: one GLB holding the input mesh, a generated skeleton and per-vertex skin weights.</summary>
+    private Task<MeshResult> GenerateRiggedAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.SceneMesh is null)
+        {
+            throw new NotSupportedException(
+                $"3D model '{id}' rigs a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.");
+        }
+        if (request.Image is not null)
+            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+        if (request.Steps != 0 || request.GridResolution != 0)
+            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
+        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        UniRigPipeline.ValidateMesh(input);
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                UniRigPipeline pipeline = GetOrLoadRig(spec, id);
+                UniRigResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }, cancel);
+                return new MeshResult { Data = result.Glb, Format = "glb" };
+            },
+            cancel);
+    }
+
+    /// <summary>Returns the cached rigging pipeline for <paramref name="spec"/>; the checkpoints themselves load per request.</summary>
+    private UniRigPipeline GetOrLoadRig(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Supply the folder holding {UniRigPipeline.SkeletonCheckpoint} and {UniRigPipeline.SkinCheckpoint} as the local path.");
+        }
+        lock (_gate)
+        {
+            if (_rigPipelines.TryGetValue(spec.LocalPath, out UniRigPipeline? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                UniRigPipeline pipeline = new(_engine.Backend, spec.LocalPath);
+                _rigPipelines[spec.LocalPath] = pipeline;
+                return pipeline;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to prepare the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
     }
 
     private static bool IsHairDeck(ModelSpec spec) =>
@@ -348,14 +413,17 @@ public sealed class MeshService : IMeshService, IDisposable
         // and holding the lock meanwhile would stall every other model load.
         List<LoadedMesh> pipelines;
         List<CoLa3DPipeline> scenePipelines;
+        List<UniRigPipeline> rigPipelines;
         List<HairDeckRuntime> hairDecks;
         lock (_gate)
         {
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
+            rigPipelines = _rigPipelines.Values.ToList();
             hairDecks = _hairDecks.Values.ToList();
             _pipelines.Clear();
             _scenePipelines.Clear();
+            _rigPipelines.Clear();
             _hairDecks.Clear();
         }
         foreach (LoadedMesh loaded in pipelines)
@@ -363,6 +431,10 @@ public sealed class MeshService : IMeshService, IDisposable
             loaded.Pipeline.Dispose();
         }
         foreach (CoLa3DPipeline pipeline in scenePipelines)
+        {
+            pipeline.Dispose();
+        }
+        foreach (UniRigPipeline pipeline in rigPipelines)
         {
             pipeline.Dispose();
         }
