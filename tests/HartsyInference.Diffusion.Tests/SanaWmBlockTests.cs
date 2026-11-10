@@ -54,6 +54,20 @@ public sealed class SanaWmBlockTests : IDisposable
     }
 
     [Fact]
+    public void Block_Dispose_ReleasesTheFfnsOwnTensors()
+    {
+        using IBackend backend = new CpuBackend();
+        using SanaWmCheckpoint checkpoint = LoadLayout();
+        SanaWmBlock block = new(backend, checkpoint.Config, 0, checkpoint.Weights);
+        // The FFN's tap-major depthwise kernel is the only [3, 3, channels] tensor a block lists.
+        Tensor taps = block.EnumerateWeights().Single(tensor => tensor.Shape.Rank == 3 && tensor.Shape[0] == 3 && tensor.Shape[1] == 3);
+
+        block.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => taps.AsReadOnlySpan<float>());
+    }
+
+    [Fact]
     public void Block_SingleFrameGrid_Runs()
     {
         using IBackend backend = new CpuBackend();

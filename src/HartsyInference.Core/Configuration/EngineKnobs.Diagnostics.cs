@@ -131,9 +131,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> OrpheusProf =
         Bool("diagnostics.orpheusProf", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Times the Orpheus TTS decode loop's logits/sample/forward phases with per-step device syncs.");
 
-    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.</summary>
+    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the model stage timer
+    /// (<see cref="Backends.StageProfiler"/>), which syncs the device around each stage.</summary>
     public static readonly Knob<bool> Profile =
-        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.");
+        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the device-synced model stage timer (StageProfiler).");
 
     /// <summary>Dumps the accumulated per-op profile table at every backend Sync (per generation) to diagnostics.profileOut.</summary>
     public static readonly Knob<bool> ProfileEach =

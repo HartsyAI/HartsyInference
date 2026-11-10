@@ -70,4 +70,8 @@ public sealed record WorldCapabilities
     /// <summary>Whether a request may ask for sequential classifier-free guidance: the conditional and unconditional passes
     /// run as two calls per step instead of one batch-2 call. No model declares it until its pipeline implements the path.</summary>
     public bool SupportsSequentialCfg { get; init; }
+
+    /// <summary>Chunk-by-chunk streaming generation with live actions, when the model has it; null for a model that only
+    /// renders whole rollouts.</summary>
+    public WorldStreamingCapabilities? Streaming { get; init; }
 }

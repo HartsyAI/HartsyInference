@@ -75,8 +75,10 @@ public sealed class SanaWmForwardContext : IDisposable
     /// <summary>Builds the context for one forward over a <c>frames × height × width</c> latent grid.</summary>
     /// <param name="cameraConditions">Per batch item and frame, 16 camera-to-world floats then fx, fy, cx, cy in latent pixels; read
     /// only when the checkpoint has the camera branch.</param>
+    /// <param name="frameOffset">Temporal position of the grid's first frame, which the RoPE tables start at: 0 for a whole
+    /// clip, the frames already generated for a chunk of a stream.</param>
     public static SanaWmForwardContext Create(IBackend backend, SanaWmConfig config, int batch, int frames, int height, int width,
-        Tensor blockTime, Tensor memory, Tensor? memoryBias, Tensor? plucker, ReadOnlySpan<float> cameraConditions)
+        Tensor blockTime, Tensor memory, Tensor? memoryBias, Tensor? plucker, ReadOnlySpan<float> cameraConditions, int frameOffset = 0)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
@@ -84,6 +86,7 @@ public sealed class SanaWmForwardContext : IDisposable
         ArgumentNullException.ThrowIfNull(memory);
         if (batch <= 0 || frames <= 0 || height <= 0 || width <= 0)
             throw new ArgumentOutOfRangeException(nameof(batch), "Batch and latent grid extents must be positive.");
+        ArgumentOutOfRangeException.ThrowIfNegative(frameOffset);
         int tokens = checked(frames * height * width);
         long textTokens = memory.Shape.Rank == 3 ? memory.Shape[1] : -1;
         int channels = config.HiddenSize;
@@ -102,7 +105,7 @@ public sealed class SanaWmForwardContext : IDisposable
         try
         {
             (Tensor cos, Tensor sin, Tensor cameraCos, Tensor cameraSin) =
-                SanaWmConditioning.Rope(backend, config.HeadDim, frames, height, width, tables);
+                SanaWmConditioning.Rope(backend, config.HeadDim, frames, height, width, tables, frameOffset);
             tables.Remove(cos);
             tables.Remove(sin);
             context.RopeCos = context.Own(cos);

@@ -1,13 +1,17 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Rotary;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
 /// <summary>Main branch of a SANA-WM softmax attention layer (upstream <c>_forward_softmax_attn</c>): the GDN q/k/v projection,
 /// full-channel RMSNorm, interleaved RoPE on every head dim, then softmax over all tokens with scale <c>headDim^-1/2</c>.
-/// Returns the branch before the camera sum, output gate and projection. Runs one batch item at a time.</summary>
+/// Returns the branch before the camera sum, output gate and projection. Runs one batch item at a time. Given a block's stream
+/// state the queries of a chunk attend to the keys and values kept from earlier chunks as well as their own (upstream
+/// <c>CachedChunkCausalSoftmaxAttn</c>); the kept keys carry the RoPE of the positions they were made at.</summary>
 public sealed class SanaWmSoftmaxAttention
 {
     private const float RmsEpsilon = 1e-5f;
@@ -79,7 +83,11 @@ public sealed class SanaWmSoftmaxAttention
     }
 
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major with <c>tokens·C</c> elements. Returns <c>[N, C]</c>.</summary>
-    internal Tensor ForwardItem(Tensor a, int tokens, Tensor ropeCos, Tensor ropeSin)
+    /// <param name="window">Keys and values of earlier chunks in a chunk-causal stream; null attends within the input only.</param>
+    /// <param name="commitUnits">Above zero, stages this chunk's keys and values into <paramref name="window"/> as that many
+    /// units (latent frames).</param>
+    internal Tensor ForwardItem(Tensor a, int tokens, Tensor ropeCos, Tensor ropeSin, Tensor? projectionInput = null,
+        RollingTokenWindow? window = null, int commitUnits = 0)
     {
         if (a.DType != DType.F32 || a.ElementCount != (long)tokens * _channels)
             throw new ArgumentException($"The item input must be F32 with {tokens}x{_channels} elements; got {a.DType} {a.Shape}.", nameof(a));
@@ -87,14 +95,30 @@ public sealed class SanaWmSoftmaxAttention
         SanaWmTensors.Require(ropeSin, nameof(ropeSin), DType.F32, [tokens, _headDim]);
 
         using SanaWmScratch scratch = new();
-        Tensor qh = Heads(scratch, a, 0, _qNorm, ropeCos, ropeSin, tokens);
-        Tensor kh = Heads(scratch, a, _channels, _kNorm, ropeCos, ropeSin, tokens);
-        Tensor vh = Heads(scratch, a, 2 * _channels, null, ropeCos, ropeSin, tokens);
+        Tensor projected = projectionInput ?? a;
+        Tensor qh = Heads(scratch, projected, 0, _qNorm, ropeCos, ropeSin, tokens);
+        Tensor kh = Heads(scratch, projected, _channels, _kNorm, ropeCos, ropeSin, tokens);
+        Tensor vh = Heads(scratch, projected, 2 * _channels, null, ropeCos, ropeSin, tokens);
         Tensor attended = scratch.New(1, _heads, tokens, _headDim);
-        _backend.ScaledDotProductAttention(attended, qh, kh, vh, null, (float)(1.0 / Math.Sqrt(_headDim)));
+        using (StageProfiler.Begin(_backend, "sm", "attn.main.sdpa"))
+        {
+            using SanaWmWindowedKeys context = SanaWmWindowedKeys.Join(_backend, window, kh, vh);
+            _backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, context.Keys, context.Values, null,
+                (float)(1.0 / Math.Sqrt(_headDim)), allowF16: false) with { Numerics = AttentionNumerics.Bf16Storage });
+        }
+
         scratch.Release(qh);
-        scratch.Release(kh);
-        scratch.Release(vh);
+        if (window is not null && commitUnits > 0)
+        {
+            // The window takes the chunk's own keys and values; nothing here reads them again.
+            window.Stage([scratch.Detach(kh), scratch.Detach(vh)], commitUnits);
+        }
+        else
+        {
+            scratch.Release(kh);
+            scratch.Release(vh);
+        }
+
         Tensor output = scratch.New(tokens, _channels);
         _backend.Permute0213(output, attended, _heads, tokens, _headDim);
         return scratch.Detach(output);

@@ -222,8 +222,9 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         _audio.Dispose();
     }
 
-    /// <summary>One per-modality <c>LTX2ConnectorTransformer1d</c>: learnable registers + N gated self-attn blocks.</summary>
-    private sealed class Connector : IDisposable
+    /// <summary>One per-modality <c>LTX2ConnectorTransformer1d</c>: learnable registers + N self-attn blocks, gated where
+    /// the checkpoint carries gate logits (LTX-2.3) and ungated where it does not (LTX-2.0).</summary>
+    internal sealed class Connector : IDisposable
     {
         private readonly int _dim, _heads, _headDim, _numBlocks, _numRegisters;
         private readonly float _normEps;
@@ -245,16 +246,18 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
             _ffW2 = new Tensor?[numBlocks]; _ffB2 = new Tensor?[numBlocks];
         }
 
-        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
+        /// <param name="blocks">The block list's name under <paramref name="p"/>: <c>transformer_1d_blocks</c> in a
+        /// Lightricks checkpoint, <c>transformer_blocks</c> in a diffusers one.</param>
+        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, string blocks = "transformer_1d_blocks")
         {
             _registers = TensorCasts.LoadF32(w, $"{p}.learnable_registers");
             for (int i = 0; i < _numBlocks; i++)
             {
-                _attn[i].LoadWeights(w, $"{p}.transformer_1d_blocks.{i}.attn1");
-                _ffW0[i] = w[$"{p}.transformer_1d_blocks.{i}.ff.net.0.proj.weight"];
-                w.TryGetValue($"{p}.transformer_1d_blocks.{i}.ff.net.0.proj.bias", out _ffB0[i]);
-                _ffW2[i] = w[$"{p}.transformer_1d_blocks.{i}.ff.net.2.weight"];
-                w.TryGetValue($"{p}.transformer_1d_blocks.{i}.ff.net.2.bias", out _ffB2[i]);
+                _attn[i].LoadWeights(w, $"{p}.{blocks}.{i}.attn1");
+                _ffW0[i] = w[$"{p}.{blocks}.{i}.ff.net.0.proj.weight"];
+                w.TryGetValue($"{p}.{blocks}.{i}.ff.net.0.proj.bias", out _ffB0[i]);
+                _ffW2[i] = w[$"{p}.{blocks}.{i}.ff.net.2.weight"];
+                w.TryGetValue($"{p}.{blocks}.{i}.ff.net.2.bias", out _ffB2[i]);
             }
         }
 

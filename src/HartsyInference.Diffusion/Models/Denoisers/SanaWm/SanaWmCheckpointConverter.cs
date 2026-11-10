@@ -4,7 +4,10 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
-/// <summary>Loads a SANA-WM DiT safetensors file under the upstream key names, such as <c>blocks.0.attn.qkv.weight</c>.</summary>
+/// <summary>Loads a SANA-WM DiT safetensors file under the upstream key names, such as <c>blocks.0.attn.qkv.weight</c>. The
+/// bidirectional stage-1 DiT and the chunk-causal streaming student share one layout, so both load here; the streaming
+/// release is a pickle whose state dict (under <c>generator</c> when present, with any <c>model.</c> prefix stripped) is
+/// saved to safetensors first, with or without <c>pos_embed</c>.</summary>
 /// <remarks>Keys are not renamed to the diffusers layout. Dtype policy: BF16 for linear and convolution weights and for
 /// <c>y_embedder.y_embedding</c>, which is kept as stored. F32 for biases, norms, GDN and gate parameters (<c>A_log</c>,
 /// <c>dt_bias</c>, <c>beta_proj</c>, <c>gate_proj</c>, <c>recall_gate</c>), the adaLN path (<c>t_block</c>,
@@ -107,7 +110,8 @@ public static class SanaWmCheckpointConverter
         Add(specs, "y_embedder.y_proj.fc2.weight", DType.BF16, c, c);
         Add(specs, "y_embedder.y_proj.fc2.bias", DType.F32, c);
         Add(specs, "y_embedder.y_embedding", DType.BF16, config.NullCaptionLength, config.TextWidth);
-        Add(specs, "pos_embed", DType.F32, 1, config.PosEmbedTokens, c);
+        if (config.PosEmbedTokens > 0)
+            Add(specs, "pos_embed", DType.F32, 1, config.PosEmbedTokens, c);
         Add(specs, "attention_y_norm.weight", DType.F32, c);
         if (config.HasPluckerBranch)
         {

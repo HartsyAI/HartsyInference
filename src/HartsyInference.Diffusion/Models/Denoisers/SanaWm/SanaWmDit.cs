@@ -7,9 +7,11 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
-/// <summary>The SANA-WM stage-1 DiT (<c>SanaMSVideoCamCtrl_1600M_P1_D20</c>, flow_euler_ltx path). Patch size is 1, so the
-/// 1×1×1 embedders run as per-token linears over T-major tokens. The header's <c>pos_embed</c> is unused with
-/// <c>wan_rope</c>, so it is not loaded. Timesteps are truncated to integers before the sinusoidal embedding.</summary>
+/// <summary>The SANA-WM stage-1 DiT: <c>SanaMSVideoCamCtrl_1600M_P1_D20</c> over a whole clip (<see cref="Forward"/>, the
+/// flow_euler_ltx path) and its chunk-causal streaming sibling <c>SanaMSVideoCamCtrlStreaming_1600M_P1_D20</c> over one chunk
+/// at a time (<see cref="ForwardChunk"/>, upstream <c>forward_long</c>). The two share every parameter name. Patch size is 1,
+/// so the 1×1×1 embedders run as per-token linears over T-major tokens. The header's <c>pos_embed</c> is unused with RoPE, so
+/// it is not loaded. Timesteps are truncated to integers before the sinusoidal embedding.</summary>
 /// <remarks>Weights are borrowed from the checkpoint in their stored dtype, preloaded on a device backend and freed from it when
 /// the DiT is disposed; no F32 copy of a weight matrix is made. A CFG batch runs one item at a time through the whole stack,
 /// which is sequential CFG inside one call: the same arithmetic as the joint batch, with the activation peak of a single
@@ -169,6 +171,54 @@ public sealed class SanaWmDit : IDisposable
         return scratch.Detach(output);
     }
 
+    /// <summary>Predicts the flow velocity for one chunk of a chunk-causal stream. Returns a new F32
+    /// <c>[1, OutChannels, T, H, W]</c> tensor. The chunk's frames sit at temporal positions
+    /// <c>[cache.CommittedFrames, cache.CommittedFrames + T)</c>; every block continues from the state in
+    /// <paramref name="cache"/>.</summary>
+    /// <param name="x">F32 latents <c>[1, InChannels, T, H, W]</c> of the chunk.</param>
+    /// <param name="timesteps">One timestep per frame of the chunk, <c>T</c> values; truncated to integers.</param>
+    /// <param name="text">Caption features <c>[1, 1, L, TextWidth]</c>, F32.</param>
+    /// <param name="mask">Caption validity <c>[1, L]</c>, F32; read on the host.</param>
+    /// <param name="cameraConditions">Per frame of the chunk, 16 camera-to-world floats then fx, fy, cx, cy: <c>T·20</c> floats.</param>
+    /// <param name="chunkPlucker">F32 plucker features <c>[1, PluckerChannels, T, H, W]</c> of the chunk's frames.</param>
+    /// <param name="cache">The stream's carried state, created for this grid. A denoising pass only reads it.</param>
+    /// <param name="commit">Stages the state after this chunk into <paramref name="cache"/>: set on the pass over the chunk's
+    /// clean latents at timestep 0, then call <see cref="SanaWmStreamCache.Commit"/>.</param>
+    public Tensor ForwardChunk(Tensor x, ReadOnlySpan<float> timesteps, Tensor text, Tensor mask, ReadOnlySpan<float> cameraConditions,
+        Tensor chunkPlucker, SanaWmStreamCache cache, bool commit)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(x);
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(mask);
+        ArgumentNullException.ThrowIfNull(chunkPlucker);
+        ArgumentNullException.ThrowIfNull(cache);
+        if (x.DType != DType.F32 || x.Shape.Rank != 5 || x.Shape[0] != 1 || x.Shape[1] != _config.InChannels)
+            throw new ArgumentException($"x must be F32 [1, {_config.InChannels}, T, H, W]; got {x.DType} {x.Shape}.", nameof(x));
+
+        int frames = (int)x.Shape[2];
+        int height = (int)x.Shape[3];
+        int width = (int)x.Shape[4];
+        if (height != cache.LatentHeight || width != cache.LatentWidth)
+            throw new ArgumentException($"The stream state is for a {cache.LatentHeight}x{cache.LatentWidth} grid; the chunk is "
+                + $"{height}x{width}.", nameof(cache));
+        int tokens = checked(frames * height * width);
+        long textTokens = text.Shape.Rank == 4 ? text.Shape[2] : -1;
+        SanaWmTensors.Require(text, nameof(text), DType.F32, [1, 1, textTokens, _config.TextWidth]);
+        SanaWmTensors.Require(mask, nameof(mask), DType.F32, [1, textTokens]);
+        SanaWmTensors.Require(chunkPlucker, nameof(chunkPlucker), DType.F32, [1, _config.PluckerChannels, frames, height, width]);
+        if (timesteps.Length != frames)
+            throw new ArgumentException($"timesteps must hold {frames} values, one per frame; got {timesteps.Length}.", nameof(timesteps));
+        if (cameraConditions.Length != frames * SanaWmCamRays.ConditionWidth)
+            throw new ArgumentException($"camera conditions must hold {frames * SanaWmCamRays.ConditionWidth} floats.",
+                nameof(cameraConditions));
+
+        Grid grid = new(frames, height, width, tokens, textTokens);
+        int forward = ++_forwards;
+        return ForwardItem(x, timesteps, text, mask.AsReadOnlySpan<float>(), cameraConditions, chunkPlucker, grid,
+            TraceLabel(forward, 0), forward == 1, cache, commit);
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -187,9 +237,11 @@ public sealed class SanaWmDit : IDisposable
     }
 
     // One batch item through the embedders, every block and the final layer; returns [1, OutChannels, T, H, W]. A non-null trace
-    // label records device memory after the item, and also after the context and each block when traceBlocks is set.
+    // label records device memory after the item, and also after the context and each block when traceBlocks is set. With a
+    // stream cache the item is one chunk: RoPE starts at the frames already committed and every block reads its carried state.
     private Tensor ForwardItem(Tensor x, ReadOnlySpan<float> timesteps, Tensor text, ReadOnlySpan<float> mask,
-        ReadOnlySpan<float> cameraConditions, Tensor chunkPlucker, Grid grid, string? trace, bool traceBlocks)
+        ReadOnlySpan<float> cameraConditions, Tensor chunkPlucker, Grid grid, string? trace, bool traceBlocks,
+        SanaWmStreamCache? cache = null, bool commit = false)
     {
         traceBlocks &= trace is not null;
         List<Tensor> conditioning = [];
@@ -207,7 +259,7 @@ public sealed class SanaWmDit : IDisposable
             Tensor memory = SanaWmConditioning.Caption(_backend, _caption, text, 1, grid.TextTokens, conditioning);
             Tensor memoryBias = SanaWmConditioning.MaskBias(_backend, mask, 1, grid.TextTokens, conditioning);
             using SanaWmForwardContext context = SanaWmForwardContext.Create(_backend, _config, 1, grid.Frames, grid.Height,
-                grid.Width, blockTime, memory, memoryBias, plucker, cameraConditions);
+                grid.Width, blockTime, memory, memoryBias, plucker, cameraConditions, cache?.CommittedFrames ?? 0);
             if (traceBlocks)
                 DeviceMemoryTrace.Record(_backend, trace!, "context");
 
@@ -215,7 +267,7 @@ public sealed class SanaWmDit : IDisposable
             {
                 Tensor input = hidden;
                 hidden = null;
-                hidden = _blocks[i].ForwardOwned(input, context);
+                hidden = _blocks[i].ForwardOwned(input, context, cache?.Block(i), commit);
                 if (traceBlocks)
                     DeviceMemoryTrace.Record(_backend, trace + " block", i);
             }

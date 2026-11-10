@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
@@ -126,8 +127,11 @@ public sealed class SanaWmCamBranch : IDisposable
 
     /// <summary>One batch item: <paramref name="a"/> is F32 token-major <c>[N, C]</c> (any shape of that size), <paramref name="beta"/>
     /// <c>[H, T, S]</c> and <paramref name="decay"/> <c>[H, T]</c>. Returns <c>out_proj_cam</c> of the scan, <c>[N, C]</c>.</summary>
+    /// <param name="stream">The block's carried state for a chunk-causal stream (upstream <c>_cached_cam_branch</c>); null runs
+    /// the whole clip bidirectionally.</param>
+    /// <param name="commit">Stages the state after this chunk into <paramref name="stream"/>.</param>
     internal Tensor ForwardItem(IBackend backend, Tensor a, SanaWmCameraInputs camera, int item, Tensor beta, Tensor decay, int frames,
-        int spatial)
+        int spatial, string profileTag = "cam", Tensor? projectionInput = null, SanaWmBlockStream? stream = null, bool commit = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (_queryWeight is null || _convKernel is null)
@@ -138,27 +142,44 @@ public sealed class SanaWmCamBranch : IDisposable
         float keyScale = MathF.Pow(_headDim, -0.5f) * MathF.Pow(spatial, -0.5f);
 
         using SanaWmScratch scratch = new();
-        Tensor keyScaled = scratch.Track(ProjectKey(backend, a, keyScale, frames, spatial));
-        Tensor discounted = scratch.Track(DiscountBeta(backend, keyScaled, camera, item, beta, frames, spatial));
-        Tensor key = Transform(backend, scratch, keyScaled, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+        Tensor discounted, key, query, value;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.prep"))
+        {
+            Tensor projected = projectionInput ?? a;
+            Tensor keyScaled = scratch.Track(ProjectKey(backend, projected, keyScale, frames, spatial, stream, commit));
+            discounted = scratch.Track(DiscountBeta(backend, keyScaled, camera, item, beta, frames, spatial));
+            key = Transform(backend, scratch, keyScaled, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
 
-        Tensor queryRaw = scratch.New(tokens, _channels);
-        backend.Linear(queryRaw, a, _queryWeight, _queryBias);
-        Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels));
-        Tensor query = Transform(backend, scratch, queryActivated, camera.RaysTransposed(item), camera.Cos, camera.Sin, tokens);
+            Tensor queryRaw = scratch.New(tokens, _channels);
+            backend.Linear(queryRaw, projected, _queryWeight, _queryBias);
+            Tensor queryActivated = NormActivate(backend, scratch, queryRaw, _queryNorm!, new TensorShape(tokens, _channels), 1f);
+            query = Transform(backend, scratch, queryActivated, camera.RaysTransposed(item), camera.Cos, camera.Sin, tokens);
 
-        Tensor valueRaw = scratch.New(tokens, _channels);
-        backend.Linear(valueRaw, a, _valueWeight!, _valueBias);
-        Tensor value = Transform(backend, scratch, valueRaw, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+            Tensor valueRaw = scratch.New(tokens, _channels);
+            backend.Linear(valueRaw, projected, _valueWeight!, _valueBias);
+            value = Transform(backend, scratch, valueRaw, camera.RaysInverse(item), camera.Cos, camera.Sin, tokens);
+        }
 
-        Tensor scanned = scratch.Track(SanaWmCamScan.Run(backend, query, key, value, discounted, decay, frames, spatial, _heads, _headDim));
+        Tensor scanned;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.scan"))
+        {
+            Tensor? nextState = commit && stream is not null ? scratch.New(_heads, _headDim, _headDim) : null;
+            scanned = scratch.Track(SanaWmCamScan.Run(backend, query, key, value, discounted, decay, frames, spatial, _heads, _headDim,
+                stream?.CameraNumerator!.Current, nextState));
+            if (nextState is not null)
+                stream!.CameraNumerator!.Stage(scratch.Detach(nextState));
+        }
+
         scratch.Release(query);
         scratch.Release(key);
         scratch.Release(value);
         scratch.Release(discounted);
-        Tensor readout = Transform(backend, scratch, scanned, camera.Rays(item), camera.Cos, camera.NegSin, tokens);
+        Tensor readout;
+        using (StageProfiler.Begin(backend, profileTag, "attn.cam.readout"))
+            readout = Transform(backend, scratch, scanned, camera.Rays(item), camera.Cos, camera.NegSin, tokens);
         Tensor output = scratch.New(tokens, _channels);
-        backend.Linear(output, readout, _outputWeight!, _outputBias);
+        using (StageProfiler.Begin(backend, profileTag, "attn.out_proj_cam"))
+            backend.Linear(output, readout, _outputWeight!, _outputBias);
         return scratch.Detach(output);
     }
 
@@ -180,29 +201,28 @@ public sealed class SanaWmCamBranch : IDisposable
 
     /// <summary>K path: <c>k' = ReLU(RMSNorm(conv(Linear(x)))) · k_scale</c>, shaped <c>[N·H, D]</c> so the discount's per-head
     /// norm reads it directly.</summary>
-    private Tensor ProjectKey(IBackend backend, Tensor a, float keyScale, int frames, int spatial)
+    private Tensor ProjectKey(IBackend backend, Tensor a, float keyScale, int frames, int spatial, SanaWmBlockStream? stream, bool commit)
     {
         int tokens = frames * spatial;
         using SanaWmScratch scratch = new();
         Tensor raw = scratch.New(tokens, _channels);
         backend.Linear(raw, a, _keyWeight!, _keyBias);
-        Tensor convolved = scratch.Track(SanaWmTemporalConv.Apply(backend, raw, _convKernel!, frames, spatial, _channels));
+        FrameTailCache? tail = stream?.CameraKeyTail;
+        Tensor convolved = scratch.Track(SanaWmTemporalConv.ApplyWithContext(backend, raw, _convKernel!, frames, spatial, _channels,
+            tail?.Current, tail?.HeldFrames ?? 0));
+        if (commit)
+            tail?.Stage(raw);
         scratch.Release(raw);
-        Tensor activated = NormActivate(backend, scratch, convolved, _keyNorm!, new TensorShape(tokens, _channels));
-        Tensor scaled = scratch.New((long)tokens * _heads, _headDim);
-        backend.Scale(scaled, activated, keyScale);
+        Tensor scaled = NormActivate(backend, scratch, convolved, _keyNorm!, new TensorShape((long)tokens * _heads, _headDim), keyScale);
         return scratch.Detach(scaled);
     }
 
-    // Releases input; returns a tracked ReLU(RMSNorm(input)) over the full channel dim.
-    private static Tensor NormActivate(IBackend backend, SanaWmScratch scratch, Tensor input, Tensor norm, TensorShape shape)
+    // Releases input; returns a tracked ReLU(RMSNorm(input))·scale over the full channel dim, one fused op.
+    private static Tensor NormActivate(IBackend backend, SanaWmScratch scratch, Tensor input, Tensor norm, TensorShape shape, float scale)
     {
-        Tensor normed = scratch.New(shape);
-        backend.RmsNorm(normed, input, norm, NormEpsilon);
-        scratch.Release(input);
         Tensor activated = scratch.New(shape);
-        backend.LeakyRelu(activated, normed, 0f);
-        scratch.Release(normed);
+        backend.RmsNormRelu(activated, input, norm, NormEpsilon, scale);
+        scratch.Release(input);
         return activated;
     }
 

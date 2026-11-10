@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
@@ -39,15 +40,38 @@ internal static class SanaWmTemporalConv
     /// <summary>Convolves token-major <c>[frames·spatial, C]</c> F32 along frames; returns a new <c>[frames·spatial, C]</c> tensor.</summary>
     internal static Tensor Apply(IBackend backend, Tensor input, Tensor kernel, int frames, int spatial, int channels)
     {
-        int tokens = checked(frames * spatial);
-        using SanaWmScratch scratch = new();
-        Tensor channelFirst = scratch.New(1, channels, frames, spatial);
-        backend.Transpose2D(channelFirst, input, tokens, channels);
-        Tensor convolved = scratch.New(1, channels, frames, spatial);
-        backend.Conv2dDepthwise(convolved, channelFirst, kernel, null, 1, 1, SourceTaps - 1, 0);
-        scratch.Release(channelFirst);
-        Tensor output = scratch.New(tokens, channels);
-        backend.Transpose2D(output, convolved, channels, tokens);
-        return scratch.Detach(output);
+        Tensor output = new(new TensorShape((long)frames * spatial, channels), DType.F32);
+        try
+        {
+            // The token-major rows are convolved along the frame axis in place: no channel-first round trip.
+            backend.DepthwiseConvFrames(output, input, kernel, frames, spatial, channels, Taps, SourceTaps - 1);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The chunk-causal form of <see cref="Apply"/> (upstream <c>_cached_temporal_short_conv</c>): the causal half
+    /// reads the <paramref name="contextFrames"/> frames of <paramref name="context"/> that precede the chunk, the reverse half
+    /// stays inside the chunk. That is the same symmetric filter over <c>[context ⊕ input]</c> with zero padding after the
+    /// chunk, read at the chunk's frames. A null context is a stream's first chunk: plain <see cref="Apply"/>.</summary>
+    /// <param name="context">Token rows <c>[contextFrames·spatial, C]</c> of the frames before the chunk, or null.</param>
+    internal static Tensor ApplyWithContext(IBackend backend, Tensor input, Tensor kernel, int frames, int spatial, int channels,
+        Tensor? context, int contextFrames)
+    {
+        if (context is null || contextFrames == 0)
+            return Apply(backend, input, kernel, frames, spatial, channels);
+        if (context.ElementCount != (long)contextFrames * spatial * channels)
+            throw new ArgumentException($"The context must hold {contextFrames} frames of {spatial}x{channels}; got {context.Shape}.",
+                nameof(context));
+        // A stream keeps its tail narrower than the chunk (BF16, as upstream's cache); the convolution reads it widened.
+        using Tensor? widened = context.DType == input.DType ? null : StreamingTensors.CastTo(backend, context, input.DType);
+        using Tensor joined = StreamingTensors.Concat(backend, [widened ?? context, input], 0);
+        using Tensor convolved = Apply(backend, joined, kernel, contextFrames + frames, spatial, channels);
+        return SanaWmTensors.Slice(backend, convolved, (long)contextFrames * spatial * channels,
+            new TensorShape((long)frames * spatial, channels));
     }
 }

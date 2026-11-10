@@ -186,10 +186,34 @@ public sealed class SanaWmCameraConditioning : IDisposable
         if (frames == 0 || latentIntrinsics.Count != frames)
             throw new ArgumentException($"Need one intrinsics entry per pose; got {latentIntrinsics.Count} for {frames} poses.",
                 nameof(latentIntrinsics));
+        return PackRange(relativePoses, latentIntrinsics, latentHeight, latentWidth, 0, (frames - 1) / TemporalStride + 1);
+    }
+
+    /// <summary><see cref="Pack"/> for latent frames <c>[firstLatentFrame, firstLatentFrame + latentFrames)</c> only: the camera
+    /// inputs of one chunk of a stream, whose path need only reach the chunk's last raw frame.</summary>
+    /// <param name="relativePoses">Poses relative to frame 0, one per raw frame, reaching at least raw frame
+    /// <c>8·(firstLatentFrame + latentFrames − 1)</c>.</param>
+    /// <param name="latentIntrinsics">One entry for every raw frame, or one per raw frame covering the same range.</param>
+    /// <returns>The conditions (<c>latentFrames·20</c> floats) and the host F32 chunk Plücker
+    /// <c>[1, 48, latentFrames, H, W]</c>, owned by the caller.</returns>
+    public static (float[] Conditions, Tensor ChunkPlucker) PackRange(IReadOnlyList<float[]> relativePoses,
+        IReadOnlyList<PinholeIntrinsics> latentIntrinsics, int latentHeight, int latentWidth, int firstLatentFrame, int latentFrames)
+    {
+        ArgumentNullException.ThrowIfNull(relativePoses);
+        ArgumentNullException.ThrowIfNull(latentIntrinsics);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentHeight, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(latentWidth, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(firstLatentFrame);
+        ArgumentOutOfRangeException.ThrowIfLessThan(latentFrames, 1);
+        int frames = relativePoses.Count;
+        int lastRaw = (firstLatentFrame + latentFrames - 1) * TemporalStride;
+        if (lastRaw >= frames)
+            throw new ArgumentException($"Latent frame {firstLatentFrame + latentFrames - 1} samples raw frame {lastRaw}; the path "
+                + $"has {frames} poses.", nameof(relativePoses));
+        if (latentIntrinsics.Count != 1 && latentIntrinsics.Count <= lastRaw)
+            throw new ArgumentException($"Need one intrinsics entry, or one per raw frame through {lastRaw}; got "
+                + $"{latentIntrinsics.Count}.", nameof(latentIntrinsics));
 
-        int latentFrames = (frames - 1) / TemporalStride + 1;
         float[] conditions = new float[latentFrames * ConditionWidth];
         int plane = latentHeight * latentWidth;
         Tensor plucker = new(new TensorShape([1, PluckerChannels, latentFrames, latentHeight, latentWidth]), DType.F32, DeviceKind.Cpu);
@@ -200,9 +224,9 @@ public sealed class SanaWmCameraConditioning : IDisposable
             float[] rays = new float[plane * PluckerEmbedding.Channels];
             for (int t = 0; t < latentFrames; t++)
             {
-                int index = t * TemporalStride;
+                int index = (firstLatentFrame + t) * TemporalStride;
                 relativePoses[index].AsSpan(0, 16).CopyTo(conditions.AsSpan(t * ConditionWidth));
-                PinholeIntrinsics k = latentIntrinsics[index];
+                PinholeIntrinsics k = IntrinsicsAt(latentIntrinsics, index);
                 conditions[t * ConditionWidth + 16] = k.Fx;
                 conditions[t * ConditionWidth + 17] = k.Fy;
                 conditions[t * ConditionWidth + 18] = k.Cx;
@@ -212,7 +236,7 @@ public sealed class SanaWmCameraConditioning : IDisposable
                 for (int slot = 0; slot < TemporalStride; slot++)
                 {
                     int raw = Math.Min(start + slot, frames - 1);
-                    PinholeIntrinsics rawK = latentIntrinsics[raw];
+                    PinholeIntrinsics rawK = IntrinsicsAt(latentIntrinsics, raw);
                     PluckerEmbedding.Compute(relativePoses[raw], rawK.Fx, rawK.Fy, rawK.Cx, rawK.Cy, latentHeight, latentWidth, rays,
                         0f, PluckerLayout.DirectionMoment);
                     for (int c = 0; c < PluckerEmbedding.Channels; c++)
@@ -236,6 +260,9 @@ public sealed class SanaWmCameraConditioning : IDisposable
 
     /// <inheritdoc/>
     public void Dispose() => Interlocked.Exchange(ref _chunkPlucker, null)?.Dispose();
+
+    private static PinholeIntrinsics IntrinsicsAt(IReadOnlyList<PinholeIntrinsics> intrinsics, int rawFrame) =>
+        intrinsics[intrinsics.Count == 1 ? 0 : rawFrame];
 
     // np.linspace(0, 1, n, dtype=float32): i/(n−1) in double, the last point exactly 1, rounded to single.
     private static double[] LinspaceSingle(int count)

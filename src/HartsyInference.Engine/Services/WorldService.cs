@@ -71,10 +71,19 @@ public sealed class WorldService : IWorldService, IDisposable
     /// null draws and encodes one. The run's phase takes ownership of the returned tensor.</summary>
     internal Func<WorldPlan, Core.Tensors.Tensor?>? SanaWmInitialLatent { get; set; }
 
+    /// <summary>Supplies recorded upstream tensors for each SANA-WM stream (parity tests replay a recorded seed latent and
+    /// per-chunk noise); null draws and encodes them.</summary>
+    internal Func<WorldPlan, SanaWmStreamInjection?>? SanaWmStreamInjection { get; set; }
+
     /// <summary>Opens a session that renders <paramref name="plan"/>'s clip with <paramref name="pipeline"/> in one run. Every run
     /// from this service queues behind the same execution lease.</summary>
     internal IWorldSession OpenOneShot(IOneShotClipPipeline pipeline, WorldPlan plan) =>
         new OneShotWorldSession(pipeline, plan, _executionLease, _runLedger);
+
+    /// <summary>Opens a session that streams <paramref name="plan"/> chunk by chunk with <paramref name="pipeline"/>. A stream
+    /// holds the same execution lease as a batch run for as long as it runs, so the two never share the device.</summary>
+    internal IWorldSession OpenChunked(IChunkedWorldPipeline pipeline, WorldPlan plan) =>
+        new ChunkedWorldSession(pipeline, plan, _executionLease, _runLedger);
 
     /// <inheritdoc/>
     public IWorldSession Open(ModelSpec spec, WorldRequest request)
@@ -130,6 +139,7 @@ public sealed class WorldService : IWorldService, IDisposable
                 WorldArchitecture.Diamond => LoadDiamond(spec),
                 WorldArchitecture.HunyuanGameCraft => LoadHunyuanGameCraft(spec),
                 WorldArchitecture.SanaWm => LoadSanaWm(spec),
+                WorldArchitecture.SanaWmStreaming => LoadSanaWmStreaming(spec),
                 _ => throw new NotSupportedException($"The {architecture} architecture has no loader."),
             };
             _pipelines[key] = loaded;
@@ -237,6 +247,17 @@ public sealed class WorldService : IWorldService, IDisposable
         WorldComponents components = WorldComponentResolver.Resolve(spec);
         return LoadInPhase("SANA-WM", spec, phase => new LoadedWorld(phase, plan => OpenOneShot(
             new SanaWmClipPipeline(() => new SanaWmEngineComponents(_engine.Backend, components, _runLedger), SanaWmInitialLatent), plan)));
+    }
+
+    /// <summary>Resolves SANA-WM streaming's DiT, causal VAE, Gemma-2 text encoder and tokenizer files. As with the batch model
+    /// nothing is loaded here: each stream loads its own components under its own phases and releases them when it ends
+    /// (<see cref="SanaWmEngineComponents"/>), so the cache entry holds file paths only.</summary>
+    private LoadedWorld LoadSanaWmStreaming(ModelSpec spec)
+    {
+        WorldComponents components = WorldComponentResolver.Resolve(spec);
+        return LoadInPhase("SANA-WM streaming", spec, phase => new LoadedWorld(phase, plan => OpenChunked(
+            new SanaWmStreamPipeline(() => new SanaWmEngineComponents(_engine.Backend, components, _runLedger), SanaWmStreamInjection),
+            plan)));
     }
 
     /// <summary>Runs one model load under a fresh <see cref="WorldPhase"/>. A load that throws releases everything it acquired

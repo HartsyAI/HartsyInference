@@ -144,6 +144,191 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
         Compare($"synthetic DiT, batch {batch}", RunOnBoth(Run));
     }
 
+    /// <summary>The CUDA <see cref="IBackend.FrameDeltaScan"/> (batched Gram, injection and readout GEMMs around the recurrence
+    /// kernel) against the host reference at the real head width, for a 112-wide value and for the unit value of a
+    /// denominator, with operand scales like the model's (ReLU'd keys scaled by D^-1/2·S^-1/2, beta and decay in (0, 1)).</summary>
+    [Theory]
+    [InlineData(112)]
+    [InlineData(1)]
+    public void FrameDeltaScan_RealHeadWidth_CudaMatchesHostReference(int valueDim)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int frames = 5, spatial = 40, heads = 3, keyDim = 112;
+        long tokens = (long)frames * spatial;
+        Random random = new(1234);
+        float keyScale = (float)(Math.Pow(keyDim, -0.5) * Math.Pow(spatial, -0.5));
+        List<Tensor> owned = [];
+        Tensor Fill(long[] dims, Func<float> sample)
+        {
+            Tensor tensor = new(new TensorShape(dims), DType.F32);
+            Span<float> values = tensor.AsSpan<float>();
+            for (int i = 0; i < values.Length; i++)
+                values[i] = sample();
+            owned.Add(tensor);
+            return tensor;
+        }
+
+        Tensor query = Fill([tokens, heads * keyDim], () => MathF.Max(0f, (float)random.NextDouble() * 2f - 0.5f));
+        Tensor key = Fill([tokens, heads * keyDim], () => MathF.Max(0f, (float)random.NextDouble() * 2f - 0.5f) * keyScale * 8f);
+        Tensor? value = valueDim == 1 ? null : Fill([tokens, heads * valueDim], () => (float)random.NextDouble() * 2f - 1f);
+        Tensor beta = Fill([heads, frames, spatial], () => (float)random.NextDouble());
+        Tensor decay = Fill([heads, frames], () => 0.5f + 0.5f * (float)random.NextDouble());
+        try
+        {
+            float[] Run(IBackend backend)
+            {
+                using Tensor output = new(new TensorShape(tokens, heads * valueDim), DType.F32);
+                backend.FrameDeltaScan(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim);
+                return Read(backend, output);
+            }
+
+            (float[] cpu, float[] cuda) = RunOnBoth(Run);
+            double error = 0, norm = 0;
+            for (int i = 0; i < cpu.Length; i++)
+            {
+                error += (double)(cpu[i] - cuda[i]) * (cpu[i] - cuda[i]);
+                norm += (double)cpu[i] * cpu[i];
+            }
+
+            double relative = Math.Sqrt(error / Math.Max(norm, double.Epsilon));
+            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}: relative L2 {relative:E3} (TF32 GEMMs)");
+            Compare($"FrameDeltaScan valueDim {valueDim}", (cpu, cuda));
+            Assert.True(relative < 5e-3, $"FrameDeltaScan relative L2 {relative:E3} against the host reference.");
+
+            // Streaming: the same scan started from a carried forward state, also writing the state it ends in.
+            Tensor initial = Fill([heads, keyDim, valueDim], () => ((float)random.NextDouble() * 2f - 1f) * 0.05f);
+            float[] RunCarried(IBackend backend)
+            {
+                using Tensor output = new(new TensorShape(tokens, heads * valueDim), DType.F32);
+                using Tensor final = new(new TensorShape(heads, keyDim, valueDim), DType.F32);
+                backend.FrameDeltaScan(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim, initial, final);
+                return [.. Read(backend, output), .. Read(backend, final)];
+            }
+
+            (float[] cpuCarried, float[] cudaCarried) = RunOnBoth(RunCarried);
+            double carriedError = 0, carriedNorm = 0;
+            for (int i = 0; i < cpuCarried.Length; i++)
+            {
+                carriedError += (double)(cpuCarried[i] - cudaCarried[i]) * (cpuCarried[i] - cudaCarried[i]);
+                carriedNorm += (double)cpuCarried[i] * cpuCarried[i];
+            }
+
+            double carriedRelative = Math.Sqrt(carriedError / Math.Max(carriedNorm, double.Epsilon));
+            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}, carried state: relative L2 {carriedRelative:E3}");
+            Assert.False(cpuCarried.AsSpan(0, cpu.Length).SequenceEqual(cpu), "The carried state did not change the scan.");
+            Assert.True(carriedRelative < 5e-3, $"Carried-state FrameDeltaScan relative L2 {carriedRelative:E3} against the host reference.");
+        }
+        finally
+        {
+            SanaWmTensors.DisposeAll(owned);
+        }
+    }
+
+    /// <summary>The fused CUDA kernels behind <see cref="IBackend.UcpeTransform"/>, <see cref="IBackend.DepthwiseConvFrames"/> and
+    /// <see cref="IBackend.DepthwiseConvGlu"/> (F32 and BF16) against their host references, at the real head and channel widths.</summary>
+    [Theory]
+    [InlineData("ucpe")]
+    [InlineData("frames")]
+    [InlineData("rmsrelu")]
+    [InlineData("glu-f32")]
+    [InlineData("glu-bf16")]
+    [InlineData("glu-bf16-vec")]
+    public void FusedOps_CudaMatchHostReference(string op)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        Random random = new(4321);
+        List<Tensor> owned = [];
+        Tensor Fill(long[] dims, DType dtype = default)
+        {
+            Tensor f32 = new(new TensorShape(dims), DType.F32);
+            Span<float> values = f32.AsSpan<float>();
+            for (int i = 0; i < values.Length; i++)
+                values[i] = (float)random.NextDouble() * 2f - 1f;
+            owned.Add(f32);
+            if (dtype != DType.BF16)
+                return f32;
+            Tensor bf16 = f32.CastTo(DType.BF16);
+            owned.Add(bf16);
+            return bf16;
+        }
+
+        try
+        {
+            Func<IBackend, float[]> run;
+            switch (op)
+            {
+                case "ucpe":
+                {
+                    const int tokens = 37, heads = 3, headDim = 112;
+                    Tensor input = Fill([tokens, heads * headDim]), matrices = Fill([tokens, 4, 4]);
+                    Tensor cos = Fill([tokens, headDim / 2]), sin = Fill([tokens, headDim / 2]);
+                    run = backend =>
+                    {
+                        using Tensor output = new(new TensorShape(tokens, heads * headDim), DType.F32);
+                        backend.UcpeTransform(output, input, matrices, cos, sin, tokens, heads, headDim);
+                        return Read(backend, output);
+                    };
+                    break;
+                }
+                case "rmsrelu":
+                {
+                    const int rows = 29, width = 2240;
+                    Tensor input = Fill([rows, width]), weight = Fill([width]);
+                    run = backend =>
+                    {
+                        using Tensor output = new(new TensorShape(rows * 20, width / 20), DType.F32);
+                        backend.RmsNormRelu(output, input, weight, 1e-5f, 0.0213f);
+                        return Read(backend, output);
+                    };
+                    break;
+                }
+                case "frames":
+                {
+                    const int frames = 6, spatial = 11, channels = 96, taps = 7;
+                    Tensor input = Fill([frames * spatial, channels]), weight = Fill([channels, taps]);
+                    run = backend =>
+                    {
+                        using Tensor output = new(new TensorShape(frames * spatial, channels), DType.F32);
+                        backend.DepthwiseConvFrames(output, input, weight, frames, spatial, channels, taps, 3);
+                        return Read(backend, output);
+                    };
+                    break;
+                }
+                default:
+                {
+                    // glu-bf16-vec takes the vectorized kernel (whole 8-channel groups, whole 4-pixel runs); the others the
+                    // per-element one. The BF16 cases read SiLU'd inputs, as the FFN does.
+                    DType dtype = op.StartsWith("glu-bf16", StringComparison.Ordinal) ? DType.BF16 : DType.F32;
+                    bool inputSilu = dtype == DType.BF16;
+                    int frames = 2, height = 5, width = op == "glu-bf16-vec" ? 8 : 7, hidden = 40;
+                    Tensor input = Fill([frames * height * width, 2 * hidden], dtype), taps = Fill([3, 3, 2 * hidden]);
+                    Tensor bias = Fill([2 * hidden]);
+                    run = backend =>
+                    {
+                        using Tensor output = new(new TensorShape(frames * height * width, hidden), dtype);
+                        backend.DepthwiseConvGlu(output, input, taps, bias, frames, height, width, 3, inputSilu);
+                        backend.OffloadActivation(output);
+                        using Tensor f32 = output.DType == DType.F32 ? new Tensor(output.Shape, DType.F32) : output.CastTo(DType.F32);
+                        return output.DType == DType.F32 ? output.AsReadOnlySpan<float>().ToArray() : f32.AsReadOnlySpan<float>().ToArray();
+                    };
+                    break;
+                }
+            }
+
+            (float[] cpu, float[] cuda) = RunOnBoth(run);
+            double maxAbs = 0;
+            for (int i = 0; i < cpu.Length; i++)
+                maxAbs = Math.Max(maxAbs, Math.Abs(cpu[i] - cuda[i]));
+            _output.WriteLine($"{op}: max abs {maxAbs:E3} over {cpu.Length} values");
+            // F32 kernels sum in the reference's tap order up to FMA contraction; BF16 output rounds once (2^-8 relative).
+            Assert.True(maxAbs < (op.StartsWith("glu-bf16", StringComparison.Ordinal) ? 2e-2 : 1e-4), $"{op}: CUDA against host max abs {maxAbs:E3}.");
+        }
+        finally
+        {
+            SanaWmTensors.DisposeAll(owned);
+        }
+    }
+
     private (float[] Cpu, float[] Cuda) RunOnBoth(Func<IBackend, float[]> run)
     {
         float[] cpu;

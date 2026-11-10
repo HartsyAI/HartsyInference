@@ -55,7 +55,7 @@ public sealed class SanaWmBlockRealWeightsTests : IClassFixture<SanaWmBlockRealW
         List<Tensor> scratch = [];
         try
         {
-            SanaWmGlumbTempFfn ffn = new(
+            using SanaWmGlumbTempFfn ffn = new(
                 ToF32(backend, weights["blocks.0.mlp.inverted_conv.conv.weight"], owned), weights["blocks.0.mlp.inverted_conv.conv.bias"],
                 ToF32(backend, weights["blocks.0.mlp.depth_conv.conv.weight"], owned), weights["blocks.0.mlp.depth_conv.conv.bias"],
                 ToF32(backend, weights["blocks.0.mlp.point_conv.conv.weight"], owned), ToF32(backend, weights["blocks.0.mlp.t_conv.weight"], owned));
