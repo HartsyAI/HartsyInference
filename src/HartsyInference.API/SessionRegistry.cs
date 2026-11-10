@@ -54,12 +54,21 @@ public class SessionRegistry<TSession> : IDisposable
         if (_sessions.TryGetValue(id, out Entry? entry)) entry.Touch();
     }
 
-    /// <summary>Removes and releases the session, if present. Returns whether one was found.</summary>
+    /// <summary>Removes and releases the session, if present. Returns whether one was found. The session is gone from the registry
+    /// either way: a release that throws is logged, not surfaced, so a client's DELETE does not report a failure for a session that is
+    /// no longer reachable.</summary>
     public async ValueTask<bool> CloseAsync(string id)
     {
         if (!_sessions.TryRemove(id, out Entry? entry))
             return false;
-        await _close(entry.Session).ConfigureAwait(false);
+        try
+        {
+            await _close(entry.Session).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Core.Logging.Logs.Warning($"[SessionRegistry] Releasing a {typeof(TSession).Name} failed: {ex.Message}");
+        }
         return true;
     }
 

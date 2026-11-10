@@ -15,6 +15,10 @@ public sealed partial class TextService
     /// <summary>Loads a MOSS-VL GGUF or checkpoint folder onto <paramref name="slot"/>. Caller has already unloaded what the slot held.</summary>
     private void LoadMossVl(TextDeviceSlot slot, string deviceKey, string path, TextRequest request)
     {
+        // Parsed first: a mistyped precision fails here, before a backend is built or device memory touched.
+        DType? plainPrecision;
+        try { plainPrecision = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
+        catch (ArgumentException ex) { throw new HartsyInferenceException(ex.Message, ex); }
         if (slot.ExtraStageBackends is not null)
             DisposeStageBackends(slot);
         string buildSelector = string.IsNullOrWhiteSpace(request.Device) ? PrimaryDeviceKey() : request.Device.Trim().ToLowerInvariant();
@@ -41,9 +45,6 @@ public sealed partial class TextService
             backend.CacheQuantizedWeightCasts = false;
         try
         {
-            DType? plainPrecision;
-            try { plainPrecision = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
-            catch (ArgumentException ex) { throw new HartsyInferenceException(ex.Message, ex); }
             if (plainPrecision is not null && File.Exists(path))
                 Logs.Warning($"[TextService] WeightPrecision '{request.WeightPrecision}' applies to checkpoint folders; the GGUF loads at its own quant.");
             slot.MossVl = MossVlRuntime.Load(path, backend, lowVramQuant: !string.IsNullOrEmpty(request.LowVramQuant), plainPrecision);
@@ -117,7 +118,9 @@ public sealed partial class TextService
             return;
         long shardBytes = Directory.EnumerateFiles(folder, "*.safetensors").Sum(f => new FileInfo(f).Length);
         const long MarginBytes = 4L << 30;
-        // BF16 widens 2x; a 4-bit or FP8 folder holds 4-8 bit projections that widen 4-8x, so 4x the shards bounds it.
+        // BF16 shards widen 2x. A quantized folder widens 4x (FP8) to 8x (NF4) per quantized projection, but its shards also hold
+        // BF16 layers (cross-attention, the first and last blocks, the vision tower) that widen only 2x, and the quantized
+        // projections are decoded one at a time into the disk cache and mapped, not held at once; 4x the shards bounds the peak.
         long widen = ModelAssets.Checkpoints.HfQuantCheckpoint.DeclaresQuantization(folder) ? 4 : 2;
         long requiredBytes = widen * shardBytes + MarginBytes;
         long availableBytes = availableKb * 1024;
@@ -131,9 +134,20 @@ public sealed partial class TextService
     /// <summary>Notes once per slot that a kept MOSS-VL model was loaded with a different low-VRAM setting than this request asks for.</summary>
     private static void LogMossVlLowVramMismatch(TextDeviceSlot slot, string deviceKey, TextRequest request)
     {
-        if (slot.MossVl is not { } runtime || request.LowVramQuant is null)
+        if (slot.MossVl is not { } runtime)
             return;
-        LogLoadTimeSettingMismatch(slot, deviceKey, "LowVramQuant", request.LowVramQuant.Length > 0, runtime.LowVramQuant);
+        if (request.LowVramQuant is not null)
+            LogLoadTimeSettingMismatch(slot, deviceKey, "LowVramQuant", request.LowVramQuant.Length > 0, runtime.LowVramQuant);
+        // A precision only applies to a folder load; a GGUF keeps its own quant whatever was asked.
+        if (request.WeightPrecision is not null && !runtime.Model.IsGguf && slot.LoggedSettingMismatches.Add("WeightPrecision"))
+        {
+            DType? requested;
+            try { requested = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
+            catch (ArgumentException) { return; }   // a mistyped value is reported by the load that would use it
+            if (requested != runtime.PlainPrecision)
+                Logs.Debug($"[TextService] WeightPrecision '{request.WeightPrecision}' requested for the already-loaded slot on {deviceKey}, but it "
+                    + $"was loaded with {runtime.PlainPrecision?.Name ?? "native"} projections; it takes effect on the next load, so unload the slot to change it.");
+        }
     }
 
     /// <summary>The most recent user message carrying images or a video, or null.</summary>

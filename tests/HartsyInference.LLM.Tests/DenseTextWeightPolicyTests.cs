@@ -91,6 +91,9 @@ public sealed class DenseTextWeightPolicyTests
     [InlineData("native", null)]
     [InlineData("q8_0", "Q8_0")]
     [InlineData("Q4_K", "Q4_K")]
+    [InlineData("q4", "Q4_K")]      // a bare q4 means what it means for every other model
+    [InlineData("q4_0", "Q4_0")]
+    [InlineData("q6", "Q6_K")]
     public void PrecisionNamesParse(string? name, string? expected) =>
         Assert.Equal(expected, DenseTextWeightPolicy.ParsePlainPrecision(name)?.Name);
 

@@ -109,8 +109,10 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
     private readonly object _pushLock = new();
     private Thread? _thread;
     private double _lastTimestamp = double.NegativeInfinity;
+    private readonly object _lifecycle = new();
     private long _generated, _framesProcessed, _framesDropped;
     private int _disposed;
+    private int _stopped;
 
     public RealtimeVlmSession(IStreamingVlmDecoder decoder, IStreamingFrameEncoder encoder, IRealtimeVlmProtocol protocol,
         ILlmTokenizer tokenizer, RealtimeVlmOptions? options = null)
@@ -138,12 +140,16 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
     /// <exception cref="InvalidOperationException">The session already started.</exception>
     public void Start(string? systemPrompt, string initialPrompt)
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         string opening = _protocol.InitialPrompt(systemPrompt ?? _protocol.DefaultSystemPrompt, initialPrompt ?? string.Empty);
-        Thread thread = new(() => Run(opening)) { IsBackground = true, Name = "realtime-vlm" };
-        if (Interlocked.CompareExchange(ref _thread, thread, null) is not null)
-            throw new InvalidOperationException("The session is already running.");
-        thread.Start();
+        // Under the lifecycle lock with DisposeAsync's read of the thread, so a dispose either sees the thread or stops this start.
+        lock (_lifecycle)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            if (_thread is not null)
+                throw new InvalidOperationException("The session is already running.");
+            _thread = new Thread(() => Run(opening)) { IsBackground = true, Name = "realtime-vlm" };
+            _thread.Start();
+        }
     }
 
     /// <summary>Queues a frame captured at <paramref name="timestampSeconds"/> in the stream. Returns true when the queue was full and
@@ -156,7 +162,7 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
         if (!double.IsFinite(timestampSeconds)) throw new ArgumentOutOfRangeException(nameof(timestampSeconds), "A frame timestamp must be finite.");
         lock (_pushLock)
         {
-            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            ThrowIfUnusable();
             if (timestampSeconds < _lastTimestamp)
                 throw new ArgumentException($"Frame timestamps must not go backwards: {timestampSeconds} after {_lastTimestamp}.", nameof(timestampSeconds));
             _lastTimestamp = timestampSeconds;
@@ -170,8 +176,15 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
     public void PushPrompt(string prompt)
     {
         ArgumentNullException.ThrowIfNull(prompt);
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        ThrowIfUnusable();
         _prompts.Writer.TryWrite(prompt);
+    }
+
+    /// <summary>Input after the loop has stopped (disposed, or faulted) can never be read, so it is refused rather than accepted silently.</summary>
+    private void ThrowIfUnusable()
+    {
+        if (Volatile.Read(ref _disposed) != 0 || Volatile.Read(ref _stopped) != 0)
+            throw new ObjectDisposedException(nameof(RealtimeVlmSession), "The session has stopped: it was disposed or its loop failed.");
     }
 
     /// <summary>The session's events, in order, until it stops or faults.</summary>
@@ -181,10 +194,12 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        Thread? thread;
+        lock (_lifecycle) thread = _thread;
         _stop.Cancel();
         _frames.Writer.TryComplete();
         _prompts.Writer.TryComplete();
-        if (Volatile.Read(ref _thread) is { } thread)
+        if (thread is not null)
             await Task.Run(thread.Join).ConfigureAwait(false);
         _events.Writer.TryComplete();
         _decoder.Dispose();
@@ -215,6 +230,8 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
                 if (budget > TimeSpan.Zero) stop.WaitHandle.WaitOne(budget);
                 clock.Restart();
 
+                // Only the silence token idles the loop. The reference sampler has no end-of-turn stop either: after an <|im_end|> it
+                // keeps decoding, and a prompt's segment adds its own turn boundary.
                 bool idle = token == _protocol.SilenceTokenId;
                 Drain(frames, prompts);
                 while (idle && frames.Count == 0 && prompts.Count == 0 && !stop.IsCancellationRequested)
@@ -258,6 +275,7 @@ public sealed class RealtimeVlmSession : IAsyncDisposable
         }
         finally
         {
+            Volatile.Write(ref _stopped, 1);   // input after this point can never be read
             _events.Writer.TryComplete();
         }
     }

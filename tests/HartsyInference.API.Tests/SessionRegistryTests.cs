@@ -47,6 +47,16 @@ public sealed class SessionRegistryTests
     }
 
     [Fact]
+    public async Task AFailingCloseStillRemovesTheSessionAndReportsItClosed()
+    {
+        using SessionRegistry<Probe> registry = new(TimeSpan.FromMinutes(10), _ => throw new InvalidOperationException("boom"));
+        string id = registry.Register(new Probe());
+        Assert.True(await registry.CloseAsync(id));
+        Assert.Null(registry.Get(id));
+        Assert.False(await registry.CloseAsync(id));
+    }
+
+    [Fact]
     public void DisposeClosesEverySessionStillOpen()
     {
         SessionRegistry<Probe> registry = Registry();

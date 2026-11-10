@@ -24,5 +24,10 @@ internal sealed class GatedStreamingDecoder(IStreamingVlmDecoder inner, Func<Can
         return inner.ForwardSample(ids, frames, sampler, history, cancel);
     }
 
-    public void Dispose() => inner.Dispose();
+    /// <summary>Frees the session's KV caches under the gate: the device's other services may be submitting work while it runs.</summary>
+    public void Dispose()
+    {
+        using IDisposable held = gate(CancellationToken.None);
+        inner.Dispose();
+    }
 }

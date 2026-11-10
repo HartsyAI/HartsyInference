@@ -366,11 +366,14 @@ public sealed partial class HfQuantCheckpoint : IDisposable
         Add(new HfQuantWeight(key, location.Shape, HfWeightStorage.Fp8Channel, location.DType, key));
     }
 
+    private static readonly string[] Fp8ScaleSuffixes = [".weight_scale", ".input_scale"];
+
     /// <summary>The <c>weight_scale</c> (and compressed-tensors' static <c>input_scale</c>) beside an FP8 weight that has no
-    /// <c>weight_scale_inv</c>: read with the weight, not as a weight of its own.</summary>
+    /// <c>weight_scale_inv</c>: read with the weight, not as a weight of its own. <c>input_scale</c> is only skipped: this loader
+    /// runs weight-only (activations are not quantized), so the static activation scale has no use.</summary>
     private bool IsFp8ScaleCompanion(string key)
     {
-        foreach (string suffix in (string[])[".weight_scale", ".input_scale"])
+        foreach (string suffix in Fp8ScaleSuffixes)
         {
             if (!key.EndsWith(suffix, StringComparison.Ordinal)) continue;
             string weight = key[..^suffix.Length] + Weight;
