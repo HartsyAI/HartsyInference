@@ -93,7 +93,8 @@ public sealed class Ernie5OpsParityTests
         CpuBackend cpu = new();
         Random rng = new(11);
         float[] specials = [float.NaN, float.NegativeInfinity, float.PositiveInfinity, -0f, 0f, 1f, 1f, -2f];
-        foreach ((int rows, int cols, int topK, int offset) in new[] { (5, 37, 9, 0), (3, 1000, 64, 7), (4, 600, 600, 0), (2, 10, 50, -3), (1, 513, 1, 0) })
+        (int Rows, int Cols, int TopK, int Offset)[] cases = [(5, 37, 9, 0), (3, 1000, 64, 7), (4, 600, 600, 0), (2, 10, 50, -3), (1, 513, 1, 0)];
+        foreach ((int rows, int cols, int topK, int offset) in cases)
         {
             float[] scores = new float[rows * cols];
             for (int i = 0; i < scores.Length; i++)
@@ -161,9 +162,12 @@ public sealed class Ernie5OpsParityTests
         {
             float[] x = Values(rng, m * groups * d, 1f);
             using Tensor input = Make(x, m, groups * d);
-            using Tensor weight = fp8 ? MakeBytes(RandomCodes(rng, groups * r * d), groups * r, d) : Make(Values(rng, groups * r * d, 1f), groups * r, d);
+            using Tensor weight = fp8
+                ? MakeBytes(RandomCodes(rng, groups * r * d), groups * r, d)
+                : Make(Values(rng, groups * r * d, 1f), groups * r, d);
             int gridRows = (groups * r + 127) / 128, gridCols = (d + 127) / 128;
-            using Tensor? scale = fp8 ? Make(Values(rng, gridRows * gridCols, 1f).Select(v => 0.5f + MathF.Abs(v)).ToArray(), gridRows, gridCols) : null;
+            float[] scales = Values(rng, gridRows * gridCols, 1f).Select(v => 0.5f + MathF.Abs(v)).ToArray();
+            using Tensor? scale = fp8 ? Make(scales, gridRows, gridCols) : null;
             using Tensor expected = new(new TensorShape(m, groups * r), DType.F32), actual = new(new TensorShape(m, groups * r), DType.F32);
             cpu.BlockDiagonalLinear(expected, input, weight, scale, groups);
             device.BlockDiagonalLinear(actual, input, weight, scale, groups);
@@ -237,7 +241,8 @@ public sealed class Ernie5OpsParityTests
     {
         Assert.Equal(want.Length, got.Length);
         for (int i = 0; i < want.Length; i++)
-            Assert.True(MathF.Abs(want[i] - got[i]) <= tolerance * MathF.Max(1f, MathF.Abs(want[i])), $"{label} element {i}: cpu {want[i]} device {got[i]}");
+            Assert.True(MathF.Abs(want[i] - got[i]) <= tolerance * MathF.Max(1f, MathF.Abs(want[i])),
+                $"{label} element {i}: cpu {want[i]} device {got[i]}");
     }
 
     private static byte[] RandomCodes(Random rng, int count)

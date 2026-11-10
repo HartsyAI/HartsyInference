@@ -113,7 +113,8 @@ public sealed partial class CudaKernels
     public unsafe void LaunchBlockDiagonalLinear(ulong x, ulong w, ulong scale, ulong y, int m, int n, int k, int inWidth, int groupRows,
         int blockRows, int blockCols, nint stream)
     {
-        if (!HasBlockDiagonalLinearKernels) throw new InvalidOperationException("fp8_block_linear.ptx in the Ptx folder has no block_diag_linear entries.");
+        if (!HasBlockDiagonalLinearKernels)
+            throw new InvalidOperationException("fp8_block_linear.ptx in the Ptx folder has no block_diag_linear entries.");
         ulong xA = x, wA = w, sA = scale, yA = y;
         int mA = m, nA = n, kA = k, iwA = inWidth, grA = groupRows, brA = blockRows, bcA = blockCols, gcA = (k + blockCols - 1) / blockCols;
         uint gridY = (uint)Math.Min(m, 65535);

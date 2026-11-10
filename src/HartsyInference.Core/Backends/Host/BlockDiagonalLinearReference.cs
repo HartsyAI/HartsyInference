@@ -22,7 +22,8 @@ public static class BlockDiagonalLinearReference
         long rows = weight.Shape[0], d = weight.Shape[1];
         if (weight.DType == DType.F32)
         {
-            if (weightScaleInv is not null) throw new ArgumentException("An F32 BlockDiagonalLinear weight takes no scale grid.", nameof(weightScaleInv));
+            if (weightScaleInv is not null)
+                throw new ArgumentException("An F32 BlockDiagonalLinear weight takes no scale grid.", nameof(weightScaleInv));
         }
         else if (weight.DType == DType.F8E4M3)
         {
@@ -39,7 +40,8 @@ public static class BlockDiagonalLinearReference
             throw new NotSupportedException($"BlockDiagonalLinear takes an F32 or F8_E4M3 weight, not {weight.DType.Name}.");
         }
         if (d == 0 || rows % groups != 0)
-            throw new ArgumentException($"BlockDiagonalLinear weight {weight.Shape} must have D > 0 and rows divisible by {groups} groups.", nameof(weight));
+            throw new ArgumentException($"BlockDiagonalLinear weight {weight.Shape} must have D > 0 and rows divisible by {groups} groups.",
+                nameof(weight));
         long r = rows / groups, inWidth = groups * d;
         if (input.Shape.Rank < 1 || input.Shape[input.Shape.Rank - 1] != inWidth)
             throw new ArgumentException($"BlockDiagonalLinear input must end in G*D={inWidth}; got {input.Shape}.", nameof(input));

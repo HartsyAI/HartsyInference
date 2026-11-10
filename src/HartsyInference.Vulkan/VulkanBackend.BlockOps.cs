@@ -73,7 +73,8 @@ public sealed partial class VulkanBackend
             return;
         }
         using OpScope _op = EnterOp();
-        DispatchBlockLinear(output, input, weight, weightScaleInv, null, m, groups * r, d, groups * d, r, blockRows, blockCols, "BlockDiagonalLinear");
+        DispatchBlockLinear(output, input, weight, weightScaleInv, null, m, groups * r, d, groups * d, r, blockRows, blockCols,
+            "BlockDiagonalLinear");
     }
 
     // fp8_block_linear over an FP8 weight with its scales, or an F32 weight when scaleInv is null. The workgroup count in X is

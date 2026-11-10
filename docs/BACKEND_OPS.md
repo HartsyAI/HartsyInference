@@ -205,7 +205,7 @@ Reference: `GluReference.Apply`. Contract: `GluContract.Validate`. A `GluSpec` n
 `β_lin · tanh(u/β_lin)`, with `β` and `β_lin` in `GluSpec.SituBeta` and `SituLinearBeta`, defaulting to `SituDefaults`) and
 which half is the gate (`GluGateHalf.First` for `[gate | up]` projections, `Second` for `[value | gate]`). The presets
 `GluSpec.SwiGlu`, `GeGluFirst`, `GeGlu`, `GeGluErf` and `Situ` are the forms the models use. The CUDA and Vulkan kernels
-compile in the defaults and refuse other SiTU betas.
+take both betas as launch parameters, so any finite positive pair runs on the device.
 Input and output are F32, F16 or BF16 alike; the output's last extent is half the input's. The sigmoid takes the sign-aware
 form; the tanh GELU on CUDA keeps the fast-math `2 · sigmoid(2x) − 1` form of the kernels it replaced. `GluEmitQ8` is the same
 op with a Q8_1 sidecar of the output where a backend keeps one.
@@ -326,6 +326,39 @@ Reference: `FourierEmbedReference.Apply`. Contract: `FourierEmbedContract.Valida
 dimensions, the bands (at most 30, so `2^b` stays an exact integer) and whether the coordinates lead the row. F32 `[count, D]`
 coordinates. Hunyuan3D's query embedding is `(3, 8, IncludeInput: true)`.
 
+## SparseTopK
+
+```
+indices[r, :] = ascending columns of the k = min(topK, cols) best scores[r, :]; a column ≥ limits[r] becomes −1, any other + offset
+```
+
+Reference: `SparseTopKReference.Apply`. Best is largest under `float.CompareTo`: NaN ranks below every number, −0 equals
++0, and ties keep the lower column. F32 `[rows, cols]` scores, I32 `[rows]` limits, I32 `[rows, k]` output. The selection is
+exact, so every backend returns the CPU's indices bit for bit; the device kernels find the k-th best key in four 8-bit
+radix passes and compact the row in column order. The DSA indexer (ERNIE-5.5's top-2048) selects through it; the host
+`SparseTopK.SelectSorted` that DeepSeek-V4.1 uses shares its reference.
+
+## MergeWindowTopK
+
+```
+rows[t, :] = [ topk[t, :n] | seq−w … seq−1 | −1 … ]      seq = positions[t] + 1, n = min(max(seq − window, 0), topkCols), w = min(seq, window)
+```
+
+Reference: `WindowTopKMergeReference.Apply` (vLLM-ERNIE `merge_swa_topk`). I32 throughout; the output is at least
+`topkCols + window` wide and the top-k entries are copied as given.
+
+## BlockDiagonalLinear
+
+```
+output[m, g·R + r] = Σ_d input[m, g·D + d] · w[g·R + r, d]      w F32, or e4m3(code) · scale[row / blockRows, d / blockCols]
+```
+
+Reference: `BlockDiagonalLinearReference.Apply`. The grouped output projection `wo_a` of the HCA and DeepSeek-V4.1
+attention layers (ERNIE-5.5 has 8 groups): F32 `[..., G·D]` input, `[G·R, D]` weight, F32 `[..., G·R]` output. The FP8
+weight takes the same `weight_scale_inv` grid as `Fp8BlockLinear` laid over the whole matrix and stays packed on the device.
+The CPU sums an F32 weight in order in float, as `GroupedOutputProjection` always has, and an FP8 weight as
+`Fp8BlockLinear`, so one group equals it; the GPU kernels share `Fp8BlockLinear`'s kernel and agree within float tolerance.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -358,6 +391,9 @@ Every implementation of these ops:
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
+| `SparseTopK` | reference | `sparse_index.ptx` (`sparse_topk_f32`) | `sparse_topk` |
+| `MergeWindowTopK` | reference | `sparse_index.ptx` (`merge_window_topk_i32`) | `merge_window_topk` |
+| `BlockDiagonalLinear` | reference | `fp8_block_linear.ptx` (`block_diag_linear_f32`, `block_diag_linear_fp8_f32`) | `fp8_block_linear` |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 

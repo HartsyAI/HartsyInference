@@ -92,7 +92,8 @@ public sealed partial class CudaBackend
         if (m == 0) return;
         using OpScope _op = EnterOp();
         EnsureKernels();
-        if (!_kernels!.HasBlockDiagonalLinearKernels) throw new NotSupportedException("CUDA BlockDiagonalLinear needs fp8_block_linear.ptx with its block-diagonal entries.");
+        if (!_kernels!.HasBlockDiagonalLinearKernels)
+            throw new NotSupportedException("CUDA BlockDiagonalLinear needs fp8_block_linear.ptx with its block-diagonal entries.");
         nuint bytes = GpuTransferHelper.ByteSize(output);
         ulong pX = 0, pW = 0, pS = 0, pY = 0;
         bool cached = false;

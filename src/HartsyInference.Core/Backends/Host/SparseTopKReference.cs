@@ -20,7 +20,8 @@ public static class SparseTopKReference
             throw new NotSupportedException($"SparseTopK addresses at most {int.MaxValue} scores; got {scores.Shape}.");
         int k = (int)Math.Min(topK, cols);
         if (limits.DType != DType.I32 || limits.ElementCount != rows)
-            throw new ArgumentException($"SparseTopK limits must be I32 with {rows} entries; got {limits.Shape} {limits.DType.Name}.", nameof(limits));
+            throw new ArgumentException($"SparseTopK limits must be I32 with {rows} entries; got {limits.Shape} {limits.DType.Name}.",
+                nameof(limits));
         if (indices.DType != DType.I32 || indices.Shape.Rank != 2 || indices.Shape[0] != rows || indices.Shape[1] != k)
             throw new ArgumentException($"SparseTopK indices must be I32 [{rows}, {k}]; got {indices.Shape} {indices.DType.Name}.", nameof(indices));
         return ((int)rows, (int)cols, k);
