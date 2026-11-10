@@ -58,6 +58,25 @@ public sealed class CoverCropMappingTests
     }
 
     [Fact]
+    public void OddOverhang_FloorsTheCropOffset_LikeUpstreamIntegerDivision()
+    {
+        // Upstream crops at (resized - target) // 2, so an odd overhang puts the extra pixel on the right or bottom.
+        // 1700x930 -> 1280x704: scale 704/930 gives width 1286.9, which rounds to 1287, so 7 columns overhang and Left is 3, not 4.
+        CoverCropMapping wide = CoverCropMapping.Create(1700, 930, 1280, 704);
+        Assert.Equal(1287, wide.ResizedWidth);
+        Assert.Equal(704, wide.ResizedHeight);
+        Assert.Equal(3, wide.Left);
+        Assert.Equal(0, wide.Top);
+
+        // 1280x707 -> 1280x704: no resize, 3 rows overhang, Top is 1, not 2.
+        CoverCropMapping tall = CoverCropMapping.Create(1280, 707, 1280, 704);
+        Assert.Equal(1280, tall.ResizedWidth);
+        Assert.Equal(707, tall.ResizedHeight);
+        Assert.Equal(0, tall.Left);
+        Assert.Equal(1, tall.Top);
+    }
+
+    [Fact]
     public void RandomGeometry_PointsAndIntrinsics_RoundTrip()
     {
         Random rng = new(5);
