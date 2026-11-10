@@ -28,6 +28,22 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> CudnnVersion =
         Str("paths.cudnnVersion", null, KnobScope.Construction, KnobDomain.Paths, "Overrides the cuDNN redist version (default 9.21.0.82) used in the autofetch download URL.");
 
+    /// <summary>Lets the first CUDA backend construction download NVIDIA's cuBLAS redist into the per-user cache when none is installed.</summary>
+    public static readonly Knob<bool> CublasAutofetch =
+        Bool("paths.cublasAutofetch", true, KnobScope.Construction, KnobDomain.Paths, "Lets the first CUDA backend construction download NVIDIA's cuBLAS redist (about 0.4 GB on Windows, 0.9 GB on Linux) into the per-user cache when no cuBLAS is installed. Off leaves CUDA unavailable without the CUDA Toolkit.");
+
+    /// <summary>First directory searched for cublas64_N.dll/libcublas.so.N, ahead of the per-user cache and bundled copy.</summary>
+    public static readonly Knob<string?> CublasDir =
+        Str("paths.cublasDir", null, KnobScope.Construction, KnobDomain.Paths, "First directory searched for cublas64_N.dll/libcublas.so.N (and cuBLASLt), ahead of the per-user cache and bundled copy.");
+
+    /// <summary>Direct .tar.xz/.zip URL (or local archive path) the cuBLAS auto-fetch uses instead of NVIDIA's public redist.</summary>
+    public static readonly Knob<string?> CublasUrl =
+        Str("paths.cublasUrl", null, KnobScope.Construction, KnobDomain.Paths, "Direct .tar.xz/.zip URL, or a local archive path, the cuBLAS auto-fetch uses instead of NVIDIA's public redist. Skips the sha256 check.");
+
+    /// <summary>Overrides the cuBLAS redist version used in the autofetch download URL.</summary>
+    public static readonly Knob<string?> CublasVersion =
+        Str("paths.cublasVersion", null, KnobScope.Construction, KnobDomain.Paths, "Overrides the cuBLAS redist version (default 13.10.0.20 for CUDA 13, 12.9.2.10 for CUDA 12) used in the autofetch URL. Skips the sha256 check.");
+
     /// <summary>Filename of the LTX-2.5 latent x2 upsampler to load for the two-stage flow instead of the shipped default.</summary>
     public static readonly Knob<string?> Ltx2Upsampler =
         Str("paths.ltx2Upsampler", null, KnobScope.Construction, KnobDomain.Paths, "Filename of the LTX-2.5 latent x2 upsampler to load for the two-stage flow instead of the shipped default.");
