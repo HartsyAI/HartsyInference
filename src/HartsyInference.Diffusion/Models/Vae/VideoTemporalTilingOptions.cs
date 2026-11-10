@@ -31,12 +31,44 @@ public sealed record VideoTemporalTilingOptions
 
         int intervals = tileSampleMinFrames / compression;
         int strideLatent = tileSampleStrideFrames / compression;
-        return new VideoTemporalTilingOptions
+        VideoTemporalTilingOptions options = new()
         {
             TileLatentFrames = intervals + 1,
             StrideLatentFrames = strideLatent,
             CompressionRatio = compression,
             BlendLatentFrames = intervals - strideLatent,
         };
+        // An upstream setting that cannot be blended is refused here, where it can be named, not later inside Decode.
+        options.Validate();
+        return options;
+    }
+
+    /// <summary>Checks that the windows overlap enough to blend, and that the blend fits inside both that overlap and one stride, so
+    /// no frame is ramped by more than two windows. <see cref="VideoTemporalTiling.Decode"/> applies this before it decodes
+    /// anything.</summary>
+    /// <exception cref="ArgumentException">The geometry cannot be blended.</exception>
+    public void Validate()
+    {
+        if (CompressionRatio < 1)
+        {
+            throw new ArgumentException("Compression ratio must be at least 1.");
+        }
+        if (StrideLatentFrames < 1)
+        {
+            throw new ArgumentException("Stride must be at least 1 latent frame.");
+        }
+
+        // Consecutive windows share this many latent intervals; the blend must fit inside it and inside one stride,
+        // so that no frame is ramped by more than two windows.
+        int overlap = TileLatentFrames - 1 - StrideLatentFrames;
+        int maxBlend = Math.Min(StrideLatentFrames, overlap);
+        if (maxBlend < 1)
+        {
+            throw new ArgumentException($"Tile {TileLatentFrames} with stride {StrideLatentFrames} leaves no overlap to blend across.");
+        }
+        if (BlendLatentFrames < 1 || BlendLatentFrames > maxBlend)
+        {
+            throw new ArgumentException($"Blend {BlendLatentFrames} must be in [1, {maxBlend}].");
+        }
     }
 }

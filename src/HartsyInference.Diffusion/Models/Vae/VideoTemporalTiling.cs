@@ -16,15 +16,17 @@ namespace HartsyInference.Diffusion.Models.Vae;
 public static unsafe class VideoTemporalTiling
 {
     /// <summary>Decodes a host F32 latent <c>[B, C, T, H, W]</c> window by window into <c>[B, Cout, C·(T−1)+1, Ho, Wo]</c>.
-    /// The delegate borrows each window, which the helper disposes. It returns a new F32 tensor that the helper disposes
-    /// after blending; the caller owns the result.</summary>
+    /// The delegate borrows each window and must neither modify it nor keep it. A latent longer than one tile is cut into
+    /// windows that are copies, which the helper disposes. A latent that fits one tile is passed whole, so the window is the
+    /// caller's own tensor, which the helper never disposes and a delegate that edits its input would change. The delegate
+    /// returns a new F32 tensor that the helper disposes after blending; the caller owns the result.</summary>
     public static Tensor Decode(Tensor latent, VideoTemporalTilingOptions options, Func<Tensor, Tensor> decodeWindow)
     {
         ArgumentNullException.ThrowIfNull(latent);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(decodeWindow);
         ValidateLatent(latent);
-        ValidateOptions(options);
+        options.Validate();
 
         int batch = (int)latent.Shape[0];
         int frames = (int)latent.Shape[2];
@@ -167,32 +169,6 @@ public static unsafe class VideoTemporalTiling
             {
                 throw new ArgumentException($"Latent dimension {d} must be at least 1.", nameof(latent));
             }
-        }
-    }
-
-    private static void ValidateOptions(VideoTemporalTilingOptions options)
-    {
-        if (options.CompressionRatio < 1)
-        {
-            throw new ArgumentException("Compression ratio must be at least 1.", nameof(options));
-        }
-        if (options.StrideLatentFrames < 1)
-        {
-            throw new ArgumentException("Stride must be at least 1 latent frame.", nameof(options));
-        }
-
-        // Consecutive windows share this many latent intervals; the blend must fit inside it and inside one stride,
-        // so that no frame is ramped by more than two windows.
-        int overlap = options.TileLatentFrames - 1 - options.StrideLatentFrames;
-        int maxBlend = Math.Min(options.StrideLatentFrames, overlap);
-        if (maxBlend < 1)
-        {
-            throw new ArgumentException(
-                $"Tile {options.TileLatentFrames} with stride {options.StrideLatentFrames} leaves no overlap to blend across.", nameof(options));
-        }
-        if (options.BlendLatentFrames < 1 || options.BlendLatentFrames > maxBlend)
-        {
-            throw new ArgumentException($"Blend {options.BlendLatentFrames} must be in [1, {maxBlend}].", nameof(options));
         }
     }
 

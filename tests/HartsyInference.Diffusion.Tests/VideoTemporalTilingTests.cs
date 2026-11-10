@@ -112,6 +112,62 @@ public sealed unsafe class VideoTemporalTilingTests
         Assert.Throws<ArgumentException>(() => VideoTemporalTilingOptions.FromUpstreamSampleFrames(100, 64, Compression));
     }
 
+    [Fact]
+    public void FromUpstreamSampleFrames_RefusesSettingsThatCannotBeBlended()
+    {
+        // 128/32 decoded frames: a 16-interval window advancing 4 leaves a 12-interval overlap, but the 12-interval blend
+        // would reach back past one stride, so a frame could be ramped by three windows.
+        Assert.Throws<ArgumentException>(() => VideoTemporalTilingOptions.FromUpstreamSampleFrames(128, 32, Compression));
+        // 64/64: the stride equals the window, so consecutive windows do not overlap at all.
+        Assert.Throws<ArgumentException>(() => VideoTemporalTilingOptions.FromUpstreamSampleFrames(64, 64, Compression));
+    }
+
+    [Fact]
+    public void ThrowingDelegate_ReleasesEveryWindowItWasGiven()
+    {
+        List<Tensor> seen = [];
+        using Tensor latent = Latent(40, Batch, Channels, Height, Width);
+
+        Assert.Throws<InvalidOperationException>(() => VideoTemporalTiling.Decode(latent, Options(13, 8, 4, Compression), window =>
+        {
+            seen.Add(window);
+            return seen.Count == 2 ? throw new InvalidOperationException("decode failed") : InterpolateDecode(window, Compression);
+        }));
+
+        Assert.Equal(2, seen.Count);
+        Assert.All(seen, window => Assert.Throws<ObjectDisposedException>(() => window.AsReadOnlySpan<float>()));
+        Assert.True(latent.AsReadOnlySpan<float>().Length > 0, "The caller's latent was released.");
+    }
+
+    [Theory]
+    [InlineData(40)]   // several windows
+    [InlineData(7)]    // one window, passed through whole
+    public void RejectedDelegateResult_IsReleased(int frames)
+    {
+        Tensor? rejected = null;
+        using Tensor latent = Latent(frames, Batch, Channels, Height, Width);
+
+        Assert.Throws<InvalidOperationException>(() => VideoTemporalTiling.Decode(latent, Options(13, 8, 4, Compression), window =>
+        {
+            rejected = Filled(window.Shape[0], window.Shape[1], (int)window.Shape[2], window.Shape[3], window.Shape[4], 0f);
+            return rejected;
+        }));
+
+        Assert.NotNull(rejected);
+        Assert.Throws<ObjectDisposedException>(() => rejected!.AsReadOnlySpan<float>());
+        Assert.True(latent.AsReadOnlySpan<float>().Length > 0, "The caller's latent was released.");
+    }
+
+    [Fact]
+    public void SingleWindowDelegateReturningItsInput_LeavesTheCallersLatentAlone()
+    {
+        using Tensor latent = Latent(7, Batch, Channels, Height, Width);
+
+        Assert.Throws<InvalidOperationException>(() => VideoTemporalTiling.Decode(latent, Options(13, 8, 4, 1), window => window));
+
+        Assert.True(latent.AsReadOnlySpan<float>().Length > 0, "The caller's latent was released.");
+    }
+
     [Theory]
     [InlineData(13, 13, 1)]   // stride equal to the tile leaves no overlap
     [InlineData(13, 8, 5)]    // blend wider than the four-interval overlap
