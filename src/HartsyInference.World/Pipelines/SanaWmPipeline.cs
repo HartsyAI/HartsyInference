@@ -1,11 +1,11 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
-using HartsyInference.Vision.Codec;
 using HartsyInference.World.Camera;
 using HartsyInference.World.Pipelines.SanaWm;
 
