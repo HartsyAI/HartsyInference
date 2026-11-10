@@ -18,6 +18,10 @@ public interface IRealtimeVlmProtocol
     /// <summary>The token the model emits when it has nothing to say, or null for a model without one (its loop never idles).</summary>
     int? SilenceTokenId { get; }
 
+    /// <summary>Tokens a live session never emits (their logits are dropped before sampling), so the silence token stays the only idle
+    /// signal; empty when the model needs none.</summary>
+    IReadOnlyList<int> SuppressedTokenIds { get; }
+
     /// <summary>The system prompt a live session uses when the caller gives none.</summary>
     string DefaultSystemPrompt { get; }
 

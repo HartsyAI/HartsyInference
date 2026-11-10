@@ -3,6 +3,20 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.412
+
+- **Added: live MOSS-VL-Realtime sessions.** `hartsy text --realtime -m moss-vl-realtime --video clip.mp4 "…"` (or `--frames-dir`)
+  replays the frames at their own pace into a running session, takes further prompts from stdin, and prints the reply as it
+  streams. The engine side is `ITextService.OpenRealtimeAsync`, which returns an `IRealtimeVlmSession` (push frames and prompts,
+  stream round-start, text, silence, control and dropped-frame events). A session holds its device's text slot until disposed and
+  takes the device gate per forward. On Vulkan, frames of a red disc with "What color is the circle?" give "The circle is red."
+- **Added: `RealtimeVlmSession`, a model-free live loop.** It follows the reference realtime sampler: after each token it splices
+  pending prompts and frames into the stream, idles on the silence token with a 20 ms poll, inserts the protocol's silence when a
+  cycle brings both prompts and frames, drops the oldest frame from a full queue, flushes text on whole characters, and paces the
+  token rate. A model plugs in through `IRealtimeVlmProtocol`, `IStreamingVlmDecoder` and `IStreamingFrameEncoder`;
+  `MossVlStreamingDecoder` adapts the MOSS decode session. Control tokens other than silence (MOSS: `<|response|>`) are reported
+  apart from the reply text.
+
 ## alpha.411
 
 - **Added: video input for MOSS-VL-Realtime.** `hartsy text -m moss-vl-realtime --video clip.mp4 "…"` samples the clip with ffmpeg

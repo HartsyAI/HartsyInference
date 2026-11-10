@@ -36,6 +36,8 @@ public sealed class MossVlRealtimeProtocol : IRealtimeVlmProtocol
         foreach (string token in new[] { "<|time_start|>", "<|time_end|>", "<|vision_start|>", "<|vision_end|>", ImagePad })
             if (tokenizer.SpecialId(token) is null)
                 throw new HartsyInferenceException($"The MOSS-VL tokenizer has no {token} token.");
+        // The reference suppresses an ellipsis control token when the vocabulary has one; the released tokenizer does not.
+        SuppressedTokenIds = tokenizer.SpecialId("<|...|>") is int ellipsis ? [ellipsis] : [];
     }
 
     /// <summary>The protocol with explicit token ids, for tests of its text layouts.</summary>
@@ -48,6 +50,8 @@ public sealed class MossVlRealtimeProtocol : IRealtimeVlmProtocol
     public int ImagePlaceholderId { get; }
 
     public int? SilenceTokenId { get; }
+
+    public IReadOnlyList<int> SuppressedTokenIds { get; } = [];
 
     public string DefaultSystemPrompt => SessionSystemPrompt;
 

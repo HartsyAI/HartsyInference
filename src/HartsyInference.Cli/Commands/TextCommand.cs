@@ -44,8 +44,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
 
         /// <summary>Sampling temperature; &lt;= 0 selects greedy decoding.</summary>
         [CommandOption("--temperature")]
-        [Description("Sampling temperature; 0 or less means greedy.")]
-        public float Temperature { get; init; } = 0.7f;
+        [Description("Sampling temperature; 0 or less means greedy. Default 0.7 (a --realtime run is greedy unless this is given).")]
+        public float? Temperature { get; init; }
 
         /// <summary>Nucleus sampling cutoff.</summary>
         [CommandOption("--top-p")]
@@ -91,6 +91,27 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [CommandOption("--video-max-frames")]
         [Description("Most frames sampled from --video; unset keeps the model's setting (MOSS-VL: 256).")]
         public int? VideoMaxFrames { get; init; }
+
+        /// <summary>Runs a live session: <see cref="Video"/> or <see cref="FramesDir"/> is replayed at its own pace, the prompt opens the chat,
+        /// and each stdin line is a further prompt.</summary>
+        [CommandOption("--realtime")]
+        [Description("Live session (MOSS-VL-Realtime): replay --video or --frames-dir at its pace; each stdin line is a new prompt. Greedy unless --temperature > 0 is given explicitly.")]
+        public bool Realtime { get; init; }
+
+        /// <summary>Seconds of silence after the last frame that end a <see cref="Realtime"/> run.</summary>
+        [CommandOption("--idle-exit")]
+        [Description("With --realtime: end the run after this many seconds of model silence once every frame is in. Default 3.")]
+        public double? IdleExit { get; init; }
+
+        /// <summary>Caps the live decode rate.</summary>
+        [CommandOption("--tokens-per-second")]
+        [Description("With --realtime: the most tokens decoded per second; unset is unpaced.")]
+        public double? TokensPerSecond { get; init; }
+
+        /// <summary>Prints the model's silence markers in a live run.</summary>
+        [CommandOption("--show-silence")]
+        [Description("With --realtime: print [silence] when the model stays quiet, and its other control markers (e.g. [response]).")]
+        public bool ShowSilence { get; init; }
 
         /// <summary>Top-K sampling cutoff; unset uses the model default.</summary>
         [CommandOption("--top-k")]
@@ -187,8 +208,20 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             }
             prompt = File.ReadAllText(promptFile);
         }
-        if (!CommandRunner.RequireNonEmpty(prompt, "A prompt is required.", out int exitCode))
+        int exitCode;
+        // A live session may open with an empty prompt (the reference's default) and take its questions from stdin.
+        if (!settings.Realtime && !CommandRunner.RequireNonEmpty(prompt, "A prompt is required.", out exitCode))
             return exitCode;
+        if (settings.Realtime && settings.Video is null && settings.FramesDir is null)
+        {
+            AnsiConsole.MarkupLine("[red]--realtime needs --video or --frames-dir to replay.[/]");
+            return 1;
+        }
+        if (settings.Realtime && settings.Image.Length > 0)
+        {
+            AnsiConsole.MarkupLine("[red]--realtime takes frames from --video or --frames-dir, not --image.[/]");
+            return 1;
+        }
         if (settings.TeacherForce is { Length: > 0 } && settings.ScoresOut is not { Length: > 0 })
         {
             AnsiConsole.MarkupLine("[red]--teacher-force needs --scores-out to write the scores of the forced tokens.[/]");
@@ -234,7 +267,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             return 1;
         }
 
-        float temperature = settings.Temperature;
+        float temperature = settings.Temperature ?? 0.7f;
         if (settings.GraphDecode && temperature > 0f)
         {
             AnsiConsole.MarkupLine("[yellow]--graph-decode requires greedy sampling; forcing --temperature to 0.[/]");
@@ -244,7 +277,16 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         ParamState parameters = new ParamState(Modality.Text) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         if (settings.Device is { Length: > 0 } device) parameters.Put("device", device);
         parameters.Put("max-tokens", settings.MaxTokens.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
+        // A live run is greedy like the reference unless a temperature is asked for; the one-shot default (0.7) does not apply.
+        if (!settings.Realtime || settings.Temperature is not null || settings.GraphDecode)
+            parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
+        if (settings.Realtime)
+        {
+            parameters.Put("realtime", "true");
+            parameters.PutIfSet("idle-exit", settings.IdleExit);
+            parameters.PutIfSet("tokens-per-second", settings.TokensPerSecond);
+            parameters.Put("show-silence", settings.ShowSilence ? "true" : "false");
+        }
         parameters.Put("top-p", settings.TopP.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("graph-decode", settings.GraphDecode ? "true" : "false");

@@ -108,6 +108,50 @@ internal sealed class MossVlRuntime : IDisposable
         return new MossVlImageFeatures(tokens, grid.MergedHeight, grid.MergedWidth);
     }
 
+    /// <summary>A live session on this model. Each forward and each cycle's frame encode take <paramref name="deviceGate"/>, so the device's
+    /// other services can run while the session idles.</summary>
+    /// <param name="maxVisionTokens">The session's vision cap; null uses the default.</param>
+    public RealtimeVlmSession OpenRealtime(RealtimeVlmOptions options, int? maxVisionTokens, Func<CancellationToken, IDisposable> deviceGate)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        MossVlSessionLimits limits = new(MaxTextTokens: Model.Config.Text.MaxPositionEmbeddings);
+        if (maxVisionTokens is int cap) limits = limits with { MaxVisionTokens = cap };
+        MossVlRealtimeProtocol protocol = new(Model.Config, Model.Tokenizer);
+        GatedStreamingDecoder decoder = new(new MossVlStreamingDecoder(Model.Decoder, Model.Config, _backend, limits), deviceGate);
+        return new RealtimeVlmSession(decoder, new FrameEncoder(this, deviceGate), protocol, Model.Tokenizer, options);
+    }
+
+    /// <summary>Encodes one live cycle's frames: they share the processor's batch pixel budget, as the reference processes a cycle's frames
+    /// in one call, and each runs through the tower on its own.</summary>
+    private sealed class FrameEncoder(MossVlRuntime runtime, Func<CancellationToken, IDisposable> deviceGate) : IStreamingFrameEncoder
+    {
+        public IReadOnlyList<VisionFrameFeatures> Encode(IReadOnlyList<TimedRgbFrame> frames, CancellationToken cancel)
+        {
+            VisionPatchGrid[] grids = runtime.Model.Processor.PreprocessBatch(frames.Select(f => f.Frame).ToArray());
+            List<Tensor> owned = [];
+            IDisposable? gate = null;
+            try
+            {
+                gate = deviceGate(cancel);
+                VisionFrameFeatures[] features = new VisionFrameFeatures[grids.Length];
+                for (int i = 0; i < grids.Length; i++)
+                {
+                    MossVlImageFeatures f = runtime.Encode(grids[i], owned, cancel);
+                    features[i] = new VisionFrameFeatures(f.MergedTokens, f.MergedHeight, f.MergedWidth, frames[i].TimestampSeconds);
+                }
+                owned.Clear();   // the caller owns them now
+                return features;
+            }
+            finally
+            {
+                // Freed while the device gate is still held, so no other service is submitting work against the buffers being released.
+                foreach (Tensor t in owned) t.Dispose();
+                foreach (VisionPatchGrid g in grids) g.Dispose();
+                gate?.Dispose();
+            }
+        }
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
