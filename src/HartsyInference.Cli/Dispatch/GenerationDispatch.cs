@@ -153,6 +153,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        if (parameters.GetBool("realtime", false))
+            return await RealtimeDispatch.RunAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false);
         float temperature = parameters.GetFloat("temperature", 0.7f);
         List<ImageData> images = [];
         if (parameters.GetStringOrNull("image") is { Length: > 0 } imagePaths)
@@ -167,7 +169,21 @@ public static class GenerationDispatch
             // "cuda:0" pins an ordinal; the composite "cuda:0+cuda:1" form requests the LLM layer split
             // (TextService.LoadSharded) — layers pooled across both cards by free VRAM.
             Device = parameters.GetStringOrNull("device"),
-            Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
+            Messages =
+            [
+                new TextMessage
+                {
+                    Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null,
+                    Video = parameters.GetStringOrNull("video") is { } videoPath
+                        ? new VideoClip { Data = File.ReadAllBytes(videoPath), Format = Path.GetExtension(videoPath).TrimStart('.') }
+                        : null,
+                    VideoFrames = parameters.GetStringOrNull("frames-dir") is { } framesDir
+                        ? FolderFrames(framesDir, parameters.GetDoubleOrNull("frame-fps") ?? 1.0)
+                        : null,
+                },
+            ],
+            VideoFps = parameters.GetDoubleOrNull("video-fps"),
+            VideoMaxFrames = parameters.GetIntOrNull("video-max-frames"),
             SystemPrompt = parameters.GetStringOrNull("system"),
             MaxTokens = forced?.Count ?? parameters.GetInt("max-tokens", 256),
             ForcedTokenIds = forced,
@@ -186,6 +202,7 @@ public static class GenerationDispatch
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            WeightPrecision = parameters.GetStringOrNull("precision"),
             AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
             Placement = parameters.GetStringOrNull("placement"),
         };
@@ -616,6 +633,10 @@ public static class GenerationDispatch
             .ConfigureAwait(false);
         return SelfWrittenVisionArtifact($"{images.Count} input frames → {written} output frame(s) in {dir}", written);
     }
+
+    /// <summary>A folder of PNG/BMP frames as a timed video: name order, frame <c>i</c> at <c>i / fps</c> seconds.</summary>
+    internal static IReadOnlyList<TimedImage> FolderFrames(string folder, double fps) =>
+        [.. VisionBatchInputs(folder).Select((path, i) => new TimedImage { Image = LoadImage(path), TimestampSeconds = i / fps })];
 
     /// <summary>The images a folder input contributes, sorted by name: the formats <see cref="ImageIo.DecodeFile"/> reads
     /// (.png, .bmp). Other files are skipped rather than failing the batch.</summary>

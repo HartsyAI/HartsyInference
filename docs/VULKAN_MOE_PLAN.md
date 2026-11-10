@@ -304,7 +304,7 @@ Open:
 ## Plan, in order
 
 Each step lands as its own PR, with a parity test against the CPU reference for every new shader and a before/after
-`tests/regression-ab.sh` on the flagship CUDA models only if shared code moved. Effort figures are estimates, not
+real-generation comparison on the flagship CUDA models only if shared code moved. Effort figures are estimates, not
 measurements.
 
 **0. Loader fix (this PR).** The per-expert and fused-QKV views of a dequantized tensor read freed memory, so any MoE GGUF

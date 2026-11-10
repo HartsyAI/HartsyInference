@@ -190,17 +190,22 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("ActQuantDequantInPlace");
         LatentQuantReference.ValidateActQuant(x, encoding);
-        LatentEncodings.RequireDeviceKernel(encoding, "CUDA ActQuantDequantInPlace");
         int group = LatentEncodings.GroupSize(encoding);
         if (group == 0) return;
         using OpScope _op = EnterOp();
         EnsureKernels();
         RequireAttentionKernels();
+        if (encoding == LatentEncoding.Fp8E4M3Ue8m0x128 && !_kernels!.HasActQuantFp8x128Kernel)
+            throw new NotSupportedException("CUDA ActQuantDequantInPlace needs the FP8x128 entry of latent_quant.ptx.");
         ulong pX = 0;
         try
         {
             pX = GpuTransferHelper.CopyToDevice(x);
-            _kernels!.LaunchActQuantDequantInPlace(pX, x.ElementCount / group, encoding, _stream.Handle);
+            long groups = x.ElementCount / group;
+            if (encoding == LatentEncoding.Fp8E4M3Ue8m0x128)
+                _kernels!.LaunchActQuantDequantFp8x128(pX, groups, _stream.Handle);
+            else
+                _kernels!.LaunchActQuantDequantInPlace(pX, groups, encoding, _stream.Handle);
             RecacheInPlace(x, pX);
         }
         finally

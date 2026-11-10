@@ -17,7 +17,8 @@ public sealed class ChatMessageContent
     public static implicit operator ChatMessageContent?(string? text) => text is null ? null : new ChatMessageContent { Text = text };
 }
 
-/// <summary>One content part of an array-form message content: <c>{"type":"text","text":...}</c> or <c>{"type":"image_url","image_url":{"url":...}}</c>.</summary>
+/// <summary>One content part of an array-form message content: <c>{"type":"text","text":...}</c>, <c>{"type":"image_url","image_url":{"url":...}}</c>
+/// or <c>{"type":"video_url","video_url":{"url":...}}</c>.</summary>
 public sealed class ChatContentPart
 {
     public required string Type { get; init; }
@@ -25,6 +26,9 @@ public sealed class ChatContentPart
 
     /// <summary>The image's URL. Only <c>data:</c> URIs are decoded; a remote URL is refused rather than fetched.</summary>
     public string? ImageUrl { get; init; }
+
+    /// <summary>A <c>video_url</c> part's URL, for video-capable models. Only <c>data:</c> URIs are decoded; a remote URL is refused.</summary>
+    public string? VideoUrl { get; init; }
 }
 
 /// <summary>Reads and writes <see cref="ChatMessageContent"/> in OpenAI's wire shape: a string, or an array of parts that round-trips unchanged.</summary>
@@ -51,15 +55,16 @@ internal sealed class ChatMessageContentConverter : JsonConverter<ChatMessageCon
         if (part.ValueKind != JsonValueKind.Object || !part.TryGetProperty("type", out JsonElement type) || type.ValueKind != JsonValueKind.String)
             throw new JsonException("Each content part must be an object with a string 'type'.");
         string? text = part.TryGetProperty("text", out JsonElement t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
-        string? url = null;
-        if (part.TryGetProperty("image_url", out JsonElement image))
-        {
-            if (image.ValueKind == JsonValueKind.Object && image.TryGetProperty("url", out JsonElement u) && u.ValueKind == JsonValueKind.String)
-                url = u.GetString();
-            else if (image.ValueKind == JsonValueKind.String)
-                url = image.GetString();
-        }
-        return new ChatContentPart { Type = type.GetString()!, Text = text, ImageUrl = url };
+        return new ChatContentPart { Type = type.GetString()!, Text = text, ImageUrl = Url(part, "image_url"), VideoUrl = Url(part, "video_url") };
+    }
+
+    /// <summary>A media part's URL, written either as <c>{"url": ...}</c> or as a bare string.</summary>
+    private static string? Url(JsonElement part, string name)
+    {
+        if (!part.TryGetProperty(name, out JsonElement media)) return null;
+        if (media.ValueKind == JsonValueKind.Object && media.TryGetProperty("url", out JsonElement u) && u.ValueKind == JsonValueKind.String)
+            return u.GetString();
+        return media.ValueKind == JsonValueKind.String ? media.GetString() : null;
     }
 
     public override void Write(Utf8JsonWriter writer, ChatMessageContent value, JsonSerializerOptions options)
@@ -80,6 +85,12 @@ internal sealed class ChatMessageContentConverter : JsonConverter<ChatMessageCon
             {
                 writer.WriteStartObject("image_url");
                 writer.WriteString("url", part.ImageUrl);
+                writer.WriteEndObject();
+            }
+            if (part.VideoUrl is not null)
+            {
+                writer.WriteStartObject("video_url");
+                writer.WriteString("url", part.VideoUrl);
                 writer.WriteEndObject();
             }
             writer.WriteEndObject();
