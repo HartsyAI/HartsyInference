@@ -1,9 +1,6 @@
 # Changelog
 
-## Unreleased
-
-The SANA-WM stack (stage 1, its performance pass, and streaming) is written up here once. The `## alpha.N` section and the
-`VersionSuffix` are set when the stack lands on `main`.
+## alpha.408
 
 - **Added: SANA-WM stage 1 (`sana-wm`).** `hartsy world -m sana-wm --image <png> --prompt-file <txt> --intrinsics fx,fy,cx,cy
   (--actions "w-80,dw-40,aw-40" | --camera poses.npy)` renders up to 161 frames at 704x1280 and 16 fps from one image, a prompt
