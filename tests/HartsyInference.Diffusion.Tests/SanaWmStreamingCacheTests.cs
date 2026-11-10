@@ -45,7 +45,7 @@ public sealed class SanaWmStreamingCacheTests
         using SafeTensorsLoader fixture = Load();
         using CpuBackend cpu = new();
         IBackend backend = cpu;
-        SanaWmGlumbTempFfn ffn = new(fixture.GetTensor("ffn.inverted_conv.conv.weight"), fixture.GetTensor("ffn.inverted_conv.conv.bias"),
+        using SanaWmGlumbTempFfn ffn = new(fixture.GetTensor("ffn.inverted_conv.conv.weight"), fixture.GetTensor("ffn.inverted_conv.conv.bias"),
             fixture.GetTensor("ffn.depth_conv.conv.weight"), fixture.GetTensor("ffn.depth_conv.conv.bias"),
             fixture.GetTensor("ffn.point_conv.conv.weight"), fixture.GetTensor("ffn.t_conv.weight"));
         using FrameTailCache tail = new(backend, SanaWmBlockStream.FfnTailFrames, 0, Spatial);

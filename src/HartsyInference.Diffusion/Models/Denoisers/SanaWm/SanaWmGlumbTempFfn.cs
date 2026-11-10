@@ -7,13 +7,14 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// <summary>SANA-WM GLUMBConvTemp feed-forward. Tokens <c>[B, T·H·W, C]</c> (T-major) go through a gated 2-D conv per
 /// frame, then a temporal residual <c>y + Conv2d(C, C, (3, 1))(y)</c> over T, where <c>y</c> is the point-conv output.
 /// Activations and conv kernels share one dtype, F32 or BF16; biases are that dtype or F32. The weights are borrowed and must
-/// outlive the FFN. In a chunk-causal stream (upstream <c>CachedGLUMBConvTemp</c>) the temporal convolution reads the last
-/// frame of the previous chunk on its left and zeros on its right.</summary>
+/// outlive the FFN. The two tensors the FFN builds itself, the tap-major depthwise kernel and a cast depthwise bias, are its own,
+/// and <see cref="Dispose"/> releases them. In a chunk-causal stream (upstream <c>CachedGLUMBConvTemp</c>) the temporal convolution
+/// reads the last frame of the previous chunk on its left and zeros on its right.</summary>
 /// <remarks>The gated conv runs on the tokens as they are (channels-last, as upstream's <c>permute</c> view feeds cuDNN): the 1×1
 /// convolutions are GEMMs over the token rows and the depthwise convolution and GLU are one fused channels-last op, so no
 /// activation is transposed. It is per frame, so it runs over chunks of frames: the hidden buffers, the largest in the block,
 /// never hold more than the chunk budget.</remarks>
-public sealed class SanaWmGlumbTempFfn
+public sealed class SanaWmGlumbTempFfn : IDisposable
 {
     /// <summary>Default budget of one hidden buffer, in elements: 64 MiB of BF16.</summary>
     public const long DefaultHiddenChunkElements = 1L << 25;
@@ -31,6 +32,8 @@ public sealed class SanaWmGlumbTempFfn
     private readonly Tensor _depthBias;
     private readonly Tensor _pointWeight;
     private readonly Tensor _temporalWeight;
+    private readonly List<Tensor> _owned = [];
+    private int _disposed;
 
     /// <summary>Builds the FFN from upstream-layout weights: inverted <c>[2H, C, 1, 1]</c> with bias <c>[2H]</c>, depthwise
     /// <c>[2H, 1, 3, 3]</c> with bias <c>[2H]</c>, point <c>[C, H, 1, 1]</c> (no bias), temporal <c>[C, C, 3, 1]</c> (no bias).</summary>
@@ -76,8 +79,23 @@ public sealed class SanaWmGlumbTempFfn
         // The 1×1 kernels as GEMM weights; views over the borrowed tensors, so no copy. The depthwise bias is F32 for the fused op.
         _invWeight = invWeight.Reshape(new TensorShape(2L * _hidden, _channels));
         _invBias = invBias;
-        _depthTaps = TapMajor(depthWeight, 2 * _hidden);
-        _depthBias = depthBias.DType == DType.F32 ? depthBias : depthBias.CastTo(DType.F32);
+        Tensor taps = TapMajor(depthWeight, 2 * _hidden);
+        Tensor bias;
+        try
+        {
+            bias = depthBias.DType == DType.F32 ? depthBias : depthBias.CastTo(DType.F32);
+        }
+        catch
+        {
+            taps.Dispose();
+            throw;
+        }
+
+        _depthTaps = taps;
+        _owned.Add(taps);
+        _depthBias = bias;
+        if (!ReferenceEquals(bias, depthBias))
+            _owned.Add(bias);
         _pointWeight = pointWeight.Reshape(new TensorShape(_channels, _hidden));
         _temporalWeight = temporalWeight;
     }
@@ -88,6 +106,15 @@ public sealed class SanaWmGlumbTempFfn
     /// <summary>The tensors <see cref="Forward"/> reads (the GEMM views of the 1×1 kernels, not their parents), for preloading on a
     /// device backend.</summary>
     public IEnumerable<Tensor> EnumerateWeights() => [_invWeight, _invBias, _depthTaps, _depthBias, _pointWeight, _temporalWeight];
+
+    /// <summary>Releases the tap-major depthwise kernel and the cast depthwise bias the FFN built. The weights it was given are
+    /// not touched, and a device copy of any tensor <see cref="EnumerateWeights"/> lists must be freed first. Safe to call twice.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        SanaWmTensors.DisposeAll(_owned);
+    }
 
     /// <summary>Runs the FFN on tokens <c>[B, frames·height·width, C]</c>; returns a new owned <c>[B, N, C]</c> tensor in the input dtype.</summary>
     /// <exception cref="NotSupportedException">BF16 input on a backend without BF16 support.</exception>
