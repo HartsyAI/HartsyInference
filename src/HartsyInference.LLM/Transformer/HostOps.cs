@@ -18,6 +18,16 @@ internal static class HostOps
         return output.AsReadOnlySpan<float>().ToArray();
     }
 
+    /// <summary>The grouped projection <c>y[t, g, :] = weight[g] @ x[t, g, :]</c> through <see cref="IBackend.BlockDiagonalLinear"/>;
+    /// <paramref name="weight"/> is <c>[groups * rank, groupDim]</c>, F32 or F8E4M3 with <paramref name="weightScaleInv"/>.</summary>
+    public static float[] BlockDiagonal(IBackend backend, ReadOnlySpan<float> x, int rows, int groups, Tensor weight, Tensor? weightScaleInv)
+    {
+        using Tensor input = HostMath.Tensor(x, rows, x.Length / rows);
+        using Tensor output = new(new TensorShape(rows, weight.Shape[0]), DType.F32);
+        backend.BlockDiagonalLinear(output, input, weight, weightScaleInv, groups);
+        return output.AsReadOnlySpan<float>().ToArray();
+    }
+
     /// <summary>RMS norm of each <paramref name="width"/>-wide row in place.</summary>
     public static void RmsNorm(IBackend backend, Span<float> data, int width, Tensor weight, float eps)
     {

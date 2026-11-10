@@ -185,7 +185,7 @@ internal sealed class Ernie5Layer : IDisposable
             WqB = Read(l[2]),
             Wkv = Read(l[3]),
             KvNorm = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[4]))),
-            WoA = Host(l[5]),
+            WoA = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[5]))),
             WoB = Read(l[6]),
             Sink = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[7]))),
             CompressorWkv = Read(l[8]),
