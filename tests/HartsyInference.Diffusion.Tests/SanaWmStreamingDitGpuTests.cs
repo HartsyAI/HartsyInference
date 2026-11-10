@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers.SanaWm;
@@ -64,10 +65,27 @@ public sealed class SanaWmStreamingDitGpuTests(ITestOutputHelper output)
                 float[] conditions = raymap.AsReadOnlySpan<float>().Slice(start * 20, frames * 20).ToArray();
                 Tensor chunkPlucker = Frames(plucker, start, frames, owned);
 
+                // SANAWM_STREAM_PROFILE=1: a device-synced stage profile of each chunk's warm denoise passes (2 to 4).
+                bool profile = Environment.GetEnvironmentVariable("SANAWM_STREAM_PROFILE") == "1";
+                int pass = i % 5;
+                if (profile && pass == 1)
+                {
+                    KnobStore.Set(EngineKnobs.Profile, true);
+                    KnobStore.Set(EngineKnobs.ProfileSync, true);
+                    StageProfiler.Reset();
+                }
+
                 Stopwatch clock = Stopwatch.StartNew();
                 using Tensor velocity = dit.ForwardChunk(x, timesteps, caption, mask, conditions, chunkPlucker, cache, commit: save);
                 device.OffloadActivation(velocity);
                 clock.Stop();
+                if (profile && pass == 3)
+                {
+                    output.WriteLine($"stage profile, chunk {start}..{end}, passes 2-4:");
+                    output.WriteLine(StageProfiler.Report());
+                    KnobStore.Clear(EngineKnobs.Profile);
+                    KnobStore.Clear(EngineKnobs.ProfileSync);
+                }
                 ReadOnlySpan<float> expected = Host32(reference.GetTensor($"call{i:D2}_out"), owned).AsReadOnlySpan<float>();
                 (double cosine, double relative) = Compare(velocity.AsReadOnlySpan<float>(), expected);
                 worstCosine = Math.Min(worstCosine, cosine);
