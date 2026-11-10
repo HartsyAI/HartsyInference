@@ -3,6 +3,24 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.413
+
+- **Added: live MOSS-VL sessions over HTTP.** `POST /v1/native/realtime/sessions` opens one (the model loads through the
+  long-running queue). `POST …/{id}/frame` takes a base64 PNG and its timestamp, `POST …/{id}/prompt` a prompt, and
+  `GET …/{id}/stream` is server-sent events (`round_start`, `text`, `silence`, `control`, `frames_dropped`, `error`) with a
+  keep-alive comment while the model is silent. `GET …/{id}` returns the counters and `DELETE …/{id}` closes the session and frees
+  its device slot. Sessions idle longer than `RealtimeSessionIdleTimeoutMinutes` (10) are closed. Checked end to end on Vulkan
+  against the GGUF: open, three frames, a prompt, the stream, stats, close, then 404.
+- **Added: `video_url` content parts on `/v1/chat/completions`.** A `data:video/…;base64,` part becomes the message's video for
+  video-capable models (128 MiB at most, one per message); a remote URL or a non-`video/` type is refused. Chat completions now
+  takes bodies up to `MaxVideoRequestBodyBytes` (256 MiB), as native video does, instead of Kestrel's 30 MB default.
+- **Changed: live-session streams.** One stream per session (a second gets 409); a session whose loop failed reports its `error`
+  event and is closed, freeing its device slot, and later input to it is a 404; closing a session never reports a failure for one
+  already removed.
+- **Changed: world and realtime sessions share `SessionRegistry<TSession>`.**
+- **Added: `tests/HartsyInference.API.Tests`.** It also runs `SeedVr2ModelLayoutTests`, which had no project before; its one
+  Windows path-separator bug is fixed.
+
 ## alpha.412
 
 - **Added: live MOSS-VL-Realtime sessions.** `hartsy text --realtime -m moss-vl-realtime --video clip.mp4 "…"` (or `--frames-dir`)
