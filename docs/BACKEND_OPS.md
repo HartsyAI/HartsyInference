@@ -326,6 +326,82 @@ Reference: `FourierEmbedReference.Apply`. Contract: `FourierEmbedContract.Valida
 dimensions, the bands (at most 30, so `2^b` stays an exact integer) and whether the coordinates lead the row. F32 `[count, D]`
 coordinates. Hunyuan3D's query embedding is `(3, 8, IncludeInput: true)`.
 
+## Exp, Reciprocal
+
+```
+out[i] = e^in[i]        out[i] = 1 / in[i]
+```
+
+Reference: `ElementwiseMathReference.Exp` and `.Reciprocal`. Contract: `ElementwiseMathContract.Validate`. Input and output are
+each F32 or BF16, with equal element counts (shapes may differ); the value is read as F32, mapped in F32 and rounded once to the
+output dtype, BF16 to nearest even. The division is IEEE (`±0` gives `±∞`). `exp` follows each backend's math library, so it
+is held to a tolerance. The output shares no storage with the input. SANA-WM's Gated-DeltaNet decay rate and denominator use them.
+
+## FrameDeltaScan
+
+```
+per head h, frame t:  G_t = Σ_s β k kᵀ   U_t = Σ_s β k vᵀ   S ← d_t·(S − G_t·S) + U_t
+F_t = S after frame t (forward, inclusive)      R_t = S from frames after t (reverse, exclusive)
+out[n = t·spatial + s, h, :] = q[n, h, :] · (F_t + R_t)
+forward S before frame 0 = initialState (or 0)   finalState = F_{frames−1}   reverse S always starts from 0
+```
+
+Reference: `FrameDeltaScanReference.Run`; validation `FrameDeltaScanReference.Validate`. Token-major F32 `query` and `key`
+`[N, heads·keyDim]`, `value` `[N, heads·valueDim]` or null for a value of 1 (`valueDim` 1: a linear-attention denominator),
+F32 `beta [heads, frames, spatial]` and `decay [heads, frames]`. A frame's tokens update the state together (the SANA-WM
+Gated-DeltaNet, main branch numerator and denominator and camera branch). Optional F32 `initialState` and `finalState`
+`[heads, keyDim, valueDim]` carry the forward state across calls: one call per chunk is then a chunk-causal scan, with every
+earlier chunk reaching a token through the state and the later frames of its own chunk through the reverse pass (the
+SANA-WM streaming student). `finalState` must not alias `initialState`. The CUDA build computes every (head, frame) Gram
+and injection with two batched GEMMs over the token-major operands in place (row stride `heads·dim`), runs the two
+recurrences as parallel blocks of one kernel, and reads the tokens out with a third batched GEMM; the GEMMs run at the
+backend's F32 GEMM precision (TF32 by default). It is the documented exception to the execution requirements below: it
+allocates its intermediates (the β-scaled keys, Grams, injections and the two state sets), is six launches, and uploads
+its GEMM pointer arrays per call, so it is not graph-capture safe.
+
+## DepthwiseConvGlu
+
+```
+d = depthwise_k×k(act(input)) + bias        output = d[..., :H] · SiLU(d[..., H:])        act = SiLU or identity
+```
+
+Reference: `DepthwiseConvGluReference.Run`. Channels-last F32 or BF16 `input [frames, height, width, 2H]` (value channels,
+then gate), F32 tap-major `taps [k, k, 2H]`, optional F32 `bias [2H]`, output `[frames, height, width, H]` in the input
+dtype. Stride 1, zero padding `k/2`. With `inputSilu` the convolution reads `SiLU(input)`, so the activation of the GEMM that
+produced the input needs no pass of its own (SANA-WM's GLUMBConv). The convolution output is never stored; the product is
+rounded once. CUDA: one thread per output element, or, for BF16 3×3 with whole 8-channel groups and 4-pixel runs, one
+thread per 8 channels of an image row that loads each input column once per run.
+
+## UcpeTransform
+
+```
+first headDim/2 of each head:  y[4g..4g+3] = M_n · x[4g..4g+3]          (per-token 4×4 matrix)
+last headDim/2:                (x0, x1) → (x0·c − x1·s, x1·c + x0·s)   (angle at the pair's even index)
+```
+
+Reference: `UcpeTransformReference.Run`. F32 token-major `input` and `output [N, heads·headDim]`, `matrices [N, 4, 4]`
+row-major, `cos` and `sin [N, headDim/2]` (negate `sin` for the inverse rotation). SANA-WM's camera branch (UCPE) applies
+it to q, k, v and its readout; it replaces a gather, a batched 4×4 GEMM, a scatter, a copy and a rotary.
+
+## DepthwiseConvFrames
+
+```
+out[t, s, c] = Σ_j weight[c, j] · input[t + j − pad, s, c]      (zero outside the clip)
+```
+
+Reference: `DepthwiseConvFramesReference.Run`. F32 token-major `[frames, spatial, channels]` in and out, F32 `weight` of
+`channels·taps` values. A depthwise conv along the frame axis without transposing to channel-first: the SANA-WM key paths'
+bidirectional temporal conv (a symmetric 7-tap kernel).
+
+## RmsNormRelu
+
+```
+out = max(x · rsqrt(mean(x²) + eps) · w, 0) · scale      per row of weight.ElementCount values
+```
+
+The default composes `RmsNorm`, `LeakyRelu(0)` and `Scale`; CUDA fuses them into one warp-per-row kernel for F32. The output
+may be shaped differently from the input (same element count), as the SANA-WM camera keys are.
+
 ## Execution requirements
 
 Every implementation of these ops:
@@ -358,6 +434,12 @@ Every implementation of these ops:
 | `NeighborhoodAttention` | reference | `neighborhood_attention.ptx` (`neighborhood_attention_f32`, `_tiled8x8_f32`, `_tiled4x8_f32`) | reference |
 | `FakeQuantizeUniform` | reference | `point_ops.ptx` (`fake_quantize_uniform_f32`) | reference |
 | `FourierEmbed` | reference | `fourier_embed_f32` | reference |
+| `Exp`, `Reciprocal` | reference | `point_ops.ptx` (`elementwise_math_<in>_<out>`, F32 and BF16 each side) | reference |
+| `FrameDeltaScan` | reference | `frame_scan.ptx` (`frame_scan_scale_keys_f32`, `frame_scan_recurrence_f32`, `_col_f32`, `frame_scan_sum_f32`) around cuBLAS batched GEMMs | reference |
+| `DepthwiseConvGlu` | reference | `depthwise_glu.ptx` (`depthwise_glu_f32/bf16`, `depthwise_glu_bf16_vec`) | reference |
+| `UcpeTransform` | reference | `ucpe.ptx` (`ucpe_transform_f32`) | reference |
+| `DepthwiseConvFrames` | reference | `frame_conv.ptx` (`depthwise_conv_frames_f32`) | reference |
+| `RmsNormRelu` | composed | `rms_relu.ptx` (`rms_norm_relu_f32`); other dtypes composed | composed |
 
 The Vulkan shaders index with 32-bit words, so a view reaching past 2³² − 1 elements is refused there.
 

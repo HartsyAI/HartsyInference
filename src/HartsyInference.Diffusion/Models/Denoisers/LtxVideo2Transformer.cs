@@ -4,6 +4,7 @@ using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Memory.Vram.Streaming;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using AdaLnSingle = HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.LtxVideo2AdaLnSingle;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
@@ -591,39 +592,9 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         videoC.Dispose(); audioC.Dispose(); videoU.Dispose(); audioU.Dispose();
     }
 
-    /// <summary>AdaLN-Single output, fully device-resident: <c>shift/scale = scale_shift_table + embedded</c> ([dim],
-    /// broadcast over the sequence; table rows are [shift; scale] — keep that order), LayerNorm-no-affine,
-    /// <c>·(1+scale)+shift</c>, then <c>proj_out</c>. Must stay device-resident — a host loop drains the full hidden
-    /// state per forward.</summary>
     private static Tensor OutputLayer(IBackend backend, Tensor hidden, Tensor embedded, Tensor scaleShift,
-        Tensor projW, Tensor? projB, int s, int dim, int outChannels)
-    {
-        Tensor ssShift = new Tensor(new TensorShape(dim), DType.F32);
-        backend.SliceRows(ssShift, scaleShift, 0);
-        Tensor ssScale = new Tensor(new TensorShape(dim), DType.F32);
-        backend.SliceRows(ssScale, scaleShift, 1);
-        Tensor shift = new Tensor(new TensorShape(dim), DType.F32);
-        backend.Add(shift, ssShift, embedded);
-        ssShift.Dispose();
-        Tensor scale1 = new Tensor(new TensorShape(dim), DType.F32);
-        backend.Add(scale1, ssScale, embedded);
-        ssScale.Dispose();
-        Tensor scale1p = new Tensor(new TensorShape(dim), DType.F32);
-        backend.AddScalar(scale1p, scale1, 1f);
-        scale1.Dispose();
-        // LayerNormNoAffine and AffineBroadcastLastDim both reject a mixed input/output pair, so these follow the
-        // stream; the final proj_out writes F32 because the pipeline's GuidedEulerStep is F32-only.
-        Tensor normed = new Tensor(new TensorShape(s, dim), hidden.DType);
-        // The reference hardcodes norm_out at 1e-6 independent of norm_eps (transformer_ltx2.py:1313).
-        backend.LayerNormNoAffine(normed, hidden, 1e-6f);
-        Tensor modded = new Tensor(new TensorShape(s, dim), hidden.DType);
-        backend.AffineBroadcastLastDim(modded, normed, scale1p, shift);
-        normed.Dispose(); scale1p.Dispose(); shift.Dispose();
-        Tensor outVel = new Tensor(new TensorShape(s, outChannels), DType.F32);
-        backend.Linear(outVel, modded, projW, projB);
-        modded.Dispose();
-        return outVel;
-    }
+        Tensor projW, Tensor? projB, int s, int dim, int outChannels) =>
+        LtxVideo2BlockOps.OutputLayer(backend, hidden, embedded, scaleShift, projW, projB, s, dim, outChannels);
 
     /// <summary>Rebuilds and pins the per-generation RoPE tables. They depend only on (grid, fps, audioFrames), so
     /// every forward flavor shares this one site rather than keeping three copies that can drift.</summary>
@@ -681,53 +652,5 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
             _keyframesAbsPos = _keyframesOnes = null;
         }
         GC.SuppressFinalize(this);
-    }
-
-    /// <summary>One <c>LTX2AdaLayerNormSingle</c>: a PixArt timestep embedder (<c>emb.timestep_embedder.linear_1/2</c>:
-    /// sinusoidal-256 → SiLU → <c>dim</c>) feeding <c>linear</c> (SiLU → <c>numParams·dim</c>). Returns the flat
-    /// <c>[numParams·dim]</c> modulation vector and the <c>[dim]</c> embedded timestep (used by the output layer).</summary>
-    private sealed class AdaLnSingle
-    {
-        private readonly int _dim, _numParams;
-        private Tensor? _emb1W, _emb1B, _emb2W, _emb2B, _linW, _linB;
-
-        public AdaLnSingle(int dim, int numParams)
-        {
-            _dim = dim;
-            _numParams = numParams;
-        }
-
-        public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
-        {
-            _emb1W = w[$"{p}.emb.timestep_embedder.linear_1.weight"]; w.TryGetValue($"{p}.emb.timestep_embedder.linear_1.bias", out _emb1B);
-            _emb2W = w[$"{p}.emb.timestep_embedder.linear_2.weight"]; w.TryGetValue($"{p}.emb.timestep_embedder.linear_2.bias", out _emb2B);
-            _linW = w[$"{p}.linear.weight"]; w.TryGetValue($"{p}.linear.bias", out _linB);
-        }
-
-        public IEnumerable<Tensor> EnumerateWeights()
-        {
-            foreach (Tensor? t in new[] { _emb1W, _emb1B, _emb2W, _emb2B, _linW, _linB })
-                if (t is not null) yield return t;
-        }
-
-        public (Tensor Mod, Tensor Embedded) Forward(IBackend backend, float timestep)
-        {
-            Tensor sin = new Tensor(new TensorShape(1, 256), DType.F32);
-            DiTUtils.SinusoidalTimestepEmbedding(sin, timestep, 1, 256, 10000f);
-            Tensor e1 = new Tensor(new TensorShape(1, _dim), DType.F32);
-            backend.Linear(e1, sin, _emb1W!, _emb1B); sin.Dispose();
-            Tensor e1a = new Tensor(e1.Shape, DType.F32); backend.Silu(e1a, e1); e1.Dispose();
-            Tensor embedded2d = new Tensor(new TensorShape(1, _dim), DType.F32);
-            backend.Linear(embedded2d, e1a, _emb2W!, _emb2B); e1a.Dispose();
-
-            Tensor sil = new Tensor(new TensorShape(1, _dim), DType.F32); backend.Silu(sil, embedded2d);
-            Tensor modFlat = new Tensor(new TensorShape(1, _numParams * _dim), DType.F32);
-            backend.Linear(modFlat, sil, _linW!, _linB); sil.Dispose();
-
-            // Returned as the [1, n·dim]/[1, dim] Linear outputs directly — every consumer is an element-count
-            // device op, so a host repack here would D2H-drain both tensors per modulator per forward (the
-            // Kandinsky temb stream-drain pathology).
-            return (modFlat, embedded2d);
-        }
     }
 }

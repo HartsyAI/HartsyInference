@@ -4,6 +4,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Worlds;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
@@ -21,8 +22,10 @@ public static class WorldEndpoints
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.World);
             try
             {
-                IWorldSession session = await queue.EnqueueAsync(() => Task.FromResult(engine.World.Open(spec, req.Request)), ct);
-                return Results.Ok(new { sessionId = registry.Register(session) });
+                // Planning refuses a request the model cannot serve before the queue slot is taken and before any weight loads.
+                WorldPlan plan = WorldPlanResolver.Resolve(spec, req.Request, engine.BackendSelector);
+                IWorldSession session = await queue.EnqueueAsync(() => Task.FromResult(engine.World.Open(spec, plan.Request)), ct);
+                return Results.Ok(new { sessionId = registry.Register(session, plan.Fps), frames = plan.Frames, fps = plan.Fps, seed = plan.Seed });
             }
             catch (Exception ex)
             {
@@ -35,14 +38,23 @@ public static class WorldEndpoints
             IWorldSession? session = registry.Get(id);
             if (session is null)
                 return SessionNotFound(id);
-            session.SendAction(req.Action);
+            try
+            {
+                session.SendAction(req.Action);
+            }
+            catch (InvalidOperationException ex) when (ex is not ObjectDisposedException)
+            {
+                // A batch session has already started its run: a late action conflicts with the session's state.
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status409Conflict, ex.Message, "invalid_request_error");
+            }
             return Results.Ok(new { accepted = true });
         });
 
         app.MapGet("/v1/native/world/sessions/{id}/stream", async (string id, WorldSessionRegistry registry, HttpContext ctx, CancellationToken ct) =>
         {
             IWorldSession? session = registry.Get(id);
-            if (session is null)
+            int? fps = registry.FrameRate(id);
+            if (session is null || fps is null)
             {
                 await HartsyInferenceServiceExtensions.WriteErrorAsync(
                     ctx, StatusCodes.Status404NotFound, $"World session '{id}' is not open (never existed, closed, or idle-timed-out).", "invalid_request_error");
@@ -61,6 +73,7 @@ public static class WorldEndpoints
                     string evt = SseHelpers.Event("frame", new
                     {
                         index = frame.Index,
+                        timestampMs = WorldPlan.FrameTimestampMs(frame.Index, fps.Value),
                         png = Convert.ToBase64String(PngEncoder.Encode(frame.Rgb, frame.Width, frame.Height)),
                     }, jsonOptions);
                     await ctx.Response.WriteAsync(evt, ct);

@@ -195,7 +195,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         Tensor cur = hidden;
         ConstantKvCache[]? textKv = _textKv is { } scope && scope.Activation == act ? scope.Caches : null;
         _fwdCounter++;
-        string? vramLog = EngineKnobs.WanVram.Value;
+        string? vramLog = DeviceMemoryTrace.FilePath(EngineKnobs.WanVram);
         IKvRewrite? kvRewrite = cp is null ? null : new CpExchangeRewrite(cp.Exchange, cp.Rank, 0);
 
         // Across-step First-Block cache (single-stream FBC; QwenImageTransformer holds the dual-stream
@@ -207,7 +207,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         if (stepCache is not null && _blocks.Length > 1)
         {
             if (vramLog is not null)
-                System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block 0: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
+                DeviceMemoryTrace.RecordTo(vramLog, backend, $"wan fwd#{_fwdCounter} block 0");
             BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: "b0", textKv: textKv?[0], branchDType: act);
@@ -231,7 +231,7 @@ public sealed unsafe class WanVideoTransformer : IDisposable, IStreamableDenoise
         for (int i = startBlock; i < _blocks.Length; i++)
         {
             if (vramLog is not null)
-                System.IO.File.AppendAllText(vramLog, $"fwd#{_fwdCounter} block {i}: free {backend.FreeMemoryBytes() / (1024.0 * 1024 * 1024):F3} GB\n");
+                DeviceMemoryTrace.RecordTo(vramLog, backend, $"wan fwd#{_fwdCounter} block {i}");
             BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, cur, encoderProj, timestepProj, _rope, cos, sin, tokensPerGroup,
                 imageContextLen: imageContextLen, dbg: i == 0 ? "b0" : null, selfAttnKvRewrite: kvRewrite, textKv: textKv?[i],

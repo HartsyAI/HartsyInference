@@ -3,9 +3,10 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.OpParity.Cases;
 
-/// <summary>The per-element and per-point embeddings with one caller each: DIAMOND's 256-level pixel quantization over
-/// <c>[-1, 1]</c> and Hunyuan3D's Fourier embedding of query coordinates. The fixtures were recorded against
-/// the entry points <see cref="IBackend.FakeQuantizeUniform"/> and <see cref="IBackend.FourierEmbed"/> replaced. F32 everywhere.</summary>
+/// <summary>The per-element and per-point ops: DIAMOND's 256-level pixel quantization over <c>[-1, 1]</c>, Hunyuan3D's Fourier
+/// embedding of query coordinates, and the elementwise exp and reciprocal SANA-WM's Gated-DeltaNet reads. The fixtures were
+/// recorded against the entry points <see cref="IBackend.FakeQuantizeUniform"/> and <see cref="IBackend.FourierEmbed"/> replaced.
+/// F32, except the BF16-output math cases.</summary>
 public static class PointCases
 {
     public const string Family = "point";
@@ -27,6 +28,16 @@ public static class PointCases
         // Eight octave bands over [count, 3] coordinates: x, then sin and cos per coordinate and band → 3·(2·8+1) = 51 wide.
         cases.Add(new(Family, "fourier_embed_f32", seed => new Operands(seed).In("coords", new TensorShape(5, 3), 2f).Out("out", new TensorShape(5, 51)).Tensors,
             (be, t) => be.FourierEmbed(t.Outputs["out"], t.Inputs["coords"], new FourierEmbedSpec(3, 8, IncludeInput: true)), _ => true, All, Transcendental));
+        // Inputs within ±4 keep exp finite; the reciprocal reads exp's positive output, so every compared value is finite.
+        cases.Add(new(Family, "exp_f32", seed => new Operands(seed).In("x", new TensorShape(4, 37), 4f).Out("out", new TensorShape(4, 37)).Tensors,
+            (be, t) => be.Exp(t.Outputs["out"], t.Inputs["x"]), _ => true, All, Transcendental));
+        cases.Add(new(Family, "reciprocal_f32", seed => new Operands(seed).In("x", new TensorShape(4, 37), 4f)
+                .Out("exp", new TensorShape(4, 37)).Out("out", new TensorShape(4, 37)).Tensors,
+            (be, t) =>
+            {
+                be.Exp(t.Outputs["exp"], t.Inputs["x"]);
+                be.Reciprocal(t.Outputs["out"], t.Outputs["exp"]);
+            }, _ => true, All, Transcendental));
         return cases;
     }
 

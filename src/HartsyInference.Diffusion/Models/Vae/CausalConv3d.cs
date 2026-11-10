@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -35,8 +36,18 @@ public sealed unsafe class CausalConv3d
     private readonly bool _replicateFirstPad;   // LTX/HunyuanVideo: pad with copies of the edge frame instead of zeros
     private readonly bool _spatialReplicatePad; // HunyuanVideo: F.pad(mode="replicate") spatially instead of zero-pad
     private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
-    private readonly Tensor _weight5d;    // [cOut, cIn, kt, kh, kw] in the compute dtype — what a native 3-D conv reads
-    private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw] — the per-tap path (and convs a native op declines)
+    // The two weight forms are not held together for long. The per-tap slices are cut the first time a call needs them, and a
+    // conv the backend's native 3-D op has declined DeclinesBeforeSettling times without ever serving lets go of the 5-D form:
+    // a conv that runs per tap would otherwise keep a second copy of its weights on the host and, on a device backend that
+    // promotes weights it uses, on the device (a decoder of 528M parameters held 2 GB for 1 GB of weights). One decline is not
+    // enough to settle, because a native call also declines when it runs out of workspace for one geometry.
+    private const int DeclinesBeforeSettling = 2;
+    private readonly object _weightGate = new();
+    private Tensor? _weight5d;      // [cOut, cIn, kt, kh, kw] in the compute dtype — what a native 3-D conv reads; null once declined
+    private Tensor[]? _weight2d;    // kt slices of [cOut, cIn, kh, kw] — the per-tap path; null until a call needs it
+    private bool _nativeServed;     // the backend's native 3-D conv has run this conv at least once
+    private int _nativeDeclines;    // calls it declined, counted while it has never served the conv
+    private bool _nativeDeclined;   // it declined DeclinesBeforeSettling times and never served: the 5-D form is gone
     private readonly Tensor? _bias;         // F32 in every compute dtype: a BF16 output rounds the sum once
     private readonly Tensor _zero;          // one zero in the compute dtype, broadcast when there is no bias
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
@@ -68,8 +79,6 @@ public sealed unsafe class CausalConv3d
         _zero = new Tensor(new TensorShape(1), _computeDtype);
         _zero.AsSpan<byte>().Clear();
         _weight5d = weight5d.CastTo(_computeDtype);   // an owned copy either way
-        // Both forms are built here, before inference: a backend with a native 3-D conv still declines small ones.
-        _weight2d = SliceTemporal(_weight5d);
     }
 
     /// <summary>Output channel count.</summary>
@@ -116,12 +125,58 @@ public sealed unsafe class CausalConv3d
         return slices;
     }
 
-    /// <summary>Enumerates the 5-D weight, its per-tap slices and the bias for GPU preloading.</summary>
+    /// <summary>Enumerates the weight forms the conv holds now and the bias, for GPU preloading and release: the 5-D weight
+    /// before the first call, then whichever form the first calls settle on (the per-tap slices once a native 3-D conv has
+    /// declined, the 5-D weight while it serves). Enumerate again after the first forward rather than keeping the list.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        yield return _weight5d;
-        foreach (Tensor w in _weight2d) yield return w;
+        Tensor? weight5d;
+        Tensor[]? weight2d;
+        lock (_weightGate)
+        {
+            weight5d = _weight5d;
+            weight2d = _weight2d;
+        }
+
+        if (weight5d is not null) yield return weight5d;
+        if (weight2d is not null)
+        {
+            foreach (Tensor w in weight2d) yield return w;
+        }
+
         if (_bias is not null) yield return _bias;
+    }
+
+    /// <summary>The per-tap slices, cut from the 5-D weight on first use.</summary>
+    private Tensor[] Slices()
+    {
+        lock (_weightGate)
+        {
+            return _weight2d ??= SliceTemporal(_weight5d ?? throw new InvalidOperationException("The conv holds no weights."));
+        }
+    }
+
+    /// <summary>The backend's native 3-D conv has declined a conv repeatedly and never served it: release the 5-D form, on the
+    /// host and on the device, since nothing reads it again. The slices are not preloaded here: a backend that
+    /// promotes the weights a conv keeps using does so, and one that does not is left to its own budget.</summary>
+    private void SettleOnPerTap(IBackend backend)
+    {
+        Tensor? old;
+        lock (_weightGate)
+        {
+            if (_nativeDeclined)
+                return;
+            _nativeDeclined = true;
+            _weight2d ??= SliceTemporal(_weight5d ?? throw new InvalidOperationException("The conv holds no weights."));
+            old = _weight5d;
+            _weight5d = null;
+        }
+
+        if (old is not null)
+        {
+            backend.FreeWeights([old]);
+            old.Dispose();
+        }
     }
 
     /// <summary>Runs the causal 3D conv. <paramref name="input"/> is <c>[B, cIn, Tin, H, W]</c>; <paramref name="cacheFrames"/> (optional <c>[B, cIn, C, H, W]</c>) prepends streaming context, replacing that many zero-pad frames. Returns <c>[B, cOut, Tout, H', W']</c>.
@@ -176,8 +231,16 @@ public sealed unsafe class CausalConv3d
             Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), _computeDtype);
             // Native 3-D convolution where the backend has one: every tap in one reduction, and only the output frames
             // are computed — the per-tap pass below convolves all paddedT frames for each of the kt taps.
-            if (!DisableNativeConv3d && backend.TryConv3DFrameMajor(fastOut, padded, _weight5d, _bias, _strideT, _strideH, _strideW, convPadH, convPadW))
+            bool tryNative = !DisableNativeConv3d && !_nativeDeclined;
+            if (tryNative && backend.TryConv3DFrameMajor(fastOut, padded, _weight5d!, _bias, _strideT, _strideH, _strideW, convPadH, convPadW))
+            {
+                _nativeServed = true;
                 return fastOut;
+            }
+
+            Tensor[] weights2d = Slices();
+            if (tryNative && !_nativeServed && ++_nativeDeclines >= DeclinesBeforeSettling)
+                SettleOnPerTap(backend);
             FillBias(backend, fastOut);
             // Each tap's frame-major conv output [paddedT, cOut, H', W'] adds its strideT-spaced frames into the
             // channel-major output: out[co, to] += convDt[to·strideT + dt, co].
@@ -185,7 +248,7 @@ public sealed unsafe class CausalConv3d
             for (int dt = 0; dt < _kt; dt++)
             {
                 using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), _computeDtype);
-                backend.Conv2D(convDt, padded, _weight2d[dt], null, _strideH, _strideW, convPadH, convPadW);
+                backend.Conv2D(convDt, padded, weights2d[dt], null, _strideH, _strideW, convPadH, convPadW);
                 backend.AccumulateStrided(fastOut, convDt, new StridedCopySpec(taps, StridedView.Of(convDt.Shape).Slice(0, dt, tout, _strideT)));
             }
             return fastOut;
@@ -194,6 +257,7 @@ public sealed unsafe class CausalConv3d
         // Device-resident output: every temporal slot is written by the strided frame scatter below (GPU), so no host clear.
         if (_computeDtype != DType.F32)
             throw new NotSupportedException("CausalConv3d BF16 compute supports only the batched B=1 fast path.");
+        Tensor[] perTap = Slices();
         Tensor output = new Tensor(new TensorShape([(long)batch, _cOut, tout, hOut, wOut]), DType.F32);
         Span<long> slotDims = [batch, _cOut, 1, hOut, wOut];
         StridedView biasView = StridedView.VectorAlong(slotDims, 1);
@@ -213,7 +277,7 @@ public sealed unsafe class CausalConv3d
                     frame = padded;
                 }
                 Tensor conv = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);
-                backend.Conv2D(conv, frame, _weight2d[dt], null, _strideH, _strideW,
+                backend.Conv2D(conv, frame, perTap[dt], null, _strideH, _strideW,
                     _spatialReplicatePad ? 0 : _padH, _spatialReplicatePad ? 0 : _padW);
                 frame.Dispose();
                 if (acc is null) { acc = conv; }
@@ -233,6 +297,32 @@ public sealed unsafe class CausalConv3d
             acc.Dispose();
         }
         return output;
+    }
+
+    /// <summary><see cref="Forward"/> for one chunk of a stream. The left context is the tail of the input the conv saw on
+    /// earlier chunks, kept in <paramref name="cache"/>; while the stream is shorter than the context, the oldest frame is
+    /// repeated, which is the replicate padding a whole-clip pass gives the first frames. The chunk's own tail is staged for the
+    /// next call. A null cache, or a conv with no temporal context, is a plain <see cref="Forward"/>.</summary>
+    /// <exception cref="InvalidOperationException">The conv is not causal: its output would depend on frames after the chunk.</exception>
+    public Tensor ForwardStreaming(IBackend backend, Tensor input, CausalStreamCache? cache)
+    {
+        if (cache is null || _padTLeft == 0)
+            return Forward(backend, input);
+        if (!_causal)
+            throw new InvalidOperationException("Only a causal convolution can run a stream a chunk at a time.");
+        FrameTailCache tail = cache.NextTail(_padTLeft);
+        using Tensor? context = tail.ReplicatePadded(_padTLeft);
+        Tensor output = Forward(backend, input, context);
+        try
+        {
+            tail.Stage(input);
+            return output;
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Extracts temporal frame <paramref name="srcT"/> of the (conceptually) left-padded input as a <c>[B, cIn, H, W]</c> tensor, or null for an all-zero pad frame.</summary>
