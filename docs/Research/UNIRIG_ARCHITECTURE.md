@@ -103,6 +103,12 @@ Total for the two checkpoints: 5,815,082,028 B. Hashes are the Hugging Face LFS 
 | Rigged GLB | `HairCardGlbWriter` (HairDeck-prefixed records: skins, joints, IBMs, animation) | write a separate skin exporter; reuse of HairDeck's writer is not attempted because byte-identical HairDeck output cannot be proven without refactoring its record types |
 | Checkpoints | `PytorchPickleLoader` (zip `.ckpt`), `PickleCheckpointRepacker` | both `.ckpt` files are Lightning checkpoints; nested `state_dict`, possible optimizer state in the 4.38 GB skin file; **not yet opened** |
 
+## Checked against the real skeleton checkpoint (2026-11-09)
+
+Read with the safe-subset loader: 585 tensors, all F32, root `state_dict.model.*`, no optimizer state, no quantized storage ("quantization" in the path is the 256-bin coordinate grid). Verified: OPT hidden 1024, 24 layers, 16 heads, FFN 4096, vocab 267, `embed_positions` `[3078, 1024]` (OPT's +2 offset; dropped at load), no `project_in/out`, separate `lm_head` `[267, 1024]`, per-layer `self_attn_layer_norm` + `final_layer_norm` (pre-norm layout), `q/k/v/out_proj` with biases; encoder `input_proj` `[512, 54]`, fused `c_qkv` `[1536, 512]` without bias, `c_kv` `[1024, 512]`, 16 resblocks, `ln_post`, `output_proj` `[1024, 512]`. The `GenericTransformer` host works with a key remap and no engine change (`AbsolutePositionEmbeddings`, `UseLayerNorm`, `Relu`, `FfnBias`, untied head).
+
+Open items 1–3 below are answered for the skeleton file; the skin file is still unread.
+
 ## Open questions (need the real files)
 
 1. Exact tensor names, shapes and dtypes in both `.ckpt` files (OPT dims, whether `lm_head` exists or is tied, BN running stats in the skin PTv3, `flash_attn` MHA parameter names, Michelangelo key prefixes).
