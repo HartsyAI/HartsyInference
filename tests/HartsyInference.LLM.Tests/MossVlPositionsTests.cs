@@ -59,7 +59,7 @@ public sealed class MossVlPositionsTests
         MossVlPositionPlan plan = MossVlPositions.Plan(twoImages, ImageToken, [new MossVlImage(2, 2), new MossVlImage(2, 2)]);
 
         Assert.Equal(10, plan.VisionLength);
-        Assert.Equal(new float[] { 1f, 1f, 1f }, plan.RowMask);
+        Assert.Null(plan.RowMask);   // every row sees an image, so no row is masked
         Assert.NotNull(plan.CrossGroups);
         IReadOnlyList<MossVlCrossGroup> groups = plan.CrossGroups!;
         Assert.Equal(2, groups.Count);

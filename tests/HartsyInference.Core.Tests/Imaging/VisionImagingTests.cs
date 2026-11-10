@@ -112,15 +112,19 @@ public sealed class VisionImagingTests
         Assert.Equal(35_999, plan[^1].Index);
     }
 
+    [Theory]
+    [InlineData(10, 720, 1280, 1_000_000, 224, 416)]
+    [InlineData(100_000, 720, 1280, 1_000_000, 64, 96)]
+    [InlineData(5, 120, 160, 65_536_000, 128, 160)]
+    [InlineData(256, 1080, 1920, 65_536_000, 352, 672)]
+    [InlineData(3, 64, 48, 65_536_000, 64, 64)]
+    public void FrameSizeMatchesTheVideoProcessor(int frames, int h, int w, long videoMaxPixels, int eh, int ew) =>
+        // Expected values from MOSS-VL's video smart_resize (per-frame cap, clip volume, per-frame floor).
+        Assert.Equal((eh, ew), VideoFrameSampling.FrameSize(h, w, frames, 32, new VideoFrameSamplingOptions(VideoMaxPixels: videoMaxPixels)));
+
     [Fact]
-    public void FrameSizeSharesTheVideoBudgetAcrossFrames()
-    {
-        VideoFrameSamplingOptions options = new(VideoMaxPixels: 1_000_000);
-        // 10 frames of 720p share 1 MP: 100 000 px each, so smart_resize brings 720x1280 down to 224x416.
-        Assert.Equal(SmartResize.Qwen2Vl(720, 1280, 32, 4096, 100_000), VideoFrameSampling.FrameSize(720, 1280, 10, 32, options));
-        // So many frames that the share falls below the per-frame minimum: the minimum wins.
-        Assert.Equal(SmartResize.Qwen2Vl(720, 1280, 32, 4096, 4096), VideoFrameSampling.FrameSize(720, 1280, 100_000, 32, options));
-    }
+    public void FrameSizeRefusesFramesSmallerThanThePatchBlock() =>
+        Assert.Throws<ArgumentException>(() => VideoFrameSampling.FrameSize(16, 64, 4, 32, new VideoFrameSamplingOptions()));
 
     [Theory]
     [InlineData(0.0, "0.0")]

@@ -79,8 +79,8 @@ preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI
 
 1. Realtime session loop: frame and prompt queues, `<|silence|>` idling, interruption by appending a new turn, and cross-KV that
    grows per frame. Not built yet.
-2. Video input: frame sampling and timestamp text exist in `Core.Imaging` and `FfmpegFrameSource`; the offline video prompt and
-   the appendable decode session are not built yet.
+2. Video input: done. Offline video uses one timed vision block per the processor; frames are sized by the reference video
+   smart-resize. The appendable `MossVlDecodeSession` (segments, growing `CrossKvCache`) is in place for the realtime loop.
 3. NF4 (bitsandbytes) and FP8 (compressed-tensors, per-channel BF16 scales) checkpoints are not loaded yet.
 4. CUDA has not run here: cuBLAS 13 is missing (auto-provisioning is in review). Full BF16 generation needs about 21 GB of
    device memory; the 12 GB RTX 3060 runs the GGUF.

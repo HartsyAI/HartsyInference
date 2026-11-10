@@ -3,7 +3,7 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
-## alpha.411
+## alpha.413
 
 - **Added: a model-independent mesh post-processing and PBR baking toolkit in `HartsyInference.ThreeD`.** `MeshDecimator`
   (quadric edge collapse with the upstream 3x-then-target schedule), `MeshCleaner`, `TriangleBvh`, `UvUnwrapper` (chart
@@ -12,6 +12,38 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   to Y-up). `PbrMeshPostProcessor` chains them for a mesh plus a sparse attribute volume. Pure C#, no model dependency, and
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
+
+## alpha.412
+
+- **Added: live MOSS-VL-Realtime sessions.** `hartsy text --realtime -m moss-vl-realtime --video clip.mp4 "…"` (or `--frames-dir`)
+  replays the frames at their own pace into a running session, takes further prompts from stdin, and prints the reply as it
+  streams. The engine side is `ITextService.OpenRealtimeAsync`, which returns an `IRealtimeVlmSession` (push frames and prompts,
+  stream round-start, text, silence, control and dropped-frame events). A session holds its device's text slot until disposed and
+  takes the device gate per forward. On Vulkan, frames of a red disc with "What color is the circle?" give "The circle is red."
+- **Added: `RealtimeVlmSession`, a model-free live loop.** It follows the reference realtime sampler: after each token it splices
+  pending prompts and frames into the stream, idles on the silence token with a 20 ms poll, inserts the protocol's silence when a
+  cycle brings both prompts and frames, drops the oldest frame from a full queue, flushes text on whole characters, and paces the
+  token rate. A model plugs in through `IRealtimeVlmProtocol`, `IStreamingVlmDecoder` and `IStreamingFrameEncoder`;
+  `MossVlStreamingDecoder` adapts the MOSS decode session. Control tokens other than silence (MOSS: `<|response|>`) are reported
+  apart from the reply text.
+
+## alpha.411
+
+- **Added: video input for MOSS-VL-Realtime.** `hartsy text -m moss-vl-realtime --video clip.mp4 "…"` samples the clip with ffmpeg
+  per the model's video settings (1 fps, up to 256 frames, `--video-fps`/`--video-max-frames` to change). `--frames-dir` takes a
+  folder of PNG frames instead and needs no ffmpeg. The API takes `TextMessage.Video` or `TextMessage.VideoFrames`. The frames share
+  one size (the reference's video smart-resize, now `SmartResize.Qwen2VlVideo`) and go into one timed `<|vision_start|>…<|vision_end|>`
+  block. On Vulkan a five-frame clip of a red disc crossing the frame is described as "A red circle … moves from the left side of the
+  frame to the right side". Other models refuse a request with video by name.
+- **Changed: the MOSS-VL decode session appends.** `MossVlDecodeSession.Forward` adds a segment of text and images to a running
+  stream. Positions continue from the last segment, each row sees every earlier image, and each image's vision keys and values are
+  projected once into a growing `CrossKvCache`. A stream built in two segments gives the same logits as one forward (max diff 0 on
+  Vulkan). This is the base for the realtime session. A cancelled segment leaves the session usable.
+- **Fixed: MOSS-VL still images use the checkpoint's prompt layout.** The chat template renders an image as a bare `<|image_pad|>`;
+  the engine had wrapped it in `<|vision_start|>`/`<|vision_end|>`. Asked whether two copies of one image are the same, the model
+  now answers "Yes, they are the same."
+- **Added: `IRealtimeVlmProtocol`** (prompt layouts and control tokens of a streaming VLM) with MOSS-VL's implementation, and a shared
+  `VlmDecodeOps.DecodeLoop` (stop tokens, streaming deltas, cancellation) for VLM generators.
 
 ## alpha.410
 
