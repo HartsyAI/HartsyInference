@@ -171,6 +171,9 @@ public sealed class SanaWmBlock : IDisposable
         _gdn?.Dispose();
         _gdnCamera?.Dispose();
         _softmaxCamera?.Dispose();
+        // The FFN's own host tensors go before the block's owned list, which holds the weights it borrowed. _ffn is null when the
+        // constructor failed before it was built.
+        _ffn?.Dispose();
         SanaWmTensors.DisposeAll(_owned);
     }
 

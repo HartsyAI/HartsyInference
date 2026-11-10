@@ -76,6 +76,7 @@ internal sealed class SanaWmGlumbTempCase : IDisposable
 
     public void Dispose()
     {
+        Ffn.Dispose();
         foreach (Tensor owned in _owned)
             owned.Dispose();
         _owned.Clear();

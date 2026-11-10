@@ -90,6 +90,36 @@ public sealed class SanaWmGlumbTempFfnTests
         Assert.Throws<ArgumentException>(() => c.Ffn.Forward(backend, c.Input, 3, 4, 6));
     }
 
+    /// <summary>The FFN builds a tap-major depthwise kernel, and a cast copy of the depthwise bias when that bias is not F32. Those are
+    /// its own and <see cref="SanaWmGlumbTempFfn.Dispose"/> releases them; the weights it was handed stay the caller's.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Dispose_ReleasesWhatTheFfnBuilt_AndLeavesTheBorrowedWeights(bool biasIsCast)
+    {
+        // BF16 operands make the depthwise bias a cast copy; F32 operands leave it borrowed.
+        using SanaWmGlumbTempCase c = SanaWmGlumbTempCase.Load(FixtureT1,
+            biasIsCast ? SanaWmOperandMode.Bf16Storage : SanaWmOperandMode.Exact);
+        // Inverted GEMM view, inverted bias, tap-major depthwise kernel, depthwise bias, point GEMM view, temporal kernel.
+        Tensor[] weights = c.Ffn.EnumerateWeights().ToArray();
+        Tensor taps = weights[2], depthBias = weights[3];
+
+        c.Ffn.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => taps.AsReadOnlySpan<float>());
+        if (biasIsCast)
+        {
+            Assert.Throws<ObjectDisposedException>(() => depthBias.AsReadOnlySpan<float>());
+        }
+        else
+        {
+            Assert.True(depthBias.AsReadOnlySpan<float>().Length > 0, "A borrowed F32 bias was released with the FFN.");
+            Assert.True(weights[1].AsReadOnlySpan<float>().Length > 0, "A borrowed weight was released with the FFN.");
+        }
+
+        c.Ffn.Dispose();
+    }
+
     private static float MaxAbsDifference(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
     {
         float max = 0f;
