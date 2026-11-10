@@ -129,9 +129,10 @@ internal sealed class MossVlRuntime : IDisposable
         {
             VisionPatchGrid[] grids = runtime.Model.Processor.PreprocessBatch(frames.Select(f => f.Frame).ToArray());
             List<Tensor> owned = [];
+            IDisposable? gate = null;
             try
             {
-                using IDisposable gate = deviceGate(cancel);
+                gate = deviceGate(cancel);
                 VisionFrameFeatures[] features = new VisionFrameFeatures[grids.Length];
                 for (int i = 0; i < grids.Length; i++)
                 {
@@ -143,8 +144,10 @@ internal sealed class MossVlRuntime : IDisposable
             }
             finally
             {
+                // Freed while the device gate is still held, so no other service is submitting work against the buffers being released.
                 foreach (Tensor t in owned) t.Dispose();
                 foreach (VisionPatchGrid g in grids) g.Dispose();
+                gate?.Dispose();
             }
         }
     }
