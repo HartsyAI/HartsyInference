@@ -9,6 +9,11 @@ public enum HfWeightStorage
     /// <summary>F8 E4M3 values with an F32 <c>weight_scale_inv</c> block grid beside them.</summary>
     Fp8Block,
 
+    /// <summary>F8 E4M3 values with one scale per output row (or one for the tensor) in a <c>weight_scale</c> beside them, as
+    /// compressed-tensors writes FP8 <c>channel</c> and <c>tensor</c> strategies (llm-compressor <c>FP8_DYNAMIC</c>):
+    /// <c>w[r, c] = e4m3(q[r, c]) · weight_scale[r]</c>.</summary>
+    Fp8Channel,
+
     /// <summary>Symmetric 4-bit GPTQ: <c>qweight</c>, <c>scales</c>, <c>qzeros</c> and an optional <c>g_idx</c>.</summary>
     GptqInt4,
 

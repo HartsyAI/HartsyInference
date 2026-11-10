@@ -1,0 +1,174 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Imaging;
+using HartsyInference.Core.Logging;
+using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Requests;
+using HartsyInference.LLM.Models.MossVl;
+
+namespace HartsyInference.Engine.Services;
+
+/// <summary>MOSS-VL-Realtime in the text service. The model is a cross-attention VLM with its own loader, so it takes neither the GGUF
+/// language-model path nor a scheduler: a request runs on the pipeline route through <see cref="MossVlRuntime"/>.</summary>
+public sealed partial class TextService
+{
+    /// <summary>Loads a MOSS-VL GGUF or checkpoint folder onto <paramref name="slot"/>. Caller has already unloaded what the slot held.</summary>
+    private void LoadMossVl(TextDeviceSlot slot, string deviceKey, string path, TextRequest request)
+    {
+        // Parsed first: a mistyped precision fails here, before a backend is built or device memory touched.
+        DType? plainPrecision;
+        try { plainPrecision = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
+        catch (ArgumentException ex) { throw new HartsyInferenceException(ex.Message, ex); }
+        if (slot.ExtraStageBackends is not null)
+            DisposeStageBackends(slot);
+        string buildSelector = string.IsNullOrWhiteSpace(request.Device) ? PrimaryDeviceKey() : request.Device.Trim().ToLowerInvariant();
+        string[] shardDevices = ResolveShardDevices(deviceKey);
+        if (shardDevices.Length >= 2)
+        {
+            // The cross-attention decoder has no layer split. A composite key passed whole to CreateBackendFor would parse its
+            // ordinal from "0+cuda:1" and silently land on ordinal 0, so build on the first listed device and say so.
+            Logs.Warning($"[TextService] '{deviceKey}' requests a {shardDevices.Length}-way split, but MOSS-VL loads on one device. "
+                + $"Loading on '{shardDevices[0]}' only; the rest of the device list is ignored.");
+            deviceKey = shardDevices[0];
+            buildSelector = shardDevices[0];
+        }
+        IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
+        ApplyCacheWeightCastsOverride(slot, request, [backend]);
+        bool cpu = backend is Core.Backends.Cpu.CpuBackend;
+        // A GGUF dequantizes everything on the CPU (about 42 GB for this model); on a GPU the packed projections stay packed.
+        if (File.Exists(path))
+            EnsureRamHeadroomFor(path, dequantizesEverything: cpu);
+        else if (cpu)
+            EnsureRamHeadroomForMossVlFolderOnCpu(path, ReadAvailableMemoryKb());
+        // Decode reads the packed blocks through the quantized GEMV; a widened copy of a quantized weight would only serve prefill.
+        if (!cpu && backend.Capabilities.QuantizedTypes is not null)
+            backend.CacheQuantizedWeightCasts = false;
+        try
+        {
+            if (plainPrecision is not null && File.Exists(path))
+                Logs.Warning($"[TextService] WeightPrecision '{request.WeightPrecision}' applies to checkpoint folders; the GGUF loads at its own quant.");
+            slot.MossVl = MossVlRuntime.Load(path, backend, lowVramQuant: !string.IsNullOrEmpty(request.LowVramQuant), plainPrecision);
+        }
+        catch
+        {
+            // A preload that ran out of memory part-way leaves weights resident in the backend's cache. Disposing the host tensors
+            // does not release them, and with slot.MossVl unset the next UnloadSlot would skip the device cleanup.
+            try { backend.FreeAllDeviceMemory(); }
+            catch (Exception freeError) { Logs.Warning($"[TextService] Freeing device memory after a failed MOSS-VL load failed: {freeError.Message}"); }
+            throw;
+        }
+        slot.Scheduler = null;
+        slot.PlannedPlacement = null;
+        slot.PlacementRequested = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        Logs.Info($"[TextService] Loaded MOSS-VL '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' "
+            + $"({(slot.MossVl.Model.IsGguf ? "GGUF" : "checkpoint")}, decoder and vision tower) on {deviceKey}.");
+    }
+
+    /// <summary>Answers the last user message about its images on the slot's MOSS-VL model, streaming the reply.</summary>
+    private static GenOutcome RunMossVl(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
+    {
+        if (request.ForcedTokenIds is not null || request.ReturnTokenScores)
+            throw new HartsyInferenceException("Teacher forcing and token scores are not served for MOSS-VL.");
+        TextMessage? media = LastUserMedia(request);
+        IReadOnlyList<ImageData> images = media?.Images ?? [];
+        VideoFrameSamplingOptions sampling = slot.MossVl!.Model.VideoSampling;
+        sampling = sampling with
+        {
+            Fps = request.VideoFps ?? sampling.Fps,
+            MaxFrames = request.VideoMaxFrames ?? sampling.MaxFrames,
+        };
+        IReadOnlyList<TimedImage> video = media?.VideoFrames ?? (media?.Video is { } clip ? SampleVideo(clip, sampling, cancel) : []);
+        if (images.Count == 0 && video.Count == 0)
+            throw new HartsyInferenceException(
+                "MOSS-VL-Realtime answers about images and video: attach an image (CLI: --image) or a video (CLI: --video) to the user message.");
+        int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
+        // The model answers one user turn about its media; a system prompt and earlier turns are not replayed into the prompt.
+        if (request.Messages.Count > 1 && slot.LoggedSettingMismatches.Add("MossVlHistory"))
+            Logs.Info("[TextService] MOSS-VL answers only the last user message and its media; the system prompt and earlier turns are not used.");
+        MossVlGeneration reply = slot.MossVl.Generate(VisionQuestion(request), images, video, sampling, maxTokens, BuildVisionSampling(request),
+            sink is null ? null : delta => sink(new TextChunk { Kind = TextChunkKind.Chunk, Text = delta }), cancel);
+        return new GenOutcome(reply.Text, reply.HitTokenLimit ? StopReason.Length : StopReason.Stop, reply.PromptTokens, reply.CompletionTokens);
+    }
+
+    /// <summary>Decodes <paramref name="clip"/> with ffmpeg and keeps the frames the model's sampling plan picks.</summary>
+    private static IReadOnlyList<TimedImage> SampleVideo(VideoClip clip, VideoFrameSamplingOptions sampling, CancellationToken cancel)
+    {
+        using Video.Encoding.FfmpegFrameSource source = Video.Encoding.FfmpegFrameSource.FromBytes(clip.Data, clip.Format, sampling);
+        List<TimedImage> frames = [];
+        foreach (TimedRgbFrame frame in source.ReadAsync(cancel).ToBlockingEnumerable(cancel))
+        {
+            frames.Add(new TimedImage
+            {
+                Image = new ImageData { Rgb = frame.Frame.Rgb.ToArray(), Width = frame.Frame.Width, Height = frame.Frame.Height },
+                TimestampSeconds = frame.TimestampSeconds,
+            });
+        }
+        Logs.Info($"[TextService] Sampled {frames.Count} video frames at {sampling.Fps:G3} fps.");
+        return frames;
+    }
+
+    /// <summary>Refuses a MOSS-VL checkpoint folder on the CPU when the host cannot hold it widened: the CPU path keeps every projection as
+    /// F32, twice the BF16 shards (about 42 GB for the released model), plus a fixed margin for activations and the mapped shards' pages.</summary>
+    /// <param name="availableKb">Free host RAM in KiB; zero or less means unknown, and nothing is refused.</param>
+    internal static void EnsureRamHeadroomForMossVlFolderOnCpu(string folder, long availableKb)
+    {
+        if (availableKb <= 0 || !Directory.Exists(folder))
+            return;
+        long shardBytes = Directory.EnumerateFiles(folder, "*.safetensors").Sum(f => new FileInfo(f).Length);
+        const long MarginBytes = 4L << 30;
+        // BF16 shards widen 2x. A quantized folder widens 4x (FP8) to 8x (NF4) per quantized projection, but its shards also hold
+        // BF16 layers (cross-attention, the first and last blocks, the vision tower) that widen only 2x, and the quantized
+        // projections are decoded one at a time into the disk cache and mapped, not held at once; 4x the shards bounds the peak.
+        long widen = ModelAssets.Checkpoints.HfQuantCheckpoint.DeclaresQuantization(folder) ? 4 : 2;
+        long requiredBytes = widen * shardBytes + MarginBytes;
+        long availableBytes = availableKb * 1024;
+        if (availableBytes < requiredBytes)
+            throw new HartsyInferenceException(
+                $"Not enough free host RAM to load MOSS-VL '{Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar))}' on the CPU: "
+                + $"{availableBytes / (double)(1L << 30):0.0} GB free, need about {requiredBytes / (double)(1L << 30):0.0} GB "
+                + $"(the {shardBytes / (double)(1L << 30):0.0} GB of shards widened to F32, plus a margin). Use a GPU device or the GGUF.");
+    }
+
+    /// <summary>Notes once per slot that a kept MOSS-VL model was loaded with a different low-VRAM setting than this request asks for.</summary>
+    private static void LogMossVlLowVramMismatch(TextDeviceSlot slot, string deviceKey, TextRequest request)
+    {
+        if (slot.MossVl is not { } runtime)
+            return;
+        if (request.LowVramQuant is not null)
+            LogLoadTimeSettingMismatch(slot, deviceKey, "LowVramQuant", request.LowVramQuant.Length > 0, runtime.LowVramQuant);
+        // A precision only applies to a folder load; a GGUF keeps its own quant whatever was asked.
+        if (request.WeightPrecision is not null && !runtime.Model.IsGguf && slot.LoggedSettingMismatches.Add("WeightPrecision"))
+        {
+            DType? requested;
+            try { requested = LLM.Transformer.DenseTextWeightPolicy.ParsePlainPrecision(request.WeightPrecision); }
+            catch (ArgumentException) { return; }   // a mistyped value is reported by the load that would use it
+            if (requested != runtime.PlainPrecision)
+                Logs.Debug($"[TextService] WeightPrecision '{request.WeightPrecision}' requested for the already-loaded slot on {deviceKey}, but it "
+                    + $"was loaded with {runtime.PlainPrecision?.Name ?? "native"} projections; it takes effect on the next load, so unload the slot to change it.");
+        }
+    }
+
+    /// <summary>The most recent user message carrying images or a video, or null.</summary>
+    private static TextMessage? LastUserMedia(TextRequest request)
+    {
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            TextMessage m = request.Messages[i];
+            if (m.Role == TextRole.User && (m.Images is { Count: > 0 } || m.Video is not null || m.VideoFrames is { Count: > 0 }))
+                return m;
+        }
+        return null;
+    }
+
+    /// <summary>Refuses a request with video for a model that has no video input, rather than answering as if there were none.</summary>
+    private static void RequireNoVideo(TextRequest request)
+    {
+        foreach (TextMessage m in request.Messages)
+        {
+            if (m.Video is not null || m.VideoFrames is { Count: > 0 })
+                throw new NotSupportedException("Video input is supported by MOSS-VL-Realtime only; this model takes text and images.");
+        }
+    }
+}

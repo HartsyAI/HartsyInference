@@ -36,6 +36,10 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>How long an interactive world session may sit with no action/stream activity before the server evicts it and releases its backend resources.</summary>
     public int WorldSessionIdleTimeoutMinutes { get; set; } = 10;
 
+    /// <summary>How long a live vision session may go with no frame, prompt or connected stream before the server closes it and frees its
+    /// device slot.</summary>
+    public int RealtimeSessionIdleTimeoutMinutes { get; set; } = 10;
+
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
 

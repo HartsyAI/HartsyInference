@@ -264,6 +264,8 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
+            // The patch embedding is the encoder's own F32 copy (ReshapeConvToLinear); the bias and position table are the caller's.
+            _patchEmbedWeight?.Dispose();
             _patchEmbedWeight = _patchEmbedBias = _posEmbedWeight = null;
         }
         GC.SuppressFinalize(this);

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Vision.Dinov2;
 
@@ -111,7 +112,7 @@ public sealed unsafe class DepthAnythingPreprocessor
         {
             // torch's antialias=True path uses the PIL A = −0.5 kernel (not the non-AA −0.75 kernel).
             ReadOnlySpan<float> plane = new((void*)src, inH * inW);
-            Codec.Resample.BicubicPlane(plane, inW, inH, resized, dstWidth, dstHeight, a: -0.5f, antialias: true);
+            Resample.BicubicPlane(plane, inW, inH, resized, dstWidth, dstHeight, a: -0.5f, antialias: true);
             float max = 0f;
             foreach (float v in resized) if (v > max) max = v;
             if (max > 0f)
