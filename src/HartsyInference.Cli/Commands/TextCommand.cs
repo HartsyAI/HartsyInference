@@ -44,8 +44,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
 
         /// <summary>Sampling temperature; &lt;= 0 selects greedy decoding.</summary>
         [CommandOption("--temperature")]
-        [Description("Sampling temperature; 0 or less means greedy.")]
-        public float Temperature { get; init; } = 0.7f;
+        [Description("Sampling temperature; 0 or less means greedy. Default 0.7 (a --realtime run is greedy unless this is given).")]
+        public float? Temperature { get; init; }
 
         /// <summary>Nucleus sampling cutoff.</summary>
         [CommandOption("--top-p")]
@@ -272,7 +272,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             return 1;
         }
 
-        float temperature = settings.Temperature;
+        float temperature = settings.Temperature ?? 0.7f;
         if (settings.GraphDecode && temperature > 0f)
         {
             AnsiConsole.MarkupLine("[yellow]--graph-decode requires greedy sampling; forcing --temperature to 0.[/]");
@@ -283,7 +283,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         if (settings.Device is { Length: > 0 } device) parameters.Put("device", device);
         parameters.Put("max-tokens", settings.MaxTokens.ToString(CultureInfo.InvariantCulture));
         // A live run is greedy like the reference unless a temperature is asked for; the one-shot default (0.7) does not apply.
-        if (!settings.Realtime || Environment.GetCommandLineArgs().Contains("--temperature"))
+        if (!settings.Realtime || settings.Temperature is not null || settings.GraphDecode)
             parameters.Put("temperature", temperature.ToString(CultureInfo.InvariantCulture));
         if (settings.Realtime)
         {
