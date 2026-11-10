@@ -6,7 +6,8 @@ namespace HartsyInference.ThreeD.Models.Utonia;
 
 /// <summary>
 /// One Point Transformer block: submanifold-conv positional encoding, patch attention and an MLP, each with a
-/// residual. Inference only, so drop-path is the identity.
+/// residual. Inference only, so drop-path is the identity. Every full-width operator runs in row chunks, so the
+/// block's features live in host memory and only one chunk at a time occupies VRAM.
 /// </summary>
 internal sealed class UtoniaBlock : IDisposable
 {
@@ -23,13 +24,18 @@ internal sealed class UtoniaBlock : IDisposable
     private readonly UtoniaLinear _fc1;
     private readonly UtoniaLinear _fc2;
     private readonly bool _preNorm;
+    private readonly int _channels;
+    private readonly long _chunkBytes;
+    private readonly int _rowsPerChunk;
     private bool _disposed;
 
     public UtoniaBlock(IBackend backend, UtoniaWeights weights, string prefix, UtoniaConfig config, int channels, int heads,
-        int patchSize, int orderIndex)
+        int patchSize, int orderIndex, long chunkBytes = UtoniaRowChunks.ChunkBytes)
     {
         _backend = backend;
         _preNorm = config.PreNorm;
+        _channels = channels;
+        _chunkBytes = chunkBytes;
         long c = channels;
         long hidden = (long)(channels * config.MlpRatio);
 
@@ -48,9 +54,10 @@ internal sealed class UtoniaBlock : IDisposable
 
         UtoniaLinear qkv = Linear(weights, prefix, UtoniaCheckpointKeys.AttnQkv, 3 * c, c, config.QkvBias);
         UtoniaLinear proj = Linear(weights, prefix, UtoniaCheckpointKeys.AttnProj, c, c, true);
-        _attention = new UtoniaSerializedAttention(backend, qkv, proj, channels, heads, patchSize, config.RopeBase, orderIndex);
+        _attention = new UtoniaSerializedAttention(backend, qkv, proj, channels, heads, patchSize, config.RopeBase, orderIndex, chunkBytes);
         _fc1 = Linear(weights, prefix, UtoniaCheckpointKeys.MlpFc1, hidden, c, true);
         _fc2 = Linear(weights, prefix, UtoniaCheckpointKeys.MlpFc2, c, hidden, true);
+        _rowsPerChunk = UtoniaRowChunks.RowsPerChunk(chunkBytes, Math.Max(channels, hidden));
     }
 
     /// <summary>Runs the block on <paramref name="point"/>'s features and replaces them. Requires a serialized, sparsified point.</summary>
@@ -58,10 +65,10 @@ internal sealed class UtoniaBlock : IDisposable
     {
         Tensor x0 = point.Feat;
         Tensor cpe = CpeBranch(point, x0);
-        Tensor x1 = UtoniaTensors.Add(_backend, x0, cpe);
+        Tensor x1 = Sum(x0, cpe);
         cpe.Dispose();
 
-        Tensor attnIn = _preNorm ? _norm1.Forward(x1) : x1;
+        Tensor attnIn = _preNorm ? Normalize(_norm1, x1) : x1;
         Tensor attn = _attention.Forward(attnIn, point);
         if (_preNorm)
         {
@@ -72,28 +79,23 @@ internal sealed class UtoniaBlock : IDisposable
         x1.Dispose();
         if (!_preNorm)
         {
-            Tensor normed1 = _norm1.Forward(x2);
+            Tensor normed1 = Normalize(_norm1, x2);
             x2.Dispose();
             x2 = normed1;
         }
 
-        Tensor mlpIn = _preNorm ? _norm2.Forward(x2) : x2;
-        Tensor hidden = _fc1.Forward(mlpIn);
+        Tensor mlpIn = _preNorm ? Normalize(_norm2, x2) : x2;
+        Tensor mlp = Mlp(mlpIn);
         if (_preNorm)
         {
             mlpIn.Dispose();
         }
 
-        Tensor activated = new(hidden.Shape, DType.F32);
-        _backend.GeluErf(activated, hidden);
-        hidden.Dispose();
-        Tensor mlp = _fc2.Forward(activated);
-        activated.Dispose();
         Tensor x3 = Residual(x2, mlp, _gamma2);
         x2.Dispose();
         if (!_preNorm)
         {
-            Tensor normed2 = _norm2.Forward(x3);
+            Tensor normed2 = Normalize(_norm2, x3);
             x3.Dispose();
             x3 = normed2;
         }
@@ -118,30 +120,53 @@ internal sealed class UtoniaBlock : IDisposable
     private Tensor CpeBranch(UtoniaPoint point, Tensor feat)
     {
         SparseTensor input = point.AsSparse(feat);
-        SparseTensor conv = SparseOps.SubmanifoldConv3dSparse(_backend, input, _convSlices, _convBias);
-        Tensor flat = new(feat.Shape, DType.F32);
-        _backend.CopyTo(flat, conv.Feats);
-        conv.Feats.Dispose();
-        Tensor linear = _cpeLinear.Forward(flat);
+        SparseTensor conv = SparseOps.SubmanifoldConv3dSparse(_backend, input, _convSlices, _convBias, _chunkBytes);
+        Tensor flat = conv.Feats.Reshape(feat.Shape);
+        Tensor normed = UtoniaRowChunks.Map(flat, _channels, _rowsPerChunk, (src, res) =>
+        {
+            using Tensor linear = new(new TensorShape(src.Shape[0], _channels), DType.F32);
+            _cpeLinear.Forward(src, linear);
+            _cpeNorm.Forward(linear, res);
+        });
         flat.Dispose();
-        Tensor normed = _cpeNorm.Forward(linear);
-        linear.Dispose();
+        conv.Feats.Dispose();
         return normed;
     }
+
+    private Tensor Mlp(Tensor input)
+    {
+        return UtoniaRowChunks.Map(input, _channels, _rowsPerChunk, (src, res) =>
+        {
+            using Tensor hidden = new(new TensorShape(src.Shape[0], _fc1.OutChannels), DType.F32);
+            _fc1.Forward(src, hidden);
+            using Tensor activated = new(hidden.Shape, DType.F32);
+            _backend.GeluErf(activated, hidden);
+            _fc2.Forward(activated, res);
+        });
+    }
+
+    private Tensor Normalize(UtoniaLayerNorm norm, Tensor input) =>
+        UtoniaRowChunks.Map(input, _channels, _rowsPerChunk, (src, res) => norm.Forward(src, res));
+
+    private Tensor Sum(Tensor a, Tensor b) =>
+        UtoniaRowChunks.Map2(a, b, _channels, _rowsPerChunk, (x, y, res) => _backend.Add(res, x, y));
 
     /// <summary>Returns <c>shortcut + gamma * branch</c> as a new tensor; <paramref name="branch"/> is released.</summary>
     private Tensor Residual(Tensor shortcut, Tensor branch, Tensor? gamma)
     {
-        Tensor scaled = branch;
-        if (gamma is not null)
+        Tensor sum = UtoniaRowChunks.Map2(shortcut, branch, _channels, _rowsPerChunk, (s, b, res) =>
         {
-            scaled = new Tensor(branch.Shape, DType.F32);
-            _backend.AffineBroadcastLastDim(scaled, branch, gamma, null);
-            branch.Dispose();
-        }
+            if (gamma is null)
+            {
+                _backend.Add(res, s, b);
+                return;
+            }
 
-        Tensor sum = UtoniaTensors.Add(_backend, shortcut, scaled);
-        scaled.Dispose();
+            using Tensor scaled = new(b.Shape, DType.F32);
+            _backend.AffineBroadcastLastDim(scaled, b, gamma, null);
+            _backend.Add(res, s, scaled);
+        });
+        branch.Dispose();
         return sum;
     }
 

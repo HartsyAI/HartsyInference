@@ -23,7 +23,10 @@ internal sealed class UtoniaLinear
     public Tensor Forward(Tensor input)
     {
         Tensor output = new(new TensorShape(input.Shape[0], OutChannels), DType.F32);
-        _backend.Linear(output, input, _weight, _bias);
+        Forward(input, output);
         return output;
     }
+
+    /// <summary>Writes <c>[rows, OutChannels]</c> into <paramref name="output"/>; used per row chunk.</summary>
+    public void Forward(Tensor input, Tensor output) => _backend.Linear(output, input, _weight, _bias);
 }

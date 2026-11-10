@@ -85,6 +85,43 @@ public sealed record CoLa3DConfig
     /// <summary>Feed-forward expansion ratio (4).</summary>
     public double MlpRatio { get; init; } = 4.0;
 
+    /// <summary>Architecture of <c>cola3d_free_q20.pt</c>: learnable part queries, no prompts.</summary>
+    public static CoLa3DConfig FreeQ20 => new()
+    {
+        LatentChannels = 32,
+        LatentResolution = 64,
+        UtoniaFeatureDim = 576,
+        HiddenDim = 768,
+        NumLayers = 6,
+        NumHeads = 12,
+        MaxParts = 20,
+        QuerySource = QuerySourceKind.Fixed,
+        QueryInit = QueryInitKind.Positional,
+    };
+
+    /// <summary>Architecture of <c>cola3d_mask_q20.pt</c>: one query per prompt 2D mask, with the mask-centre encoding.</summary>
+    public static CoLa3DConfig MaskQ20 => FreeQ20 with
+    {
+        QuerySource = QuerySourceKind.PromptMask,
+        MaskEncoder = MaskEncoderKind.CnnCenterPe,
+    };
+
+    /// <summary>Architecture of <c>cola3d_point_q20.pt</c>: one query per prompt 3D point, reading the Utonia-fused latent.</summary>
+    public static CoLa3DConfig PointQ20 => FreeQ20 with
+    {
+        QuerySource = QuerySourceKind.PromptPoint,
+        PointFeatureSource = PointFeatureSourceKind.LatentUtonia,
+    };
+
+    /// <summary>The q20 architecture for a query source.</summary>
+    public static CoLa3DConfig ForQuerySource(QuerySourceKind source) => source switch
+    {
+        QuerySourceKind.Fixed => FreeQ20,
+        QuerySourceKind.PromptMask => MaskQ20,
+        QuerySourceKind.PromptPoint => PointQ20,
+        _ => throw new ArgumentOutOfRangeException(nameof(source), source, "Unknown query source."),
+    };
+
     /// <summary>Head dimension, valid after <see cref="Validate"/>.</summary>
     public int HeadDim => HiddenDim / NumHeads;
 
