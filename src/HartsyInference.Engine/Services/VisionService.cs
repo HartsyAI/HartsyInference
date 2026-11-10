@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
