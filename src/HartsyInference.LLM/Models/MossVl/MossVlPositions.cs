@@ -262,7 +262,13 @@ public static class MossVlPositions
         try
         {
             foreach (MossVlCrossGroup group in plan.CrossGroups)
-                built.Add(new CrossImageGroup(group.KvLength, BuildRowMask(group.RowSelect, t, hiddenSize)));
+            {
+                // A contiguous group is attended by its row range, so its [1, T, hidden] mask is never built.
+                (int start, int count) = CrossImageGroup.ContiguousRange(group.RowSelect);
+                built.Add(start >= 0
+                    ? new CrossImageGroup(group.KvLength, null, start, count)
+                    : new CrossImageGroup(group.KvLength, BuildRowMask(group.RowSelect, t, hiddenSize)));
+            }
             return built;
         }
         catch
@@ -275,7 +281,7 @@ public static class MossVlPositions
     private static void DisposeGroups(IEnumerable<CrossImageGroup>? groups)
     {
         if (groups is null) return;
-        foreach (CrossImageGroup group in groups) group.Select.Dispose();
+        foreach (CrossImageGroup group in groups) group.Select?.Dispose();
     }
 
     /// <summary>Builds the rotary tables for <paramref name="plan"/>: pair <c>j</c> of each row rotates by its interleaved M-RoPE axis,
@@ -339,6 +345,6 @@ public sealed class MossVlRope(MultimodalRope rope, bool ownsVision = true) : ID
         }
         Rope.RowMask?.Dispose();
         if (Rope.ImageGroups is not null)
-            foreach (CrossImageGroup group in Rope.ImageGroups) group.Select.Dispose();
+            foreach (CrossImageGroup group in Rope.ImageGroups) group.Select?.Dispose();
     }
 }

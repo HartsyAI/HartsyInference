@@ -91,9 +91,12 @@ preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI
    18% by layer 16 (Q4_K: 1.8%), driven by the stack's large outlier activations. `--precision` (a GGUF type) re-quantizes the BF16
    projections a release leaves unquantized; with it both releases run on a 12 GB card (NF4 + q8_0: 28.8 tok/s, FP8 + q4_k:
    9.7 tok/s on Vulkan).
-4. CUDA has not run here: cuBLAS 13 is missing (auto-provisioning is in review). Full BF16 generation needs about 21 GB of
-   device memory; the 12 GB RTX 3060 runs the GGUF.
-5. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:
+4. Performance (alpha.415): each cross-attention image group attends only its own rows, so a video's prefill no longer grows with
+   frames squared (64 frames: 378 s to 10.2 s on Vulkan). The vision tower (about 325 ms per 256×256 frame on Vulkan) bounds a live
+   session near 3 frames per second; decode slows past about 32 frames held (20 tok/s at 64). Neither is optimized yet.
+5. CUDA has not run here: cuBLAS 13 is missing (the cuBLAS autofetch in #707, `paths.cublasAutofetch`, downloads it on first
+   CUDA use once merged). Full BF16 generation needs about 21 GB of device memory; the 12 GB RTX 3060 runs the GGUF.
+6. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:
    `MossVlConfig.FromGguf` reads the `moss_vl.*` metadata and matches `config.json` exactly.
 
 ## Status
