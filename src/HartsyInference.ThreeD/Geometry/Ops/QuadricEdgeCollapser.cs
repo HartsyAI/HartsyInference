@@ -16,6 +16,7 @@ internal sealed class QuadricEdgeCollapser
     private readonly int[] _version;
     private readonly HashSet<int> _scratchA = [];
     private readonly HashSet<int> _scratchB = [];
+    private readonly HashSet<long> _scratchEdges = [];
     private int _aliveFaces;
 
     public QuadricEdgeCollapser(Mesh mesh, MeshDecimatorOptions options)
@@ -299,7 +300,46 @@ internal sealed class QuadricEdgeCollapser
         if (common != sharedCount)
             return false;
 
+        // The full link condition also forbids a link edge on both sides: a face (a, c, d) and a face (b, c, d) would merge into two
+        // coincident triangles. Counting common neighbours alone misses this, e.g. on a tetrahedron.
+        if (WouldDuplicateFace(a, b))
+            return false;
+
         return NormalsHold(a, x, y, z, shared, sharedCount) && NormalsHold(b, x, y, z, shared, sharedCount);
+    }
+
+    /// <summary>True when a face around <paramref name="a"/> and a face around <paramref name="b"/>, neither holding the other vertex,
+    /// share the same two remaining vertices, so collapsing the edge would leave two faces on one vertex pair.</summary>
+    private bool WouldDuplicateFace(int a, int b)
+    {
+        _scratchEdges.Clear();
+        foreach (int f in _vertexFaces[a])
+        {
+            if (FaceHas(f, b)) continue;
+            _scratchEdges.Add(OppositeEdgeKey(f, a));
+        }
+        foreach (int f in _vertexFaces[b])
+        {
+            if (FaceHas(f, a)) continue;
+            if (_scratchEdges.Contains(OppositeEdgeKey(f, b))) return true;
+        }
+        return false;
+    }
+
+    private bool FaceHas(int face, int vertex) =>
+        _faces[face * 3] == vertex || _faces[face * 3 + 1] == vertex || _faces[face * 3 + 2] == vertex;
+
+    /// <summary>Order-independent key of the two vertices of <paramref name="face"/> other than <paramref name="vertex"/>.</summary>
+    private long OppositeEdgeKey(int face, int vertex)
+    {
+        int first = -1, second = -1;
+        for (int c = 0; c < 3; c++)
+        {
+            int v = _faces[face * 3 + c];
+            if (v == vertex) continue;
+            if (first < 0) first = v; else second = v;
+        }
+        return ((long)Math.Min(first, second) << 32) | (uint)Math.Max(first, second);
     }
 
     private bool NormalsHold(int moving, double x, double y, double z, ReadOnlySpan<int> shared, int sharedCount)

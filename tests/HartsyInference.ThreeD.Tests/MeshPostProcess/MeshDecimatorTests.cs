@@ -22,6 +22,22 @@ public sealed class MeshDecimatorTests
     }
 
     [Fact]
+    public void Tetrahedron_IsNeverCollapsedIntoCoincidentFaces()
+    {
+        Mesh tetrahedron = new()
+        {
+            Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+            Indices = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+        };
+
+        Mesh reduced = MeshDecimator.Decimate(tetrahedron, 2);
+
+        Assert.Equal(4, reduced.TriangleCount);
+        Assert.True(SyntheticMeshes.IsClosedManifold(reduced));
+        Assert.True(SyntheticMeshes.SignedVolume(reduced) > 0);
+    }
+
+    [Fact]
     public void Torus_KeepsItsGenus()
     {
         Mesh torus = SyntheticMeshes.Torus(60, 30);
