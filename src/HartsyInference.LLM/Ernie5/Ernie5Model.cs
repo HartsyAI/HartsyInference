@@ -8,7 +8,8 @@ namespace HartsyInference.LLM.Ernie5;
 
 /// <summary>Host reference model of ERNIE-5.5 (vLLM-ERNIE <c>Ernie5_5ForCausalLM</c>): the token embedding broadcast to <c>hc_mult</c> residual
 /// streams, the decoder layers (HCA or DSA attention, dense or latent-MoE SiTU FFN, each under mHC), the mHC head read-out with the final
-/// RMS norm, the LM head, and multimax. MTP layers are not loaded.</summary>
+/// RMS norm, the LM head, and multimax. With <see cref="Ernie5LoadOptions.Mtp"/> it also runs the multi-token-prediction layer
+/// (vLLM-ERNIE <c>Ernie5_5MTP</c>) that drafts the token after next.</summary>
 /// <remarks>
 /// <para>Every op runs through <see cref="IBackend"/> on the CPU backend. Device backends are refused by name: no CUDA or Vulkan kernel takes the
 /// checkpoint's 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.</para>
@@ -31,6 +32,11 @@ public sealed class Ernie5Model : IDisposable
     private readonly float[] _finalNorm;
     private readonly float[]? _multimaxRanges;
     private readonly float[]? _multimaxGains;
+    private readonly float[]? _mtpHeadFn;
+    private readonly float[]? _mtpHeadScale;
+    private readonly float[]? _mtpHeadBase;
+    private readonly float[]? _mtpNorm;
+    private Ernie5MtpLayer? _mtp;
     private Tensor? _embedding;
     private Tensor? _lmHead;
     private int _disposed;
@@ -40,7 +46,8 @@ public sealed class Ernie5Model : IDisposable
     /// <param name="source">The weights; every key must map (<see cref="Ernie5WeightMap"/>). Not owned unless loaded through
     /// <see cref="Load"/>.</param>
     /// <param name="options">Sequence length and weight residency.</param>
-    /// <exception cref="NotSupportedException">The backend is not the CPU, or the config names a feature the model does not implement.</exception>
+    /// <exception cref="NotSupportedException">The backend is not the CPU, the config names a feature the model does not implement, or
+    /// <see cref="Ernie5LoadOptions.Mtp"/> asks for MTP on a checkpoint with other than one MTP layer.</exception>
     /// <exception cref="InvalidDataException">A checkpoint key maps to nothing, or a parameter has no key.</exception>
     public Ernie5Model(IBackend backend, Ernie5Config config, IErnie5WeightSource source, Ernie5LoadOptions options)
         : this(backend, config, source, options, ownedSource: null)
@@ -60,7 +67,10 @@ public sealed class Ernie5Model : IDisposable
         IReadOnlyList<string> missing = config.UnimplementedFeatures();
         if (missing.Count > 0)
             throw new NotSupportedException($"This ERNIE-5.5 config names features the model does not implement: {string.Join("; ", missing)}.");
-        Coverage = Ernie5WeightMap.Check(config, source.Names);
+        if (options.Mtp && config.NumNextnPredictLayers != 1)
+            throw new NotSupportedException($"This ERNIE-5.5 config has {config.NumNextnPredictLayers} multi-token-prediction layers; "
+                + "MTP is wired for exactly one.");
+        Coverage = Ernie5WeightMap.Check(config, source.Names, options.Mtp);
         Coverage.RequireComplete();
 
         _backend = backend;
@@ -84,6 +94,17 @@ public sealed class Ernie5Model : IDisposable
             _multimaxRanges = Ernie5Layer.HostF32(source, Ernie5WeightNames.MultimaxRanges);
             _multimaxGains = Ernie5Layer.HostF32(source, Ernie5WeightNames.MultimaxGains);
         }
+        if (options.Mtp)
+        {
+            int mtp = config.NumHiddenLayers;
+            float[] stored = Ernie5Layer.HostF32(source, Ernie5WeightNames.Mtp(mtp, Ernie5WeightNames.MtpHeadFn));
+            if (stored.Length != (long)flat * hc)
+                throw new InvalidDataException($"MTP layer {mtp} {Ernie5WeightNames.MtpHeadFn} holds {stored.Length} values, not {flat} x {hc}.");
+            _mtpHeadFn = Ernie5Layer.Transpose(stored, flat, hc);
+            _mtpHeadScale = Ernie5Layer.HostF32(source, Ernie5WeightNames.Mtp(mtp, Ernie5WeightNames.MtpHeadScale));
+            _mtpHeadBase = Ernie5Layer.HostF32(source, Ernie5WeightNames.Mtp(mtp, Ernie5WeightNames.MtpHeadBase));
+            _mtpNorm = Ernie5Layer.HostF32(source, Ernie5WeightNames.Mtp(mtp, Ernie5WeightNames.MtpFinalNorm));
+        }
         try
         {
             _embedding = source.Read(Ernie5WeightNames.Embedding);
@@ -91,7 +112,10 @@ public sealed class Ernie5Model : IDisposable
             RequireMatrix(_embedding, config.VocabSize, config.HiddenSize, Ernie5WeightNames.Embedding);
             RequireMatrix(_lmHead, config.VocabSize, config.HiddenSize, Ernie5WeightNames.LmHead);
             if (options.ResidentWeights)
+            {
                 for (int i = 0; i < _layers.Length; i++) _layers[i] = new Ernie5Layer(backend, config, i, source, _hcaRope, _dsaRope);
+                if (options.Mtp) _mtp = new Ernie5MtpLayer(backend, config, config.NumHiddenLayers, source, _hcaRope, _dsaRope);
+            }
         }
         catch
         {
@@ -129,7 +153,7 @@ public sealed class Ernie5Model : IDisposable
         if (capacity > _options.MaxSequenceTokens)
             throw new ArgumentOutOfRangeException(nameof(capacity), capacity,
                 $"The model was loaded for sequences of up to {_options.MaxSequenceTokens} tokens.");
-        return new Ernie5SequenceState(Config, capacity);
+        return new Ernie5SequenceState(Config, capacity, _options.Mtp);
     }
 
     /// <summary>Appends <paramref name="tokenIds"/> to <paramref name="state"/> and returns the logits, <c>[rows, vocab]</c> after multimax: the last
@@ -144,15 +168,19 @@ public sealed class Ernie5Model : IDisposable
     /// last row only, or every row when <paramref name="allRows"/>.</summary>
     public float[] ForwardHidden(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, bool allRows = false)
     {
+        float[] stream = ForwardStream(tokenIds, state);
+        int tokens = tokenIds.Length, rows = allRows ? tokens : 1, flat = Config.HcMult * Config.HiddenSize;
+        return ReadOut(stream.AsSpan((tokens - rows) * flat, rows * flat));
+    }
+
+    /// <summary>Appends <paramref name="tokenIds"/> to <paramref name="state"/> and returns the residual stream after the last decoder layer, before
+    /// the head read-out, for every appended token, <c>[tokens, hc, hidden]</c>: the target hidden state <see cref="MtpForward"/> reads.</summary>
+    public float[] ForwardStream(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state)
+    {
         ArgumentNullException.ThrowIfNull(state);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        int tokens = tokenIds.Length, d = Config.HiddenSize, hc = Config.HcMult, vocab = Config.VocabSize, startPos = state.Length;
-        if (state.Faulted) throw new InvalidOperationException("An earlier Forward on this state failed partway through; call Reset() before reusing it.");
-        if (tokens < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
-        if (startPos + tokens > state.Capacity)
-            throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; {startPos + tokens} were asked for.");
-        foreach (int id in tokenIds)
-            if ((uint)id >= (uint)vocab) throw new ArgumentOutOfRangeException(nameof(tokenIds), id, "Token id is outside the vocabulary.");
+        int tokens = tokenIds.Length, d = Config.HiddenSize, hc = Config.HcMult, startPos = state.Length;
+        RequireAppendable(tokenIds, state, startPos);
 
         float[] stream = Embed(tokenIds, d, hc);
         bool completed = false;
@@ -178,11 +206,67 @@ public sealed class Ernie5Model : IDisposable
             if (!completed) state.MarkFaulted();
         }
         state.Length = startPos + tokens;
+        return stream;
+    }
 
-        int rows = allRows ? tokens : 1;
-        float[] hidden = new float[tokens * d];
-        _head.Head(stream, tokens, _headFn, _headScale, _headBase, _finalNorm, hidden);
-        return hidden.AsSpan((tokens - rows) * d, rows * d).ToArray();
+    /// <summary>The mHC head read-out and final RMS norm of residual-stream rows from <see cref="ForwardStream"/>, <c>[rows, hidden]</c>.</summary>
+    public float[] ReadOut(ReadOnlySpan<float> stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        int rows = StreamRows(stream, nameof(stream));
+        float[] hidden = new float[rows * Config.HiddenSize];
+        _head.Head(stream, rows, _headFn, _headScale, _headBase, _finalNorm, hidden);
+        return hidden;
+    }
+
+    /// <summary>
+    /// Runs the multi-token-prediction layer on <paramref name="tokenIds"/> at positions from <see cref="Ernie5SequenceState.MtpLength"/>,
+    /// appending to its cache. Row <c>i</c> mixes <paramref name="previous"/> row <c>i</c> (the target stream of the token at that position,
+    /// from <see cref="ForwardStream"/>, or an earlier draft step's output) with the embedding of <paramref name="tokenIds"/>[i], the token after
+    /// it. Returns the layer's output stream, <c>[tokens, hc, hidden]</c>: <see cref="MtpHidden"/> reads a draft from it, and a further draft
+    /// step takes it as <paramref name="previous"/>.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The model was loaded without <see cref="Ernie5LoadOptions.Mtp"/>.</exception>
+    public float[] MtpForward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<float> previous, Ernie5SequenceState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        RequireMtp();
+        if (!state.HasMtp) throw new ArgumentException("The sequence state has no MTP caches; create it with CreateState.", nameof(state));
+        int tokens = tokenIds.Length, d = Config.HiddenSize, startPos = state.MtpLength;
+        RequireAppendable(tokenIds, state, startPos);
+        if (StreamRows(previous, nameof(previous)) != tokens)
+            throw new ArgumentException($"previous must hold one stream row per token ({tokens}).", nameof(previous));
+
+        float[] embedded = Embed(tokenIds, d, 1);
+        Ernie5MtpLayer layer = _mtp ?? new Ernie5MtpLayer(_backend, Config, Config.NumHiddenLayers, _source, _hcaRope, _dsaRope);
+        bool completed = false;
+        try
+        {
+            float[] output = layer.Forward(previous, embedded, tokens, startPos, state);
+            completed = true;
+            state.MtpLength = startPos + tokens;
+            return output;
+        }
+        finally
+        {
+            if (!ReferenceEquals(layer, _mtp)) layer.Dispose();
+            // The MTP cache already advanced; MtpLength no longer matches it.
+            if (!completed) state.MarkFaulted();
+        }
+    }
+
+    /// <summary>The MTP layer's read-out of stream rows from <see cref="MtpForward"/>: its own mHC head and <c>shared_head.norm</c>,
+    /// <c>[rows, hidden]</c>. <see cref="Logits"/> turns it into draft logits through the shared LM head and multimax.</summary>
+    /// <exception cref="InvalidOperationException">The model was loaded without <see cref="Ernie5LoadOptions.Mtp"/>.</exception>
+    public float[] MtpHidden(ReadOnlySpan<float> stream)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        RequireMtp();
+        int rows = StreamRows(stream, nameof(stream));
+        float[] hidden = new float[rows * Config.HiddenSize];
+        _head.Head(stream, rows, _mtpHeadFn!, _mtpHeadScale!, _mtpHeadBase!, _mtpNorm!, hidden);
+        return hidden;
     }
 
     /// <summary>The LM head and multimax over <paramref name="rows"/> hidden rows from <see cref="ForwardHidden"/>, <c>[rows, vocab]</c>.</summary>
@@ -200,18 +284,42 @@ public sealed class Ernie5Model : IDisposable
         return logits;
     }
 
-    // The first layer's broadcast pre-mix (vLLM mhc_pre_broadcast) equals the ordinary pre-mix over hc identical copies of the embedding.
-    private float[] Embed(ReadOnlySpan<int> tokenIds, int d, int hc)
+    // Each embedding row repeated `copies` times. With hc copies this is the first layer's broadcast pre-mix (vLLM mhc_pre_broadcast),
+    // which equals the ordinary pre-mix over hc identical copies; the MTP layer takes one copy.
+    private float[] Embed(ReadOnlySpan<int> tokenIds, int d, int copies)
     {
-        float[] stream = new float[tokenIds.Length * hc * d];
+        float[] stream = new float[tokenIds.Length * copies * d];
         for (int t = 0; t < tokenIds.Length; t++)
         {
             using Tensor row = _embedding!.SliceRows(tokenIds[t], 1);
             using Tensor f32 = row.DType == DType.F32 ? row.To(row.Device) : row.CastTo(DType.F32);
             ReadOnlySpan<float> values = f32.AsReadOnlySpan<float>();
-            for (int c = 0; c < hc; c++) values.CopyTo(stream.AsSpan((t * hc + c) * d, d));
+            for (int c = 0; c < copies; c++) values.CopyTo(stream.AsSpan((t * copies + c) * d, d));
         }
         return stream;
+    }
+
+    private void RequireAppendable(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, int startPos)
+    {
+        if (state.Faulted) throw new InvalidOperationException("An earlier Forward on this state failed partway through; call Reset() before reusing it.");
+        if (tokenIds.Length < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
+        if (startPos + tokenIds.Length > state.Capacity)
+            throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; {startPos + tokenIds.Length} were asked for.");
+        foreach (int id in tokenIds)
+            if ((uint)id >= (uint)Config.VocabSize) throw new ArgumentOutOfRangeException(nameof(tokenIds), id, "Token id is outside the vocabulary.");
+    }
+
+    private void RequireMtp()
+    {
+        if (!_options.Mtp) throw new InvalidOperationException("The model was loaded without Ernie5LoadOptions.Mtp, so it has no MTP layer.");
+    }
+
+    private int StreamRows(ReadOnlySpan<float> stream, string name)
+    {
+        int flat = Config.HcMult * Config.HiddenSize;
+        if (stream.Length < flat || stream.Length % flat != 0)
+            throw new ArgumentException($"{name} must hold whole residual-stream rows of {flat} values.", name);
+        return stream.Length / flat;
     }
 
     private static Tensor HostTensor(ReadOnlySpan<float> values, int rows, int cols)
@@ -231,6 +339,7 @@ public sealed class Ernie5Model : IDisposable
     {
         foreach (Ernie5Layer? layer in _layers) layer?.Dispose();
         Array.Clear(_layers);
+        Interlocked.Exchange(ref _mtp, null)?.Dispose();
         Interlocked.Exchange(ref _embedding, null)?.Dispose();
         Interlocked.Exchange(ref _lmHead, null)?.Dispose();
     }

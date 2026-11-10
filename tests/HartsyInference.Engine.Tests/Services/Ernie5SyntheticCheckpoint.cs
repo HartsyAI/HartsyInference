@@ -5,13 +5,14 @@ using HartsyInference.LLM.Ernie5;
 namespace HartsyInference.Engine.Tests.Services;
 
 /// <summary>Writes a tiny ERNIE-5.5 checkpoint directory (config, F32 safetensors with every key the model maps, byte-level tokenizer and chat
-/// template) with seeded random weights. Layer 0 is an HCA attention with a dense FFN; layer 1 is a DSA attention with a latent MoE.</summary>
+/// template) with seeded random weights. Layer 0 is an HCA attention with a dense FFN; layer 1 is a DSA attention with a latent MoE; layer 2 is
+/// the multi-token-prediction layer, a DSA attention with a latent MoE like the real checkpoint's layer 43.</summary>
 internal static class Ernie5SyntheticCheckpoint
 {
     internal const int Vocab = 264, Hidden = 16, Hc = 2, Layers = 2, Heads = 2, HeadDim = 8, QLora = 8, OGroups = 1, OLoraRank = 8;
     internal const int MlaHeads = 2, MlaQLora = 8, MlaKvLora = 8, MlaNope = 4, MlaRope = 4, MlaV = 4, IndexHeads = 2, IndexHeadDim = 128;
     internal const int Dense = 12, MoeInter = 8, Latent = 6, Experts = 4, SharedExperts = 1, ExpertsPerTok = 2;
-    internal const int BosId = 256, EosId = 257;
+    internal const int BosId = 256, EosId = 257, MtpLayers = 1;
 
     /// <summary>The config as a checkpoint ships it; <paramref name="overrides"/> replaces or adds top-level fields (raw JSON values).</summary>
     internal static string ConfigJson(IReadOnlyDictionary<string, string>? overrides = null)
@@ -22,7 +23,7 @@ internal static class Ernie5SyntheticCheckpoint
             ["vocab_size"] = Vocab.ToString(CultureInfo.InvariantCulture),
             ["hidden_size"] = Hidden.ToString(CultureInfo.InvariantCulture),
             ["num_hidden_layers"] = Layers.ToString(CultureInfo.InvariantCulture),
-            ["num_nextn_predict_layers"] = "0",
+            ["num_nextn_predict_layers"] = MtpLayers.ToString(CultureInfo.InvariantCulture),
             ["num_attention_heads"] = Heads.ToString(CultureInfo.InvariantCulture),
             ["num_key_value_heads"] = "1",
             ["head_dim"] = HeadDim.ToString(CultureInfo.InvariantCulture),
@@ -58,7 +59,7 @@ internal static class Ernie5SyntheticCheckpoint
             ["hidden_act"] = "\"situ\"",
             ["activation_situ_beta"] = "4.0",
             ["activation_situ_linear_beta"] = "25.0",
-            ["compress_ratios"] = "[2, -2]",
+            ["compress_ratios"] = "[2, -2, -2]",
             ["experimental_attention_variant"] = "\"dsv4_hybrid\"",
             ["use_gated_attn"] = "false",
             ["use_vha_attention"] = "false",
@@ -137,7 +138,7 @@ internal static class Ernie5SyntheticCheckpoint
     {
         Random rng = new(seed);
         List<(string Name, int[] Shape, float[] Values)> tensors = [];
-        foreach (string key in Ernie5WeightMap.ExpectedKeys(config))
+        foreach (string key in Ernie5WeightMap.ExpectedKeys(config).Concat(Ernie5WeightMap.ExpectedMtpKeys(config)))
         {
             int[] shape = ShapeOf(key, config);
             int count = shape.Aggregate(1, (a, n) => a * n);
@@ -189,9 +190,10 @@ internal static class Ernie5SyntheticCheckpoint
         int hc = c.HcMult, mixes = (2 + hc) * hc, flat = hc * c.HiddenSize, h = c.HiddenSize;
         if (key == Ernie5WeightNames.Embedding || key == Ernie5WeightNames.LmHead) return [c.VocabSize, h];
         if (key == Ernie5WeightNames.FinalNorm) return [h];
-        if (key == Ernie5WeightNames.HeadFn) return [flat, hc];
-        if (key == Ernie5WeightNames.HeadBase) return [hc];
-        if (key == Ernie5WeightNames.HeadScale) return [1];
+        // the main head and each MTP layer's own head share the hc_head_* leaf names
+        if (key.EndsWith(Ernie5WeightNames.MtpHeadFn, StringComparison.Ordinal)) return [flat, hc];
+        if (key.EndsWith(Ernie5WeightNames.MtpHeadBase, StringComparison.Ordinal)) return [hc];
+        if (key.EndsWith(Ernie5WeightNames.MtpHeadScale, StringComparison.Ordinal)) return [1];
         if (key.Contains("_hyper_connection.mapping_proj.weight", StringComparison.Ordinal)) return [flat, mixes];
         if (key.Contains("_hyper_connection.bias", StringComparison.Ordinal)) return [mixes];
         if (key.Contains("_hyper_connection.alpha_", StringComparison.Ordinal)) return [1];
@@ -200,6 +202,8 @@ internal static class Ernie5SyntheticCheckpoint
 
         int layer = LayerOf(key);
         string leaf = key[(key.IndexOf('.', "model.layers.".Length) + 1)..];
+        if (leaf is Ernie5WeightNames.MtpEmbedNorm or Ernie5WeightNames.MtpHiddenNorm or Ernie5WeightNames.MtpFinalNorm) return [h];
+        if (leaf is Ernie5WeightNames.MtpEmbedProj or Ernie5WeightNames.MtpHiddenProj) return [h, h];
         if (leaf.StartsWith("self_attn.", StringComparison.Ordinal))
             return c.IsDsaLayer(layer) ? DsaShape(leaf, c) : HcaShape(leaf, c);
         if (leaf.StartsWith("mlp.", StringComparison.Ordinal) && layer < c.FirstKDenseReplace)

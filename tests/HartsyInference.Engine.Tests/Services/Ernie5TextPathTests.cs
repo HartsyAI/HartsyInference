@@ -79,9 +79,10 @@ public sealed class Ernie5TextPathTests : IDisposable
     }
 
     [Theory]
-    [InlineData("num_nextn_predict_layers", "1", "multi-token-prediction layer(s) from layer 2")]
     [InlineData("hidden_act", "\"gelu\"", "FFN activation 'gelu'")]
-    [InlineData("compress_ratios", "[4, -2]", "compress ratio 4")]
+    [InlineData("compress_ratios", "[4, -2, -2]", "layer 0 attention with compress ratio 4")]
+    [InlineData("compress_ratios", "[2, -2, 4]", "layer 2 attention with compress ratio 4")]
+    [InlineData("compress_ratios", "[2, -2]", "compress_ratios with 2 entries for 3 decoder and MTP layers")]
     public void Text_path_refuses_an_unrunnable_checkpoint_by_name(string field, string value, string named)
     {
         string dir = WriteCheckpoint("refuses-" + field);

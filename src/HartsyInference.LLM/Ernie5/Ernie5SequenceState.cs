@@ -3,26 +3,30 @@ using HartsyInference.LLM.Transformer.Dsa;
 
 namespace HartsyInference.LLM.Ernie5;
 
-/// <summary>Per-sequence caches of every ERNIE-5.5 decoder layer: an <see cref="HcaAttentionState"/> on HCA layers and a
-/// <see cref="DsaAttentionState"/> on DSA layers. The FFNs and hyper-connections keep no state.</summary>
+/// <summary>Per-sequence caches of every ERNIE-5.5 decoder layer, and of the MTP layers when asked for: an <see cref="HcaAttentionState"/> on
+/// HCA layers and a <see cref="DsaAttentionState"/> on DSA layers. The FFNs and hyper-connections keep no state.</summary>
 public sealed class Ernie5SequenceState : IDisposable
 {
     private readonly HcaAttentionState?[] _hca;
     private readonly DsaAttentionState?[] _dsa;
+    private readonly int _mainLayers;
     private int _disposed;
 
     /// <param name="config">The model's config.</param>
     /// <param name="capacity">Longest sequence this state will hold.</param>
-    public Ernie5SequenceState(Ernie5Config config, int capacity)
+    /// <param name="mtp">Also holds caches for the multi-token-prediction layers.</param>
+    public Ernie5SequenceState(Ernie5Config config, int capacity, bool mtp = false)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
         Capacity = capacity;
-        _hca = new HcaAttentionState?[config.NumHiddenLayers];
-        _dsa = new DsaAttentionState?[config.NumHiddenLayers];
+        _mainLayers = config.NumHiddenLayers;
+        int layers = mtp ? config.TotalLayers : config.NumHiddenLayers;
+        _hca = new HcaAttentionState?[layers];
+        _dsa = new DsaAttentionState?[layers];
         try
         {
-            for (int i = 0; i < config.NumHiddenLayers; i++)
+            for (int i = 0; i < layers; i++)
             {
                 if (config.IsDsaLayer(i)) _dsa[i] = new DsaAttentionState(capacity, Ernie5Layer.DsaSettings(config));
                 else _hca[i] = new HcaAttentionState(capacity, Ernie5Layer.HcaSettings(config, i));
@@ -41,6 +45,12 @@ public sealed class Ernie5SequenceState : IDisposable
     /// <summary>Tokens committed so far.</summary>
     public int Length { get; internal set; }
 
+    /// <summary>Whether the state holds caches for the multi-token-prediction layers.</summary>
+    public bool HasMtp => _hca.Length > _mainLayers;
+
+    /// <summary>Positions committed to the MTP layers' caches so far; the next <see cref="Ernie5Model.MtpForward"/> starts here.</summary>
+    public int MtpLength { get; internal set; }
+
     /// <summary>Set when a forward failed partway through its layers, so the caches no longer match <see cref="Length"/>.</summary>
     internal bool Faulted { get; private set; }
 
@@ -57,6 +67,7 @@ public sealed class Ernie5SequenceState : IDisposable
     public void Reset()
     {
         Length = 0;
+        MtpLength = 0;
         Faulted = false;
         foreach (HcaAttentionState? s in _hca) s?.Reset();
         foreach (DsaAttentionState? s in _dsa) s?.Reset();
