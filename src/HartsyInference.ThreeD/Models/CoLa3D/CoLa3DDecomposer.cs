@@ -61,7 +61,7 @@ public sealed class CoLa3DDecomposer : IDisposable
         int n = latent.Count;
         ValidateInputs(latent, utonia, n);
         (int Start, int End)[] ranges = BatchRanges(latent.Coords, n);
-        int queries = ValidatePrompts(prompts, latent.Coords, ranges);
+        int queries = ValidatePrompts(prompts, latent, ranges);
         bool[] active = ActiveMask(prompts, ranges.Length, queries);
         int width = _config.HiddenDim;
 
@@ -173,7 +173,7 @@ public sealed class CoLa3DDecomposer : IDisposable
 
     /// <summary>Validates the prompt inputs for the configured source and returns the query count per sample. Point prompts
     /// are checked against the latent here, so a rejected request fails before any tensor is allocated.</summary>
-    private int ValidatePrompts(CoLa3DQueryPrompts? prompts, int[] coords, (int Start, int End)[] ranges)
+    private int ValidatePrompts(CoLa3DQueryPrompts? prompts, SparseTensor latent, (int Start, int End)[] ranges)
     {
         int batch = ranges.Length;
         if (_config.QuerySource == CoLa3DConfig.QuerySourceKind.Fixed)
@@ -189,6 +189,8 @@ public sealed class CoLa3DDecomposer : IDisposable
             throw new HartsyInferenceException($"Prompts describe {prompts.Batch} samples; the latent holds {batch}.");
         if (prompts.Queries < 1)
             throw new HartsyInferenceException("Prompts need at least one query slot per sample.");
+        if (prompts.Queries > _config.MaxParts)
+            throw new HartsyInferenceException($"Prompts name {prompts.Queries} queries; this checkpoint takes at most {_config.MaxParts}.");
         if (prompts.Valid is not null && prompts.Valid.Length != batch * prompts.Queries)
             throw new HartsyInferenceException($"Valid mask holds {prompts.Valid.Length} entries; expected {batch * prompts.Queries}.");
 
@@ -206,7 +208,11 @@ public sealed class CoLa3DDecomposer : IDisposable
             throw new HartsyInferenceException("PromptPoint queries take points and no masks.");
         if (prompts.Points.Length != batch * prompts.Queries * 3)
             throw new HartsyInferenceException($"Prompt points hold {prompts.Points.Length} values; expected {batch * prompts.Queries * 3}.");
-        CoLa3DPointPromptEncoder.ValidatePoints(coords, ranges, prompts.Points, prompts.Valid, prompts.Queries, _config.LatentResolution);
+        if (latent.Resolution != _config.LatentResolution)
+            throw new HartsyInferenceException(
+                $"Point prompts index a {_config.LatentResolution}^3 latent; this latent is {latent.Resolution}^3.");
+        CoLa3DPointPromptEncoder.ValidatePoints(
+            latent.Coords, ranges, prompts.Points, prompts.Valid, prompts.Queries, _config.LatentResolution);
         return prompts.Queries;
     }
 

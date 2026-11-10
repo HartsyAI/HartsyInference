@@ -8,7 +8,7 @@ public sealed class CoLa3DConfigTests
     [Fact]
     public void FreeQ20Config_IsValidAndDerivesTheCheckpointShapes()
     {
-        CoLa3DConfig config = CoLa3DTestSupport.FreeQ20();
+        CoLa3DConfig config = CoLa3DConfig.FreeQ20;
         config.Validate();
 
         Assert.Equal(64, config.HeadDim);
@@ -36,10 +36,10 @@ public sealed class CoLa3DConfigTests
     [Fact]
     public void Validate_RejectsZeroSlotsAndBadMaskWidths()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DTestSupport.FreeQ20() with { MaxParts = 0 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DTestSupport.MaskQ20() with { MaskEncoderHidden = 6 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DTestSupport.MaskQ20() with { MaskPePerAxis = 3 }));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DTestSupport.FreeQ20() with { MlpRatio = double.NaN }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DConfig.FreeQ20 with { MaxParts = 0 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DConfig.MaskQ20 with { MaskEncoderHidden = 6 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DConfig.MaskQ20 with { MaskPePerAxis = 3 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Validated(CoLa3DConfig.FreeQ20 with { MlpRatio = double.NaN }));
     }
 
     private static CoLa3DConfig Validated(CoLa3DConfig config)

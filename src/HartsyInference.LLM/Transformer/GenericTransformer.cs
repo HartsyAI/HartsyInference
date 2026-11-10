@@ -526,9 +526,9 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         else
         {
             if (_cfg.Mla is not null) throw new NotSupportedException("MultimodalRope is not supported with MLA.");
-            // The vision tables and the cross bias are read only when a cross layer projects its keys and values. Once every cross
-            // layer holds them (each decode step of a request), they are borrowed from the caller instead of copied again.
-            bool visionRead = crossKv is null || !CrossKvComplete(crossKv);
+            // The vision tables are read only when a cross layer projects new vision keys, i.e. when this call brings vision tokens.
+            // A call over vision already in the cache (a decode step) has none to copy.
+            bool visionRead = crossStates is not null && rope.VisionCos is not null;
             // Each copy is released if a later one fails; once the record exists the finally below owns them.
             Tensor? textCos = null, textSin = null, visionCos = null, visionSin = null, rowMask = null;
             List<CrossImageGroup>? groups = null;
@@ -538,15 +538,15 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 textSin = MakeResident(backend, rope.TextSin);
                 if (visionRead)
                 {
-                    visionCos = MakeResident(backend, rope.VisionCos);
-                    visionSin = MakeResident(backend, rope.VisionSin);
+                    visionCos = MakeResident(backend, rope.VisionCos!);
+                    visionSin = MakeResident(backend, rope.VisionSin!);
                 }
                 rowMask = rope.RowMask is null ? null : MakeResident(backend, rope.RowMask);
                 if (rope.ImageGroups is not null)
                 {
                     groups = [];
                     foreach (CrossImageGroup group in rope.ImageGroups)
-                        groups.Add(new CrossImageGroup(group.KvLength, MakeResident(backend, group.Select)));
+                        groups.Add(group.Select is null ? group : group with { Select = MakeResident(backend, group.Select) });
                 }
                 resident = new MultimodalRope(textCos, textSin, visionCos ?? rope.VisionCos, visionSin ?? rope.VisionSin, rowMask, groups);
                 ownsResidentVision = visionRead;
@@ -559,7 +559,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 visionSin?.Dispose();
                 rowMask?.Dispose();
                 if (groups is not null)
-                    foreach (CrossImageGroup group in groups) group.Select.Dispose();
+                    foreach (CrossImageGroup group in groups) group.Select?.Dispose();
                 throw;
             }
             cos = resident.TextCos;
@@ -632,8 +632,10 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 if (_cfg.IsCrossAttnLayer(i))
                 {
                     // mllama: cross-attend the vision features. With no image present the layer is skipped (HF masks
-                    // it out), so the hidden state passes through unchanged.
-                    next = crossStates is not null ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen, resident, crossKv, i)
+                    // it out), so the hidden state passes through unchanged. A MOSS-VL session's cache holds the vision seen so far,
+                    // so a call that brings none (a decode step) still cross-attends it.
+                    next = crossStates is not null || crossKv is { Length: > 0 }
+                        ? _layers[i].CrossForward(backend, hidden, t, crossStates, crossLen, resident, crossKv, i)
                         : CopyHidden(backend, hidden);
                 }
                 else
@@ -651,6 +653,8 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
             if (advanceCache)
             {
                 cache.AdvanceLength(t);
+                // The new vision rows every cross layer appended become part of the cache only now that the whole call has run.
+                if (crossKv is not null && crossStates is not null) crossKv.Commit(crossLen);
             }
 
             if (applyFinalNorm)
@@ -687,24 +691,16 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
                 resident.TextSin.Dispose();
                 if (ownsResidentVision)
                 {
-                    resident.VisionCos.Dispose();
-                    resident.VisionSin.Dispose();
+                    resident.VisionCos?.Dispose();
+                    resident.VisionSin?.Dispose();
                 }
                 resident.RowMask?.Dispose();
                 if (resident.ImageGroups is not null)
-                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select.Dispose();
+                    foreach (CrossImageGroup group in resident.ImageGroups) group.Select?.Dispose();
             }
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
-    }
-
-    /// <summary>True when every cross-attention layer already holds its projected keys and values for the request.</summary>
-    private bool CrossKvComplete(Multimodal.CrossKvCache kv)
-    {
-        for (int i = 0; i < _layers.Length; i++)
-            if (_cfg.IsCrossAttnLayer(i) && kv.Get(i) is null) return false;
-        return true;
     }
 
     /// <summary>Ends a forward stopped by <paramref name="cancel"/> before layer <paramref name="layer"/>: releases the
@@ -1760,7 +1756,7 @@ public sealed unsafe class GenericTransformer : IDisposable, HartsyInference.LLM
         }
 
         /// <summary>mllama gated cross-attention forward: reads the encoded <paramref name="vision"/> features instead of the causal text K/V; used at the cross-attention layer indices, where the self-attention <see cref="Forward"/> path is bypassed.</summary>
-        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor vision, int visionLen, MultimodalRope? rope = null,
+        public Tensor CrossForward(IBackend backend, Tensor hidden, int t, Tensor? vision, int visionLen, MultimodalRope? rope = null,
             Multimodal.CrossKvCache? kvCache = null, int layer = 0)
             => _crossAttn!.Forward(backend, hidden, t, vision, visionLen, rope, kvCache, layer);
 

@@ -194,9 +194,6 @@ Dedicated CPU/GPU CI was removed by project decision; do not recreate it as rout
 These are the shared blocks the [Comfy-Org rollout](COMFY_ORG_ROLLOUT.md) needs before its consumers. Each one lands
 with its first consumer and is removed here once it ships.
 
-- [ ] `tests/require-executed.sh`, hoisted from the `run_class` check in `run-multigpu-campaign.sh`.
-  - Takes a nonempty expected-test manifest.
-  - Fails on a self-skip, an unavailable-backend guard, zero passed, or a missing manifest test.
 - [ ] Vision contracts. All of these are additive:
   - a `VisionBatchRequest` for multi-view input, and for frames with timestamps or fps;
   - new `VisionMode` values with per-mode validation;

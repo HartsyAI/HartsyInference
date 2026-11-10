@@ -131,7 +131,6 @@ public sealed partial class VulkanBackend
     public void ActQuantDequantInPlace(Tensor x, LatentEncoding encoding)
     {
         LatentQuantReference.ValidateActQuant(x, encoding);
-        LatentEncodings.RequireDeviceKernel(encoding, "Vulkan ActQuantDequantInPlace");
         int group = LatentEncodings.GroupSize(encoding);
         if (group == 0)
         {

@@ -9,13 +9,19 @@ public sealed record MeshRequest
     /// <summary>The text prompt; may be empty for pure image-to-3D.</summary>
     public string Prompt { get; init; } = "";
 
-    /// <summary>Input image for image-to-3D; null for text-to-3D.</summary>
+    /// <summary>Input image for image-to-3D; null for text-to-3D and for scene models.</summary>
     public ImageData? Image { get; init; }
+
+    /// <summary>Input triangle scene for scene-decomposition models (cola3d); null for image models.</summary>
+    public SceneMeshData? SceneMesh { get; init; }
+
+    /// <summary>Objects to extract from <see cref="SceneMesh"/>; null runs free queries. Scene models only.</summary>
+    public SceneMeshPrompt? ScenePrompt { get; init; }
 
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
-    /// <summary>Grid / voxel resolution; 0 uses the model default.</summary>
+    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt).</summary>
     public int GridResolution { get; init; }
 
     /// <summary>RNG seed; negative means a random seed.</summary>

@@ -12,6 +12,14 @@ public sealed record TextMessage
     /// <summary>Attached images for multimodal turns; null/empty for text-only.</summary>
     public IReadOnlyList<ImageData>? Images { get; init; }
 
+    /// <summary>An attached video container (decoded with ffmpeg and sampled per the model's video settings), for video-capable models.
+    /// A model without video input refuses a request that carries one.</summary>
+    public VideoClip? Video { get; init; }
+
+    /// <summary>An attached video as already-decoded frames with their times, in time order; used instead of <see cref="Video"/> when
+    /// the caller decodes or samples itself. Taken as given: no further sampling.</summary>
+    public IReadOnlyList<TimedImage>? VideoFrames { get; init; }
+
     /// <summary>Tool calls an <see cref="TextRole.Assistant"/> turn made; null for a plain turn.</summary>
     public IReadOnlyList<NativeToolCall>? ToolCalls { get; init; }
 

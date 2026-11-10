@@ -90,6 +90,41 @@ public sealed class MossVlGenerateTests
         }
     }
 
+    /// <summary>The GGUF-only path end to end on one GPU: the vision tower comes out of the GGUF (F16, un-padded qkv) and runs on the
+    /// same backend as the decoder, which is loaded through the backend weight policy. The greedy reply must describe the image.</summary>
+    [RealWeightsFact(CheckpointVariable, VisionVariable, GgufVariable)]
+    public void GgufTowerAndDecoderOnOneBackendDescribeTheImage()
+    {
+        (MossVlConfig config, ILlmTokenizer tokenizer) = LoadConfigAndTokenizer();
+        string referenceDir = Path.GetDirectoryName(Environment.GetEnvironmentVariable(VisionVariable)!)!;
+        (long[] patchShape, float[] patchData) = NpyReader.ReadFloat32(Path.Combine(referenceDir, "patches.npy"));
+        using Tensor patches = new(new TensorShape(patchShape[0], patchShape[1]), DType.F32);
+        patchData.AsSpan().CopyTo(patches.AsSpan<float>());
+
+        string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
+        string backendName = (Environment.GetEnvironmentVariable(BackendVariable) ?? "vulkan").ToLowerInvariant();
+        bool cuda = backendName == "cuda";
+        using IBackend backend = cuda ? new CudaBackend(0, CudaPtxDirectory.Resolve()) : new VulkanBackend();
+        using MossVlVisionTower tower = MossVlVisionTower.OpenGguf(gguf, backend);
+        using MossVlTextDecoder decoder = MossVlTextDecoder.OpenGguf(gguf, config,
+            new MossVlLoadOptions { Backend = backend, LowVramQuant = true });
+        Qwen3VlVisionEncoder.VisionOutput vision = tower.Encoder.Forward(backend, patches, 1, PatchGridHeight, PatchGridWidth);
+        try
+        {
+            MossVlGenerator generator = new(decoder, config, tokenizer, backend);
+            string reply = generator.Generate(Question, vision.MergedTokens, MergedHeight, MergedWidth, maxTokens: 48,
+                sampling: SamplingOptions.GreedyPreset);
+
+            Console.WriteLine($"MOSS-VL GGUF tower + decoder on {backendName} (greedy, {config.Text.NumLayers} layers): question=\"{Question}\"");
+            Console.WriteLine($"REPLY: {reply}");
+            Assert.Contains("noise", reply);
+        }
+        finally
+        {
+            vision.MergedTokens.Dispose();
+        }
+    }
+
     /// <summary>Two images in one prompt on the real decoder: the cross-attention bias hides each image from the rows before its
     /// placeholder. There is no two-image reference, so this checks that the path runs and produces text.</summary>
     [RealWeightsFact(CheckpointVariable, VisionVariable, GgufVariable)]
