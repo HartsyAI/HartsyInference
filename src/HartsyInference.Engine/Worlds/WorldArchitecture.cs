@@ -15,4 +15,8 @@ public enum WorldArchitecture
     /// <summary>SANA-WM stage 1: a camera-controlled DiT, the LTX-2 video VAE, and a Gemma-2-2B text encoder, loaded one stage
     /// at a time per run.</summary>
     SanaWm,
+
+    /// <summary>SANA-WM streaming: the chunk-causal distilled DiT (the stage-1 layout), the causal LTX-2 video VAE, and the
+    /// same Gemma-2-2B text encoder. The DiT and the VAE decoder stay loaded together for the length of a stream.</summary>
+    SanaWmStreaming,
 }

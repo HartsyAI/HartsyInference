@@ -31,17 +31,29 @@ public static class WorldPlanResolver
         string backend = ResolveBackend(caps, backendSelector, id);
         string precision = request.Precision is null ? caps.Precisions[0] : Allowed(caps.Precisions, request.Precision, "precision", id);
         RejectUnsupportedOptions(caps, request, id);
-        int frames = ResolveFrames(caps, request.Frames ?? caps.DefaultFrames, id, notes);
+        bool streaming = ResolveStreaming(caps, request, id);
+        int requestedFrames = request.Unbounded ? 0 : request.Frames ?? caps.DefaultFrames;
+        int frames = request.Unbounded ? 0 : ResolveFrames(caps, requestedFrames, id, notes);
         int fps = ResolveFps(caps, request.Fps ?? caps.DefaultFps, id);
         int steps = ResolveSteps(caps, request.Steps, id, notes);
         string? sampler = request.Sampler is null ? null : Allowed(caps.Samplers, request.Sampler, "sampler", id);
-        CameraPlan camera = ResolveCamera(caps, request.Camera, frames, init, id, notes);
+        // A stream steered by live actions has no path to check up front: an empty path or a script is its opening state.
+        bool live = streaming && caps.Streaming!.SupportsLiveActions && request.Camera is not { Poses.Count: > 0 };
+        if (request.Unbounded && !live)
+        {
+            throw new WorldPlanningException(
+                $"An unbounded '{id}' stream is steered by live actions; it takes no fixed camera path. Give a frame count with the path.");
+        }
+        CameraPlan camera = live
+            ? ResolveLiveCamera(caps, request.Camera, init, id)
+            : ResolveCamera(caps, request.Camera, frames, init, id, notes);
 
         bool seedDrawn = request.Seed < 0;
         long seed = seedDrawn ? (drawSeed?.Invoke() ?? Random.Shared.NextInt64(0, int.MaxValue)) : request.Seed;
         WorldRequest resolved = request with
         {
-            Frames = frames,
+            Frames = request.Unbounded ? null : frames,
+            Streaming = streaming,
             Fps = fps,
             Steps = steps,
             Seed = seed,
@@ -54,8 +66,10 @@ public static class WorldPlanResolver
             ModelId = id,
             Backend = backend,
             Precision = precision,
-            RequestedFrames = request.Frames ?? caps.DefaultFrames,
+            RequestedFrames = requestedFrames,
             Frames = frames,
+            Streaming = streaming,
+            Unbounded = request.Unbounded,
             Fps = fps,
             Steps = steps,
             Guidance = request.Guidance,
@@ -87,6 +101,64 @@ public static class WorldPlanResolver
             throw new WorldPlanningException($"'{id}' does not run on the {kind} backend; allowed: {string.Join(", ", allowed)}.");
         }
         return kind;
+    }
+
+    /// <summary>Whether the session streams: the request's choice, else the model's only mode. A streaming request needs a model
+    /// that declares streaming, a batch request a model that has a batch mode, and an unbounded run a stream that supports it.</summary>
+    private static bool ResolveStreaming(WorldCapabilities caps, WorldRequest request, string id)
+    {
+        WorldStreamingCapabilities? streaming = caps.Streaming;
+        bool wanted = request.Streaming ?? streaming?.Only ?? false;
+        if (wanted && streaming is null)
+        {
+            throw new WorldPlanningException(
+                $"'{id}' is a batch model: it renders its whole rollout in one run and has no chunk-by-chunk streaming mode.");
+        }
+        if (!wanted && streaming is { Only: true })
+        {
+            throw new WorldPlanningException($"'{id}' only generates as a stream; it has no whole-clip batch mode.");
+        }
+        if (!request.Unbounded)
+        {
+            return wanted;
+        }
+        if (!wanted || streaming is not { SupportsUnbounded: true })
+        {
+            throw new WorldPlanningException(
+                $"'{id}' needs a frame count; only a streaming model that supports unbounded runs can run until it is stopped.");
+        }
+        if (request.Frames is not null)
+        {
+            throw new WorldPlanningException("Give a frame count or an unbounded run, not both.");
+        }
+        return true;
+    }
+
+    /// <summary>The camera of a stream steered by live actions: no poses, an optional opening script kept as written (the
+    /// stream plays it, then follows the actions it is sent), and one set of intrinsics.</summary>
+    private static CameraPlan ResolveLiveCamera(WorldCapabilities caps, WorldCameraPath? camera, ImageData init, string id)
+    {
+        if (camera?.FrameIntrinsics is not null)
+        {
+            throw new WorldPlanningException($"A live '{id}' stream takes one set of intrinsics for every frame, not per-frame intrinsics.");
+        }
+        if (camera?.Script is string script)
+        {
+            if (!caps.CameraModes.Contains(WorldCameraMode.ActionScript) || caps.CameraScript is null)
+            {
+                throw new WorldPlanningException($"'{id}' takes no action-script camera path.");
+            }
+            try
+            {
+                _ = caps.CameraScript.Expand(script);
+            }
+            catch (FormatException ex)
+            {
+                throw new WorldPlanningException($"The camera action script for '{id}' is invalid: {ex.Message}");
+            }
+        }
+        WorldIntrinsics? intrinsics = ValidateIntrinsics(camera?.Intrinsics, caps, init, id);
+        return new CameraPlan(new WorldCameraPath { Script = camera?.Script, Intrinsics = intrinsics }, null);
     }
 
     private static void RejectUnsupportedOptions(WorldCapabilities caps, WorldRequest request, string id)

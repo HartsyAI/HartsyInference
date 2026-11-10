@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 
@@ -7,7 +8,8 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// frame, then a temporal residual <c>y + Conv2d(C, C, (3, 1))(y)</c> over T, where <c>y</c> is the point-conv output.
 /// Activations and conv kernels share one dtype, F32 or BF16; biases are that dtype or F32. The weights are borrowed and must
 /// outlive the FFN. The two tensors the FFN builds itself, the tap-major depthwise kernel and a cast depthwise bias, are its own,
-/// and <see cref="Dispose"/> releases them.</summary>
+/// and <see cref="Dispose"/> releases them. In a chunk-causal stream (upstream <c>CachedGLUMBConvTemp</c>) the temporal convolution
+/// reads the last frame of the previous chunk on its left and zeros on its right.</summary>
 /// <remarks>The gated conv runs on the tokens as they are (channels-last, as upstream's <c>permute</c> view feeds cuDNN): the 1×1
 /// convolutions are GEMMs over the token rows and the depthwise convolution and GLU are one fused channels-last op, so no
 /// activation is transposed. It is per frame, so it runs over chunks of frames: the hidden buffers, the largest in the block,
@@ -116,11 +118,21 @@ public sealed class SanaWmGlumbTempFfn : IDisposable
 
     /// <summary>Runs the FFN on tokens <c>[B, frames·height·width, C]</c>; returns a new owned <c>[B, N, C]</c> tensor in the input dtype.</summary>
     /// <exception cref="NotSupportedException">BF16 input on a backend without BF16 support.</exception>
-    public Tensor Forward(IBackend backend, Tensor x, int frames, int height, int width, string profileTag = "ffn")
+    public Tensor Forward(IBackend backend, Tensor x, int frames, int height, int width, string profileTag = "ffn") =>
+        Forward(backend, x, frames, height, width, profileTag, null, commit: false);
+
+    /// <summary><see cref="Forward(IBackend, Tensor, int, int, int, string)"/> for one chunk of a chunk-causal stream of batch 1.</summary>
+    /// <param name="tail">The point-convolution output of the frame before the chunk, which the temporal convolution reads as
+    /// its left context; null runs the clip form, zero-padded on both sides.</param>
+    /// <param name="commit">Stages this chunk's last frame into <paramref name="tail"/>.</param>
+    internal Tensor Forward(IBackend backend, Tensor x, int frames, int height, int width, string profileTag, FrameTailCache? tail,
+        bool commit)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(x);
         ValidateInput(backend, x, frames, height, width);
+        if (tail is not null && x.Shape[0] != 1)
+            throw new ArgumentException($"A chunk-causal stream runs one batch item per forward; got batch {x.Shape[0]}.", nameof(x));
 
         int batch = (int)x.Shape[0];
         int rows = batch * frames;
@@ -131,7 +143,14 @@ public sealed class SanaWmGlumbTempFfn : IDisposable
             point = scratch.Track(SpatialPath(backend, x, rows, height, width));
         Tensor output;
         using (StageProfiler.Begin(backend, profileTag, "mlp.temporal"))
-            output = scratch.Track(TemporalPath(backend, point, batch, frames, area));
+        {
+            output = tail?.Current is Tensor previous
+                ? scratch.Track(TemporalPathWithContext(backend, point, previous, tail.HeldFrames, frames, area))
+                : scratch.Track(TemporalPath(backend, point, batch, frames, area));
+            if (commit)
+                tail?.Stage(point);
+        }
+
         scratch.Release(point);
         return scratch.Detach(output);
     }
@@ -217,6 +236,35 @@ public sealed class SanaWmGlumbTempFfn : IDisposable
 
         Tensor output = scratch.New(new TensorShape(batch, tokens, _channels), _dtype);
         backend.Transpose2D(output, residual, _channels, tokens);
+        return scratch.Detach(output);
+    }
+
+    /// <summary><see cref="TemporalPath"/> for a chunk that follows <paramref name="contextFrames"/> earlier frames: the
+    /// convolution runs over <c>[context ⊕ chunk]</c> and its output is read at the chunk's frames, so the first frame sees the
+    /// previous chunk's last frame and the last frame sees zeros. Token rows <c>[T·H·W, C]</c> in, <c>[1, T·H·W, C]</c> out.</summary>
+    private Tensor TemporalPathWithContext(IBackend backend, Tensor point, Tensor context, int contextFrames, int frames, int area)
+    {
+        int tokens = frames * area;
+        int joinedFrames = contextFrames + frames;
+        int joinedTokens = joinedFrames * area;
+        using SanaWmScratch scratch = new();
+        Tensor joined = scratch.Track(StreamingTensors.Concat(backend, [context, point], 0));
+        Tensor timeMajor = scratch.New(new TensorShape(1, _channels, joinedFrames, area), _dtype);
+        backend.Transpose2D(timeMajor, joined, joinedTokens, _channels);
+        scratch.Release(joined);
+
+        Tensor convolved = scratch.New(new TensorShape(1, _channels, joinedFrames, area), _dtype);
+        backend.Conv2D(convolved, timeMajor, _temporalWeight, null, 1, 1, TemporalKernel / 2, 0);
+        scratch.Release(timeMajor);
+        Tensor convolvedRows = scratch.New(new TensorShape(joinedTokens, _channels), _dtype);
+        backend.Transpose2D(convolvedRows, convolved, _channels, joinedTokens);
+        scratch.Release(convolved);
+
+        Tensor residual = scratch.Track(SanaWmTensors.Slice(backend, convolvedRows, (long)contextFrames * area * _channels,
+            new TensorShape(1, tokens, _channels)));
+        scratch.Release(convolvedRows);
+        Tensor output = scratch.New(new TensorShape(1, tokens, _channels), _dtype);
+        backend.Add(output, residual, point);
         return scratch.Detach(output);
     }
 

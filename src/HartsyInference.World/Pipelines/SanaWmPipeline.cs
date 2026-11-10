@@ -46,11 +46,9 @@ public sealed class SanaWmPipeline
 
     private const float TrainTimesteps = 1000f;
     private const float SigmaEpsilon = 1e-6f;
-    private const int LatentHeight = Height / SanaWmCameraConditioning.SpatialStride;
-    private const int LatentWidth = Width / SanaWmCameraConditioning.SpatialStride;
+    internal const int LatentHeight = Height / SanaWmCameraConditioning.SpatialStride;
+    internal const int LatentWidth = Width / SanaWmCameraConditioning.SpatialStride;
     private const int LatentPlane = LatentHeight * LatentWidth;
-
-    private static readonly SanaWmGuidanceBranch[] Branches = [SanaWmGuidanceBranch.Unconditional, SanaWmGuidanceBranch.Conditional];
 
     private readonly ISanaWmComponents _components;
 
@@ -193,28 +191,8 @@ public sealed class SanaWmPipeline
             values[i] = Bf16(values[i]);
     }
 
-    private SanaWmTextConditioning EncodeText(SanaWmClipRequest request)
-    {
-        using SanaWmStage<ISanaWmTextEncoder> stage = _components.OpenTextEncoder();
-        SanaWmTextConditioning text = stage.Component.Encode(request.Prompt, request.NegativePrompt);
-        bool accepted = false;
-        try
-        {
-            foreach (SanaWmGuidanceBranch branch in Branches)
-            {
-                RequireShape(text.Features(branch), "caption features", 4);
-                RequireShape(text.Mask(branch), "caption mask", 2);
-                RoundToBf16(text.Features(branch).AsSpan<float>());
-            }
-            accepted = true;
-            return text;
-        }
-        finally
-        {
-            if (!accepted)
-                text.Dispose();
-        }
-    }
+    private SanaWmTextConditioning EncodeText(SanaWmClipRequest request) =>
+        SanaWmEncoding.EncodeText(_components.OpenTextEncoder, request.Prompt, request.NegativePrompt);
 
     private Tensor InitialLatents(SanaWmClipRequest request, int latentFrames)
     {
@@ -253,30 +231,9 @@ public sealed class SanaWmPipeline
         }
     }
 
-    private Tensor EncodeFirstFrame(SanaWmClipRequest request)
-    {
-        using Tensor video = PrepareImage(request.ImageRgb, request.ImageWidth, request.ImageHeight);
-        RoundToBf16(video.AsSpan<float>());
-        Tensor first;
-        using (SanaWmStage<ISanaWmImageEncoder> stage = _components.OpenImageEncoder())
-            first = stage.Component.Encode(video);
-        bool accepted = false;
-        try
-        {
-            TensorShape expected = new([1, LatentChannels, 1, LatentHeight, LatentWidth]);
-            if (first.DType != DType.F32 || first.Shape != expected)
-                throw new InvalidOperationException($"The image encoder returned {first.DType} {first.Shape}; expected F32 {expected}.");
-            RoundToBf16(first.AsSpan<float>());
-            request.Tap?.Invoke("first_latent", first);
-            accepted = true;
-            return first;
-        }
-        finally
-        {
-            if (!accepted)
-                first.Dispose();
-        }
-    }
+    private Tensor EncodeFirstFrame(SanaWmClipRequest request) =>
+        SanaWmEncoding.EncodeFirstFrame(_components.OpenImageEncoder, request.ImageRgb, request.ImageWidth, request.ImageHeight,
+            request.Tap);
 
     private void Sample(SanaWmClipRequest request, SanaWmTextConditioning text, SanaWmCameraConditioning camera, Tensor latents,
         CancellationToken cancel, Action<GenerationProgress>? progress)
@@ -393,12 +350,6 @@ public sealed class SanaWmPipeline
                 next = candidate;
         }
         return next;
-    }
-
-    private static void RequireShape(Tensor tensor, string name, int rank)
-    {
-        if (tensor.DType != DType.F32 || tensor.Shape.Rank != rank)
-            throw new InvalidOperationException($"The text encoder returned {name} as {tensor.DType} {tensor.Shape}; expected F32 rank {rank}.");
     }
 
     private static void Validate(SanaWmClipRequest request)

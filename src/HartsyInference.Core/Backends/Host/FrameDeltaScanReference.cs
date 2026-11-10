@@ -10,7 +10,7 @@ public static class FrameDeltaScanReference
 {
     /// <summary>Validates the operands of <see cref="IBackend.FrameDeltaScan"/>.</summary>
     public static void Validate(Tensor output, Tensor query, Tensor key, Tensor? value, Tensor beta, Tensor decay, int frames,
-        int spatial, int heads, int keyDim, int valueDim)
+        int spatial, int heads, int keyDim, int valueDim, Tensor? initialState = null, Tensor? finalState = null)
     {
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(query);
@@ -40,20 +40,26 @@ public static class FrameDeltaScanReference
             Require(value, nameof(value), tokens * heads * valueDim);
         Require(beta, nameof(beta), tokens * heads);
         Require(decay, nameof(decay), (long)frames * heads);
+        RequireState(initialState, nameof(initialState), heads, keyDim, valueDim);
+        RequireState(finalState, nameof(finalState), heads, keyDim, valueDim);
+        if (initialState is not null && ReferenceEquals(initialState, finalState))
+            throw new ArgumentException("FrameDeltaScan finalState must not alias initialState.", nameof(finalState));
     }
 
     /// <summary>Host <see cref="IBackend.FrameDeltaScan"/>.</summary>
     public static unsafe void Run(Tensor output, Tensor query, Tensor key, Tensor? value, Tensor beta, Tensor decay, int frames,
-        int spatial, int heads, int keyDim, int valueDim)
+        int spatial, int heads, int keyDim, int valueDim, Tensor? initialState = null, Tensor? finalState = null)
     {
-        Validate(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim);
+        Validate(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim, initialState, finalState);
         float* outPtr = (float*)output.DataPointer;
         float* qPtr = (float*)query.DataPointer;
         float* kPtr = (float*)key.DataPointer;
         float* vPtr = value is null ? null : (float*)value.DataPointer;
         float* betaPtr = (float*)beta.DataPointer;
         float* decayPtr = (float*)decay.DataPointer;
-        Pointers p = new((nint)outPtr, (nint)qPtr, (nint)kPtr, (nint)vPtr, (nint)betaPtr, (nint)decayPtr);
+        float* initialPtr = initialState is null ? null : (float*)initialState.DataPointer;
+        float* finalPtr = finalState is null ? null : (float*)finalState.DataPointer;
+        Pointers p = new((nint)outPtr, (nint)qPtr, (nint)kPtr, (nint)vPtr, (nint)betaPtr, (nint)decayPtr, (nint)initialPtr, (nint)finalPtr);
         Shape shape = new(frames, spatial, heads, keyDim, valueDim);
         long work = (long)frames * spatial * keyDim * (keyDim + 2L * valueDim);
         CpuParallel.For(heads, work * heads, (p, shape), static (h, state) => Head(state.p, state.shape, h));
@@ -90,12 +96,17 @@ public static class FrameDeltaScanReference
 
         float[] state = new float[dk * dv];
         float[] next = new float[dk * dv];
+        if (p.Initial != 0)
+            new ReadOnlySpan<float>((float*)p.Initial + (long)h * dk * dv, dk * dv).CopyTo(state);
         for (int t = 0; t < frames; t++)
         {
             Advance(state, next, grams.AsSpan(t * dk * dk, dk * dk), injections.AsSpan(t * dk * dv, dk * dv), decay[(long)h * frames + t], dk, dv);
             (state, next) = (next, state);
             Readout(output, q, state, t, h, s, accumulate: false);
         }
+
+        if (p.Final != 0)
+            state.AsSpan().CopyTo(new Span<float>((float*)p.Final + (long)h * dk * dv, dk * dv));
 
         Array.Clear(state);
         for (int t = frames - 1; t >= 0; t--)
@@ -146,7 +157,16 @@ public static class FrameDeltaScanReference
             throw new ArgumentException($"FrameDeltaScan {name} {tensor.Shape} must hold {elements} elements.", name);
     }
 
-    private readonly record struct Pointers(nint Output, nint Query, nint Key, nint Value, nint Beta, nint Decay);
+    private static void RequireState(Tensor? state, string name, int heads, int keyDim, int valueDim)
+    {
+        if (state is null)
+            return;
+        if (state.DType != DType.F32)
+            throw new ArgumentException($"FrameDeltaScan {name} must be F32, got {state.DType.Name}.", name);
+        Require(state, name, (long)heads * keyDim * valueDim);
+    }
+
+    private readonly record struct Pointers(nint Output, nint Query, nint Key, nint Value, nint Beta, nint Decay, nint Initial, nint Final);
 
     private readonly record struct Shape(int Frames, int Spatial, int Heads, int KeyDim, int ValueDim);
 }

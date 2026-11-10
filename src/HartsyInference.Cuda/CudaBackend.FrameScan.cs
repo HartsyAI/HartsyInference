@@ -7,14 +7,16 @@ namespace HartsyInference.Cuda;
 
 // IBackend.FrameDeltaScan on the device: every (head, frame) Gram and injection in two batched GEMMs, the sequential state
 // recurrence in one kernel, and the token readout in a third batched GEMM, all addressing the token-major operands in
-// place (row stride heads·dim), so nothing is transposed to head-major first.
+// place (row stride heads·dim), so nothing is transposed to head-major first. A carried forward state seeds the recurrence
+// kernel, and the forward state after the scan is copied out of the last frame's slice of the per-frame states.
 public sealed partial class CudaBackend
 {
     /// <inheritdoc cref="IBackend.FrameDeltaScan"/>
     public unsafe void FrameDeltaScan(Tensor output, Tensor query, Tensor key, Tensor? value, Tensor beta, Tensor decay, int frames,
-        int spatial, int heads, int keyDim, int valueDim)
+        int spatial, int heads, int keyDim, int valueDim, Tensor? initialState = null, Tensor? finalState = null)
     {
-        FrameDeltaScanReference.Validate(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim);
+        FrameDeltaScanReference.Validate(output, query, key, value, beta, decay, frames, spatial, heads, keyDim, valueDim, initialState,
+            finalState);
         using NvtxRange _nvtx = NvtxRange.Push("FrameDeltaScan");
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -28,9 +30,9 @@ public sealed partial class CudaBackend
         int keyRow = heads * keyDim;
         int valueRow = heads * valueDim;
         const int f32 = sizeof(float);
-        ulong pQ = 0, pK = 0, pV = 0, pBeta = 0, pDecay = 0, pOut = 0, scaled = 0, gramT = 0, injection = 0, states = 0, reverse = 0, ones = 0,
-            pointers = 0;
-        bool cachedOutput = false;
+        ulong pQ = 0, pK = 0, pV = 0, pBeta = 0, pDecay = 0, pInitial = 0, pOut = 0, pFinal = 0, scaled = 0, gramT = 0, injection = 0,
+            states = 0, reverse = 0, ones = 0, pointers = 0;
+        bool cachedOutput = false, cachedFinal = false;
         try
         {
             pQ = GpuTransferHelper.CopyToDevice(query);
@@ -38,6 +40,7 @@ public sealed partial class CudaBackend
             pV = value is null ? 0 : GpuTransferHelper.CopyToDevice(value);
             pBeta = GpuTransferHelper.CopyToDevice(beta);
             pDecay = GpuTransferHelper.CopyToDevice(decay);
+            pInitial = initialState is null ? 0 : GpuTransferHelper.CopyToDevice(initialState);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             scaled = GpuTransferHelper.AllocateDevice((nuint)(tokens * keyRow * f32));
@@ -102,7 +105,23 @@ public sealed partial class CudaBackend
                     CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
 
             using (NvtxRange.PushFine("FrameDeltaScan.recurrence"))
-                _kernels.LaunchFrameScanRecurrence(states, reverse, gramT, injection, pDecay, frames, heads, keyDim, valueDim, _stream.Handle);
+                _kernels.LaunchFrameScanRecurrence(states, reverse, gramT, injection, pDecay, pInitial, frames, heads, keyDim, valueDim,
+                    _stream.Handle);
+
+            if (finalState is not null)
+            {
+                // The reverse state of the last frame is zero, so the summed last-frame slice is the forward state after the scan.
+                nuint stateBytes = (nuint)((long)keyDim * valueDim * f32);
+                pFinal = GpuTransferHelper.AllocateDevice((nuint)heads * stateBytes);
+                for (int h = 0; h < heads; h++)
+                {
+                    ulong source = states + (ulong)(((long)h * frames + frames - 1) * keyDim * valueDim * f32);
+                    CudaMemory.CopyDeviceToDeviceAsync(pFinal + (ulong)h * stateBytes, source, stateBytes, _stream.Handle);
+                }
+
+                GpuTransferHelper.CacheActivation(finalState, pFinal, (nuint)heads * stateBytes);
+                cachedFinal = true;
+            }
 
             // readout (row-major [S, Dv] = q·state); column-major stateᵀ·qᵀ = State_cm · Q_cm, written in place at row stride heads·Dv.
             using (NvtxRange.PushFine("FrameDeltaScan.readout"))
@@ -120,6 +139,8 @@ public sealed partial class CudaBackend
             if (pV != 0) GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pBeta);
             GpuTransferHelper.FreeDevice(pDecay);
+            if (pInitial != 0) GpuTransferHelper.FreeDevice(pInitial);
+            if (!cachedFinal && pFinal != 0) GpuTransferHelper.FreeDevice(pFinal);
             foreach (ulong temp in new[] { scaled, gramT, injection, states, reverse, ones, pointers })
             {
                 if (temp != 0) GpuTransferHelper.FreeDevice(temp);

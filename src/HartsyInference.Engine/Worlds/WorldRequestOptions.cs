@@ -41,6 +41,15 @@ public sealed record WorldRequestOptions
     /// <summary>Runs guidance as two sequential passes per step; refused by a model that does not declare the capability.</summary>
     public bool SequentialCfg { get; init; }
 
+    /// <summary>Runs the model's refiner stage; refused by a model that does not declare one.</summary>
+    public bool Refiner { get; init; }
+
+    /// <summary>Asks for chunk-by-chunk streaming (true) or a whole-clip batch run (false); null takes the model's own mode.</summary>
+    public bool? Streaming { get; init; }
+
+    /// <summary>Runs a streaming session until it is stopped rather than for a frame count.</summary>
+    public bool Unbounded { get; init; }
+
     /// <summary>Builds the request for <paramref name="initImage"/>, reading the camera and intrinsics files when they are named.</summary>
     /// <exception cref="ArgumentException">Intrinsics were given without a camera path or script, both a camera file and a script
     /// were given, or the intrinsics do not parse.</exception>
@@ -56,6 +65,11 @@ public sealed record WorldRequestOptions
             : null;
         if (Intrinsics is not null)
         {
+            // A live stream has no path up front: its intrinsics ride on an empty camera path that the actions extend.
+            if (camera is null && (Streaming == true || Unbounded))
+            {
+                camera = new WorldCameraPath();
+            }
             if (camera is null)
             {
                 throw new ArgumentException("Intrinsics need a camera path or action script to apply to.", nameof(Intrinsics));
@@ -79,6 +93,9 @@ public sealed record WorldRequestOptions
             Seed = Seed,
             Camera = camera,
             SequentialCfg = SequentialCfg,
+            Refiner = Refiner,
+            Streaming = Streaming,
+            Unbounded = Unbounded,
             Vram = vram,
         };
     }

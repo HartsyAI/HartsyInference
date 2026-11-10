@@ -45,17 +45,20 @@ public sealed partial class CudaKernels
 
     /// <summary>The forward-inclusive plus reverse-exclusive state of every head and frame, from the transposed Grams and the
     /// injections: both scans run at once (grid z = direction), the reverse into <paramref name="reverseScratch"/>, which is then
-    /// added into <paramref name="states"/>.</summary>
-    public unsafe void LaunchFrameScanRecurrence(ulong states, ulong reverseScratch, ulong gramT, ulong injection, ulong decay, int frames,
-        int heads, int keyDim, int valueDim, nint stream)
+    /// added into <paramref name="states"/>. The forward scan starts from <paramref name="initial"/>
+    /// (<c>[heads, keyDim, valueDim]</c>) when it is non-zero. The reverse state of the last frame is zero, so the last
+    /// frame's slice of <paramref name="states"/> is the forward state after the scan.</summary>
+    public unsafe void LaunchFrameScanRecurrence(ulong states, ulong reverseScratch, ulong gramT, ulong injection, ulong decay,
+        ulong initial, int frames, int heads, int keyDim, int valueDim, nint stream)
     {
         if (_frameScanRecurrence == 0) throw new InvalidOperationException("frame_scan.ptx not present in the Ptx folder.");
         if (keyDim > FrameScanMaxKeyDim)
             throw new NotSupportedException($"The CUDA frame scan holds key heads up to {FrameScanMaxKeyDim} wide; got {keyDim}.");
-        ulong stA = states, rvA = reverseScratch, gA = gramT, uA = injection, dA = decay;
+        ulong stA = states, rvA = reverseScratch, gA = gramT, uA = injection, dA = decay, iA = initial;
         uint fA = (uint)frames, kA = (uint)keyDim, vA = (uint)valueDim;
-        void** args = stackalloc void*[8];
-        args[0] = &stA; args[1] = &rvA; args[2] = &gA; args[3] = &uA; args[4] = &dA; args[5] = &fA; args[6] = &kA; args[7] = &vA;
+        void** args = stackalloc void*[9];
+        args[0] = &stA; args[1] = &rvA; args[2] = &gA; args[3] = &uA; args[4] = &dA; args[5] = &iA; args[6] = &fA; args[7] = &kA;
+        args[8] = &vA;
         // A single value column (a denominator) takes the one-column build instead of padding to FrameScanCols.
         bool column = valueDim == 1;
         uint gridX = column ? 1u : (uint)((valueDim + FrameScanCols - 1) / FrameScanCols);

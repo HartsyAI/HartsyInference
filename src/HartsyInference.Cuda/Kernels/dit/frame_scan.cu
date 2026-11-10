@@ -2,7 +2,8 @@
 //
 //   frame_scan_scale_keys_f32   kb[n, h, :] = beta[h, t, s] * key[n, h, :]  (n = t*spatial + s)
 //   frame_scan_recurrence_f32   per head: S <- d_t*(S - G_t*S) + U_t over frames; the forward (inclusive) and reverse
-//                               (exclusive) scans run as separate blocks and write F_t and R_t
+//                               (exclusive) scans run as separate blocks and write F_t and R_t. The forward scan starts
+//                               from `initial` when it is non-null (a state carried from an earlier chunk)
 //   frame_scan_sum_f32          F_t + R_t
 //
 // The backend computes G_t = sum_s beta k k^T and U_t = sum_s beta k v^T for every (head, frame) with batched GEMMs
@@ -43,11 +44,12 @@ __global__ void frame_scan_scale_keys_f32(
 // Thread r owns state row r; COLS state columns per block; blockIdx.z picks the direction, so the forward and reverse scans
 // run as separate blocks at the same time. The forward block writes F_t (the state after frame t) to `forward`, the reverse
 // block R_t (the state before frame t's update, frames after t only) to `reverse`. Per frame the transposed Gram is staged
-// in shared memory FRAME_SCAN_JTILE rows at a time (coalesced copies), so the j loop reads shared memory.
+// in shared memory FRAME_SCAN_JTILE rows at a time (coalesced copies), so the j loop reads shared memory. `initial`
+// ([heads, keyDim, valueDim], or null for zero) seeds the forward block only; the reverse block always starts from zero.
 template <int COLS>
 __device__ __forceinline__ void frame_scan_recurrence(float* __restrict__ forward, float* __restrict__ reverseOut,
-    const float* __restrict__ gramT, const float* __restrict__ injection, const float* __restrict__ decay, unsigned int frames,
-    unsigned int keyDim, unsigned int valueDim)
+    const float* __restrict__ gramT, const float* __restrict__ injection, const float* __restrict__ decay,
+    const float* __restrict__ initial, unsigned int frames, unsigned int keyDim, unsigned int valueDim)
 {
     __shared__ __align__(16) float tile[2][FRAME_SCAN_MAX_KEY][COLS];
     __shared__ __align__(16) float gram[FRAME_SCAN_JTILE][FRAME_SCAN_MAX_KEY];
@@ -63,9 +65,11 @@ __device__ __forceinline__ void frame_scan_recurrence(float* __restrict__ forwar
     float* __restrict__ states = reverse ? reverseOut : forward;
     {
         int cur = 0;
+        const float* seed = (!reverse && active && initial != nullptr)
+            ? initial + (unsigned long long)h * stateStride + (unsigned long long)r * valueDim + c0 : nullptr;
 #pragma unroll
         for (int c = 0; c < COLS; c++)
-            tile[0][r][c] = 0.0f;
+            tile[0][r][c] = (seed != nullptr && (unsigned int)c < cols) ? seed[c] : 0.0f;
         __syncthreads();
 
         for (unsigned int step = 0; step < frames; step++)
@@ -158,19 +162,20 @@ __global__ void frame_scan_recurrence_f32(
     const float* __restrict__ gramT,      // [heads, frames, keyDim, keyDim]
     const float* __restrict__ injection,  // [heads, frames, keyDim, valueDim]
     const float* __restrict__ decay,      // [heads, frames]
+    const float* __restrict__ initial,    // [heads, keyDim, valueDim] forward state before frame 0, or null
     unsigned int frames,
     unsigned int keyDim,
     unsigned int valueDim)
 {
-    frame_scan_recurrence<FRAME_SCAN_COLS>(forward, reverse, gramT, injection, decay, frames, keyDim, valueDim);
+    frame_scan_recurrence<FRAME_SCAN_COLS>(forward, reverse, gramT, injection, decay, initial, frames, keyDim, valueDim);
 }
 
 // valueDim == 1 (a linear-attention denominator): one state column per head, grid (1, heads, 2).
 __global__ void frame_scan_recurrence_col_f32(float* __restrict__ forward, float* __restrict__ reverse,
-    const float* __restrict__ gramT, const float* __restrict__ injection, const float* __restrict__ decay, unsigned int frames,
-    unsigned int keyDim, unsigned int valueDim)
+    const float* __restrict__ gramT, const float* __restrict__ injection, const float* __restrict__ decay,
+    const float* __restrict__ initial, unsigned int frames, unsigned int keyDim, unsigned int valueDim)
 {
-    frame_scan_recurrence<1>(forward, reverse, gramT, injection, decay, frames, keyDim, valueDim);
+    frame_scan_recurrence<1>(forward, reverse, gramT, injection, decay, initial, frames, keyDim, valueDim);
 }
 
 // forward[i] += reverse[i]: F_t + R_t, the state each frame's tokens read out.

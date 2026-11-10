@@ -13,6 +13,13 @@ namespace HartsyInference.Cli.Commands;
 /// <c>hartsy world -m sana-wm --image demo.png --prompt-file demo.txt (--actions "w-80,dw-40,aw-40" | --camera poses.npy)
 /// --intrinsics intrinsics.npy [--frames 161] [--steps 60] [--cfg-scale 5] [--flow-shift 9.8] [--seed 42]</c>. For a model that
 /// takes an action-script camera (SANA-WM), <c>--actions</c> is that script; for the others it is the per-frame action plan.
+/// SANA-WM streaming generates chunk by chunk and can be driven while it runs:
+/// <c>hartsy world -m sana-wm-streaming --image demo.png --prompt-file demo.txt --intrinsics fx,fy,cx,cy
+/// [--actions "w-48"] [--frames 241 | --unbounded] [--interactive] [--refiner]</c>. There <c>--actions</c> is the opening move, and with
+/// <c>--interactive</c> the keys <c>wasdijkl</c> toggle the held controls, space releases them and <c>q</c> ends the stream.
+/// <c>--refiner</c> passes each chunk through the LTX-2 refiner before it is decoded; its files default to the streaming
+/// release's layout beside the DiT folder (<c>refiner_diffusers/</c>, <c>gemma3_12b/</c>) and its memory use is set by the
+/// <c>vram.sanaWmRefiner*</c> settings.
 /// Every option is checked by the engine's world planner before a checkpoint is loaded.
 /// Camera file format: a JSON file <c>{"poses": [[16 numbers], ...], "intrinsics": {"fx", "fy", "cx", "cy"}}</c> or a
 /// NumPy <c>.npy</c> float32/float64 array shaped (N, 16) or (N, 4, 4). Each pose is a camera-to-world matrix, row-major,
@@ -34,7 +41,7 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         /// <summary>Model id.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: oasis, diamond or sana-wm.")]
+        [Description("Model id: oasis, diamond, sana-wm or sana-wm-streaming.")]
         public string Model { get; init; } = "oasis";
 
         /// <summary>The prompt the world is seeded with.</summary>
@@ -61,6 +68,32 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("--text-encoder-path")]
         [Description("SANA-WM: Gemma-2-2B .safetensors (default: text_encoder/gemma-2-2b-it/ beside the DiT folder).")]
         public string? TextEncoderPath { get; init; }
+
+        /// <summary>Runs the model's refiner stage; refused by a model without one.</summary>
+        [CommandOption("--refiner")]
+        [Description("Run the model's refiner stage (sana-wm-streaming: the chunk-causal LTX-2 refiner; needs its checkpoints "
+            + "and far more VRAM than stage 1).")]
+        public bool Refiner { get; init; }
+
+        /// <summary>Override of the refiner transformer checkpoint.</summary>
+        [CommandOption("--refiner-path")]
+        [Description("Refiner transformer .safetensors (default: refiner_diffusers/transformer/ beside the DiT folder).")]
+        public string? RefinerPath { get; init; }
+
+        /// <summary>Override of the refiner's text connectors checkpoint.</summary>
+        [CommandOption("--refiner-connectors-path")]
+        [Description("Refiner text connectors .safetensors (default: refiner_diffusers/connectors/ beside the DiT folder).")]
+        public string? RefinerConnectorsPath { get; init; }
+
+        /// <summary>Override of the refiner's Gemma-3-12B text encoder: a file or a folder of shards.</summary>
+        [CommandOption("--refiner-text-encoder-path")]
+        [Description("Refiner Gemma-3-12B text encoder: one .safetensors or a folder of shards (default: gemma3_12b/ beside the DiT folder).")]
+        public string? RefinerTextEncoderPath { get; init; }
+
+        /// <summary>Override of the refiner text encoder's tokenizer model.</summary>
+        [CommandOption("--refiner-tokenizer-path")]
+        [Description("Refiner text encoder tokenizer.model (default: beside the refiner text encoder).")]
+        public string? RefinerTokenizerPath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
@@ -134,6 +167,24 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("--sequential-cfg")]
         [Description("Run guidance as two sequential passes per step (only models that support it).")]
         public bool SequentialCfg { get; init; }
+
+        /// <summary>Ask for chunk-by-chunk streaming generation; refused by a model that has no streaming mode.</summary>
+        [CommandOption("--streaming")]
+        [Description("Generate chunk by chunk, delivering frames as each chunk completes (models with a streaming mode; "
+            + "sana-wm-streaming always streams).")]
+        public bool Streaming { get; init; }
+
+        /// <summary>Run a streaming session until it is stopped instead of for a frame count.</summary>
+        [CommandOption("--unbounded")]
+        [Description("Streaming: run until stopped (q in --interactive, or Ctrl+C) instead of for --frames. Each frame is written to "
+            + "disk as it arrives (about 1 GB of PNG per minute of 720p video), and stopping saves what was generated and muxes the MP4.")]
+        public bool Unbounded { get; init; }
+
+        /// <summary>Drive a streaming session from the keyboard while it runs.</summary>
+        [CommandOption("--interactive")]
+        [Description("Streaming: steer from the keyboard while generating. wasdijkl toggle the held controls, space releases "
+            + "them, q or Esc ends the stream and saves what was generated.")]
+        public bool Interactive { get; init; }
     }
 
     /// <inheritdoc/>
@@ -202,12 +253,24 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         PutIfSet(parameters, "cfg-scale", settings.CfgScale);
         PutIfSet(parameters, "flow-shift", settings.FlowShift);
         parameters.Put("sequential-cfg", settings.SequentialCfg ? "true" : "false");
+        parameters.Put("streaming", settings.Streaming ? "true" : "false");
+        parameters.Put("unbounded", settings.Unbounded ? "true" : "false");
+        parameters.Put("interactive", settings.Interactive ? "true" : "false");
+        parameters.Put("refiner", settings.Refiner ? "true" : "false");
 
         Dictionary<string, string> aux = new Dictionary<string, string>();
         if (!string.IsNullOrWhiteSpace(settings.VaePath))
             aux[WorldComponentResolver.VaeAuxKey] = settings.VaePath;
         if (!string.IsNullOrWhiteSpace(settings.TextEncoderPath))
             aux[WorldComponentResolver.TextEncoderAuxKey] = settings.TextEncoderPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerPath))
+            aux[WorldComponentResolver.RefinerAuxKey] = settings.RefinerPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerConnectorsPath))
+            aux[WorldComponentResolver.RefinerConnectorsAuxKey] = settings.RefinerConnectorsPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerTextEncoderPath))
+            aux[WorldComponentResolver.RefinerTextEncoderAuxKey] = settings.RefinerTextEncoderPath;
+        if (!string.IsNullOrWhiteSpace(settings.RefinerTokenizerPath))
+            aux[WorldComponentResolver.RefinerTokenizerAuxKey] = settings.RefinerTokenizerPath;
         ModelSpec spec = baseSpec with { Aux = aux };
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 

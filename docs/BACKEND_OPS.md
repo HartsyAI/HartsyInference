@@ -343,12 +343,16 @@ is held to a tolerance. The output shares no storage with the input. SANA-WM's G
 per head h, frame t:  G_t = Σ_s β k kᵀ   U_t = Σ_s β k vᵀ   S ← d_t·(S − G_t·S) + U_t
 F_t = S after frame t (forward, inclusive)      R_t = S from frames after t (reverse, exclusive)
 out[n = t·spatial + s, h, :] = q[n, h, :] · (F_t + R_t)
+forward S before frame 0 = initialState (or 0)   finalState = F_{frames−1}   reverse S always starts from 0
 ```
 
 Reference: `FrameDeltaScanReference.Run`; validation `FrameDeltaScanReference.Validate`. Token-major F32 `query` and `key`
 `[N, heads·keyDim]`, `value` `[N, heads·valueDim]` or null for a value of 1 (`valueDim` 1: a linear-attention denominator),
 F32 `beta [heads, frames, spatial]` and `decay [heads, frames]`. A frame's tokens update the state together (the SANA-WM
-Gated-DeltaNet, main branch numerator and denominator and camera branch). The CUDA build computes every (head, frame) Gram
+Gated-DeltaNet, main branch numerator and denominator and camera branch). Optional F32 `initialState` and `finalState`
+`[heads, keyDim, valueDim]` carry the forward state across calls: one call per chunk is then a chunk-causal scan, with every
+earlier chunk reaching a token through the state and the later frames of its own chunk through the reverse pass (the
+SANA-WM streaming student). `finalState` must not alias `initialState`. The CUDA build computes every (head, frame) Gram
 and injection with two batched GEMMs over the token-major operands in place (row stride `heads·dim`), runs the two
 recurrences as parallel blocks of one kernel, and reads the tokens out with a third batched GEMM; the GEMMs run at the
 backend's F32 GEMM precision (TF32 by default). It is the documented exception to the execution requirements below: it

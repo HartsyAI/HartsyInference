@@ -102,11 +102,13 @@ internal static class SanaWmConditioning
 
     /// <summary>Main 3D RoPE for a latent grid: interleaved-pair cos and sin <c>[N, headDim]</c> from <see cref="WanRope"/>,
     /// and the per-complex tables <c>[N, headDim/2]</c> taken from its even columns, which the camera branch cuts from.</summary>
+    /// <param name="frameOffset">Temporal position of the grid's first frame: 0 for a whole clip, the frames already generated
+    /// for a chunk of a stream (upstream <c>casual_wan_rope</c> over <c>[start_f, end_f)</c>).</param>
     internal static (Tensor Cos, Tensor Sin, Tensor CameraCos, Tensor CameraSin) Rope(IBackend backend, int headDim, int frames,
-        int height, int width, List<Tensor> scratch)
+        int height, int width, List<Tensor> scratch, int frameOffset = 0)
     {
         WanRope rope = new(headDim, RopeTheta, RopeMaxSequence);
-        (Tensor cosHost, Tensor sinHost) = rope.BuildCosSin(frames, height, width);
+        (Tensor cosHost, Tensor sinHost) = rope.BuildCosSin(frames, height, width, frameOffset);
         Tensor cos = Track(scratch, SanaWmTensors.Stage(backend, cosHost));
         Tensor sin = Track(scratch, SanaWmTensors.Stage(backend, sinHost));
         int tokens = frames * height * width;
