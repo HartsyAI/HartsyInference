@@ -89,9 +89,9 @@ public static partial class EngineKnobs
             v => v >= 1 ? v : 1);
 
     /// <summary>How a SANA-WM stream holds its softmax windows and key tails between chunks: <c>auto</c>, <c>f32</c> or <c>bf16</c>.</summary>
-    /// <remarks>BF16 is upstream's storage and halves those states (about 0.9 GB at 720p) but widens them again on every pass,
-    /// about 40 ms per pass on a 4090. <c>auto</c> (the default) uses BF16 on a device of 16 GiB or less, where F32 runs out of
-    /// memory decoding chunk 1, and F32 on a larger one.</remarks>
+    /// <remarks>BF16 is upstream's storage and halves those states (about 0.9 GB at 720p) but widens them again on every pass.
+    /// <c>auto</c> (the default) uses BF16 on a device of 16 GiB or less, where F32 runs out of memory decoding chunk 1, and
+    /// F32 on a larger one.</remarks>
     public static readonly Knob<string?> SanaWmStreamState =
         Str("vram.sanaWmStreamState", null, KnobScope.Runtime, KnobDomain.Vram,
             "How a SANA-WM stream holds its softmax windows and key tails between chunks: auto (default: BF16 on a device of 16 GiB or less, else F32), f32 or bf16.");
