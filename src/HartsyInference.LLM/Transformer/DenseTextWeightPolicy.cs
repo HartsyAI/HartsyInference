@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.LLM.Transformer;
 
@@ -49,16 +50,14 @@ public static class DenseTextWeightPolicy
     /// <summary>Parses a precision name for plain projections: <c>native</c> (or empty) keeps them; <c>q8_0</c>, <c>q6_k</c>,
     /// <c>q5_k</c>, <c>q4_k</c>, <c>q4_0</c> re-quantize them.</summary>
     /// <exception cref="ArgumentException">Any other name.</exception>
-    public static DType? ParsePlainPrecision(string? name) => name?.Trim().ToLowerInvariant() switch
+    public static DType? ParsePlainPrecision(string? name)
     {
-        null or "" or "native" or "default" or "bf16" => null,
-        "q8" or "q8_0" => DType.Q8_0,
-        "q6" or "q6_k" => DType.Q6_K,
-        "q5" or "q5_k" => DType.Q5_K,
-        "q4_k" or "q4_k_m" => DType.Q4_K,
-        "q4" or "q4_0" => DType.Q4_0,
-        _ => throw new ArgumentException($"Unknown weight precision '{name}'; expected native, q8_0, q6_k, q5_k, q4_k or q4_0.", nameof(name)),
-    };
+        string? mode = name?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(mode) || mode is "native" or "default" or "bf16") return null;
+        // The engine's one quant-name table, so a name means the same type here as for every other model (a bare q4 is Q4_K).
+        return GgufQuantCache.ResolveQuant(mode)
+            ?? throw new ArgumentException($"Unknown weight precision '{name}'; expected native, q8_0, q6_k, q5_k, q4_k or q4_0.", nameof(name));
+    }
 
     private static bool Packs(IBackend? backend, HfQuantWeight weight, DType packed) =>
         backend is not null && backend.SupportsResidentQuant(packed) && weight.Shape.Rank == 2 && weight.Shape[1] % packed.BlockElementCount == 0;

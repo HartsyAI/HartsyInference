@@ -90,6 +90,53 @@ public sealed class RealtimeRouteTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.NotFound, (await _http.DeleteAsync($"/v1/native/realtime/sessions/{id}")).StatusCode);
     }
 
+    private async Task<string> OpenSession()
+    {
+        HttpResponseMessage opened = await _http.PostAsJsonAsync("/v1/native/realtime/sessions", new { model = "moss-vl-realtime", modelPath = _modelPath });
+        Assert.Equal(HttpStatusCode.OK, opened.StatusCode);
+        return (await opened.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("sessionId").GetString()!;
+    }
+
+    [Fact]
+    public async Task ASecondStreamOnTheSameSessionIsRefused()
+    {
+        string id = await OpenSession();
+        FakeSession session = _text.Sessions.Single();
+        session.Emit(new RealtimeVlmChunk(RealtimeVlmChunkKind.Text, "hello"));
+
+        using HttpResponseMessage first = await _http.GetAsync($"/v1/native/realtime/sessions/{id}/stream", HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);   // headers go out with the first event, so the first stream is registered
+        HttpResponseMessage second = await _http.GetAsync($"/v1/native/realtime/sessions/{id}/stream");
+        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+
+        session.End();   // the first stream drains and finishes
+        string body = await first.Content.ReadAsStringAsync();
+        Assert.Contains("event: text", body);
+    }
+
+    [Fact]
+    public async Task AnErrorEventClosesTheSessionAndFreesItsSlot()
+    {
+        string id = await OpenSession();
+        FakeSession session = _text.Sessions.Single();
+        session.Emit(new RealtimeVlmChunk(RealtimeVlmChunkKind.Error, "the vision cap was reached"));
+
+        string stream = await _http.GetStringAsync($"/v1/native/realtime/sessions/{id}/stream");
+        Assert.Contains("event: error", stream);
+        Assert.True(session.Disposed);
+        Assert.Equal(HttpStatusCode.NotFound, (await _http.PostAsJsonAsync($"/v1/native/realtime/sessions/{id}/prompt", new { prompt = "more" })).StatusCode);
+    }
+
+    [Fact]
+    public async Task ALargeChatBodyIsNotCutOffByKestrelsDefaultLimit()
+    {
+        // 35 MB is past Kestrel's 30,000,000-byte default; a video_url part is allowed far more (the option's 256 MiB).
+        string content = new('A', 35_000_000);
+        using StringContent body = new($$"""{"model":"qwen3","messages":[{"role":"user","content":"{{content}}"}]}""", System.Text.Encoding.UTF8, "application/json");
+        HttpResponseMessage response = await _http.PostAsync("/v1/chat/completions", body);
+        Assert.NotEqual(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+    }
+
     [Fact]
     public async Task AModelThatCannotStreamIsRefusedWithAProblem()
     {

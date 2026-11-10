@@ -486,14 +486,20 @@ public static class CompatEndpoints
         int comma = url.IndexOf(',');
         if (comma < 0 || !url[..comma].EndsWith(";base64", StringComparison.OrdinalIgnoreCase))
             throw new HartsyInferenceException("Video data URIs must be base64-encoded: data:video/<type>;base64,<data>.");
+        string mime = url[prefix.Length..comma][..^";base64".Length];
+        if (!mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase) || mime.Length == "video/".Length)
+            throw new HartsyInferenceException($"A video_url must be a data:video/<type>;base64 URI; got '{(mime.Length == 0 ? "no media type" : mime)}'.");
+        string format = mime["video/".Length..];
         long decodedBytes = (long)(url.Length - comma - 1) / 4 * 3;
         if (decodedBytes > MaxVideoBytes)
             throw new HartsyInferenceException($"Video data decodes to about {decodedBytes} bytes, over the {MaxVideoBytes}-byte (128 MiB) limit.");
-        string mime = url[prefix.Length..comma][..^";base64".Length];
-        string? format = mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? mime["video/".Length..] : null;
         try
         {
-            return new VideoClip { Data = Convert.FromBase64String(url[(comma + 1)..].Trim()), Format = format };
+            // Decoded straight from the URI's characters: a substring of the payload would be a second ~170 MB string at the limit.
+            byte[] buffer = GC.AllocateUninitializedArray<byte>((int)Math.Min(decodedBytes + 3, int.MaxValue));
+            if (!Convert.TryFromBase64Chars(url.AsSpan(comma + 1), buffer, out int written))
+                throw new FormatException("The payload is not valid base64.");
+            return new VideoClip { Data = written == buffer.Length ? buffer : buffer.AsSpan(0, written).ToArray(), Format = format };
         }
         catch (FormatException ex)
         {

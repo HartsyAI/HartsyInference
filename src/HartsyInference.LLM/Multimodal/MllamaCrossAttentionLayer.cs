@@ -142,11 +142,9 @@ public sealed unsafe class MllamaCrossAttentionLayer
         if (rope is not null) backend.Rotary(RotaryCall.TokenMajor(qN, rope.TextCos, rope.TextSin, RotaryPairing.RotateHalf, RopeTableLayout.RotateHalf));
 
         // Groups that each name their own contiguous rows attend only those rows (consumes qN).
-        if (rope?.ImageGroups is { Count: > 0 } ranged && hq * d == _hidden && ranged.All(g => g.RowStart >= 0))
-        {
-            Tensor rangedOut = ApplyRowMask(backend, RangedGroupAttention(backend, qN, t, kMh, vMh, ranged), rope);
-            return GatedTail(backend, text, t, rangedOut, rope);
-        }
+        // Rows no group covers come out zero, so the row mask is not applied to the attention output here.
+        if (rope?.ImageGroups is { Count: > 0 } ranged && ranged.All(g => g.RowStart >= 0))
+            return GatedTail(backend, text, t, RangedGroupAttention(backend, qN, t, kMh, vMh, ranged), rope);
 
         Tensor qMh = new(new TensorShape(1, hq, t, d), DType.F32); backend.Permute0213(qMh, qN, t, hq, d);
         qN.Dispose();
@@ -182,12 +180,13 @@ public sealed unsafe class MllamaCrossAttentionLayer
     }
 
     /// <summary>Multi-image cross-attention when each group's rows are one contiguous range: the group's query rows attend its key
-    /// prefix, the group outputs are stitched back in row order (zeros for rows no group covers), and the result is projected once.
-    /// Equal to <see cref="GroupedAttention"/>, at the cost of one attention over the rows instead of one per group over all rows.
-    /// Consumes the token-major query <paramref name="qN"/> (<c>[1, t, heads, d]</c>); the keys and values are borrowed.</summary>
+    /// prefix, the group outputs are stitched back in row order at the merged-head width (zeros for rows no group covers), and the
+    /// result is projected once. Equal to the row-masked <see cref="GroupedAttention"/>, at the cost of one attention over the rows
+    /// instead of one per group over all rows. Consumes the token-major query <paramref name="qN"/> (<c>[1, t, heads, d]</c>); the keys
+    /// and values are borrowed.</summary>
     private Tensor RangedGroupAttention(IBackend backend, Tensor qN, int t, Tensor kMh, Tensor vMh, IReadOnlyList<CrossImageGroup> groups)
     {
-        int hq = _numHeads, d = _headDim;
+        int hq = _numHeads, d = _headDim, mergedWidth = hq * d;
         List<Tensor> pieces = [];
         try
         {
@@ -196,7 +195,8 @@ public sealed unsafe class MllamaCrossAttentionLayer
             {
                 if (group.RowStart < row || group.RowStart + group.RowCount > t)
                     throw new ArgumentException($"Cross-attention groups overlap or run past the {t} rows.", nameof(groups));
-                if (group.RowStart > row) pieces.Add(Zeros(backend, group.RowStart - row));
+                if (group.RowCount == 0) continue;
+                if (group.RowStart > row) pieces.Add(Zeros(group.RowStart - row, mergedWidth));
                 int rows = group.RowCount;
                 Tensor qRows = new(new TensorShape(1, rows, hq, d), DType.F32);
                 backend.SliceRows(qRows, qN, group.RowStart * hq);   // rows of d values: a row of the sequence is hq of them
@@ -205,10 +205,11 @@ public sealed unsafe class MllamaCrossAttentionLayer
                 qRows.Dispose();
                 Tensor attn = _attn.AttendOverKvHeadMajor(backend, qMh, kMh, vMh, null, 0, 0,
                     new KvAttentionCall { KvLength = group.KvLength, Bidirectional = true }, OperandOwnership.Query);
-                pieces.Add(_attn.MergeHeads(backend, attn, new TensorShape(1, rows, _hidden)));
+                pieces.Add(_attn.MergeHeads(backend, attn, new TensorShape(1, rows, mergedWidth)));
                 row = group.RowStart + rows;
             }
-            if (row < t) pieces.Add(Zeros(backend, t - row));
+            if (row < t) pieces.Add(Zeros(t - row, mergedWidth));
+            if (pieces.Count == 0) throw new ArgumentException("A multi-image cross-attention needs at least one group.", nameof(groups));
 
             Tensor merged;
             if (pieces.Count == 1)
@@ -218,7 +219,7 @@ public sealed unsafe class MllamaCrossAttentionLayer
             }
             else
             {
-                merged = new Tensor(new TensorShape(1, t, _hidden), DType.F32);
+                merged = new Tensor(new TensorShape(1, t, mergedWidth), DType.F32);
                 backend.Concat(merged, [.. pieces], dim: 1);
             }
             using (merged)
@@ -238,9 +239,9 @@ public sealed unsafe class MllamaCrossAttentionLayer
     private static ArgumentException MissingSelect() =>
         new("A cross-attention group without a row range needs its row selection mask.", "groups");
 
-    private Tensor Zeros(IBackend backend, int rows)
+    private static Tensor Zeros(int rows, int width)
     {
-        Tensor zeros = new(new TensorShape(1, rows, _hidden), DType.F32);
+        Tensor zeros = new(new TensorShape(1, rows, width), DType.F32);
         zeros.AsSpan<float>().Clear();
         return zeros;
     }

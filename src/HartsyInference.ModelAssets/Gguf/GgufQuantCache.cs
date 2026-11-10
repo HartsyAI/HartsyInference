@@ -8,25 +8,68 @@ namespace HartsyInference.ModelAssets.Gguf;
 /// through <see cref="GgufWriter"/>'s lazy entries, and later loads map the file directly.</summary>
 public static class GgufQuantCache
 {
-    /// <summary>Resolves a quant mode (q8_0 / q4_k / q5_k / q6_k, plus aliases) to a block dtype, or null for none.</summary>
+    /// <summary>Resolves a quant mode (q8_0 / q4_0 / q4_k / q5_k / q6_k, plus aliases) to a block dtype, or null for none. A bare
+    /// <c>q4</c> means Q4_K, the better 4-bit format; ask for <c>q4_0</c> by name.</summary>
     public static DType? ResolveQuant(string? mode) => mode?.Trim().ToLowerInvariant() switch
     {
         "q8_0" or "q8" => DType.Q8_0,
+        "q4_0" => DType.Q4_0,
         "q4_k" or "q4" or "q4_k_m" or "q4_k_s" => DType.Q4_K,
         "q5_k" or "q5" or "q5_k_m" => DType.Q5_K,
         "q6_k" or "q6" => DType.Q6_K,
         _ => null,
     };
 
+    /// <summary>A bounded <c>produceAhead</c> for entries that read a mapped checkpoint and quantize into their own buffers: several run
+    /// at once while the writer still emits them in order, and a few large F32 intermediates are the most held at a time.</summary>
+    public static int ParallelProduceAhead => Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+
+    /// <summary>Where a model folder's converted-weight cache goes: <c>_gguf-cache</c> inside <paramref name="sourceDirectory"/> when
+    /// that folder can be written (so the cache travels with the model), else a per-folder directory under
+    /// <c>~/.cache/hartsyinference/quant-cache</c>. A Hugging Face cache snapshot (<c>snapshots/&lt;rev&gt;</c>) counts as read-only: its
+    /// files are links into a content-addressed store, and a stray folder there is not tracked or cleaned with the repo.</summary>
+    /// <param name="sourceDirectory">The model folder the cache converts.</param>
+    /// <param name="fileName">The cache file's name, which carries whatever distinguishes one conversion from another.</param>
+    public static string DefaultPath(string sourceDirectory, string fileName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(sourceDirectory);
+        ArgumentException.ThrowIfNullOrEmpty(fileName);
+        string full = Path.GetFullPath(sourceDirectory);
+        string beside = Path.Combine(full, "_gguf-cache");
+        if (!IsHuggingFaceSnapshot(full) && CanWrite(beside)) return Path.Combine(beside, fileName);
+        string key = System.Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(full)))[..16];
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return Path.Combine(home, ".cache", "hartsyinference", "quant-cache", key, fileName);
+    }
+
+    private static bool IsHuggingFaceSnapshot(string fullPath) =>
+        fullPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains("snapshots", StringComparer.Ordinal);
+
+    private static bool CanWrite(string directory)
+    {
+        try
+        {
+            Directory.CreateDirectory(directory);
+            string probe = Path.Combine(directory, $".write-probe-{Environment.ProcessId}-{Guid.NewGuid():N}");
+            File.WriteAllBytes(probe, []);
+            File.Delete(probe);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>Quantizes <paramref name="source"/> by <paramref name="policy"/> into the cache at <paramref name="cachePath"/>
     /// (written on the first call) and returns the cached weights under their source shapes, plus the loader that maps them —
     /// keep it alive while the weights are used.</summary>
     public static (Dictionary<string, Tensor> Weights, GgufLoader Loader) Load(IReadOnlyDictionary<string, Tensor> source,
-        string cachePath, GgufQuantPolicy policy, string architecture, string logTag)
+        string cachePath, GgufQuantPolicy policy, string architecture, string logTag, int produceAhead = 1)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(policy);
-        GgufLoader loader = Open(cachePath, () => Entries(source, policy), architecture, logTag);
+        GgufLoader loader = Open(cachePath, () => Entries(source, policy), architecture, logTag, produceAhead: produceAhead);
         try
         {
             // Shapes come back from the source, not the file: the writer emits ggml order (see GgufQuantizer.ReadBack).
@@ -44,8 +87,11 @@ public static class GgufQuantCache
     /// never leaves a cache that looks complete. An existing file is reused only when every <paramref name="metadata"/> value and
     /// the tensor inventory (names, dtypes, element counts) match: a cache left by another version, precision or source checkpoint
     /// is rebuilt rather than read as this one, since quantization keeps the shapes a later check could catch.</summary>
+    /// <param name="produceAhead">How many entries the writer produces at once when it writes the cache (see
+    /// <see cref="GgufWriter.ProduceAhead"/>). 1 is serial; <see cref="ParallelProduceAhead"/> suits entries that read a mapped
+    /// checkpoint and quantize into their own buffers. Each in-flight entry holds its own intermediates, so a caller opts in.</param>
     public static GgufLoader Open(string cachePath, Func<IEnumerable<GgufCacheEntry>> entries, string architecture, string logTag,
-        IDictionary<string, object>? metadata = null)
+        IDictionary<string, object>? metadata = null, int produceAhead = 1)
     {
         ArgumentException.ThrowIfNullOrEmpty(cachePath);
         ArgumentNullException.ThrowIfNull(entries);
@@ -61,7 +107,7 @@ public static class GgufQuantCache
             existing.Dispose();
             Logs.Warning($"{logTag} The quant cache '{cachePath}' does not match this load ({mismatch}); rebuilding it.");
         }
-        Write(cachePath, entries(), architecture, logTag, metadata);
+        Write(cachePath, entries(), architecture, logTag, metadata, produceAhead);
         GgufLoader loader = Map(cachePath);
         Logs.Info($"{logTag} Mapped the quant cache '{cachePath}' ({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");
         return loader;
@@ -178,7 +224,7 @@ public static class GgufQuantCache
     }
 
     private static void Write(string cachePath, IEnumerable<GgufCacheEntry> entries, string architecture, string logTag,
-        IDictionary<string, object>? metadata)
+        IDictionary<string, object>? metadata, int produceAhead)
     {
         Logs.Info($"{logTag} Writing the quant cache '{cachePath}' (one time, one tensor at a time)...");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(cachePath))!);
@@ -189,9 +235,7 @@ public static class GgufQuantCache
         {
             using (GgufWriter writer = new(temporary))
             {
-                // Entry producers read a mapped checkpoint and quantize into their own buffers, so several run at once; the
-                // writer still emits them in order. Bounded so a few large F32 intermediates are the most held at a time.
-                writer.ProduceAhead = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+                writer.ProduceAhead = produceAhead;
                 writer.SetMetadata("general.architecture", architecture);
                 writer.SetMetadata("general.name", $"{architecture} (HartsyInference quant cache)");
                 if (metadata is not null)

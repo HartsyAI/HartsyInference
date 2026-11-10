@@ -5,7 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.415
 
-- **Fixed: multi-image and video prefill no longer grows with frames squared.** The gated cross-attention layer (MOSS-VL, Mllama)
+- **Fixed: multi-image and video prefill no longer grows with frames squared.** The gated cross-attention layer (MOSS-VL)
   ran every prompt row's attention once per image group, projected each, and masked away all but one group's rows. Groups whose
   rows are one contiguous range (every MOSS-VL group) now attend only their own rows over their key prefix, the results are
   stitched in row order and projected once, and their `[1, T, hidden]` row masks are no longer built. Same results (segmented and
@@ -17,8 +17,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   | 32 | 35.0 s | 2.3–3.4 s |
   | 64 | 378 s | 10.2 s |
 
-  Decode with 64 frames held went from 13.5 to 20.4 tok/s; up to 32 frames it stays at about 31 tok/s. Groups without a range keep
-  the masked path, with the output projection now applied once to the summed groups.
+  Decode with 64 frames held went from 12.1 to 20.4 tok/s; up to 32 frames it stays at 30.5 to 31.8 tok/s (28.4 before at 32
+  frames). Groups without a range keep the masked path, with the output projection now applied once to the summed groups.
 - **Added: `MossVlProfileTests`** (`Category=GpuBenchmark`, opt-in `HARTSY_MOSS_VL_PROFILE=1`): vision tower per frame (about
   325 ms for a 256×256 frame on Vulkan), prefill and decode by frame count.
 
@@ -48,7 +48,11 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   its device slot. Sessions idle longer than `RealtimeSessionIdleTimeoutMinutes` (10) are closed. Checked end to end on Vulkan
   against the GGUF: open, three frames, a prompt, the stream, stats, close, then 404.
 - **Added: `video_url` content parts on `/v1/chat/completions`.** A `data:video/…;base64,` part becomes the message's video for
-  video-capable models (128 MiB at most, one per message); a remote URL is refused.
+  video-capable models (128 MiB at most, one per message); a remote URL or a non-`video/` type is refused. Chat completions now
+  takes bodies up to `MaxVideoRequestBodyBytes` (256 MiB), as native video does, instead of Kestrel's 30 MB default.
+- **Changed: live-session streams.** One stream per session (a second gets 409); a session whose loop failed reports its `error`
+  event and is closed, freeing its device slot, and later input to it is a 404; closing a session never reports a failure for one
+  already removed.
 - **Changed: world and realtime sessions share `SessionRegistry<TSession>`.**
 - **Added: `tests/HartsyInference.API.Tests`.** It also runs `SeedVr2ModelLayoutTests`, which had no project before; its one
   Windows path-separator bug is fixed.

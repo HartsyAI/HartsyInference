@@ -17,9 +17,10 @@ public static class HfQuantWeightCache
     /// <param name="architecture">The cache file's <c>general.architecture</c>.</param>
     /// <param name="logTag">Log prefix, e.g. <c>[MOSS-VL]</c>.</param>
     /// <param name="identity">Values the cache must match to be reused (a version, the chosen precision); the source files are added.</param>
+    /// <param name="produceAhead">Entries converted at once when the cache is written (see <see cref="GgufQuantCache.Open"/>); 1 is serial.</param>
     public static (IReadOnlyDictionary<string, Tensor> Weights, IDisposable Owner) Load(HfQuantCheckpoint checkpoint,
         Func<HfQuantWeight, DType> target, string cachePath, string architecture, string logTag,
-        IReadOnlyDictionary<string, object>? identity = null, Func<string, bool>? include = null)
+        IReadOnlyDictionary<string, object>? identity = null, Func<string, bool>? include = null, int produceAhead = 1)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
         ArgumentNullException.ThrowIfNull(target);
@@ -44,7 +45,7 @@ public static class HfQuantWeightCache
 
         Logs.Info($"{logTag} {converted.Count} weights convert ({string.Join(", ", converted.GroupBy(w => $"{w.Storage}→{target(w).Name}").Select(g => $"{g.Count()} {g.Key}"))}); "
             + $"{borrowed.Count} are used as stored.");
-        GgufLoader loader = GgufQuantCache.Open(cachePath, Entries, architecture, logTag, metadata);
+        GgufLoader loader = GgufQuantCache.Open(cachePath, Entries, architecture, logTag, metadata, produceAhead);
         try
         {
             if (error.Count > 0) Logs.Info($"{logTag} Re-quantization: {error}.");
