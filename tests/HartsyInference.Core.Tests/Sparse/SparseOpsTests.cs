@@ -41,6 +41,25 @@ public sealed unsafe class SparseOpsTests
     }
 
     [Fact]
+    public void SubmanifoldConv_ChunkedRulebookIsBitIdenticalToUnchunked()
+    {
+        CpuBackend backend = new();
+        Random rng = new(13);
+        int n = 40, res = 6, cin = 3, cout = 5;
+        SparseTensor x = Make(RandomCoords(rng, n, res), res, Enumerable.Range(0, n * cin).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray(), cin);
+        Tensor[] slices = SparseOps.ConvWeightSlices(Filled(new TensorShape(new long[] { cout, 3, 3, 3, cin }), rng));
+        Tensor bias = Filled(new TensorShape(cout), rng);
+
+        // 140 bytes is 7 rows of max(cin, cout) = 5 floats, so most offsets split into several chunks with a short tail.
+        float[] whole = Read(SparseOps.SubmanifoldConv3dSparse(backend, x, slices, bias, 1L << 30).Feats);
+        float[] chunked = Read(SparseOps.SubmanifoldConv3dSparse(backend, x, slices, bias, 140).Feats);
+
+        Assert.Equal(whole.Length, chunked.Length);
+        for (int i = 0; i < whole.Length; i++)
+            Assert.Equal(BitConverter.SingleToInt32Bits(whole[i]), BitConverter.SingleToInt32Bits(chunked[i]));
+    }
+
+    [Fact]
     public void SubmanifoldConv_NeighboursDoNotMatchAcrossBatchItems()
     {
         CpuBackend backend = new();

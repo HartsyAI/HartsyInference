@@ -8,6 +8,7 @@ using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.Memory.Vram;
 
@@ -788,14 +789,17 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
-    /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
+    /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        bool scene = MeshModelIds.SceneMesh.Contains((spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant());
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadMeshImage(prompt),
+            Image = scene ? null : LoadMeshImage(prompt),
+            SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
@@ -1307,7 +1311,62 @@ public static class GenerationDispatch
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <summary>Reads the cola3d scene prompt from <c>--prompt-mask</c> or <c>--prompt-point</c>; null when neither is given.</summary>
+    private static SceneMeshPrompt? LoadScenePrompt(ParamState parameters)
+    {
+        string[]? maskPaths = SplitPaths(parameters.GetStringOrNull("prompt-mask"));
+        string[]? pointTexts = SplitPaths(parameters.GetStringOrNull("prompt-point"));
+        if (maskPaths is null && pointTexts is null)
+        {
+            return null;
+        }
+        if (maskPaths is not null && pointTexts is not null)
+        {
+            throw new ArgumentException("Give --prompt-mask or --prompt-point, not both.");
+        }
+        if (maskPaths is not null)
+        {
+            return new SceneMeshPrompt { Masks = maskPaths.Select(LoadPromptMask).ToList() };
+        }
+        return new SceneMeshPrompt { Points = pointTexts!.Select(ParseScenePoint).ToList() };
+    }
+
+    /// <summary>Reads one mask PNG; the red channel is the coverage.</summary>
+    private static ScenePromptMask LoadPromptMask(string path)
+    {
+        ImageData image = LoadImage(path);
+        byte[] coverage = new byte[image.Width * image.Height];
+        for (int i = 0; i < coverage.Length; i++)
+        {
+            coverage[i] = image.Rgb[i * 3];
+        }
+        return new ScenePromptMask { Coverage = coverage, Width = image.Width, Height = image.Height };
+    }
+
+    /// <summary>Parses <c>x,y,z</c> in the scene mesh's units.</summary>
+    private static ScenePoint ParseScenePoint(string text)
+    {
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length != 3 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x)
+            || !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y)
+            || !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+        {
+            throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
+        }
+        return new ScenePoint(x, y, z);
+    }
+
+    /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>
+    private static SceneMeshData LoadSceneMesh(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Input scene mesh not found: {path}");
+        }
+        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = SceneMeshReader.FormatOf(path) };
+    }
+
     /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
     private static ImageData LoadMeshImage(string promptPath)
     {
@@ -1321,6 +1380,7 @@ public static class GenerationDispatch
         return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
     }
 
+    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');
@@ -1331,6 +1391,7 @@ public static class GenerationDispatch
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
+
     /// <summary>The per-run VRAM override from <c>--vram-mode</c>, or null when the caller did not ask for one.</summary>
     /// <remarks>Null rather than an explicit Auto: null means "follow the engine", which is a different statement
     /// from "pin Auto" once a host has configured a backend policy.</remarks>
