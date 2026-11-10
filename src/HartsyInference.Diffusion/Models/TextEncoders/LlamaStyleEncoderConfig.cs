@@ -88,6 +88,10 @@ public sealed record LlamaStyleEncoderConfig
     /// a parity-test detail, not a structural one.)</summary>
     public float EmbeddingScale { get; init; } = 1.0f;
 
+    /// <summary>Attention-logit soft-cap (Gemma 2): each scaled score becomes <c>cap · tanh(score / cap)</c> before
+    /// softmax. <c>0</c> (default) disables it, leaving the dense attention path unchanged.</summary>
+    public float AttentionLogitSoftcap { get; init; } = 0f;
+
     // ────────────────────────────────────────────────────────────────────
     // GPT-OSS additions (MoE FFN, attention sinks, sliding window per-layer,
     // YaRN-extended RoPE, clamped non-standard SwiGLU). All default to off so
@@ -380,18 +384,14 @@ public sealed record LlamaStyleEncoderConfig
     };
 
     /// <summary>Gemma 2 2B preset (Lumina-Image-2.0 text encoder). 26 layers, hidden=2304, GQA 8:4,
-    /// head_dim=256 (note: hidden=2304 != heads*head_dim=2048 — Gemma 2 uses an oversized head_dim
-    /// distinct from hidden_size, projected back via the o_proj weight), intermediate=9216,
+    /// head_dim=256 (hidden=2304 != heads*head_dim=2048; the o_proj projects back to hidden), intermediate=9216,
     /// vocab=256000. RMSNorm eps 1e-6, RoPE theta 10000, no attention bias.
-    /// <para>Caveats vs vanilla Llama family: Gemma 2 uses GeGLU (GELU(gate)*up) rather than SwiGLU,
-    /// applies a fixed query pre-attention scalar of sqrt(256), softcaps attention logits at 50.0,
-    /// alternates sliding-window attention (4096), and uses pre+post norms on both attention and FFN
-    /// (4 RMSNorms per block). This preset turns on <see cref="Activation"/>=GeluTanh,
-    /// <see cref="HasFfnSandwichNorms"/>=true, and <see cref="RmsNormScalePlusOne"/>=true so the
-    /// encoder produces Gemma-2-correct hidden states up to the soft-cap and sliding-window
-    /// approximations (the encoder uses full-attention without logit clipping; small numerical drift
-    /// is expected for long-context prompts but the structural shape and feature-extractor behavior
-    /// match). Verified against <c>Alpha-VLLM/Lumina-Image-2.0/text_encoder/config.json</c>.</summary>
+    /// <para>Implemented: GeGLU, pre+post sandwich norms, (1+w) RMSNorm scales, sqrt(hidden) embedding scale,
+    /// attention scale 1/sqrt(256) (the 2B <c>query_pre_attn_scalar</c>), and the attention-logit soft-cap of 50
+    /// (<see cref="AttentionLogitSoftcap"/>). Not implemented: the alternating sliding window of 4096 (every layer
+    /// attends causally over the whole prompt, which matches the upstream model for prompts up to 4096 tokens), and
+    /// the final-logit soft-cap of 30, which applies to the LM head only and never to these hidden states.
+    /// Verified against <c>Alpha-VLLM/Lumina-Image-2.0/text_encoder/config.json</c>.</summary>
     public static LlamaStyleEncoderConfig Gemma2_2B => new()
     {
         HiddenSize = 2304,
@@ -410,7 +410,8 @@ public sealed record LlamaStyleEncoderConfig
         Activation = MlpActivation.GeluTanh,
         RmsNormScalePlusOne = true,
         HasFfnSandwichNorms = true,
-        EmbeddingScale = 48f, // sqrt(2304) — Gemma normalizer (was previously missing here)
+        EmbeddingScale = 48f,
+        AttentionLogitSoftcap = 50f,
         EosTokenId = 1,
         BosTokenId = 2,
     };
