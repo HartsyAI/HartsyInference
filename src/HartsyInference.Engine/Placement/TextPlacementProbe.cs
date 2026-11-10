@@ -23,8 +23,10 @@ public static class TextPlacementProbe
     {
         TextPlacementDemand demand = TextPlacementDemandReader.FromGguf(path, contextTokens, includeRedundantSplits, KvCaches.F16ForCudaPlacement);
         int primary = BackendFactory.ParseOrdinal(deviceKey);
+        CudaContext.EnsureProvisioned();   // the caller asked for CUDA: fetch a missing cuBLAS before counting devices
         if (CudaTopology.ProbeDevice(primary) is not GpuTopologyInfo first)
-            throw new HartsyInferenceException($"CUDA device '{deviceKey}' was not found; no placement can be planned.");
+            throw new HartsyInferenceException($"CUDA device '{deviceKey}' was not found; no placement can be planned." +
+                (CudaContext.LastUnavailableReason is { } why ? $" {why}" : string.Empty));
         List<TextPlacementDevice> devices = [new(BackendFactory.WithOrdinal("cuda", primary), first.FreeMemoryBytes)];
         long? hostFree = HostMemoryInfo.AvailableBytes();
         // The other devices are probed only when one GPU is not the answer: probing opens a context on each, which a model that

@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Cuda.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.Engine.Tests" />
     <InternalsVisibleTo Include="HartsyInference.GpuBenchmarks" />
   </ItemGroup>
 
