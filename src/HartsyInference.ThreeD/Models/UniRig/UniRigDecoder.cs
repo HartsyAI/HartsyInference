@@ -142,7 +142,8 @@ public sealed class UniRigDecoder : IDisposable
         Dictionary<string, Tensor> map = new(StringComparer.Ordinal)
         {
             ["model.embed_tokens.weight"] = _embedTokens,
-            ["model.embed_positions.weight"] = DropPositionOffset(UniRigCheckpoint.Get(weights, $"{Decoder}.embed_positions.weight", _config.MaxPositions + PositionOffset, h)),
+            ["model.embed_positions.weight"] = DropPositionOffset(UniRigCheckpoint.Get(weights, $"{Decoder}.embed_positions.weight",
+                _config.MaxPositions + PositionOffset, h)),
             ["model.norm.weight"] = UniRigCheckpoint.Get(weights, $"{Decoder}.final_layer_norm.weight", h),
             ["model.norm.bias"] = UniRigCheckpoint.Get(weights, $"{Decoder}.final_layer_norm.bias", h),
             ["lm_head.weight"] = UniRigCheckpoint.Get(weights, "transformer.lm_head.weight", _config.VocabSize, h),

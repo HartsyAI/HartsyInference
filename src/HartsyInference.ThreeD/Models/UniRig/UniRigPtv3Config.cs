@@ -36,7 +36,8 @@ public sealed record UniRigPtv3Config
     public void Validate()
     {
         int stages = Depths?.Length ?? 0;
-        if (stages == 0 || Channels?.Length != stages || Heads?.Length != stages || InChannels <= 0 || PatchSize <= 0 || GridSize <= 0f || Order is not { Length: > 0 })
+        if (stages == 0 || Channels?.Length != stages || Heads?.Length != stages || InChannels <= 0
+            || PatchSize <= 0 || GridSize <= 0f || Order is not { Length: > 0 })
         {
             throw new HartsyInferenceException("UniRig point transformer config is inconsistent.");
         }

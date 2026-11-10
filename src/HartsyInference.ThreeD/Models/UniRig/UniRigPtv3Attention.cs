@@ -102,7 +102,8 @@ internal sealed class UniRigPtv3Attention(IBackend backend, Tensor qkvWeight, Te
             {
                 for (int h = 0; h < heads; h++)
                 {
-                    os.Slice((((p * heads) + h) * length + t) * _headDim, _headDim).CopyTo(attendedSlots.AsSpan((start + t) * channels + h * _headDim, _headDim));
+                    os.Slice((((p * heads) + h) * length + t) * _headDim,
+                        _headDim).CopyTo(attendedSlots.AsSpan((start + t) * channels + h * _headDim, _headDim));
                 }
             }
         }

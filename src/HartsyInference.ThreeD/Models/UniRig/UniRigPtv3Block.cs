@@ -29,7 +29,8 @@ internal sealed class UniRigPtv3Block : IDisposable
     private readonly UniRigPtv3Attention _attention;
     private bool _disposed;
 
-    public UniRigPtv3Block(IBackend backend, IReadOnlyDictionary<string, Tensor> w, string prefix, int channels, int heads, int patchSize, int orderIndex)
+    public UniRigPtv3Block(IBackend backend, IReadOnlyDictionary<string, Tensor> w, string prefix, int channels, int heads,
+        int patchSize, int orderIndex)
     {
         _backend = backend;
         long c = channels;

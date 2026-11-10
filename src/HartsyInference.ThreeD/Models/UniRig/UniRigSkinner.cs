@@ -11,7 +11,8 @@ public static class UniRigSkinner
     public const int SampleVertices = 8192;
 
     /// <param name="mesh">The mesh as prepared for stage 1, in the same normalized frame as <paramref name="skeleton"/>.</param>
-    public static UniRigSkinResult Skin(UniRigSkinModel model, UniRigPreparedMesh mesh, UniRigSkeleton skeleton, UniRigVoxelSkinOptions? voxelOptions = null,
+    public static UniRigSkinResult Skin(UniRigSkinModel model, UniRigPreparedMesh mesh, UniRigSkeleton skeleton,
+        UniRigVoxelSkinOptions? voxelOptions = null,
         int seed = 12345, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(model);
