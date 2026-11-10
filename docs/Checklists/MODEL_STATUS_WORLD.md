@@ -11,6 +11,8 @@ is in the [Remaining work](#remaining-work) section below; bring-up debugging no
 |---|---|
 | **Oasis-500m** (Decart + Etched) | Real-weight numeric parity vs `etched-ai/open-oasis` on **CUDA/3060**: ViT-VAE encode corr **0.99999999**, decode corr **1.0**, DiT-S/2 v-pred corr **1.0** (maxAbs 3e-5). ([details](#oasis-500m)) |
 | **DIAMOND** (Eloi Alonso et al.) | **Network built from scratch + verified** vs `eloialonso/diamond` (Atari/Breakout) on **CUDA and CPU**: inner U-Net corr **1.0** (maxAbs 7e-6), full EDM denoise **bit-exact** (maxAbs 0.0), 3-step Karras+Euler sampler **bit-exact** (maxAbs 3e-8). ([details](#diamond)) |
+| **SANA-WM** (NVIDIA, stage 1) | Real-weight output matches NVIDIA's stage-1 reference on **CUDA/4090 and 3060 (12 GB)**: one DiT step cosine **0.99986**, a 161-frame clip PSNR min/mean **28.6 / 34.9 dB**, SSIM **0.947 / 0.977**. CLI only (`hartsy world -m sana-wm`): no SwarmUI or HTTP route, so the catalog status stays `ValidationPending`. Stage 1 only, which upstream calls lower quality than its refiner output. Non-commercial. ([details](#sana-wm-stage-1)) |
+| **SANA-WM streaming** (NVIDIA, stage 1) | The chunk-causal distilled model, `hartsy world -m sana-wm-streaming`. Matches upstream's own streaming sampler on **CUDA/4090 and 3060 (12 GB)**: all 15 DiT calls cosine ≥ **0.9996**, all 73 frames PSNR min **44.9 dB** (SSIM min 0.9973), including a live action-script drive. One 24-frame chunk takes **1.75 s** on the 4090 and **7.7 s** on the 3060. CLI only; the refiner is a separate row and unverified. ([details](#sana-wm-streaming)) |
 
 ## CLI-wired, correctness open (🔧)
 
@@ -36,6 +38,7 @@ All built end-to-end with structural tests passing; numeric parity pending.
 | **Matrix-Game 3.0** (Skywork) | Flagship. ([details](#matrix-game-30)) |
 | **Matrix-Game 2.0** (Skywork) | Entry-level. ([details](#matrix-game-20)) |
 | **Hunyuan-GameCraft 1.0** (Tencent) | 12.5B HunyuanVideo MM-DiT + CameraNet (Plücker rays) + 33-ch composite history. ([details](#hunyuan-gamecraft-10)) |
+| **SANA-WM streaming refiner** (stage 2) | `--refiner`, off by default. The chunk-causal LTX-2.0 19B video transformer, Gemma-3 text path and connector. Matches upstream's own `RefinerChunkRunner` on a tiny random model on the CPU (3e-5 relative). **Never run on a GPU or on real weights**, and not compared with upstream: that needs the release's BF16 Gemma-3-12B (24.4 GB, not downloaded). ([details](#sana-wm-streaming)) |
 
 ## Not started (❌)
 
@@ -69,6 +72,9 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Overall ~75% built / low validated; numeric validation is checkpoint-gated for MatrixGame2/3, Oasis, GameCraft, DIAMOND.
 
 ### Live / streaming
+- [ ] SANA-WM streaming: a live viewer. `--interactive` steers the stream and frames are written as they arrive, but nothing shows the video while it generates.
+- [ ] SANA-WM streaming refiner: run it on a GPU and compare it with upstream. That needs the release's BF16 Gemma-3-12B (24.4 GB) and block streaming for the 19B transformer on a 24 GB card.
+- [ ] SANA-WM and SANA-WM streaming through SwarmUI. There is no route yet, and the catalog status stays `ValidationPending` until there is one.
 - [ ] `MatrixGame3InteractivePipeline`.
 - [ ] `RollingKvCache`.
 - [ ] Streaming `IFrameStepper`.
@@ -109,3 +115,31 @@ Entry-level. 1.8B Wan2.1-lineage. **Wan-backbone DiT forward verified corr 0.999
 ### Hunyuan-GameCraft 1.0
 
 12.5B HunyuanVideo MM-DiT + CameraNet (Plücker rays) + 33-ch composite history. PCM+CFG 8-step. Reusable `.pt` pickle loader + N-axis rope. No license gate (engine MIT, user-supplied weights — and the HF repo itself is public/ungated, confirmed 2026-07-21). **Checkpoint loader landed 2026-08-06 — code-complete, NOT verified against real weights — but `WorldService` still fails fast, now for one specific, named reason instead of the old blanket "not loadable" message.** `HunyuanGameCraftPipeline.LoadFromPath` chains `HunyuanGameCraftCheckpointConverter` (coarse prefix router: DiT/CameraNet/Vae/Llava/Clip) into `HunyuanVideoCheckpointConverter` (Tencent-raw/diffusers → hybrid naming, same remap the base HunyuanVideo T2V recipe uses) for the merged DiT+CameraNet `.pt` dump, and `HunyuanVideoCheckpointConverter.ConvertVaeDecoder` for the standalone 3D-VAE aux checkpoint; `WorldService.LoadHunyuanGameCraft` separately loads Llava-Llama-3-8B + CLIP-L from two more aux paths (`llava-path`/`clip-path`, alongside the existing `vae-path`). **No VAE encoder is built** — the structural ldm→diffusers key remap exists (`CheckpointConvertUtils.ConvertVaeEncoderKey`), but the mid-attention Conv3d→Linear reshape `ConvertVaeDecoder`'s `AttnProj` applies for the decoder has no encoder-side counterpart wired up yet — so no session could ever turn `WorldRequest.InitImage` into chunk-0 history regardless of which weights are supplied. `WorldService.LoadHunyuanGameCraft` therefore checks `HunyuanGameCraftPipeline.LoadFromPathBuildsVaeEncoder` (currently always false) and throws `NotSupportedException` **before loading the checkpoint set** — loading ~51GB into RAM for a session that can't succeed would be pure waste on a box with a documented history of 45–62GB OOM kills. This box has no local copy of the real **~51GB** checkpoint set anyway (only ~28–31GB free at the time this was written); verification stopped at: (a) chaining the two converters on a synthetic Tencent-raw dict produces exactly the keys `HunyuanVideoDit.LoadWeights`/`GameCraftCameraNet.LoadWeights` index, and (b) `HunyuanGameCraftPipeline.LoadFromPath` (called directly, bypassing the gate) fails with a clean `FileNotFoundException` — not a crash — when pointed at missing paths — see `HunyuanGameCraftLoaderTests`. Also note: `LoadFromPath`'s `GameCraftActionEncoder` resolution binding is fixed at construction (default 320×512) and must match the actual generation resolution — see `HunyuanGameCraftPipeline.LoadFromPath`'s param docs. DiT block-streaming/sharding (Phase 4b) is separate, still-open follow-up work, as is the VAE-encoder reshape itself and the interactive session (text conditioning, WASD parsing, `GameCraftFrameStepper` wiring) that would sit on top of it.
+
+### SANA-WM (stage 1)
+
+NVIDIA's SANA-WM (`Efficient-Large-Model/SANA-WM_bidirectional`, NVlabs/Sana `b3bad956`): a 2.6B bidirectional Gated-DeltaNet and softmax camera DiT, the LTX-2 VAE and Gemma-2-2B-it. `hartsy world -m sana-wm` runs stage 1 only (`--no_refiner`, `flow_euler_ltx`, 60 steps, CFG 5.0, shift 9.8, BF16), up to 161 frames (`1 + 8n`) at 704x1280 and 16 fps.
+
+**Verified 2026-11-09 against upstream's stage-1 reference, through the CLI.** This is an approved exception to the Swarm-only rule, and the SwarmUI route is open work. Checkpoints: DiT `93a20c3fc184c44299234b0ed78b5895030533ff453fca2b66f9ed391e0ac258`, VAE `107cc359e3c4bce18c53d98686f4b3fe10c4207b6665d89b38b0741270514bfb`, Gemma-2-2B-it `bf06a1e6cfe1610beb98a2975e5602e7fc108d902b3ff9dd62282d749c7a2394`. On the RTX 4090 and the RTX 3060 (12 GB):
+
+- One DiT step on the real weights, cosine against upstream's velocity: **0.99986** on both cards.
+- A 161-frame clip with upstream's initial noise injected, against upstream's frames: PSNR min / mean **28.6 / 34.9 dB** on the 4090 (3060: 28.6 / 34.8 dB), SSIM min / mean **0.947 / 0.977** on both. The frames were viewed and show the same scene and camera motion. The noise is injected because the two random generators differ, so noise generation is not compared.
+- Camera tensors against upstream's dumps: error of 1e-6 or less.
+- `SanaWmDeviceParityGpuTests`, `SanaWmDitGpuTests` and `SanaWmEndToEndGpuTests` pass on the 4090 under the GPU lock, with the end-to-end floors enforced (PSNR min ≥ 28 dB, SSIM min ≥ 0.94).
+- Speed, same weights, precision and CFG mode: **2.59 s** per CFG step on the 4090 against 3.05 to 3.08 s for upstream PyTorch. On the 3060, 13.6 s per step and 14.5 minutes for the clip, with a device-wide peak of 7.6 GiB in the DiT phase and 11.1 GiB in the VAE decode. Upstream does not fit that card.
+
+**Limits.** CLI only: no SwarmUI or HTTP route, so the catalog status stays `ValidationPending`. Stage 1 only, which upstream describes as lower quality than its refiner output. The weights are non-commercial, and the LTX-2 VAE is under the LTX-2 community licence (the owner confirmed non-commercial use on 2026-11-09).
+
+### SANA-WM streaming
+
+NVIDIA's `Efficient-Large-Model/SANA-WM_streaming`: the same model distilled to be chunk-causal. `hartsy world -m sana-wm-streaming` generates three latent frames (24 video frames) per chunk, the first chunk four, with upstream's self-forcing schedule `1000,960,889,727,0` and CFG 1.0, and decodes each chunk with the causal LTX-2 VAE as soon as it is done. The camera path can grow while it runs (`--actions`, `--interactive`, `--unbounded`). Stage 1 only.
+
+**Verified 2026-11-10 against upstream's own streaming sampler** (demo_0, seed 42, 73 frames in chunks of 4, 3 and 3 latent frames, upstream's initial noise injected), through the CLI. Checkpoints: `sana_dit/model.pt` `95f8dae5fad465a2917b77144f6cbf43a544683c113415b4579885a165a70c2f`, converted as upstream's loader reads it (take `generator`, strip `model.`, drop `pos_embed`: 871 BF16 tensors in the stage-1 layout, weights-only load because the pickle is untrusted), and the causal VAE `3694526c1da964fcf1ebccb70edb09895bf9e0a723b3ac48e0b5adf5bf97cc4a`.
+
+- All 15 DiT calls of the run replayed through the stream cache with upstream's inputs: worst cosine **0.99961** (4090) and **0.99963** (3060). Chunks 2 and 3 match as well as chunk 1, which checks the state carried between chunks.
+- All 73 frames through the CLI path, against upstream's decoded frames: PSNR min / mean **44.9 / 47.7 dB** on the 4090 and **45.1 / 47.8 dB** on the 3060, SSIM min **0.9973** and **0.9974**. The frames were viewed.
+- A live action script (`w-24,d-24,s-24`, forward, turn right, reverse) through the live camera path, against an upstream run with the same script and noise: PSNR 49 dB forward, 46 to 47 dB turning, 34 to 42 dB reversing. Reversing makes stage 1 invent dark cracked ground at the bottom right, and upstream does the same from the same input, so it is the model and not the port.
+- Time per 24-frame chunk after the first: **1.75 s** on the 4090 (upstream: 1.16 s sampling plus 0.97 s decode) and **7.7 s** on the 3060 (upstream runs out of memory while loading there). Peak device memory 13.1 GB and 10.8 GB. The 3060 holds the carried state in BF16 (`vram.sanaWmStreamState=auto` picks that on cards of 16 GiB or less).
+- The whole `Category=GpuIntegration` set ran on the 4090 under the GPU lock, one class at a time: 29 passed, 0 failed, 5 skipped (the MOSS-VL tests, which need weights and reference dumps that are not configured here).
+
+**Limits.** CLI only. The CLI writes each frame to disk as it arrives, but there is no live viewer. The refiner (`--refiner`) is a separate row and is unverified: it has never run on a GPU, and not on real weights. The weights are non-commercial.

@@ -47,8 +47,8 @@ public sealed class LtxVideo2Attention
                 $"'{p}' attention weights are [{qIn}]/[{kvIn}] wide; the block declared q={_qInDim} kv={_kvInDim}.");
         _vW = w[$"{p}.to_v.weight"]; w.TryGetValue($"{p}.to_v.bias", out _vB);
         _oW = w[$"{p}.to_out.0.weight"]; w.TryGetValue($"{p}.to_out.0.bias", out _oB);
-        _nq = TensorCasts.LoadF32(w, $"{p}.q_norm.weight");
-        _nk = TensorCasts.LoadF32(w, $"{p}.k_norm.weight");
+        _nq = TensorCasts.LoadF32(w, NormKey(w, p, "q_norm", "norm_q"));
+        _nk = TensorCasts.LoadF32(w, NormKey(w, p, "k_norm", "norm_k"));
         // Per-head output gating is a 2.3-only feature; earlier LTX-2 (e.g. 19B) omits it (ungated attention).
         if (w.TryGetValue($"{p}.to_gate_logits.weight", out Tensor? gw)) { _gateW = gw; w.TryGetValue($"{p}.to_gate_logits.bias", out _gateB); }
 
@@ -72,6 +72,11 @@ public sealed class LtxVideo2Attention
         foreach (Tensor? t in new[] { _qW, _qB, _kW, _kB, _vW, _vB, _oW, _oB, _nq, _nk, _gateW, _gateB })
             if (t is not null) yield return t;
     }
+
+    /// <summary>The QK-norm weight key under <paramref name="p"/>: the Lightricks name (<c>q_norm</c>), or the diffusers
+    /// name (<c>norm_q</c>) of a checkpoint saved from <c>LTX2Attention</c>.</summary>
+    internal static string NormKey(IReadOnlyDictionary<string, Tensor> w, string p, string native, string diffusers) =>
+        w.ContainsKey($"{p}.{native}.weight") ? $"{p}.{native}.weight" : $"{p}.{diffusers}.weight";
 
     /// <summary>Attention over query rows <paramref name="qInput"/> <c>[Sq, qInDim]</c> attending to
     /// <paramref name="kvInput"/> <c>[Sk, kvInDim]</c>. Pass <paramref name="qRope"/>/<paramref name="kRope"/> null

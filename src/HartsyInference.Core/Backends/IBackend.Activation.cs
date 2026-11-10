@@ -4,9 +4,17 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
 
-// Activations, the uniform fake quantize, the gated linear unit, the group gate and the fused linear prologue and epilogue.
+// Activations, elementwise exp and reciprocal, the uniform fake quantize, the gated linear unit, the group gate and the fused
+// linear prologue and epilogue.
 public partial interface IBackend
 {
+    /// <summary>Elementwise <c>out = e^x</c>, computed in F32; input and output each F32 or BF16, of equal element count.
+    /// Contract: <see cref="Contracts.ElementwiseMathContract"/>; reference: <see cref="ElementwiseMathReference"/>.</summary>
+    void Exp(Tensor output, Tensor input) => ElementwiseMathReference.Exp(output, input);
+
+    /// <summary>Elementwise <c>out = 1 / x</c> with IEEE division (<c>±0</c> gives <c>±∞</c>); dtypes as <see cref="Exp"/>.</summary>
+    void Reciprocal(Tensor output, Tensor input) => ElementwiseMathReference.Reciprocal(output, input);
+
     /// <summary>Uniform fake quantization: every value clamped to <c>[low, high]</c>, truncated to one of <paramref name="levels"/>
     /// evenly spaced steps and mapped back into the range (DIAMOND's 256-level pixel quantization over <c>[−1, 1]</c>). F32.
     /// Contract: <see cref="Contracts.FakeQuantizeContract"/>; reference: <see cref="FakeQuantizeReference"/>.</summary>

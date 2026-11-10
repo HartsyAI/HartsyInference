@@ -8,6 +8,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
+    <!-- SANA-WM resizes its seed image with the shared PIL-style Lanczos resampler in Vision.Codec. Vision depends only on
+         Core, ModelAssets and Diffusion, so there is no cycle. -->
+    <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
   </ItemGroup>
 
 </Project>

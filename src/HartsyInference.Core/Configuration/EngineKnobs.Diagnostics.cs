@@ -131,9 +131,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> OrpheusProf =
         Bool("diagnostics.orpheusProf", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Times the Orpheus TTS decode loop's logits/sample/forward phases with per-step device syncs.");
 
-    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.</summary>
+    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the model stage timer
+    /// (<see cref="Backends.StageProfiler"/>), which syncs the device around each stage.</summary>
     public static readonly Knob<bool> Profile =
-        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.");
+        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the device-synced model stage timer (StageProfiler).");
 
     /// <summary>Dumps the accumulated per-op profile table at every backend Sync (per generation) to diagnostics.profileOut.</summary>
     public static readonly Knob<bool> ProfileEach =
@@ -187,9 +188,15 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> WanDebug =
         Bool("diagnostics.wanDebug", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Logs per-step velocity/latent stats and free-VRAM for the Wan video and Wan-S2V pipelines.");
 
-    /// <summary>File path to append per-block free-VRAM readings to during the Wan video transformer forward.</summary>
+    /// <summary>File path to append per-block device-memory readings to during the Wan video transformer forward;
+    /// <see cref="VramTrace"/> covers the same points.</summary>
     public static readonly Knob<string?> WanVram =
-        Str("diagnostics.wanVram", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append per-block free-VRAM readings to during the Wan video transformer forward.");
+        Str("diagnostics.wanVram", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append per-block device-memory readings to during the Wan video transformer forward; diagnostics.vramTrace covers the same points.");
+
+    /// <summary>File path to append labelled device-memory readings to: driver free and used bytes, the allocator pool's reserved
+    /// and used bytes, and the resident weight and activation bytes, each after a device sync. Unset disables the trace.</summary>
+    public static readonly Knob<string?> VramTrace =
+        Str("diagnostics.vramTrace", null, KnobScope.Runtime, KnobDomain.Diagnostics, "File path to append labelled device-memory readings to (driver free/used, allocator pool reserved/used, resident weights and activations), each after a device sync, at the phase, step and block points a model records (SANA-WM, Wan); unset disables it.");
 
     /// <summary>Directory for a safetensors dump of every YuE decode-stage intermediate, for Python reference parity.</summary>
     public static readonly Knob<string?> YueDump =
