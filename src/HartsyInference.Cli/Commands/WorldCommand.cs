@@ -1,58 +1,119 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Engine.Worlds;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Rolls out an interactive world model from a first-frame image with an action plan.</summary>
-/// <remarks>Oasis does a one-shot batch rollout; DIAMOND runs a genuinely per-frame loop, one real denoise per action.</remarks>
+/// <summary>Rolls out an interactive world model from a first-frame image with an action plan or a camera path.</summary>
+/// <remarks>Oasis does a one-shot batch rollout; DIAMOND runs a genuinely per-frame loop, one real denoise per action.
+/// SANA-WM renders a whole camera-controlled clip in one run:
+/// <c>hartsy world -m sana-wm --image demo.png --prompt-file demo.txt (--actions "w-80,dw-40,aw-40" | --camera poses.npy)
+/// --intrinsics intrinsics.npy [--frames 161] [--steps 60] [--cfg-scale 5] [--flow-shift 9.8] [--seed 42]</c>. For a model that
+/// takes an action-script camera (SANA-WM), <c>--actions</c> is that script; for the others it is the per-frame action plan.
+/// Every option is checked by the engine's world planner before a checkpoint is loaded.
+/// Camera file format: a JSON file <c>{"poses": [[16 numbers], ...], "intrinsics": {"fx", "fy", "cx", "cy"}}</c> or a
+/// NumPy <c>.npy</c> float32/float64 array shaped (N, 16) or (N, 4, 4). Each pose is a camera-to-world matrix, row-major,
+/// OpenCV convention (+X right, +Y down, +Z forward), one per frame; frame 0 is the seed image.</remarks>
 public sealed class WorldCommand : Command<WorldCommand.Settings>
 {
     /// <summary>Options for <c>hartsy world</c>.</summary>
     public sealed class Settings : CommandSettings
     {
         /// <summary>Path to the first-frame image (Oasis expects 640x360; DIAMOND expects 64x64).</summary>
-        [CommandArgument(0, "<image>")]
-        [Description("Path to the first-frame PNG (Oasis: 640x360; DIAMOND: 64x64).")]
-        public string Image { get; init; } = "";
+        [CommandArgument(0, "[image]")]
+        [Description("Path to the first-frame PNG (Oasis: 640x360; DIAMOND: 64x64; SANA-WM: any size, cover-cropped to 1280x704).")]
+        public string? Image { get; init; }
+
+        /// <summary>The first-frame image, as an option instead of the positional argument.</summary>
+        [CommandOption("--image")]
+        [Description("Path to the first-frame PNG (same as the positional argument).")]
+        public string? ImageOption { get; init; }
 
         /// <summary>Model id.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: oasis or diamond.")]
+        [Description("Model id: oasis, diamond or sana-wm.")]
         public string Model { get; init; } = "oasis";
+
+        /// <summary>The prompt the world is seeded with.</summary>
+        [CommandOption("--prompt")]
+        [Description("Prompt text (SANA-WM). Use --prompt-file for a long prompt.")]
+        public string? Prompt { get; init; }
+
+        /// <summary>A UTF-8 text file holding the prompt; surrounding whitespace is trimmed.</summary>
+        [CommandOption("--prompt-file")]
+        [Description("UTF-8 text file holding the prompt (SANA-WM).")]
+        public string? PromptFile { get; init; }
 
         /// <summary>Path to the model checkpoint (Oasis DiT, or the DIAMOND denoiser).</summary>
         [CommandOption("--model-path")]
         [Description("Path to the model checkpoint (Oasis DiT .safetensors, or the DIAMOND denoiser .safetensors).")]
         public string? ModelPath { get; init; }
 
-        /// <summary>Path to the Oasis ViT-VAE .safetensors (Oasis only).</summary>
+        /// <summary>Path to the VAE .safetensors: Oasis's ViT-VAE, or an override of SANA-WM's LTX-2 VAE.</summary>
         [CommandOption("--vae-path")]
-        [Description("Path to the Oasis ViT-VAE .safetensors (Oasis only; DIAMOND has no VAE).")]
+        [Description("Path to the VAE .safetensors (Oasis: required ViT-VAE; SANA-WM: overrides vae/ beside the DiT; DIAMOND has none).")]
         public string? VaePath { get; init; }
+
+        /// <summary>Override of SANA-WM's Gemma-2-2B text encoder .safetensors.</summary>
+        [CommandOption("--text-encoder-path")]
+        [Description("SANA-WM: Gemma-2-2B .safetensors (default: text_encoder/gemma-2-2b-it/ beside the DiT folder).")]
+        public string? TextEncoderPath { get; init; }
 
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
         public string Backend { get; init; } = "auto";
 
-        /// <summary>Number of frames to roll out.</summary>
+        /// <summary>Number of frames to roll out, counting the seed frame; null uses the model default.</summary>
         [CommandOption("--frames")]
-        [Description("Number of frames to roll out.")]
-        public int Frames { get; init; } = 16;
+        [Description("Frames to roll out, counting the seed frame (default: the model's own count, 16 for Oasis and DIAMOND).")]
+        public int? Frames { get; init; }
 
-        /// <summary>Comma-separated action tokens, cycled to fill the frame count; model-specific default when omitted.</summary>
+        /// <summary>Output frame rate; null uses the model default.</summary>
+        [CommandOption("--fps")]
+        [Description("Output frame rate (default: the model's own rate, 24 for Oasis and DIAMOND).")]
+        public int? Fps { get; init; }
+
+        /// <summary>Path to a per-frame camera path (.json or .npy); see the command remarks for the format.</summary>
+        [CommandOption("--camera")]
+        [Description("Per-frame camera path, one camera-to-world pose per frame (.json or .npy). Models without camera input refuse it.")]
+        public string? Camera { get; init; }
+
+        /// <summary>Pinhole intrinsics in pixels of the seed image: fx,fy,cx,cy or an intrinsics file.</summary>
+        [CommandOption("--intrinsics")]
+        [Description("Intrinsics in pixels of the seed image: fx,fy,cx,cy, or a .npy ((4,), (3,3), (F,4), (F,3,3)) or .json file. "
+            + "Overrides the camera file's intrinsics; needs --camera or an action-script --actions.")]
+        public string? Intrinsics { get; init; }
+
+        /// <summary>Oasis/DIAMOND: comma-separated action tokens cycled over the frames. SANA-WM: the camera action script.</summary>
         /// <remarks>Oasis defaults to "forward"; DIAMOND defaults to a fire/left/right demo cycle.</remarks>
         [CommandOption("--actions")]
-        [Description("Comma-separated action tokens, cycled to fill --frames (default: a model-specific demo plan).")]
+        [Description("Oasis/DIAMOND: comma-separated action tokens, cycled to fill --frames (default: a demo plan). SANA-WM: "
+            + "the camera script, <keys>-<frames> segments over wasdijkl or none (e.g. w-80,dw-40,aw-40).")]
         public string? Actions { get; init; }
 
-        /// <summary>DDIM/denoising steps per frame (Oasis only; DIAMOND's step count is fixed by its config).</summary>
+        /// <summary>Classifier-free guidance scale (SANA-WM).</summary>
+        [CommandOption("--cfg-scale")]
+        [Description("Classifier-free guidance scale (SANA-WM; default 5.0).")]
+        public double? CfgScale { get; init; }
+
+        /// <summary>Flow-matching schedule shift (SANA-WM).</summary>
+        [CommandOption("--flow-shift")]
+        [Description("Flow-matching schedule shift (SANA-WM; default 9.8).")]
+        public double? FlowShift { get; init; }
+
+        /// <summary>Upstream's action overlay; not ported, so the flag is refused.</summary>
+        [CommandOption("--action-overlay")]
+        [Description("Composite upstream's action overlay onto the video (not ported yet; refused).")]
+        public bool ActionOverlay { get; init; }
+
+        /// <summary>DDIM/denoising steps per frame; null uses the model default (10 for Oasis).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps per frame (Oasis only).")]
-        public int Steps { get; init; } = 10;
+        [Description("Denoising steps per frame (Oasis only; default 10). DIAMOND fixes its own step count.")]
+        public int? Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
@@ -68,15 +129,34 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [CommandOption("-q|--quiet")]
         [Description("Suppress progress output.")]
         public bool Quiet { get; init; }
+
+        /// <summary>Run guidance as two sequential passes per step; refused by a model that does not declare it.</summary>
+        [CommandOption("--sequential-cfg")]
+        [Description("Run guidance as two sequential passes per step (only models that support it).")]
+        public bool SequentialCfg { get; init; }
     }
 
     /// <inheritdoc/>
     public override int Execute(CommandContext context, Settings settings)
     {
-        if (!CommandRunner.RequireNonEmpty(settings.Image, "A first-frame image path is required.", out int exitCode))
+        if (settings.Image is not null && settings.ImageOption is not null)
+        {
+            AnsiConsole.MarkupLine("[red]Give the first-frame image once: as the argument or with[/] [#2ea5e0]--image[/][red].[/]");
+            return 1;
+        }
+        string image = settings.Image ?? settings.ImageOption ?? "";
+        if (!CommandRunner.RequireNonEmpty(image, "A first-frame image path is required.", out int exitCode))
             return exitCode;
 
-        if (string.IsNullOrWhiteSpace(settings.ModelPath))
+        if (settings.ActionOverlay)
+        {
+            AnsiConsole.MarkupLine("[red]--action-overlay is not supported yet: upstream's overlay compositor is not ported.[/]");
+            return 1;
+        }
+
+        ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
+        bool fromCatalogAssets = baseSpec.Catalog is { Assets.Count: > 0 };
+        if (string.IsNullOrWhiteSpace(settings.ModelPath) && !fromCatalogAssets)
         {
             AnsiConsole.MarkupLine("[red]A model checkpoint is required via[/] [#2ea5e0]--model-path[/][red].[/]");
             return 1;
@@ -89,19 +169,76 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
             return 1;
         }
 
+        if (settings.Prompt is not null && settings.PromptFile is not null)
+        {
+            AnsiConsole.MarkupLine("[red]Give the prompt once: with[/] [#2ea5e0]--prompt[/] [red]or[/] [#2ea5e0]--prompt-file[/][red].[/]");
+            return 1;
+        }
+        string? prompt = settings.Prompt;
+        if (settings.PromptFile is not null)
+        {
+            if (!File.Exists(settings.PromptFile))
+            {
+                AnsiConsole.MarkupLine($"[red]Prompt file not found:[/] {Markup.Escape(settings.PromptFile)}");
+                return 1;
+            }
+            prompt = File.ReadAllText(settings.PromptFile).Trim();
+            if (prompt.Length == 0)
+            {
+                AnsiConsole.MarkupLine($"[red]Prompt file is empty:[/] {Markup.Escape(settings.PromptFile)}");
+                return 1;
+            }
+        }
+
         ParamState parameters = new ParamState(Modality.World) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
-        parameters.Put("frames", settings.Frames.ToString(CultureInfo.InvariantCulture));
-        parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
+        PutIfSet(parameters, "frames", settings.Frames);
+        PutIfSet(parameters, "fps", settings.Fps);
+        PutIfSet(parameters, "steps", settings.Steps);
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         parameters.Put("actions", settings.Actions ?? "");
+        PutIfSet(parameters, "camera", settings.Camera);
+        PutIfSet(parameters, "intrinsics", settings.Intrinsics);
+        PutIfSet(parameters, "world-prompt", prompt);
+        PutIfSet(parameters, "cfg-scale", settings.CfgScale);
+        PutIfSet(parameters, "flow-shift", settings.FlowShift);
+        parameters.Put("sequential-cfg", settings.SequentialCfg ? "true" : "false");
 
-        Dictionary<string, string> aux = isOasis ? new Dictionary<string, string> { ["vae-path"] = settings.VaePath! }
-            : new Dictionary<string, string>();
-        ModelSpec baseSpec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.World);
+        Dictionary<string, string> aux = new Dictionary<string, string>();
+        if (!string.IsNullOrWhiteSpace(settings.VaePath))
+            aux[WorldComponentResolver.VaeAuxKey] = settings.VaePath;
+        if (!string.IsNullOrWhiteSpace(settings.TextEncoderPath))
+            aux[WorldComponentResolver.TextEncoderAuxKey] = settings.TextEncoderPath;
         ModelSpec spec = baseSpec with { Aux = aux };
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
-        return CommandRunner.Run(Modality.World, spec, settings.Image, parameters, settings.Backend, settings.Quiet,
+        return CommandRunner.Run(Modality.World, spec, image, parameters, settings.Backend, settings.Quiet,
             settings.Output, label, showResponseRule: false);
+    }
+
+    /// <summary>Stores an optional option so an unset one reads back as null and the model default applies.</summary>
+    private static void PutIfSet(ParamState parameters, string key, int? value)
+    {
+        if (value is int v)
+        {
+            parameters.Put(key, v.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>Stores an optional number so an unset one reads back as null and the model default applies.</summary>
+    private static void PutIfSet(ParamState parameters, string key, double? value)
+    {
+        if (value is double v)
+        {
+            parameters.Put(key, v.ToString("R", CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>Stores an optional text option so an unset one reads back as null.</summary>
+    private static void PutIfSet(ParamState parameters, string key, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            parameters.Put(key, value);
+        }
     }
 }

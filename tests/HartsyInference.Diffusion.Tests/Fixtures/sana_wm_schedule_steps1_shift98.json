@@ -1,0 +1,30 @@
+{
+ "description": "SANA-WM flow_euler_ltx sigma schedule, produced by diffusers FlowMatchEulerDiscreteScheduler .set_timesteps via retrieve_timesteps (stable_diffusion_3 pipeline), CPU, no shift_terminal.",
+ "generator": "tests/HartsyInference.Diffusion.Tests/Fixtures/generate_sana_wm_schedule_fixtures.py",
+ "diffusers_version": "0.37.0",
+ "torch_version": "2.9.1+cu128",
+ "numpy_version": "2.5.4",
+ "steps": 1,
+ "shift": 9.8,
+ "endpoints": {
+  "init_sigma_max_float32": 1.0,
+  "init_sigma_min_float32": 0.009714513085782528,
+  "linspace_start_float64": 1000.0,
+  "linspace_stop_float64": 9.714513085782528
+ },
+ "sigmas_float64": [
+  1.0,
+  0.0
+ ],
+ "sigmas_float32": [
+  1.0,
+  0.0
+ ],
+ "timesteps_float32": [
+  1000.0
+ ],
+ "sign_probe_max_abs_error": {
+  "scalar_step_vs_x_plus_dsigma_v": 0.0,
+  "per_token_ltx_step_vs_x_plus_dsigma_v": 0.0
+ }
+}

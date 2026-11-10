@@ -7,6 +7,7 @@ using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Worlds;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
@@ -856,41 +857,63 @@ public static class GenerationDispatch
     /// <summary>World rollout through <see cref="IWorldService"/>: queues one action per frame, then drains the session's frame stream.</summary>
     /// <remarks>Actions come from <c>--actions</c> (cycled to fill the count) or a model-specific default demo plan.
     /// Oasis batches the queued plan into a single one-shot rollout; DIAMOND runs one real denoise per queued action
-    /// (see <see cref="DiamondWorldSession"/>).</remarks>
+    /// (see <see cref="DiamondWorldSession"/>). A model that takes an action-script camera (SANA-WM) reads <c>--actions</c> as
+    /// that script instead, and is sent no per-frame actions.</remarks>
     private static async Task<GeneratedArtifact> WorldAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, string? outputDir, bool quiet, CancellationToken cancel)
     {
-        int totalFrames = Math.Max(2, parameters.GetInt("frames", 16));
-        WorldRequest request = new WorldRequest
+        bool scriptCamera = spec.Catalog?.World?.CameraModes.Contains(WorldCameraMode.ActionScript) == true;
+        string? actions = parameters.GetStringOrNull("actions");
+        WorldRequestOptions options = new WorldRequestOptions
         {
-            Vram = ParseVramOverrides(parameters),
-            InitImage = LoadImage(prompt),
-            Steps = parameters.GetInt("steps", 10),
+            Prompt = parameters.GetStringOrNull("world-prompt"),
+            Frames = parameters.GetIntOrNull("frames"),
+            Fps = parameters.GetIntOrNull("fps"),
+            Steps = parameters.GetIntOrNull("steps"),
+            Guidance = parameters.GetDoubleOrNull("cfg-scale"),
+            FlowShift = parameters.GetDoubleOrNull("flow-shift"),
             Seed = parameters.GetInt("seed", -1),
+            CameraPath = parameters.GetStringOrNull("camera"),
+            CameraScript = scriptCamera ? actions : null,
+            Intrinsics = parameters.GetStringOrNull("intrinsics"),
+            SequentialCfg = parameters.GetBool("sequential-cfg", false),
         };
-
-        string[] actionPlan = ResolveActionPlan(parameters.GetStringOrNull("actions"), spec.Catalog?.Id);
+        WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
+        WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
         List<VideoFrame> frames = new List<VideoFrame>();
-        using IWorldSession session = engine.World.Open(spec, request);
-        for (int i = 0; i < totalFrames - 1; i++)
+        using IWorldSession session = engine.World.Open(spec, plan.Request);
+        if (!scriptCamera)
         {
-            session.SendAction(actionPlan[i % actionPlan.Length]);
+            string[] actionPlan = ResolveActionPlan(actions, spec.Catalog?.Id);
+            for (int i = 0; i < plan.ActionCount; i++)
+            {
+                session.SendAction(actionPlan[i % actionPlan.Length]);
+            }
         }
         try
         {
             await foreach (VideoFrame frame in session.StreamAsync(cancel).ConfigureAwait(false))
             {
                 frames.Add(frame);
-                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = totalFrames });
+                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = plan.Frames });
             }
         }
         finally
         {
             progress?.Finish();
         }
-        return FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world");
+        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world",
+            null, plan.Fps);
+        artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
+        artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
+        // Planning adjustments (a truncated camera path, an expanded action script) are reported with the artifact.
+        for (int i = 0; i < plan.Notes.Count; i++)
+        {
+            artifact.Meta[$"note{i + 1}"] = plan.Notes[i];
+        }
+        return artifact;
     }
 
     /// <summary>Resolves the action plan: an explicit comma-separated <paramref name="actionsOption"/>, else a per-model demo plan.</summary>
