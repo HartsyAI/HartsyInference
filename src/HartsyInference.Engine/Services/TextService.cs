@@ -33,7 +33,7 @@ using HartsyInference.Core.Backends.Experts;
 namespace HartsyInference.Engine.Services;
 
 /// <summary>Text-generation service: owns per-device model slots, GGUF/SSM loading, chat-template application, sampling, the multimodal VLM path, and token streaming — all against the native <see cref="TextRequest"/> contract. Lifted from SwarmUI's HartsyLocalLLMProvider with the host-app coupling stripped.</summary>
-public sealed class TextService : ITextService, IDisposable
+public sealed partial class TextService : ITextService, IDisposable
 {
     /// <summary>OpenAI-CLIP normalization for the mllama image processor (splice encoders expose their own).</summary>
     private static readonly float[] MllamaMean = [0.48145466f, 0.4578275f, 0.40821073f];
@@ -411,7 +411,8 @@ public sealed class TextService : ITextService, IDisposable
                 continue;
             try
             {
-                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.Looped?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer;
+                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.Looped?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer
+                    ?? slot.MossVl?.Model.Tokenizer;
                 if (tokenizer is not null)
                     return tokenizer.EncodeOrdinary(text).Length;
             }
@@ -505,7 +506,8 @@ public sealed class TextService : ITextService, IDisposable
                 ImageData? image = LastImage(request);
                 if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
-                outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
+                outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
+                    : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
             }
@@ -1034,6 +1036,18 @@ public sealed class TextService : ITextService, IDisposable
                 $"(looked under '{RepoPaths.ModelsRoot()}').");
         if (ProbeHfDirectory(path) is { } hfCheckpoint)
         {
+            if (string.Equals(hfCheckpoint.ModelType, LLM.Models.MossVl.MossVlConfig.ModelType, StringComparison.Ordinal))
+            {
+                if (KeepsLoadedModel(slot, path, hfDirectory: true))
+                {
+                    LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
+                    LogMossVlLowVramMismatch(slot, deviceKey, request);
+                    return;
+                }
+                UnloadSlot(slot);
+                LoadMossVl(slot, deviceKey, path, request);
+                return;
+            }
             LoadHfDirectory(slot, deviceKey, hfCheckpoint, path);
             return;
         }
@@ -1042,12 +1056,19 @@ public sealed class TextService : ITextService, IDisposable
             LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
             LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
             LogPlacementMismatch(slot, deviceKey, request.Placement);
+            LogMossVlLowVramMismatch(slot, deviceKey, request);
             return;
         }
         string[] shardDevices = ResolveShardDevices(deviceKey);
         ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
         string architecture0 = PeekArchitecture(path);
+        // MOSS-VL's cross-attention decoder and in-file vision tower have their own loader; it runs on one device.
+        if (string.Equals(architecture0, LLM.Models.MossVl.MossVlConfig.ModelType, StringComparison.Ordinal))
+        {
+            LoadMossVl(slot, deviceKey, path, request);
+            return;
+        }
         // TP claims ShardDevices as its rank list (ValidatePlacement enforces Count == degree and excludes
         // every other multi-device mode). This branch MUST come before the layer-split one — without it a
         // TP config would silently layer-split, pass token parity AND the both-cards VRAM check, and read
@@ -1176,8 +1197,9 @@ public sealed class TextService : ITextService, IDisposable
     /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
-        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null || slot.SsmModel is not null || slot.Model is not null
-            : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
+        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (slot.MossVl is not null || (hfDirectory
+            ? slot.DeepSeekV41 is not null || slot.SsmModel is not null || slot.Model is not null
+            : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null));
 
     /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing
     /// path frees nothing: the load refuses it first.</summary>
@@ -1722,7 +1744,8 @@ public sealed class TextService : ITextService, IDisposable
             catch (Exception ex) { Logs.Debug($"[TextService] Disposing the expert offload failed: {ex.Message}"); }
             slot.ExpertOffload = null;
         }
-        if (slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null)
+        if (slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null
+            || slot.MossVl is not null)
         {
             if (slot.Backend is not null)
             {
@@ -1752,6 +1775,8 @@ public sealed class TextService : ITextService, IDisposable
         slot.Looped = null;
         slot.DeepSeekV41?.Dispose();
         slot.DeepSeekV41 = null;
+        slot.MossVl?.Dispose();
+        slot.MossVl = null;
         slot.ResidencyPlan = null;
         slot.PlannedPlacement = null;
         slot.PlacementRequested = null;

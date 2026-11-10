@@ -109,6 +109,10 @@ internal sealed class TextDeviceSlot
     /// <summary>Cross-attention vision encoder (Llama-3.2-Vision), or null when text-only / splice.</summary>
     public MllamaVisionEncoder? MllamaVision { get; set; }
 
+    /// <summary>The loaded MOSS-VL model (text decoder and vision tower on <see cref="Backend"/>), or null. Exclusive of every other
+    /// model field: a MOSS-VL load leaves <see cref="Model"/> and <see cref="Pipeline"/> null.</summary>
+    public MossVlRuntime? MossVl { get; set; }
+
     /// <summary>The loaded sidecar mmproj path, or null when the model is text-only.</summary>
     public string? VisionPath { get; set; }
 
