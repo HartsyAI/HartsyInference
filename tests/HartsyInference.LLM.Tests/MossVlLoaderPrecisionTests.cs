@@ -167,4 +167,32 @@ public sealed class MossVlLoaderPrecisionTests
         using Tensor bad = F32(new float[25], new TensorShape(25));
         Assert.Throws<InvalidDataException>(() => MossVlVisionTower.UnpadQkv(bad, 2, 4));
     }
+
+    /// <summary>The released MOSS-VL GGUF embeds no tokenizer, so a folder holding only a GGUF is refused with the file to add and the
+    /// repository it comes from, before any weight is read.</summary>
+    [Fact]
+    public void LoneGgufWithoutTokenizerNamesTheMissingFile()
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "hartsy-moss-lone-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string gguf = Path.Combine(folder, "moss.gguf");
+        try
+        {
+            using (HartsyInference.ModelAssets.Gguf.GgufWriter writer = new(gguf))
+            {
+                writer.SetMetadata("general.architecture", "moss_vl");
+                using Tensor marker = F32([0f, 0f], new TensorShape(2));
+                writer.AddTensor("blk.0.cross_gate_attn.weight", marker);
+                writer.Flush();
+            }
+            HartsyInference.Core.Exceptions.HartsyInferenceException error = Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(
+                () => MossVlModel.Open(gguf, new MossVlLoadOptions()));
+            Assert.Contains("tokenizer.json", error.Message);
+            Assert.Contains(MossVlModel.TokenizerRepo, error.Message);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
 }

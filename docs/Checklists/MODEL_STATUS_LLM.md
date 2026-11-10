@@ -131,25 +131,27 @@ IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M by known-block test only, no small published file).
 | **GenericTransformer** (Qwen2/Qwen3/Llama-3) | ✅ | Parity tests; backs the text encoders + native LLM. Llama-3 RoPE NTK-by-parts validated. |
 | **T5 / UMT5 / Pile-T5 (AuraFlow) / BERT / SigLIP / Qwen3-VL vision tower** | 🔬 | Diff tests present (`T5EncoderDiff`, `BertModel`, `Siglip`, `Qwen3VlVisionTower`); Pile-T5 == UMT5 (per-layer rel-attn-bias). |
 
-## MOSS-VL-Realtime — in progress (🔧, not runnable yet)
+## MOSS-VL-Realtime — runs on Vulkan (🧪 validation pending)
 
 OpenMOSS 48-layer VLM with 12 gated cross-attention layers, a Qwen3-VL-style ViT with deepstack taps, and a realtime
-streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCHITECTURE.md). Weights:
-`OpenMOSS-Team/MOSS-VL-Realtime-SGLANG` (BF16, 22.7 GB, Apache-2.0, not gated), placed at
-`Models/LLM/moss-vl-realtime/`; the five shards match their LFS sha256.
+streaming mode. Architecture and gaps: [MOSS_VL_ARCHITECTURE.md](../MOSS_VL_ARCHITECTURE.md). Catalog id `moss-vl-realtime`:
+the community GGUF (`SkyContact/MOSS-VL-Realtime-GGUF`, Q4_K_M, 8.4 GB, vision tower inside) plus the tokenizer and JSON configs
+from `OpenMOSS-Team/MOSS-VL-Realtime-SGLANG`; variant `bf16` is the official 22.7 GB checkpoint. Apache-2.0, not gated.
 
-- ✅ Config reader (`Models/MossVl/MossVlConfig`) and real-checkpoint key layout (895 keys, exact match).
-- ✅ Vision tower with deepstack merger: relative parity 2.7e-6 against a numpy transcription on the real weights (grid 1×16×24).
-- ✅ Cross-attention query and key RoPE and the row mask, as an optional `MultimodalRope` (mllama default unchanged).
-- ✅ Text model (`Models/MossVl/MossVlTextDecoder`): `GenericTransformer` over `model.language_model.*` and `lm_head`, plus the
-  vision separator; single-image positions with interleaved M-RoPE (`MossVlPositions`).
-- ✅ Text parity on the real weights, layers 0–2 (self, self, gated cross): the cross layer's own delta matches the numpy
-  transcription at relative 5e-7. The gates are about 1e-2, so the delta is checked directly; a missing query rotation fails it.
-- ✅ Logits and KV-cached decode (`MossVlDecodeSession`): prefill and one decode step match the reference at relative ~1e-6, and the greedy token agrees (`MossVlGenerationParityTests`).
-- ✅ Tokenizer: the chat template encodes to the HF `tokenizers` ids through the shared `tokenizer.json` loader (`MossVlTokenizerTests`).
-- ✅ Generator (`MossVlGenerator.Generate`): sampling loop on the shared `SamplerChain`, same defaults as `MllamaGenerator`.
-- ❌ Multi-image cross-attention masks (refused with an error). Image preprocessing and vision-tower wiring belong to Engine composition.
-- ❌ Realtime session loop, CUDA/Vulkan kernels, full 48-layer run. The full F32 text model needs about 42 GB, more than this machine's 40 GB of RAM, so a full-model run needs streamed or BF16 weights first. No real generation has run.
+Run: `hartsy text -m moss-vl-realtime -i photo.png "What is in this image?"`. A request without an image is refused by name.
+
+- ✅ Config (`config.json`, or the GGUF's `moss_vl.*` metadata for a GGUF without it) and key layout (895 keys).
+- ✅ Vision tower with deepstack merger from either source; the GGUF's padded qkv is un-padded at load. Parity against a numpy
+  transcription: safetensors 2.7e-6, GGUF 1.9e-6 (CPU); 5e-4 on Vulkan (16-bit weights).
+- ✅ Image preprocessing from raw pixels (`MossVlImageProcessor` on the shared `Core.Imaging`): grids identical to `transformers`,
+  0.2–0.3% of values one 8-bit level off.
+- ✅ Text decoder: layers 0–2 match at 9.8e-8 (CPU F32), 2.9e-5 (Vulkan, BF16 cast to F16), 5.0e-3 (GGUF); prefill and decode
+  logits ~1e-6; tokenizer matches the HF library.
+- ✅ Multi-image prompts (per-image cross-attention groups); both images are described.
+- ✅ End to end on Vulkan through the CLI (GGUF, RTX 3060): a red disc and a blue square are named correctly; decode about 29 tok/s.
+- ✅ Weights load in stored precision for the backend (BF16 on CUDA, F16 on Vulkan, packed GGUF quants).
+- ❌ CUDA not run here (cuBLAS 13 missing; auto-provisioning is in review). Full BF16 generation needs about 21 GB of device memory.
+- ❌ Realtime session loop, video input, NF4/FP8 checkpoints: in progress.
 
 ## Remaining work
 

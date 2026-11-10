@@ -734,6 +734,9 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model) and catalog row; the Text path refuses it by name (Ernie5Config.RequireRunnable).
             Ernie5Catalog.Build(),
 
+            // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
+            MossVlCatalog.Build(),
+
             // Image / diffusion
             new CatalogEntry
             {
