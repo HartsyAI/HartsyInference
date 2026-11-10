@@ -100,6 +100,76 @@ public sealed class Ernie5TextPathTests : IDisposable
         HfTextDirectoryLoader.RequireSupported(info);
     }
 
+    [Fact]
+    public void Forward_matches_the_hidden_state_and_logits_split()
+    {
+        string dir = WriteCheckpoint("split");
+        using CpuBackend backend = new();
+        using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = 16 });
+        int[] ids = [1, 2, 3];
+
+        float[] direct;
+        using (Ernie5SequenceState a = model.CreateState(16)) direct = model.Forward(ids, a, allRows: true);
+        float[] split;
+        using (Ernie5SequenceState b = model.CreateState(16)) split = model.Logits(model.ForwardHidden(ids, b, allRows: true), ids.Length);
+
+        Assert.Equal(direct, split);
+    }
+
+    [Fact]
+    public void Rejected_token_id_leaves_the_sequence_intact()
+    {
+        HfCheckpointInfo info = Probe(WriteCheckpoint("rejects"));
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        using ISequenceState state = model.Generation.CreateSequenceState(new SequenceStateOptions(16));
+        using (Tensor first = model.Generation.Prefill(new PrefillChunk(new[] { 1, 2 }, 0), state)) { }
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => model.Generation.Prefill(new PrefillChunk(new[] { 3, Ernie5SyntheticCheckpoint.Vocab }, 2), state));
+
+        Assert.Equal(2, state.Length);
+        using Tensor next = model.Generation.Prefill(new PrefillChunk(new[] { 3 }, 2, LastRowOnly: true), state);
+        Assert.Equal(3, state.Length);
+    }
+
+    [Fact]
+    public void Rolling_back_across_two_appends_reproduces_the_second_append()
+    {
+        HfCheckpointInfo info = Probe(WriteCheckpoint("segments"));
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        int dim = Ernie5SyntheticCheckpoint.Hidden;
+        using ISequenceState state = model.Generation.CreateSequenceState(new SequenceStateOptions(16));
+        using (Tensor head = model.Generation.Prefill(new PrefillChunk(new[] { 1, 2 }, 0), state)) { }
+        using Tensor tail = model.Generation.Prefill(new PrefillChunk(new[] { 3 }, 2, LastRowOnly: true), state);
+        float[] original = tail.AsReadOnlySpan<float>().ToArray();
+
+        state.Truncate(2);
+        using Tensor replayed = model.Generation.Prefill(new PrefillChunk(new[] { 3 }, 2, LastRowOnly: true), state);
+
+        Assert.Equal(dim, original.Length);
+        for (int i = 0; i < dim; i++) Assert.InRange(Math.Abs(original[i] - replayed.AsReadOnlySpan<float>()[i]), 0f, 1e-4f);
+    }
+
+    [Fact]
+    public void Prompt_text_renders_through_the_template_and_generates()
+    {
+        HfCheckpointInfo info = Probe(WriteCheckpoint("prompt"));
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        TextGenerationPipeline pipeline = new(model.Generation, model.Tokenizer, model.Template);
+
+        GenerationResult result = pipeline.Generate(new GenerationRequest
+        {
+            Prompt = "hi",
+            MaxTokens = 2,
+            Sampling = new SamplingOptions { Temperature = 0f },
+        });
+
+        Assert.True(result.TokenIds.Count <= 2);
+        Assert.True(result.PromptTokens > 0);
+    }
+
     private string WriteCheckpoint(string name)
     {
         string dir = Path.Combine(_root, name);

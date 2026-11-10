@@ -17,7 +17,7 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 and ERNIE-5.5 (host reference models), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
 internal static class HfTextDirectoryLoader
 {
-    /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
+    /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 or ERNIE model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
     internal const int MaxSequenceTokens = 16384;
 
     /// <summary>Longest sequence (prompt plus generation) a loaded stateful-family model accepts; it sizes the KV cache of its attention layers.</summary>
@@ -26,7 +26,7 @@ internal static class HfTextDirectoryLoader
     /// <summary>The options the Text path loads with; the RAM guard and the memory profile size against the same ones.</summary>
     internal static DeepSeekV41LoadOptions LoadOptions { get; } = new(MaxSequenceTokens);
 
-    /// <summary>The ERNIE-5.5 options the Text path loads with: layers are read and dequantized per forward, so host memory stays at one layer's F32 weights.</summary>
+    /// <summary>The ERNIE-5.5 options the Text path loads with: layers are dequantized one at a time from the mapped checkpoint on every forward.</summary>
     internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
 
     /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1 or ERNIE-5.5) that <see cref="LoadHostReference"/> serves.</summary>

@@ -893,7 +893,7 @@ public sealed class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 checkpoint onto the host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
+    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 or ERNIE-5.5 checkpoint onto its host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
@@ -917,7 +917,7 @@ public sealed class TextService : ITextService, IDisposable
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
         else if (ernie)
-            Logs.Warning("[TextService] ERNIE-5.5 has no host memory guard yet, so a load larger than RAM is not refused.");
+            Logs.Warning("[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, modelName);
         try
         {
@@ -1178,7 +1178,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Whether a load of <paramref name="path"/> keeps the model <paramref name="slot"/> holds. Every load path reloads by this rule, and the lease wait
-    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
+    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a host reference model
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
         string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.HostReference is not null || slot.SsmModel is not null || slot.Model is not null

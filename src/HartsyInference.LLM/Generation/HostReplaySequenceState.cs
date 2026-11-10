@@ -2,23 +2,22 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.LLM.Generation;
 
-/// <summary>A host reference sequence whose keys live in the model's own caches. It records the committed token ids, so
-/// <see cref="Truncate"/> resets the caches and replays the kept prefix.</summary>
-/// <remarks>The replay follows how the history was built: the first append runs as one prefill chunk and every later token runs
-/// on its own. Those two modes are not arithmetically equivalent, so a rollback into the first chunk replays the kept part of it as
-/// one chunk and the rest token by token. Not thread-safe: run one sequence at a time.</remarks>
 /// <summary>Runs tokens at the end of a model's caches and writes their hidden rows.</summary>
 public delegate void HostReplayForward(ReadOnlySpan<int> tokenIds, Span<float> hidden);
 
+/// <summary>A host reference sequence whose keys live in the model's own caches. It records the committed token ids and the size of each
+/// append, so <see cref="Truncate"/> resets the caches and replays the kept prefix with the same chunking the history was built with.</summary>
+/// <remarks>Replay costs one forward pass per recorded append, not one per token, so a rollback does not re-read the weights once per token.
+/// A rollback into the middle of an append replays the kept part of it as one chunk. Not thread-safe: run one sequence at a time.</remarks>
 public sealed class HostReplaySequenceState : ISequenceState
 {
     private readonly HostReplayForward _forward;
     private readonly Action _reset;
     private readonly Action? _dispose;
     private readonly List<int> _tokens = [];
+    private readonly List<int> _appendLengths = [];
     private readonly float[] _lastHidden;
     private readonly int _dim;
-    private int _chunkLength;
     private int _disposed;
 
     /// <param name="capacity">Most tokens the sequence may hold.</param>
@@ -64,7 +63,6 @@ public sealed class HostReplaySequenceState : ISequenceState
         if (Length + ids.Length > Capacity)
             throw new InvalidOperationException($"The sequence holds {Capacity} tokens; {Length + ids.Length} were asked for.");
         if (hidden.Length != ids.Length * _dim) throw new ArgumentException($"hidden must hold {ids.Length} rows of {_dim} values.", nameof(hidden));
-        if (_tokens.Count == 0) _chunkLength = ids.Length;
         try
         {
             _forward(ids, hidden);
@@ -75,6 +73,7 @@ public sealed class HostReplaySequenceState : ISequenceState
             throw;
         }
         _tokens.AddRange(ids);
+        _appendLengths.Add(ids.Length);
         hidden.Slice((ids.Length - 1) * _dim, _dim).CopyTo(_lastHidden);
     }
 
@@ -84,12 +83,22 @@ public sealed class HostReplaySequenceState : ISequenceState
         if ((uint)newLength > (uint)Length) throw new ArgumentOutOfRangeException(nameof(newLength), newLength, $"The sequence holds {Length} tokens.");
         if (newLength == Length) return;
         int[] kept = _tokens.GetRange(0, newLength).ToArray();
-        int chunk = _chunkLength;
+        List<int> chunks = [];
+        int remaining = newLength;
+        foreach (int length in _appendLengths)
+        {
+            if (remaining == 0) break;
+            int take = Math.Min(length, remaining);
+            chunks.Add(take);
+            remaining -= take;
+        }
         Reset();
-        if (newLength == 0) return;
-        int prefill = Math.Min(newLength, chunk);
-        Append(kept.AsSpan(0, prefill), new float[prefill * _dim]);
-        for (int i = prefill; i < newLength; i++) Append(kept.AsSpan(i, 1), new float[_dim]);
+        int start = 0;
+        foreach (int chunk in chunks)
+        {
+            Append(kept.AsSpan(start, chunk), new float[chunk * _dim]);
+            start += chunk;
+        }
     }
 
     /// <inheritdoc />
@@ -97,7 +106,7 @@ public sealed class HostReplaySequenceState : ISequenceState
     {
         _reset();
         _tokens.Clear();
-        _chunkLength = 0;
+        _appendLengths.Clear();
     }
 
     /// <inheritdoc />

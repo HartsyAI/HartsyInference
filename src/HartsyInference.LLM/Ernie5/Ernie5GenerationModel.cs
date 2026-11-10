@@ -62,6 +62,9 @@ public sealed class Ernie5GenerationModel : IGenerationModel
         if (ids.IsEmpty) throw new ArgumentException("Prefill needs at least one token.", nameof(chunk));
         if (chunk.PosStart != sequence.Length)
             throw new ArgumentException($"The chunk starts at position {chunk.PosStart} but the sequence holds {sequence.Length} tokens.", nameof(chunk));
+        // checked here, before the sequence moves: a failure inside the forward resets the sequence
+        foreach (int id in ids)
+            if ((uint)id >= (uint)_model.Config.VocabSize) throw new ArgumentOutOfRangeException(nameof(chunk), id, "Token id is outside the vocabulary.");
 
         int dim = _model.Config.HiddenSize;
         float[] hidden = new float[ids.Length * dim];
@@ -106,12 +109,16 @@ public sealed class Ernie5GenerationModel : IGenerationModel
     /// <summary>Empty: the weights are host arrays and a checkpoint view, not engine tensors, so there is nothing for a residency planner to place.</summary>
     public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => [];
 
-    /// <summary>An upper bound: each layer keeps one row per token of its HCA window and compressed latents, its DSA latent and its indexer keys.</summary>
+    /// <summary>An upper bound: each layer holds its sliding window, one row per context token, and the widest partial compressor group, each row
+    /// sized for the widest of the HCA and DSA caches.</summary>
     public long EstimateSequenceBytes(int contextTokens)
     {
         Ernie5Config c = _model.Config;
-        long perTokenFloats = (long)c.HeadDim + c.MlaKvLoraRank + c.MlaQkRopeHeadDim + c.IndexHeadDim;
-        return (long)contextTokens * c.NumHiddenLayers * perTokenFloats * sizeof(float);
+        long rowFloats = (long)c.HeadDim + c.MlaKvLoraRank + c.MlaQkRopeHeadDim + c.IndexHeadDim;
+        int widestRatio = 0;
+        foreach (int ratio in c.CompressRatios) widestRatio = Math.Max(widestRatio, ratio);
+        long rowsPerLayer = (long)c.SlidingWindow + contextTokens + widestRatio;
+        return rowsPerLayer * c.NumHiddenLayers * rowFloats * sizeof(float);
     }
 
     /// <summary>Free and total host memory as the runtime sees it; there is no device on this path.</summary>
