@@ -101,7 +101,7 @@ internal sealed class Trellis2FlowCore : IDisposable
         return x;
     }
 
-    /// <summary>Non-affine layer norm (eps 1e-5) then <c>out_layer</c>: <c>[1, N, C]</c> to <c>[1, N, OutChannels]</c>; consumes <paramref name="h"/>.</summary>
+    /// <summary>Non-affine layer norm (eps 1e-5) then <c>out_layer</c>, <c>[1, N, C]</c> to <c>[1, N, OutChannels]</c>; consumes <paramref name="h"/>.</summary>
     internal Tensor Project(IBackend backend, Tensor h)
     {
         using Tensor owned = h;

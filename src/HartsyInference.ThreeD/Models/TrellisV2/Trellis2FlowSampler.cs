@@ -30,7 +30,7 @@ public static class Trellis2FlowSampler
         return t;
     }
 
-    /// <summary>Denoises <paramref name="noise"/> (F32, any shape) and returns the sample, which the caller owns; the noise is not modified.</summary>
+    /// <summary>Denoises <paramref name="noise"/> (F32, any shape); the caller owns the returned sample, and the noise is not modified.</summary>
     /// <param name="onStep">Called after each step; it may throw to cancel, and the sample is released first.</param>
     public static Tensor Sample(IBackend backend, Tensor noise, Trellis2SamplerParams parameters, Predict predict, Action<int>? onStep = null)
     {

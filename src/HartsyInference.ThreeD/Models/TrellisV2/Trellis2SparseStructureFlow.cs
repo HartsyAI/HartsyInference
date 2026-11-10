@@ -36,7 +36,8 @@ public sealed class Trellis2SparseStructureFlow : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int r = _config.Resolution, tokens = _config.DenseTokens, cin = _config.InChannels;
-        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != cin || latent.Shape[2] != r || latent.Shape[3] != r || latent.Shape[4] != r)
+        if (latent.Shape.Rank != 5 || latent.Shape[0] != 1 || latent.Shape[1] != cin || latent.Shape[2] != r || latent.Shape[3] != r
+            || latent.Shape[4] != r)
             throw new ArgumentException($"Latent must be [1, {cin}, {r}, {r}, {r}]; got {latent.Shape}.", nameof(latent));
         RequireCond(cond);
 

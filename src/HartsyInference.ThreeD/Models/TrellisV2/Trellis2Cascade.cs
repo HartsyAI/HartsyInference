@@ -130,9 +130,11 @@ public static class Trellis2Cascade
     public static (int[] Coords, int Resolution) FitTokenCap(ReadOnlySpan<int> upsampled, int coarseResolution, int targetResolution, int maxTokens)
     {
         if (targetResolution < FloorResolution)
-            throw new ArgumentOutOfRangeException(nameof(targetResolution), targetResolution, $"The cascade target must be at least {FloorResolution}.");
+            throw new ArgumentOutOfRangeException(
+                nameof(targetResolution), targetResolution, $"The cascade target must be at least {FloorResolution}.");
         if ((targetResolution - FloorResolution) % ResolutionStep != 0)
-            throw new ArgumentException($"The cascade target {targetResolution} must be the {FloorResolution} floor plus a multiple of {ResolutionStep}.", nameof(targetResolution));
+            throw new ArgumentException(
+                $"The cascade target {targetResolution} must be the {FloorResolution} floor plus a multiple of {ResolutionStep}.", nameof(targetResolution));
         if (maxTokens <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxTokens), maxTokens, "The token cap must be positive.");
         int resolution = targetResolution;

@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
-/// <summary>Parameters of one <c>FlowEulerGuidanceIntervalSampler</c> run: the pipeline's <c>params</c> plus the sampler's <c>sigma_min</c>.</summary>
+/// <summary>Parameters of one <c>FlowEulerGuidanceIntervalSampler</c> run: the pipeline <c>params</c> plus the sampler <c>sigma_min</c>.</summary>
 public sealed record Trellis2SamplerParams
 {
     /// <summary>Euler steps (<c>steps</c>).</summary>

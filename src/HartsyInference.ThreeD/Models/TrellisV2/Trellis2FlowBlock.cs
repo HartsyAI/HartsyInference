@@ -231,7 +231,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
         return o;
     }
 
-    /// <summary>Per-head <c>F.normalize(x) · gamma · sqrt(D)</c> as RMS norm times <c>gamma [H, D]</c>; consumes <paramref name="heads"/>. A null gamma means no norm.</summary>
+    /// <summary>Per-head <c>F.normalize(x) · gamma · sqrt(D)</c> as RMS norm times <c>gamma [H, D]</c>; consumes <paramref name="heads"/>; a null gamma means no norm.</summary>
     private Tensor HeadNorm(IBackend backend, Tensor heads, Tensor? gamma)
     {
         if (gamma is null)

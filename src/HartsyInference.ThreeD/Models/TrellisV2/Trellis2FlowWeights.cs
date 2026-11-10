@@ -55,7 +55,8 @@ public sealed class Trellis2FlowWeights : IDisposable
     }
 
     /// <summary>Checks and widens already-loaded <paramref name="tensors"/>; <paramref name="loaders"/> are released with the result.</summary>
-    public static Trellis2FlowWeights FromTensors(Trellis2FlowConfig config, IReadOnlyDictionary<string, Tensor> tensors, IEnumerable<IDisposable>? loaders = null)
+    public static Trellis2FlowWeights FromTensors(
+        Trellis2FlowConfig config, IReadOnlyDictionary<string, Tensor> tensors, IEnumerable<IDisposable>? loaders = null)
         => FromTensors(config, tensors, [.. loaders ?? []], []);
 
     private static Trellis2FlowWeights FromTensors(
