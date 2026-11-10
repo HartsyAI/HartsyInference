@@ -21,7 +21,10 @@ public sealed record RealtimeVlmRequest
     /// <summary>The most frames one cycle takes from the queue; null takes them all.</summary>
     public int? MaxFramesPerCycle { get; init; }
 
-    /// <summary>The most vision tokens the session holds before it refuses more frames; null uses the model default.</summary>
+    /// <summary>The most vision tokens the session holds; null uses the model default. The model has no visual-KV window to drop old
+    /// frames, so a session that reaches the cap ends with an <see cref="RealtimeVlmChunkKind.Error"/> event (about 65 tokens a frame:
+    /// roughly 17 minutes of 1 fps video at the default). The text length is capped the same way, at the model's context. A client
+    /// that expects longer streams opens a new session when one ends.</summary>
     public int? MaxVisionTokens { get; init; }
 
     /// <summary>Sampling temperature; null (with the other sampling fields null) decodes greedily, as the reference does.</summary>

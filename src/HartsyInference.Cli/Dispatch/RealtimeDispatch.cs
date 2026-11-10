@@ -13,8 +13,9 @@ namespace HartsyInference.Cli.Dispatch;
 /// takes further prompts from stdin (one per line), and prints the model's reply as it streams.</summary>
 internal static class RealtimeDispatch
 {
-    /// <summary>Runs one live session until its frames are spent and the model has been silent for <c>idle-exit</c> seconds, stdin
-    /// closes after that, or <paramref name="cancel"/> fires (Ctrl+C).</summary>
+    /// <summary>Runs one live session until its frames are spent and the model has been silent for <c>idle-exit</c> seconds, or
+    /// <paramref name="cancel"/> fires (Ctrl+C). Closing stdin only stops further prompts; it does not end the run. A frame source
+    /// that fails ends the run with its error.</summary>
     public static async Task<GeneratedArtifact> RunAsync(IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters,
         bool quiet, CancellationToken cancel)
     {
@@ -38,6 +39,7 @@ internal static class RealtimeDispatch
         StringBuilder reply = new();
         Stopwatch sinceOutput = Stopwatch.StartNew();
         bool lastWasSilence = false, framesDone = false;
+        Exception? feederError = null;
         try
         {
             Task feeder = Task.Run(async () =>
@@ -50,6 +52,13 @@ internal static class RealtimeDispatch
                 }
                 Volatile.Write(ref framesDone, true);
             }, stop.Token);
+            // A frame source that fails (no ffmpeg, a bad file, a rejected frame) must end the run with its error: left alone the model
+            // idles on silence for ever, since the frames-done flag that ends the run is never set.
+            _ = feeder.ContinueWith(task =>
+            {
+                Interlocked.CompareExchange(ref feederError, task.Exception!.GetBaseException(), null);
+                stop.Cancel();
+            }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
             _ = Task.Run(() => ReadPrompts(session, stop.Token), stop.Token);
             Task watchdog = Task.Run(async () =>
             {
@@ -103,6 +112,8 @@ internal static class RealtimeDispatch
             Console.WriteLine();
             await feeder.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
             await watchdog.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+            if (Volatile.Read(ref feederError) is { } sourceError)
+                throw new InvalidOperationException($"The frame source failed: {sourceError.Message}", sourceError);
         }
         finally
         {

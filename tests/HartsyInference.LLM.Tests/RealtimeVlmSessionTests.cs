@@ -135,6 +135,39 @@ public sealed class RealtimeVlmSessionTests
     }
 
     [Fact]
+    public async Task InputAfterAFaultIsRefusedInsteadOfAcceptedSilently()
+    {
+        FakeTokenizer tokenizer = new();
+        // The second forward throws, as MossVlDecodeSession does when a vision or text cap is reached.
+        ScriptedDecoder decoder = new([Silence, tokenizer.Char('x')]) { FailAtCall = 1 };
+        await using RealtimeVlmSession session = new(decoder, new FakeEncoder(), Protocol, tokenizer);
+        session.Start(null, "");
+        await ReadUntil(session, x => x.Count == 1);
+        session.PushPrompt("go on");   // wakes the idle loop, whose forward then fails
+        List<RealtimeVlmEvent> rest = [];
+        await foreach (RealtimeVlmEvent e in session.ReadAsync().WithTimeout(TimeSpan.FromSeconds(10))) rest.Add(e);
+        Assert.Equal(RealtimeVlmEventKind.Faulted, rest[^1].Kind);
+
+        Assert.Throws<ObjectDisposedException>(() => session.PushPrompt("late"));
+        Assert.Throws<ObjectDisposedException>(() => session.PushFrame(Frame(), 5.0));
+    }
+
+    [Fact]
+    public async Task DisposingASessionThatNeverStartedEndsItsStream()
+    {
+        RealtimeVlmSession session = new(new ScriptedDecoder([]), new FakeEncoder(), Protocol, new FakeTokenizer());
+        Task<List<RealtimeVlmEvent>> reader = Task.Run(async () =>
+        {
+            List<RealtimeVlmEvent> events = [];
+            await foreach (RealtimeVlmEvent e in session.ReadAsync().WithTimeout(TimeSpan.FromSeconds(10))) events.Add(e);
+            return events;
+        });
+        await session.DisposeAsync();
+        Assert.Empty(await reader);
+        Assert.Throws<ObjectDisposedException>(() => session.Start(null, ""));
+    }
+
+    [Fact]
     public async Task PacingCapsTheTokenRate()
     {
         FakeTokenizer tokenizer = new();
