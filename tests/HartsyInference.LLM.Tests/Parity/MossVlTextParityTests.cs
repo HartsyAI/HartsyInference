@@ -39,14 +39,14 @@ public sealed class MossVlTextParityTests
     public void DecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
     {
         string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
-        Run(config => MossVlTextDecoder.Open(checkpoint, config, Layers), () => new CpuBackend(), RelativeTolerance);
+        Run((config, _) => MossVlTextDecoder.Open(checkpoint, config, Layers), () => new CpuBackend(), RelativeTolerance);
     }
 
     [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable, GgufVariable)]
     public void GgufDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
     {
         string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
-        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers), () => new CpuBackend(), QuantizedTolerance);
+        Run((config, _) => MossVlTextDecoder.OpenGguf(gguf, config, Layers), () => new CpuBackend(), QuantizedTolerance);
     }
 
     /// <summary>The GGUF source on the CUDA backend: quantized projections stay packed and run through the quantized matmul.</summary>
@@ -55,7 +55,7 @@ public sealed class MossVlTextParityTests
     public void GgufCudaDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
     {
         string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
-        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true, lowVramQuant: true),
+        Run((config, _) => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true, lowVramQuant: true),
             () => new CudaBackend(0, CudaPtxDirectory.Resolve()), QuantizedTolerance);
     }
 
@@ -65,11 +65,42 @@ public sealed class MossVlTextParityTests
     public void GgufVulkanDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
     {
         string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
-        Run(config => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true),
+        Run((config, _) => MossVlTextDecoder.OpenGguf(gguf, config, Layers, keepQuantized: true),
             () => new VulkanBackend(), QuantizedTolerance);
     }
 
-    private static void Run(Func<MossVlConfig, MossVlTextDecoder> open, Func<IBackend> makeBackend, double tolerance)
+    /// <summary>The BF16 safetensors source loaded for the Vulkan backend: projections are cast once to F16 (Vulkan has no BF16
+    /// GEMM), not widened to F32.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable)]
+    public void Bf16VulkanDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
+        Run((config, backend) => MossVlTextDecoder.Open(checkpoint, config, new MossVlLoadOptions { Backend = backend, LayerLimit = Layers }),
+            () => new VulkanBackend(), RelativeTolerance);
+    }
+
+    /// <summary>The BF16 safetensors source loaded for CUDA: projections stay BF16 for the native BF16 GEMM.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable)]
+    public void Bf16CudaDecoderLayersMatchTheReferenceAndTheCrossLayerDeltaMatches()
+    {
+        string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
+        Run((config, backend) => MossVlTextDecoder.Open(checkpoint, config, new MossVlLoadOptions { Backend = backend, LayerLimit = Layers }),
+            () => new CudaBackend(0, CudaPtxDirectory.Resolve()), RelativeTolerance);
+    }
+
+    /// <summary>The GGUF source loaded through the backend policy on Vulkan: packed where Vulkan has a kernel, F16 otherwise.</summary>
+    [Trait("Category", "GpuIntegration")]
+    [RealWeightsFact(CheckpointVariable, VisionVariable, TextVariable, GgufVariable)]
+    public void GgufVulkanBackendPolicyDecoderLayersMatchTheReference()
+    {
+        string gguf = Environment.GetEnvironmentVariable(GgufVariable)!;
+        Run((config, backend) => MossVlTextDecoder.OpenGguf(gguf, config, new MossVlLoadOptions { Backend = backend, LayerLimit = Layers }),
+            () => new VulkanBackend(), QuantizedTolerance);
+    }
+
+    private static void Run(Func<MossVlConfig, IBackend, MossVlTextDecoder> open, Func<IBackend> makeBackend, double tolerance)
     {
         string checkpoint = Path.GetDirectoryName(Environment.GetEnvironmentVariable(CheckpointVariable)!)!;
         string mergedPath = Environment.GetEnvironmentVariable(VisionVariable)!;
@@ -87,8 +118,8 @@ public sealed class MossVlTextParityTests
         (_, float[] refCrossInput) = NpyReader.ReadFloat32(Path.Combine(refDir, "cross_input.npy"));
         Assert.Equal((long)ids.Length, refShape[0]);
 
-        using MossVlTextDecoder decoder = open(config);
         using IBackend backend = makeBackend();
+        using MossVlTextDecoder decoder = open(config, backend);
 
         using Tensor merged = new(new TensorShape(mergedShape[0], mergedShape[1]), DType.F32);
         mergedData.AsSpan().CopyTo(merged.AsSpan<float>());
