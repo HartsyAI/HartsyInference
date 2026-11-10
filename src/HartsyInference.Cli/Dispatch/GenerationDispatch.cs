@@ -861,7 +861,12 @@ public static class GenerationDispatch
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
+        string slug = Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"'));
+        // A streaming session writes each frame to disk as it arrives, so a long or unbounded run holds none of its pixels and keeps
+        // what it generated if it stops early. A batch rollout hands over all its frames at once, and they are collected.
+        StreamingFrameWriter? spool = plan.Streaming ? new StreamingFrameWriter(outputDir ?? RepoPaths.OutputRoot(), slug) : null;
         List<VideoFrame> frames = new List<VideoFrame>();
+        int received = 0;
         using IWorldSession session = engine.World.Open(spec, plan.Request);
         if (!scriptCamera)
         {
@@ -880,13 +885,29 @@ public static class GenerationDispatch
         {
             await foreach (VideoFrame frame in session.StreamAsync(userStop.Token).ConfigureAwait(false))
             {
-                frames.Add(frame);
-                progress?.Report(new StepPreview { Step = frames.Count, TotalSteps = plan.Unbounded ? frames.Count : plan.Frames });
+                if (spool is not null)
+                {
+                    spool.Add(frame.Rgb, frame.Width, frame.Height);
+                }
+                else
+                {
+                    frames.Add(frame);
+                }
+                received++;
+                progress?.Report(new StepPreview { Step = received, TotalSteps = plan.Unbounded ? received : plan.Frames });
             }
         }
-        catch (OperationCanceledException) when (userStop.IsCancellationRequested && !cancel.IsCancellationRequested && frames.Count > 0)
+        catch (OperationCanceledException) when (received > 0 && userStop.IsCancellationRequested
+            && (!cancel.IsCancellationRequested || plan.Unbounded))
         {
-            // The user ended the stream from the keyboard: keep the frames generated so far.
+            // The stream was ended on purpose, so what it generated up to then is kept: from the keyboard (q), or with Ctrl+C when the
+            // run has no frame count to reach (--unbounded, which is stopped that way).
+        }
+        catch when (spool is { Count: > 0 })
+        {
+            // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where.
+            Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
+            throw;
         }
         finally
         {
@@ -897,8 +918,20 @@ public static class GenerationDispatch
             }
             progress?.Finish();
         }
-        GeneratedArtifact artifact = FrameArtifact(frames, outputDir, Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"')), "world",
-            null, plan.Fps);
+        GeneratedArtifact artifact;
+        if (spool is not null)
+        {
+            if (spool.Count == 0)
+            {
+                throw new InvalidOperationException("The world pipeline produced no frames.");
+            }
+            VideoOutputWriter.Written written = spool.Complete(null, plan.Fps);
+            artifact = DescribeFrames(spool.Count, spool.Width, spool.Height, spool.FirstFrame!, written, null);
+        }
+        else
+        {
+            artifact = FrameArtifact(frames, outputDir, slug, "world", null, plan.Fps);
+        }
         artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
         // Planning adjustments (a truncated camera path, an expanded action script) are reported with the artifact.
@@ -1054,20 +1087,26 @@ public static class GenerationDispatch
         }
         VideoOutputWriter.Written written = VideoOutputWriter.Write(
             pixels, width, height, outputDir ?? RepoPaths.OutputRoot(), slug, audio, fps);
+        return DescribeFrames(frames.Count, width, height, frames[0].Rgb, written, audio);
+    }
 
+    /// <summary>Describes a frame sequence already on disk, previewing its first frame inline.</summary>
+    private static GeneratedArtifact DescribeFrames(int count, int width, int height, byte[] firstFrame,
+        VideoOutputWriter.Written written, AudioBuffer? audio)
+    {
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Video,
             Extension = "png",
-            Text = $"{frames.Count} frames ({width}x{height}) → {written.Directory}"
+            Text = $"{count} frames ({width}x{height}) → {written.Directory}"
                 + (written.AudioPath is null ? "" : $" + {audio!.Seconds:0.0}s audio.wav")
                 + (written.Mp4Path is null ? "" : " + video.mp4"),
-            PreviewRgb = frames[0].Rgb,
+            PreviewRgb = firstFrame,
             PreviewWidth = width,
             PreviewHeight = height,
             SelfWritten = true,
         };
-        artifact.Meta["frames"] = frames.Count.ToString(CultureInfo.InvariantCulture);
+        artifact.Meta["frames"] = count.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["size"] = $"{width}x{height}";
         if (written.Mp4Path is not null)
         {

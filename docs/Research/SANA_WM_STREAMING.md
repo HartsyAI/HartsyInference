@@ -245,8 +245,10 @@ noise injected: per-frame PSNR 49 dB for the forward chunk, 46 to 47 dB for the 
 min 0.986. The frames are the same picture; the differences sit on the edges of invented texture, and the sky and horizon
 differ by about 0, so the camera is right. The reverse chunk's lower PSNR is the model, not the port: reversing makes stage 1
 invent dark cracked rock at the bottom right, upstream does the same from the same input, and small BF16 differences grow on
-invented detail. The refiner may clean it up (not tested). Still open: the CLI keeps every frame until the end, so
-`--interactive` and `--unbounded` do not show the video live yet (progressive MP4 and preview, assigned to the parent session).
+invented detail. The refiner may clean it up (not tested). The CLI writes each frame to disk as it arrives and keeps none
+of the pixels, so memory stays flat however long an `--unbounded` run goes (a 720p frame is 1.2 MB of PNG on disk and
+2.7 MB of RGB in memory), and Ctrl+C or `q` on that run saves what was generated and muxes the MP4. Still open: there is no
+live viewer, so the video cannot be watched while it generates.
 
 Open from the same report: `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass.
 Harmless at a window of two chunks; worth caching the joined window across the five passes of a chunk if the window grows.

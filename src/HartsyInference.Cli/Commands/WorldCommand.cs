@@ -176,7 +176,8 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         /// <summary>Run a streaming session until it is stopped instead of for a frame count.</summary>
         [CommandOption("--unbounded")]
-        [Description("Streaming: run until stopped (q in --interactive, or Ctrl+C) instead of for --frames.")]
+        [Description("Streaming: run until stopped (q in --interactive, or Ctrl+C) instead of for --frames. Each frame is written to "
+            + "disk as it arrives (about 1 GB of PNG per minute of 720p video), and stopping saves what was generated and muxes the MP4.")]
         public bool Unbounded { get; init; }
 
         /// <summary>Drive a streaming session from the keyboard while it runs.</summary>
