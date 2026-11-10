@@ -181,6 +181,19 @@ public sealed class CudaModule : IDisposable
         return function;
     }
 
+    /// <summary>Gets a kernel function handle, or 0 when this module does not define it (CUDA_ERROR_NOT_FOUND, 500).</summary>
+    public nint TryGetFunction(string functionName)
+    {
+        if (_unloadable)
+            return 0;
+        const int CudaErrorNotFound = 500;
+        int result = CudaDriverApi.cuModuleGetFunction(out nint function, Handle, functionName);
+        if (result == CudaErrorNotFound)
+            return 0;
+        result.ThrowOnError();
+        return function;
+    }
+
     public void Dispose()
     {
         try

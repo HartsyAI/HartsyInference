@@ -51,7 +51,7 @@ Gates for ✅:
 
 | Phase | Scope | Shared infrastructure first |
 |---|---|---|
-| P0 | Pins, this inventory, independent catalog fixes, extension mapping sweep, test-execution helper | `tests/require-executed.sh` |
+| P0 | Pins, this inventory, independent catalog fixes, extension mapping sweep | — |
 | P1 | Quick wins: catalog assets, first real-weight runs, small fixes | — |
 | P2 | Additive request/output contracts | vision batch request, new `VisionMode` values, structured `VisionResult`, `ImageResult.Layers` |
 | P3 | Finish the partial models | ByT5 encoder, Stable Audio CFG + v-pred EDM |

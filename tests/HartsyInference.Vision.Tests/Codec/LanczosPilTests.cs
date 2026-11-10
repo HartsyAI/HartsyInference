@@ -1,4 +1,4 @@
-using HartsyInference.Vision.Codec;
+using HartsyInference.Core.Imaging;
 
 namespace HartsyInference.Vision.Tests.Codec;
 

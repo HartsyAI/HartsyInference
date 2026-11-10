@@ -25,6 +25,7 @@ KERNELS_SM75=(
     "dequant_mxfp8_to_f16"
     "w8a8"
     "convrot"
+    "fp8_block_linear"
 )
 KERNELS_SM80=(
     "fp8_quant"

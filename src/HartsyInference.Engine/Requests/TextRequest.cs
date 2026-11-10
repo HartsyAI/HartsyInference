@@ -92,6 +92,12 @@ public sealed record TextRequest
     /// <summary>Low-VRAM on-the-fly quant to load weights at (e.g. "q8_0"); null loads at full precision.</summary>
     public string? LowVramQuant { get; init; }
 
+    /// <summary>For a checkpoint folder: a GGUF block type (<c>q8_0</c>, <c>q6_k</c>, <c>q5_k</c>, <c>q4_k</c>, <c>q4_0</c>) its plain
+    /// float projections are re-quantized to on load, cached on disk after the first time, so a model too large in BF16 fits a smaller
+    /// card. Null or <c>native</c> keeps them as stored. Quantized checkpoints (NF4, FP8, GPTQ) load packed either way. Takes effect at
+    /// load, like <see cref="LowVramQuant"/>; served by MOSS-VL today.</summary>
+    public string? WeightPrecision { get; init; }
+
     /// <summary>Where the model is placed when this request loads it: <c>auto</c>, <c>gpu</c>, <c>split</c> or <c>offload</c>.
     /// Null uses the <c>vram.textPlacement</c> setting, which defaults to <c>auto</c>. Applies to a GGUF loaded on a single CUDA
     /// device key; an explicit multi-device key (<c>cuda:0+cuda:1</c>) is a split already. Takes effect at load, like
@@ -142,4 +148,12 @@ public sealed record TextRequest
     /// reload. Measured on Qwen3-4B-Q4_K_M: the split originals are ~1.21 GiB of the ~3.53 GiB default single-device
     /// upload (file is 2.33 GiB); only the sharded and tensor-parallel load paths already exclude them by default.</summary>
     public bool? PreloadRedundantWeightSplits { get; init; }
+
+    /// <summary>Frames sampled per second from an attached <see cref="TextMessage.Video"/>; null keeps the model's own setting
+    /// (MOSS-VL: 1.0).</summary>
+    public double? VideoFps { get; init; }
+
+    /// <summary>The most frames sampled from an attached <see cref="TextMessage.Video"/>; null keeps the model's own setting
+    /// (MOSS-VL: 256).</summary>
+    public int? VideoMaxFrames { get; init; }
 }

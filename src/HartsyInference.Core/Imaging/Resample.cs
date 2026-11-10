@@ -1,4 +1,4 @@
-namespace HartsyInference.Vision.Codec;
+namespace HartsyInference.Core.Imaging;
 
 /// <summary>Separable Keys-bicubic resampling with optional antialiasing (kernel support scaled by the
 /// downscale factor — a proper low-pass prefilter; plain 4-tap bicubic aliases on downscales). Half-pixel

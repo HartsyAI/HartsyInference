@@ -245,6 +245,52 @@ public sealed class CoLa3DDecomposerTests
     }
 
     [Fact]
+    public void Forward_RejectsMoreQueriesThanMaxParts()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.PromptMask) with { MaxParts = 3 };
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 16);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config, [3], seed: 17);
+        Tensor masks = new(new TensorShape(1, 4, 4, 4), DType.F32);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            CoLa3DQueryPrompts prompts = new() { Batch = 1, Queries = 4, Masks = masks };
+            HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => decomposer.Forward(backend, latent, utonia, prompts));
+            Assert.Contains("at most 3", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            masks.Dispose();
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
+    public void Forward_RejectsPointPromptsOnALatentOfAnotherResolution()
+    {
+        CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.PromptPoint);
+        Dictionary<string, Tensor> weights = CoLa3DTestSupport.RandomWeights(config, seed: 18);
+        (SparseTensor latent, Tensor utonia) = CoLa3DTestSupport.RandomLatent(config with { LatentResolution = 16 }, [3], seed: 19);
+        try
+        {
+            using CpuBackend backend = new();
+            using CoLa3DDecomposer decomposer = new(config, weights);
+            CoLa3DQueryPrompts prompts = new() { Batch = 1, Queries = 1, Points = [0, 0, 0] };
+            HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => decomposer.Forward(backend, latent, utonia, prompts));
+            Assert.Contains("index a 8^3 latent", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            latent.Feats.Dispose();
+            utonia.Dispose();
+            CoLa3DTestSupport.Dispose(weights.Values);
+        }
+    }
+
+    [Fact]
     public void Forward_RejectsBatchesThatAreNotGroupedFromZero()
     {
         CoLa3DConfig config = CoLa3DTestSupport.Tiny(CoLa3DConfig.QuerySourceKind.Fixed);
