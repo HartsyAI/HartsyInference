@@ -31,7 +31,7 @@ Check these before every phase. Each one exists because it has already caused a 
   Do this before any restart or timed batch. After a timed batch, run `tests/swarm-quiet-window.sh --verify-since <UTC start
   of the batch>`. Exit code 4 means you must redo the batch. Sample `nvidia-smi` during the batch too, because the script
   cannot see foreign GPU processes afterwards. Discard any affected run. Count your own Swarm requests toward the verify by
-  comparing its `requested` lines with what you sent. If another agent's `tests/regression-ab.sh` stops the live Swarm for
+  comparing its `requested` lines with what you sent. If another agent stops the live Swarm for
   a run, it restores Swarm afterwards. If Swarm is down, check `ps` before you start it. Do not evict or restart Swarm in the
   middle of a generation. The device index 0 and 1 mapping is reversed between the engine, `CUDA_VISIBLE_DEVICES` and
   `nvidia-smi`, so confirm the device from the engine log line (see the memory notes).

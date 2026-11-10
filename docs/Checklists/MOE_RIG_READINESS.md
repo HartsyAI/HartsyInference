@@ -91,12 +91,12 @@ Subsystems with CPU tests in place:
    for c in $classes RigPreflightTests; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
    dotnet test tests/HartsyInference.Cuda.Tests --filter "$filter"
    ```
-5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
+5. **Deferred: refactor A/B for the cache changes.** Do not use a before/after generation comparison as evidence for #304 yet. No
    production path constructs `CudaExpertCache` (only the class and its tests do), and no core regression case drives it,
    so both arms would bypass the changed cache and could report identical output vacuously. The requirement that
    generations stay identical stays open. Evidence for the cache refactor on the rig is step 3. Reopen this step once an
    executor or a dedicated harness acquires and evicts experts through the cache; then run
-   `tests/regression-ab.sh --fresh --expect identical --backend cuda` on that case.
+   an identical-output A/B on that case: a fresh `origin/main` build against the branch, CUDA, same seeds, arms interleaved.
 6. Vulkan MoE primitives, after the CUDA lane has finished, with no other GPU run in progress:
    `dotnet test tests/HartsyInference.Vulkan.Tests --filter "FullyQualifiedName~HartsyInference.Vulkan.Tests.VulkanMoePrimitiveTests."`
    (the trailing dot matches this class only).

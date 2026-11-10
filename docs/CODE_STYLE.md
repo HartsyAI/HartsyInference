@@ -84,18 +84,18 @@ Traits classify tests; they do not automatically filter dotnet test. Run the CPU
 
     dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=GpuBenchmark&Category!=Slow&Network!=Real"
 
-CI runs only part of this: cpu-lints.yml runs TestTierLintTests, KnobRegistryTests and EnvReadAllowlistTests on every
-pull request that touches src or tests; the rest of the CPU lane, and every GPU lane, is run by hand. TestTierLintTests
-checks unguarded GPU/backend and gitignored fixture access. Use a recognized resource guard or a justified
-tier-lint: guarded annotation.
+CI does not run tests: its checks build the benchmark runner and the packages. The CPU lane and every GPU lane are run by
+hand before a PR is marked ready, and the PR body says which ran and which did not. A test that needs a GPU, a backend or a
+gitignored fixture uses a resource-guarded fact (such as `RealWeightsFact`), so it skips cleanly where the resource is
+missing instead of failing.
 
 Parity tests live in tests/<Project>/Parity/ and end in *ParityTests, selected with
 FullyQualifiedName~Parity. Resource-dependent tests remain resource-dependent after numerical verification;
 only self-contained CPU tests can graduate to Unit. Never remove a resource trait just because parity passed.
 Missing checkpoints may skip normal integration runs; mandatory campaigns use HARTSY_REQUIRE_REAL_WEIGHTS=1
-where supported so missing weights fail rather than masquerade as validation. Mandatory runs go through
-tests/require-executed.sh, which also fails on SKIPPED or backend-guard lines, zero passed, or a manifest test that
-did not execute.
+where supported so missing weights fail rather than masquerade as validation. For a mandatory run, read the output: a
+SKIPPED line, a backend-guard line, zero passed, or an expected test that did not execute means nothing was validated, and
+the run is reported as not run.
 
 Most tests/python-reference binary dumps are gitignored. Commit small deterministic Unit fixtures under
 an explicit ignore exception; otherwise guard them and classify as Integration. Tests target net10.0;

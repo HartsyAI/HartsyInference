@@ -38,7 +38,8 @@ Work through these steps in order:
    - For a CUDA or Vulkan change, run the whole `Category=GpuIntegration` category for the affected backends, not only
      the tests the change seems to touch. A dispatch-gate change must run on every weight of that dtype.
    - Anything that can change output or speed needs a real-generation A/B. Build `origin/main` fresh (PTX included)
-     and the branch, then run them interleaved on the same seeds with `tests/regression-ab.sh`. Report wall clock,
+     and the branch, then run them by hand on the same prompts, seeds and settings, alternating the arms so clock and thermal drift
+     hit both equally, at least two repetitions each, keeping every run's output. Report wall clock,
      per-step ms, VRAM, and SSIM or a raw-pixel digest for each pair. State before you run it whether the expectation
      is identical (a refactor) or bounded (a numerics change, with a floor and a reason). Put the table in the PR body.
      CUDA picks the F32 attention route and tile height (and MiniMax-H3 its chunk rows) from free VRAM. A change that
