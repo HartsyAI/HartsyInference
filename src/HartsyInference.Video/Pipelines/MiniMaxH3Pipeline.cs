@@ -131,7 +131,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
 
         (int condVideoRows, int condAudioRows) = MiniMaxH3Conditioning.ConditioningRowCounts(layout);
         RequireConditioningRows(request.CondVideoRows, condVideoRows, _config.VideoPatchDim, "video");
-        RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioLatentsDim, "audio");
+        RequireConditioningRows(request.CondAudioRows, condAudioRows, _config.AudioChannels, "audio");
 
         (IReadOnlyList<float>? videoMaskRows, IReadOnlyList<float>? videoFeatureMaskValues) =
             NormalizeDenoiseMask(
@@ -141,7 +141,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
         (IReadOnlyList<float>? audioMaskRows, IReadOnlyList<float>? audioFeatureMaskRows) =
             NormalizeDenoiseMask(
                 request.AudioDenoiseMaskRows, request.AudioDenoiseFeatureMaskRows,
-                request.AudioDenoiseSourceRows, audioRowCount, _config.AudioLatentsDim,
+                request.AudioDenoiseSourceRows, audioRowCount, _config.AudioChannels,
                 patchArea: 1, modality: "audio");
         bool hasDenoiseMask = videoFeatureMaskValues is not null || audioFeatureMaskRows is not null;
         if (request.Controls?.Any(static control => control.IsInpaint) == true && hasDenoiseMask)
@@ -167,7 +167,7 @@ public sealed unsafe class MiniMaxH3Pipeline : DiffusionPipelineBase
             throw new NotSupportedException("MiniMax-H3 PDD is distilled to CFG 1; use CFG 1 with the PDD adapter.");
         }
         Tensor videoLat = SeedGenerator.CreateNoise(new TensorShape(videoRowCount, _config.VideoPatchDim), seed);
-        Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioLatentsDim), seed ^ 0x5D2B);
+        Tensor audioLat = SeedGenerator.CreateNoise(new TensorShape(audioRowCount, _config.AudioChannels), seed ^ 0x5D2B);
         Tensor? videoFixedNoise = null;
         Tensor? videoInjection = null;
         Tensor? videoTokenMask = null;

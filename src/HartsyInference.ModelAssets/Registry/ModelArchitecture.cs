@@ -36,6 +36,10 @@ public enum ModelArchitecture
     /// <summary>MiniMax-H3 joint audio/video DiT (paired video/audio patch projections).</summary>
     MiniMaxH3,
 
+    /// <summary>MiniMax-H3-Image: the same DiT without audio, with stacked output heads and a 2D image VAE. Kept apart
+    /// from <see cref="MiniMaxH3"/> so callers never re-inspect the file to tell the two apart.</summary>
+    MiniMaxH3Image,
+
     /// <summary>Qwen-Image 2.1 single-stream DiT (shared modulation + zero-centered text norm). A different
     /// architecture from Qwen-Image v1, which has no rule here and is selected by catalog id.</summary>
     QwenImage21,
