@@ -1287,6 +1287,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Creates a CUDA backend for the specified device ordinal. If ptxDir is provided, loads PTX kernels from that directory.</summary>
     public CudaBackend(int deviceOrdinal = 0, string? ptxDir = null)
     {
+        // cuBLAS is required (cublasCreate below). On a driver-only machine this downloads it once, before any native
+        // resource exists, so a refusal leaves nothing to clean up.
+        CudaLibraryResolver.Register();
+        if (!CublasRuntime.EnsureAvailable())
+        {
+            GC.SuppressFinalize(this);
+            throw new InvalidOperationException($"The CUDA backend needs cuBLAS: {CublasRuntime.Reason}");
+        }
         // Force the managed worker to exist before this finalizable object acquires its first native resource.
         BackendAbandonmentReaper.EnsureStarted();
         _context = new CudaContext(deviceOrdinal);

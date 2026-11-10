@@ -74,19 +74,30 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
 
 ## Gaps and open items
 
-1. Cross-attention query/key RoPE and deepstack merger are not in the engine. Both are needed for the real model.
-2. Realtime session loop is not implemented. Offline prefill and decode come first.
-3. Weight format is a decision, not a fallback. BF16 (22.7 GB) and the F32 widening (about 42 GB) do not fit the RTX 3060's
-   12 GB, and F32 does not fit 40 GB of RAM. The loader must accept every published format and keep weights in their stored
-   precision, dequantizing per matmul or per layer, not widening the whole model at load. Target for 12 GB VRAM: the GGUF
-   Q4_K (8.4 GB). The official NF4 (11.8 GB) and FP8 (15.7 GB) are further formats; FP8 also exceeds 12 GB.
-   Existing owners: `HfQuantFlavorDetector` and `HfQuantCheckpoint` (compressed-tensors, bitsandbytes), `Nf4Codec`,
-   `Fp8BlockF32Codec`, and `GgufLoader` / `GgufModelLoader` with `GgufCodecRegistry`. None is wired to the MOSS-VL text
-   decoder yet. The NF4 companion layout and the GGUF tensor types are unverified.
-4. Python reference: Python 3.12 is installed and on PATH. Reference dumps still need `torch` and `transformers==5.12.1`.
-   Loading the BF16 shards needs roughly their 22.7 GB in RAM (estimate); this machine has 40 GB.
-5. The GGUF-side deepstack note in `Qwen3VlEncoder` says a future mmproj with deepstack tensors would need it. This model
-   has them, so that path is a useful reference but not a drop-in.
+Done since the first snapshot: cross-attention query/key RoPE, the deepstack merger, multi-image prompts, raw-pixel
+preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI route (`hartsy text -m moss-vl-realtime -i …`).
+
+1. Realtime session loop: done. `RealtimeVlmSession` (generic, `LLM/Multimodal/Streaming`) follows the reference
+   `_real_time_sample`: frames and prompts are spliced in after each token, `<|silence|>` idles with a 20 ms poll, a cycle with
+   prompts and frames gets a spliced `<|silence|>`, and a prompt appends a new turn (the stream never truncates). The reference has
+   no visual-KV window; a session that reaches its vision cap is refused by name. Engine `OpenRealtimeAsync`, CLI `--realtime`,
+   and SSE routes under `/v1/native/realtime/sessions`.
+2. Video input: done. Offline video uses one timed vision block per the processor; frames are sized by the reference video
+   smart-resize.
+3. NF4 (bitsandbytes double-quant) and FP8 (compressed-tensors per-channel) checkpoints: done. They load through
+   `HfQuantCheckpoint` and a one-time GGUF cache, NF4 as Q4_K and FP8 as Q8_0 where the backend keeps those packed
+   (`DenseTextWeightPolicy`). Against the BF16 checkpoint, NF4 decodes at 9.3% relative RMS (12.2% after Q4_K) and FP8 at 2.7%
+   (2.7% after Q8_0). NF4 as Q4_0 (12.9%) was tried first and produced garbage: hidden-state drift against the F16 stack reached
+   18% by layer 16 (Q4_K: 1.8%), driven by the stack's large outlier activations. `--precision` (a GGUF type) re-quantizes the BF16
+   projections a release leaves unquantized; with it both releases run on a 12 GB card (NF4 + q8_0: 28.8 tok/s, FP8 + q4_k:
+   9.7 tok/s on Vulkan).
+4. Performance (alpha.415): each cross-attention image group attends only its own rows, so a video's prefill no longer grows with
+   frames squared (64 frames: 378 s to 10.2 s on Vulkan). The vision tower (about 325 ms per 256×256 frame on Vulkan) bounds a live
+   session near 3 frames per second; decode slows past about 32 frames held (20 tok/s at 64). Neither is optimized yet.
+5. CUDA has not run here: cuBLAS 13 is missing (the cuBLAS autofetch in #707, `paths.cublasAutofetch`, downloads it on first
+   CUDA use once merged). Full BF16 generation needs about 21 GB of device memory; the 12 GB RTX 3060 runs the GGUF.
+6. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:
+   `MossVlConfig.FromGguf` reads the `moss_vl.*` metadata and matches `config.json` exactly.
 
 ## Status
 
@@ -109,11 +120,19 @@ These are the same names `MllamaCrossAttentionLayer.LoadWeights` already reads.
   steps, with the decode token at the prompt's next position and the same vision features read by the cross layers. Parity
   against the numpy recompute: relative ~1e-6, same greedy token. Reuses `GenericTransformer.ProjectLogits`, `SamplerChain` and
   `VlmDecodeOps`, and `HfTokenizerJson` for `tokenizer.json`.
-- Not built: multi-image cross-attention masks (refused), image preprocessing and vision-tower wiring (Engine composition),
-  realtime loop, CUDA kernels. The full F32 text model is about 42 GB and does not fit this machine's RAM.
 - GGUF text source: `MossVlTextDecoder.OpenGguf` with `MossVlKeyMapper` (`moss_vl`). Q4_K and Q6_K projections stay packed
   (`keepQuantized`). CPU parity on layers 0–2 against the BF16 reference: relative 5.0e-3, cross-layer delta 6.5e-3. Vulkan
-  parity matches the CPU result. CUDA needs cuBLAS 13, which is not installed here, so its test cannot run yet.
+  parity matches the CPU result. CUDA has not run here (cuBLAS 13 missing).
 - Test generation (`MossVlGenerateTests`, Vulkan, all 48 layers, packed quant): the reply was "A static, full-frame image of a
   television test pattern with multicolored vertical bars and a grainy texture." The image features come from the numpy vision
   dump, not a fresh run of the vision tower. The reply has not been checked against that image beyond this one run.
+- Backend-aware loads: `MossVlLoadOptions.Backend` keeps BF16 on a BF16 backend, casts it once to F16 on Vulkan (refusing values
+  beyond F16's range by name), and keeps GGUF quants packed where the backend has a kernel (shared `DenseWeightCasts`,
+  `QuantizedWeightPolicy`). Layers 0–2 on Vulkan from the BF16 checkpoint: relative 2.9e-5.
+- GGUF vision tower: `MossVlVisionTower.OpenGguf` maps `v.*`/`mm.*` to `model.visual.*` and removes the converter's qkv padding
+  (q and k per rotary half, 36 to 40 rows; v per head, 72 to 80). CPU parity 1.9e-6; Vulkan 5e-4.
+- Pixels: `MossVlImageProcessor` (Qwen2-VL smart resize, PIL bicubic on 8-bit, batch pixel budget) over `Core.Imaging`. Grids match
+  `transformers` exactly; 0.2–0.3% of values differ by one 8-bit level.
+- Engine: `TextService` routes a `moss_vl` GGUF or checkpoint folder to `MossVlRuntime` (decoder and tower on the slot backend,
+  weights preloaded), streams the reply, and refuses a request without an image. On Vulkan through the CLI, a synthetic red disc
+  and blue square were named correctly at about 29 tok/s decode.

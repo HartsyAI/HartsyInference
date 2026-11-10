@@ -1,11 +1,11 @@
 using System.Buffers.Binary;
-using System.Text;
 using System.Text.Json;
 using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
 
-/// <summary>Writes a <see cref="Mesh"/> to binary glTF 2.0 (<c>.glb</c>) via manual chunk framing, exporting POSITION, optional NORMAL, and triangle indices as a single mesh/primitive.</summary>
+/// <summary>Writes meshes to binary glTF 2.0 (<c>.glb</c>) via manual chunk framing. Each mesh becomes one node and one
+/// mesh with a single triangle primitive, exporting POSITION, optional NORMAL, and indices.</summary>
 public static class GlbWriter
 {
     private const uint Magic = 0x46546C67;      // "glTF"
@@ -16,27 +16,41 @@ public static class GlbWriter
     public static byte[] Write(Mesh mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
-        if (mesh.VertexCount == 0 || mesh.TriangleCount == 0)
-            throw new ArgumentException("Mesh has no geometry to export.", nameof(mesh));
+        return Write([mesh]);
+    }
 
-        bool hasNormals = mesh.Normals is { Length: > 0 } && mesh.Normals.Length == mesh.Vertices.Length;
+    /// <summary>Serializes every mesh in <paramref name="meshes"/> into one scene, one node per mesh, in order.</summary>
+    public static byte[] Write(IReadOnlyList<Mesh> meshes)
+    {
+        ArgumentNullException.ThrowIfNull(meshes);
+        if (meshes.Count == 0)
+            throw new ArgumentException("No meshes to export.", nameof(meshes));
 
-        // --- Build the binary buffer: positions, [normals], indices (all 4-byte aligned by construction). ---
-        int posBytes = mesh.Vertices.Length * 4;
-        int normBytes = hasNormals ? mesh.Normals!.Length * 4 : 0;
-        int idxBytes = mesh.Indices.Length * 4;
-        byte[] bin = new byte[posBytes + normBytes + idxBytes];
-        int off = 0;
-        WriteFloats(bin, ref off, mesh.Vertices);
-        if (hasNormals) WriteFloats(bin, ref off, mesh.Normals!);
-        int idxOffset = off;
-        foreach (int i in mesh.Indices) { BinaryPrimitives.WriteUInt32LittleEndian(bin.AsSpan(off), (uint)i); off += 4; }
+        // --- Lay out the binary buffer: per mesh, positions, [normals], indices (all 4-byte aligned by construction). ---
+        List<Layout> layouts = [];
+        int binLength = 0, accessorCount = 0;
+        foreach (Mesh mesh in meshes)
+        {
+            if (mesh.VertexCount == 0 || mesh.TriangleCount == 0)
+                throw new ArgumentException("Mesh has no geometry to export.", nameof(meshes));
+            bool hasNormals = mesh.Normals is { Length: > 0 } && mesh.Normals.Length == mesh.Vertices.Length;
+            Layout layout = new(mesh, hasNormals, binLength) { Accessor = accessorCount };
+            layouts.Add(layout);
+            binLength = checked(binLength + layout.TotalBytes);
+            accessorCount += layout.ViewCount;
+        }
 
-        // POSITION accessor requires min/max bounds.
-        (float[] min, float[] max) = Bounds(mesh.Vertices);
+        byte[] bin = new byte[binLength];
+        foreach (Layout layout in layouts)
+        {
+            int off = layout.BinOffset;
+            WriteFloats(bin, ref off, layout.Mesh.Vertices);
+            if (layout.HasNormals) WriteFloats(bin, ref off, layout.Mesh.Normals!);
+            foreach (int i in layout.Mesh.Indices) { BinaryPrimitives.WriteUInt32LittleEndian(bin.AsSpan(off), (uint)i); off += 4; }
+        }
 
         // --- JSON chunk ---
-        byte[] json = BuildJson(mesh, hasNormals, posBytes, normBytes, idxBytes, idxOffset, bin.Length, min, max);
+        byte[] json = BuildJson(layouts, binLength);
 
         // --- Pad chunks to 4-byte alignment (JSON: spaces; BIN: zeros). ---
         byte[] jsonPad = Pad(json, 0x20);
@@ -60,8 +74,7 @@ public static class GlbWriter
     /// <summary>Writes <paramref name="mesh"/> as GLB to <paramref name="path"/>.</summary>
     public static void Save(string path, Mesh mesh) => File.WriteAllBytes(path, Write(mesh));
 
-    private static byte[] BuildJson(Mesh mesh, bool hasNormals, int posBytes, int normBytes, int idxBytes,
-        int idxOffset, int binLen, float[] min, float[] max)
+    private static byte[] BuildJson(List<Layout> layouts, int binLen)
     {
         using MemoryStream ms = new();
         using (Utf8JsonWriter w = new(ms))
@@ -75,40 +88,53 @@ public static class GlbWriter
 
             w.WriteNumber("scene", 0);
             w.WriteStartArray("scenes");
-            w.WriteStartObject(); w.WriteStartArray("nodes"); w.WriteNumberValue(0); w.WriteEndArray(); w.WriteEndObject();
+            w.WriteStartObject();
+            w.WriteStartArray("nodes");
+            for (int m = 0; m < layouts.Count; m++) w.WriteNumberValue(m);
+            w.WriteEndArray();
+            w.WriteEndObject();
             w.WriteEndArray();
 
             w.WriteStartArray("nodes");
-            w.WriteStartObject(); w.WriteNumber("mesh", 0); w.WriteEndObject();
+            for (int m = 0; m < layouts.Count; m++) { w.WriteStartObject(); w.WriteNumber("mesh", m); w.WriteEndObject(); }
             w.WriteEndArray();
 
+            // Accessors and views are numbered per mesh: positions, [normals], indices.
             w.WriteStartArray("meshes");
-            w.WriteStartObject();
-            w.WriteStartArray("primitives");
-            w.WriteStartObject();
-            w.WriteStartObject("attributes");
-            w.WriteNumber("POSITION", 0);
-            if (hasNormals) w.WriteNumber("NORMAL", 1);
-            w.WriteEndObject();
-            w.WriteNumber("indices", hasNormals ? 2 : 1);
-            w.WriteNumber("mode", 4); // TRIANGLES
-            w.WriteEndObject();
-            w.WriteEndArray();
-            w.WriteEndObject();
+            foreach (Layout layout in layouts)
+            {
+                w.WriteStartObject();
+                w.WriteStartArray("primitives");
+                w.WriteStartObject();
+                w.WriteStartObject("attributes");
+                w.WriteNumber("POSITION", layout.Accessor);
+                if (layout.HasNormals) w.WriteNumber("NORMAL", layout.Accessor + 1);
+                w.WriteEndObject();
+                w.WriteNumber("indices", layout.Accessor + (layout.HasNormals ? 2 : 1));
+                w.WriteNumber("mode", 4); // TRIANGLES
+                w.WriteEndObject();
+                w.WriteEndArray();
+                w.WriteEndObject();
+            }
             w.WriteEndArray();
 
-            // bufferViews: 0=positions, [1=normals], last=indices.
             w.WriteStartArray("bufferViews");
-            WriteBufferView(w, 0, posBytes, 34962);
-            if (hasNormals) WriteBufferView(w, posBytes, normBytes, 34962);
-            WriteBufferView(w, idxOffset, idxBytes, 34963);
+            foreach (Layout layout in layouts)
+            {
+                WriteBufferView(w, layout.BinOffset, layout.Mesh.Vertices.Length * 4, 34962);
+                if (layout.HasNormals) WriteBufferView(w, layout.BinOffset + layout.Mesh.Vertices.Length * 4, layout.Mesh.Normals!.Length * 4, 34962);
+                WriteBufferView(w, layout.IndexOffset, layout.Mesh.Indices.Length * 4, 34963);
+            }
             w.WriteEndArray();
 
-            // accessors mirror the bufferView order.
             w.WriteStartArray("accessors");
-            WritePositionAccessor(w, 0, mesh.VertexCount, min, max);
-            if (hasNormals) WriteVec3Accessor(w, 1, mesh.VertexCount);
-            WriteIndexAccessor(w, hasNormals ? 2 : 1, mesh.Indices.Length);
+            foreach (Layout layout in layouts)
+            {
+                (float[] min, float[] max) = Bounds(layout.Mesh.Vertices);
+                WritePositionAccessor(w, layout.Accessor, layout.Mesh.VertexCount, min, max);
+                if (layout.HasNormals) WriteVec3Accessor(w, layout.Accessor + 1, layout.Mesh.VertexCount);
+                WriteIndexAccessor(w, layout.Accessor + (layout.HasNormals ? 2 : 1), layout.Mesh.Indices.Length);
+            }
             w.WriteEndArray();
 
             w.WriteStartArray("buffers");
@@ -194,5 +220,34 @@ public static class GlbWriter
         Array.Copy(data, padded, data.Length);
         for (int i = data.Length; i < padded.Length; i++) padded[i] = padByte;
         return padded;
+    }
+
+    /// <summary>Where one mesh sits in the binary buffer and in the accessor and view numbering.</summary>
+    private sealed class Layout
+    {
+        public Layout(Mesh mesh, bool hasNormals, int binOffset)
+        {
+            Mesh = mesh;
+            HasNormals = hasNormals;
+            BinOffset = binOffset;
+            IndexOffset = binOffset + mesh.Vertices.Length * 4 + (hasNormals ? mesh.Normals!.Length * 4 : 0);
+        }
+
+        public Mesh Mesh { get; }
+
+        public bool HasNormals { get; }
+
+        /// <summary>Byte offset of this mesh's positions in the buffer.</summary>
+        public int BinOffset { get; }
+
+        /// <summary>Byte offset of this mesh's indices in the buffer.</summary>
+        public int IndexOffset { get; }
+
+        public int TotalBytes => IndexOffset + Mesh.Indices.Length * 4 - BinOffset;
+
+        public int ViewCount => HasNormals ? 3 : 2;
+
+        /// <summary>Index of this mesh's position accessor and view; its views and accessors follow in order.</summary>
+        public int Accessor { get; set; }
     }
 }

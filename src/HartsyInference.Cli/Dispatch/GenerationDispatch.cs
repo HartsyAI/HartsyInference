@@ -9,6 +9,7 @@ using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
 using HartsyInference.Engine.Worlds;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.Memory.Vram;
 
@@ -152,6 +153,8 @@ public static class GenerationDispatch
     private static async Task<GeneratedArtifact> TextAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        if (parameters.GetBool("realtime", false))
+            return await RealtimeDispatch.RunAsync(engine, spec, prompt, parameters, quiet, cancel).ConfigureAwait(false);
         float temperature = parameters.GetFloat("temperature", 0.7f);
         List<ImageData> images = [];
         if (parameters.GetStringOrNull("image") is { Length: > 0 } imagePaths)
@@ -166,7 +169,21 @@ public static class GenerationDispatch
             // "cuda:0" pins an ordinal; the composite "cuda:0+cuda:1" form requests the LLM layer split
             // (TextService.LoadSharded) — layers pooled across both cards by free VRAM.
             Device = parameters.GetStringOrNull("device"),
-            Messages = [new TextMessage { Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null }],
+            Messages =
+            [
+                new TextMessage
+                {
+                    Role = TextRole.User, Content = prompt, Images = images.Count > 0 ? images : null,
+                    Video = parameters.GetStringOrNull("video") is { } videoPath
+                        ? new VideoClip { Data = File.ReadAllBytes(videoPath), Format = Path.GetExtension(videoPath).TrimStart('.') }
+                        : null,
+                    VideoFrames = parameters.GetStringOrNull("frames-dir") is { } framesDir
+                        ? FolderFrames(framesDir, parameters.GetDoubleOrNull("frame-fps") ?? 1.0)
+                        : null,
+                },
+            ],
+            VideoFps = parameters.GetDoubleOrNull("video-fps"),
+            VideoMaxFrames = parameters.GetIntOrNull("video-max-frames"),
             SystemPrompt = parameters.GetStringOrNull("system"),
             MaxTokens = forced?.Count ?? parameters.GetInt("max-tokens", 256),
             ForcedTokenIds = forced,
@@ -185,6 +202,7 @@ public static class GenerationDispatch
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
+            WeightPrecision = parameters.GetStringOrNull("precision"),
             AlwaysFreeMemory = parameters.GetBool("always-free-memory", false) ? true : null,
             Placement = parameters.GetStringOrNull("placement"),
         };
@@ -616,6 +634,10 @@ public static class GenerationDispatch
         return SelfWrittenVisionArtifact($"{images.Count} input frames → {written} output frame(s) in {dir}", written);
     }
 
+    /// <summary>A folder of PNG/BMP frames as a timed video: name order, frame <c>i</c> at <c>i / fps</c> seconds.</summary>
+    internal static IReadOnlyList<TimedImage> FolderFrames(string folder, double fps) =>
+        [.. VisionBatchInputs(folder).Select((path, i) => new TimedImage { Image = LoadImage(path), TimestampSeconds = i / fps })];
+
     /// <summary>The images a folder input contributes, sorted by name: the formats <see cref="ImageIo.DecodeFile"/> reads
     /// (.png, .bmp). Other files are skipped rather than failing the batch.</summary>
     internal static string[] VisionBatchInputs(string folder)
@@ -789,14 +811,17 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
-    /// <summary>Image-to-3D through <see cref="IMeshService"/>; the CLI's "prompt" is the input image path.</summary>
+    /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
+        bool scene = MeshModelIds.SceneMesh.Contains((spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant());
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = LoadMeshImage(prompt),
+            Image = scene ? null : LoadMeshImage(prompt),
+            SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
@@ -1438,7 +1463,62 @@ public static class GenerationDispatch
     private static string[]? SplitPaths(string? joined) =>
         string.IsNullOrWhiteSpace(joined) ? null : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries);
 
-    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
+    /// <summary>Reads the cola3d scene prompt from <c>--prompt-mask</c> or <c>--prompt-point</c>; null when neither is given.</summary>
+    private static SceneMeshPrompt? LoadScenePrompt(ParamState parameters)
+    {
+        string[]? maskPaths = SplitPaths(parameters.GetStringOrNull("prompt-mask"));
+        string[]? pointTexts = SplitPaths(parameters.GetStringOrNull("prompt-point"));
+        if (maskPaths is null && pointTexts is null)
+        {
+            return null;
+        }
+        if (maskPaths is not null && pointTexts is not null)
+        {
+            throw new ArgumentException("Give --prompt-mask or --prompt-point, not both.");
+        }
+        if (maskPaths is not null)
+        {
+            return new SceneMeshPrompt { Masks = maskPaths.Select(LoadPromptMask).ToList() };
+        }
+        return new SceneMeshPrompt { Points = pointTexts!.Select(ParseScenePoint).ToList() };
+    }
+
+    /// <summary>Reads one mask PNG; the red channel is the coverage.</summary>
+    private static ScenePromptMask LoadPromptMask(string path)
+    {
+        ImageData image = LoadImage(path);
+        byte[] coverage = new byte[image.Width * image.Height];
+        for (int i = 0; i < coverage.Length; i++)
+        {
+            coverage[i] = image.Rgb[i * 3];
+        }
+        return new ScenePromptMask { Coverage = coverage, Width = image.Width, Height = image.Height };
+    }
+
+    /// <summary>Parses <c>x,y,z</c> in the scene mesh's units.</summary>
+    private static ScenePoint ParseScenePoint(string text)
+    {
+        string[] parts = text.Split(',', StringSplitOptions.TrimEntries);
+        if (parts.Length != 3 || !float.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out float x)
+            || !float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float y)
+            || !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+        {
+            throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
+        }
+        return new ScenePoint(x, y, z);
+    }
+
+    /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>
+    private static SceneMeshData LoadSceneMesh(string promptPath)
+    {
+        string path = promptPath.Trim().Trim('"');
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Input scene mesh not found: {path}");
+        }
+        return new SceneMeshData { Data = File.ReadAllBytes(path), Format = SceneMeshReader.FormatOf(path) };
+    }
+
     /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
     private static ImageData LoadMeshImage(string promptPath)
     {
@@ -1452,6 +1532,7 @@ public static class GenerationDispatch
         return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
     }
 
+    /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>
     private static ImageData LoadImage(string promptPath)
     {
         string path = promptPath.Trim().Trim('"');
@@ -1462,6 +1543,7 @@ public static class GenerationDispatch
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(path);
         return new ImageData { Rgb = rgb, Width = width, Height = height };
     }
+
     /// <summary>The per-run VRAM override from <c>--vram-mode</c>, or null when the caller did not ask for one.</summary>
     /// <remarks>Null rather than an explicit Auto: null means "follow the engine", which is a different statement
     /// from "pin Auto" once a host has configured a backend policy.</remarks>

@@ -39,4 +39,16 @@ public partial interface IBackend
     void LinearI8U8(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? bias, Tensor? diag = null,
         Tensor? diagInput = null)
         => throw new NotSupportedException("LinearI8U8 is implemented on the CPU backend only.");
+
+    /// <summary>Linear over an FP8 e4m3 weight with F32 block scales, dequantized in the product and never materialized:
+    /// <c>output[m, n] = Σₖ input[m, k]·e4m3(weight[n, k])·scale[n / blockRows, k / blockCols] + bias[n]</c>.</summary>
+    /// <remarks><para><paramref name="weight"/> is F8E4M3 <c>[N, K]</c> and stays in that form on the device.
+    /// <paramref name="weightScaleInv"/> is F32 <c>[ceil(N / blockRows), ceil(K / blockCols)]</c>, the DeepSeek-style
+    /// <c>weight_scale_inv</c> grid. <paramref name="input"/> and <paramref name="output"/> are F32, the input
+    /// <c>[..., K]</c> and the output <c>[..., N]</c> with the same leading dimensions.</para>
+    /// <para>Reference: <see cref="Host.Fp8BlockLinearReference"/>. The GPU backends accumulate in F32 in a different
+    /// order, so they agree with it within float tolerance rather than bit for bit.</para></remarks>
+    void Fp8BlockLinear(Tensor output, Tensor input, Tensor weight, Tensor weightScaleInv, Tensor? bias,
+        int blockRows = 128, int blockCols = 128) =>
+        throw NotSupportedPrimitive(nameof(Fp8BlockLinear));
 }

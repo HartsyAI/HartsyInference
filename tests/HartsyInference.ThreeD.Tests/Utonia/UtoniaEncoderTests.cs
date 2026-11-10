@@ -41,6 +41,31 @@ public sealed class UtoniaEncoderTests
         second.Feats.Dispose();
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Forward_RowChunksMatchTheUnchunkedRunExactly(bool encoderOnly)
+    {
+        UtoniaConfig config = UtoniaTestData.TinyConfig(encoderOnly);
+        (int[] coords, int batchSize) = RandomCoords(seed: 31, grid: 16, perSample: new[] { 13, 6 });
+        using UtoniaEncoder whole = new(new CpuBackend(), config, UtoniaTestData.RandomWeights(config, 5), UtoniaRowChunks.ChunkBytes);
+        using UtoniaEncoder chunked = new(new CpuBackend(), config, UtoniaTestData.RandomWeights(config, 5), chunkBytes: 96);
+
+        UtoniaFeatures expected = whole.Forward(coords, batchSize);
+        UtoniaFeatures actual = chunked.Forward(coords, batchSize);
+
+        Assert.Equal(expected.GridCoord, actual.GridCoord);
+        float[] e = UtoniaTestData.Read(expected.Feats), a = UtoniaTestData.Read(actual.Feats);
+        Assert.Equal(e.Length, a.Length);
+        for (int i = 0; i < e.Length; i++)
+        {
+            Assert.Equal(BitConverter.SingleToInt32Bits(e[i]), BitConverter.SingleToInt32Bits(a[i]));
+        }
+
+        expected.Feats.Dispose();
+        actual.Feats.Dispose();
+    }
+
     [Fact]
     public void ForwardLevel4_EmptyInputReturnsZeroRows()
     {

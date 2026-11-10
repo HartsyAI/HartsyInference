@@ -817,6 +817,9 @@ public static class ModelCatalog
             // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model) and catalog row; the Text path refuses it by name (Ernie5Config.RequireRunnable).
             Ernie5Catalog.Build(),
 
+            // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
+            MossVlCatalog.Build(),
+
             // Image / diffusion
             new CatalogEntry
             {
@@ -2537,6 +2540,7 @@ public static class ModelCatalog
             E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),
             E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
+            E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             HairDeck(),
 
             // Interactive / world models
