@@ -16,13 +16,17 @@ internal sealed class MossVlRuntime : IDisposable
     private readonly IBackend _backend;
     private int _disposed;
 
-    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend, bool lowVramQuant)
+    private MossVlRuntime(MossVlModel model, MossVlVisionTower tower, IBackend backend, bool lowVramQuant, DType? plainPrecision)
     {
         Model = model;
         Tower = tower;
         _backend = backend;
         LowVramQuant = lowVramQuant;
+        PlainPrecision = plainPrecision;
     }
+
+    /// <summary>The block type the folder's plain projections were re-quantized to at load; null for as stored (and for a GGUF).</summary>
+    public DType? PlainPrecision { get; }
 
     public MossVlModel Model { get; }
 
@@ -45,7 +49,7 @@ internal sealed class MossVlRuntime : IDisposable
             // Resident up front: without it a device backend uploads each weight on the op that first reads it.
             backend.PreloadWeightGroups(model.Decoder.Model.EnumerateWeightGroups(includeRedundantSplits: false));
             backend.PreloadWeights(tower.Encoder.EnumerateWeights());
-            return new MossVlRuntime(model, tower, backend, lowVramQuant);
+            return new MossVlRuntime(model, tower, backend, lowVramQuant, model.IsGguf ? null : plainPrecision);
         }
         catch
         {
