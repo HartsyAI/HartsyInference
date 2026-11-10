@@ -717,4 +717,249 @@ $L__BB0_62:
 	ret;
 
 }
+	// .globl	act_quant_dequant_fp8x128_inplace_f32
+.visible .entry act_quant_dequant_fp8x128_inplace_f32(
+	.param .u64 act_quant_dequant_fp8x128_inplace_f32_param_0,
+	.param .u64 act_quant_dequant_fp8x128_inplace_f32_param_1
+)
+{
+	.reg .pred 	%p<22>;
+	.reg .f32 	%f<95>;
+	.reg .b32 	%r<65>;
+	.reg .b64 	%rd<21>;
+
+
+	ld.param.u64 	%rd11, [act_quant_dequant_fp8x128_inplace_f32_param_0];
+	ld.param.u64 	%rd12, [act_quant_dequant_fp8x128_inplace_f32_param_1];
+	cvta.to.global.u64 	%rd1, %rd11;
+	mov.u32 	%r19, %ctaid.x;
+	mov.u32 	%r20, %ntid.x;
+	mul.wide.u32 	%rd13, %r19, %r20;
+	mov.u32 	%r21, %tid.x;
+	cvt.u64.u32 	%rd14, %r21;
+	add.s64 	%rd2, %rd13, %rd14;
+	setp.ge.s64 	%p1, %rd2, %rd12;
+	@%p1 bra 	$L__BB1_19;
+
+	shl.b64 	%rd3, %rd2, 7;
+	shl.b64 	%rd15, %rd2, 9;
+	add.s64 	%rd16, %rd1, %rd15;
+	add.s64 	%rd19, %rd16, 32;
+	mov.f32 	%f92, 0f00000000;
+	mov.u32 	%r61, 0;
+
+$L__BB1_2:
+	ld.global.f32 	%f15, [%rd19+-32];
+	abs.f32 	%f16, %f15;
+	max.f32 	%f17, %f92, %f16;
+	ld.global.f32 	%f18, [%rd19+-28];
+	abs.f32 	%f19, %f18;
+	max.f32 	%f20, %f17, %f19;
+	ld.global.f32 	%f21, [%rd19+-24];
+	abs.f32 	%f22, %f21;
+	max.f32 	%f23, %f20, %f22;
+	ld.global.f32 	%f24, [%rd19+-20];
+	abs.f32 	%f25, %f24;
+	max.f32 	%f26, %f23, %f25;
+	ld.global.f32 	%f27, [%rd19+-16];
+	abs.f32 	%f28, %f27;
+	max.f32 	%f29, %f26, %f28;
+	ld.global.f32 	%f30, [%rd19+-12];
+	abs.f32 	%f31, %f30;
+	max.f32 	%f32, %f29, %f31;
+	ld.global.f32 	%f33, [%rd19+-8];
+	abs.f32 	%f34, %f33;
+	max.f32 	%f35, %f32, %f34;
+	ld.global.f32 	%f36, [%rd19+-4];
+	abs.f32 	%f37, %f36;
+	max.f32 	%f38, %f35, %f37;
+	ld.global.f32 	%f39, [%rd19];
+	abs.f32 	%f40, %f39;
+	max.f32 	%f41, %f38, %f40;
+	ld.global.f32 	%f42, [%rd19+4];
+	abs.f32 	%f43, %f42;
+	max.f32 	%f44, %f41, %f43;
+	ld.global.f32 	%f45, [%rd19+8];
+	abs.f32 	%f46, %f45;
+	max.f32 	%f47, %f44, %f46;
+	ld.global.f32 	%f48, [%rd19+12];
+	abs.f32 	%f49, %f48;
+	max.f32 	%f50, %f47, %f49;
+	ld.global.f32 	%f51, [%rd19+16];
+	abs.f32 	%f52, %f51;
+	max.f32 	%f53, %f50, %f52;
+	ld.global.f32 	%f54, [%rd19+20];
+	abs.f32 	%f55, %f54;
+	max.f32 	%f56, %f53, %f55;
+	ld.global.f32 	%f57, [%rd19+24];
+	abs.f32 	%f58, %f57;
+	max.f32 	%f59, %f56, %f58;
+	ld.global.f32 	%f60, [%rd19+28];
+	abs.f32 	%f61, %f60;
+	max.f32 	%f92, %f59, %f61;
+	add.s64 	%rd19, %rd19, 64;
+	add.s32 	%r61, %r61, 16;
+	setp.ne.s32 	%p2, %r61, 128;
+	@%p2 bra 	$L__BB1_2;
+
+	mov.f32 	%f62, 0f38D1B717;
+	max.f32 	%f63, %f92, %f62;
+	mov.f32 	%f64, 0f3B124925;
+	mul.rn.f32 	%f65, %f63, %f64;
+	mov.b32 	%r24, %f65;
+	shr.u32 	%r25, %r24, 23;
+	and.b32  	%r26, %r24, 8388607;
+	setp.ne.s32 	%p3, %r26, 0;
+	mov.u32 	%r62, 0;
+	selp.u32 	%r27, 1, 0, %p3;
+	add.s32 	%r28, %r25, %r27;
+	and.b32  	%r29, %r28, 255;
+	setp.eq.s32 	%p4, %r29, 0;
+	shl.b32 	%r30, %r28, 23;
+	and.b32  	%r31, %r30, 2139095040;
+	selp.b32 	%r32, 4194304, %r31, %p4;
+	mov.b32 	%f3, %r32;
+	shl.b64 	%rd17, %rd3, 2;
+	add.s64 	%rd18, %rd1, %rd17;
+	add.s64 	%rd20, %rd18, 4;
+
+$L__BB1_4:
+	add.s64 	%rd9, %rd20, -4;
+	ld.global.f32 	%f66, [%rd20+-4];
+	div.rn.f32 	%f67, %f66, %f3;
+	setp.lt.f32 	%p5, %f67, 0fC3E00000;
+	setp.gt.f32 	%p6, %f67, 0f43E00000;
+	selp.f32 	%f68, 0f43E00000, %f67, %p6;
+	selp.f32 	%f69, 0fC3E00000, %f68, %p5;
+	mov.b32 	%r4, %f69;
+	abs.f32 	%f4, %f69;
+	setp.lt.f32 	%p7, %f4, 0f3C800000;
+	@%p7 bra 	$L__BB1_6;
+	bra.uni 	$L__BB1_5;
+
+$L__BB1_6:
+	mov.f32 	%f70, 0f44000000;
+	mul.rn.f32 	%f71, %f4, %f70;
+	cvt.rni.f32.f32 	%f72, %f71;
+	cvt.rzi.u32.f32 	%r63, %f72;
+	bra.uni 	$L__BB1_7;
+
+$L__BB1_5:
+	and.b32  	%r33, %r4, 2147483647;
+	shr.u32 	%r34, %r4, 20;
+	and.b32  	%r35, %r34, 1;
+	add.s32 	%r36, %r33, %r35;
+	add.s32 	%r37, %r36, 524287;
+	shr.u32 	%r38, %r37, 20;
+	add.s32 	%r39, %r38, -960;
+	min.u32 	%r63, %r39, 127;
+
+$L__BB1_7:
+	shr.u32 	%r40, %r4, 24;
+	or.b32  	%r8, %r63, %r40;
+	shr.u32 	%r41, %r63, 3;
+	and.b32  	%r9, %r41, 15;
+	setp.eq.s32 	%p8, %r9, 15;
+	and.b32  	%r10, %r63, 7;
+	setp.eq.s32 	%p9, %r10, 7;
+	and.pred  	%p10, %p9, %p8;
+	mov.f32 	%f93, 0f7FC00000;
+	@%p10 bra 	$L__BB1_11;
+
+	and.b32  	%r42, %r8, 128;
+	setp.eq.s32 	%p11, %r42, 0;
+	selp.f32 	%f5, 0f3F800000, 0fBF800000, %p11;
+	setp.eq.s32 	%p12, %r9, 0;
+	@%p12 bra 	$L__BB1_10;
+
+	shl.b32 	%r43, %r9, 23;
+	add.s32 	%r44, %r43, 1006632960;
+	shl.b32 	%r45, %r10, 20;
+	or.b32  	%r46, %r44, %r45;
+	mov.b32 	%f74, %r46;
+	mul.rn.f32 	%f93, %f5, %f74;
+	bra.uni 	$L__BB1_11;
+
+$L__BB1_10:
+	cvt.rn.f32.s32 	%f75, %r10;
+	mul.rn.f32 	%f76, %f5, %f75;
+	mov.f32 	%f77, 0f3B000000;
+	mul.rn.f32 	%f93, %f76, %f77;
+
+$L__BB1_11:
+	mul.rn.f32 	%f78, %f93, %f3;
+	st.global.f32 	[%rd9], %f78;
+	ld.global.f32 	%f79, [%rd9+4];
+	div.rn.f32 	%f80, %f79, %f3;
+	setp.lt.f32 	%p13, %f80, 0fC3E00000;
+	setp.gt.f32 	%p14, %f80, 0f43E00000;
+	selp.f32 	%f81, 0f43E00000, %f80, %p14;
+	selp.f32 	%f82, 0fC3E00000, %f81, %p13;
+	mov.b32 	%r11, %f82;
+	abs.f32 	%f9, %f82;
+	setp.lt.f32 	%p15, %f9, 0f3C800000;
+	@%p15 bra 	$L__BB1_13;
+	bra.uni 	$L__BB1_12;
+
+$L__BB1_13:
+	mov.f32 	%f83, 0f44000000;
+	mul.rn.f32 	%f84, %f9, %f83;
+	cvt.rni.f32.f32 	%f85, %f84;
+	cvt.rzi.u32.f32 	%r64, %f85;
+	bra.uni 	$L__BB1_14;
+
+$L__BB1_12:
+	and.b32  	%r47, %r11, 2147483647;
+	shr.u32 	%r48, %r11, 20;
+	and.b32  	%r49, %r48, 1;
+	add.s32 	%r50, %r47, %r49;
+	add.s32 	%r51, %r50, 524287;
+	shr.u32 	%r52, %r51, 20;
+	add.s32 	%r53, %r52, -960;
+	min.u32 	%r64, %r53, 127;
+
+$L__BB1_14:
+	shr.u32 	%r54, %r11, 24;
+	or.b32  	%r15, %r64, %r54;
+	shr.u32 	%r55, %r64, 3;
+	and.b32  	%r16, %r55, 15;
+	setp.eq.s32 	%p16, %r16, 15;
+	and.b32  	%r17, %r64, 7;
+	setp.eq.s32 	%p17, %r17, 7;
+	and.pred  	%p18, %p17, %p16;
+	mov.f32 	%f94, 0f7FC00000;
+	@%p18 bra 	$L__BB1_18;
+
+	and.b32  	%r56, %r15, 128;
+	setp.eq.s32 	%p19, %r56, 0;
+	selp.f32 	%f10, 0f3F800000, 0fBF800000, %p19;
+	setp.eq.s32 	%p20, %r16, 0;
+	@%p20 bra 	$L__BB1_17;
+
+	shl.b32 	%r57, %r16, 23;
+	add.s32 	%r58, %r57, 1006632960;
+	shl.b32 	%r59, %r17, 20;
+	or.b32  	%r60, %r58, %r59;
+	mov.b32 	%f87, %r60;
+	mul.rn.f32 	%f94, %f10, %f87;
+	bra.uni 	$L__BB1_18;
+
+$L__BB1_17:
+	cvt.rn.f32.s32 	%f88, %r17;
+	mul.rn.f32 	%f89, %f10, %f88;
+	mov.f32 	%f90, 0f3B000000;
+	mul.rn.f32 	%f94, %f89, %f90;
+
+$L__BB1_18:
+	mul.rn.f32 	%f91, %f94, %f3;
+	st.global.f32 	[%rd9+4], %f91;
+	add.s64 	%rd20, %rd20, 8;
+	add.s32 	%r62, %r62, 2;
+	setp.ne.s32 	%p21, %r62, 128;
+	@%p21 bra 	$L__BB1_4;
+
+$L__BB1_19:
+	ret;
+
+}
 
