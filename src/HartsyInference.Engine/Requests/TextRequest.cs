@@ -142,4 +142,12 @@ public sealed record TextRequest
     /// reload. Measured on Qwen3-4B-Q4_K_M: the split originals are ~1.21 GiB of the ~3.53 GiB default single-device
     /// upload (file is 2.33 GiB); only the sharded and tensor-parallel load paths already exclude them by default.</summary>
     public bool? PreloadRedundantWeightSplits { get; init; }
+
+    /// <summary>Frames sampled per second from an attached <see cref="TextMessage.Video"/>; null keeps the model's own setting
+    /// (MOSS-VL: 1.0).</summary>
+    public double? VideoFps { get; init; }
+
+    /// <summary>The most frames sampled from an attached <see cref="TextMessage.Video"/>; null keeps the model's own setting
+    /// (MOSS-VL: 256).</summary>
+    public int? VideoMaxFrames { get; init; }
 }

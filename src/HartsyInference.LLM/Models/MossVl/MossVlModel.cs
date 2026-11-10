@@ -17,8 +17,10 @@ public sealed class MossVlModel : IDisposable
     /// <summary>The Hugging Face repository whose tokenizer and JSON configs a lone GGUF needs.</summary>
     public const string TokenizerRepo = "OpenMOSS-Team/MOSS-VL-Realtime-SGLANG";
 
-    private MossVlModel(MossVlConfig config, MossVlTextDecoder decoder, ILlmTokenizer tokenizer, MossVlImageProcessor processor, string path, bool gguf)
+    private MossVlModel(MossVlConfig config, MossVlTextDecoder decoder, ILlmTokenizer tokenizer, MossVlImageProcessor processor,
+        Core.Imaging.VideoFrameSamplingOptions videoSampling, string path, bool gguf)
     {
+        VideoSampling = videoSampling;
         Config = config;
         Decoder = decoder;
         Tokenizer = tokenizer;
@@ -34,6 +36,9 @@ public sealed class MossVlModel : IDisposable
     public ILlmTokenizer Tokenizer { get; }
 
     public MossVlImageProcessor Processor { get; }
+
+    /// <summary>How a video is sampled and sized (<c>video_preprocessor_config.json</c>, or the released checkpoint's values).</summary>
+    public Core.Imaging.VideoFrameSamplingOptions VideoSampling { get; }
 
     /// <summary>The GGUF file or checkpoint folder the model came from.</summary>
     public string Path { get; }
@@ -78,9 +83,16 @@ public sealed class MossVlModel : IDisposable
             tokenizer = LoadTokenizerJson(tokenizerPath);
         }
         MossVlImageProcessor processor = File.Exists(processorPath) ? MossVlImageProcessor.FromFile(processorPath) : MossVlImageProcessor.Default;
+        string videoPath = System.IO.Path.Combine(folder, "video_preprocessor_config.json");
+        Core.Imaging.VideoFrameSamplingOptions videoSampling = new();
+        if (File.Exists(videoPath))
+        {
+            using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(videoPath));
+            videoSampling = MossVlImageProcessor.VideoOptionsFromJson(doc.RootElement);
+        }
 
         MossVlTextDecoder decoder = gguf ? MossVlTextDecoder.OpenGguf(path, config, options) : MossVlTextDecoder.Open(path, config, options);
-        return new MossVlModel(config, decoder, tokenizer, processor, path, gguf);
+        return new MossVlModel(config, decoder, tokenizer, processor, videoSampling, path, gguf);
     }
 
     /// <inheritdoc/>

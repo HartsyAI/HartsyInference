@@ -483,6 +483,8 @@ public sealed partial class TextService : ITextService, IDisposable
         using IDisposable gate = DeviceGate.AcquireAllOrdinals(LoadGateOrdinalsFor(slot, deviceKey, spec.LocalPath), cancel);
         LoadInto(slot, deviceKey, spec, request);
         _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: slot.Backend);
+        // Refused before the route is chosen: the scheduler builds text-only input and would drop a video silently.
+        if (slot.MossVl is null) RequireNoVideo(request);
         if (slot.Scheduler is null || !ScheduledRouteAllowed(request, LastImage(request) is not null)) return null;
         slot.EnterLease();
         return slot.Scheduler;
@@ -506,6 +508,7 @@ public sealed partial class TextService : ITextService, IDisposable
                 ImageData? image = LastImage(request);
                 if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
+                if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
