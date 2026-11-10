@@ -32,7 +32,8 @@ public static class StreamingTensors
     }
 
     /// <summary>The tensors of <paramref name="parts"/> joined along <paramref name="axis"/> as a new tensor. Every part has the
-    /// same dtype and the same extents off the axis. Four-byte dtypes use the backend's <c>Concat</c>; narrower ones are
+    /// same dtype and the same extents off the axis. A device backend joins any dtype with its <c>Concat</c> (device-to-device
+    /// copies sized by the dtype); the CPU backend's <c>Concat</c> copies four bytes an element, so there narrower dtypes are
     /// scattered into place.</summary>
     public static Tensor Concat(IBackend backend, ReadOnlySpan<Tensor> parts, int axis)
     {
@@ -59,7 +60,9 @@ public static class StreamingTensors
         Tensor joined = new(WithAxis(first.Shape, axis, total), first.DType);
         try
         {
-            if (first.DType.SizeInBytes == sizeof(float))
+            // The scatter is one strided copy per part, about five times slower than Concat on CUDA for the BF16 FFN tail
+            // that every streamed SANA-WM pass joins (+40 ms a pass on a 4090), so only the CPU backend takes it.
+            if (first.DType.SizeInBytes == sizeof(float) || !backend.Device.IsCpu)
             {
                 backend.Concat(joined, parts, axis);
             }
