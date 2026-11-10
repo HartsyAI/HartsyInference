@@ -84,10 +84,10 @@ Traits classify tests; they do not automatically filter dotnet test. Run the CPU
 
     dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=GpuBenchmark&Category!=Slow&Network!=Real"
 
-CI does not run tests: its checks build the benchmark runner and the packages. The CPU lane and every GPU lane are run by
-hand before a PR is marked ready, and the PR body says which ran and which did not. A test that needs a GPU, a backend or a
-gitignored fixture uses a resource-guarded fact (such as `RealWeightsFact`), so it skips cleanly where the resource is
-missing instead of failing.
+CI does not run tests: pull requests only build the benchmark runner; packages are built and published on merge to main.
+The CPU lane and every GPU lane are run by hand before a PR is marked ready, and the PR body says which ran and which did
+not. A test that needs a GPU, a backend or a gitignored fixture uses a resource-guarded fact (such as `RealWeightsFact`), so
+it skips cleanly where the resource is missing instead of failing.
 
 Parity tests live in tests/<Project>/Parity/ and end in *ParityTests, selected with
 FullyQualifiedName~Parity. Resource-dependent tests remain resource-dependent after numerical verification;

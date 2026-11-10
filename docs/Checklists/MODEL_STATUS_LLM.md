@@ -152,10 +152,10 @@ Run: `hartsy text -m moss-vl-realtime -i photo.png "What is in this image?"`. A 
   Video prefill (one image group per frame) after alpha.415: 16 frames 0.9 s, 32 frames 2.3–3.4 s, 64 frames 10.2 s; decode stays
   near 31 tok/s up to 32 frames (20 tok/s at 64). The vision tower takes about 325 ms per 256×256 frame.
 - ✅ Weights load in stored precision for the backend (BF16 on CUDA, F16 on Vulkan, packed GGUF quants).
-- ❌ CUDA not run here (cuBLAS 13 missing; `paths.cublasAutofetch` downloads it on first CUDA use, not yet run against the real
-  redist). Full BF16 generation needs about 21 GB of device memory; `--precision q8_0` on the BF16 folder halves that.
+- ❌ CUDA not run here (cuBLAS 13 missing; the cuBLAS autofetch in #707, `paths.cublasAutofetch`, downloads it on first CUDA use
+  once merged, not yet run against the real redist). Full BF16 generation needs about 21 GB of device memory; `--precision q8_0` on the BF16 folder halves that.
 - ✅ Video: `--video` (ffmpeg) or `--frames-dir`; frames sampled and sized as the reference does, one timed vision block. A moving red disc is described as moving left to right (Vulkan).
-- ✅ Appendable decode session: segments continue positions and append vision once; two segments equal one forward exactly (Vulkan).
+- ✅ Appendable decode session: segments continue positions and append vision once; on Vulkan, two segments equalled one forward exactly before alpha.415 and agree within 1.2e-3 relative after it (alpha.415 changed the cross-attention row ranges).
 - ✅ Live sessions: `hartsy text --realtime --frames-dir … "question"` (or `--video`), the Engine's `OpenRealtimeAsync`, and SSE
   routes under `/v1/native/realtime/sessions`. On Vulkan, frames of a red disc with "What color is the circle?" give "The circle is
   red."; a frame folder replayed at 1 fps answers "Red" as each frame arrives.
