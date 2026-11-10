@@ -234,7 +234,7 @@ public sealed class CudaContext : IDisposable
             // check can't disagree with what actual P/Invoke resolution would find.
             if (!CudaLibraryResolver.CublasLoadable())
             {
-                LastUnavailableReason = "cuBLAS could not be loaded (libcublas.so.13/.12/.11 — usually means the CUDA Toolkit is missing, not just the driver).";
+                LastUnavailableReason = CublasRuntime.Reason;
                 return false;
             }
 
@@ -252,6 +252,28 @@ public sealed class CudaContext : IDisposable
         {
             LastUnavailableReason = $"{ex.GetType().Name}: {ex.Message}";
             return false;
+        }
+    }
+
+    /// <summary>Downloads cuBLAS when it is missing, the driver works and a CUDA device exists, so automatic backend selection
+    /// can pick CUDA on a driver-only machine. Does nothing when cuBLAS is installed, the fetch is off, or there is no NVIDIA GPU.
+    /// Never throws; a failed fetch leaves <see cref="IsAvailable"/> false with the reason.</summary>
+    /// <remarks>This is the one place a download can happen during engine start (<c>BackendFactory.Resolve("auto")</c>); it runs
+    /// once per process and logs progress. <c>paths.cublasAutofetch=false</c> turns it off.</remarks>
+    public static void EnsureProvisioned()
+    {
+        try
+        {
+            CudaLibraryResolver.Register();
+            CublasRuntime.EnsureProbed();
+            if (!CublasRuntime.FetchPending) return;
+            EnsureCudaInitialized();
+            CudaDriverApi.cuDeviceGetCount(out int count).ThrowOnError();
+            if (count > 0) CublasRuntime.EnsureAvailable();
+        }
+        catch
+        {
+            // The driver is unusable; IsAvailable reports why.
         }
     }
 
