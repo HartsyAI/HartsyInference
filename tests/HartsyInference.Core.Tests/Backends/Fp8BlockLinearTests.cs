@@ -65,6 +65,45 @@ public sealed class Fp8BlockLinearTests
     }
 
     [Fact]
+    public void Fp8BlockLinear_HandComputedSingleCode()
+    {
+        // e4m3 0x38 decodes to 1.0; with scale 2 every weight is 2, so each output is 2 * sum(x).
+        const int k = 4;
+        using Tensor input = Make(new float[] { 1f, 2f, 3f, 4f }, 1, k);
+        using Tensor weight = MakeBytes(new byte[] { 0x38, 0x38, 0x38, 0x38 }, 1, k);
+        using Tensor scale = Make(new float[] { 2f }, 1, 1);
+        using Tensor output = new(new TensorShape(1, 1), DType.F32);
+
+        new CpuBackend().Fp8BlockLinear(output, input, weight, scale, null);
+
+        Assert.Equal(20f, output.AsReadOnlySpan<float>()[0]);
+    }
+
+    [Fact]
+    public void Fp8BlockLinear_NanWeightCodePropagates()
+    {
+        // 0x7F is e4m3 NaN; any output that reads it must be NaN.
+        using Tensor input = Make(new float[] { 1f, 1f }, 1, 2);
+        using Tensor weight = MakeBytes(new byte[] { 0x7F, 0x38 }, 1, 2);
+        using Tensor scale = Make(new float[] { 1f }, 1, 1);
+        using Tensor output = new(new TensorShape(1, 1), DType.F32);
+
+        new CpuBackend().Fp8BlockLinear(output, input, weight, scale, null);
+
+        Assert.True(float.IsNaN(output.AsReadOnlySpan<float>()[0]));
+    }
+
+    [Fact]
+    public void Fp8BlockLinear_RejectsZeroInputWidth()
+    {
+        using Tensor input = new(new TensorShape(1, 0), DType.F32);
+        using Tensor weight = new(new TensorShape(4, 0), DType.F8E4M3);
+        using Tensor scale = new(new TensorShape(1, 1), DType.F32);
+        using Tensor output = new(new TensorShape(1, 4), DType.F32);
+        Assert.Throws<ArgumentException>(() => Fp8BlockLinearReference.Validate(output, input, weight, scale, null, 128, 128));
+    }
+
+    [Fact]
     public void Fp8BlockLinear_RejectsScaleGridOfTheWrongShape()
     {
         using Tensor input = new(new TensorShape(1, 256), DType.F32);

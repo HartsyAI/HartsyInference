@@ -18,6 +18,7 @@ public sealed partial class CudaBackend
         EnsureKernels();
         if (!_kernels!.HasHadamardKernels) throw new NotSupportedException("CUDA Hadamard needs hadamard.ptx in the Ptx folder.");
         long count = input.ElementCount;
+        if (count == 0) return;
         if (ReferenceEquals(input, output))
         {
             ulong pX = 0;
@@ -57,6 +58,7 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("Fp8BlockLinear");
         (int m, int n, int k) = Fp8BlockLinearReference.Validate(output, input, weight, weightScaleInv, bias, blockRows, blockCols);
+        if (m == 0 || n == 0) return;
         using OpScope _op = EnterOp();
         EnsureKernels();
         if (!_kernels!.HasFp8BlockLinearKernels) throw new NotSupportedException("CUDA Fp8BlockLinear needs fp8_block_linear.ptx in the Ptx folder.");

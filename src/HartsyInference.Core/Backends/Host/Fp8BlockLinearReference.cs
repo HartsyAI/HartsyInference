@@ -28,7 +28,9 @@ public static class Fp8BlockLinearReference
                 nameof(weightScaleInv));
         if (input.Shape.Rank < 1 || input.Shape[input.Shape.Rank - 1] != k)
             throw new ArgumentException($"Fp8BlockLinear input must end in K={k}; got {input.Shape}.", nameof(input));
+        if (k == 0) throw new ArgumentException("Fp8BlockLinear needs K > 0.", nameof(weight));
         long m = input.ElementCount / k;
+        if (m * k > int.MaxValue) throw new NotSupportedException("Fp8BlockLinear input exceeds 32-bit indexing.");
         if (output.ElementCount != m * n || output.Shape.Rank < 1 || output.Shape[output.Shape.Rank - 1] != n)
             throw new ArgumentException($"Fp8BlockLinear output must be [..., {n}] with {m} rows; got {output.Shape}.", nameof(output));
         if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != n))

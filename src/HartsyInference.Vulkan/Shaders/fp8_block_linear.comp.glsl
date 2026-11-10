@@ -21,6 +21,7 @@ layout(push_constant) uniform Push {
     uint blockCols;
     uint gridCols;
     uint hasBias;
+    uint nBase;
 } pc;
 
 #include "latent_codec.glsl"
@@ -28,7 +29,7 @@ layout(push_constant) uniform Push {
 shared float partial[128];
 
 void main() {
-    uint n = gl_WorkGroupID.x;
+    uint n = pc.nBase + gl_WorkGroupID.x;
     uint t = gl_LocalInvocationID.x;
     uint wBase = n * pc.K;
     uint sBase = (n / pc.blockRows) * pc.gridCols;

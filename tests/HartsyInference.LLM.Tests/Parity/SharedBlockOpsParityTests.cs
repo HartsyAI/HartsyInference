@@ -34,6 +34,20 @@ public sealed class SharedBlockOpsParityTests
         Fp8BlockLinearParity(device);
     }
 
+    [CudaFact]
+    public void Cuda_Fp8BlockLinear_WideOutputMatchesCpuReference()
+    {
+        using IBackend device = new CudaBackend(0, CudaPtxDirectory.Resolve());
+        Fp8BlockLinearWideParity(device);
+    }
+
+    [VulkanFact]
+    public void Vulkan_Fp8BlockLinear_WideOutputMatchesCpuReference()
+    {
+        using IBackend device = new VulkanBackend();
+        Fp8BlockLinearWideParity(device);
+    }
+
     [VulkanFact]
     public void Vulkan_Hadamard_MatchesCpuReference()
     {
@@ -122,6 +136,27 @@ public sealed class SharedBlockOpsParityTests
             device.Fp8BlockLinear(actual, input, weight, scale, biasTensor, block, block);
             AssertClose(expected.AsReadOnlySpan<float>().ToArray(), actual.AsReadOnlySpan<float>().ToArray(), 2e-4f, b is null ? "no bias" : "bias");
         }
+    }
+
+    // N above 65535 forces the Vulkan dispatch to split the output columns across workgroup chunks.
+    private static void Fp8BlockLinearWideParity(IBackend device)
+    {
+        CpuBackend cpu = new();
+        const int m = 1, n = 65600, k = 128, block = 128;
+        Random rng = new(41);
+        byte[] codes = RandomCodes(rng, n * k);
+        int gridRows = (n + block - 1) / block;
+        float[] scales = new float[gridRows];
+        Array.Fill(scales, 1.25f);
+        float[] x = Values(rng, m * k, 1f);
+        using Tensor input = Make(x, m, k);
+        using Tensor weight = MakeBytes(codes, n, k);
+        using Tensor scale = Make(scales, gridRows, 1);
+        using Tensor expected = new(new TensorShape(m, n), DType.F32);
+        using Tensor actual = new(new TensorShape(m, n), DType.F32);
+        cpu.Fp8BlockLinear(expected, input, weight, scale, null, block, block);
+        device.Fp8BlockLinear(actual, input, weight, scale, null, block, block);
+        AssertClose(expected.AsReadOnlySpan<float>().ToArray(), actual.AsReadOnlySpan<float>().ToArray(), 2e-4f, "wide output");
     }
 
     private static void AssertClose(float[] want, float[] got, float tolerance, string label)

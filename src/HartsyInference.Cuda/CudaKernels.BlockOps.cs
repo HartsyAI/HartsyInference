@@ -29,17 +29,17 @@ public sealed partial class CudaKernels
         if (CanLoad(hadamardPath))
         {
             _hadamardModule = LoadOwnedModule(hadamardPath);
-            _hadamardStageF32 = _hadamardModule.GetFunction("hadamard_stage_f32");
-            _hadamardScaleF32 = _hadamardModule.GetFunction("hadamard_scale_f32");
+            _hadamardStageF32 = _hadamardModule.TryGetFunction("hadamard_stage_f32");
+            _hadamardScaleF32 = _hadamardModule.TryGetFunction("hadamard_scale_f32");
         }
         string fp8LinearPath = Ptx("fp8_block_linear");
         if (CanLoad(fp8LinearPath))
         {
             _fp8BlockLinearModule = LoadOwnedModule(fp8LinearPath);
-            _fp8BlockLinearF32 = _fp8BlockLinearModule.GetFunction("fp8_block_linear_f32");
+            _fp8BlockLinearF32 = _fp8BlockLinearModule.TryGetFunction("fp8_block_linear_f32");
         }
         if (_latentQuantModule is not null && _actQuantDequantInplaceF32 != 0)
-            _actQuantDequantFp8x128F32 = _latentQuantModule.GetFunction("act_quant_dequant_fp8x128_inplace_f32");
+            _actQuantDequantFp8x128F32 = _latentQuantModule.TryGetFunction("act_quant_dequant_fp8x128_inplace_f32");
     }
 
     /// <summary>One butterfly stage over every row pair (src may equal dst); scale multiplies both outputs.</summary>

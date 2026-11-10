@@ -58,6 +58,8 @@ public sealed partial class VulkanBackend
         {
             return;
         }
+        // The workgroup count in X is capped at 65535 on the minimum Vulkan limit, so N is dispatched in chunks.
+        const uint maxGroups = 65535;
         using OpScope _op = EnterOp();
         List<VulkanBuffer> temps = new();
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * sizeof(float)));
@@ -70,15 +72,20 @@ public sealed partial class VulkanBackend
             VulkanKernel kernel = GetKernel("fp8_block_linear", storageBufferCount: 5, ReadOnlySpan<SpecConstant>.Empty);
             Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, wBuf.Handle, sBuf.Handle, bBuf.Handle, outBuf.Handle };
             Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
-            Authoring.PushConstants pc = new(pcBytes);
-            pc.U32((uint)m);
-            pc.U32((uint)n);
-            pc.U32((uint)k);
-            pc.U32((uint)blockRows);
-            pc.U32((uint)blockCols);
-            pc.U32((uint)((k + blockCols - 1) / blockCols));
-            pc.U32(bias is null ? 0u : 1u);
-            Dispatch(kernel, bufs, pc.Written, (uint)n, (uint)Math.Min(m, 65535), 1);
+            for (uint nBase = 0; nBase < n; nBase += maxGroups)
+            {
+                Authoring.PushConstants pc = new(pcBytes);
+                pc.U32((uint)m);
+                pc.U32((uint)n);
+                pc.U32((uint)k);
+                pc.U32((uint)blockRows);
+                pc.U32((uint)blockCols);
+                pc.U32((uint)((k + blockCols - 1) / blockCols));
+                pc.U32(bias is null ? 0u : 1u);
+                pc.U32(nBase);
+                uint groupsN = (uint)Math.Min(n - nBase, maxGroups);
+                Dispatch(kernel, bufs, pc.Written, groupsN, (uint)Math.Min(m, 65535), 1);
+            }
             CacheOutput(output, outBuf);
         }
         catch (Exception ex)
