@@ -57,6 +57,39 @@ public sealed class SanaWmGlumbTempFfnTests
     }
 
     [Fact]
+    public void Dispose_ReleasesTheTensorsItBuilt_AndLeavesTheBorrowedWeights()
+    {
+        // BF16 storage makes the FFN build both of its tensors: the F32 tap-major depthwise kernel, and the F32 copy of the
+        // BF16 depthwise bias. EnumerateWeights is [inverted, inverted bias, taps, depth bias, point, temporal].
+        using SanaWmGlumbTempCase c = SanaWmGlumbTempCase.Load(FixtureT3, SanaWmOperandMode.Bf16Storage);
+        Tensor[] weights = [.. c.Ffn.EnumerateWeights()];
+        Tensor taps = weights[2], depthBias = weights[3], borrowedBias = weights[1], point = weights[4];
+        Assert.Equal(DType.F32, depthBias.DType);
+        Assert.Equal(DType.BF16, borrowedBias.DType);
+
+        c.Ffn.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => taps.AsReadOnlySpan<float>());
+        Assert.Throws<ObjectDisposedException>(() => depthBias.AsReadOnlySpan<float>());
+        Assert.True(borrowedBias.AsReadOnlySpan<ushort>().Length > 0);   // borrowed from the case, still readable
+        Assert.True(point.AsReadOnlySpan<ushort>().Length > 0);
+        c.Ffn.Dispose();   // idempotent
+    }
+
+    [Fact]
+    public void Dispose_WithAnF32Bias_ReleasesTheTapsButNotTheBorrowedBias()
+    {
+        using SanaWmGlumbTempCase c = SanaWmGlumbTempCase.Load(FixtureT3, SanaWmOperandMode.Exact);
+        Tensor[] weights = [.. c.Ffn.EnumerateWeights()];
+        Tensor taps = weights[2], depthBias = weights[3];
+
+        c.Ffn.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => taps.AsReadOnlySpan<float>());
+        Assert.True(depthBias.AsReadOnlySpan<float>().Length > 0);   // F32 input: the FFN borrowed it, so it is not released
+    }
+
+    [Fact]
     public void Forward_ChunkedOneFrameAtATime_MatchesOneChunk()
     {
         IBackend backend = new CpuBackend();

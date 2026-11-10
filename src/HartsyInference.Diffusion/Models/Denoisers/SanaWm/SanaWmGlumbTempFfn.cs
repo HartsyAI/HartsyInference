@@ -6,12 +6,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// <summary>SANA-WM GLUMBConvTemp feed-forward. Tokens <c>[B, T·H·W, C]</c> (T-major) go through a gated 2-D conv per
 /// frame, then a temporal residual <c>y + Conv2d(C, C, (3, 1))(y)</c> over T, where <c>y</c> is the point-conv output.
 /// Activations and conv kernels share one dtype, F32 or BF16; biases are that dtype or F32. The weights are borrowed and must
-/// outlive the FFN.</summary>
+/// outlive the FFN, except for the two tensors it builds from them (the tap-major depthwise kernel, and the depthwise bias when
+/// it is cast to F32), which it owns and <see cref="Dispose"/> releases.</summary>
 /// <remarks>The gated conv runs on the tokens as they are (channels-last, as upstream's <c>permute</c> view feeds cuDNN): the 1×1
 /// convolutions are GEMMs over the token rows and the depthwise convolution and GLU are one fused channels-last op, so no
 /// activation is transposed. It is per frame, so it runs over chunks of frames: the hidden buffers, the largest in the block,
 /// never hold more than the chunk budget.</remarks>
-public sealed class SanaWmGlumbTempFfn
+public sealed class SanaWmGlumbTempFfn : IDisposable
 {
     /// <summary>Default budget of one hidden buffer, in elements: 64 MiB of BF16.</summary>
     public const long DefaultHiddenChunkElements = 1L << 25;
@@ -27,8 +28,10 @@ public sealed class SanaWmGlumbTempFfn
     private readonly Tensor _invBias;
     private readonly Tensor _depthTaps;
     private readonly Tensor _depthBias;
+    private readonly bool _ownsDepthBias;
     private readonly Tensor _pointWeight;
     private readonly Tensor _temporalWeight;
+    private int _disposed;
 
     /// <summary>Builds the FFN from upstream-layout weights: inverted <c>[2H, C, 1, 1]</c> with bias <c>[2H]</c>, depthwise
     /// <c>[2H, 1, 3, 3]</c> with bias <c>[2H]</c>, point <c>[C, H, 1, 1]</c> (no bias), temporal <c>[C, C, 3, 1]</c> (no bias).</summary>
@@ -75,9 +78,30 @@ public sealed class SanaWmGlumbTempFfn
         _invWeight = invWeight.Reshape(new TensorShape(2L * _hidden, _channels));
         _invBias = invBias;
         _depthTaps = TapMajor(depthWeight, 2 * _hidden);
-        _depthBias = depthBias.DType == DType.F32 ? depthBias : depthBias.CastTo(DType.F32);
-        _pointWeight = pointWeight.Reshape(new TensorShape(_channels, _hidden));
-        _temporalWeight = temporalWeight;
+        try
+        {
+            _ownsDepthBias = depthBias.DType != DType.F32;
+            _depthBias = _ownsDepthBias ? depthBias.CastTo(DType.F32) : depthBias;
+            _pointWeight = pointWeight.Reshape(new TensorShape(_channels, _hidden));
+            _temporalWeight = temporalWeight;
+        }
+        catch
+        {
+            // The constructor owns the taps it built; nothing else holds them yet.
+            _depthTaps.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Releases the tensors the FFN built from its weights; the borrowed weights stay the caller's. Call it after the
+    /// device copies of <see cref="EnumerateWeights"/> are freed. The FFN cannot run afterwards.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        _depthTaps.Dispose();
+        if (_ownsDepthBias)
+            _depthBias.Dispose();
     }
 
     /// <summary>The activation and conv-kernel dtype.</summary>

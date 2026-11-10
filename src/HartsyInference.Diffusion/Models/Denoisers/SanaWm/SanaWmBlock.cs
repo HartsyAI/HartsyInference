@@ -171,6 +171,8 @@ public sealed class SanaWmBlock : IDisposable
         _gdn?.Dispose();
         _gdnCamera?.Dispose();
         _softmaxCamera?.Dispose();
+        // Null when the constructor failed before it built the FFN.
+        _ffn?.Dispose();
         SanaWmTensors.DisposeAll(_owned);
     }
 
