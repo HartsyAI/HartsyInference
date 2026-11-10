@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.TextEncoders;
@@ -56,35 +57,10 @@ public sealed unsafe class Qwen3VlImageProcessor
     /// <paramref name="factor"/>, the area kept within [<paramref name="minPixels"/>, <paramref name="maxPixels"/>], aspect
     /// preserved, and the longer side capped at <paramref name="maxSideLength"/> when it is positive.</summary>
     public static (int height, int width) SmartResize(int height, int width, int factor, long minPixels, long maxPixels,
-        int maxSideLength = 0)
-    {
-        if (height < factor) height = factor;
-        if (width < factor) width = factor;
+        int maxSideLength = 0) =>
+        Core.Imaging.SmartResize.Compute(height, width, factor, minPixels, maxPixels, maxSideLength);
 
-        if (maxSideLength > 0 && Math.Max(height, width) > maxSideLength)
-        {
-            double beta = (double)Math.Max(height, width) / maxSideLength;
-            height = Math.Max(factor, (int)Math.Floor(height / beta));
-            width = Math.Max(factor, (int)Math.Floor(width / beta));
-        }
-
-        int hBar = Math.Max(factor, (int)Math.Round((double)height / factor) * factor);
-        int wBar = Math.Max(factor, (int)Math.Round((double)width / factor) * factor);
-
-        if ((long)hBar * wBar > maxPixels)
-        {
-            double beta = Math.Sqrt((double)height * width / maxPixels);
-            hBar = Math.Max(factor, (int)Math.Floor(height / beta / factor) * factor);
-            wBar = Math.Max(factor, (int)Math.Floor(width / beta / factor) * factor);
-        }
-        else if ((long)hBar * wBar < minPixels)
-        {
-            double beta = Math.Sqrt((double)minPixels / (height * width));
-            hBar = (int)Math.Ceiling(height * beta / factor) * factor;
-            wBar = (int)Math.Ceiling(width * beta / factor) * factor;
-        }
-        return (hBar, wBar);
-    }
+    private VisionPatchSpec Spec => new(_config.PatchSize, _config.SpatialMergeSize, _config.TemporalPatchSize, _config.InChannels);
 
     /// <summary>Preprocesses one RGB image tensor <c>[3, H, W]</c> (values in <c>[0, 1]</c>).</summary>
     /// <returns><c>pixelValues [numPatches, patchEmbedInDim]</c> and grid <c>(t, h, w)</c> in patch units.</returns>
@@ -96,42 +72,12 @@ public sealed unsafe class Qwen3VlImageProcessor
         int srcW = (int)rgb.Shape[2];
         (int dstH, int dstW) = SmartResize(srcH, srcW);
 
-        // Bilinear resize + normalize into a [3, dstH, dstW] buffer.
+        // Bilinear resize + normalize into a [3, dstH, dstW] buffer; a still image repeats across the temporal patch.
         float[] img = ResizeAndNormalize(rgb, srcH, srcW, dstH, dstW, _mean, _std);
-
-        int patch = _config.PatchSize;
-        int merge = _config.SpatialMergeSize;
-        int temporal = _config.TemporalPatchSize;
-        int channels = _config.InChannels;
-        int gridH = dstH / patch;
-        int gridW = dstW / patch;
-        int hBlocks = gridH / merge;
-        int wBlocks = gridW / merge;
-        int numPatches = gridH * gridW;
-        int featDim = channels * temporal * patch * patch;
-
-        Tensor pixelValues = new Tensor(new TensorShape(numPatches, featDim), DType.F32);
-        float* dst = (float*)pixelValues.DataPointer;
-
-        int token = 0;
-        for (int hb = 0; hb < hBlocks; hb++)
-            for (int wb = 0; wb < wBlocks; wb++)
-                for (int mh = 0; mh < merge; mh++)
-                    for (int mw = 0; mw < merge; mw++)
-                    {
-                        int row0 = (hb * merge + mh) * patch;
-                        int col0 = (wb * merge + mw) * patch;
-                        float* tokenDst = dst + (long)token * featDim;
-                        int idx = 0;
-                        for (int c = 0; c < channels; c++)
-                            for (int tp = 0; tp < temporal; tp++) // still image: identical across temporal frames
-                                for (int ph = 0; ph < patch; ph++)
-                                    for (int pw = 0; pw < patch; pw++)
-                                        tokenDst[idx++] = img[(long)c * dstH * dstW + (row0 + ph) * dstW + (col0 + pw)];
-                        token++;
-                    }
-
-        return (pixelValues, 1, gridH, gridW);
+        float[][] temporal = new float[_config.TemporalPatchSize][];
+        Array.Fill(temporal, img);
+        Tensor pixelValues = VisionPatchPreprocessor.Patchify(temporal, dstH, dstW, Spec);
+        return (pixelValues, 1, dstH / _config.PatchSize, dstW / _config.PatchSize);
     }
 
     /// <summary>Preprocesses one temporal patch of RGB frames (<c>[3, H, W]</c> each, values in <c>[0, 1]</c>) as a
@@ -165,39 +111,8 @@ public sealed unsafe class Qwen3VlImageProcessor
         float[][] imgs = new float[temporal][];
         for (int i = 0; i < temporal; i++)
             imgs[i] = ResizeAndNormalize(frames[i], srcH, srcW, dstH, dstW, _mean, _std);
-
-        int patch = _config.PatchSize;
-        int merge = _config.SpatialMergeSize;
-        int channels = _config.InChannels;
-        int gridH = dstH / patch;
-        int gridW = dstW / patch;
-        int hBlocks = gridH / merge;
-        int wBlocks = gridW / merge;
-        int numPatches = gridH * gridW;
-        int featDim = channels * temporal * patch * patch;
-
-        Tensor pixelValues = new Tensor(new TensorShape(numPatches, featDim), DType.F32);
-        float* dst = (float*)pixelValues.DataPointer;
-
-        int token = 0;
-        for (int hb = 0; hb < hBlocks; hb++)
-            for (int wb = 0; wb < wBlocks; wb++)
-                for (int mh = 0; mh < merge; mh++)
-                    for (int mw = 0; mw < merge; mw++)
-                    {
-                        int row0 = (hb * merge + mh) * patch;
-                        int col0 = (wb * merge + mw) * patch;
-                        float* tokenDst = dst + (long)token * featDim;
-                        int idx = 0;
-                        for (int c = 0; c < channels; c++)
-                            for (int tp = 0; tp < temporal; tp++)
-                                for (int ph = 0; ph < patch; ph++)
-                                    for (int pw = 0; pw < patch; pw++)
-                                        tokenDst[idx++] = imgs[tp][(long)c * dstH * dstW + (row0 + ph) * dstW + (col0 + pw)];
-                        token++;
-                    }
-
-        return (pixelValues, 1, gridH, gridW);
+        Tensor pixelValues = VisionPatchPreprocessor.Patchify(imgs, dstH, dstW, Spec);
+        return (pixelValues, 1, dstH / _config.PatchSize, dstW / _config.PatchSize);
     }
 
     private static float[] ResizeAndNormalize(Tensor rgb, int srcH, int srcW, int dstH, int dstW,

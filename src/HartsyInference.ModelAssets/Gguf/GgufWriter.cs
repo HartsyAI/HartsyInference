@@ -93,6 +93,17 @@ public sealed class GgufWriter : IDisposable
     /// <summary>Number of tensors registered so far.</summary>
     public int TensorCount => _tensors.Count;
 
+    /// <summary>How many lazily produced tensors are converted at once while <see cref="Flush"/> writes them in order: 1 (the default)
+    /// produces each only when it is written; a larger value overlaps that many conversions, holding up to that many converted tensors
+    /// in memory. Raise it only when the producers are safe to run concurrently.</summary>
+    public int ProduceAhead
+    {
+        get => _produceAhead;
+        set => _produceAhead = value >= 1 ? value : throw new ArgumentOutOfRangeException(nameof(value), value, "ProduceAhead must be at least 1.");
+    }
+
+    private int _produceAhead = 1;
+
     /// <summary>Writes the GGUF file. All registered tensors are emitted in registration order.</summary>
     public void Flush()
     {
@@ -125,23 +136,53 @@ public sealed class GgufWriter : IDisposable
         for (long i = 0; i < padding; i++) w.Write((byte)0);
 
         long dataStart = fs.Position;
-        foreach (TensorEntry t in _tensors)
+        // Lazy tensors are produced up to ProduceAhead at a time on the pool and written strictly in registration order.
+        Dictionary<int, Task<Tensor>> pending = [];
+        void StartThrough(int first, int last)
         {
-            long expectedAbsolute = dataStart + t.RelativeOffset;
-            long padToHere = expectedAbsolute - fs.Position;
-            for (long i = 0; i < padToHere; i++) w.Write((byte)0);
-            WriteEntryData(w, t);
+            for (int j = first; j <= last && j < _tensors.Count; j++)
+            {
+                if (_tensors[j].Produce is { } produce && !pending.ContainsKey(j) && _tensors[j].Tensor is null)
+                    pending[j] = _produceAhead == 1 ? Task.FromResult(produce()) : Task.Run(produce);
+            }
+        }
+        int started = -1;
+        try
+        {
+            for (int i = 0; i < _tensors.Count; i++)
+            {
+                TensorEntry t = _tensors[i];
+                if (_produceAhead > 1 && i + _produceAhead - 1 > started)
+                {
+                    StartThrough(Math.Max(i, started + 1), i + _produceAhead - 1);
+                    started = i + _produceAhead - 1;
+                }
+                long expectedAbsolute = dataStart + t.RelativeOffset;
+                long padToHere = expectedAbsolute - fs.Position;
+                for (long p = 0; p < padToHere; p++) w.Write((byte)0);
+                if (t.Tensor is not null)
+                {
+                    WriteTensorData(w, t.Tensor);
+                    continue;
+                }
+                if (!pending.Remove(i, out Task<Tensor>? task)) task = Task.FromResult(t.Produce!());
+                using Tensor produced = task.GetAwaiter().GetResult();
+                WriteProduced(w, t, produced);
+            }
+        }
+        finally
+        {
+            // A failure part-way still owns the tensors produced ahead of it.
+            foreach (Task<Tensor> task in pending.Values)
+            {
+                try { task.GetAwaiter().GetResult().Dispose(); }
+                catch { /* the failure being reported is the first one */ }
+            }
         }
     }
 
-    private static void WriteEntryData(BinaryWriter w, TensorEntry entry)
+    private static void WriteProduced(BinaryWriter w, TensorEntry entry, Tensor produced)
     {
-        if (entry.Tensor is not null)
-        {
-            WriteTensorData(w, entry.Tensor);
-            return;
-        }
-        using Tensor produced = entry.Produce!();
         if (produced.DType != entry.DType || produced.Shape.ElementCount != entry.Shape.ElementCount)
         {
             throw new InvalidDataException(

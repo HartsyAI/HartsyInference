@@ -217,6 +217,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly nint _maxpool2dF16;
     private readonly nint _depthwiseConv2dF32;
     private readonly nint _depthwiseConv2dF16;
+    private readonly nint _depthwiseConv2dBf16;
     private readonly nint _msdaForwardF32;
 
     // ── Softmax function handles ─────────────────────────────────────────
@@ -643,6 +644,7 @@ public sealed partial class CudaKernels : IDisposable
         _depthwiseConv2dModule = LoadOwnedModule(Ptx("depthwise_conv2d"));
         _depthwiseConv2dF32 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f32");
         _depthwiseConv2dF16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f16");
+        _depthwiseConv2dBf16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_bf16");
 
         _msdaModule = LoadOwnedModule(Ptx("msda"));
         _msdaForwardF32 = _msdaModule.GetFunction("msda_forward_f32");
@@ -1090,6 +1092,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
+        LoadBlockOpKernels();
         LoadLayoutKernels();
         LoadRotaryKernels();
         LoadNormModulateKernels();
@@ -1664,7 +1667,8 @@ public sealed partial class CudaKernels : IDisposable
         int hasBias, int n, int channels, int inH, int inW, int outH, int outW,
         int kH, int kW, int strideH, int strideW, int padH, int padW, nint stream)
     {
-        nint func = dtype == DType.F16 ? _depthwiseConv2dF16 : _depthwiseConv2dF32;
+        nint func = dtype == DType.F16 ? _depthwiseConv2dF16
+            : dtype == DType.BF16 ? _depthwiseConv2dBf16 : _depthwiseConv2dF32;
         ulong outArg = output, inArg = input, wArg = weight, bArg = bias;
         int hasBiasArg = hasBias;
         uint nArg = (uint)n, chArg = (uint)channels, inHArg = (uint)inH, inWArg = (uint)inW;

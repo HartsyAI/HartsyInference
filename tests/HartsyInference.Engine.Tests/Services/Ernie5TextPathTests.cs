@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Sampling;
@@ -168,6 +169,33 @@ public sealed class Ernie5TextPathTests : IDisposable
 
         Assert.True(result.TokenIds.Count <= 2);
         Assert.True(result.PromptTokens > 0);
+    }
+
+    [Fact]
+    public void Chat_template_receives_the_bos_literal_as_its_special_id()
+    {
+        HfCheckpointInfo info = Probe(WriteCheckpoint("template-bos"));
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+
+        int[] ids = model.Template.Encode(model.Tokenizer, [new ChatMessage("user", "hi")], addGenerationPrompt: false);
+
+        Assert.Equal(Ernie5SyntheticCheckpoint.BosId, ids[0]);
+    }
+
+    [Fact]
+    public void Generation_config_stop_ids_reach_the_tokenizer_once_each()
+    {
+        string dir = WriteCheckpoint("stop-ids");
+        File.WriteAllText(Path.Combine(dir, "generation_config.json"), "{\"eos_token_id\": [257, 100, 257]}");
+        HfCheckpointInfo info = Probe(dir);
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+
+        IReadOnlyList<int> stops = model.Tokenizer.StopIds;
+
+        Assert.Contains(100, stops);
+        Assert.Equal(1, stops.Count(id => id == Ernie5SyntheticCheckpoint.EosId));
     }
 
     private string WriteCheckpoint(string name)

@@ -91,7 +91,7 @@ internal static class Ernie5SyntheticCheckpoint
         File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson());
         File.WriteAllText(Path.Combine(directory, "tokenizer.json"), TokenizerJson());
         File.WriteAllText(Path.Combine(directory, "tokenizer_config.json"), "{\"bos_token\": \"<s>\", \"eos_token\": \"</s>\"}");
-        File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{% for message in messages %}{{ message['content'] }}{% endfor %}");
+        File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
         Ernie5Config config = Ernie5Config.Parse(ConfigJson());
         WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed);
     }

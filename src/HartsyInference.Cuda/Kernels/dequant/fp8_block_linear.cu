@@ -1,0 +1,41 @@
+// Linear over an FP8 e4m3 weight with F32 block scales, dequantized in the product (see IBackend.Fp8BlockLinear):
+//   y[m, n] = sum_k x[m, k] * e4m3(w[n, k]) * scale[n / blockRows, k / blockCols] + bias[n]
+// One block of 128 threads per output column n; the block loops over the rows m and reduces each dot product in shared
+// memory. The weight stays packed in device memory; each element is decoded where it is read.
+
+#define FP8_LINEAR_THREADS 128
+
+__device__ __forceinline__ float fp8_linear_decode_e4m3(unsigned int code)
+{
+    const int e = (code >> 3) & 0xF, m = code & 7;
+    if (e == 0xF && m == 7) return __int_as_float(0x7fc00000);
+    const float sign = (code & 0x80u) ? -1.0f : 1.0f;
+    if (e == 0) return __fmul_rn(__fmul_rn(sign, (float)m), 0.001953125f);
+    return __fmul_rn(sign, __int_as_float(((e + 120) << 23) | (m << 20)));
+}
+
+extern "C" __global__ void fp8_block_linear_f32(const float* x, const unsigned char* w, const float* scale, const float* bias,
+                                                float* y, int M, int N, int K, int blockRows, int blockCols, int gridCols)
+{
+    __shared__ float partial[FP8_LINEAR_THREADS];
+    const int n = blockIdx.x;
+    const unsigned char* wRow = w + (long long)n * K;
+    const float* scaleRow = scale + (long long)(n / blockRows) * gridCols;
+    const float biasN = bias == nullptr ? 0.0f : bias[n];
+    for (int m = blockIdx.y; m < M; m += gridDim.y)
+    {
+        const float* xRow = x + (long long)m * K;
+        float acc = 0.0f;
+        for (int k = threadIdx.x; k < K; k += FP8_LINEAR_THREADS)
+            acc = __fadd_rn(acc, __fmul_rn(xRow[k], __fmul_rn(fp8_linear_decode_e4m3(wRow[k]), scaleRow[k / blockCols])));
+        partial[threadIdx.x] = acc;
+        __syncthreads();
+        for (int s = FP8_LINEAR_THREADS / 2; s > 0; s >>= 1)
+        {
+            if (threadIdx.x < s) partial[threadIdx.x] = __fadd_rn(partial[threadIdx.x], partial[threadIdx.x + s]);
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) y[(long long)m * N + n] = __fadd_rn(partial[0], biasN);
+        __syncthreads();
+    }
+}

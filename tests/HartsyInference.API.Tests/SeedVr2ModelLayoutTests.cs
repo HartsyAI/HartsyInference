@@ -71,7 +71,7 @@ public sealed class SeedVr2ModelLayoutTests : IDisposable
     public void Transformer7BNumz_OldInstallNameIsStillFound_SoNothingIsRedownloaded()
     {
         // Installs from the previous catalog saved the numz 7B transformer under its numz name.
-        string installed = Place("Stable-Diffusion/SeedVR2", "seedvr2_ema_7b_fp16.safetensors");
+        string installed = Place(Path.Combine("Stable-Diffusion", "SeedVR2"), "seedvr2_ema_7b_fp16.safetensors");
         Assert.Equal(installed, ModelDownloader.TargetPath(Asset("seedvr2-7b-numz", "transformer")));
         Assert.DoesNotContain(ModelDownloader.MissingAssets(ModelCatalog.Find("seedvr2-7b-numz")!), asset => asset.Role == "transformer");
     }

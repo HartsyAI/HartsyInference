@@ -1,3 +1,4 @@
+using HartsyInference.Core.Imaging;
 using HartsyInference.Vision.Codec;
 
 namespace HartsyInference.ThreeD.Models.HairDeck.Preprocessing;

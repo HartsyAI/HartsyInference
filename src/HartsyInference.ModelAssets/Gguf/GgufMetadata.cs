@@ -40,6 +40,32 @@ public sealed class GgufMetadata
         return defaultValue;
     }
 
+    /// <summary>Gets an integer metadata value stored as any GGUF integer type (converters differ: one writes uint32, another
+    /// int32), or the default when absent or not an integer.</summary>
+    /// <exception cref="OverflowException">The stored value does not fit an int.</exception>
+    public int GetInteger(string key, int defaultValue = 0) =>
+        _values.TryGetValue(key, out object? value) && value is byte or sbyte or short or ushort or int or uint or long or ulong
+            ? Convert.ToInt32(value)
+            : defaultValue;
+
+    /// <summary>Gets an integer array stored as any GGUF integer element type, or null when absent or not an integer array.</summary>
+    public int[]? GetIntegerArray(string key)
+    {
+        if (!_values.TryGetValue(key, out object? value)) return null;
+        return value switch
+        {
+            int[] ints => ints,
+            uint[] uints => uints.Select(u => checked((int)u)).ToArray(),
+            long[] longs => longs.Select(l => checked((int)l)).ToArray(),
+            ulong[] ulongs => ulongs.Select(u => checked((int)u)).ToArray(),
+            short[] shorts => shorts.Select(s => (int)s).ToArray(),
+            ushort[] ushorts => ushorts.Select(s => (int)s).ToArray(),
+            byte[] bytes => bytes.Select(b => (int)b).ToArray(),
+            sbyte[] sbytes => sbytes.Select(b => (int)b).ToArray(),
+            _ => null,
+        };
+    }
+
     /// <summary>Gets a float32 metadata value, or the default if not found.</summary>
     public float GetFloat32(string key, float defaultValue = 0f)
     {

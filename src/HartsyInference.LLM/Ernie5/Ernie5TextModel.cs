@@ -48,13 +48,15 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         (string? bosLiteral, string? eosLiteral) = HfChatAssets.SpecialTokenLiterals(directory);
         ILlmTokenizer tokenizer;
         IChatTemplate template;
+        List<int> stopIds = StopIds(directory, config);
         try
         {
-            (tokenizer, template) = HfChatAssets.Load(directory, StopIds(directory, config), bosLiteral, eosLiteral);
+            (tokenizer, template) = HfChatAssets.Load(directory, stopIds, bosLiteral, eosLiteral);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException)
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException or FormatException)
         {
-            throw new HartsyInferenceException($"'{tokenizerPath}' is not a usable byte-level BPE tokenizer: {ex.Message}", ex);
+            // Both files come through one call, so the message names both rather than guessing which one failed.
+            throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
         Ernie5Model model = Ernie5Model.Load(directory, backend, options);
@@ -87,16 +89,22 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         {
             using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
             if (!document.RootElement.TryGetProperty("eos_token_id", out JsonElement value)) return ids;
-            if (value.ValueKind == JsonValueKind.Number) ids.Add(value.GetInt32());
+            if (value.ValueKind == JsonValueKind.Number) ids.Add(StopId(value, path));
             else if (value.ValueKind == JsonValueKind.Array)
                 foreach (JsonElement item in value.EnumerateArray())
-                    if (item.ValueKind == JsonValueKind.Number) ids.Add(item.GetInt32());
+                    if (item.ValueKind == JsonValueKind.Number) ids.Add(StopId(item, path));
         }
         catch (JsonException ex)
         {
             throw new HartsyInferenceException($"'{path}' is not valid JSON: {ex.Message}", ex);
         }
         return [.. ids.Distinct()];
+    }
+
+    private static int StopId(JsonElement value, string path)
+    {
+        if (value.TryGetInt32(out int id)) return id;
+        throw new HartsyInferenceException($"'{path}' names eos_token_id {value.GetRawText()}, which is not a 32-bit token id.");
     }
 
     /// <inheritdoc />
