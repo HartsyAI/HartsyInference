@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends.Contracts;
+using HartsyInference.Core.Backends.Host;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -213,27 +215,28 @@ public partial interface IBackend
             }
     }
 
-    /// <summary>Depthwise 2D convolution (groups=C), weight <c>[C,1,kH,kW]</c> — used by YOLO11's class branch and C2PSA encoding.</summary>
+    /// <summary>Depthwise 2D convolution (groups=C), weight <c>[C,1,kH,kW]</c> — used by YOLO11's class branch and C2PSA encoding.
+    /// The host reference takes F32 output from F32 operands, or BF16 output from F32/BF16 operands (rounded to BF16 first, as CUDA does).</summary>
     unsafe void Conv2dDepthwise(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int strideH, int strideW, int padH, int padW)
     {
+        if (output.DType == DType.BF16)
+        {
+            DepthwiseConv2dReference.ComputeBf16(output, input, weight, bias, strideH, strideW, padH, padW);
+            return;
+        }
         if (input.DType != DType.F32 || output.DType != DType.F32 || weight.DType != DType.F32)
-            throw new NotSupportedException($"Conv2dDepthwise default fallback only supports F32 — got input={input.DType}, output={output.DType}, weight={weight.DType}.");
-        if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
-            throw new ArgumentException($"Conv2dDepthwise requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
-        if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
-            throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
-        if (input.Shape[1] != weight.Shape[0] || output.Shape[1] != weight.Shape[0])
-            throw new ArgumentException("Conv2dDepthwise requires input/output channel count to equal weight channel count.");
+            throw new NotSupportedException($"Conv2dDepthwise default fallback only supports F32 (or BF16 output) — got input={input.DType}, output={output.DType}, weight={weight.DType}.");
 
-        int n = (int)input.Shape[0];
-        int c = (int)input.Shape[1];
-        int iH = (int)input.Shape[2];
-        int iW = (int)input.Shape[3];
-        int oH = (int)output.Shape[2];
-        int oW = (int)output.Shape[3];
-        int kH = (int)weight.Shape[2];
-        int kW = (int)weight.Shape[3];
+        DepthwiseConv2dGeometry g = DepthwiseConv2dContract.Validate(input, weight, bias, output);
+        int n = g.Batch;
+        int c = g.Channels;
+        int iH = g.InH;
+        int iW = g.InW;
+        int oH = g.OutH;
+        int oW = g.OutW;
+        int kH = g.KernelH;
+        int kW = g.KernelW;
 
         float* srcBase = (float*)input.DataPointer;
         float* dstBase = (float*)output.DataPointer;
