@@ -3,6 +3,25 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.415
+
+- **Fixed: multi-image and video prefill no longer grows with frames squared.** The gated cross-attention layer (MOSS-VL)
+  ran every prompt row's attention once per image group, projected each, and masked away all but one group's rows. Groups whose
+  rows are one contiguous range (every MOSS-VL group) now attend only their own rows over their key prefix, the results are
+  stitched in row order and projected once, and their `[1, T, hidden]` row masks are no longer built. Same results (segmented and
+  single forwards agree within 1.2e-3; the video reply is unchanged). MOSS-VL GGUF prefill on Vulkan (RTX 3060):
+
+  | frames | before | after |
+  |---|---|---|
+  | 16 | 5.2 s | 0.9 s |
+  | 32 | 35.0 s | 2.3–3.4 s |
+  | 64 | 378 s | 10.2 s |
+
+  Decode with 64 frames held went from 12.1 to 20.4 tok/s; up to 32 frames it stays at 30.5 to 31.8 tok/s (28.4 before at 32
+  frames). Groups without a range keep the masked path, with the output projection now applied once to the summed groups.
+- **Added: `MossVlProfileTests`** (`Category=GpuBenchmark`, opt-in `HARTSY_MOSS_VL_PROFILE=1`): vision tower per frame (about
+  325 ms for a 256×256 frame on Vulkan), prefill and decode by frame count.
+
 ## alpha.414
 
 - **Added: the MOSS-VL NF4 and FP8 releases load from their folders.** `hartsy text --model-path <MOSS-VL-Realtime-NF4> --precision
