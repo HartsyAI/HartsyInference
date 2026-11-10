@@ -1,6 +1,6 @@
 # Changelog
 
-## alpha.408
+## alpha.416
 
 - **Added: SANA-WM stage 1 (`sana-wm`).** `hartsy world -m sana-wm --image <png> --prompt-file <txt> --intrinsics fx,fy,cx,cy
   (--actions "w-80,dw-40,aw-40" | --camera poses.npy)` renders up to 161 frames at 704x1280 and 16 fps from one image, a prompt
