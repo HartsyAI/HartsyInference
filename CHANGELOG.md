@@ -14,6 +14,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
   `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
   fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
+
 ## alpha.416
 
 - **Added: SANA-WM stage 1 (`sana-wm`).** `hartsy world -m sana-wm --image <png> --prompt-file <txt> --intrinsics fx,fy,cx,cy
