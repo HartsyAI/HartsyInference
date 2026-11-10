@@ -58,11 +58,10 @@ public sealed partial class VulkanBackend
             return;
         }
         using OpScope _op = EnterOp();
-        List<VulkanBuffer> temps = new();
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(int)));
         try
         {
-            VulkanBuffer tBuf = cols == 0 ? Placeholder(temps) : GetBuffer(topk);
+            VulkanBuffer tBuf = GetBuffer(topk);
             VulkanBuffer pBuf = GetBuffer(positions);
             VulkanKernel kernel = GetKernel("merge_window_topk", storageBufferCount: 3, _default1DSpec);
             Span<ulong> bufs = stackalloc ulong[] { tBuf.Handle, pBuf.Handle, outBuf.Handle };
@@ -84,10 +83,6 @@ public sealed partial class VulkanBackend
             Logs.Error("Vulkan MergeWindowTopK dispatch failed", ex);
             outBuf.Dispose();
             throw;
-        }
-        finally
-        {
-            FreeTemps(temps);
         }
     }
 }

@@ -51,7 +51,7 @@ public sealed partial class CudaBackend
         bool cached = false;
         try
         {
-            pT = cols == 0 ? 0 : GpuTransferHelper.CopyToDevice(topk);
+            pT = GpuTransferHelper.CopyToDevice(topk);
             pP = GpuTransferHelper.CopyToDevice(positions);
             pOut = GpuTransferHelper.AllocateDevice(bytes);
             _kernels.LaunchMergeWindowTopK(pT, pP, pOut, (long)tokens * width, cols, window, width, _stream.Handle);
