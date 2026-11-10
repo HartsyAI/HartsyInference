@@ -4,9 +4,10 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.World.Pipelines.SanaWm;
 
 /// <summary>Which dtype a SANA-WM stream holds its softmax windows and key tails in between chunks. BF16 is upstream's own
-/// storage and halves those states (about 0.9 GB at 720p); each pass then widens them again, about 40 ms per pass on a
-/// 4090 (+9% chunk time, measured). F32 holds them as computed and is faster. So the narrow form is for a card with no
-/// room for the wide one, which <c>auto</c> takes to be a device of 16 GiB or less, and F32 is for the rest.</summary>
+/// storage and halves those states (about 0.9 GB at 720p); each pass then widens them again. F32 holds them as computed
+/// and skips those conversions. So the narrow form is for a card with no room for the wide one, which <c>auto</c> takes to
+/// be a device of 16 GiB or less, and F32 is for the rest. The cost of the widening alone has not been measured on a large
+/// card (a slowdown first blamed on it was the 16-bit join in <c>StreamingTensors.Concat</c>).</summary>
 public static class SanaWmStreamState
 {
     /// <summary>The largest device, in bytes, on which <c>auto</c> holds the state in BF16: a 12 GB card runs out of memory

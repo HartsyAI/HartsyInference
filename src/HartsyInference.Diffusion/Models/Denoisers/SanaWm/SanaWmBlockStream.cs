@@ -11,9 +11,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.SanaWm;
 /// upstream's <c>S_kv</c> slot and equal to its camera slot; keys and values are head-major <c>[1, H, N, D]</c>.
 /// <para>Storage dtype is a choice of the stream: with a <c>stateDType</c> of BF16 (upstream's cache holds its keys, values and
 /// key-convolution inputs in BF16) the softmax windows and the two key tails are stored narrow and widened on every pass
-/// that reads them; with null they are stored as computed (F32). BF16 halves those states, about 0.9 GB at 720p, and costs
-/// about 40 ms per pass on a 4090 to widen them again, so it is the choice of a card with no room for F32, not a default
-/// (see <c>SanaWmStreamState</c>). Scan states stay F32 (they are small and recur), and the FFN tail keeps its own dtype. A
+/// that reads them; with null they are stored as computed (F32). BF16 halves those states, about 0.9 GB at 720p, at the
+/// price of widening them again on every pass, so it is the choice of a card with no room for F32 (see
+/// <c>SanaWmStreamState</c>). Scan states stay F32 (they are small and recur), and the FFN tail keeps its own dtype. A
 /// pass that closes a chunk converts only what it stages, so the F32 chunk tensors are released as soon as the narrow copies
 /// exist.</para></remarks>
 internal sealed class SanaWmBlockStream

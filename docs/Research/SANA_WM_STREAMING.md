@@ -237,6 +237,17 @@ frames, stage 1 only, upstream's noise and first latent injected; a real run, no
 | time | chunk 0 at 12.9 s including model loads, then 2.11 s and 1.74 s per 24-frame chunk (0.86× real time); upstream 2.13 s |
 | device memory | 10.98 GiB in use, about 1 GiB of it other processes |
 
+**Live action script on the 4090** (parent session, 2026-11-09, `d55f74893`): `hartsy world -m sana-wm-streaming … --intrinsics
+fx,fy,cx,cy --frames 73 --actions "w-24,d-24,s-24"` (forward, turn right, reverse) runs end to end through the live camera
+path (no poses; the script is queued into `LiveCameraPath`) and writes 73 frames and an MP4 in about 39 s of wall time; the
+view follows the script. Against an upstream streaming run with the same script (`--camera-source action`) and upstream's
+noise injected: per-frame PSNR 49 dB for the forward chunk, 46 to 47 dB for the turn, 34 to 42 dB for the reverse; SSIM
+min 0.986. The frames are the same picture; the differences sit on the edges of invented texture, and the sky and horizon
+differ by about 0, so the camera is right. The reverse chunk's lower PSNR is the model, not the port: reversing makes stage 1
+invent dark cracked rock at the bottom right, upstream does the same from the same input, and small BF16 differences grow on
+invented detail. The refiner may clean it up (not tested). Still open: the CLI keeps every frame until the end, so
+`--interactive` and `--unbounded` do not show the video live yet (progressive MP4 and preview, assigned to the parent session).
+
 Open from the same report: `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass.
 Harmless at a window of two chunks; worth caching the joined window across the five passes of a chunk if the window grows.
 (The report's other item, BF16 softmax storage, is applied; see the next section.)
@@ -302,17 +313,25 @@ residency.
 (was 44.9 / 47.7), SSIM min 0.9972: within the BF16 floor. Device peak 13.3 GB (was 14.2), committed state at the save passes
 792, 2018 and 2244 MB (was 1431, 3221, 3672). Speed: 1.89 s per chunk against 1.74 s (+9%); a pass that reads the window took
 212 to 231 ms against 170 to 185 (about +41 ms, the same in chunks 1 and 2 although chunk 2's window is larger, so it is not
-bandwidth; chunk 0, which has no state, is unchanged at about 205 ms). The widening is 70-odd cast launches, fresh pool
-allocations and joins per pass; where the 41 ms goes was not profiled.
+bandwidth; chunk 0, which has no state, is unchanged at about 205 ms).
 
-So the narrow state is a choice, not a default. **`vram.sanaWmStreamState`** (`auto`, `f32`, `bf16`; `SanaWmStreamState`)
-picks it: `auto` holds the state in BF16 on a device of 16 GiB or less, which is where F32 runs out of memory, and as
-computed (F32) on a larger one, which has the room and the speed. The 4090 therefore runs as it did before the BF16 change;
-the log line `[SANA-WM] streaming state held as …` says which was chosen.
+**The slowdown was not the widening.** An A/B of the replay showed the same +43 ms per windowed pass with the state in F32,
+and the replay's opt-in stage profile (`SANAWM_STREAM_PROFILE=1`) put all of it in `mlp.temporal`: the FFN temporal conv
+joins its BF16 tail with the BF16 point-conv output through `StreamingTensors.Concat`, and the 16-bit scatter added for the
+CPU backend (below) ran on CUDA too, one strided copy per part, about five times slower than `Concat` on that op. The fix
+(`d55f74893`, by the parent session) takes `backend.Concat` on every backend but the CPU. After it: 4090 with F32 state
+1.75 to 1.76 s per chunk (the original 1.74), replay passes 170 to 187 ms, device peak 13.1 GB; 3060 with BF16 state 7.6 to
+7.8 s per chunk, device peak 10.79 GB. What widening a BF16 state costs on its own was not separately measured after
+the fix, because the 4090 runs F32 under `auto`.
+
+**`vram.sanaWmStreamState`** (`auto`, `f32`, `bf16`; `SanaWmStreamState`) picks the storage: `auto` holds the state in BF16 on
+a device of 16 GiB or less, which is where F32 runs out of memory, and as computed (F32) on a larger one, which has the room
+and skips the conversions. The log line `[SANA-WM] streaming state held as …` says which was chosen. The threshold is a
+memory argument; if a later A/B shows BF16 costs nothing on a large card, `auto` could take BF16 everywhere.
 
 Considered and not done:
 - *Widening the window once per chunk and reusing it for the chunk's passes.* The window cannot change during a chunk, so
-  this is the obvious fix for the speed, but the cached F32 copy (1.1 GB for the windows, 0.7 GB for the tails) would sit
+  this was the obvious fix for what looked like a widening cost (it was the `Concat` scatter, above). The cached F32 copy (1.1 GB for the windows, 0.7 GB for the tails) would sit
   beside the committed BF16 state and the staged chunk at the save pass, 0.5 GB over the F32 design at the one point the
   3060 had no memory (11904 of 11912 MiB). Releasing it before the save pass leaves a widen per chunk for that pass.
 - *Attention over BF16 operands without widening* (Q, the joined K and V and the output in BF16, the output widened after):
