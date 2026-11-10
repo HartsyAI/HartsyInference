@@ -14,6 +14,9 @@ namespace HartsyInference.API.Endpoints;
 /// <remarks>
 /// <para>Opening loads the model through the long-running queue. After that the session runs on its own loop: it holds its device's text
 /// slot until closed and takes the device gate per forward, so it does not hold a queue slot for its lifetime.</para>
+/// <para>Events are buffered until a stream reads them: a client that only pushes input grows the session's memory, and a later stream
+/// replays the backlog (which is what a reconnect wants). One stream at a time; a second gets 409. A session whose loop failed
+/// (a cap reached, the decoder faulted) reports an <c>error</c> event and is closed, and later input to it is a 404.</para>
 /// <para>TODO(websocket): one duplex WebSocket (frames and prompts up, events down) would remove the per-frame HTTP round trip and the
 /// separate SSE connection. The session contract (<see cref="IRealtimeVlmSession"/>) is transport-neutral, so a WebSocket route can drive
 /// it directly; measure the per-frame POST cost at camera rates before adding one.</para>
@@ -96,17 +99,30 @@ public static class RealtimeEndpoints
                 await HartsyInferenceServiceExtensions.WriteErrorAsync(ctx, StatusCodes.Status404NotFound, NotFoundMessage(id), "invalid_request_error");
                 return;
             }
+            // The session's events are consumed, so two readers would each get an arbitrary share of the tokens.
+            if (!ActiveStreams.TryAdd(id, 0))
+            {
+                await HartsyInferenceServiceExtensions.WriteErrorAsync(
+                    ctx, StatusCodes.Status409Conflict, $"Realtime session '{id}' already has a stream connected; close it before opening another.",
+                    "invalid_request_error");
+                return;
+            }
             JsonSerializerOptions json = SseHelpers.ResolveJsonOptions(ctx);
             ctx.Response.Headers.ContentType = "text/event-stream";
             ctx.Response.Headers.CacheControl = "no-cache";
-            await using IAsyncEnumerator<RealtimeVlmChunk> events = session.StreamAsync(ct).GetAsyncEnumerator(ct);
+            // Cancelled on every exit so a read still pending can finish before the enumerator is disposed.
+            using CancellationTokenSource streamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            IAsyncEnumerator<RealtimeVlmChunk> events = session.StreamAsync(streamCts.Token).GetAsyncEnumerator(streamCts.Token);
+            Task<bool>? next = null;
             try
             {
-                Task<bool> next = events.MoveNextAsync().AsTask();
+                next = events.MoveNextAsync().AsTask();
                 while (true)
                 {
                     // A connected stream keeps the session alive; a silent model still gets a keep-alive comment.
-                    Task done = await Task.WhenAny(next, Task.Delay(KeepAlive, ct));
+                    using CancellationTokenSource tick = CancellationTokenSource.CreateLinkedTokenSource(streamCts.Token);
+                    Task done = await Task.WhenAny(next, Task.Delay(KeepAlive, tick.Token));
+                    tick.Cancel();   // stop the timer when the event won, so a chatty model leaves none running
                     registry.Touch(id);
                     if (done != next)
                     {
@@ -115,8 +131,16 @@ public static class RealtimeEndpoints
                         continue;
                     }
                     if (!await next) break;
-                    await ctx.Response.WriteAsync(Format(events.Current, json), ct);
+                    RealtimeVlmChunk chunk = events.Current;
+                    await ctx.Response.WriteAsync(Format(chunk, json), ct);
                     await ctx.Response.Body.FlushAsync(ct);
+                    if (chunk.Kind == RealtimeVlmChunkKind.Error)
+                    {
+                        // The loop has ended and the session can take no more input: free its device slot now instead of holding
+                        // it until the client closes or the idle sweep finds it.
+                        await registry.CloseAsync(id);
+                        break;
+                    }
                     next = events.MoveNextAsync().AsTask();
                 }
             }
@@ -129,11 +153,25 @@ public static class RealtimeEndpoints
                 await ctx.Response.WriteAsync(SseHelpers.ErrorEvent(ex.Message, json), CancellationToken.None);
                 await ctx.Response.Body.FlushAsync(CancellationToken.None);
             }
+            finally
+            {
+                streamCts.Cancel();
+                if (next is not null)
+                {
+                    try { await next; }
+                    catch (Exception) { /* the read ended with the cancellation or the session's end */ }
+                }
+                await events.DisposeAsync();
+                ActiveStreams.TryRemove(id, out _);
+            }
         });
 
         app.MapDelete($"{Base}/{{id}}", async (string id, RealtimeSessionRegistry registry) =>
             await registry.CloseAsync(id) ? Results.Ok(new { closed = id }) : SessionNotFound(id));
     }
+
+    /// <summary>Sessions with a stream connected, so a second reader is refused.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> ActiveStreams = new(StringComparer.Ordinal);
 
     /// <summary>One session event as an SSE frame: <c>round_start</c>, <c>text</c>, <c>silence</c>, <c>control</c>,
     /// <c>frames_dropped</c> or <c>error</c>.</summary>
