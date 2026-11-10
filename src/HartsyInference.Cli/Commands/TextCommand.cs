@@ -153,6 +153,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
         public bool LowVramQuant { get; init; }
 
+        /// <summary>Re-quantizes a checkpoint folder's plain float projections on load.</summary>
+        [CommandOption("--precision")]
+        [Description("For a checkpoint folder: re-quantize its plain BF16 projections to q8_0, q6_k, q5_k, q4_k or q4_0 on load (cached on disk). NF4/FP8 folders load packed either way.")]
+        public string? Precision { get; init; }
+
         /// <summary>Where the model is placed when this run loads it.</summary>
         [CommandOption("--placement")]
         [Description("Model placement for a GGUF on CUDA: auto (one GPU, else split across GPUs, else expert offload), gpu, split or offload.")]
@@ -321,6 +326,7 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("loops", loops.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
+        if (settings.Precision is { Length: > 0 } precision) parameters.Put("precision", precision);
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
         if (settings.Placement is { Length: > 0 } placement)
             parameters.Put("placement", placement);
