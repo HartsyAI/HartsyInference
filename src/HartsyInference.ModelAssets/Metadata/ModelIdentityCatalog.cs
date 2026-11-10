@@ -62,6 +62,7 @@ public static class ModelIdentityCatalog
             Image("sdxl", "stable-diffusion-xl-v1-base", "Stable Diffusion XL 1.0", "Stability AI", "openrail++", "1024x1024"),
             Image("sd3", "stable-diffusion-v3-medium", "Stable Diffusion 3 Medium", "Stability AI", "other", "1024x1024"),
             Image("flux1", "Flux.1-dev", "Flux.1 Dev", "Black Forest Labs", "other", "1024x1024", "black-forest-labs/FLUX.1-dev"),
+            Image("minimax-h3-image", "minimax-h3-image", "MiniMax-H3-Image", "MiniMax", "other", "2048x2048"),
             Image("flux2", "flux.2-dev", "Flux.2 Dev", "Black Forest Labs", "other", "1024x1024"),
             // One SwarmUI class covers the full and the step-distilled build; the weights tell them apart.
             Image("flux3", "flux.3-klein", "Flux.3 Klein", "Black Forest Labs", "other", "1024x1024",
