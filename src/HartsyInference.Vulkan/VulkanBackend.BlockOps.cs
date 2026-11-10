@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
 
-// Walsh-Hadamard stages and the block-scaled FP8 linear (Shaders/hadamard.comp.glsl, fp8_block_linear.comp.glsl).
+// Walsh-Hadamard stages, and the block-scaled FP8 and grouped linears (Shaders/hadamard.comp.glsl, fp8_block_linear.comp.glsl).
 public sealed partial class VulkanBackend
 {
     /// <inheritdoc/>
@@ -58,16 +58,37 @@ public sealed partial class VulkanBackend
         {
             return;
         }
-        // The workgroup count in X is capped at 65535 on the minimum Vulkan limit, so N is dispatched in chunks.
-        const uint maxGroups = 65535;
         using OpScope _op = EnterOp();
+        DispatchBlockLinear(output, input, weight, weightScaleInv, bias, m, n, k, k, n, blockRows, blockCols, "Fp8BlockLinear");
+    }
+
+    /// <inheritdoc/>
+    public void BlockDiagonalLinear(Tensor output, Tensor input, Tensor weight, Tensor? weightScaleInv, int groups,
+        int blockRows = 128, int blockCols = 128)
+    {
+        (int m, int r, int d) = BlockDiagonalLinearReference.Validate(output, input, weight, weightScaleInv, groups, blockRows, blockCols);
+        RequireShader("fp8_block_linear");
+        if (m == 0)
+        {
+            return;
+        }
+        using OpScope _op = EnterOp();
+        DispatchBlockLinear(output, input, weight, weightScaleInv, null, m, groups * r, d, groups * d, r, blockRows, blockCols, "BlockDiagonalLinear");
+    }
+
+    // fp8_block_linear over an FP8 weight with its scales, or an F32 weight when scaleInv is null. The workgroup count in X is
+    // capped at 65535 on the minimum Vulkan limit, so N is dispatched in chunks.
+    private void DispatchBlockLinear(Tensor output, Tensor input, Tensor weight, Tensor? scaleInv, Tensor? bias, int m, int n, int k,
+        int inWidth, int groupRows, int blockRows, int blockCols, string op)
+    {
+        const uint maxGroups = 65535;
         List<VulkanBuffer> temps = new();
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * sizeof(float)));
         try
         {
             VulkanBuffer xBuf = GetBuffer(input);
-            VulkanBuffer wBuf = PaddedInput(weight, temps);
-            VulkanBuffer sBuf = GetBuffer(weightScaleInv);
+            VulkanBuffer wBuf = scaleInv is null ? GetBuffer(weight) : PaddedInput(weight, temps);
+            VulkanBuffer sBuf = scaleInv is null ? Placeholder(temps) : GetBuffer(scaleInv);
             VulkanBuffer bBuf = bias is null ? Placeholder(temps) : GetBuffer(bias);
             VulkanKernel kernel = GetKernel("fp8_block_linear", storageBufferCount: 5, ReadOnlySpan<SpecConstant>.Empty);
             Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, wBuf.Handle, sBuf.Handle, bBuf.Handle, outBuf.Handle };
@@ -83,6 +104,9 @@ public sealed partial class VulkanBackend
                 pc.U32((uint)((k + blockCols - 1) / blockCols));
                 pc.U32(bias is null ? 0u : 1u);
                 pc.U32(nBase);
+                pc.U32((uint)inWidth);
+                pc.U32((uint)groupRows);
+                pc.U32(scaleInv is null ? 0u : 1u);
                 uint groupsN = (uint)Math.Min(n - nBase, maxGroups);
                 Dispatch(kernel, bufs, pc.Written, groupsN, (uint)Math.Min(m, 65535), 1);
             }
@@ -90,7 +114,7 @@ public sealed partial class VulkanBackend
         }
         catch (Exception ex)
         {
-            Logs.Error("Vulkan Fp8BlockLinear dispatch failed", ex);
+            Logs.Error($"Vulkan {op} dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }

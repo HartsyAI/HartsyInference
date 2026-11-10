@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends.Host;
+
 namespace HartsyInference.LLM.Transformer.Sparse;
 
 /// <summary>Builds one query's sparse key set from an indexer top-k that skips the trailing window, followed by that window
@@ -19,19 +21,12 @@ public static class SparseWindowMerge
     {
         ArgumentOutOfRangeException.ThrowIfNegative(position);
         ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
-        ArgumentOutOfRangeException.ThrowIfNegative(topkWidth);
-        if (row.Length < topkWidth + window) throw new ArgumentException("row must hold topkWidth + window entries.", nameof(row));
-        int seq = position + 1;
-        int n = Math.Min(Math.Max(seq - window, 0), topkWidth);
-        int w = Math.Min(seq, window);
-        if (topk.Length < n) throw new ArgumentException($"topk holds {topk.Length} entries; this query needs {n}.", nameof(topk));
-        for (int i = 0; i < n; i++)
+        int n = Math.Min(Math.Max(position + 1 - window, 0), Math.Max(topkWidth, 0));
+        for (int i = 0; i < n && i < topk.Length; i++)
         {
-            if ((uint)topk[i] >= (uint)(seq - window)) throw new ArgumentException($"topk entry {topk[i]} is outside [0, {seq - window}).", nameof(topk));
-            row[i] = topk[i];
+            if ((uint)topk[i] >= (uint)(position + 1 - window))
+                throw new ArgumentException($"topk entry {topk[i]} is outside [0, {position + 1 - window}).", nameof(topk));
         }
-        for (int i = 0; i < w; i++) row[n + i] = seq - w + i;
-        row[(n + w)..].Fill(-1);
-        return n + w;
+        return WindowTopKMergeReference.MergeRow(topk, topkWidth, position, window, row);
     }
 }

@@ -6,7 +6,7 @@ using HartsyInference.Cuda.Profiling;
 
 namespace HartsyInference.Cuda;
 
-// Walsh-Hadamard rotation and the block-scaled FP8 linear, shared with the DSA indexer and ERNIE-5.5 weights.
+// Walsh-Hadamard rotation, the block-scaled FP8 linear and the grouped linear, shared with the DSA indexer and ERNIE-5.5 weights.
 public sealed partial class CudaBackend
 {
     /// <inheritdoc />
@@ -80,6 +80,36 @@ public sealed partial class CudaBackend
         {
             if (!cached) GpuTransferHelper.FreeDevice(pY);
             FreeAll(pX, pW, pS, pB);
+        }
+    }
+
+    /// <inheritdoc />
+    public void BlockDiagonalLinear(Tensor output, Tensor input, Tensor weight, Tensor? weightScaleInv, int groups,
+        int blockRows = 128, int blockCols = 128)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("BlockDiagonalLinear");
+        (int m, int r, int d) = BlockDiagonalLinearReference.Validate(output, input, weight, weightScaleInv, groups, blockRows, blockCols);
+        if (m == 0) return;
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        if (!_kernels!.HasBlockDiagonalLinearKernels) throw new NotSupportedException("CUDA BlockDiagonalLinear needs fp8_block_linear.ptx with its block-diagonal entries.");
+        nuint bytes = GpuTransferHelper.ByteSize(output);
+        ulong pX = 0, pW = 0, pS = 0, pY = 0;
+        bool cached = false;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(input);
+            pW = GpuTransferHelper.CopyToDevice(weight);
+            pS = weightScaleInv is null ? 0 : GpuTransferHelper.CopyToDevice(weightScaleInv);
+            pY = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels.LaunchBlockDiagonalLinear(pX, pW, pS, pY, m, groups * r, d, groups * d, r, blockRows, blockCols, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pY, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pY);
+            FreeAll(pX, pW, pS);
         }
     }
 

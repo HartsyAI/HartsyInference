@@ -14,7 +14,6 @@ public sealed partial class CudaBackend
     {
         using NvtxRange _nvtx = NvtxRange.Push("Glu");
         (int inner, long rows) = GluContract.Validate(output, input, spec);
-        GluContract.RequireBakedSitu(spec, "CUDA");
         if (rows == 0) return;
         using OpScope _op = EnterOp();
         EnsureKernels();

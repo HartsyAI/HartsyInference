@@ -19,7 +19,6 @@ public sealed partial class VulkanBackend
     {
         using OpScope _op = EnterOp();
         (int inner, long rows) = GluContract.Validate(output, input, spec);
-        GluContract.RequireBakedSitu(spec, "Vulkan");
         if (rows == 0) return;
         if (input.DType == DType.BF16)
         {
@@ -40,6 +39,8 @@ public sealed partial class VulkanBackend
             Authoring.PushConstants pc = new(pcBytes);
             pc.U32((uint)inner);
             pc.U32((uint)total);
+            pc.F32(spec.SituBeta);
+            pc.F32(spec.SituLinearBeta);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
             Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
             CacheOutput(output, outBuf);
