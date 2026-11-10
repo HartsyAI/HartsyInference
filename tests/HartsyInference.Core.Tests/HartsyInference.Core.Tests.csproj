@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
   </ItemGroup>
 
 </Project>
