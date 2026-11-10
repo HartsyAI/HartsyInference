@@ -237,6 +237,17 @@ frames, stage 1 only, upstream's noise and first latent injected; a real run, no
 | time | chunk 0 at 12.9 s including model loads, then 2.11 s and 1.74 s per 24-frame chunk (0.86× real time); upstream 2.13 s |
 | device memory | 10.98 GiB in use, about 1 GiB of it other processes |
 
+**Live action script on the 4090** (parent session, 2026-11-09, `d55f74893`): `hartsy world -m sana-wm-streaming … --intrinsics
+fx,fy,cx,cy --frames 73 --actions "w-24,d-24,s-24"` (forward, turn right, reverse) runs end to end through the live camera
+path (no poses; the script is queued into `LiveCameraPath`) and writes 73 frames and an MP4 in about 39 s of wall time; the
+view follows the script. Against an upstream streaming run with the same script (`--camera-source action`) and upstream's
+noise injected: per-frame PSNR 49 dB for the forward chunk, 46 to 47 dB for the turn, 34 to 42 dB for the reverse; SSIM
+min 0.986. The frames are the same picture; the differences sit on the edges of invented texture, and the sky and horizon
+differ by about 0, so the camera is right. The reverse chunk's lower PSNR is the model, not the port: reversing makes stage 1
+invent dark cracked rock at the bottom right, upstream does the same from the same input, and small BF16 differences grow on
+invented detail. The refiner may clean it up (not tested). Still open: the CLI keeps every frame until the end, so
+`--interactive` and `--unbounded` do not show the video live yet (progressive MP4 and preview, assigned to the parent session).
+
 Open from the same report: `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass.
 Harmless at a window of two chunks; worth caching the joined window across the five passes of a chunk if the window grows.
 (The report's other item, BF16 softmax storage, is applied; see the next section.)
