@@ -83,7 +83,7 @@ internal static class UniRigSkeletonBuilder
                 }
 
                 mean /= childCount[i];
-                direction = [joints[3 * i], joints[3 * i + 1], joints[3 * i + 2] + ExtrudeScale * mean];
+                direction = [0f, 0f, mean];
             }
             else
             {
