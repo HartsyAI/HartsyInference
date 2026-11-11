@@ -1053,6 +1053,68 @@ public static class ModelCatalog
                     SideModels.Flux2Vae,
                 },
             },
+            // MiniMax-H3-Image (text-to-image). Three builds of one DiT, all sharing the H3 flat folder so the Qwen3-VL-32B
+            // text encoder is downloaded once. The recipe finds the encoder and the image VAE as siblings of the DiT folder.
+            // UNTESTED: nothing here has run on real weights. Status stays validation-pending until the GPU run passes.
+            // Licence: minimax-h3-image-community-license-agreement (see README).
+            new CatalogEntry
+            {
+                Id = "minimax-h3-image-bf16", Modality = img, DisplayName = "MiniMax-H3-Image (bf16, LoRA base)",
+                Architecture = "H3 image DiT (audio-free) + Qwen3-VL-32B + 2D image VAE, 6-step stacked heads",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "diffusion_models/minimax_h3_image_pruned_bf16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/diffusion_models", Role = "transformer",
+                        Sha256 = "a767f5325db019588b3491a93d80288d336c826a7aeb87bec67675e554367222" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "vae/minimax_h3_image_vae_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae", Role = "vae",
+                        Sha256 = "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/text_encoders", Role = "text encoder",
+                        Sha256 = "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Default build: the int8 ConvRot transformer is provisional; confirm against bf16 on the GPU run.
+                Id = "minimax-h3-image", Modality = img, DisplayName = "MiniMax-H3-Image (int8 ConvRot)",
+                Architecture = "H3 image DiT (audio-free) + Qwen3-VL-32B + 2D image VAE, 6-step stacked heads",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/diffusion_models", Role = "transformer",
+                        Sha256 = "83eb140f1ff95c068f8a6886e6d3f3d0d4ab2e07bb2fe6d2ef992a51146ee622" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "vae/minimax_h3_image_vae_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae", Role = "vae",
+                        Sha256 = "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/text_encoders", Role = "text encoder",
+                        Sha256 = "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "minimax-h3-image-w4a8", Modality = img, DisplayName = "MiniMax-H3-Image (w4a8)",
+                Architecture = "H3 image DiT (audio-free) + Qwen3-VL-32B + 2D image VAE, 6-step stacked heads",
+                Status = vp,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "diffusion_models/minimax_h3_image_pruned_w4a8.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/diffusion_models", Role = "transformer",
+                        Sha256 = "517cc19b85348386f4df7c806dce80d839d0899e7cdaa3e1dbb09de964381dbb" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3-Image", RepoPath = "vae/minimax_h3_image_vae_fp16.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/vae", Role = "vae",
+                        Sha256 = "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af" },
+                    new() { Repo = "Comfy-Org/MiniMax-H3", RepoPath = "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                        TargetSubdir = "Stable-Diffusion/MiniMaxH3/flat/text_encoders", Role = "text encoder",
+                        Sha256 = "35a88d51044231fe332301d7a62aa81e3f2cba62febeb446e2c1e3e0ef76f2c6" },
+                },
+            },
             new CatalogEntry
             {
                 // Bria Fibo 2.0 dev (text-to-image). Licence: CC-BY-NC-4.0, non-commercial; commercial use needs a Bria agreement.

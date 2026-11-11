@@ -21,7 +21,10 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
     public string Name => FamilyId;
 
     /// <inheritdoc/>
-    public bool Matches(string familyId) => string.Equals(familyId, FamilyId, StringComparison.OrdinalIgnoreCase);
+    public bool Matches(string familyId) =>
+        string.Equals(familyId, FamilyId, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "minimax-h3-image-bf16", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "minimax-h3-image-w4a8", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Text-to-image only for now. TODO(phase 5b): add RefEdit once reference conditioning is wired.
     /// TODO(phase 5c): add Lora once merges are verified on the bf16 base.</summary>
