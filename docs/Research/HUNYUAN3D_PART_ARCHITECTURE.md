@@ -25,8 +25,8 @@ mesh -> P3-SAM (point-prompted 3D segmentation, 400 FPS prompts, NMS, face label
 
 ## X-Part (`XPart/partgen`, `config/infer.yaml`)
 
-- Weights: `model/model.safetensors` 6,630,571,584 B (the DiT), `shapevae/shapevae.safetensors` 655,539,474 B, `conditioner/conditioner.safetensors` 1,755,920,004 B, `p3sam/p3sam.safetensors` above; configs `model/config.json`, `shapevae/config.json`, `conditioner/config.json`, `scheduler/config.json`. The release is "a light version of X-Part" (README); the full model is only on Hunyuan3D-Studio. Recommended inputs: scanned or AI-generated meshes.
-- DiT (`PartFormerDITPlain`): width 2048, depth 21, 16 heads, RMS q/k norm, no biases, learned part embedding (`valid_num` 50), two cross-attentions (object tokens and part-in-bbox tokens, both 1024-wide), MoE in 6 layers (8 experts, top-2), 1024 latent tokens of 64 channels. This is the same family as the Hunyuan3D-2.1 shape DiT, which this repository already runs (MoE routing included).
+- Weights: `model/model.safetensors` 6,630,571,584 B (the DiT; dtype unread, size implies 2-byte), `shapevae/shapevae.safetensors` 655,539,474 B, `conditioner/conditioner.safetensors` 1,755,920,004 B, `p3sam/p3sam.safetensors` above; configs `model/config.json`, `shapevae/config.json`, `conditioner/config.json`, `scheduler/config.json`. The release is "a light version of X-Part" (README); the full model is only on Hunyuan3D-Studio. Recommended inputs: scanned or AI-generated meshes.
+- DiT (`PartFormerDITPlain`): width 2048, depth 21, 16 heads, RMS q/k norm, no biases, learned part embedding (`valid_num` 50), two cross-attentions (object tokens and part-in-bbox tokens, both 1024-wide), MoE in 6 layers (8 experts, top-2), 1024 latent tokens of 64 channels. This is the same family as the Hunyuan3D-2.1 shape DiT, which this repository already runs (MoE routing included). Structure checked in `partformer_dit.py` and `moe_layers.py`: the MoE block has a shared expert (as in 2.1); U-skips (`skip_linear` over a concatenation, then a norm) on layers 11 to 20 (`layer > depth // 2`); the time embedding is prepended as one token (`torch.cat([c, x])`). Not yet compared: the fused-QKV head regroup (`Hunyuan3DPlainBlock.Regroup`). A parity trap: with `use_part_embed` the forward adds `part_embed[torch.randperm(valid_num)[:num_parts]]` (random part ids at inference), so a reference run needs the permutation pinned.
 - Scheduler: `FlowMatchEulerDiscreteScheduler`, 1000 training steps, flow matching with an Euler integrator (the repository already has the Hunyuan3D flow sampler).
 - Shape VAE (`VolumeDecoderShapeVAE`): 1024 latents x 64, width 1024, 8 encoder and 16 decoder layers, 8 Fourier frequencies, `qk_norm`, 81,920 surface points, scale factor 1.0039506. Hunyuan3D shape VAE family, with a different latent count; the conditioner uses two copies (4096 latents for the object, bbox-local for the part).
 - Conditioner: ShapeVAE object and local encoders plus a Sonata feature extractor (`use_seg_feat`), the P3-SAM output giving the part boxes.
@@ -35,17 +35,18 @@ mesh -> P3-SAM (point-prompted 3D segmentation, 400 FPS prompts, NMS, face label
 
 | Need | Existing code | Gap |
 |---|---|---|
-| Sonata (PTv3) | `Models/Utonia` (`UtoniaEncoder`, serialisation z / hilbert, pooling stages), `Models/UniRig/UniRigPtv3*` | Sonata is the predecessor: different stem and attention details (to be read in `sonata/model.py`, 874 lines); `enc_mode` unpooling by concatenation; flash attention is a plain attention here |
-| P3-SAM heads and prompt batching | none | small MLPs; the prompt batch is K x N 512-wide tensors (400 x 100k x 777 would need chunking) |
-| FPS, adjacency, NMS, connected regions | `Geometry/Ops` (sampler, BVH, cleaner), `MeshOps` | FPS and the label fix-up |
+| Sonata (PTv3) | `Models/Utonia` (`UtoniaEncoder`, serialisation z / hilbert, pooling stages), `Models/UniRig/UniRigPtv3*` | Sonata is the predecessor: different stem and attention details (to be read in `sonata/model.py`, 874 lines); `enc_mode` unpooling by concatenation; upstream uses flash-attn kernels; the engine's attention op replaces them |
+| P3-SAM heads and prompt batching | none | small MLPs; the prompt batch is K x N x 777 F32 at stage 2: 32 prompts x 100k points is about 9.9 GB, so chunking is needed even at the upstream batch size of 32 |
+| FPS, adjacency, NMS, connected regions | `Geometry/Ops` (`SurfaceSampler.FarthestPointIndices`, BVH, cleaner), `MeshOps` | the label fix-up and NMS; parity needs the exact call: `auto_mask.py` uses `fpsample.fps_sampling(_points, prompt_num)` with its default variant and start index (not yet read from `fpsample`), which decides the 400 prompts |
 | X-Part DiT, MoE, flow sampler, shape VAE | `Models/Hunyuan3D` (DiT, MoE, ShapeVae, flow sampler) | latent count, part embedding, second cross-attention, `use_attention_pooling` off |
 | Conditioner | ShapeVae encoder, Sonata above | the 1.76 GB conditioner file layout |
 
 ## Plan and what is needed
 
 1. P3-SAM first (small: 451 MB, one backbone, MLP heads, geometry post-processing, no sampler): port Sonata (check `Models/Utonia` against `sonata/model.py`), the heads and `mesh_sam`. Verification needs the Python reference dumps (features, masks, labels) on one mesh, so a Python environment with the repository's requirements is needed or a CPU-only transcription run.
-2. X-Part second: reuse the Hunyuan3D DiT, add the part conditioning, a 6.6 GB F32 DiT (3.3 GB F16) and a 1.7 GB conditioner; does not fit F32 in 12 GB, needs the F16 path.
+2. X-Part second: reuse the Hunyuan3D DiT, add the part conditioning, a 6.6 GB DiT and a 1.7 GB conditioner. dtype unknown (headers not read); 6,630,571,584 B over about 3.3 B parameters (a 2048 x 21 MoE DiT like the 2.1 one, which has about 3.0 B, plus the second cross-attention) implies F16 or BF16 already, so there is no F16 saving: 6.6 GB of DiT, 1.7 GB of conditioner and the VAE plus activations is tight on 12 GB, as for 2.1.
 3. Omni follows its own spike.
+4. Once a catalog id exists, the licence terms (3e disclosure, territory exclusion) go in the model catalog or licence notes; the pickle reader, if ever needed, is the existing `PytorchPickleLoader`.
 
 Download needed for step 1: `tencent/Hunyuan3D-Part` @ `677174466c…` `p3sam/p3sam.safetensors` (450,968,044 B, sha256 above) and `p3sam/config.json` (134 B), to `Models/3D/hunyuan3d-part/p3sam/` (not downloaded yet; only the header has been read). `facebook/sonata` is not needed. X-Part files (about 9 GB) are a separate later request.
 
