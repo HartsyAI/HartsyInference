@@ -27,10 +27,12 @@ public sealed class StreamingFrameWriterTests : IDisposable
         Assert.NotNull(writer.OutputDirectory);
         Assert.StartsWith(_root, writer.OutputDirectory);
         Assert.EndsWith("-frames-001", writer.OutputDirectory);
-        Assert.True(File.Exists(Path.Combine(writer.OutputDirectory, "frame_0001.png")), "frame 1 is on disk before the stream ends");
+        writer.WaitForWrites();
+        Assert.True(File.Exists(Path.Combine(writer.OutputDirectory, "frame_0001.png")), "frame 1 is on disk once the writers have it");
 
         writer.Add(Frame(1), Width, Height);
         writer.Add(Frame(2), Width, Height);
+        writer.WaitForWrites();
         Assert.Equal(3, writer.Count);
         Assert.Equal((Width, Height), (writer.Width, writer.Height));
         Assert.Equal(["frame_0001.png", "frame_0002.png", "frame_0003.png"],
@@ -40,11 +42,13 @@ public sealed class StreamingFrameWriterTests : IDisposable
     [Fact]
     public void Add_WritesTheSameFilesAsTheBatchWriter()
     {
-        byte[][] frames = [Frame(0), Frame(1), Frame(2), Frame(3)];
+        // More frames than the queue holds, so the writers run past the point where the stream has to wait for them.
+        byte[][] frames = Enumerable.Range(0, StreamingFrameWriter.QueueCapacity + 8).Select(Frame).ToArray();
         string batch = FrameWriter.WriteFrames(frames, Width, Height, _root, "batch");
         StreamingFrameWriter writer = new(_root, "stream");
         foreach (byte[] frame in frames)
             writer.Add(frame, Width, Height);
+        writer.WaitForWrites();
 
         for (int i = 1; i <= frames.Length; i++)
         {
@@ -60,6 +64,7 @@ public sealed class StreamingFrameWriterTests : IDisposable
         byte[] first = Frame(0);
         writer.Add(first, Width, Height);
         WeakReference later = AddLaterFrames(writer);
+        writer.WaitForWrites();
 
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -80,6 +85,58 @@ public sealed class StreamingFrameWriterTests : IDisposable
         writer.Add(Frame(0), Width, Height);
         Assert.Throws<ArgumentException>(() => writer.Add(new byte[4 * 4 * 3], 4, 4));
         Assert.Equal(1, writer.Count);
+    }
+
+    [Fact]
+    public async Task A_stalled_writer_holds_the_stream_back_once_the_queue_is_full()
+    {
+        using ManualResetEventSlim gate = new(initialState: false);
+        StreamingFrameWriter writer = new(_root, "held", gate);
+        const int Total = StreamingFrameWriter.QueueCapacity + 16;
+        Task adding = Task.Run(() =>
+        {
+            for (int i = 0; i < Total; i++)
+                writer.Add(Frame(i), Width, Height);
+        });
+
+        await Task.Delay(300);
+        Assert.False(adding.IsCompleted, "the stream must wait while the writers are held");
+        // The queue holds QueueCapacity frames, the writers hold a few more, and one is waiting to enter the queue: bounded, not growing.
+        Assert.InRange(writer.Count, StreamingFrameWriter.QueueCapacity, StreamingFrameWriter.QueueCapacity + 16);
+
+        gate.Set();
+        await adding.WaitAsync(TimeSpan.FromSeconds(10));
+        writer.WaitForWrites();
+        Assert.Equal(Total, writer.Count);
+        Assert.Equal(Total, Directory.GetFiles(writer.OutputDirectory!, "*.png").Length);
+        writer.Dispose();
+    }
+
+    [Fact]
+    public void Dispose_waits_for_the_queued_frames_so_a_stream_that_stops_early_keeps_them()
+    {
+        StreamingFrameWriter writer = new(_root, "stopped");
+        for (int i = 0; i < 5; i++)
+            writer.Add(Frame(i), Width, Height);
+
+        writer.Dispose();
+
+        Assert.Equal(5, Directory.GetFiles(writer.OutputDirectory!, "*.png").Length);
+    }
+
+    [Fact]
+    public void A_frame_that_cannot_be_written_fails_the_next_wait_and_the_stream_after_it()
+    {
+        StreamingFrameWriter writer = new(_root, "gone");
+        writer.Add(Frame(0), Width, Height);
+        writer.WaitForWrites();
+        Directory.Delete(writer.OutputDirectory!, recursive: true);
+
+        writer.Add(Frame(1), Width, Height);
+
+        Assert.Throws<InvalidOperationException>(() => writer.WaitForWrites());
+        Assert.Throws<InvalidOperationException>(() => writer.Add(Frame(2), Width, Height));
+        writer.Dispose();
     }
 
     [Fact]

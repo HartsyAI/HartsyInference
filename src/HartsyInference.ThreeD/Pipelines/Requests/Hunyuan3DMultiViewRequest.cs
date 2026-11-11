@@ -9,7 +9,7 @@ public sealed record Hunyuan3DMultiViewRequest
     /// <summary>Number of denoise steps. 0 uses the checkpoint's default.</summary>
     public int Steps { get; init; }
 
-    /// <summary>Classifier-free guidance scale (or the embedded guidance for distilled builds). 0 uses the default.</summary>
+    /// <summary>Classifier-free guidance scale; distilled builds embed it in the timestep vector instead (upstream does the same with its 5.0 default). 0 uses the default.</summary>
     public float CfgScale { get; init; }
 
     /// <summary>RNG seed for the initial latent noise. Null is random.</summary>

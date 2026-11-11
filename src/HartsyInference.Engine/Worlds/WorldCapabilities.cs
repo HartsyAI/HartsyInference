@@ -74,4 +74,7 @@ public sealed record WorldCapabilities
     /// <summary>Chunk-by-chunk streaming generation with live actions, when the model has it; null for a model that only
     /// renders whole rollouts.</summary>
     public WorldStreamingCapabilities? Streaming { get; init; }
+
+    /// <summary>The keys that steer the model while it runs, for a live viewer; null for a model with no live control.</summary>
+    public IWorldControlScheme? LiveControls { get; init; }
 }

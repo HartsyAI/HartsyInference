@@ -89,10 +89,15 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             dit = flux;
         }
 
-        Hunyuan3DShapeVae vae = new(config); vae.LoadWeights(w.ShapeVae);
-        if (flashVdmVaeDir is not null)
+        Hunyuan3DShapeVae vae;
+        if (flashVdmVaeDir is null)
         {
-            // FlashVDM decodes with its own VAE checkpoint (a narrower geo decoder), not the one bundled with the DiT.
+            vae = new(config);
+            vae.LoadWeights(w.ShapeVae);
+        }
+        else
+        {
+            // FlashVDM decodes with its own VAE checkpoint (a narrower geo decoder); the bundled one is never loaded.
             string vaeYaml = Path.Combine(flashVdmVaeDir, "config.yaml"), vaeWeights = Path.Combine(flashVdmVaeDir, "model.fp16.safetensors");
             if (!File.Exists(vaeYaml) || !File.Exists(vaeWeights))
                 throw new FileNotFoundException($"FlashVDM needs the turbo VAE (config.yaml and model.fp16.safetensors) in '{flashVdmVaeDir}'.");
@@ -149,29 +154,35 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
     {
         Backend.PreloadWeights(_dino.EnumerateWeights());
         List<Tensor> tokens = [];
-        foreach (Hunyuan3DViewImage view in views.OrderBy(v => (int)v.View))
+        try
         {
-            Tensor pixels = _preprocessor.Preprocess(view.Rgb, view.Width, view.Height);
-            Tensor encoded = _dino.Encode(Backend, pixels);
-            pixels.Dispose();
-            if (_cfg.ViewCount > 1)
+            foreach (Hunyuan3DViewImage view in views.OrderBy(v => (int)v.View))
             {
-                int count = (int)encoded.Shape[1], width = (int)encoded.Shape[2];
-                float[] embedding = Hunyuan3DViewEmbedding.Create((int)view.View, width);
-                Tensor full = new(encoded.Shape, DType.F32);
-                float* fp = (float*)full.DataPointer;
-                for (int t = 0; t < count; t++)
-                    embedding.AsSpan().CopyTo(new Span<float>(fp + (long)t * width, width));
-                Tensor sum = new(encoded.Shape, DType.F32);
-                Backend.Add(sum, encoded, full);
-                encoded.Dispose(); full.Dispose();
-                encoded = sum;
-            }
+                Tensor pixels = _preprocessor.Preprocess(view.Rgb, view.Width, view.Height);
+                Tensor encoded = _dino.Encode(Backend, pixels);
+                pixels.Dispose();
+                if (_cfg.ViewCount > 1)
+                {
+                    int count = (int)encoded.Shape[1], width = (int)encoded.Shape[2];
+                    float[] embedding = Hunyuan3DViewEmbedding.Create((int)view.View, width);
+                    Tensor full = new(encoded.Shape, DType.F32);
+                    float* fp = (float*)full.DataPointer;
+                    for (int t = 0; t < count; t++)
+                        embedding.AsSpan().CopyTo(new Span<float>(fp + (long)t * width, width));
+                    Tensor sum = new(encoded.Shape, DType.F32);
+                    Backend.Add(sum, encoded, full);
+                    encoded.Dispose(); full.Dispose();
+                    encoded = sum;
+                }
 
-            tokens.Add(encoded);
+                tokens.Add(encoded);
+            }
+        }
+        finally
+        {
+            Backend.FreeWeights(_dino.EnumerateWeights());
         }
 
-        Backend.FreeWeights(_dino.EnumerateWeights());
         if (tokens.Count == 1)
             return tokens[0];
         int condDim = (int)tokens[0].Shape[2];
@@ -238,7 +249,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond?.Dispose();
-        Probe($"dit-loop ({steps} steps x2 CFG)");
+        Probe($"dit-loop ({steps - 1} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
         Tensor scaled = new(latents.Shape, DType.F32);
@@ -249,7 +260,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.PreloadWeights(_vae.EnumerateWeights());
         float iso = requestIso != 0f ? requestIso : _cfg.IsoLevel;
         ScalarField3D field = _flashVdm
-            ? _vae.DecodeFlashVdm(Backend, latents, gridRes, _cfg.BoundingBox, iso)
+            ? _vae.DecodeFlashVdm(Backend, latents, gridRes, _cfg.BoundingBox, -iso)   // upstream passes mc_level here, which centres the band at logit -mc_level
             : _vae.Decode(Backend, latents, gridRes, _cfg.BoundingBox);
         Backend.FreeWeights(_vae.EnumerateWeights());
         latents.Dispose();

@@ -31,7 +31,8 @@ public sealed record UniRigDecoderConfig
         if (HiddenSize <= 0 || NumLayers <= 0 || NumHeads <= 0 || HiddenSize % NumHeads != 0 || FfnSize <= 0 || VocabSize <= 0 || MaxPositions <= 2)
         {
             throw new HartsyInferenceException(
-                $"UniRig decoder config is invalid: hidden {HiddenSize}, layers {NumLayers}, heads {NumHeads}, ffn {FfnSize}, vocab {VocabSize}, positions {MaxPositions}.");
+                $"UniRig decoder config is invalid: hidden {HiddenSize}, layers {NumLayers}, heads {NumHeads}, ffn {FfnSize}, "
+                + $"vocab {VocabSize}, positions {MaxPositions}.");
         }
     }
 }
