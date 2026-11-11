@@ -20,7 +20,7 @@ public sealed class HunyuanPaintRealWeightsTests(ITestOutputHelper output)
         Dictionary<string, Tensor> weights = loader.GetAllTensors();
 
         HunyuanPaintConfig config = HunyuanPaintLoader.Detect(weights);
-        HunyuanPaintUnet unet = new(config, generating: true), reference = new(config, generating: false);
+        using HunyuanPaintUnet unet = new(config, generating: true), reference = new(config, generating: false);
         unet.LoadWeights(weights, "unet");
         reference.LoadWeights(weights, "unet_dual");
         HunyuanPaintPromptTokens tokens = HunyuanPaintPromptTokens.FromWeights(weights, config, "unet");

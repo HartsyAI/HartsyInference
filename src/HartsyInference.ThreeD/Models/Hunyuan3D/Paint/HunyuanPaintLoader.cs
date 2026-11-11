@@ -39,12 +39,12 @@ public sealed class HunyuanPaintLoader : IDisposable
             Dictionary<string, Tensor> unetWeights = Read(Find(folder, "unet"), owners);
             HunyuanPaintConfig config = Detect(unetWeights);
             HunyuanPaintUnet unet = new(config, generating: true), reference = new(config, generating: false);
+            owners.Add(unet);
+            owners.Add(reference);
             unet.LoadWeights(unetWeights, "unet");
             reference.LoadWeights(unetWeights, "unet_dual");
             HunyuanPaintPromptTokens prompts = HunyuanPaintPromptTokens.FromWeights(unetWeights, config, "unet");
 
-            owners.Add(unet);
-            owners.Add(reference);
             // The released VAE is F16 and the VAE kernels read F32: convert once, and release the copies with the loader.
             HunyuanPaintF32Weights vaeWeights = new(Read(Find(folder, "vae"), owners));
             owners.Add(vaeWeights);
@@ -79,8 +79,8 @@ public sealed class HunyuanPaintLoader : IDisposable
         }
         catch
         {
-            foreach (IDisposable owner in owners)
-                owner.Dispose();
+            for (int i = owners.Count - 1; i >= 0; i--)
+                owners[i].Dispose();
             throw;
         }
     }
@@ -99,8 +99,8 @@ public sealed class HunyuanPaintLoader : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        foreach (IDisposable owner in _owners)
-            owner.Dispose();
+        for (int i = _owners.Count - 1; i >= 0; i--)
+            _owners[i].Dispose();
         _owners.Clear();
     }
 

@@ -259,9 +259,7 @@ public sealed class HunyuanPaintPipeline
         {
             float s = _config.UsePoseRope ? guidance * ViewScale(views[v].Azimuth) : guidance;
             for (int i = v * plane; i < (v + 1) * plane; i++)
-                result[i] = _config.UsePoseRope
-                    ? branch[0][i] + s * (branch[1][i] - branch[0][i])
-                    : branch[0][i] + s * (branch[1][i] - branch[0][i]);
+                result[i] = branch[0][i] + s * (branch[1][i] - branch[0][i]);
         }
         return result;
     }
