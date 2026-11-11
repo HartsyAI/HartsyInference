@@ -26,6 +26,8 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     public MiniMaxH3VideoVaeDecoder(MiniMaxH3VideoVaeConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
+        if (config.Decoder2D)
+            throw new NotSupportedException("MiniMax-H3 single-frame (2D) VAE decode is not implemented yet.");
         if (config.RopeDim % 6 != 0)
             throw new ArgumentException($"Rope width {config.RopeDim} must be divisible by 2×3 axes.", nameof(config));
         if (config.RopeDim > config.DimHead)

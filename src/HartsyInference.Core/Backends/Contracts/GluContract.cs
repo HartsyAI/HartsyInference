@@ -28,13 +28,4 @@ public static class GluContract
             throw new ArgumentException("Glu output storage must not overlap the input.", nameof(output));
         return (inner, rows);
     }
-
-    /// <summary>Refuses a SiTU whose betas differ from the constants a device kernel bakes in, so the device never runs other values.</summary>
-    public static void RequireBakedSitu(in GluSpec spec, string backend)
-    {
-        if (spec.Activation != GluActivation.Situ) return;
-        if (spec.SituBeta == SituDefaults.Beta && spec.SituLinearBeta == SituDefaults.LinearBeta) return;
-        throw new NotSupportedException($"{backend} SiTU-GLU has beta {SituDefaults.Beta} and linear beta {SituDefaults.LinearBeta} compiled in; "
-            + $"got beta {spec.SituBeta} and linear beta {spec.SituLinearBeta}. Run this on the CPU backend or parameterize the {backend} kernel.");
-    }
 }

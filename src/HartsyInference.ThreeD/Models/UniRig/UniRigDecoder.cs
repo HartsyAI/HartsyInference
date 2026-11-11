@@ -20,6 +20,7 @@ public sealed class UniRigDecoder : IDisposable
     private readonly GenericTransformer _transformer;
     private readonly Tensor _embedTokens;
     private readonly List<Tensor> _owned = [];
+    private readonly float[] _logits;
     private FixedKvCache? _cache;
     private int _length;
     private bool _disposed;
@@ -54,12 +55,13 @@ public sealed class UniRigDecoder : IDisposable
         });
         _embedTokens = UniRigCheckpoint.Get(weights, $"{Decoder}.embed_tokens.weight", config.VocabSize, config.HiddenSize);
         _transformer.LoadWeights(Remap(weights), "model", "lm_head.weight");
+        _logits = new float[config.VocabSize];
     }
 
     /// <summary>Tokens currently held in the key/value cache.</summary>
     public int Length => _length;
 
-    /// <summary>Starts a sequence from conditioning embeddings plus start tokens and returns the logits after the last row (<c>[VocabSize]</c>).</summary>
+    /// <summary>Starts a sequence from conditioning embeddings plus start tokens and returns the logits after the last row (<c>[VocabSize]</c>). The array is reused by the next <see cref="Step"/>.</summary>
     /// <param name="condition">Conditioning rows <c>[1, T, HiddenSize]</c>, already projected to the decoder width.</param>
     /// <param name="startTokens">Token ids appended after the conditioning rows (BOS, class).</param>
     public float[] Begin(Tensor condition, ReadOnlySpan<int> startTokens)
@@ -94,7 +96,7 @@ public sealed class UniRigDecoder : IDisposable
         return LastLogits(hiddenStates, rows);
     }
 
-    /// <summary>Feeds one generated token and returns the next logits.</summary>
+    /// <summary>Feeds one generated token and returns the next logits, in the same array <see cref="Begin"/> returned (overwritten per call).</summary>
     public float[] Step(int token)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -133,7 +135,8 @@ public sealed class UniRigDecoder : IDisposable
     private float[] LastLogits(Tensor hiddenStates, int rows)
     {
         using Tensor logits = _transformer.ProjectLogits(_backend, hiddenStates, rows);
-        return logits.AsSpan<float>().Slice((rows - 1) * _config.VocabSize, _config.VocabSize).ToArray();
+        logits.AsSpan<float>().Slice((rows - 1) * _config.VocabSize, _config.VocabSize).CopyTo(_logits);
+        return _logits;
     }
 
     private Dictionary<string, Tensor> Remap(IReadOnlyDictionary<string, Tensor> weights)
