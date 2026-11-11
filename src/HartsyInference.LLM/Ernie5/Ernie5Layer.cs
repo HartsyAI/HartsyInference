@@ -8,8 +8,9 @@ using HartsyInference.LLM.Transformer.Sparse;
 
 namespace HartsyInference.LLM.Ernie5;
 
-/// <summary>One ERNIE-5.5 decoder layer (vLLM-ERNIE <c>Ernie5_5DecoderLayer</c>): an HCA or DSA attention and a dense or latent-MoE SiTU FFN,
-/// each wrapped in its own manifold-constrained hyper-connection over the <c>[tokens, hc, hidden]</c> residual stream.</summary>
+/// <summary>One ERNIE-5.5 decoder layer (vLLM-ERNIE <c>Ernie5_5DecoderLayer</c>), or the decoder block of an MTP layer: an HCA or DSA
+/// attention and a dense or latent-MoE SiTU FFN, each wrapped in its own manifold-constrained hyper-connection over the
+/// <c>[tokens, hc, hidden]</c> residual stream.</summary>
 /// <remarks>Each sublayer derives its mixes from the stream, collapses it, RMS-normalizes the result, runs, and expands its output back.
 /// The FFN's mixes are derived from the stream after the attention's expand, which is what the reference's fused post-pre computes.</remarks>
 internal sealed class Ernie5Layer : IDisposable
@@ -70,7 +71,7 @@ internal sealed class Ernie5Layer : IDisposable
         }
     }
 
-    /// <summary>Decoder layer index.</summary>
+    /// <summary>Layer index; MTP layers follow the decoder layers.</summary>
     public int Index { get; }
 
     /// <summary>Runs the layer on <paramref name="stream"/> (<c>[tokens, hc, hidden]</c>) in place.</summary>
@@ -185,7 +186,7 @@ internal sealed class Ernie5Layer : IDisposable
             WqB = Read(l[2]),
             Wkv = Read(l[3]),
             KvNorm = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[4]))),
-            WoA = Host(l[5]),
+            WoA = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[5]))),
             WoB = Read(l[6]),
             Sink = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[7]))),
             CompressorWkv = Read(l[8]),
@@ -238,15 +239,15 @@ internal sealed class Ernie5Layer : IDisposable
     private static HyperConnection BuildHc(IBackend backend, Ernie5Config cfg, int index, string module, IErnie5WeightSource source)
     {
         int hc = cfg.HcMult, mixes = (2 + hc) * hc, flat = hc * cfg.HiddenSize;
-        float[] stored = HostF32(source, Ernie5WeightNames.Hc(index, module, Ernie5WeightNames.HcLeaves[0]));
+        float[] stored = HostF32(source, Ernie5WeightNames.Hc(cfg, index, module, Ernie5WeightNames.HcLeaves[0]));
         if (stored.Length != (long)mixes * flat)
             throw new InvalidDataException($"Layer {index} {module} mapper holds {stored.Length} values, not {flat} x {mixes}.");
         float[] fn = Transpose(stored, flat, mixes);
-        float[] bias = HostF32(source, Ernie5WeightNames.Hc(index, module, Ernie5WeightNames.HcLeaves[1]));
+        float[] bias = HostF32(source, Ernie5WeightNames.Hc(cfg, index, module, Ernie5WeightNames.HcLeaves[1]));
         float[] scale = new float[3];
         for (int i = 0; i < 3; i++)
         {
-            float[] alpha = HostF32(source, Ernie5WeightNames.Hc(index, module, Ernie5WeightNames.HcLeaves[2 + i]));
+            float[] alpha = HostF32(source, Ernie5WeightNames.Hc(cfg, index, module, Ernie5WeightNames.HcLeaves[2 + i]));
             if (alpha.Length != 1) throw new InvalidDataException($"Layer {index} {module} {Ernie5WeightNames.HcLeaves[2 + i]} must hold one value.");
             scale[i] = alpha[0];
         }

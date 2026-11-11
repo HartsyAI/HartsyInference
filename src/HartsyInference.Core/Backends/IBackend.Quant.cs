@@ -51,4 +51,16 @@ public partial interface IBackend
     void Fp8BlockLinear(Tensor output, Tensor input, Tensor weight, Tensor weightScaleInv, Tensor? bias,
         int blockRows = 128, int blockCols = 128) =>
         throw NotSupportedPrimitive(nameof(Fp8BlockLinear));
+
+    /// <summary>Block-diagonal linear: each of <paramref name="groups"/> input slices projects through only its own weight rows,
+    /// <c>output[m, g·R + r] = Σ_d input[m, g·D + d]·weight[g·R + r, d]</c>, the grouped output projection <c>wo_a</c>.</summary>
+    /// <remarks><para><paramref name="weight"/> is <c>[G·R, D]</c>, F32 (<paramref name="weightScaleInv"/> null) or F8E4M3 with the
+    /// F32 block-scale grid <see cref="Fp8BlockLinear"/> takes, laid over the whole matrix. <paramref name="input"/> is F32
+    /// <c>[..., G·D]</c> and <paramref name="output"/> F32 <c>[..., G·R]</c>.</para>
+    /// <para>Reference: <see cref="Host.BlockDiagonalLinearReference"/>. An F32 weight sums each product in order in float, as the host
+    /// grouped projection always has; an FP8 weight decodes and accumulates as <see cref="Fp8BlockLinear"/>, so one group equals
+    /// it. The GPU backends agree within float tolerance.</para></remarks>
+    void BlockDiagonalLinear(Tensor output, Tensor input, Tensor weight, Tensor? weightScaleInv, int groups,
+        int blockRows = 128, int blockCols = 128) =>
+        throw NotSupportedPrimitive(nameof(BlockDiagonalLinear));
 }

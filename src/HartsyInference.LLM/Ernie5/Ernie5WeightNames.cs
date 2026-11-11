@@ -82,8 +82,44 @@ public static class Ernie5WeightNames
     /// <summary>The key of a dense FFN leaf of layer <paramref name="layer"/>.</summary>
     public static string DenseFfn(int layer, string leaf) => $"{Layer(layer)}.mlp.{leaf}";
 
-    /// <summary>The key of a hyper-connection leaf of layer <paramref name="layer"/>.</summary>
-    public static string Hc(int layer, string module, string leaf) => $"{Layer(layer)}.{module}.{leaf}";
+    /// <summary>The key of a hyper-connection leaf of layer <paramref name="layer"/>; an MTP layer keeps its hyper-connections under
+    /// <see cref="MtpBlock"/>, everything else of its decoder block at the layer root.</summary>
+    public static string Hc(Ernie5Config config, int layer, string module, string leaf) =>
+        config.IsMtpLayer(layer) ? $"{Layer(layer)}.{MtpBlock}.{module}.{leaf}" : $"{Layer(layer)}.{module}.{leaf}";
+
+    /// <summary>Sub-prefix of an MTP layer's decoder-block hyper-connections (vLLM <c>ernie5_5_mapper</c> drops it).</summary>
+    public const string MtpBlock = "transformer_layer";
+
+    /// <summary>RMS norm of an MTP layer's token embedding, <c>[hidden]</c>.</summary>
+    public const string MtpEmbedNorm = "enorm.weight";
+
+    /// <summary>RMS norm of an MTP layer's previous hidden stream, <c>[hidden]</c>.</summary>
+    public const string MtpHiddenNorm = "hnorm.weight";
+
+    /// <summary>Projection of an MTP layer's normed embedding, <c>[hidden, hidden]</c>.</summary>
+    public const string MtpEmbedProj = "e_proj.weight";
+
+    /// <summary>Projection of an MTP layer's normed previous stream, <c>[hidden, hidden]</c>.</summary>
+    public const string MtpHiddenProj = "h_proj.weight";
+
+    /// <summary>An MTP layer's own mHC head read-out projection, F32 stored <c>[hc * hidden, hc]</c> (input-major) like <see cref="HeadFn"/>.</summary>
+    public const string MtpHeadFn = "hc_head_fn";
+
+    /// <summary>An MTP layer's mHC head gate bias, F32 <c>[hc]</c>.</summary>
+    public const string MtpHeadBase = "hc_head_base";
+
+    /// <summary>An MTP layer's mHC head gate scale, F32 <c>[1]</c>.</summary>
+    public const string MtpHeadScale = "hc_head_scale";
+
+    /// <summary>An MTP layer's final RMS norm before the shared LM head, <c>[hidden]</c>.</summary>
+    public const string MtpFinalNorm = "shared_head.norm.weight";
+
+    /// <summary>Leaves an MTP layer has outside its decoder block (vLLM <c>_MTP_LAYER_OWN</c>); the LM head and embedding are shared.</summary>
+    public static readonly string[] MtpLeaves =
+        [MtpEmbedNorm, MtpHiddenNorm, MtpEmbedProj, MtpHiddenProj, MtpHeadFn, MtpHeadBase, MtpHeadScale, MtpFinalNorm];
+
+    /// <summary>The key of an MTP-own leaf of layer <paramref name="layer"/>.</summary>
+    public static string Mtp(int layer, string leaf) => $"{Layer(layer)}.{leaf}";
 
     /// <summary>Every key of the latent MoE block of layer <paramref name="layer"/>: the checkpoint's own name (<c>block_sparse_moe.*</c>,
     /// <c>w1</c>/<c>w3</c>/<c>w2</c> experts) and the engine name <see cref="MoeFeedForward"/> reads it under, the load-time remap MiniMax

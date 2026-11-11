@@ -1,0 +1,450 @@
+namespace HartsyInference.ThreeD.Geometry.Ops;
+
+/// <summary>
+/// Topology repair for indexed triangle meshes: vertex welding, degenerate and duplicate face removal, non-manifold edge thinning,
+/// small-component removal, hole filling and orientation unification. Every step returns a new geometry-only mesh (positions and
+/// indices; normals, UVs and colors are dropped) with unreferenced vertices removed and the surviving order preserved.
+/// </summary>
+public static class MeshCleaner
+{
+    /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, non-manifold, small
+    /// components, holes, orientation.</summary>
+    public static Mesh Clean(Mesh mesh, MeshCleanOptions? options = null)
+    {
+        Validate(mesh);
+        options ??= new MeshCleanOptions();
+        Mesh m = Compact(mesh.Vertices, mesh.Indices);
+        if (options.WeldVertices) m = WeldVertices(m, options.WeldTolerance);
+        if (options.RemoveDegenerateFaces) m = RemoveDegenerateFaces(m);
+        if (options.RemoveDuplicateFaces) m = RemoveDuplicateFaces(m);
+        if (options.RepairNonManifoldEdges) m = RepairNonManifoldEdges(m);
+        if (options.SmallComponentAreaRatio > 0) m = RemoveSmallComponents(m, options.SmallComponentAreaRatio);
+        if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
+        if (options.UnifyOrientation) m = UnifyOrientation(m, options.OrientOutward);
+        return m;
+    }
+
+    /// <summary>Merges vertices closer than <paramref name="tolerance"/> (0: identical positions only) by snapping to a grid of that size.</summary>
+    public static Mesh WeldVertices(Mesh mesh, double tolerance = 0)
+    {
+        Validate(mesh);
+        if (tolerance < 0 || double.IsNaN(tolerance))
+            throw new ArgumentOutOfRangeException(nameof(tolerance), "Tolerance must be non-negative.");
+        float[] v = mesh.Vertices;
+        int count = mesh.VertexCount;
+        int[] remap = new int[count];
+        List<float> kept = new(v.Length);
+        if (tolerance == 0)
+        {
+            Dictionary<(float, float, float), int> seen = new(count);
+            for (int i = 0; i < count; i++)
+            {
+                (float, float, float) key = (v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+                if (!seen.TryGetValue(key, out int id))
+                {
+                    id = kept.Count / 3;
+                    seen[key] = id;
+                    kept.Add(key.Item1); kept.Add(key.Item2); kept.Add(key.Item3);
+                }
+                remap[i] = id;
+            }
+        }
+        else
+        {
+            Dictionary<(long, long, long), int> seen = new(count);
+            for (int i = 0; i < count; i++)
+            {
+                (long, long, long) key = ((long)Math.Floor(v[i * 3] / tolerance), (long)Math.Floor(v[i * 3 + 1] / tolerance),
+                    (long)Math.Floor(v[i * 3 + 2] / tolerance));
+                if (!seen.TryGetValue(key, out int id))
+                {
+                    id = kept.Count / 3;
+                    seen[key] = id;
+                    kept.Add(v[i * 3]); kept.Add(v[i * 3 + 1]); kept.Add(v[i * 3 + 2]);
+                }
+                remap[i] = id;
+            }
+        }
+        int[] indices = new int[mesh.Indices.Length];
+        for (int i = 0; i < indices.Length; i++)
+            indices[i] = remap[mesh.Indices[i]];
+        return Compact([.. kept], indices);
+    }
+
+    /// <summary>Removes faces that repeat a vertex or whose area is zero.</summary>
+    public static Mesh RemoveDegenerateFaces(Mesh mesh)
+    {
+        Validate(mesh);
+        int faces = mesh.TriangleCount;
+        bool[] keep = new bool[faces];
+        for (int f = 0; f < faces; f++)
+        {
+            int a = mesh.Indices[f * 3], b = mesh.Indices[f * 3 + 1], c = mesh.Indices[f * 3 + 2];
+            keep[f] = a != b && b != c && a != c && FaceArea(mesh.Vertices, a, b, c) > 1e-30;
+        }
+        return Rebuild(mesh, keep);
+    }
+
+    /// <summary>Removes faces that use the same three vertices as an earlier face, in either winding.</summary>
+    public static Mesh RemoveDuplicateFaces(Mesh mesh)
+    {
+        Validate(mesh);
+        int faces = mesh.TriangleCount;
+        bool[] keep = new bool[faces];
+        HashSet<(int, int, int)> seen = new(faces);
+        for (int f = 0; f < faces; f++)
+        {
+            int a = mesh.Indices[f * 3], b = mesh.Indices[f * 3 + 1], c = mesh.Indices[f * 3 + 2];
+            int lo = Math.Min(a, Math.Min(b, c)), hi = Math.Max(a, Math.Max(b, c));
+            keep[f] = seen.Add((lo, a + b + c - lo - hi, hi));
+        }
+        return Rebuild(mesh, keep);
+    }
+
+    /// <summary>For every edge shared by more than two faces keeps the pair that is consistently wound and largest, and drops the rest.</summary>
+    public static Mesh RepairNonManifoldEdges(Mesh mesh)
+    {
+        Validate(mesh);
+        int faces = mesh.TriangleCount;
+        EdgeTable table = EdgeTable.Build(mesh.Indices, mesh.VertexCount);
+        bool[] keep = new bool[faces];
+        Array.Fill(keep, true);
+        List<int> run = [];
+        for (int s = 0; s < table.Count;)
+        {
+            int e = table.RunEnd(s);
+            if (e - s > 2)
+            {
+                run.Clear();
+                for (int k = s; k < e; k++)
+                    if (keep[table.HalfEdges[k] / 3]) run.Add(table.HalfEdges[k]);
+                if (run.Count > 2) ThinRun(mesh, table, run, keep);
+            }
+            s = e;
+        }
+        return Rebuild(mesh, keep);
+    }
+
+    /// <summary>Removes vertex-connected components below <paramref name="areaRatio"/> of the total area; the largest always stays.</summary>
+    public static Mesh RemoveSmallComponents(Mesh mesh, double areaRatio)
+    {
+        Validate(mesh);
+        if (areaRatio < 0 || double.IsNaN(areaRatio))
+            throw new ArgumentOutOfRangeException(nameof(areaRatio), "Ratio must be non-negative.");
+        int faces = mesh.TriangleCount;
+        int[] parent = new int[mesh.VertexCount];
+        for (int i = 0; i < parent.Length; i++) parent[i] = i;
+        for (int f = 0; f < faces; f++)
+        {
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 1]);
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 2]);
+        }
+        double[] area = new double[mesh.VertexCount];
+        double total = 0, largest = 0;
+        for (int f = 0; f < faces; f++)
+        {
+            double a = FaceArea(mesh.Vertices, mesh.Indices[f * 3], mesh.Indices[f * 3 + 1], mesh.Indices[f * 3 + 2]);
+            area[Find(parent, mesh.Indices[f * 3])] += a;
+            total += a;
+        }
+        foreach (double a in area)
+            largest = Math.Max(largest, a);
+        bool[] keep = new bool[faces];
+        for (int f = 0; f < faces; f++)
+        {
+            double a = area[Find(parent, mesh.Indices[f * 3])];
+            keep[f] = a >= largest || a >= areaRatio * total;
+        }
+        return Rebuild(mesh, keep);
+    }
+
+    /// <summary>Closes boundary loops whose perimeter is at most <paramref name="maxPerimeter"/> (mesh units): a triangle for three
+    /// vertices, otherwise a fan around a new centroid vertex. Loops that cannot be traced to a closed cycle are left open.</summary>
+    public static Mesh FillHoles(Mesh mesh, double maxPerimeter)
+    {
+        Validate(mesh);
+        if (!(maxPerimeter >= 0))
+            throw new ArgumentOutOfRangeException(nameof(maxPerimeter), "Perimeter must be non-negative.");
+        EdgeTable table = EdgeTable.Build(mesh.Indices, mesh.VertexCount);
+        List<(int From, int To)> boundary = [];
+        for (int s = 0; s < table.Count;)
+        {
+            int e = table.RunEnd(s);
+            if (e - s == 1)
+                boundary.Add((table.From(table.HalfEdges[s]), table.To(table.HalfEdges[s])));
+            s = e;
+        }
+        if (boundary.Count == 0)
+            return Compact(mesh.Vertices, mesh.Indices);
+        boundary.Sort();
+
+        Dictionary<int, List<int>> outgoing = [];
+        for (int i = 0; i < boundary.Count; i++)
+        {
+            if (!outgoing.TryGetValue(boundary[i].From, out List<int>? list))
+                outgoing[boundary[i].From] = list = [];
+            list.Add(i);
+        }
+
+        List<float> verts = [.. mesh.Vertices];
+        List<int> idx = [.. mesh.Indices];
+        bool[] used = new bool[boundary.Count];
+        List<int> loop = [];
+        for (int start = 0; start < boundary.Count; start++)
+        {
+            if (used[start]) continue;
+            loop.Clear();
+            used[start] = true;
+            loop.Add(boundary[start].From);
+            int cur = start;
+            bool closed = false;
+            while (true)
+            {
+                int next = boundary[cur].To;
+                if (next == loop[0]) { closed = true; break; }
+                loop.Add(next);
+                int following = -1;
+                if (outgoing.TryGetValue(next, out List<int>? options))
+                    foreach (int o in options)
+                        if (!used[o]) { following = o; break; }
+                if (following < 0) break;
+                used[following] = true;
+                cur = following;
+            }
+            if (!closed || loop.Count < 3 || LoopPerimeter(mesh.Vertices, loop) > maxPerimeter)
+                continue;
+            AddFill(verts, idx, loop);
+        }
+        return Compact([.. verts], [.. idx]);
+    }
+
+    /// <summary>Makes neighboring faces agree on winding by flood fill across manifold edges; with <paramref name="orientOutward"/> closed
+    /// components with negative signed volume are then flipped as a whole.</summary>
+    public static Mesh UnifyOrientation(Mesh mesh, bool orientOutward = true)
+    {
+        Validate(mesh);
+        int faces = mesh.TriangleCount;
+        int[] indices = (int[])mesh.Indices.Clone();
+        EdgeTable table = EdgeTable.Build(indices, mesh.VertexCount);
+        int[] degree = new int[faces + 1];
+        bool[] open = new bool[faces];
+        for (int s = 0; s < table.Count;)
+        {
+            int e = table.RunEnd(s);
+            if (e - s == 2)
+            {
+                degree[table.HalfEdges[s] / 3]++;
+                degree[table.HalfEdges[s + 1] / 3]++;
+            }
+            else
+            {
+                for (int k = s; k < e; k++) open[table.HalfEdges[k] / 3] = true;
+            }
+            s = e;
+        }
+        int[] start = new int[faces + 1];
+        for (int f = 0; f < faces; f++) start[f + 1] = start[f] + degree[f];
+        int[] neighbor = new int[start[faces]];
+        bool[] sameDirection = new bool[start[faces]];
+        int[] fill = new int[faces];
+        for (int s = 0; s < table.Count;)
+        {
+            int e = table.RunEnd(s);
+            if (e - s == 2)
+            {
+                int h0 = table.HalfEdges[s], h1 = table.HalfEdges[s + 1];
+                int f0 = h0 / 3, f1 = h1 / 3;
+                bool same = table.From(h0) == table.From(h1);
+                neighbor[start[f0] + fill[f0]] = f1; sameDirection[start[f0] + fill[f0]++] = same;
+                neighbor[start[f1] + fill[f1]] = f0; sameDirection[start[f1] + fill[f1]++] = same;
+            }
+            s = e;
+        }
+
+        bool[] flip = new bool[faces];
+        int[] component = new int[faces];
+        Array.Fill(component, -1);
+        List<List<int>> components = [];
+        Queue<int> queue = new();
+        for (int seed = 0; seed < faces; seed++)
+        {
+            if (component[seed] >= 0) continue;
+            List<int> members = [];
+            component[seed] = components.Count;
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                int f = queue.Dequeue();
+                members.Add(f);
+                for (int k = start[f]; k < start[f + 1]; k++)
+                {
+                    int g = neighbor[k];
+                    if (component[g] >= 0) continue;
+                    component[g] = components.Count;
+                    flip[g] = sameDirection[k] ? !flip[f] : flip[f];
+                    queue.Enqueue(g);
+                }
+            }
+            components.Add(members);
+        }
+
+        foreach (List<int> members in components)
+        {
+            bool closed = true;
+            foreach (int f in members)
+                if (open[f]) { closed = false; break; }
+            if (orientOutward && closed)
+            {
+                double volume = 0;
+                foreach (int f in members)
+                    volume += SignedVolume(mesh.Vertices, indices, f, flip[f]);
+                if (volume < 0)
+                    foreach (int f in members) flip[f] = !flip[f];
+            }
+        }
+        for (int f = 0; f < faces; f++)
+            if (flip[f]) (indices[f * 3 + 1], indices[f * 3 + 2]) = (indices[f * 3 + 2], indices[f * 3 + 1]);
+        return Compact(mesh.Vertices, indices);
+    }
+
+    private static void ThinRun(Mesh mesh, EdgeTable table, List<int> run, bool[] keep)
+    {
+        while (run.Count > 2)
+        {
+            int bestI = 0, bestJ = 1;
+            double bestScore = double.NegativeInfinity;
+            for (int i = 0; i < run.Count; i++)
+            {
+                for (int j = i + 1; j < run.Count; j++)
+                {
+                    bool consistent = table.From(run[i]) != table.From(run[j]);
+                    double score = FaceAreaOf(mesh, run[i] / 3) + FaceAreaOf(mesh, run[j] / 3) + (consistent ? 1e30 : 0.0);
+                    if (score > bestScore) { bestScore = score; bestI = i; bestJ = j; }
+                }
+            }
+            for (int k = run.Count - 1; k >= 0; k--)
+            {
+                if (k == bestI || k == bestJ) continue;
+                keep[run[k] / 3] = false;
+                run.RemoveAt(k);
+                if (k < bestI) bestI--;
+                if (k < bestJ) bestJ--;
+            }
+        }
+    }
+
+    private static void AddFill(List<float> verts, List<int> idx, List<int> loop)
+    {
+        int n = loop.Count;
+        if (n == 3)
+        {
+            idx.Add(loop[0]); idx.Add(loop[2]); idx.Add(loop[1]);
+            return;
+        }
+        float cx = 0, cy = 0, cz = 0;
+        foreach (int v in loop)
+        {
+            cx += verts[v * 3]; cy += verts[v * 3 + 1]; cz += verts[v * 3 + 2];
+        }
+        int center = verts.Count / 3;
+        verts.Add(cx / n); verts.Add(cy / n); verts.Add(cz / n);
+        for (int i = 0; i < n; i++)
+        {
+            idx.Add(loop[(i + 1) % n]); idx.Add(loop[i]); idx.Add(center);
+        }
+    }
+
+    private static double LoopPerimeter(float[] v, List<int> loop)
+    {
+        double sum = 0;
+        for (int i = 0; i < loop.Count; i++)
+        {
+            int a = loop[i] * 3, b = loop[(i + 1) % loop.Count] * 3;
+            double dx = v[a] - v[b], dy = v[a + 1] - v[b + 1], dz = v[a + 2] - v[b + 2];
+            sum += Math.Sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        return sum;
+    }
+
+    private static double SignedVolume(float[] v, int[] idx, int face, bool flipped)
+    {
+        int a = idx[face * 3] * 3, b = idx[face * 3 + (flipped ? 2 : 1)] * 3, c = idx[face * 3 + (flipped ? 1 : 2)] * 3;
+        double ax = v[a], ay = v[a + 1], az = v[a + 2], bx = v[b], by = v[b + 1], bz = v[b + 2], cx = v[c], cy = v[c + 1], cz = v[c + 2];
+        return (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6.0;
+    }
+
+    private static double FaceAreaOf(Mesh mesh, int face) =>
+        FaceArea(mesh.Vertices, mesh.Indices[face * 3], mesh.Indices[face * 3 + 1], mesh.Indices[face * 3 + 2]);
+
+    private static double FaceArea(float[] v, int a, int b, int c)
+    {
+        double ux = v[b * 3] - (double)v[a * 3], uy = v[b * 3 + 1] - (double)v[a * 3 + 1], uz = v[b * 3 + 2] - (double)v[a * 3 + 2];
+        double wx = v[c * 3] - (double)v[a * 3], wy = v[c * 3 + 1] - (double)v[a * 3 + 1], wz = v[c * 3 + 2] - (double)v[a * 3 + 2];
+        double cx = uy * wz - uz * wy, cy = uz * wx - ux * wz, cz = ux * wy - uy * wx;
+        return 0.5 * Math.Sqrt(cx * cx + cy * cy + cz * cz);
+    }
+
+    private static int Find(int[] parent, int x)
+    {
+        while (parent[x] != x)
+        {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        return x;
+    }
+
+    private static void Union(int[] parent, int a, int b)
+    {
+        int ra = Find(parent, a), rb = Find(parent, b);
+        if (ra == rb) return;
+        if (ra < rb) parent[rb] = ra; else parent[ra] = rb;
+    }
+
+    private static Mesh Rebuild(Mesh mesh, bool[] keepFace)
+    {
+        int count = 0;
+        foreach (bool k in keepFace) if (k) count++;
+        int[] indices = new int[count * 3];
+        int o = 0;
+        for (int f = 0; f < keepFace.Length; f++)
+        {
+            if (!keepFace[f]) continue;
+            indices[o++] = mesh.Indices[f * 3]; indices[o++] = mesh.Indices[f * 3 + 1]; indices[o++] = mesh.Indices[f * 3 + 2];
+        }
+        return Compact(mesh.Vertices, indices);
+    }
+
+    private static Mesh Compact(float[] vertices, int[] indices)
+    {
+        int count = vertices.Length / 3;
+        int[] map = new int[count];
+        Array.Fill(map, -1);
+        int kept = 0;
+        foreach (int i in indices)
+            if (map[i] < 0) map[i] = 0;
+        for (int i = 0; i < count; i++)
+            if (map[i] == 0) map[i] = kept++;
+        float[] outV = new float[kept * 3];
+        for (int i = 0; i < count; i++)
+        {
+            if (map[i] < 0) continue;
+            outV[map[i] * 3] = vertices[i * 3]; outV[map[i] * 3 + 1] = vertices[i * 3 + 1]; outV[map[i] * 3 + 2] = vertices[i * 3 + 2];
+        }
+        int[] outI = new int[indices.Length];
+        for (int i = 0; i < indices.Length; i++)
+            outI[i] = map[indices[i]];
+        return new Mesh { Vertices = outV, Indices = outI };
+    }
+
+    private static void Validate(Mesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        if (mesh.Vertices.Length % 3 != 0 || mesh.Indices.Length % 3 != 0)
+            throw new ArgumentException("Mesh arrays must hold whole vertices and triangles.", nameof(mesh));
+        int count = mesh.VertexCount;
+        foreach (int i in mesh.Indices)
+            if ((uint)i >= (uint)count)
+                throw new ArgumentException("A triangle index lies outside the vertex array.", nameof(mesh));
+    }
+}

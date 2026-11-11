@@ -44,7 +44,15 @@ public sealed partial class VulkanBackend
     public void Attention(in AttentionCall call)
     {
         if (call.LegacyGap() is { } gap)
+        {
+            // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
+            if (AttentionFlashLowering.Gap(in call) is null)
+            {
+                AttentionFlashLowering.Run(this, in call);
+                return;
+            }
             throw new AttentionUnsupportedException($"Vulkan attention serves a call its legacy entry point can carry; this one has {gap}.");
+        }
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
         switch (call.Route)
         {
@@ -218,9 +226,12 @@ public sealed partial class VulkanBackend
         ];
     }
 
-    // ── FlashAttention: C.1-C.4 ───────────────────────────────────────────────────────────────────────────────────
+    // ── FlashAttention: C.1-C.5 ───────────────────────────────────────────────────────────────────────────────────
 
-    private bool FlashOnDevice(in AttentionCall c) =>
+    /// <summary>Whether a device row computes the call: the sdpa_flash kernels (C.2-C.4) or the wide row (C.5).</summary>
+    private bool FlashOnDevice(in AttentionCall c) => FlashKernelOnDevice(in c) || FlashWideAdmits(in c);
+
+    private bool FlashKernelOnDevice(in AttentionCall c) =>
         c.Logits.Softcap == 0f && c.Logits.Sinks is null && c.Logits.AlibiSlopes is null && c.QkHeadDim <= FlashMaxHeadDim;
 
     private AttentionKernelRow[] BuildFlashRows()
@@ -245,7 +256,7 @@ public sealed partial class VulkanBackend
                     MinHeadDim = 64, MaxHeadDim = 128, Gqa = true, Masks = RowCausalWindow, MinQueryTokens = 64,
                     UsesQueryKey = AttentionFormats.F16, UsesProbValue = AttentionFormats.F16, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "C.2",
-                (in AttentionCall c) => FlashOnDevice(in c) && c.Mask.Causal,
+                (in AttentionCall c) => FlashKernelOnDevice(in c) && c.Mask.Causal,
                 (in AttentionCall c) =>
                 {
                     return TryFlashCm2CausalPrefill(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.Positions.KvLength,
@@ -258,7 +269,7 @@ public sealed partial class VulkanBackend
                 (in AttentionCall c) =>
                 {
                     int kvLen = c.Positions.KvLength, qOffset = c.Positions.QueryOffset, window = c.Mask.LegacySlidingWindow;
-                    return FlashOnDevice(in c) && kvLen >= 1 && kvLen <= c.KeyTokens && qOffset >= 0 && window >= 0
+                    return FlashKernelOnDevice(in c) && kvLen >= 1 && kvLen <= c.KeyTokens && qOffset >= 0 && window >= 0
                         && (!c.Mask.Causal || qOffset < kvLen)
                         && CanUseFlashDecode(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, c.KvGroup);
                 },
@@ -272,11 +283,21 @@ public sealed partial class VulkanBackend
                 {
                     MaxHeadDim = FlashMaxHeadDim, Gqa = true, Masks = RowCausalWindow, Lowering = AttentionLowering.Cast, Saturates = true,
                 }, "C.4",
-                (in AttentionCall c) => FlashOnDevice(in c) && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
+                (in AttentionCall c) => FlashKernelOnDevice(in c) && ScalarGridFits(c.QueryTokens, c.Heads, c.Batch),
                 (in AttentionCall c) =>
                 {
                     DispatchFlashAttention(c.Output.Storage, c.Query.Storage, c.Key.Storage, c.Value.Storage, mask: null, c.Scale, c.Mask.Causal,
                         c.Positions.QueryOffset, c.Mask.LegacySlidingWindow, skv: c.Positions.KvLength, c.KvGroup);
+                    return true;
+                }),
+            new DelegateAttentionRow(Cap("flash.wide", E, AttentionDTypes.F32, AttentionDTypes.F32, HM) with
+                {
+                    MaxHeadDim = FlashWideMaxHeadDim, Gqa = true, LogitTerms = true,
+                }, "C.5",
+                (in AttentionCall c) => FlashWideAdmits(in c),
+                (in AttentionCall c) =>
+                {
+                    DispatchFlashWide(in c);
                     return true;
                 }),
         ];

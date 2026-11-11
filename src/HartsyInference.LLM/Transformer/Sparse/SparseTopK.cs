@@ -1,6 +1,9 @@
+using HartsyInference.Core.Backends.Host;
+
 namespace HartsyInference.LLM.Transformer.Sparse;
 
-/// <summary>Per-query top-k over indexer scores, shared by the sparse-attention layers (DeepSeek V4.1 compressed positions, DSA tokens).</summary>
+/// <summary>Per-query top-k over indexer scores, shared by the sparse-attention layers (DeepSeek V4.1 compressed positions, DSA tokens);
+/// the device form is <see cref="HartsyInference.Core.Backends.IBackend.SparseTopK"/>.</summary>
 /// <remarks>Ties break toward the lower index, so results are deterministic where torch leaves tie order unspecified.</remarks>
 public static class SparseTopK
 {
@@ -16,24 +19,10 @@ public static class SparseTopK
     {
         int k = Math.Min(topk, scores.Length);
         if (dest.Length < k) throw new ArgumentException("dest is too small.", nameof(dest));
-        int[] picked = Best(scores.ToArray(), k);
-        Array.Sort(picked);
-        for (int i = 0; i < k; i++) dest[i] = picked[i] < limit ? picked[i] + offset : -1;
+        SparseTopKReference.SelectRow(scores, limit, k, offset, dest);
         return k;
     }
 
     /// <summary>The indices of the <paramref name="k"/> largest values, best first, ties toward the lower index.</summary>
-    public static int[] Best(float[] values, int k)
-    {
-        ArgumentNullException.ThrowIfNull(values);
-        if ((uint)k > (uint)values.Length) throw new ArgumentOutOfRangeException(nameof(k));
-        int[] idx = new int[values.Length];
-        for (int i = 0; i < idx.Length; i++) idx[i] = i;
-        Array.Sort(idx, (a, b) =>
-        {
-            int c = values[b].CompareTo(values[a]);
-            return c != 0 ? c : a.CompareTo(b);
-        });
-        return idx.AsSpan(0, k).ToArray();
-    }
+    public static int[] Best(float[] values, int k) => SparseTopKReference.Best(values, k);
 }
