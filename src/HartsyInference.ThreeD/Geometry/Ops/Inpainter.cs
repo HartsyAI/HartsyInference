@@ -13,8 +13,8 @@ public static class Inpainter
     private const float Infinity = 1e6f;
 
     /// <summary>Returns a copy of <paramref name="data"/> (<c>width * height * channels</c>, texel-major) with every texel where
-    /// <paramref name="known"/> is false filled in. Known texels are unchanged; an image with no known texel is returned as is.</summary>
-    public static float[] Inpaint(float[] data, int width, int height, int channels, bool[] known, int radius)
+    /// <paramref name="known"/> is false filled in. Known texels are unchanged; with <paramref name="clampToUnit"/> every filled value is held to [0, 1], as OpenCV does by working in 8 bits (the gradient term otherwise runs away across large gaps); an image with no known texel is returned as is.</summary>
+    public static float[] Inpaint(float[] data, int width, int height, int channels, bool[] known, int radius, bool clampToUnit = false)
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(known);
@@ -47,7 +47,7 @@ public static class Inpainter
                 continue;
             t[i] = Solve(t, flag, i, width, height);
             signed[i] = t[i];
-            Estimate(result, flag, signed, i, width, height, channels, radius);
+            Estimate(result, flag, signed, i, width, height, channels, radius, clampToUnit);
             flag[i] = Band;
             heap.Enqueue(i, (t[i], i));
         }
@@ -69,7 +69,7 @@ public static class Inpainter
                 {
                     t[q] = cand;
                     signed[q] = cand;
-                    Estimate(result, flag, signed, q, width, height, channels, radius);
+                    Estimate(result, flag, signed, q, width, height, channels, radius, clampToUnit);
                     flag[q] = Band;
                     heap.Enqueue(q, (cand, q));
                 }
@@ -152,7 +152,7 @@ public static class Inpainter
         return (lo + hi + MathF.Sqrt(2f - (hi - lo) * (hi - lo))) * 0.5f;
     }
 
-    private static void Estimate(float[] img, byte[] flag, float[] signed, int p, int width, int height, int channels, int radius)
+    private static void Estimate(float[] img, byte[] flag, float[] signed, int p, int width, int height, int channels, int radius, bool clampToUnit)
     {
         int px = p % width, py = p / width;
         float tp = signed[p];
@@ -191,7 +191,7 @@ public static class Inpainter
             }
         }
         for (int c = 0; c < channels; c++)
-            img[p * channels + c] = wsum > 0 ? (float)(sum[c] / wsum) : 0f;
+            img[p * channels + c] = wsum > 0 ? (clampToUnit ? Math.Clamp((float)(sum[c] / wsum), 0f, 1f) : (float)(sum[c] / wsum)) : 0f;
     }
 
     // Central difference when both sides are valid, one-sided when one is, zero otherwise.

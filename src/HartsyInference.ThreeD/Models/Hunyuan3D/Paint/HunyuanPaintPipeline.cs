@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
@@ -21,6 +22,17 @@ public sealed class HunyuanPaintPipeline
     private readonly IPaintConditioner? _conditioner;
     private readonly Func<byte[], int, (byte[] Rgb, int Size)>? _upscale;
     private readonly HunyuanPaintSchedule _schedule = new();
+
+    /// <summary>Receives one line per stage with its wall time (view selection, geometry maps, VAE encode, reference stream, each step, VAE decode, bake).</summary>
+    public Action<string>? StageLog { get; set; }
+
+    private readonly Stopwatch _stage = new();
+
+    private void Stage(string name)
+    {
+        StageLog?.Invoke($"{name}: {_stage.Elapsed.TotalSeconds:F2} s");
+        _stage.Restart();
+    }
 
     /// <summary>Assembles the pipeline from loaded parts. <paramref name="upscale"/> maps a square RGB view to a larger one (Real-ESRGAN x4 upstream; 2.0 skips it).</summary>
     public HunyuanPaintPipeline(IBackend backend, HunyuanPaintConfig config, HunyuanPaintUnet unet, HunyuanPaintUnet reference, HunyuanPaintPromptTokens prompts,
@@ -46,8 +58,9 @@ public sealed class HunyuanPaintPipeline
         options ??= new HunyuanPaintOptions();
         Validate(options);
         if (mesh.Uvs is null)
-            mesh = UvUnwrapper.Unwrap(mesh, cancellationToken: cancellationToken).Mesh;
+            mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
         int size = options.ViewResolution;
+        _stage.Restart();
 
         PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
         PaintViewRenderer renderer = new(frame);
@@ -55,9 +68,31 @@ public sealed class HunyuanPaintPipeline
             ? PaintViewSelector.Select(renderer, PaintViewCandidate.All, options.MaxViews, cancellationToken: cancellationToken)
             : PaintViewCandidate.Fixed;
 
+        Stage($"views selected ({views.Count})");
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
+        Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
-        return Bake(mesh, frame, renderer, views, generated, options, cancellationToken);
+        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, cancellationToken);
+        Stage("bake");
+        return baked;
+    }
+
+    /// <summary>Encodes and decodes one image with the pipeline's VAE (a diagnostic for checking the VAE weights and timing): resizes to <paramref name="size"/>
+    /// square, reports the latent statistics through <see cref="StageLog"/> and returns the decoded RGB bytes.</summary>
+    public byte[] VaeRoundTrip(ReadOnlySpan<byte> rgb, int width, int height, int size)
+    {
+        byte[] resized = HunyuanPaintImages.Resize(rgb, width, height, size, size);
+        using Tensor image = HunyuanPaintImages.ToTensor([resized], size);
+        _stage.Restart();
+        using Tensor latent = _codec.Encode(_backend, image);
+        Stage($"vae encode {size} px, latent {latent.Shape}");
+        float[] values = HunyuanPaintImages.ToArray(latent);
+        double mean = values.Average(), std = Math.Sqrt(values.Average(v => (v - mean) * (v - mean)));
+        StageLog?.Invoke($"latent mean {mean:F3} std {std:F3} finite {values.All(float.IsFinite)}");
+        _stage.Restart();
+        using Tensor decoded = _codec.Decode(_backend, latent);
+        Stage("vae decode");
+        return HunyuanPaintImages.ToBytes(decoded)[0];
     }
 
     /// <summary>The 2.0 camera class of a view (<c>camera_info</c> plus the five reference slots the UNet skips).</summary>
@@ -123,6 +158,7 @@ public sealed class HunyuanPaintPipeline
         using (Tensor t = _codec.Encode(_backend, positionImages))
             positionLatent = HunyuanPaintImages.ToArray(t);
         using Tensor referenceLatent = _codec.Encode(_backend, referenceImage);
+        Stage("vae encode (normal, position, reference)");
 
         HunyuanPaintBlockState write = new() { Write = true, Text = [_prompts.Reference] };
         Dictionary<int, (Tensor Cos, Tensor Sin)>? rotation = null;
@@ -132,6 +168,7 @@ public sealed class HunyuanPaintPipeline
             int[] referenceClass = _config.CameraClasses > 0 ? [0] : [];
             foreach (Tensor t in _reference.Forward(_backend, [referenceLatent], 0f, referenceClass, write))
                 t.Dispose();
+            Stage("reference stream");
 
             dino = _conditioner?.Tokens(_backend, reference, size, size);
             zeroDino = dino is null ? null : new Tensor(dino.Shape, DType.F32);
@@ -188,9 +225,11 @@ public sealed class HunyuanPaintPipeline
                     float[] guided = Guide(predictions.Select(p => p[m]).ToArray(), views, guidance, n, latent);
                     latents[m] = samplers[m].Step(guided, latents[m], step, _config.UsePoseRope ? null : GaussianArray(random, perMaterial));
                 }
+                Stage($"step {step + 1}/{steps}");
                 progress?.Invoke(new GenerationProgress(step + 1, steps, (DateTime.UtcNow - started).TotalMilliseconds));
             }
 
+            Stage("sampling done");
             byte[][] generated = new byte[materials * n][];
             for (int m = 0; m < materials; m++)
             {
@@ -200,6 +239,7 @@ public sealed class HunyuanPaintPipeline
                 for (int v = 0; v < n; v++)
                     generated[m * n + v] = images[v];
             }
+            Stage("vae decode");
             return generated;
         }
         finally
@@ -264,6 +304,29 @@ public sealed class HunyuanPaintPipeline
         return result;
     }
 
+    // Texels further than GutterReach from any painted texel never show on the mesh; the gradient fill runs away there, so they take the mean painted colour.
+    private const int GutterReach = 12;
+
+    private static void FlattenFarGutter(float[] texture, bool[] known, int size)
+    {
+        double[] mean = new double[3];
+        long count = 0;
+        for (int i = 0; i < known.Length; i++)
+            if (known[i])
+            {
+                count++;
+                for (int c = 0; c < 3; c++)
+                    mean[c] += texture[i * 3 + c];
+            }
+        if (count == 0)
+            return;
+        bool[] near = PaintImageFilters.Dilate(known, size, size, GutterReach);
+        for (int i = 0; i < near.Length; i++)
+            if (!near[i])
+                for (int c = 0; c < 3; c++)
+                    texture[i * 3 + c] = (float)(mean[c] / count);
+    }
+
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
         HunyuanPaintOptions o, CancellationToken cancellationToken)
     {
@@ -291,7 +354,8 @@ public sealed class HunyuanPaintPipeline
             (float[] texture, bool[] known) = merger.Finish();
             if (m == 0)
                 painted = known.Count(k => k);
-            textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius);
+            textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true);
+            FlattenFarGutter(textures[m], known, size);
         }
 
         TextureImage baseColor = TextureImage.FromFloats(textures[0], size, size, 3, 0, 3);
