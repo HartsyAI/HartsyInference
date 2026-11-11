@@ -9,8 +9,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   multi-head latent attention with the DSA indexer, a dense SiTU first layer, latent SiTU MoE layers, and block attention residuals. The KDA
   recurrence is a new per-key-channel delta op (`IBackend.SsmChannelDecayPrefill`, with CUDA and Vulkan kernels). The row softmax
   (`SoftmaxRows`) and the attention residual (`AttentionResidual`) are shared. ERNIE's multimax head, dense GLU FFN and hyper-connection
-  sublayer moved to shared owners. A synthetic decoder matches the CPU on CUDA and Vulkan. The checkpoint loader and config reader are not
-  built yet, so the real model is not run.
+  sublayer moved to shared owners. A synthetic decoder matches the CPU on CUDA and Vulkan. The config reader, the checkpoint loader and packed MXFP4 routed experts (CUDA and Vulkan packed linear) are in, tested on synthetic
+  checkpoints; the real checkpoint has not been run.
 
 ## Unreleased
 
