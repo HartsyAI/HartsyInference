@@ -3,12 +3,20 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
-## alpha.418
+## alpha.419
 
 - **Added: Vulkan `LeakyRelu` and `AdaInstanceNorm1d`.** Both threw "not yet implemented" on the Vulkan backend, which stopped
   Kokoro, StyleTTS 2 and CosyVoice 2 from running there. The same stubs also blocked the CAM++ speaker encoder, the AuK VAE
   encoder, Silero VAD and other callers on Vulkan. `LeakyRelu` is an elementwise op; `AdaInstanceNorm1d` is a new two-pass kernel
   that matches the CPU and CUDA semantics.
+
+## alpha.418
+
+- **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,
+  `Ernie5Model` loads layer 43 and drafts the token after next: `ForwardStream` returns the target's pre-head stream,
+  `MtpForward` runs the MTP layer on it (chained steps feed its output back), and `MtpHidden` plus `Logits` read the draft through
+  the shared LM head. Verified on a synthetic checkpoint only; the Text path does not draft yet. A checkpoint is no longer refused
+  for having MTP layers.
 
 ## alpha.417
 
