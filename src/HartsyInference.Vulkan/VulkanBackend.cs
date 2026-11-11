@@ -1876,13 +1876,77 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
         using OpScope _op = EnterOp();
-        throw new NotImplementedException("VulkanBackend.AdaInstanceNorm1d not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2 prosody and decoder paths.");
+        DispatchAdaInstanceNorm1d(output, input, gamma, beta, eps);
     }
 
     public void LeakyRelu(Tensor output, Tensor input, float slope)
     {
         using OpScope _op = EnterOp();
-        throw new NotImplementedException("VulkanBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
+        // Op 12 — the slope goes through the `scalar` push-constant slot.
+        DispatchElementwise(12u, output, input, null, scalar: slope, minVal: 0, maxVal: 0);
+    }
+
+    private void DispatchAdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
+    {
+        if (input.Shape.Rank != 3)
+            throw new ArgumentException($"AdaInstanceNorm1d expects rank-3 input [B,C,T], got {input.Shape}.");
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException("AdaInstanceNorm1d runs on F32 tensors only.");
+
+        int batch = (int)input.Shape[0];
+        int channels = (int)input.Shape[1];
+        int t = (int)input.Shape[2];
+        if (batch < 1 || channels < 1 || t < 1)
+            throw new ArgumentException($"AdaInstanceNorm1d needs B, C and T of at least 1, got {input.Shape}.");
+
+        bool perBatch = gamma.Shape.Rank == 2;
+        bool gammaFits = perBatch
+            ? (int)gamma.Shape[0] == batch && (int)gamma.Shape[1] == channels
+            : gamma.Shape.Rank == 1 && (int)gamma.Shape[0] == channels;
+        if (!gammaFits)
+            throw new ArgumentException($"AdaInstanceNorm1d gamma {gamma.Shape} must be [B={batch},C={channels}] or [C={channels}].");
+        if (beta.Shape.Rank != gamma.Shape.Rank || beta.ElementCount != gamma.ElementCount)
+            throw new ArgumentException($"AdaInstanceNorm1d beta {beta.Shape} must match gamma {gamma.Shape}.");
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer gBuf = GetBuffer(gamma);
+        VulkanBuffer bBuf = GetBuffer(beta);
+        VulkanBuffer? gOwned = null, bOwned = null;
+        VulkanBuffer gEff = gBuf, bEff = bBuf;
+        if (gamma.DType != DType.F32) { (gEff, gOwned) = CastIfNeeded(gamma, gBuf, DType.F32); }
+        if (beta.DType != DType.F32) { (bEff, bOwned) = CastIfNeeded(beta, bBuf, DType.F32); }
+
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, 256), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1)
+            };
+            VulkanKernel k = GetKernel("adain1d_f32", 4, spec);
+
+            Span<byte> pc = stackalloc byte[4 * 4];
+            BinaryWriteUInt(pc, 0, (uint)t);
+            BinaryWriteUInt(pc, 4, (uint)channels);
+            BinaryWriteUInt(pc, 8, perBatch ? 1u : 0u);
+            BinaryWriteFloat(pc, 12, eps);
+
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, gEff.Handle, bEff.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc, (uint)(batch * channels));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan DispatchAdaInstanceNorm1d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (gOwned is not null) _xfer.FreeDevice(gOwned);
+            if (bOwned is not null) _xfer.FreeDevice(bOwned);
+        }
     }
 
     #endregion

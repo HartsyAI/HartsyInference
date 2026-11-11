@@ -3,6 +3,13 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.418
+
+- **Added: Vulkan `LeakyRelu` and `AdaInstanceNorm1d`.** Both threw "not yet implemented" on the Vulkan backend, which stopped
+  Kokoro, StyleTTS 2 and CosyVoice 2 from running there. The same stubs also blocked the CAM++ speaker encoder, the AuK VAE
+  encoder, Silero VAD and other callers on Vulkan. `LeakyRelu` is an elementwise op; `AdaInstanceNorm1d` is a new two-pass kernel
+  that matches the CPU and CUDA semantics.
+
 ## alpha.417
 
 - **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session
