@@ -57,6 +57,24 @@ public static class MiniMaxH3Schedule
         return sigmas;
     }
 
+    /// <summary>The MiniMax-H3-Image sigma schedule: the checkpoint's own grid, unshifted. Its heads are distilled on
+    /// this grid, so the step count must equal the head count and no resolution-dependent shift applies.</summary>
+    public static double[] ImageSigmas(IReadOnlyList<double> grid)
+    {
+        ArgumentNullException.ThrowIfNull(grid);
+        if (grid.Count < 2 || grid[0] != 1.0 || grid[^1] != 0.0)
+        {
+            throw new ArgumentException("The MiniMax-H3-Image grid must run from 1.0 to 0.0 with at least one step.", nameof(grid));
+        }
+
+        double[] sigmas = new double[grid.Count];
+        for (int i = 0; i < grid.Count; i++)
+        {
+            sigmas[i] = grid[i];
+        }
+        return sigmas;
+    }
+
     /// <summary>Per-token timesteps for one step: video/text follow <c>1 - sigma_v</c>, audio follows its own shifted
     /// schedule, and conditioning rows pin near 1 because they carry clean latents.</summary>
     public static (float Video, float Audio) Timesteps(double sigmaVideo, double shiftVideo, double shiftAudio)

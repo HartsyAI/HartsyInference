@@ -2,7 +2,7 @@
 //
 //   glu_<t>                 out[r, i] = act(gate[r, i]) · value[r, i] over the [gate | value] or [value | gate] halves of each
 //                           input row; act 0 SiLU, 1 GELU-tanh (the fast sigmoid form of lm_glu_act_f32), 2 GELU-erf,
-//                           3 SiTU (4·tanh(g/4)·sigmoid(g) with the value soft-capped to 25·tanh(u/25)).
+//                           3 SiTU (β·tanh(g/β)·sigmoid(g) with the value soft-capped to β_lin·tanh(u/β_lin); the betas ride in the geometry).
 //   group_scale_<t>[_<g>]   out[i] = f(gate(row(i), group(i))) · in[i], or out[i] += that with a zero gate skipped; f is the
 //                           stored gate (0) or 2·sigmoid (1). The output may be the input.
 //
@@ -20,6 +20,8 @@ struct GluGeom
     int inner;
     int act;
     int gateFirst;
+    float situBeta;
+    float situLinearBeta;
 };
 
 struct GroupScaleGeom
@@ -46,7 +48,7 @@ __device__ __forceinline__ float sigmoid_safe(float x)
     return x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
 }
 
-__device__ __forceinline__ float glu_gate(float g, int act)
+__device__ __forceinline__ float glu_gate(float g, int act, float beta)
 {
     if (act == 0) return g * __fdividef(1.0f, 1.0f + __expf(-g));                         // SiLU
     if (act == 1)
@@ -56,12 +58,12 @@ __device__ __forceinline__ float glu_gate(float g, int act)
         return 0.5f * g * (1.0f + (2.0f * s - 1.0f));                                       // GELU-tanh
     }
     if (act == 2) return 0.5f * g * (1.0f + erff(g * 0.70710678118654752440f));            // GELU-erf
-    return 4.0f * tanhf(g * 0.25f) * sigmoid_safe(g);                                       // SiTU gate
+    return beta * tanhf(g / beta) * sigmoid_safe(g);                                        // SiTU gate
 }
 
-__device__ __forceinline__ float glu_value(float u, int act)
+__device__ __forceinline__ float glu_value(float u, int act, float linearBeta)
 {
-    return act == 3 ? 25.0f * tanhf(u / 25.0f) : u;
+    return act == 3 ? linearBeta * tanhf(u / linearBeta) : u;
 }
 
 template <typename T>
@@ -75,7 +77,7 @@ __device__ __forceinline__ void glu(T* __restrict__ out, const T* __restrict__ i
         size_t base = (size_t)r * 2u * (size_t)g.inner;
         size_t gateAt = base + (g.gateFirst ? i : (size_t)g.inner + i);
         size_t valueAt = base + (g.gateFirst ? (size_t)g.inner + i : i);
-        store_act(out, idx, glu_gate(load_act(in, gateAt), g.act) * glu_value(load_act(in, valueAt), g.act));
+        store_act(out, idx, glu_gate(load_act(in, gateAt), g.act, g.situBeta) * glu_value(load_act(in, valueAt), g.act, g.situLinearBeta));
     }
 }
 

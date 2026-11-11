@@ -24,6 +24,8 @@ public sealed partial class CudaKernels
         public int Inner;
         public int Act;
         public int GateFirst;
+        public float SituBeta;
+        public float SituLinearBeta;
     }
 
     /// <summary>Kernel parameter of the group-scale kernels; mirrors <c>GroupScaleGeom</c> field for field.</summary>
@@ -56,7 +58,11 @@ public sealed partial class CudaKernels
     public unsafe void LaunchGlu(ulong output, ulong input, DType dtype, in GluSpec spec, long rows, int inner, nint stream)
     {
         nint func = dtype == DType.F32 ? _gluF32 : dtype == DType.F16 ? _gluF16 : _gluBf16;
-        GluGeomArgs args = new() { Rows = (ulong)rows, Inner = inner, Act = (int)spec.Activation, GateFirst = spec.Gate == GluGateHalf.First ? 1 : 0 };
+        GluGeomArgs args = new()
+        {
+            Rows = (ulong)rows, Inner = inner, Act = (int)spec.Activation, GateFirst = spec.Gate == GluGateHalf.First ? 1 : 0,
+            SituBeta = spec.SituBeta, SituLinearBeta = spec.SituLinearBeta,
+        };
         ulong outArg = output, inArg = input;
         void** a = stackalloc void*[3];
         a[0] = &outArg; a[1] = &inArg; a[2] = &args;
