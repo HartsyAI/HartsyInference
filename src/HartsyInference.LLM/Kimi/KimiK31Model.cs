@@ -212,12 +212,11 @@ public sealed class KimiK31Model : IDisposable
         if (state.Position >= state.Capacity) throw new InvalidOperationException("The sequence state is full.");
         int d = _config.Hidden;
         float[] x = Embedding(token);
-        if (state.Position == 0)
-        {
-            state.Blocks.Clear();
-            state.Blocks.Add(x.ToArray());
-            Array.Clear(state.Partial);
-        }
+        // The depth-residual stack is per token: each token's block summaries start from its own embedding. Only the KDA and
+        // MLA caches carry across calls.
+        state.Blocks.Clear();
+        state.Blocks.Add(x);
+        Array.Clear(state.Partial);
         for (int i = 0; i < _config.Layers; i++)
         {
             if (i > 0 && i % _config.AttnResBlock == 0)

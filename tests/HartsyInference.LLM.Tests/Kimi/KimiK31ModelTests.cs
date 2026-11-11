@@ -45,6 +45,18 @@ public sealed class KimiK31ModelTests
         for (int i = 0; i < first.Length; i++) Assert.Equal(first[i], second[i], 6);
     }
 
+    [Fact]
+    public void LaterToken_DependsOnItsOwnEmbedding_NotTheFirstTokens()
+    {
+        // The same first token, a different second token: the second token's logits must differ.
+        KimiK31Weights weights = RandomWeights(new Random(9));
+        float[] a = Run(weights, [4, 1]);
+        float[] b = Run(weights, [4, 7]);
+        bool differs = false;
+        for (int i = 0; i < a.Length; i++) differs |= MathF.Abs(a[i] - b[i]) > 1e-5f;
+        Assert.True(differs, "the second token's logits did not depend on the second token");
+    }
+
     private static float[] Run(KimiK31Weights weights, int[] tokens)
     {
         using KimiK31Model model = new(new CpuBackend(), Config, weights, maxPositions: 16);
