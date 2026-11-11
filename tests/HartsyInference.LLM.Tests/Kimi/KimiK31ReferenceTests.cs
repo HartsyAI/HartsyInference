@@ -1,3 +1,4 @@
+using HartsyInference.LLM.Transformer.AttnRes;
 using HartsyInference.LLM.Kimi;
 using Xunit;
 
@@ -72,7 +73,7 @@ public class KimiK31ReferenceTests
         // Zero query -> every logit is 0 -> uniform weights over the sources.
         List<float[]> sources = new() { new[] { 1f, 2f }, new[] { 3f, 6f }, new[] { 5f, 10f } };
         float[] output = new float[2];
-        KimiK31Reference.AttnResMix(sources, new[] { 1f, 1f }, new[] { 0f, 0f }, output);
+        AttentionResidual.MixReference(sources, new[] { 1f, 1f }, new[] { 0f, 0f }, output);
         Assert.Equal(3f, output[0], Tol);
         Assert.Equal(6f, output[1], Tol);
     }
@@ -85,7 +86,7 @@ public class KimiK31ReferenceTests
         // source 1, so the output is ~ (1, 0).
         List<float[]> sources = new() { new[] { 0f, 1f }, new[] { 1f, 0f } };
         float[] output = new float[2];
-        KimiK31Reference.AttnResMix(sources, new[] { 1f, 1f }, new[] { 50f, 0f }, output);
+        AttentionResidual.MixReference(sources, new[] { 1f, 1f }, new[] { 50f, 0f }, output);
         Assert.InRange(output[0], 0.999f, 1.001f);
         Assert.InRange(output[1], -0.001f, 0.001f);
     }

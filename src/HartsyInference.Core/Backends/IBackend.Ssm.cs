@@ -36,6 +36,22 @@ public partial interface IBackend
         Tensor betaRaw, Tensor dtBias, Tensor ssmA, Tensor normW, int hv, int sv, int sk, int repeat, float eps) =>
         GatedDeltaNetReference.DeltaScan(output, state, q, k, v, z, alphaRaw, betaRaw, dtBias, ssmA, normW, hv, sv, sk, repeat, eps);
 
+    /// <summary>Delta-rule prefill with a per-key-channel decay (Kimi KDA), over <c>seq</c> tokens. Per token and value head:
+    /// <c>S[:, c] ·= exp(logDecay[c])</c>, <c>S += k ⊗ ((v − S·k)·sigmoid(betaRaw))</c>, <c>o = S·q</c>. The output is the raw
+    /// recurrence; the caller applies the gated norm. The gate formula stays with the model, so this op serves any family that
+    /// decays per key channel.</summary>
+    /// <param name="output">F32 <c>[seq, hv·sv]</c>.</param>
+    /// <param name="state">F32 <c>[hv, sv, sk]</c> recurrent state, updated in place.</param>
+    /// <param name="q">F32 <c>[seq, (hv/repeat)·sk]</c>, already scaled.</param>
+    /// <param name="k">F32 <c>[seq, (hv/repeat)·sk]</c>, already L2-normalized.</param>
+    /// <param name="v">F32 <c>[seq, hv·sv]</c>.</param>
+    /// <param name="logDecay">F32 <c>[seq, hv·sk]</c> log-decay per key channel, at most zero.</param>
+    /// <param name="betaRaw">F32 <c>[seq, hv]</c> write-strength projection (pre-sigmoid).</param>
+    /// <param name="repeat">Value heads per key head (key head = value head / repeat).</param>
+    void SsmChannelDecayPrefill(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor logDecay, Tensor betaRaw,
+        int hv, int sv, int sk, int repeat) =>
+        GatedDeltaNetReference.ChannelDecayScan(output, state, q, k, v, logDecay, betaRaw, hv, sv, sk, repeat);
+
     /// <summary>Qwen3.5 SSM decode step (seq=1), part 1: causal depthwise conv step + SiLU + q/k/v split + per-head L2 norms.</summary>
     /// <remarks><paramref name="history"/> is the device-persistent conv ring, shifted in place. CUDA-only (graph-capable backends).</remarks>
     void SsmConvSplitStep(Tensor q, Tensor k, Tensor v, Tensor qkvMixed, Tensor history, Tensor convW,
