@@ -6,6 +6,10 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 ## alpha.423
 
 - **Fixed: Vulkan `ConvTranspose1d` rejected grouped and depthwise weights.** The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so the depthwise pool in Kokoro's AdainResBlk1d and the grouped calls in Mimi, PocketTTS and AntiAliasedSnake failed on Vulkan. The shader now takes `groups` with weight `[C_in, C_out/groups, K]`, and dense calls sum in the same order as before. `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference. Kokoro and StyleTTS 2 are not yet re-run end to end on Vulkan.
+- **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
+  checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)
+  matches the CPU on CUDA and Vulkan. The real index maps every key, and the multimax matches the reference. `Ernie5RealCheckpointTests` runs
+  on `ERNIE_REAL_DIR` (skipped otherwise), and `docs/Checklists/ERNIE55_REAL_WEIGHTS.md` is the runbook. The indexer ReLU stays unverified.
 - **Added: `hartsy 3d -m pixal3d`, Pixal3D shape-only image to mesh (🔧, parity pending).** `Pixal3DImageTo3DPipeline` runs the cascade with the
   projection-mode flows: DINOv3 tokens split into global tokens and a patch map sampled at each voxel's projected position (NAF-upsampled for the
   shape flows), the structure flow and decoder, the 512 shape flow, the upsample, the rounding quantizer, the 1024 flow at 1024 or 1536, the shape VAE

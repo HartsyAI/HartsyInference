@@ -52,6 +52,18 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     public void Vulkan_SyntheticErnieFp8_LogitsMatchCpu() =>
         ParityOn(() => new VulkanBackend(), "Vulkan", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
 
+    // The real checkpoint's dimensions, FP8, three layers (HCA, DSA, HCA) and two MoE layers: the shapes and kernel limits of the rental run.
+    // High-precision GEMM so the F32 projections (router, LM head, head mixes) run without TF32; otherwise their ~1e-3 rounding, not the FP8
+    // path, is what this comparison measures.
+    [ErnieCudaFact]
+    public void Cuda_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new CudaBackend(0, PtxDirectory()) { HighPrecisionGemm = true }, "CUDA",
+        resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
+
+    // F16 GEMM off, the Vulkan counterpart of HighPrecisionGemm above: it rounds GEMM inputs to F16, which is the ~1e-3 this compares.
+    [ErnieVulkanFact]
+    public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
+        Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
+
     // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.
     [ErnieCudaFact]
     public void Cuda_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA");
@@ -89,9 +101,11 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     }
 
     // Compares the device's logits with the CPU's for the same checkpoint, weights and tokens.
-    private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32)
+    private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32,
+        IReadOnlyDictionary<string, string>? overrides = null)
     {
-        string dir = WriteCheckpoint(storage);
+        string dir = Path.Combine(_root, Guid.NewGuid().ToString("N"));
+        Ernie5SyntheticCheckpoint.Write(dir, storage: storage, configOverrides: overrides);
         using CpuBackend cpu = new();
         float[] want = Logits(dir, cpu, resident);
         using IBackend gpu = open();
@@ -131,7 +145,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     }
 
     // The PTX beside the test assembly, else the repository's Cuda Ptx folder.
-    private static string PtxDirectory()
+    internal static string PtxDirectory()
     {
         string beside = Path.Combine(AppContext.BaseDirectory, "Ptx");
         if (Directory.Exists(beside)) return beside;
