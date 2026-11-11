@@ -77,6 +77,10 @@ public static class Trellis2Cascade
     /// lexicographic order, as <c>unique(dim=0)</c> gives.
     /// </summary>
     public static int[] QuantizeUnique(ReadOnlySpan<int> upsampled, int coarseResolution, int hrResolution)
+        => QuantizeUnique(upsampled, coarseResolution, hrResolution, Trellis2CascadeQuantizer.Floor);
+
+    /// <summary>As <see cref="QuantizeUnique(ReadOnlySpan{int}, int, int)"/> with the mapping chosen by <paramref name="quantizer"/>.</summary>
+    public static int[] QuantizeUnique(ReadOnlySpan<int> upsampled, int coarseResolution, int hrResolution, Trellis2CascadeQuantizer quantizer)
     {
         if (coarseResolution <= 0 || hrResolution < LatentStride || hrResolution % LatentStride != 0)
             throw new ArgumentException($"Invalid cascade resolutions {coarseResolution} -> {hrResolution}.", nameof(hrResolution));
@@ -90,9 +94,7 @@ public static class Trellis2Cascade
             long key = upsampled[i * 4];
             for (int a = 1; a <= 3; a++)
             {
-                // floor((c + 0.5) · grid / coarse) in integers: exact where upstream's float32 product is exact.
-                long q = (2L * upsampled[i * 4 + a] + 1) * grid / (2L * coarseResolution);
-                key = key * 4096 + q;
+                key = key * 4096 + Quantize(upsampled[i * 4 + a], coarseResolution, grid, quantizer);
             }
 
             keys[i] = key;
@@ -122,12 +124,28 @@ public static class Trellis2Cascade
         return coords;
     }
 
+    // Both forms are exact integer arithmetic where upstream's float32 product is exact: (2c + 1) · cells / (2 · coarse), floored or rounded.
+    private static long Quantize(int c, int coarse, long grid, Trellis2CascadeQuantizer quantizer)
+    {
+        long denominator = 2L * coarse;
+        if (quantizer == Trellis2CascadeQuantizer.Floor)
+            return (2L * c + 1) * grid / denominator;
+        long numerator = (2L * c + 1) * (grid - 1), q = numerator / denominator, twiceRemainder = 2 * (numerator % denominator);
+        // torch.round is half to even; for the supported grids (multiples of 8, so grid - 1 is odd) no tie can occur.
+        return twiceRemainder > denominator || (twiceRemainder == denominator && (q & 1) == 1) ? q + 1 : q;
+    }
+
     /// <summary>
     /// Upstream's token-cap loop: starting at <paramref name="targetResolution"/>, retreat by <see cref="ResolutionStep"/> until the unique
     /// voxel count is under <paramref name="maxTokens"/> or <see cref="FloorResolution"/> is reached. Returns the voxels and the resolution
     /// the high-resolution flow and the decoder run at.
     /// </summary>
     public static (int[] Coords, int Resolution) FitTokenCap(ReadOnlySpan<int> upsampled, int coarseResolution, int targetResolution, int maxTokens)
+        => FitTokenCap(upsampled, coarseResolution, targetResolution, maxTokens, Trellis2CascadeQuantizer.Floor);
+
+    /// <summary>As <see cref="FitTokenCap(ReadOnlySpan{int}, int, int, int)"/> with the mapping chosen by <paramref name="quantizer"/>.</summary>
+    public static (int[] Coords, int Resolution) FitTokenCap(
+        ReadOnlySpan<int> upsampled, int coarseResolution, int targetResolution, int maxTokens, Trellis2CascadeQuantizer quantizer)
     {
         if (targetResolution < FloorResolution)
             throw new ArgumentOutOfRangeException(
@@ -140,7 +158,7 @@ public static class Trellis2Cascade
         int resolution = targetResolution;
         while (true)
         {
-            int[] coords = QuantizeUnique(upsampled, coarseResolution, resolution);
+            int[] coords = QuantizeUnique(upsampled, coarseResolution, resolution, quantizer);
             if (coords.Length == 0)
                 throw new HartsyInferenceException("The upsampled structure has no voxels.");
             if (coords.Length / 4 < maxTokens || resolution == FloorResolution)
