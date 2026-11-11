@@ -61,6 +61,14 @@ public sealed class MiniMaxH3ImageVaeConfigTests
         Assert.False(MiniMaxH3VideoVaeConfig.IsTwoDimensional(Fixture(postQuantRank: 5, projOutRows: 3072)));
     }
 
+    [Fact]
+    public void DecoderRefusesTheSingleFrameConfigUntilDecodeLands()
+    {
+        MiniMaxH3VideoVaeConfig config = MiniMaxH3VideoVaeConfig.Detect(Fixture(postQuantRank: 4, projOutRows: 768));
+
+        Assert.Throws<NotSupportedException>(() => new MiniMaxH3VideoVaeDecoder(config));
+    }
+
     /// <summary>Minimal decoder with one block of width <see cref="Width"/> and the key names the detector reads.</summary>
     private static Dictionary<string, Tensor> Fixture(int postQuantRank, int projOutRows)
     {
