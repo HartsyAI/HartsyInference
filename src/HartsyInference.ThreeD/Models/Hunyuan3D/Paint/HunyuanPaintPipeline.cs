@@ -57,10 +57,13 @@ public sealed class HunyuanPaintPipeline
         ArgumentNullException.ThrowIfNull(mesh);
         options ??= new HunyuanPaintOptions();
         Validate(options);
-        if (mesh.Uvs is null)
-            mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
         int size = options.ViewResolution;
         _stage.Restart();
+        if (mesh.Uvs is null)
+        {
+            mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
+            Stage("uv unwrap");
+        }
 
         PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
         PaintViewRenderer renderer = new(frame);
@@ -68,7 +71,7 @@ public sealed class HunyuanPaintPipeline
             ? PaintViewSelector.Select(renderer, PaintViewCandidate.All, options.MaxViews, cancellationToken: cancellationToken)
             : PaintViewCandidate.Fixed;
 
-        Stage($"views selected ({views.Count})");
+        Stage($"frame and views ({views.Count})");
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
         Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
@@ -229,7 +232,6 @@ public sealed class HunyuanPaintPipeline
                 progress?.Invoke(new GenerationProgress(step + 1, steps, (DateTime.UtcNow - started).TotalMilliseconds));
             }
 
-            Stage("sampling done");
             byte[][] generated = new byte[materials * n][];
             for (int m = 0; m < materials; m++)
             {
@@ -304,27 +306,27 @@ public sealed class HunyuanPaintPipeline
         return result;
     }
 
-    // Texels further than GutterReach from any painted texel never show on the mesh; the gradient fill runs away there, so they take the mean painted colour.
+    // Texels more than GutterReach (a fixed texel count, measured as a square: up to about 1.4 times that on the diagonals) from any texel the mesh covers
+    // never show on it, and the gradient fill runs away there, so they take the mean colour of the covered texels. Covered texels keep their inpainted values.
     private const int GutterReach = 12;
 
-    private static void FlattenFarGutter(float[] texture, bool[] known, int size)
+    internal static void FlattenFarGutter(float[] texture, PaintTexelSurface surface, int size)
     {
+        bool[] covered = new bool[size * size];
         double[] mean = new double[3];
-        long count = 0;
-        for (int i = 0; i < known.Length; i++)
-            if (known[i])
-            {
-                count++;
-                for (int c = 0; c < 3; c++)
-                    mean[c] += texture[i * 3 + c];
-            }
-        if (count == 0)
+        foreach (int texel in surface.Texels)
+        {
+            covered[texel] = true;
+            for (int c = 0; c < 3; c++)
+                mean[c] += texture[texel * 3 + c];
+        }
+        if (surface.Count == 0)
             return;
-        bool[] near = PaintImageFilters.Dilate(known, size, size, GutterReach);
+        bool[] near = PaintImageFilters.Dilate(covered, size, size, GutterReach);
         for (int i = 0; i < near.Length; i++)
             if (!near[i])
                 for (int c = 0; c < 3; c++)
-                    texture[i * 3 + c] = (float)(mean[c] / count);
+                    texture[i * 3 + c] = (float)(mean[c] / surface.Count);
     }
 
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
@@ -355,7 +357,7 @@ public sealed class HunyuanPaintPipeline
             if (m == 0)
                 painted = known.Count(k => k);
             textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true);
-            FlattenFarGutter(textures[m], known, size);
+            FlattenFarGutter(textures[m], surface, size);
         }
 
         TextureImage baseColor = TextureImage.FromFloats(textures[0], size, size, 3, 0, 3);
