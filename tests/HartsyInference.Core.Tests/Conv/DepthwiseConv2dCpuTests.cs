@@ -13,6 +13,20 @@ public sealed class DepthwiseConv2dCpuTests
 {
     private const int Batch = 2, Channels = 3, Height = 7, Width = 6, Kernel = 3;
 
+    /// <summary>The contract the host reference and the device backends share refuses an output with another batch than the input, which
+    /// would otherwise be written past its end.</summary>
+    [Fact]
+    public void Conv2dDepthwise_RefusesAnOutputWithAnotherBatch()
+    {
+        using Tensor input = new(new TensorShape(Batch, Channels, Height, Width), DType.F32);
+        using Tensor weight = new(new TensorShape(Channels, 1, Kernel, Kernel), DType.F32);
+        using Tensor output = new(new TensorShape(1, Channels, Height - 2, Width - 2), DType.F32);
+        IBackend backend = new CpuBackend();
+
+        ArgumentException refusal = Assert.Throws<ArgumentException>(() => backend.Conv2dDepthwise(output, input, weight, null, 1, 1, 0, 0));
+        Assert.Contains("same batch", refusal.Message);
+    }
+
     [Theory]
     [InlineData(1, 1, true)]
     [InlineData(2, 1, false)]

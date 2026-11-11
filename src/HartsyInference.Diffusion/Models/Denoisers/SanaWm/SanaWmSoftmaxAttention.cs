@@ -86,8 +86,9 @@ public sealed class SanaWmSoftmaxAttention
     /// <param name="window">Keys and values of earlier chunks in a chunk-causal stream; null attends within the input only.</param>
     /// <param name="commitUnits">Above zero, stages this chunk's keys and values into <paramref name="window"/> as that many
     /// units (latent frames).</param>
+    /// <param name="profileTag">The stage profiler's prefix, so each block reports its own row.</param>
     internal Tensor ForwardItem(Tensor a, int tokens, Tensor ropeCos, Tensor ropeSin, Tensor? projectionInput = null,
-        RollingTokenWindow? window = null, int commitUnits = 0)
+        RollingTokenWindow? window = null, int commitUnits = 0, string profileTag = "sm")
     {
         if (a.DType != DType.F32 || a.ElementCount != (long)tokens * _channels)
             throw new ArgumentException($"The item input must be F32 with {tokens}x{_channels} elements; got {a.DType} {a.Shape}.", nameof(a));
@@ -100,7 +101,7 @@ public sealed class SanaWmSoftmaxAttention
         Tensor kh = Heads(scratch, projected, _channels, _kNorm, ropeCos, ropeSin, tokens);
         Tensor vh = Heads(scratch, projected, 2 * _channels, null, ropeCos, ropeSin, tokens);
         Tensor attended = scratch.New(1, _heads, tokens, _headDim);
-        using (StageProfiler.Begin(_backend, "sm", "attn.main.sdpa"))
+        using (StageProfiler.Begin(_backend, profileTag, "attn.main.sdpa"))
         {
             using SanaWmWindowedKeys context = SanaWmWindowedKeys.Join(_backend, window, kh, vh);
             _backend.Attention(AttentionCall.FromScaledDotProductAttention(attended, qh, context.Keys, context.Values, null,

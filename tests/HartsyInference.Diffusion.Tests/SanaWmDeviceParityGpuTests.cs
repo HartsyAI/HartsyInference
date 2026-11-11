@@ -145,15 +145,19 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
     }
 
     /// <summary>The CUDA <see cref="IBackend.FrameDeltaScan"/> (batched Gram, injection and readout GEMMs around the recurrence
-    /// kernel) against the host reference at the real head width, for a 112-wide value and for the unit value of a
-    /// denominator, with operand scales like the model's (ReLU'd keys scaled by D^-1/2·S^-1/2, beta and decay in (0, 1)).</summary>
+    /// kernel) against the host reference at the real head width, for a 112-wide value, a 20-wide one (a partial column tile) and the
+    /// unit value of a denominator, over five frames and over one frame, with operand scales like the model's (ReLU'd keys scaled by
+    /// D^-1/2·S^-1/2, beta and decay in (0, 1)).</summary>
     [Theory]
-    [InlineData(112)]
-    [InlineData(1)]
-    public void FrameDeltaScan_RealHeadWidth_CudaMatchesHostReference(int valueDim)
+    [InlineData(112, 5)]
+    [InlineData(1, 5)]
+    [InlineData(20, 5)]
+    [InlineData(112, 1)]
+    [InlineData(20, 1)]
+    public void FrameDeltaScan_RealHeadWidth_CudaMatchesHostReference(int valueDim, int frames)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        const int frames = 5, spatial = 40, heads = 3, keyDim = 112;
+        const int spatial = 40, heads = 3, keyDim = 112;
         long tokens = (long)frames * spatial;
         Random random = new(1234);
         float keyScale = (float)(Math.Pow(keyDim, -0.5) * Math.Pow(spatial, -0.5));
@@ -191,8 +195,8 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
             }
 
             double relative = Math.Sqrt(error / Math.Max(norm, double.Epsilon));
-            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}: relative L2 {relative:E3} (TF32 GEMMs)");
-            Compare($"FrameDeltaScan valueDim {valueDim}", (cpu, cuda));
+            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}, frames {frames}: relative L2 {relative:E3} (TF32 GEMMs)");
+            Compare($"FrameDeltaScan valueDim {valueDim}, frames {frames}", (cpu, cuda));
             Assert.True(relative < 5e-3, $"FrameDeltaScan relative L2 {relative:E3} against the host reference.");
 
             // Streaming: the same scan started from a carried forward state, also writing the state it ends in.
@@ -214,7 +218,7 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
             }
 
             double carriedRelative = Math.Sqrt(carriedError / Math.Max(carriedNorm, double.Epsilon));
-            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}, carried state: relative L2 {carriedRelative:E3}");
+            _output.WriteLine($"FrameDeltaScan valueDim {valueDim}, frames {frames}, carried state: relative L2 {carriedRelative:E3}");
             Assert.False(cpuCarried.AsSpan(0, cpu.Length).SequenceEqual(cpu), "The carried state did not change the scan.");
             Assert.True(carriedRelative < 5e-3, $"Carried-state FrameDeltaScan relative L2 {carriedRelative:E3} against the host reference.");
         }
@@ -233,6 +237,7 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
     [InlineData("glu-f32")]
     [InlineData("glu-bf16")]
     [InlineData("glu-bf16-vec")]
+    [InlineData("glu-bf16-tall")]
     public void FusedOps_CudaMatchHostReference(string op)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -297,10 +302,12 @@ public sealed class SanaWmDeviceParityGpuTests : IDisposable
                 default:
                 {
                     // glu-bf16-vec takes the vectorized kernel (whole 8-channel groups, whole 4-pixel runs); the others the
-                    // per-element one. The BF16 cases read SiLU'd inputs, as the FFN does.
+                    // per-element one. glu-bf16-tall is vector-eligible but has frames·height past the 65,535-block grid cap, so it must
+                    // fall back to the per-element kernel instead of failing the launch. The BF16 cases read SiLU'd inputs, as the FFN does.
                     DType dtype = op.StartsWith("glu-bf16", StringComparison.Ordinal) ? DType.BF16 : DType.F32;
                     bool inputSilu = dtype == DType.BF16;
-                    int frames = 2, height = 5, width = op == "glu-bf16-vec" ? 8 : 7, hidden = 40;
+                    bool tall = op == "glu-bf16-tall";
+                    int frames = tall ? 1 : 2, height = tall ? 65_536 : 5, width = op is "glu-bf16-vec" or "glu-bf16-tall" ? 8 : 7, hidden = tall ? 8 : 40;
                     Tensor input = Fill([frames * height * width, 2 * hidden], dtype), taps = Fill([3, 3, 2 * hidden]);
                     Tensor bias = Fill([2 * hidden]);
                     run = backend =>

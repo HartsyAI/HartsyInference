@@ -16,7 +16,7 @@ public sealed partial class CudaKernels
     /// <summary>True when frame_scan.ptx loaded.</summary>
     public bool HasFrameScanKernels => _frameScanRecurrence != 0;
 
-    // Optional module: its absence leaves FrameDeltaScan on the host reference instead of failing construction.
+    // Optional module: a missing PTX does not fail construction; FrameDeltaScan then throws NotSupportedException when it is called.
     private void LoadFrameScanKernels()
     {
         string path = Ptx("frame_scan");
@@ -54,6 +54,9 @@ public sealed partial class CudaKernels
         if (_frameScanRecurrence == 0) throw new InvalidOperationException("frame_scan.ptx not present in the Ptx folder.");
         if (keyDim > FrameScanMaxKeyDim)
             throw new NotSupportedException($"The CUDA frame scan holds key heads up to {FrameScanMaxKeyDim} wide; got {keyDim}.");
+        // One block row per head: gridDim.y is capped at 65,535, and a launch past it fails with CUDA_ERROR_INVALID_VALUE.
+        if (heads > ChannelsLastLimits.MaxGridDimYZ)
+            throw new NotSupportedException($"The CUDA frame scan runs up to {ChannelsLastLimits.MaxGridDimYZ} heads per launch; got {heads}.");
         ulong stA = states, rvA = reverseScratch, gA = gramT, uA = injection, dA = decay, iA = initial;
         uint fA = (uint)frames, kA = (uint)keyDim, vA = (uint)valueDim;
         void** args = stackalloc void*[9];

@@ -9,7 +9,7 @@ public sealed partial class CudaKernels
     /// <summary>True when ucpe.ptx loaded.</summary>
     public bool HasUcpeKernels => _ucpeTransform != 0;
 
-    // Optional module: its absence leaves UcpeTransform on the host reference instead of failing construction.
+    // Optional module: a missing PTX does not fail construction; UcpeTransform then throws NotSupportedException when it is called.
     private void LoadUcpeKernels()
     {
         string path = Ptx("ucpe");
