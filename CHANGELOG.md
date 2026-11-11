@@ -9,6 +9,37 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 - **Added: Hunyuan3D-2 Fast, Turbo, mini and multiview builds.** `hartsy 3d -m hunyuan3d-fast|hunyuan3d-turbo|hunyuan3d-mini` (each its own catalog id and download set; `hunyuan3d-mv` downloads but has no CLI path yet because a request carries one image). The checkpoint's own `config.yaml` sets the architecture: Fast and Turbo embed the guidance scale and run one forward per step, Turbo samples sigmas from its consistency table (5 steps by default), mini has 8+16 blocks and 512 latents, and Turbo decodes with FlashVDM (turbo VAE, hierarchical grid with adaptive KV selection). Against the upstream Python the DiT velocity correlates 1.00000000 for every build (relative L2 4e-6 to 4e-5) and the FlashVDM field 0.99999979. `Hunyuan3DShapePipeline.GenerateMultiView` takes one to four views for 2mv checkpoints. mini-turbo (DINO at 1022) is refused. See the status doc.
 - **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
 - **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
+- **Added: UniRig skeleton generation (stage 1 of the auto-rigger), validation-pending.** `HartsyInference.ThreeD.Models.UniRig`
+  ports the `VAST-AI/UniRig` articulation-xl skeleton stage: the Michelangelo-style point encoder (65,536 points with normals, 1,024
+  farthest-point queries), the OPT decoder hosted on `GenericTransformer` with the checkpoint's keys remapped, the 256-bin
+  skeleton-tree tokenizer and its grammar as a sampler step, and mesh preparation (welding, normalization, upstream's `mix` point
+  sampler) in pure C#. The `.ckpt` is read with the safe-subset pickle loader. Not yet wired to `hartsy 3d` or `MeshService`; skinning
+  and rigged-GLB export follow in later PRs. Deviations from upstream: one sampled sequence instead of 15-beam sampling, a seeded
+  Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
+  `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
+  fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
+- **Added: TRELLIS.2 shape-only image to mesh.** `hartsy 3d <image.png> -m trellis2` and `POST /v1/native/mesh` (model `trellis2`) turn one
+  image into a GLB with positions and computed normals (no texture, no UVs). The chain is foreground preprocessing, DINOv3 conditioning,
+  the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
+  dual-grid meshing, all in C#. `--grid` is the final dual-grid resolution for this model: 512, 1024 (default, `1024_cascade`) or 1536
+  (`1536_cascade`); other values are rejected before any weight loads. `--grid` keeps its meaning for the other models. An image with an alpha
+  channel is used as the cutout; one without needs the BiRefNet-matting checkpoint (a stand-in for upstream's RMBG-2.0, which is not used).
+- **Fixed: TRELLIS.2 and HairDeck now find their Vision-folder checkpoints (DINOv3, BiRefNet-matting) through the configured Vision folder, and a matting checkpoint installed after the first TRELLIS.2 load is used without a restart.**
+- **Added: config-driven TRELLIS.2 flow classes** (`Trellis2SparseStructureFlow`, `Trellis2SlatFlow`: shared adaLN with a per-block
+  modulation, QK RMS norm, 3D RoPE), the guidance-interval FlowEuler sampler with CFG rescale, `pipeline.json` parsing, cascade
+  token-cap logic, and `ShapeVaeDecoder.Upsample` (the decoder's first levels, returning coordinates). The existing full decode is unchanged.
+- **Fixed: TRELLIS.2 meshes shaded with dark vertical streaks and speckle.** A dual-grid quad is wound the same way whichever side of the surface
+  is inside, so about half of a raw mesh's triangles faced inward and the vertex normals averaged across them were wrong. The pipeline now
+  unifies the winding (`FaceOrientation.Unify`, as upstream's `unify_face_orientations` does) before computing normals. CoLa3D shares the
+  dual-grid mesher and is unchanged.
+- Parity: the DINOv3 conditioning, the 512 shape flow forward and the guided sampler match the upstream Python on the CPU (correlation 0.99993 or better); the structure stage is not checked. The catalog entry is Structural and the status row is 🔧.
+- **Added: a model-independent mesh post-processing and PBR baking toolkit in `HartsyInference.ThreeD`.** `MeshDecimator`
+  (quadric edge collapse with the upstream 3x-then-target schedule), `MeshCleaner`, `TriangleBvh`, `UvUnwrapper` (chart
+  segmentation, planar projection, atlas packing), `Rasterizer`, `SparseAttributeVolume` with `SparseAttributeSampler`,
+  `TextureBaker`, `Inpainter` (Telea) and `PbrGlbWriter` (embedded PNG textures, glTF metallic-roughness packing, optional Z-up
+  to Y-up). `PbrMeshPostProcessor` chains them for a mesh plus a sparse attribute volume. Pure C#, no model dependency, and
+  `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
+  [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
 ## alpha.418
 

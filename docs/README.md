@@ -19,6 +19,7 @@ git preserves removed history.
 | CoLa3D geometry decoder and prompt inputs: key groups, shape VAE relation, unverified prompt conventions | [Research/COLA3D_GEOMETRY_DECODER.md](Research/COLA3D_GEOMETRY_DECODER.md) |
 | Hunyuan3D-2.1 shape model: source spike, MoE and reuse map, licence | [Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md](Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md) |
 | Hunyuan3D shape models: pins, licence terms, upstream-to-C# stage map, findings | [Research/HUNYUAN3D_ARCHITECTURE.md](Research/HUNYUAN3D_ARCHITECTURE.md) |
+| Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
