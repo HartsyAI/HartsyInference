@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Diagnostics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Requests;
@@ -127,9 +128,11 @@ public sealed class SanaWmStream : IChunkedWorldStream
             {
                 try
                 {
+                    long sampleStart = WorldStageTimings.Start();
                     Denoise(denoiser, latents, conditions, plucker, clean, cancel, progress);
                     _request.Tap?.Invoke($"chunk{chunk}_latent", latents);
                     WriteState(denoiser, latents, conditions, plucker, progress);
+                    WorldStageTimings.Record(WorldStage.ChunkSample, sampleStart);
                     // The refiner reads only the clean latents, so it runs before either model advances: a chunk cancelled
                     // here leaves both where they were.
                     if (refiner is not null)
@@ -371,14 +374,18 @@ public sealed class SanaWmStream : IChunkedWorldStream
     {
         IStreamingVideoDecoder decoder = _decoder.Component;
         int expected = decoder.PixelFrames((int)latents.Shape[2]);
+        long decodeStart = WorldStageTimings.Start();
         using Tensor rgb = decoder.DecodeNext(latents);
+        WorldStageTimings.Record(WorldStage.ChunkDecode, decodeStart);
         TensorShape shape = new([1, 3, expected, FrameHeight, FrameWidth]);
         if (rgb.DType != DType.F32 || rgb.Shape != shape)
             throw new InvalidOperationException($"The streaming decoder returned {rgb.DType} {rgb.Shape}; expected F32 {shape}.");
-        ReadOnlySpan<float> values = rgb.AsReadOnlySpan<float>();
         VideoFrame[] frames = new VideoFrame[expected];
+        long rgbStart = WorldStageTimings.Start();
+        ReadOnlySpan<float> values = rgb.AsReadOnlySpan<float>();
         for (int f = 0; f < expected; f++)
             frames[f] = new VideoFrame(FramesGenerated + f, FrameWidth, FrameHeight, ToRgb24(values, expected, f, FrameHeight, FrameWidth));
+        WorldStageTimings.Record(WorldStage.ChunkToRgb, rgbStart);
         return frames;
     }
 

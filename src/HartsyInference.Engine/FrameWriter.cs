@@ -1,3 +1,5 @@
+using HartsyInference.Core.Diagnostics;
+
 namespace HartsyInference.Engine;
 
 /// <summary>Writes a sequence of RGB24 video frames as numbered PNG files into a fresh subdirectory.</summary>
@@ -26,8 +28,15 @@ public static class FrameWriter
 
     /// <summary>Writes the frame at zero-based position <paramref name="index"/> (<c>width*height*3</c> RGB bytes) as
     /// <c>frame_NNNN.png</c>, numbered from 1: the pattern the MP4 mux reads.</summary>
-    public static void WriteFrame(string dir, int index, byte[] rgb, int width, int height) =>
-        File.WriteAllBytes(Path.Combine(dir, $"frame_{index + 1:D4}.png"), PngEncoder.Encode(rgb, width, height));
+    public static void WriteFrame(string dir, int index, byte[] rgb, int width, int height)
+    {
+        long encodeStart = WorldStageTimings.Start();
+        byte[] png = PngEncoder.Encode(rgb, width, height);
+        WorldStageTimings.Record(WorldStage.FrameEncode, encodeStart);
+        long writeStart = WorldStageTimings.Start();
+        File.WriteAllBytes(Path.Combine(dir, $"frame_{index + 1:D4}.png"), png);
+        WorldStageTimings.Record(WorldStage.FrameWrite, writeStart);
+    }
 
     private static string NextDir(string baseDir, string slug)
     {

@@ -51,6 +51,23 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
+## alpha.419
+
+- **Added: a live window for world models, `hartsy world --view`.** It plays frames at the plan's frame rate as the session generates
+  them, and steers the run from held keys: hold a key to move, release it to stop. Esc or Q, or closing the window, ends the run the
+  way `q` does, so the PNGs and the MP4 are still written. The window needs a display and cannot be combined with `--interactive`. It is
+  built on Avalonia 11.3.22, the version already in the local NuGet cache; the rest of the engine has no window dependency.
+- **Added: control schemes for world models.** `IWorldControlScheme` maps held keys to the action a session takes, and a model declares
+  one with `WorldCapabilities.LiveControls`. Built in: the SANA-WM camera (`wasd`, `ijkl`), Oasis (WASD, space, shift, ctrl, arrows
+  for the camera) and DIAMOND (fire and left or right). A model with no live control (SANA-WM stage 1) plays its clip when the run
+  completes. A new world model adds a scheme and nothing else; `docs/Research/WORLD_LIVE_VIEWER.md` has the steps.
+- **Changed: streamed frames are written by background PNG writers.** PNG encoding took about 110 ms per 1280x704 frame on the consumer
+  thread, so a 24-frame chunk spent 2.7 s writing and the model waited on it. Four writers now encode in parallel behind a queue of
+  32 frames, and the stream waits only when that queue is full. The frames and the MP4 are byte-identical to before.
+- **Fixed: a live window closes on every exit, and a failed run says so.** A failed stream is reported to the window, which stays up
+  with the error until it is closed. Ctrl+C on an unbounded run keeps its files and reports the run, not "Cancelled.". Oasis and
+  DIAMOND take one action per step, so their window buffers two frames rather than two seconds, and they stop after `--frames`.
+- **Added: a where-the-time-went breakdown** printed at the end of every `--view` run, and under `diagnostics.stageProfile`.
 ## alpha.418
 
 - **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,

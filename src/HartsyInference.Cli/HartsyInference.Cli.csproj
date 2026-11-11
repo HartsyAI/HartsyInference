@@ -39,6 +39,7 @@
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
     <ProjectReference Include="..\HartsyInference.Video\HartsyInference.Video.csproj" />
     <ProjectReference Include="..\HartsyInference.World\HartsyInference.World.csproj" />
+    <ProjectReference Include="..\HartsyInference.WorldViewer.Avalonia\HartsyInference.WorldViewer.Avalonia.csproj" />
     <ProjectReference Include="..\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
     <ProjectReference Include="..\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />

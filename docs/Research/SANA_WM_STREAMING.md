@@ -249,8 +249,8 @@ invented detail. The refiner may clean it up (not tested). The CLI writes each f
 of the pixels, so memory stays flat however long an `--unbounded` run goes (a 720p frame is 1.2 MB of PNG on disk and
 2.7 MB of RGB in memory), and Ctrl+C or `q` on that run saves what was generated and muxes the MP4. Measured on the 4090 with `--unbounded` and SIGINT at 76 s:
 the spooling CLI peaked at 11.3 GiB resident (11543 MiB), left 126 PNGs on disk and the MP4, and exited 0; the CLI before the spool, which keeps
-the frames in memory, peaked at 12.4 GiB (12655 MiB) and left nothing (exit 130). Still open: there is no live viewer, so the video cannot be
-watched while it generates.
+the frames in memory, peaked at 12.4 GiB (12655 MiB) and left nothing (exit 130). The live viewer that was still open here is now `--view`, described in
+[WORLD_LIVE_VIEWER.md](WORLD_LIVE_VIEWER.md).
 
 Open from the same report: `SanaWmWindowedKeys.Join` concatenates window and chunk on every pass, a copy per pass.
 Harmless at a window of two chunks; worth caching the joined window across the five passes of a chunk if the window grows.
