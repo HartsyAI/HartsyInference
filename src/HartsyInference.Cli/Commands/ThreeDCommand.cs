@@ -15,12 +15,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d and unirig.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis, trellis2) or a .obj/.glb mesh (cola3d, unirig). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2) or a .obj/.glb mesh (cola3d, unirig). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, trellis, trellis2, cola3d, unirig, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, cola3d, unirig, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, trellis, trellis2, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>

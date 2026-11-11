@@ -65,3 +65,48 @@ verified.
 - The same repository holds the Fast and Turbo builds as separate directories (`hunyuan3d-dit-v2-0-fast`, `-turbo`, each about
   4.93 GB, `model.fp16.safetensors` and `config.yaml`) and the VAE builds `hunyuan3d-vae-v2-0`, `-turbo` and `-withencoder`.
   Their configs and sampler differences are read in the variants step (3b), not here.
+
+## Variants (checked 2026-11-10)
+
+Pins: `tencent/Hunyuan3D-2` `9cd649ba` (base, Fast, Turbo, turbo VAE), `tencent/Hunyuan3D-2mini` `f90a0f7d`, `tencent/Hunyuan3D-2mv`
+`3a761b53`. None is gated. All three repositories carry the same Tencent Hunyuan 3D 2.0 Community License text (whitespace
+differences only), so the terms above apply to every build below.
+
+Each build is one `model.fp16.safetensors` (all F16, `model.*` DiT, `vae.*` decoder only, `conditioner.*` DINOv2-giant) plus a
+`config.yaml`. What differs from the base config, read from the configs and the safetensors headers:
+
+| Build | Size | Differences from base |
+|---|---|---|
+| Fast (`hunyuan3d-dit-v2-0-fast`) | 4,930,777,530 B | `guidance_embed: true`: adds `guidance_in.{in,out}_layer.{weight,bias}` (4 tensors, 1649 total). One forward per step, no CFG batch. |
+| Turbo (`hunyuan3d-dit-v2-0-turbo`) | 4,930,777,530 B | Fast's DiT, plus `ConsistencyFlowMatchEulerDiscreteScheduler` with `pcm_timesteps: 100`. |
+| mini (`hunyuan3d-dit-v2-mini`) | 3,819,958,234 B | 8 double + 16 single blocks, 512 latents, `scale_factor` 1.0188137. Same width, heads, DINO. |
+| mini-Fast, mini-Turbo | 3,822,584,202 B | mini plus guidance embedding; mini-Turbo also feeds DINO at 1022 px and a 1022 preprocessor, which needs position-embedding interpolation: refused. |
+| 2mv (`hunyuan3d-dit-v2-mv`) | 4,928,151,562 B | `DinoImageEncoderMV`: per-view DINO tokens plus a fixed sin/cos view embedding, views front, left, back, right in that order, any subset. DiT weights are the same shape as base. |
+| Turbo VAE (`hunyuan3d-vae-v2-0-turbo`) | 407,410,402 B | Geo decoder narrowed to 512 with a `latents_proj` (1024 to 512), MLP ratio 1, no `ln_post` and no QK norm. Used by FlashVDM for every DiT. |
+
+Sampler details (upstream `Hunyuan3DDiTFlowMatchingPipeline`):
+
+- With `guidance_embed` the pipeline skips classifier-free guidance and passes `guidance_scale` to the DiT; the DiT adds
+  `guidance_in(timestep_embedding(guidance))` to the timestep vector, with the same sinusoid and `time_factor` as the time.
+  Upstream's gradio defaults are 5 steps for Turbo, 10 for Fast and 30 for the standard builds; the library default is 50.
+- The consistency scheduler builds a 100-entry table `linspace(0, 1, 1000)[[0] + (arange(1, 100) * 10 - 1)]` and takes entries
+  `floor(linspace(0, 100, steps, endpoint=False))`, so five steps run at sigma 0, 0.1992, 0.3994, 0.5996, 0.7998.
+- FlashVDM (`FlashVDMVolumeDecoding`, mean mode): the coarse grid has `round(r0 / 4) * 4 - 1` cells per axis in 4x4x4 blocks, each
+  block attending to the top 1024 of 3072 latents (256 of 512) chosen per head by the mean of every 100th query; finer levels
+  evaluate a dilated band around sign changes, grouped into 6x6x6 spatial cells with the same selection from every 50th query.
+  The finest grid is `r0 * 2^(levels - 1) + 1` points (253 per axis for octree 256: levels 63, 126, 252), and unevaluated points are NaN.
+
+## Variant selection
+
+`ModelResolver.Resolve` parses a `family:variant` selector only for Image and Video; for Mesh `hunyuan3d:fast` is not a catalog id and
+falls through to a folder guess. 3D catalog rows had no `Assets`, `ModelDownloader` reads only `CatalogEntry.Assets`, and nothing
+reads `CatalogEntry.Variants` (the recipe variant catalog serves image and video). The mechanism chosen is **one catalog id per
+build** (`hunyuan3d`, `-fast`, `-turbo`, `-mini`, and `-mv` for download only), each with its own `Assets` in `3D/<id>/`:
+
+- it needs no resolver or downloader change, so `hartsy pull` and path lookup work as for every other 3D model;
+- the builds are separate 3.8 to 4.9 GB checkpoints with different sampling contracts, so a user wants one without fetching all;
+- the id only chooses files: the checkpoint's `config.yaml` sets the architecture, and a build is never recognised by name;
+- it touches the shared engine files in one row each (`ModelCatalog`, `MeshModelIds`, one branch in `MeshService`).
+
+Extending the resolver would need Mesh selector parsing, a variant-to-asset-subset rule in `ModelDownloader`, and a folder
+convention, all new shared surface for one family.

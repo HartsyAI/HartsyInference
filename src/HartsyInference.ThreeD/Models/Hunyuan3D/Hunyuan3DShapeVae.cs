@@ -20,7 +20,8 @@ public sealed unsafe class Hunyuan3DShapeVae
         _cfg = cfg;
         _resblocks = new Hunyuan3DVaeResBlock[cfg.VaeDepth];
         for (int i = 0; i < cfg.VaeDepth; i++) _resblocks[i] = new Hunyuan3DVaeResBlock(cfg.VaeWidth, cfg.VaeNumHeads);
-        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth, cfg.VaeNumHeads, cfg.FourierBands);
+        _geo = new Hunyuan3DGeoDecoder(cfg.VaeWidth / cfg.GeoDownsample, cfg.VaeNumHeads / cfg.GeoDownsample, cfg.FourierBands,
+            cfg.VaeWidth, cfg.GeoMlpRatio, cfg.GeoLnPost);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix = "")
@@ -111,6 +112,38 @@ public sealed unsafe class Hunyuan3DShapeVae
             Values = values, ResX = res, ResY = res, ResZ = res,
             Min = (-bound, -bound, -bound), Max = (bound, bound, bound),
         };
+    }
+
+    /// <summary>FlashVDM decode: processes the latents once, then evaluates a coarse grid and only a band around the surface at each finer level.</summary>
+    /// <returns>A field whose unevaluated points are NaN; its resolution follows <see cref="Hunyuan3DFlashVdm.Resolutions"/>, not <paramref name="octreeResolution"/>.</returns>
+    public ScalarField3D DecodeFlashVdm(IBackend backend, Tensor latent, int octreeResolution, float bound, float mcLevel = 0f)
+    {
+        if (latent.Shape.Rank != 3 || latent.Shape[0] != 1)
+            throw new ArgumentException($"latent must be [1,N,C]; got {latent.Shape}.", nameof(latent));
+        Tensor processed = ProcessLatents(backend, latent);
+        (Tensor kNorm, Tensor v) kv = _geo.PrepareKv(backend, processed);
+        processed.Dispose();
+        try
+        {
+            Hunyuan3DKvHost host = new(kv.kNorm, kv.v);
+            int latents = host.Latents;
+            int topK = latents == 3072 ? 1024 : latents == 512 ? 256 : latents / 3;
+            return Hunyuan3DFlashVdm.Decode((ReadOnlySpan<float> coords, int count, int stride, Span<float> logits) =>
+            {
+                Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
+                coords[..(count * 3)].CopyTo(new Span<float>((float*)coordsT.DataPointer, count * 3));
+                Tensor occ = _geo.QueryTopK(backend, kv, host, coordsT, count, stride, topK);
+                Tensor occF = TensorCasts.EnsureF32(occ);
+                new ReadOnlySpan<float>((float*)occF.DataPointer, count).CopyTo(logits);
+                if (!ReferenceEquals(occF, occ)) occF.Dispose();
+                occ.Dispose();
+                coordsT.Dispose();
+            }, octreeResolution, bound, mcLevel);
+        }
+        finally
+        {
+            kv.kNorm.Dispose(); kv.v.Dispose();
+        }
     }
 
     internal static Tensor F32(Tensor t) => TensorCasts.EnsureF32(t);
