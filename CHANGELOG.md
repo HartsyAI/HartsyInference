@@ -6,6 +6,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 ## alpha.423
 
 - **Fixed: Vulkan `ConvTranspose1d` rejected grouped and depthwise weights.** The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so the depthwise pool in Kokoro's AdainResBlk1d and the grouped calls in Mimi, PocketTTS and AntiAliasedSnake failed on Vulkan. The shader now takes `groups` with weight `[C_in, C_out/groups, K]`, and dense calls sum in the same order as before. `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference. Kokoro and StyleTTS 2 are not yet re-run end to end on Vulkan.
+- **Added: `hartsy 3d -m pixal3d`, Pixal3D shape-only image to mesh (🔧, parity pending).** `Pixal3DImageTo3DPipeline` runs the cascade with the
+  projection-mode flows: DINOv3 tokens split into global tokens and a patch map sampled at each voxel's projected position (NAF-upsampled for the
+  shape flows), the structure flow and decoder, the 512 shape flow, the upsample, the rounding quantizer, the 1024 flow at 1024 or 1536, the shape VAE
+  and dual-grid meshing; `MeshService` routes the new `pixal3d` id, with a catalog entry for the `TencentARC/Pixal3D` files. `--grid` is the final
+  dual-grid resolution, 1024 (default) or 1536; `--fov <radians>` sets the camera (upstream estimates it with MoGe, which is not ported; its default
+  0.8576 rad is used otherwise). `naf_release.pth` must be placed in `3D/pixal3d` by hand (a GitHub release asset the catalog cannot fetch).
+  Not verified on real weights end to end; texture, multi-view and MoGe are not implemented. `Trellis2Runtime` and the new `Pixal3DRuntime` now
+  share one matter-and-gate lifecycle (`MatterGatedRuntime<TPipeline>`); a field of view on any other model is rejected before it dispatches.
 - **Added: Pixal3D shape-only pipeline (not yet a model id).** `Pixal3DImageTo3DPipeline` runs the cascade over stub-testable stages
   (`IPixal3DConditioner`, `IPixal3DStructureStage`, `IPixal3DShapeFlowStage`): the structure flow at 16, the 512 shape flow on the pooled voxels with
   NAF-upsampled features, the shape VAE upsample, Pixal3D's rounding quantizer (`Trellis2CascadeQuantizer.RoundToCorners`) and token cap, the 1024
