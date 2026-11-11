@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Worlds;
+
 namespace HartsyInference.Engine;
 
 /// <summary>One selectable model in the catalog: its CLI id, modality, backing architecture, and maturity.</summary>
@@ -30,6 +32,10 @@ public sealed record CatalogEntry
     /// model is selected but not present, the CLI offers to download exactly these into their target folders. Empty
     /// when no preset download is defined.</summary>
     public IReadOnlyList<ModelAsset> Assets { get; init; } = Array.Empty<ModelAsset>();
+
+    /// <summary>What a world model accepts, checked before any weight loads. Null for every non-world entry; a
+    /// catalog-less world spec gets the defaults.</summary>
+    public WorldCapabilities? World { get; init; }
 
     /// <summary>Derivatives of this model (different quantizations or conversions), each with its own pinned download and
     /// the components it ships. Empty for a model with a single form; such a model's files are <see cref="Assets"/>.</summary>

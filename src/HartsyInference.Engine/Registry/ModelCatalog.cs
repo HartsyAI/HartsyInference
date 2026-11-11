@@ -1,4 +1,5 @@
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Worlds;
 
 namespace HartsyInference.Engine.Registry;
 
@@ -20,6 +21,88 @@ public static class ModelCatalog
 
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
+
+    /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
+    /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
+    private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10 };
+
+    /// <summary>SANA-WM stage 1 (<c>flow_euler_ltx</c>, no refiner): CUDA and BF16 only, 16 fps because the camera smoothing is
+    /// defined per frame at 16 fps, 9 to 161 frames on the 8n+1 grid with off-grid counts refused, a camera path given as poses
+    /// or an action script, and intrinsics required. Batch generation; the DiT accepts batch 1, so sequential CFG is available.</summary>
+    private static WorldCapabilities SanaWmWorld => new WorldCapabilities
+    {
+        Backends = ["cuda"],
+        Precisions = ["bf16"],
+        DefaultFps = 16,
+        Fps = [16],
+        DefaultFrames = 161,
+        MinFrames = 9,
+        Frames = Recipes.FrameGrid.StepPlusOne(8, Recipes.FrameNormalization.Reject, 161),
+        DefaultSteps = 60,
+        CameraModes = [WorldCameraMode.PerFramePose, WorldCameraMode.ActionScript],
+        CameraScript = SanaWmCameraScript.Instance,
+        CameraRequired = true,
+        Intrinsics = WorldIntrinsicsPolicy.Required,
+        Samplers = ["flow_euler_ltx"],
+        SupportsGuidance = true,
+        SupportsFlowShift = true,
+        SupportsRefiner = false,
+        SupportsProgressivePreview = false,
+        SupportsSequentialCfg = true,
+    };
+
+    /// <summary>SANA-WM streaming (the chunk-causal distilled student, the causal LTX-2 VAE, no refiner): CUDA and BF16 only,
+    /// 16 fps, 25 or more frames on the 24n+1 grid (a first chunk of 25 frames, then 24 per chunk) or an unbounded run. The
+    /// camera is steered by live actions, with an action script as the opening move, or follows a fixed pose path; intrinsics
+    /// are required. The distilled schedule fixes the step count, and guidance defaults to 1. The LTX-2 refiner stage is
+    /// optional and off unless asked for: it needs its own checkpoints and far more memory than stage 1.</summary>
+    private static WorldCapabilities SanaWmStreamingWorld => new WorldCapabilities
+    {
+        Backends = ["cuda"],
+        Precisions = ["bf16"],
+        DefaultFps = 16,
+        Fps = [16],
+        DefaultFrames = World.Pipelines.SanaWmStreamingPipeline.DefaultFrames,
+        MinFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk + 1,
+        Frames = Recipes.FrameGrid.StepPlusOne(World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk, Recipes.FrameNormalization.Reject),
+        DefaultSteps = 0,
+        CameraModes = [WorldCameraMode.PerFramePose, WorldCameraMode.ActionScript],
+        CameraScript = SanaWmCameraScript.Instance,
+        CameraRequired = true,
+        Intrinsics = WorldIntrinsicsPolicy.Required,
+        Samplers = ["self_forcing"],
+        SupportsGuidance = true,
+        SupportsFlowShift = false,
+        SupportsRefiner = true,
+        SupportsProgressivePreview = false,
+        SupportsSequentialCfg = false,
+        Streaming = new WorldStreamingCapabilities
+        {
+            Only = true,
+            FirstChunkFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk + 1,
+            ChunkFrames = World.Pipelines.SanaWmStreamingPipeline.FramesPerChunk,
+            SupportsUnbounded = true,
+            SupportsLiveActions = true,
+        },
+    };
+
+    /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
+    /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
+    private static IReadOnlyList<ModelAsset> SanaWmAssets =>
+    [
+        new() { Repo = "Efficient-Large-Model/SANA-WM_bidirectional", RepoPath = "dit/sana_wm_1600m_720p.safetensors",
+            TargetSubdir = "World/SanaWm/dit", Role = "transformer",
+            Sha256 = "93a20c3fc184c44299234b0ed78b5895030533ff453fca2b66f9ed391e0ac258" },
+        new() { Repo = "Efficient-Large-Model/SANA-WM_bidirectional", RepoPath = "vae/diffusion_pytorch_model.safetensors",
+            TargetSubdir = "World/SanaWm/vae", Role = "vae",
+            Sha256 = "107cc359e3c4bce18c53d98686f4b3fe10c4207b6665d89b38b0741270514bfb" },
+        new() { Repo = "Efficient-Large-Model/gemma-2-2b-it", RepoPath = "gemma-2-2b-it.safetensors",
+            TargetSubdir = "World/SanaWm/text_encoder/gemma-2-2b-it", Role = "text encoder",
+            Sha256 = "bf06a1e6cfe1610beb98a2975e5602e7fc108d902b3ff9dd62282d749c7a2394" },
+        new() { Repo = "Efficient-Large-Model/gemma-2-2b-it", RepoPath = "tokenizer.model",
+            TargetSubdir = "World/SanaWm/text_encoder/gemma-2-2b-it", Role = "tokenizer",
+            Sha256 = "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2" },
+    ];
 
     /// <summary>One MOSS-Image build from Comfy-Org's export, with the side models <see cref="Recipes.Image.MossImageRecipe"/>
     /// falls back to outside an OpenMOSS folder.</summary>
@@ -731,7 +814,7 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
-            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model) and catalog row; the Text path refuses it by name (Ernie5Config.RequireRunnable).
+            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model) and catalog row; the Text path runs it on the CPU and refuses MTP by name (Ernie5Config.RequireRunnable).
             Ernie5Catalog.Build(),
 
             // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
@@ -2464,8 +2547,12 @@ public static class ModelCatalog
             E("hunyuan-gamecraft", act, "Hunyuan-GameCraft 1.0", "HunyuanVideo MM-DiT", vp),
             E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
-            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true),
+            E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true) with { World = OasisWorld },
             E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
+            E("sana-wm", act, "SANA-WM (stage 1)", "2.6B GDN/softmax camera DiT + LTX-2 VAE", vp, cli: true)
+                with { World = SanaWmWorld, Assets = SanaWmAssets },
+            E("sana-wm-streaming", act, "SANA-WM streaming", "chunk-causal distilled GDN/softmax camera DiT + causal LTX-2 VAE, optional chunk-causal LTX-2 refiner",
+                vp, cli: true) with { World = SanaWmStreamingWorld },
 
             // Text embeddings — decoder-LLM-backed only (DecoderEmbeddingModel wraps the same verified
             // GgufLanguageModel/GenericTransformer GGUF pipeline chat models use). Not CLI-drivable yet: reachable

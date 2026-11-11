@@ -4,6 +4,7 @@ using HartsyInference.Core.Backends.Layout;
 using HartsyInference.Core.Backends.Norm;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Streaming;
 
 namespace HartsyInference.Diffusion.Models.Vae;
 
@@ -37,6 +38,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
     private readonly int _latentChannels;
     private readonly int _patch;
     private readonly bool _isCausal;
+    private readonly bool _spatialReflectPad;    // decoder_spatial_padding_mode "reflect" (diffusers config) vs zeros
     private readonly bool[] _residualRev;        // reversed upsample_residual
     private readonly float[]? _latentsMean;      // [latentChannels], pre-cast to F32
     private readonly float[]? _latentsStd;       // [latentChannels], pre-cast to F32
@@ -72,11 +74,15 @@ public sealed unsafe class LtxVideo2VaeDecoder
         return string.Join(" ", parts);
     }
 
+    /// <summary>Creates an empty decoder; <see cref="LoadWeights"/> infers the structure.</summary>
+    /// <param name="spatialReflectPad">Pads every decoder conv by spatial reflection, as a diffusers config with
+    /// <c>decoder_spatial_padding_mode: "reflect"</c> declares; zero padding otherwise.</param>
     public LtxVideo2VaeDecoder(
         int latentChannels = 128, bool[]? upsampleResidual = null,
         int patchSize = 4, bool isCausal = false,
-        float[]? latentsMean = null, float[]? latentsStd = null, DType? computeDtype = null)
+        float[]? latentsMean = null, float[]? latentsStd = null, DType? computeDtype = null, bool spatialReflectPad = false)
     {
+        _spatialReflectPad = spatialReflectPad;
         _computeDtype = computeDtype ?? DType.F32;
         _latentChannels = latentChannels;
         _patch = patchSize;
@@ -106,14 +112,16 @@ public sealed unsafe class LtxVideo2VaeDecoder
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
         _convIn = new CausalConv3d(w["decoder.conv_in.conv.weight"], VaeOps.Bias(w, "decoder.conv_in.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad,
+            computeDtype: _computeDtype);
         int output = (int)w["decoder.conv_in.conv.weight"].Shape[0];   // mid / conv_in output channels
 
         int nMid = CountResnets(w, "decoder.mid_block");
         _midResnets = new LtxVaeResnetBlock3d[nMid];
         for (int j = 0; j < nMid; j++)
         {
-            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+            _midResnets[j] = new LtxVaeResnetBlock3d(output, output, timestepCond: false,
+                isCausal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
             _midResnets[j].LoadWeights(w, $"decoder.mid_block.resnets.{j}");
         }
 
@@ -142,7 +150,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
                     // Bounds-guarded: the up-stage loop is open-ended (it stops when the weights run out) and
                     // can exceed the per-block config arrays.
                     residual: i < _residualRev.Length && _residualRev[i],
-                    isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+                    isCausal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
                 stage.Upsampler.LoadWeights(w, $"{p}.upsamplers.0");
                 temporal.Add(stride.T == 2);
             }
@@ -151,7 +159,8 @@ public sealed unsafe class LtxVideo2VaeDecoder
                 outNom = (int)w[$"{p}.resnets.0.conv1.conv.weight"].Shape[0];
                 if (output != outNom)
                 {
-                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+                    stage.ConvIn = new LtxVaeResnetBlock3d(output, outNom, timestepCond: false,
+                        isCausal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
                     stage.ConvIn.LoadWeights(w, $"{p}.conv_in");
                 }
                 temporal.Add(false);
@@ -160,7 +169,8 @@ public sealed unsafe class LtxVideo2VaeDecoder
             stage.Resnets = new LtxVaeResnetBlock3d[nRes];
             for (int j = 0; j < nRes; j++)
             {
-                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false, isCausal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+                stage.Resnets[j] = new LtxVaeResnetBlock3d(outNom, outNom, timestepCond: false,
+                    isCausal: _isCausal, spatialReflectPad: _spatialReflectPad, computeDtype: _computeDtype);
                 stage.Resnets[j].LoadWeights(w, $"{p}.resnets.{j}");
             }
             stages.Add(stage);
@@ -170,7 +180,8 @@ public sealed unsafe class LtxVideo2VaeDecoder
         _temporalScaleInferred = [.. temporal];
 
         _convOut = new CausalConv3d(w["decoder.conv_out.conv.weight"], VaeOps.Bias(w, "decoder.conv_out.conv.bias"),
-            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: false, computeDtype: _computeDtype);
+            padT: 1, padH: 1, padW: 1, replicateFirstPad: true, causal: _isCausal, spatialReflectPad: _spatialReflectPad,
+            computeDtype: _computeDtype);
     }
 
     /// <summary>Counts the contiguous <c>{prefix}.resnets.{j}.conv1.conv.weight</c> entries present in the dict.</summary>
@@ -209,10 +220,39 @@ public sealed unsafe class LtxVideo2VaeDecoder
     /// fixed number of full-output-grid tensors, so it scales linearly with the element width.</summary>
     public DType ComputeDtype => _computeDtype;
 
+    /// <summary>Whether the decoder's convolutions are causal in time, which a chunk-by-chunk streaming decode needs.</summary>
+    public bool IsCausal => _isCausal;
+
     /// <summary>Decodes a latent <c>[1, latentChannels, T_lat, H, W]</c> to RGB <c>[1, 3, (T_lat−1)·8+1,
     /// H·32, W·32]</c> in [-1,1]. Applies per-channel latent un-normalization (<c>z = latent·std + mean</c>)
     /// first when stats are present (diffusers <c>_denormalize_latents</c>, scaling_factor 1.0).</summary>
-    public Tensor Decode(IBackend backend, Tensor latent)
+    public Tensor Decode(IBackend backend, Tensor latent) => DecodeCore(backend, latent, null);
+
+    /// <summary>Decodes the next latent frames of a stream (the causal LTX-2 VAE's <c>decoder(z, feat_cache=…)</c>): every
+    /// causal conv continues from the input tail it kept in <paramref name="cache"/>, so decoding a stream a few latent
+    /// frames at a time gives the frames a single causal pass over the whole latent would. The first call returns
+    /// <c>(T_lat−1)·8+1</c> frames, each later call <c>T_lat·8</c>. The cache advances only when the call succeeds.</summary>
+    /// <exception cref="InvalidOperationException">The decoder is not causal.</exception>
+    public Tensor DecodeStreaming(IBackend backend, Tensor latent, CausalStreamCache cache)
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        if (!_isCausal)
+            throw new InvalidOperationException("Streaming decode needs a causal LTX-2 VAE decoder (decoder_causal: true).");
+        cache.BeginPass();
+        try
+        {
+            Tensor rgb = DecodeCore(backend, latent, cache);
+            cache.Commit();
+            return rgb;
+        }
+        catch
+        {
+            cache.Discard();
+            throw;
+        }
+    }
+
+    private Tensor DecodeCore(IBackend backend, Tensor latent, CausalStreamCache? cache)
     {
         if ((int)latent.Shape[1] != _latentChannels)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != {_latentChannels}.", nameof(latent));
@@ -230,21 +270,21 @@ public sealed unsafe class LtxVideo2VaeDecoder
             denorm.Dispose();
             denorm = cast;
         }
-        Tensor h = _convIn!.Forward(backend, denorm);
+        Tensor h = _convIn!.ForwardStreaming(backend, denorm, cache);
         denorm.Dispose();
         if (probe) ProbeStats("conv_in", h);
         Tap?.Invoke("conv_in", h);
-        foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
+        foreach (LtxVaeResnetBlock3d r in _midResnets) { Tensor n = r.Forward(backend, h, null, cache); h.Dispose(); h = n; }
         if (probe) ProbeStats("mid_resnets", h);
         Tap?.Invoke("mid_resnets", h);
 
         int stageIdx = 0;
         foreach (UpStage s in _upStages)
         {
-            if (s.ConvIn is not null) { Tensor n = s.ConvIn.Forward(backend, h, null); h.Dispose(); h = n; }
-            if (s.Upsampler is not null) { Tensor n = s.Upsampler.Forward(backend, h); h.Dispose(); h = n; }
+            if (s.ConvIn is not null) { Tensor n = s.ConvIn.Forward(backend, h, null, cache); h.Dispose(); h = n; }
+            if (s.Upsampler is not null) { Tensor n = s.Upsampler.Forward(backend, h, cache); h.Dispose(); h = n; }
             Tap?.Invoke($"up{stageIdx}_up", h);
-            foreach (LtxVaeResnetBlock3d r in s.Resnets) { Tensor n = r.Forward(backend, h, null); h.Dispose(); h = n; }
+            foreach (LtxVaeResnetBlock3d r in s.Resnets) { Tensor n = r.Forward(backend, h, null, cache); h.Dispose(); h = n; }
             if (probe) ProbeStats($"up_stage_{stageIdx}", h);
             Tap?.Invoke($"up{stageIdx}_res", h);
             stageIdx++;
@@ -259,7 +299,7 @@ public sealed unsafe class LtxVideo2VaeDecoder
         if (probe) ProbeStats("norm_out", normed);
         Tap?.Invoke("norm_out", normed);
         backend.Silu(normed, normed);
-        Tensor patched = _convOut!.Forward(backend, normed);   // [1, outChannels·p², F, 8H, 8W]
+        Tensor patched = _convOut!.ForwardStreaming(backend, normed, cache);   // [1, outChannels·p², F, 8H, 8W]
         normed.Dispose();
         if (probe) ProbeStats("conv_out", patched);
         Tap?.Invoke("conv_out", patched);

@@ -566,7 +566,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <summary>Finds the Gemma SentencePiece model next to the checkpoint, or next to the standalone Gemma tower — Gemma ships no embedded tokenizer in the engine.</summary>
-    private static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
+    internal static string LocateGemmaTokenizer(string checkpointPath, string? gemmaSidePath)
     {
         List<string> dirs = new List<string>();
         string? ckptDir = File.Exists(checkpointPath) ? Path.GetDirectoryName(checkpointPath) : checkpointPath;
@@ -602,6 +602,6 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 return spm[0];
             }
         }
-        throw new FileNotFoundException($"LTX-2 needs the Gemma SentencePiece tokenizer (tokenizer.model) next to the checkpoint (searched: {string.Join(", ", dirs)}).");
+        throw new FileNotFoundException($"A Gemma-3 text encoder needs its SentencePiece tokenizer (tokenizer.model) next to the checkpoint (searched: {string.Join(", ", dirs)}).");
     }
 }

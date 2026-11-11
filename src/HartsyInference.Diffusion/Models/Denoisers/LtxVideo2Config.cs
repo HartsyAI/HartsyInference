@@ -156,6 +156,12 @@ public sealed record LtxVideo2Config
 
     public static LtxVideo2Config V23 => new();
 
+    /// <summary>LTX-2.0 (the 19B audio-video checkpoint, diffusers <c>LTX2VideoTransformer3DModel</c> as first released): the
+    /// per-block table has six rows, the text cross-attention is not modulated, attention is ungated, and the caption
+    /// projection lives in the transformer. <see cref="LtxVideo2ChunkTransformer"/> runs its video stream; the dual-stream
+    /// <see cref="LtxVideo2Transformer"/> does not load this layout.</summary>
+    public static LtxVideo2Config V20 => new() { SelfAttnModParams = 6, CrossAttnMod = false };
+
     /// <summary>LTX-2.5 dev. Differs from <see cref="V23"/> in exactly the two keys the shipped checkpoints'
     /// metadata differ in — every other dimension, rope and modulation setting is identical.</summary>
     public static LtxVideo2Config V25 => new() { FfBias = false, UseKeyframesAbsPosEmbedding = true };
