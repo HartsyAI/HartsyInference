@@ -18,6 +18,8 @@ public static class Hunyuan3DConfigFile
     {
         ArgumentNullException.ThrowIfNull(yaml);
         Dictionary<string, string> values = Flatten(yaml);
+        if (Require(values, "model.target").EndsWith(".HunYuanDiTPlain", StringComparison.Ordinal))
+            return ParsePlain(values);
 
         RequireValue(values, EncoderPrefix + "kwargs.image_size", "518", "the DINOv2 input size (other sizes need position-embedding interpolation)");
         RequireValue(values, "image_processor.params.size", "512", "the image preprocessor size");
@@ -61,6 +63,47 @@ public static class Hunyuan3DConfigFile
         };
     }
 
+    private static Hunyuan3DConfig ParsePlain(Dictionary<string, string> values)
+    {
+        RequireValue(values, EncoderPrefix + "kwargs.image_size", "518", "the DINOv2 input size (other sizes need position-embedding interpolation)");
+        RequireValue(values, "image_processor.params.size", "512", "the image preprocessor size");
+        RequireValue(values, EncoderPrefix + "kwargs.config.hidden_size", "1024", "the DINOv2 variant (only large is implemented for 2.1)");
+        RequireValue(values, EncoderPrefix + "kwargs.config.num_hidden_layers", "24", "the DINOv2 variant (only large is implemented for 2.1)");
+        RequireValue(values, EncoderPrefix + "kwargs.config.use_swiglu_ffn", "false", "the DINOv2 feed-forward");
+        RequireValue(values, EncoderPrefix + "type", "DinoImageEncoder", "the conditioner");
+        string normType = Require(values, ModelPrefix + "qk_norm_type").Trim('\'', '"');
+        if (normType != "rms")
+            throw new UnsupportedModelException($"Hunyuan3D config {ModelPrefix}qk_norm_type={normType} is not supported: the Q/K norm must be rms.");
+        if (values.TryGetValue(ModelPrefix + "guidance_cond_proj_dim", out string? guidanceProj) && guidanceProj is not ("null" or "None" or "~" or ""))
+            throw new UnsupportedModelException("Hunyuan3D-2.1 guidance_cond_proj_dim is not supported (no guidance embedding is implemented for the plain DiT).");
+        double mlpRatio = values.ContainsKey(ModelPrefix + "mlp_ratio")
+            ? double.Parse(Require(values, ModelPrefix + "mlp_ratio"), CultureInfo.InvariantCulture) : 4.0; // upstream default
+        foreach (string off in new[] { "with_decoupled_ca", "use_attention_pooling", "use_pos_emb" })
+        {
+            if (Flag(values, ModelPrefix + off, defaultValue: false))
+                throw new UnsupportedModelException($"Hunyuan3D-2.1 config {off}=true is not supported.");
+        }
+
+        if (Flag(values, ModelPrefix + "qkv_bias", defaultValue: true) || !Flag(values, ModelPrefix + "qk_norm", defaultValue: false))
+            throw new UnsupportedModelException("Hunyuan3D-2.1 without QK norm or with qkv bias is not supported.");
+        if (!Require(values, "scheduler.target").EndsWith(".FlowMatchEulerDiscreteScheduler", StringComparison.Ordinal))
+            throw new UnsupportedModelException("Hunyuan3D-2.1 scheduler is not FlowMatchEulerDiscreteScheduler.");
+        int heads = Int(values, ModelPrefix + "num_heads"), width = Int(values, ModelPrefix + "hidden_size");
+        if (Int(values, ModelPrefix + "input_size") != Int(values, VaePrefix + "num_latents"))
+            throw new UnsupportedModelException("Hunyuan3D-2.1 DiT input_size differs from the VAE num_latents.");
+        return ParseVaeSection(values, VaePrefix) with
+        {
+            LatentChannels = Int(values, ModelPrefix + "in_channels"),
+            CondDim = Int(values, ModelPrefix + "context_dim"),
+            Width = width,
+            MlpDim = (int)(width * mlpRatio),
+            NumHeads = heads,
+            PlainDit = new Hunyuan3DPlainDitConfig(
+                Int(values, ModelPrefix + "depth"), Int(values, ModelPrefix + "num_moe_layers"),
+                Int(values, ModelPrefix + "num_experts"), Int(values, ModelPrefix + "moe_top_k")),
+        };
+    }
+
     /// <summary>The ShapeVAE of a stand-alone VAE config (<c>hunyuan3d-vae-*</c>), laid over <paramref name="baseConfig"/>.</summary>
     /// <exception cref="UnsupportedModelException">The VAE needs something the engine does not implement.</exception>
     public static Hunyuan3DConfig ParseVae(string yaml, Hunyuan3DConfig baseConfig)
@@ -76,11 +119,13 @@ public static class Hunyuan3DConfigFile
         };
     }
 
-    /// <summary>Flattens nested mappings to dotted keys (<c>model.params.depth</c>), dropping comments and flow lists' brackets untouched.</summary>
+    /// <summary>Flattens nested mappings to dotted keys (<c>model.params.depth</c>), dropping comments and resolving <c>&amp;name</c> and <c>*name</c> anchors; flow lists stay as text.</summary>
+    /// <remarks>Only scalar anchors work (<c>&amp;name 4096</c> then <c>*name</c>); an anchor on a mapping or a merge key (<c>&lt;&lt;: *name</c>) is not expanded.</remarks>
     internal static Dictionary<string, string> Flatten(string yaml)
     {
         Dictionary<string, string> values = new(StringComparer.Ordinal);
         List<(int Indent, string Key)> path = [];
+        Dictionary<string, string> anchors = new(StringComparer.Ordinal);
         foreach (string raw in yaml.Split('\n'))
         {
             string line = raw.TrimEnd('\r');
@@ -103,6 +148,20 @@ public static class Hunyuan3DConfigFile
             {
                 path.Add((indent, key));
                 continue;
+            }
+
+            if (value[0] == '&')
+            {
+                // "&name value" defines an anchor that "*name" repeats elsewhere in the file.
+                int space = value.IndexOf(' ', StringComparison.Ordinal);
+                string anchor = space < 0 ? value[1..] : value[1..space];
+                value = space < 0 ? string.Empty : value[(space + 1)..].Trim();
+                anchors[anchor] = value;
+            }
+            else if (value[0] == '*')
+            {
+                value = anchors.TryGetValue(value[1..], out string? alias)
+                    ? alias : throw new UnsupportedModelException($"Hunyuan3D config uses the undefined anchor '{value}'.");
             }
 
             values[string.Join('.', path.Select(p => p.Key).Append(key))] = value;

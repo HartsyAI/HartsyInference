@@ -92,6 +92,114 @@ public sealed class Hunyuan3DConfigFileTests
         Assert.Equal(1024, config.VaeWidth);
     }
 
+    [Fact]
+    public void Parse_ReadsThePlainDitOfHunyuan3D21()
+    {
+        Hunyuan3DConfig config = Hunyuan3DConfigFile.Parse(PlainYaml);
+
+        Assert.Equal(new Hunyuan3DPlainDitConfig(21, 6, 8, 2), config.PlainDit);
+        Assert.Equal(2048, config.Width);
+        Assert.Equal(16, config.NumHeads);
+        Assert.Equal(64, config.LatentChannels);
+        Assert.Equal(1024, config.CondDim);
+        Assert.Equal(4096, config.LatentTokens);
+        Assert.Equal(1.0039506158752403f, config.VaeScaleFactor);
+        Assert.False(config.GuidanceEmbed);
+    }
+
+    [Fact]
+    public void Parse_ResolvesTheYamlAnchorThatSharesTheLatentCount()
+    {
+        string anchored = PlainYaml.Replace("input_size: 4096", "input_size: &num_latents 4096").Replace("num_latents: 4096", "num_latents: *num_latents");
+
+        Assert.Equal(4096, Hunyuan3DConfigFile.Parse(anchored).LatentTokens);
+    }
+
+    [Fact]
+    public void Parse_RefusesAPlainDitWithDecoupledCrossAttention()
+    {
+        Assert.Throws<UnsupportedModelException>(
+            () => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("with_decoupled_ca: false", "with_decoupled_ca: true")));
+    }
+
+    [Fact]
+    public void Parse_AcceptsADoubleQuotedRmsNormAndReadsTheMlpRatio()
+    {
+        string yaml = PlainYaml.Replace("qk_norm_type: 'rms'", "qk_norm_type: \"rms\"").Replace("moe_top_k: 2", "moe_top_k: 2\n    mlp_ratio: 2.0");
+
+        Hunyuan3DConfig config = Hunyuan3DConfigFile.Parse(yaml);
+
+        Assert.Equal(4096, config.MlpDim);
+    }
+
+    [Fact]
+    public void Parse_RefusesAPlainDitWithAnotherNormOrAGuidanceProjection()
+    {
+        Assert.Throws<UnsupportedModelException>(() => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("'rms'", "'layer'")));
+        Assert.Throws<UnsupportedModelException>(
+            () => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("moe_top_k: 2", "moe_top_k: 2\n    guidance_cond_proj_dim: 256")));
+    }
+
+    private const string PlainYaml =
+        """
+        model:
+          target: hy3dshape.models.denoisers.hunyuandit.HunYuanDiTPlain
+          params:
+            input_size: 4096
+            in_channels: 64
+            hidden_size: 2048
+            context_dim: 1024
+            depth: 21
+            num_heads: 16
+            qk_norm: true
+            text_len: 1370
+            with_decoupled_ca: false
+            use_attention_pooling: false
+            qk_norm_type: 'rms'
+            qkv_bias: false
+            use_pos_emb: false
+            num_moe_layers: 6
+            num_experts: 8
+            moe_top_k: 2
+        vae:
+          target: hy3dshape.models.autoencoders.ShapeVAE
+          params:
+            num_latents: 4096
+            embed_dim: 64
+            num_freqs: 8
+            include_pi: false
+            heads: 16
+            width: 1024
+            num_decoder_layers: 16
+            qkv_bias: false
+            qk_norm: true
+            scale_factor: 1.0039506158752403
+            geo_decoder_mlp_expand_ratio: 4
+            geo_decoder_downsample_ratio: 1
+            geo_decoder_ln_post: true
+        conditioner:
+          target: hy3dshape.models.conditioner.SingleImageEncoder
+          params:
+            main_image_encoder:
+              type: DinoImageEncoder
+              kwargs:
+                config:
+                  hidden_size: 1024
+                  image_size: 518
+                  num_hidden_layers: 24
+                  use_swiglu_ffn: false
+                image_size: 518
+        scheduler:
+          target: hy3dshape.schedulers.FlowMatchEulerDiscreteScheduler
+          params:
+            num_train_timesteps: 1000
+        image_processor:
+          target: hy3dshape.preprocessors.ImageProcessorV2
+          params:
+            size: 512
+            border_ratio: 0.15
+        """;
+
     private static string Yaml(int depth = 16, int single = 32, int latents = 3072, string scale = "0.9990943042622529",
         string extraModel = "", bool consistency = false, string encoder = "DinoImageEncoder", string dinoSize = "518", string processorSize = "512") =>
         $"""
