@@ -91,6 +91,17 @@ public sealed partial class HfQuantCheckpoint : IDisposable
     /// <summary>Whether <paramref name="path"/> names one of this checkpoint's files, through a symbolic link in any component.</summary>
     public bool IsSourceFile(string path) => _set.Shards.Any(shard => FileSystemPathIdentity.SamePath(shard.Path, path));
 
+    /// <summary>A block-scaled FP8 weight as stored: its E4M3 tensor and its F32 <c>weight_scale_inv</c> grid, both fresh borrowed views of the
+    /// mapped checkpoint. The caller owns the weight view; the scale view must stay alive while the weight is used, because the weight's
+    /// <see cref="QuantWeightInfo"/> borrows it.</summary>
+    public (Tensor Weight, Tensor Scale) BorrowFp8Block(string name)
+    {
+        HfQuantWeight w = Get(name);
+        if (w.Storage != HfWeightStorage.Fp8Block)
+            throw new InvalidOperationException($"'{name}' is stored as {w.Storage}; it is not a block-scaled FP8 weight.");
+        return (_set.GetTensor(w.SourceKey), _set.GetTensor(w.SourceKey + "_scale_inv"));
+    }
+
     /// <summary>A plain weight as stored, as a fresh borrowed view of the mapped checkpoint (an expert of a fused stack is a row view).</summary>
     public Tensor Borrow(string name)
     {

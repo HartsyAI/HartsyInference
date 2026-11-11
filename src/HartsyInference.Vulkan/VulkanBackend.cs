@@ -954,6 +954,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
+        // Before the FP8 and quant dispatches below, which ignore a block-scale grid and would compute an unscaled product.
+        if (Fp8BlockDispatch.TryLinear(this, output, input, weight, bias)) return;
         using (OpScope _ = EnterOp())
         {
             if (!TryDispatchQuantGemv(output, input, weight, bias)
