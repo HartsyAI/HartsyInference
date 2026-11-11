@@ -21,6 +21,7 @@ git preserves removed history.
 | Hunyuan3D-2.1 shape model: source spike, MoE and reuse map, licence | [Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md](Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md) |
 | Hunyuan3D shape models: pins, licence terms, upstream-to-C# stage map, findings | [Research/HUNYUAN3D_ARCHITECTURE.md](Research/HUNYUAN3D_ARCHITECTURE.md) |
 | Hunyuan3D Paint (texturing): pins, hashes, licence, 2.5D UNet, renderer and bake, reuse map | [Research/HUNYUAN3D_PAINT_ARCHITECTURE.md](Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) |
+| Hunyuan3D Part (P3-SAM segmentation, X-Part decomposition): pins, weights, licence, reuse map | [Research/HUNYUAN3D_PART_ARCHITECTURE.md](Research/HUNYUAN3D_PART_ARCHITECTURE.md) |
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
