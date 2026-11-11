@@ -39,6 +39,9 @@ public sealed record DsaAttentionSettings
     /// <summary>Pairing of the main query/key rotation; ERNIE 5.5's is interleaved (not NeoX) on the trailing <see cref="QkRopeDim"/> values.</summary>
     public RotaryPairing RopePairing { get; init; } = RotaryPairing.Interleaved;
 
+    /// <summary>Whether the output gate (<see cref="DsaAttentionWeights.OGate"/>) reads the hidden state (Kimi's g_proj) instead of the query latent (ERNIE).</summary>
+    public bool GateFromHidden { get; init; }
+
     /// <summary>Per-head query/key width.</summary>
     public int QkHeadDim => QkNopeDim + QkRopeDim;
 

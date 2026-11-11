@@ -95,6 +95,9 @@ public sealed record KimiK31Config
     /// <summary>RMSNorm epsilon.</summary>
     public float RmsNormEps { get; init; } = 1e-6f;
 
+    /// <summary>Width of the KDA q, k or v projections: <c>Heads · KdaHeadDim</c>.</summary>
+    public int KeyDim => Heads * KdaHeadDim;
+
     /// <summary>Whether layer <paramref name="index"/> is an MLA layer.</summary>
     public bool IsMla(int index) => FullAttentionLayers.Contains(index);
 
@@ -108,7 +111,7 @@ public sealed record KimiK31Config
     public DsaAttentionSettings Mla => new()
     {
         Dim = Hidden, Heads = Heads, QLoraRank = QLoraRank, KvLoraRank = KvLoraRank, QkNopeDim = QkNopeDim, QkRopeDim = QkRopeDim,
-        VDim = VDim, Window = 0, NormEps = RmsNormEps,
+        VDim = VDim, Window = 0, NormEps = RmsNormEps, GateFromHidden = true,
         Indexer = new DsaIndexerSettings
         {
             Heads = IndexHeads, HeadDim = IndexHeadDim, RopeDim = 2, TopK = IndexTopK, Hadamard = false,
