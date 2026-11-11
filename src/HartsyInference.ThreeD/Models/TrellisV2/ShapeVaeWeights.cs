@@ -11,17 +11,18 @@ internal static class ShapeVaeWeights
     internal static Dictionary<string, Tensor> Resolve(
         IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs,
         IReadOnlyDictionary<string, Tensor> weights,
-        List<Tensor> owned)
+        List<Tensor> owned,
+        string owner = "Shape VAE")
     {
         ArgumentNullException.ThrowIfNull(weights);
         Dictionary<string, Tensor> resolved = new(specs.Count);
         foreach (ShapeVaeKeyMap.TensorSpec spec in specs)
         {
             if (!weights.TryGetValue(spec.CheckpointKey, out Tensor? t))
-                throw new HartsyInferenceException($"Shape VAE checkpoint is missing '{spec.CheckpointKey}' ({spec.ParameterName}).");
+                throw new HartsyInferenceException($"{owner} checkpoint is missing '{spec.CheckpointKey}' ({spec.ParameterName}).");
             if (!HasShape(t, spec.Shape))
                 throw new HartsyInferenceException(
-                    $"Shape VAE tensor '{spec.CheckpointKey}' is {ShapeText(t.Shape)}, expected {ShapeText(spec.Shape)}.");
+                    $"{owner} tensor '{spec.CheckpointKey}' is {ShapeText(t.Shape)}, expected {ShapeText(spec.Shape)}.");
             Tensor f = TensorCasts.EnsureF32(t);
             if (!ReferenceEquals(f, t)) owned.Add(f);
             resolved[spec.CheckpointKey] = f;
