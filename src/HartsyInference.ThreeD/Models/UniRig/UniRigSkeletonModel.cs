@@ -35,7 +35,8 @@ public sealed class UniRigSkeletonModel : IDisposable
     /// </summary>
     /// <param name="points">Positions, length <c>3 * N</c>.</param>
     /// <param name="normals">Normals, length <c>3 * N</c>.</param>
-    public UniRigSkeleton Generate(ReadOnlySpan<float> points, ReadOnlySpan<float> normals, UniRigSamplingOptions options, CancellationToken cancel = default)
+    public UniRigSkeleton Generate(ReadOnlySpan<float> points, ReadOnlySpan<float> normals, UniRigSamplingOptions options,
+        CancellationToken cancel = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(options);
@@ -70,7 +71,8 @@ public sealed class UniRigSkeletonModel : IDisposable
         _encoder.Dispose();
     }
 
-    private UniRigSkeleton GenerateOnce(ReadOnlySpan<float> points, ReadOnlySpan<float> normals, UniRigSamplingOptions options, CancellationToken cancel)
+    private UniRigSkeleton GenerateOnce(ReadOnlySpan<float> points, ReadOnlySpan<float> normals, UniRigSamplingOptions options,
+        CancellationToken cancel)
     {
         using Tensor tokens = _encoder.Encode(points, normals, options.Seed);
         using Tensor condition = new(new TensorShape(1, tokens.Shape[1], _projectionBias.Shape[0]), DType.F32);

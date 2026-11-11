@@ -103,7 +103,8 @@ public sealed class UniRigShapeEncoder : IDisposable
         int count = points.Length / 3;
         if (count == 0 || points.Length != 3 * count || normals.Length != _config.PointFeats * count)
         {
-            throw new ArgumentException($"UniRig encoder needs N points of 3 floats and {_config.PointFeats} features each; got {points.Length} and {normals.Length} floats.");
+            throw new ArgumentException(
+                $"UniRig encoder needs 3 floats and {_config.PointFeats} features per point; got {points.Length} and {normals.Length}.");
         }
 
         int[] pool = UniRigPointSelection.Choose(count, FpsPoolFactor * _config.TokenNum, seed);
@@ -121,7 +122,8 @@ public sealed class UniRigShapeEncoder : IDisposable
         for (int i = 0; i < picked.Length; i++)
         {
             poolPoints.AsSpan(3 * picked[i], 3).CopyTo(queryPoints.AsSpan(3 * i, 3));
-            poolFeats.AsSpan(_config.PointFeats * picked[i], _config.PointFeats).CopyTo(queryFeats.AsSpan(_config.PointFeats * i, _config.PointFeats));
+            poolFeats.AsSpan(_config.PointFeats * picked[i], _config.PointFeats).CopyTo(queryFeats.AsSpan(_config.PointFeats * i,
+                _config.PointFeats));
         }
 
         using Tensor data = EmbedPoints(points, normals, count);

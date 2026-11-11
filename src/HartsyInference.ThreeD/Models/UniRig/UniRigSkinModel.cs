@@ -53,7 +53,8 @@ public sealed class UniRigSkinModel : IDisposable
     /// <param name="parents">Parent per joint, <c>-1</c> for roots; parents precede children.</param>
     /// <param name="voxelSkin">Geometric prior per sampled point <c>[N, J]</c>.</param>
     /// <param name="seed">Seed of the global encoder's point subset.</param>
-    public float[] Predict(float[] points, float[] normals, float[] joints, int[] parents, float[] voxelSkin, int seed, CancellationToken cancel = default)
+    public float[] Predict(float[] points, float[] normals, float[] joints, int[] parents, float[] voxelSkin, int seed,
+        CancellationToken cancel = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         int n = points.Length / 3;
@@ -324,7 +325,8 @@ public sealed class UniRigSkinModel : IDisposable
         }
 
         using Tensor attentionTensor = UniRigOps.FromFloats(attention, new TensorShape(rows, heads));
-        using Tensor attentionNormed = UniRigOps.LayerNorm(_backend, attentionTensor, W("attn_skin_norm.weight", heads), W("attn_skin_norm.bias", heads));
+        using Tensor attentionNormed = UniRigOps.LayerNorm(_backend, attentionTensor, W("attn_skin_norm.weight", heads),
+            W("attn_skin_norm.bias", heads));
         using Tensor prior = UniRigOps.FromFloats(voxelSkin.AsSpan(start * j, rows), new TensorShape(rows, 1));
         using Tensor priorEmbedded = UniRigOps.Linear(_backend, prior, W("voxel_skin_embed.weight", heads, 1), W("voxel_skin_embed.bias", heads));
         using Tensor priorNormed = UniRigOps.LayerNorm(_backend, priorEmbedded, W("voxel_skin_norm.weight", heads), W("voxel_skin_norm.bias", heads));
@@ -362,8 +364,10 @@ public sealed class UniRigSkinModel : IDisposable
     private Tensor HiddenLayer(Tensor input, int linear, int norm, long outDim, long inDim)
     {
         using Tensor owned = input;
-        using Tensor projected = UniRigOps.Linear(_backend, owned, W($"skinweight_pred.net.{linear}.weight", outDim, inDim), W($"skinweight_pred.net.{linear}.bias", outDim));
-        using Tensor normed = UniRigOps.LayerNorm(_backend, projected, W($"skinweight_pred.net.{norm}.weight", outDim), W($"skinweight_pred.net.{norm}.bias", outDim));
+        using Tensor projected = UniRigOps.Linear(_backend, owned, W($"skinweight_pred.net.{linear}.weight", outDim, inDim),
+            W($"skinweight_pred.net.{linear}.bias", outDim));
+        using Tensor normed = UniRigOps.LayerNorm(_backend, projected, W($"skinweight_pred.net.{norm}.weight", outDim),
+            W($"skinweight_pred.net.{norm}.bias", outDim));
         return UniRigOps.GeluErf(_backend, normed);
     }
 

@@ -42,7 +42,8 @@ public sealed class UniRigPtv3Encoder : IDisposable
         long c0 = config.Channels[0];
         long cin = config.InChannels;
 
-        _stemSlices = SparseOps.ConvWeightSlices(UniRigCheckpoint.Get(weights, $"{prefix}.embedding.stem.conv.weight", c0, StemKernel, StemKernel, StemKernel, cin));
+        _stemSlices = SparseOps.ConvWeightSlices(UniRigCheckpoint.Get(weights, $"{prefix}.embedding.stem.conv.weight", c0, StemKernel,
+            StemKernel, StemKernel, cin));
         string norm = $"{prefix}.embedding.stem.norm";
         (_stemScale, _stemShift) = FoldBatchNorm(
             UniRigCheckpoint.Get(weights, $"{norm}.weight", c0), UniRigCheckpoint.Get(weights, $"{norm}.bias", c0),
@@ -66,7 +67,8 @@ public sealed class UniRigPtv3Encoder : IDisposable
             _blocks[s] = new UniRigPtv3Block[config.Depths[s]];
             for (int i = 0; i < config.Depths[s]; i++)
             {
-                _blocks[s][i] = new UniRigPtv3Block(backend, weights, $"{stage}.block{i}", config.Channels[s], config.Heads[s], config.PatchSize, i % _orders.Length);
+                _blocks[s][i] = new UniRigPtv3Block(backend, weights, $"{stage}.block{i}", config.Channels[s], config.Heads[s],
+                    config.PatchSize, i % _orders.Length);
             }
         }
     }

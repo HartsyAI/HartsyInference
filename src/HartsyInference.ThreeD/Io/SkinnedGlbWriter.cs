@@ -36,7 +36,8 @@ public static class SkinnedGlbWriter
 
         List<View> views = [];
         using MemoryStream bin = new();
-        int Add(ReadOnlySpan<byte> bytes, int target, int componentType, int count, string type, string? name, float[]? min = null, float[]? max = null)
+        int Add(ReadOnlySpan<byte> bytes, int target, int componentType, int count, string type, string? name, float[]? min = null,
+            float[]? max = null)
         {
             while (bin.Length % 4 != 0)
             {
@@ -48,10 +49,14 @@ public static class SkinnedGlbWriter
             return views.Count - 1;
         }
 
-        int position = Add(Floats(mesh.Vertices), ArrayBuffer, FloatType, mesh.VertexCount, "VEC3", "POSITION", Bounds(mesh.Vertices, true), Bounds(mesh.Vertices, false));
-        int normal = mesh.Normals is { } n && n.Length == mesh.Vertices.Length ? Add(Floats(n), ArrayBuffer, FloatType, mesh.VertexCount, "VEC3", "NORMAL") : -1;
-        int uv = mesh.Uvs is { } t && t.Length == 2 * mesh.VertexCount ? Add(Floats(t), ArrayBuffer, FloatType, mesh.VertexCount, "VEC2", "TEXCOORD_0") : -1;
-        int color = mesh.VertexColors is { } c && c.Length == mesh.Vertices.Length ? Add(Floats(c), ArrayBuffer, FloatType, mesh.VertexCount, "VEC3", "COLOR_0") : -1;
+        int position = Add(Floats(mesh.Vertices), ArrayBuffer, FloatType, mesh.VertexCount, "VEC3", "POSITION", Bounds(mesh.Vertices,
+            true), Bounds(mesh.Vertices, false));
+        int normal = mesh.Normals is { } n && n.Length == mesh.Vertices.Length ? Add(Floats(n), ArrayBuffer, FloatType,
+            mesh.VertexCount, "VEC3", "NORMAL") : -1;
+        int uv = mesh.Uvs is { } t && t.Length == 2 * mesh.VertexCount ? Add(Floats(t), ArrayBuffer, FloatType, mesh.VertexCount,
+            "VEC2", "TEXCOORD_0") : -1;
+        int color = mesh.VertexColors is { } c && c.Length == mesh.Vertices.Length ? Add(Floats(c), ArrayBuffer, FloatType,
+            mesh.VertexCount, "VEC3", "COLOR_0") : -1;
         int jointsView = Add(UShorts(joints), ArrayBuffer, UnsignedShortType, mesh.VertexCount, "VEC4", "JOINTS_0");
         int weightsView = Add(Floats(weights), ArrayBuffer, FloatType, mesh.VertexCount, "VEC4", "WEIGHTS_0");
         int indices = Add(UInts(mesh.Indices), ElementBuffer, UnsignedIntType, mesh.Indices.Length, "SCALAR", null);
@@ -75,7 +80,9 @@ public static class SkinnedGlbWriter
 
         if (joints.Length != Influences * mesh.VertexCount || weights.Length != joints.Length)
         {
-            throw new HartsyInferenceException($"Skinned GLB needs {Influences} influences per vertex; got {joints.Length} joints and {weights.Length} weights for {mesh.VertexCount} vertices.");
+            throw new HartsyInferenceException(
+                $"Skinned GLB needs {Influences} influences per vertex; "
+                + $"got {joints.Length} joints, {weights.Length} weights, {mesh.VertexCount} vertices.");
         }
 
         for (int i = 0; i < bones.Count; i++)
@@ -376,5 +383,6 @@ public static class SkinnedGlbWriter
         offset += 4;
     }
 
-    private sealed record View(int Offset, int Length, int Target, int ComponentType, int Count, string Type, string? Name, float[]? Min, float[]? Max);
+    private sealed record View(int Offset, int Length, int Target, int ComponentType, int Count, string Type, string? Name,
+        float[]? Min, float[]? Max);
 }

@@ -14,6 +14,18 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
   `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
   fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
+- **Added: UniRig skinning (stage 2), validation-pending.** The skin network of `VAST-AI/UniRig` in pure C#: UniRig's point
+  transformer (k=5 sparse-conv stem with BatchNorm, QK-norm patch attention, no pooling; `UtoniaEncoder` was checked and does not
+  fit), the global point encoder shared with stage 1, bone encoder, mesh-to-bone cross-attention and the per-bone scoring head, the
+  geometric voxel prior (grid 196, geodesic distances over mesh edges and interior voxels, no pyrender), and upstream's `reskin`
+  (nearest-sample median, one diffusion step, small-weight cut-off). Weights are non-negative and each row sums to 1. Runs on the CPU
+  backend in minutes (Horse, 494 vertices, 32 joints: 400 s); GPU timing is not measured.
+- **Added: `hartsy 3d -m unirig`, mesh in, rigged GLB out.** `MeshService` routes the new `unirig` id (`MeshModelIds.RigMesh`) through
+  the existing `MeshRequest.SceneMesh` input and the GLB `MeshResult`; no request or result field changed. The pipeline reads one stage's
+  checkpoint at a time (1.4 GB skeleton, 4.4 GB skin, F32), writes bones named `bone_0…`, tails in node `extras`, inverse bind matrices
+  and the top four influences per vertex (`SkinnedGlbWriter`, separate from the hair-card writer). Pass the folder holding
+  `skeleton/articulation-xl_quantization_256/model.ckpt` and `skin/articulation-xl/model.ckpt` with `--model-path`; `--steps` and
+  `--grid` are rejected. Validation-pending: no Python reference was run, so parity is not claimed.
 - **Added: TRELLIS.2 shape-only image to mesh.** `hartsy 3d <image.png> -m trellis2` and `POST /v1/native/mesh` (model `trellis2`) turn one
   image into a GLB with positions and computed normals (no texture, no UVs). The chain is foreground preprocessing, DINOv3 conditioning,
   the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
