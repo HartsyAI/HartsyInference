@@ -1,7 +1,8 @@
 // glu: a gated linear unit over the two halves of each input row (IBackend.Glu). ACT picks the gate function (0 SiLU, 1 GELU-tanh,
-// 2 GELU-erf, 3 SiTU, whose value side is soft-capped to 25·tanh(u/25)); GATE_FIRST says whether the gate half leads
-// ([gate | value]) or trails ([value | gate]). The sigmoid takes the sign-aware form so no tail overflows. One invocation
-// per output element; USE_FP16 picks the activation dtype. Matches GluReference up to the math library.
+// 2 GELU-erf, 3 SiTU: β·tanh(g/β)·sigmoid(g) with the value soft-capped to β_lin·tanh(u/β_lin), both betas push constants);
+// GATE_FIRST says whether the gate half leads ([gate | value]) or trails ([value | gate]). The sigmoid takes the sign-aware
+// form so no tail overflows. One invocation per output element; USE_FP16 picks the activation dtype. Matches GluReference
+// up to the math library.
 //
 // Bindings: 0=in [rows, 2*inner], 1=out [rows, inner]
 #version 460
@@ -27,6 +28,8 @@ layout(set = 0, binding = 1) writeonly buffer Out_ { DTYPE outp[]; };
 layout(push_constant) uniform Push {
     uint inner;
     uint total;      // rows * inner
+    float situBeta;
+    float situLinearBeta;
 } pc;
 
 float sigmoid_safe(float x) { return x >= 0.0 ? 1.0 / (1.0 + exp(-x)) : exp(x) / (1.0 + exp(x)); }
@@ -44,10 +47,10 @@ float gate_of(float g) {
     if (ACT == 0u) return g * sigmoid_safe(g);
     if (ACT == 1u) return 0.5 * g * (1.0 + tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)));
     if (ACT == 2u) return 0.5 * g * (1.0 + erf_approx(g * 0.7071067811865475));
-    return 4.0 * tanh(g * 0.25) * sigmoid_safe(g);
+    return pc.situBeta * tanh(g / pc.situBeta) * sigmoid_safe(g);
 }
 
-float value_of(float u) { return ACT == 3u ? 25.0 * tanh(u / 25.0) : u; }
+float value_of(float u) { return ACT == 3u ? pc.situLinearBeta * tanh(u / pc.situLinearBeta) : u; }
 
 void main() {
     uint i = gl_GlobalInvocationID.x;

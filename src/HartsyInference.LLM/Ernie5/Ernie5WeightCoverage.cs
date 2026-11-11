@@ -5,7 +5,8 @@ namespace HartsyInference.LLM.Ernie5;
 /// <summary>What a checkpoint's keys map to: model parameters, their FP8 scale companions, skipped MTP keys, and what is left over.</summary>
 /// <param name="Mapped">Keys that feed a parameter of <see cref="Ernie5Model"/>.</param>
 /// <param name="ScaleCompanions">FP8 block-scale keys whose weight is mapped.</param>
-/// <param name="SkippedMtp">Keys of the multi-token-prediction layers, skipped at load.</param>
+/// <param name="SkippedMtp">Keys of the multi-token-prediction layers, skipped because the model was loaded without
+/// <see cref="Ernie5LoadOptions.Mtp"/>.</param>
 /// <param name="Unmapped">Keys that feed nothing; any one fails the load.</param>
 /// <param name="Missing">Parameters with no key; any one fails the load.</param>
 public sealed record Ernie5WeightCoverage(int Mapped, int ScaleCompanions, int SkippedMtp, IReadOnlyList<string> Unmapped,

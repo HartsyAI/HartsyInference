@@ -20,6 +20,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   dual-grid mesher and is unchanged.
 - Parity: the DINOv3 conditioning, the 512 shape flow forward and the guided sampler match the upstream Python on the CPU (correlation 0.99993 or better); the structure stage is not checked. The catalog entry is Structural and the status row is 🔧.
 
+## alpha.418
+
+- **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,
+  `Ernie5Model` loads layer 43 and drafts the token after next: `ForwardStream` returns the target's pre-head stream,
+  `MtpForward` runs the MTP layer on it (chained steps feed its output back), and `MtpHidden` plus `Logits` read the draft through
+  the shared LM head. Verified on a synthetic checkpoint only; the Text path does not draft yet. A checkpoint is no longer refused
+  for having MTP layers.
+
 ## alpha.417
 
 - **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session
