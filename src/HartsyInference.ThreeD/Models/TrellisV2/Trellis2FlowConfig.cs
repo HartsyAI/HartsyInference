@@ -3,8 +3,9 @@ using System.Text.Json;
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
 /// <summary>TRELLIS.2 flow-transformer architecture, read from a checkpoint's <c>.json</c> sidecar (<c>args</c> of
-/// <c>SparseStructureFlowModel</c> or <c>SLatFlowModel</c>). Only the shipped parameterization is implemented: RoPE, shared
-/// adaLN modulation, and QK RMS norm on self- and cross-attention.</summary>
+/// <c>SparseStructureFlowModel</c>, <c>SLatFlowModel</c> or Pixal3D's <c>ElasticSLatFlowModel</c>). Only the shipped
+/// parameterization is implemented: RoPE, shared adaLN modulation, and QK RMS norm on self- and cross-attention. Pixal3D's
+/// <c>image_attn_mode = "proj"</c> adds a per-block projection of per-token image features to the cross-attention output.</summary>
 public sealed record Trellis2FlowConfig
 {
     /// <summary>Frequency-embedding width of the timestep embedder (upstream default).</summary>
@@ -15,6 +16,15 @@ public sealed record Trellis2FlowConfig
 
     /// <summary>Upstream <c>SLatFlowModel</c> class name: one token per sparse voxel.</summary>
     public const string SparseModelName = "SLatFlowModel";
+
+    /// <summary>Pixal3D's <c>ElasticSLatFlowModel</c> class name: a <see cref="SparseModelName"/> whose training wrapper only elasticises memory.</summary>
+    public const string ElasticSparseModelName = "ElasticSLatFlowModel";
+
+    /// <summary>Upstream <c>image_attn_mode</c> of the plain cross-attention flows.</summary>
+    public const string CrossAttentionMode = "cross";
+
+    /// <summary>Pixal3D's <c>image_attn_mode</c>: cross-attention to global tokens plus a per-block linear of per-token features.</summary>
+    public const string ProjectionAttentionMode = "proj";
 
     /// <summary>True for the dense sparse-structure flow, false for the sparse structured-latent flow.</summary>
     public required bool Dense { get; init; }
@@ -51,6 +61,19 @@ public sealed record Trellis2FlowConfig
     /// <summary>Upstream <c>qk_rms_norm_cross</c>: per-head RMS norm of the cross-attention queries and keys.</summary>
     public bool QkRmsNormCross { get; init; } = true;
 
+    /// <summary>Upstream <c>image_attn_mode</c>: <see cref="CrossAttentionMode"/> or <see cref="ProjectionAttentionMode"/>.</summary>
+    public string ImageAttentionMode { get; init; } = CrossAttentionMode;
+
+    /// <summary>Channels of the per-token projected features (<c>proj_in_channels</c>); upstream defaults them to <see cref="CondChannels"/>.
+    /// Unused unless <see cref="HasProjection"/>.</summary>
+    public int ProjInChannels { get; init; }
+
+    /// <summary>Whether every block adds <c>proj_linear(proj)</c> to its cross-attention output.</summary>
+    public bool HasProjection => ImageAttentionMode == ProjectionAttentionMode;
+
+    /// <summary>Key scope (below <c>blocks.N</c>) of the cross-attention tensors: the projection flows nest them in <c>cross_attn_block</c>.</summary>
+    public string CrossAttentionScope => HasProjection ? "cross_attn.cross_attn_block" : "cross_attn";
+
     /// <summary>Channels per attention head.</summary>
     public int HeadDim => ModelChannels / NumHeads;
 
@@ -71,6 +94,10 @@ public sealed record Trellis2FlowConfig
             throw new ArgumentException($"Flow head width {HeadDim} must be even and at least 6 to carry a 3-axis RoPE.");
         if (MlpHidden <= 0)
             throw new ArgumentException($"MLP ratio {MlpRatio} gives no hidden width.");
+        if (ImageAttentionMode is not (CrossAttentionMode or ProjectionAttentionMode))
+            throw new NotSupportedException($"Flow image_attn_mode '{ImageAttentionMode}' is not implemented; only cross and proj are.");
+        if (HasProjection && ProjInChannels <= 0)
+            throw new ArgumentException("A projection flow needs a positive proj_in_channels.");
         if (PositionEncoding != "rope")
             throw new NotSupportedException($"Flow position encoding '{PositionEncoding}' is not implemented; only rope is.");
         if (!ShareModulation)
@@ -87,8 +114,8 @@ public sealed record Trellis2FlowConfig
         bool dense = name switch
         {
             DenseModelName => true,
-            SparseModelName => false,
-            _ => throw new NotSupportedException($"Flow model '{name}' is not a TRELLIS.2 flow; expected {DenseModelName} or {SparseModelName}."),
+            SparseModelName or ElasticSparseModelName => false,
+            _ => throw new NotSupportedException($"Flow model '{name}' is not a TRELLIS.2 flow; expected {DenseModelName}, {SparseModelName} or {ElasticSparseModelName}."),
         };
         JsonElement args = root.GetProperty("args");
         if (args.TryGetProperty("rope_freq", out JsonElement freq) && freq.ValueKind == JsonValueKind.Array
@@ -97,6 +124,10 @@ public sealed record Trellis2FlowConfig
         int numHeads = args.TryGetProperty("num_heads", out JsonElement heads) && heads.ValueKind == JsonValueKind.Number
             ? heads.GetInt32()
             : args.GetProperty("model_channels").GetInt32() / (args.TryGetProperty("num_head_channels", out JsonElement hc) ? hc.GetInt32() : 64);
+        string mode = args.TryGetProperty("image_attn_mode", out JsonElement attn) && attn.ValueKind == JsonValueKind.String
+            ? attn.GetString()!
+            : CrossAttentionMode;
+        int condChannels = args.GetProperty("cond_channels").GetInt32();
         Trellis2FlowConfig config = new()
         {
             Dense = dense,
@@ -104,7 +135,11 @@ public sealed record Trellis2FlowConfig
             InChannels = args.GetProperty("in_channels").GetInt32(),
             OutChannels = args.GetProperty("out_channels").GetInt32(),
             ModelChannels = args.GetProperty("model_channels").GetInt32(),
-            CondChannels = args.GetProperty("cond_channels").GetInt32(),
+            CondChannels = condChannels,
+            ImageAttentionMode = mode,
+            ProjInChannels = args.TryGetProperty("proj_in_channels", out JsonElement proj) && proj.ValueKind == JsonValueKind.Number
+                ? proj.GetInt32()
+                : condChannels,
             NumBlocks = args.GetProperty("num_blocks").GetInt32(),
             NumHeads = numHeads,
             MlpRatio = args.TryGetProperty("mlp_ratio", out JsonElement ratio) ? ratio.GetDouble() : 4.0,

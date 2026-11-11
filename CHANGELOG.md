@@ -6,6 +6,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 ## alpha.423
 
 - **Fixed: Vulkan `ConvTranspose1d` rejected grouped and depthwise weights.** The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so the depthwise pool in Kokoro's AdainResBlk1d and the grouped calls in Mimi, PocketTTS and AntiAliasedSnake failed on Vulkan. The shader now takes `groups` with weight `[C_in, C_out/groups, K]`, and dense calls sum in the same order as before. `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference. Kokoro and StyleTTS 2 are not yet re-run end to end on Vulkan.
+- **Added: projection mode for the TRELLIS.2 flows (groundwork for Pixal3D, not yet runnable end to end).** `Trellis2FlowConfig` now
+  reads `image_attn_mode` and `proj_in_channels` and accepts the `ElasticSLatFlowModel` sidecar name; a projection flow's blocks add a
+  per-block `proj_linear` of per-token features to the cross-attention output and read the cross-attention tensors under
+  `cross_attn.cross_attn_block`. `Trellis2SparseStructureFlow` and `Trellis2SlatFlow` gain `Forward` overloads that take the features;
+  the existing overloads and TRELLIS.2 results are unchanged. Safetensors headers may now declare `C64`, which can be listed but not
+  materialised, so the Pixal3D structure flow (which saves its RoPE table) opens; `Trellis2FlowWeights.Load` leaves that buffer unread.
+  Header-checked against the real Pixal3D flows (700 F32 tensors each); nothing has been run with them yet.
 
 ## alpha.422
 
