@@ -71,11 +71,7 @@ public static class GridSampler
     /// padding_mode="border", mode="bilinear")</c>: coords in [−1,1], and a source position outside the image is clamped to the edge pixel.</summary>
     public static void GridSampleRowsBorder(ReadOnlySpan<float> rows, int channels, int h, int w, float gx, float gy, Span<float> dst)
     {
-        float fx = Math.Clamp(((gx + 1f) * w - 1f) * 0.5f, 0f, w - 1f);
-        float fy = Math.Clamp(((gy + 1f) * h - 1f) * 0.5f, 0f, h - 1f);
-        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
-        int x1 = Math.Min(x0 + 1, w - 1), y1 = Math.Min(y0 + 1, h - 1);
-        float tx = fx - x0, ty = fy - y0;
+        BorderTaps(gx, gy, h, w, out int x0, out int y0, out int x1, out int y1, out float tx, out float ty);
         ReadOnlySpan<float> r00 = rows.Slice((y0 * w + x0) * channels, channels), r10 = rows.Slice((y0 * w + x1) * channels, channels);
         ReadOnlySpan<float> r01 = rows.Slice((y1 * w + x0) * channels, channels), r11 = rows.Slice((y1 * w + x1) * channels, channels);
         for (int c = 0; c < channels; c++)
@@ -83,6 +79,21 @@ public static class GridSampler
             float top = r00[c] + (r10[c] - r00[c]) * tx, bottom = r01[c] + (r11[c] - r01[c]) * tx;
             dst[c] = top + (bottom - top) * ty;
         }
+    }
+
+    /// <summary>The four source pixels and the fractional weights <c>F.grid_sample(align_corners=False, padding_mode="border")</c> blends for a
+    /// coordinate <paramref name="gx"/>, <paramref name="gy"/> in [−1,1] on an <paramref name="h"/> by <paramref name="w"/> map: the result is
+    /// <c>(1−ty)·((1−tx)·p(x0,y0) + tx·p(x1,y0)) + ty·((1−tx)·p(x0,y1) + tx·p(x1,y1))</c>.</summary>
+    public static void BorderTaps(float gx, float gy, int h, int w, out int x0, out int y0, out int x1, out int y1, out float tx, out float ty)
+    {
+        float fx = Math.Clamp(((gx + 1f) * w - 1f) * 0.5f, 0f, w - 1f);
+        float fy = Math.Clamp(((gy + 1f) * h - 1f) * 0.5f, 0f, h - 1f);
+        x0 = (int)MathF.Floor(fx);
+        y0 = (int)MathF.Floor(fy);
+        x1 = Math.Min(x0 + 1, w - 1);
+        y1 = Math.Min(y0 + 1, h - 1);
+        tx = fx - x0;
+        ty = fy - y0;
     }
 
     private static int Lin(int x, int y, int z, int resX, int resY) => x + resX * (y + resY * z);
