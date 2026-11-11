@@ -14,12 +14,12 @@ namespace HartsyInference.LLM.Ernie5;
 /// <para>Every op runs through <see cref="IBackend"/>, so the model runs on the CPU, CUDA or Vulkan backend. The residual stream, the
 /// sublayer glue and the attention caches stay host arrays, and each backend op takes them as host tensors. On a GPU backend,
 /// <c>Ernie5ModelGpuParityTests</c> covers one prefill chunk and one decode step with weights rebuilt per forward, and with resident weights on CUDA and Vulkan; MTP is not covered on a device.</para>
-/// <para>On CUDA the FP8 linears still upload their weight and scale on every call (<c>CudaBackend.Fp8BlockLinear</c>), so the
-/// packed weights live in host memory and each forward is bound by PCIe; <see cref="Ernie5LoadOptions.ResidentWeights"/> does not
-/// keep them in VRAM.</para>
 /// <para>FP8 linears stay E4M3 with their block-scale grid on the weight, so each runs <c>IBackend.Fp8BlockLinear</c>; MoE experts run per
 /// expert through the same linear. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer; otherwise each layer is built
 /// and dropped per forward. Not thread-safe: run one sequence at a time.</para>
+/// <para>On CUDA the FP8 linears still upload their weight and scale on every call (<c>CudaBackend.Fp8BlockLinear</c>), so the
+/// packed weights live in host memory and each forward is bound by PCIe; <see cref="Ernie5LoadOptions.ResidentWeights"/> does not
+/// keep them in VRAM.</para>
 /// </remarks>
 public sealed class Ernie5Model : IDisposable
 {
