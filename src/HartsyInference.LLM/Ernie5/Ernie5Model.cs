@@ -11,10 +11,15 @@ namespace HartsyInference.LLM.Ernie5;
 /// RMS norm, the LM head, and multimax. With <see cref="Ernie5LoadOptions.Mtp"/> it also runs the multi-token-prediction layer
 /// (vLLM-ERNIE <c>Ernie5_5MTP</c>) that drafts the token after next.</summary>
 /// <remarks>
-/// <para>Every op runs through <see cref="IBackend"/> on the CPU backend. Device backends are refused by name: no CUDA or Vulkan kernel takes the
-/// checkpoint's 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.</para>
-/// <para>FP8 weights are dequantized to F32 when a layer is built. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer;
-/// otherwise each layer is built and dropped per forward. Not thread-safe: run one sequence at a time.</para>
+/// <para>Every op runs through <see cref="IBackend"/>, so the model runs on the CPU, CUDA or Vulkan backend. The residual stream, the
+/// sublayer glue and the attention caches stay host arrays, and each backend op takes them as host tensors. On a GPU backend,
+/// <c>Ernie5ModelGpuParityTests</c> covers one prefill chunk and one decode step with weights rebuilt per forward, and with resident weights on CUDA and Vulkan; MTP is not covered on a device.</para>
+/// <para>FP8 linears stay E4M3 with their block-scale grid on the weight, so each runs <c>IBackend.Fp8BlockLinear</c>; MoE experts run per
+/// expert through the same linear. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer; otherwise each layer is built
+/// and dropped per forward. Not thread-safe: run one sequence at a time.</para>
+/// <para>On CUDA the FP8 linears still upload their weight and scale on every call (<c>CudaBackend.Fp8BlockLinear</c>), so the
+/// packed weights live in host memory and each forward is bound by PCIe; <see cref="Ernie5LoadOptions.ResidentWeights"/> does not
+/// keep them in VRAM.</para>
 /// </remarks>
 public sealed class Ernie5Model : IDisposable
 {
@@ -41,12 +46,12 @@ public sealed class Ernie5Model : IDisposable
     private Tensor? _lmHead;
     private int _disposed;
 
-    /// <param name="backend">The CPU backend.</param>
+    /// <param name="backend">The CPU, CUDA or Vulkan backend.</param>
     /// <param name="config">The checkpoint's config.</param>
     /// <param name="source">The weights; every key must map (<see cref="Ernie5WeightMap"/>). Not owned unless loaded through
     /// <see cref="Load"/>.</param>
     /// <param name="options">Sequence length and weight residency.</param>
-    /// <exception cref="NotSupportedException">The backend is not the CPU, the config names a feature the model does not implement, or
+    /// <exception cref="NotSupportedException">The backend is not CPU, CUDA or Vulkan, the config names a feature the model does not implement, or
     /// <see cref="Ernie5LoadOptions.Mtp"/> asks for MTP on a checkpoint with other than one MTP layer.</exception>
     /// <exception cref="InvalidDataException">A checkpoint key maps to nothing, or a parameter has no key.</exception>
     public Ernie5Model(IBackend backend, Ernie5Config config, IErnie5WeightSource source, Ernie5LoadOptions options)
@@ -61,9 +66,8 @@ public sealed class Ernie5Model : IDisposable
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxSequenceTokens, 1);
-        if (backend.Device != DeviceKind.Cpu)
-            throw new NotSupportedException($"ERNIE-5.5 runs on the host reference path only; the {backend.Device} backend has no kernels "
-                + "for its 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.");
+        if (backend.Device.IsGpu && !backend.Device.IsCuda && !backend.Device.IsVulkan)
+            throw new NotSupportedException($"ERNIE-5.5 has no path on the {backend.Device} backend; it runs on the CPU, CUDA and Vulkan backends.");
         IReadOnlyList<string> missing = config.UnimplementedFeatures(options.Mtp);
         if (missing.Count > 0)
             throw new NotSupportedException($"This ERNIE-5.5 config names features the model does not implement: {string.Join("; ", missing)}.");
@@ -109,6 +113,9 @@ public sealed class Ernie5Model : IDisposable
         {
             _embedding = source.Read(Ernie5WeightNames.Embedding);
             _lmHead = source.Read(Ernie5WeightNames.LmHead);
+            // Embed casts rows without a block grid, so an FP8 table would read wrong values. The real checkpoint stores it BF16.
+            if (_embedding.DType == DType.F8E4M3)
+                throw new NotSupportedException($"'{Ernie5WeightNames.Embedding}' is FP8; the embedding gather reads plain values, so it must be BF16 or F32.");
             RequireMatrix(_embedding, config.VocabSize, config.HiddenSize, Ernie5WeightNames.Embedding);
             RequireMatrix(_lmHead, config.VocabSize, config.HiddenSize, Ernie5WeightNames.LmHead);
             if (options.ResidentWeights)
