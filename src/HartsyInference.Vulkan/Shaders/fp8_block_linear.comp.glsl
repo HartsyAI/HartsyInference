@@ -1,6 +1,8 @@
 // fp8_block_linear: y[m, n] = sum_k x[m, k] * e4m3(w[n, k]) * scale[n / blockRows, k / blockCols] + bias[n], the GPU side
-// of IBackend.Fp8BlockLinear. One workgroup of 128 threads per output column n; the workgroup walks the rows m and reduces
-// each dot product in shared memory. The e4m3 weight is a byte stream packed four to a word and is decoded where it is read.
+// of IBackend.Fp8BlockLinear, and of its block-diagonal form IBackend.BlockDiagonalLinear, where output n reads only the input
+// slice of its group, x[m, (n / groupRows) * K + k], and the weight may be F32 (weightFp8 0). One workgroup of 128 threads
+// per output column n; the workgroup walks the rows m and reduces each dot product in shared memory. The e4m3 weight is a
+// byte stream packed four to a word and is decoded where it is read.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
@@ -22,6 +24,9 @@ layout(push_constant) uniform Push {
     uint gridCols;
     uint hasBias;
     uint nBase;
+    uint inWidth;
+    uint groupRows;
+    uint weightFp8;
 } pc;
 
 #include "latent_codec.glsl"
@@ -33,13 +38,19 @@ void main() {
     uint t = gl_LocalInvocationID.x;
     uint wBase = n * pc.K;
     uint sBase = (n / pc.blockRows) * pc.gridCols;
+    uint xOffset = (n / pc.groupRows) * pc.K;
     for (uint m = gl_WorkGroupID.y; m < pc.M; m += gl_NumWorkGroups.y) {
-        uint xBase = m * pc.K;
+        uint xBase = m * pc.inWidth + xOffset;
         float acc = 0.0;
         for (uint k = t; k < pc.K; k += 128u) {
             uint wi = wBase + k;
-            uint code = (w_words[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu;
-            float wv = decodeE4M3(code) * s_data[sBase + k / pc.blockCols];
+            float wv;
+            if (pc.weightFp8 != 0u) {
+                uint code = (w_words[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu;
+                wv = decodeE4M3(code) * s_data[sBase + k / pc.blockCols];
+            } else {
+                wv = uintBitsToFloat(w_words[wi]);
+            }
             acc += x_data[xBase + k] * wv;
         }
         partial[t] = acc;

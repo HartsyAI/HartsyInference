@@ -6,18 +6,18 @@ using HartsyInference.Core.Configuration;
 
 namespace HartsyInference.Core.Backends;
 
-/// <summary>Inclusive device time per named model stage, accumulated per process while <see cref="EngineKnobs.Profile"/> is on.
+/// <summary>Inclusive device time per named model stage, accumulated per process while <see cref="EngineKnobs.StageProfile"/> is on.
 /// A scope syncs the backend when it opens and when it closes, so its time is the stage's GPU time with nested scopes
 /// included. Off by default; when off a scope reads the knob and does nothing else.</summary>
-/// <remarks>The per-op table of <c>diagnostics.profile</c> attributes time to backend calls; this one attributes it to the
+/// <remarks>The per-op table of <c>diagnostics.profile</c> (a separate setting, <c>diagnostics.stageProfile</c>, turns this one on) attributes time to backend calls; this one attributes it to the
 /// model's own stages, the granularity a layer-by-layer comparison against a reference implementation needs. The syncs
 /// serialize host and device, so totals under the profiler run slower than an unprofiled pass.</remarks>
 public static class StageProfiler
 {
     private static readonly ConcurrentDictionary<string, long[]> _stats = new(StringComparer.Ordinal);
 
-    /// <summary>Whether scopes record. Reads <see cref="EngineKnobs.Profile"/>.</summary>
-    public static bool Enabled => EngineKnobs.Profile.Value;
+    /// <summary>Whether scopes record. Reads <see cref="EngineKnobs.StageProfile"/>.</summary>
+    public static bool Enabled => EngineKnobs.StageProfile.Value;
 
     /// <summary>Opens a scope labelled <c>prefix.stage</c>; the label is built only when the profiler is on.</summary>
     public static Scope Begin(IBackend backend, string prefix, string stage)

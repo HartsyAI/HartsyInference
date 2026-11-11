@@ -161,6 +161,8 @@ SINGLE_KERNELS=(
     act_quant_dequant
     hadamard
     fp8_block_linear
+    sparse_topk
+    merge_window_topk
     build_window_indices
     ssm_conv_split_prefill
     ssm_l2norm_rows
@@ -253,6 +255,9 @@ compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_split" -DHAS_DEVICE_POS=1 -- "_dev"
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=0 -- ""
 compile_one "sdpa_flash_decode_combine" -DHAS_DEVICE_POS=1 -- "_dev"
+
+# sdpa_flash_wide: F32 unmasked FlashAttention with sinks or a soft-cap and head dims up to 1024 (AttentionFlashLowering).
+compile_one "sdpa_flash_wide" -- ""
 
 # Query-tiled F32 flash attention (numerics.vkTiledAttention=auto): one module per head-dim bucket (MAX_D 64, 128, 256), and a
 # bias build of each. BR query rows, TK key rows and NT threads per workgroup (NT defaults to 64); VulkanBackend.FlashTiled.cs

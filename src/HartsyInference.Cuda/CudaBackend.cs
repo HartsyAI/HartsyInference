@@ -1281,6 +1281,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         return _allowTf32 ? CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32 : CublasApi.CUBLAS_COMPUTE_32F;
     }
 
+    /// <summary><see cref="Compute32F" /> without the F16-mantissa mode of <c>numerics.gemmF16</c>, for GEMMs whose rounding errors compound
+    /// over a recurrence: TF32 when allowed, otherwise plain 32F.</summary>
+    private int Compute32FNoFast16(int gemmType) =>
+        HighPrecisionGemm || gemmType != CublasApi.CUDA_R_32F || !_allowTf32
+            ? CublasApi.CUBLAS_COMPUTE_32F
+            : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
+
     /// <summary>Compute type of the F32 SDPA GEMMs: TF32 unless <c>numerics.sdpaNoTf32</c>.</summary>
     private int SdpaF32Compute => _sdpaNoTf32 ? CublasApi.CUBLAS_COMPUTE_32F : CublasApi.CUBLAS_COMPUTE_32F_FAST_TF32;
 

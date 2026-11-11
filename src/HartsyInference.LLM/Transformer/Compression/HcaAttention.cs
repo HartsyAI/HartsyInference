@@ -50,8 +50,7 @@ public sealed class HcaAttention : IDisposable
             throw new ArgumentException("The norms must match QLoraRank and HeadDim.", nameof(weights));
         if (weights.CompressorApe is { } ape && ape.Length != settings.CompressRatio * hd)
             throw new ArgumentException("The compressor bias must hold CompressRatio x HeadDim values.", nameof(weights));
-        if (weights.WoA.Length != (long)grouped * settings.GroupDim)
-            throw new ArgumentException("wo_a must hold OGroups x OLoraRank x GroupDim values.", nameof(weights));
+        DsaIndexer.RequireShape(weights.WoA, grouped, settings.GroupDim, "wo_a");
         if (weights.Sink.DType != DType.F32 || weights.Sink.ElementCount != h)
             throw new ArgumentException("The sink must be F32 with one logit per head.", nameof(weights));
         if (weights.HeadMix is { } mix && (mix.DType != DType.F32 || mix.Shape.Rank != 2 || mix.Shape[0] != h || mix.Shape[1] != h))
@@ -105,8 +104,7 @@ public sealed class HcaAttention : IDisposable
 
         if (_w.HeadMix is { } mix) o = MixHeads(o, tokens, mix);
         PartialRotary.Rotate(_backend, _rope, rd, o, [1, tokens, h, hd], positions, inverse: true, s.RopePairing);
-        float[] z = new float[tokens * s.OGroups * s.OLoraRank];
-        GroupedOutputProjection.Apply(o, _w.WoA, tokens, s.OGroups, s.OLoraRank, s.GroupDim, z);
+        float[] z = HostOps.BlockDiagonal(_backend, o, tokens, s.OGroups, _w.WoA, _w.WoAScaleInv);
         if (_w.OGate is { } gateWeight)
             AttentionOutputGate.ApplySigmoid(z, HostOps.Project(_backend, qr, tokens, s.QLoraRank, gateWeight, s.OGroups * s.OLoraRank));
         HostOps.Project(_backend, z, tokens, s.OGroups * s.OLoraRank, _w.WoB, s.Dim).CopyTo(y);

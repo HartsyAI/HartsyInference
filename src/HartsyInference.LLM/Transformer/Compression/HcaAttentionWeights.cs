@@ -3,7 +3,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.LLM.Transformer.Compression;
 
 /// <summary>Weights of one HCA layer. Projections are <c>[out, in]</c> in any dtype <c>IBackend.Linear</c> takes; the grouped output
-/// projection, the compressor's positional bias and norm, and the sink are F32.</summary>
+/// projection is F32 or block-scaled FP8 (<c>IBackend.BlockDiagonalLinear</c>); the compressor's positional bias and norm, and the sink
+/// are F32.</summary>
 public sealed record HcaAttentionWeights
 {
     /// <summary><c>wq_a</c>: hidden state to the query latent, <c>[QLoraRank, Dim]</c>.</summary>
@@ -36,8 +37,11 @@ public sealed record HcaAttentionWeights
     /// <summary>Per-head sink logits joining the softmax denominator, F32 <c>[Heads]</c>.</summary>
     public required Tensor Sink { get; init; }
 
-    /// <summary>Grouped <c>wo_a</c>, F32 <c>[OGroups * OLoraRank * GroupDim]</c>.</summary>
-    public required float[] WoA { get; init; }
+    /// <summary>Grouped <c>wo_a</c>, <c>[OGroups * OLoraRank, GroupDim]</c>: F32, or F8E4M3 with <see cref="WoAScaleInv"/>.</summary>
+    public required Tensor WoA { get; init; }
+
+    /// <summary>The F32 <c>weight_scale_inv</c> grid of an F8E4M3 <see cref="WoA"/> in 128x128 blocks; null for an F32 one.</summary>
+    public Tensor? WoAScaleInv { get; init; }
 
     /// <summary><c>wo_b</c>: <c>OGroups * OLoraRank</c> to the hidden width.</summary>
     public required Tensor WoB { get; init; }
