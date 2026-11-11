@@ -61,7 +61,9 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
         {
             // TODO(gpu): context.CheckpointPath is assumed to be the DiT file. Confirm against a real request.
             MiniMaxH3Transformer transformer = MiniMaxH3Components.LoadTransformer(context.CheckpointPath, loaders,
-                DType.F32, context.TransformerBackends, out MiniMaxH3Config config, out Dictionary<string, Tensor> _);
+                DType.F32, context.TransformerBackends, out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
+            // LoadTransformer converts the weights but does not bind them; the video recipe binds them the same way.
+            transformer.LoadWeights(ditWeights);
             MiniMaxH3TextEncoder encoder = MiniMaxH3Components.LoadTextEncoder(textEncoder, loaders);
             Qwen2Tokenizer tokenizer = MiniMaxH3Components.LoadTokenizer(null);
             MiniMaxH3VideoVaeDecoder decoder = LoadImageVae(imageVae, loaders);
