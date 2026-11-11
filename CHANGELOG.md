@@ -46,13 +46,6 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   materialised, so the Pixal3D structure flow (which saves its RoPE table) opens; `Trellis2FlowWeights.Load` leaves that buffer unread.
   Header-checked against the real Pixal3D flows (700 F32 tensors each); nothing has been run with them yet.
 
-- **Added: SAM 3D Objects building blocks (not wired to a pipeline).** `HartsyInference.ThreeD.Models.Sam3dObjects` holds the parts the public
-  source and the released YAMLs fully specify, each with unit tests on tiny synthetic inputs and no checkpoint: `SamFlowSampler` (Euler over
-  `t = 0 → 1` on a named set of latents, `rescale_t` warp, guidance `(1 + s)·cond − s·uncond` on every latent inside a scaled-time interval,
-  the shortcut step input), `SamPoseDecoder` (6D rotation, `ScaleShiftInvariant` composition in PyTorch3D's row-vector convention),
-  `SamSparseStructure` (`prune_sparse_structure` and `downsample_sparse_structure`), `SamPointmapNormalizer` (`ObjectCentricSSI`) and
-  `SamMaskCrop` (crop and pad geometry). Gated weights are not read; the embedder, the mixture-of-transformers flow and the decoders follow.
-
 ## alpha.422
 
 - **Added: the ERNIE-5.5 host model runs on the CUDA and Vulkan backends, with its FP8 weights kept packed (synthetic checkpoint only).** `Ernie5Model` accepts a GPU backend instead of refusing it, and every op dispatches through `IBackend`. A block-scaled FP8 weight now carries its F32 `weight_scale_inv` grid on `Tensor.QuantInfo`, and every backend's `Linear` routes it to `Fp8BlockLinear` (`Fp8BlockDispatch`), so the linears and MoE experts of an FP8 checkpoint run without dequantizing to F32. The residual stream and layer glue stay host arrays, so each op still round-trips through the host. Residency is not improved: on CUDA each packed weight is uploaded on every call, so a forward is PCIe-bound, and on the CPU each FP8 linear decodes its weight into a transient F32 copy first. No real-checkpoint GPU run has been done. `Ernie5ModelGpuParityTests` checks the synthetic F32 and FP8 checkpoints' logits against the CPU on CUDA and Vulkan, and `Ernie5Fp8ReferenceTests` checks the FP8 path against its dequantized F32 twin.
