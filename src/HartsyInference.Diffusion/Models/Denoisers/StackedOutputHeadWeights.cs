@@ -37,18 +37,17 @@ public static class StackedOutputHeadWeights
         }
 
         int inDim = (int)stackedWeight.Shape[1];
+        // Accumulators are owned tensors that only ever receive backend writes. A view is read, never written: on
+        // GPU backends a write lands in the destination's cache, and disposing a view discards it.
         Tensor weight = new Tensor(new TensorShape(outRows, inDim), DType.F32);
-        Tensor bias = new Tensor(new TensorShape(outRows), DType.F32);
+        Tensor biasAcc = new Tensor(new TensorShape(outRows, 1), DType.F32);
         Tensor biasRows = stackedBias.Reshape(new TensorShape((int)stackedRows, 1));
+        Tensor? bias = null;
         bool ok = false;
         try
         {
             backend.SliceRows(weight, stackedWeight, 0);
-            using (Tensor firstBias = bias.Reshape(new TensorShape(outRows, 1)))
-            {
-                backend.SliceRows(firstBias, biasRows, 0);
-            }
-
+            backend.SliceRows(biasAcc, biasRows, 0);
             for (int n = 1; n < heads; n++)
             {
                 float scale = (float)step.Weights[n];
@@ -58,7 +57,13 @@ public static class StackedOutputHeadWeights
                 }
 
                 AddScaledWeightBlock(backend, ref weight, stackedWeight, n * outRows, scale);
-                AddScaledBiasBlock(backend, ref bias, biasRows, n * outRows, scale);
+                AddScaledBiasBlock(backend, ref biasAcc, biasRows, n * outRows, scale);
+            }
+
+            bias = new Tensor(new TensorShape(outRows), DType.F32);
+            using (Tensor flat = biasAcc.Reshape(new TensorShape(outRows)))
+            {
+                backend.Scale(bias, flat, 1f);
             }
 
             ok = true;
@@ -67,10 +72,11 @@ public static class StackedOutputHeadWeights
         finally
         {
             biasRows.Dispose();
+            biasAcc.Dispose();
             if (!ok)
             {
                 weight.Dispose();
-                bias.Dispose();
+                bias?.Dispose();
             }
         }
     }
@@ -99,22 +105,19 @@ public static class StackedOutputHeadWeights
         target = next;
     }
 
-    /// <summary>Replaces <paramref name="target"/> (rank 1) with target + scale * the block of stacked bias rows starting at
-    /// <paramref name="rowOffset"/>. The source is the stacked bias viewed as <c>[rows, 1]</c>.</summary>
+    /// <summary>Replaces the owned <c>[out, 1]</c> bias accumulator with accumulator + scale * the block of stacked bias
+    /// rows starting at <paramref name="rowOffset"/>.</summary>
     private static void AddScaledBiasBlock(IBackend backend, ref Tensor target, Tensor sourceRows, int rowOffset, float scale)
     {
         int rows = (int)target.Shape[0];
         Tensor block = new Tensor(new TensorShape(rows, 1), DType.F32);
         Tensor scaled = new Tensor(new TensorShape(rows, 1), DType.F32);
-        Tensor next = new Tensor(new TensorShape(rows), DType.F32);
+        Tensor next = new Tensor(new TensorShape(rows, 1), DType.F32);
         try
         {
             backend.SliceRows(block, sourceRows, rowOffset);
             backend.Scale(scaled, block, scale);
-            using (Tensor scaledRows = scaled.Reshape(new TensorShape(rows)))
-            {
-                backend.Add(next, target, scaledRows);
-            }
+            backend.Add(next, target, scaled);
         }
         finally
         {

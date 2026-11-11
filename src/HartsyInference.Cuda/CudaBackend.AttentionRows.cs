@@ -48,7 +48,15 @@ public sealed partial class CudaBackend
         {
             // Only the cuDNN rows read views, so the route's other rows exclude themselves and the planner refuses what none takes.
             if (call.Route is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa) || call.TermsGap() is not null)
+            {
+                // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
+                if (AttentionFlashLowering.Gap(in call) is null)
+                {
+                    AttentionFlashLowering.Run(this, in call);
+                    return;
+                }
                 throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
+            }
             RunViewCall(in call);
             return;
         }

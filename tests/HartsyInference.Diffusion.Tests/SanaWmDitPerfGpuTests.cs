@@ -88,6 +88,7 @@ public sealed class SanaWmDitPerfGpuTests
             try
             {
                 KnobStore.Set(EngineKnobs.Profile, true);
+                KnobStore.Set(EngineKnobs.StageProfile, true);
                 StageProfiler.Reset();
                 NvtxRange.ResetProfile();
                 clock.Restart();
@@ -119,6 +120,7 @@ public sealed class SanaWmDitPerfGpuTests
                 KnobStore.Clear(EngineKnobs.ProfileFine);
                 KnobStore.Clear(EngineKnobs.ProfileSync);
                 KnobStore.Clear(EngineKnobs.Profile);
+                KnobStore.Clear(EngineKnobs.StageProfile);
             }
         }
         finally
