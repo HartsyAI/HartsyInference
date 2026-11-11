@@ -16,7 +16,7 @@ public static class PrefixCacheScope
     /// use this one answer.</summary>
     internal static bool TryKey(TextDeviceSlot slot, TextRequest request, [NotNullWhen(true)] out string? key)
     {
-        if (request.PrefixCacheKey is not { Length: > 0 } prefixKey || slot.SsmPipeline is not null || slot.DeepSeekV41 is not null)
+        if (request.PrefixCacheKey is not { Length: > 0 } prefixKey || slot.SsmPipeline is not null || slot.HostReference is not null)
         {
             key = null;
             return false;
