@@ -27,7 +27,7 @@ public sealed record DsaAttentionSettings
     /// <summary>Per-head value width (<c>v_head_dim</c>).</summary>
     public required int VDim { get; init; }
 
-    /// <summary>Sliding window: the newest keys every query attends besides the indexer's picks.</summary>
+    /// <summary>Sliding window: the newest keys every query attends besides the indexer's picks; zero means none (Kimi).</summary>
     public required int Window { get; init; }
 
     /// <summary>Epsilon of the two latent RMS norms.</summary>
@@ -51,8 +51,8 @@ public sealed record DsaAttentionSettings
     /// <summary>Fails fast on a shape the layer cannot run.</summary>
     public void Validate()
     {
-        if (Dim < 1 || Heads < 1 || QLoraRank < 1 || KvLoraRank < 1 || QkNopeDim < 1 || VDim < 1 || Window < 1)
-            throw new ArgumentException("DSA widths, heads and window must be positive.");
+        if (Dim < 1 || Heads < 1 || QLoraRank < 1 || KvLoraRank < 1 || QkNopeDim < 1 || VDim < 1 || Window < 0)
+            throw new ArgumentException("DSA widths and heads must be positive; the window may be zero (none).");
         if (QkRopeDim < 2 || (QkRopeDim & 1) != 0) throw new ArgumentException("QkRopeDim must be even and positive.");
         ArgumentNullException.ThrowIfNull(Indexer);
         Indexer.Validate();
