@@ -6,6 +6,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 ## Unreleased
 
 - **Added: the ERNIE-5.5 host model runs on the CUDA and Vulkan backends (synthetic checkpoint only).** `Ernie5Model` accepts a GPU backend instead of refusing it, and every op dispatches through `IBackend`. The residual stream and layer glue stay host arrays, so each op still round-trips through the host, and the real checkpoint is not yet runnable on a GPU because its FP8 weights are dequantized to F32 on read. `Ernie5ModelGpuParityTests` checks the synthetic checkpoint's logits against the CPU on CUDA and Vulkan.
+- **Added: Hunyuan3D-2.1 shape (validation-pending).** `Hunyuan3DShapePipeline.LoadFromPath` runs a repacked `tencent/Hunyuan3D-2.1` checkpoint: a new 21-block DiT with U-skips, a time token and a mixture of experts (`Hunyuan3DPlainDit`), DINOv2-large conditioning and the existing VAE and mesher; the config reader understands the 2.1 yaml. The DiT matches the Python reference at fp32 rounding level for one forward (block outputs and final velocity correlation 1.0, relative L2 at most 6e-5; VAE occupancy 0.99999) and a 10-step mesh renders on an RTX 3060 in 34 s. There is no catalog id yet because the upstream checkpoint is a pickle; see the status doc.
 - **Added: Hunyuan3D-2 Fast, Turbo, mini and multiview builds.** `hartsy 3d -m hunyuan3d-fast|hunyuan3d-turbo|hunyuan3d-mini` (each its own catalog id and download set; `hunyuan3d-mv` downloads but has no CLI path yet because a request carries one image). The checkpoint's own `config.yaml` sets the architecture: Fast and Turbo embed the guidance scale and run one forward per step, Turbo samples sigmas from its consistency table (5 steps by default), mini has 8+16 blocks and 512 latents, and Turbo decodes with FlashVDM (turbo VAE, hierarchical grid with adaptive KV selection). Against the upstream Python the DiT velocity correlates 1.00000000 for every build (relative L2 4e-6 to 4e-5) and the FlashVDM field 0.99999979. `Hunyuan3DShapePipeline.GenerateMultiView` takes one to four views for 2mv checkpoints. mini-turbo (DINO at 1022) is refused. See the status doc.
 - **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
 - **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
@@ -53,6 +54,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
+## alpha.421
+
+- **Added: Vulkan `LeakyRelu` and `AdaInstanceNorm1d`.** Both threw "not yet implemented" on the Vulkan backend, which stopped
+  Kokoro, StyleTTS 2 and CosyVoice 2 from running there. The same stubs also blocked the CAM++ speaker encoder, the AuK VAE
+  encoder, Silero VAD and other callers on Vulkan. `LeakyRelu` is an elementwise op; `AdaInstanceNorm1d` is a new two-pass kernel
+  that matches the CPU and CUDA semantics.
+
 ## alpha.420
 
 - **Added: host APIs for MOSS-VL-Realtime**, so an app that lists and drives local models (the SwarmUI LLMAssistant extension)
@@ -84,6 +92,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   with the error until it is closed. Ctrl+C on an unbounded run keeps its files and reports the run, not "Cancelled.". Oasis and
   DIAMOND take one action per step, so their window buffers two frames rather than two seconds, and they stop after `--frames`.
 - **Added: a where-the-time-went breakdown** printed at the end of every `--view` run, and under `diagnostics.stageProfile`.
+>
 ## alpha.418
 
 - **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,
