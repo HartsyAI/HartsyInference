@@ -38,6 +38,25 @@ public sealed class TriangleBvhTests
         Assert.Equal(hit.Distance, bvh.Distance(0.3, 2.0, -0.4), 12);
     }
 
+    [Theory]
+    [InlineData(0f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f)] // A == B
+    [InlineData(0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f)] // A == C
+    [InlineData(0f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f)] // B == C
+    public void ClosestPoint_OnACollapsedEdgeTriangleIsTheClosestPointOfItsSegment(
+        float ax, float ay, float az, float bx, float by, float bz, float cx, float cy, float cz)
+    {
+        Mesh mesh = new() { Vertices = [ax, ay, az, bx, by, bz, cx, cy, cz], Indices = [0, 1, 2] };
+        TriangleBvh bvh = new(mesh);
+
+        BvhHit hit = bvh.ClosestPoint(0.5, 1.0, 0.0);
+
+        Assert.Equal(0, hit.Triangle);
+        Assert.Equal(0.5, hit.X, 9);
+        Assert.Equal(0.0, hit.Y, 9);
+        Assert.Equal(0.0, hit.Z, 9);
+        Assert.Equal(1.0, hit.Distance, 9);
+    }
+
     [Fact]
     public void ClosestPoint_OnTheSurfaceIsZeroDistance()
     {

@@ -171,15 +171,15 @@ public sealed class TriangleBvh
             {
                 u = 0; v = 1;
             }
-            else if (vc <= 0 && d1 >= 0 && d3 <= 0)
+            else if (vc <= 0 && d1 >= 0 && d3 <= 0 && d1 - d3 > 0)
             {
                 u = d1 / (d1 - d3); v = 0;
             }
-            else if (vb <= 0 && d2 >= 0 && d6 <= 0)
+            else if (vb <= 0 && d2 >= 0 && d6 <= 0 && d2 - d6 > 0)
             {
                 u = 0; v = d2 / (d2 - d6);
             }
-            else if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0)
+            else if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0 && (d4 - d3) + (d5 - d6) > 0)
             {
                 double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
                 u = 1 - w; v = w;
