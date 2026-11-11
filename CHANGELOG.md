@@ -12,6 +12,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `SamSparseStructure` (`prune_sparse_structure` and `downsample_sparse_structure`), `SamPointmapNormalizer` (`ObjectCentricSSI`) and
   `SamMaskCrop` (crop and pad geometry). Gated weights are not read; the embedder, the mixture-of-transformers flow and the decoders follow.
 
+- **Added: projection mode for the TRELLIS.2 flows (groundwork for Pixal3D, not yet runnable end to end).** `Trellis2FlowConfig` now
+  reads `image_attn_mode` and `proj_in_channels` and accepts the `ElasticSLatFlowModel` sidecar name; a projection flow's blocks add a
+  per-block `proj_linear` of per-token features to the cross-attention output and read the cross-attention tensors under
+  `cross_attn.cross_attn_block`. `Trellis2SparseStructureFlow` and `Trellis2SlatFlow` gain `Forward` overloads that take the features;
+  the existing overloads and TRELLIS.2 results are unchanged. Safetensors headers may now declare `C64`, which can be listed but not
+  materialised, so the Pixal3D structure flow (which saves its RoPE table) opens; `Trellis2FlowWeights.Load` leaves that buffer unread.
+  Header-checked against the real Pixal3D flows (700 F32 tensors each); nothing has been run with them yet.
+
 ## alpha.422
 
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads

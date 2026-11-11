@@ -4,10 +4,14 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
-/// <summary>The F32 weights of one TRELLIS.2 flow checkpoint, checked against its <see cref="Trellis2FlowConfig"/>. Checkpoint
-/// tensors are BF16; each is widened once at load, which is exact. Owns the safetensors mapping and every widened copy.</summary>
+/// <summary>The F32 weights of one TRELLIS.2 or Pixal3D flow checkpoint, checked against its <see cref="Trellis2FlowConfig"/>.
+/// TRELLIS.2 tensors are BF16 and Pixal3D's F32; each is widened once at load, which is exact. Owns the safetensors mapping and
+/// every widened copy.</summary>
 public sealed class Trellis2FlowWeights : IDisposable
 {
+    /// <summary>The dense flow's complex RoPE buffer that upstream saves with the weights; <see cref="Trellis2RopeTable"/> rebuilds it.</summary>
+    private const string RopePhasesKey = "rope_phases";
+
     private readonly List<IDisposable> _loaders;
     private readonly List<Tensor> _owned;
     private bool _disposed;
@@ -43,7 +47,7 @@ public sealed class Trellis2FlowWeights : IDisposable
         try
         {
             loader.Load(safetensorsPath);
-            return FromTensors(config, loader.GetAllTensors(), [loader], owned);
+            return FromTensors(config, ReadTensors(loader), [loader], owned);
         }
         catch
         {
@@ -74,6 +78,19 @@ public sealed class Trellis2FlowWeights : IDisposable
 
         Dictionary<string, Tensor> resolved = ShapeVaeWeights.Resolve(specs, tensors, owned, "TRELLIS.2 flow");
         return new Trellis2FlowWeights(config, resolved, loaders, owned);
+    }
+
+    private static Dictionary<string, Tensor> ReadTensors(SafeTensorsLoader loader)
+    {
+        Dictionary<string, Tensor> tensors = new(loader.Descriptors.Count);
+        foreach (KeyValuePair<string, SafeTensorDescriptor> entry in loader.Descriptors)
+        {
+            if (entry.Key == RopePhasesKey && entry.Value.DType.IsComplex)
+                continue;
+            tensors[entry.Key] = loader.GetTensor(entry.Key);
+        }
+
+        return tensors;
     }
 
     /// <summary>The tensor <paramref name="key"/>, which <see cref="Load"/> has already shape-checked.</summary>

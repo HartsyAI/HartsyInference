@@ -33,7 +33,11 @@ public sealed class Trellis2SlatFlow : IDisposable
     /// <summary>Velocity for <paramref name="x"/> (<c>[1, N, InChannels]</c> features over <paramref name="coords"/>) at model timestep
     /// <paramref name="tModel"/>, attending to <paramref name="cond"/>. <paramref name="coords"/> are <c>(batch, x, y, z)</c> rows; the
     /// array must keep its identity across the steps of one sample so the RoPE table is built once. The caller owns the result.</summary>
-    public Tensor Forward(IBackend backend, Tensor x, int[] coords, float tModel, Tensor cond)
+    public Tensor Forward(IBackend backend, Tensor x, int[] coords, float tModel, Tensor cond) => Forward(backend, x, coords, tModel, cond, null);
+
+    /// <summary>As <see cref="Forward(IBackend, Tensor, int[], float, Tensor)"/> for a projection flow, which also takes <paramref name="proj"/>
+    /// <c>[1, N, ProjInChannels]</c>, one feature row per voxel in the order of <paramref name="coords"/>.</summary>
+    public Tensor Forward(IBackend backend, Tensor x, int[] coords, float tModel, Tensor cond, Tensor? proj)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(coords);
@@ -46,6 +50,7 @@ public sealed class Trellis2SlatFlow : IDisposable
         if (cond.Shape.Rank != 3 || cond.Shape[0] != 1 || cond.Shape[2] != _config.CondChannels || cond.Shape[1] == 0)
             throw new ArgumentException($"Conditioning must be [1, L, {_config.CondChannels}]; got {cond.Shape}.", nameof(cond));
 
+        _core.CheckProjection(proj, n);
         if (_rope is null || !ReferenceEquals(_ropeCoords, coords))
         {
             _rope?.Dispose();
@@ -55,7 +60,7 @@ public sealed class Trellis2SlatFlow : IDisposable
 
         Tensor h = _core.Embed(backend, x);
         using Tensor mod = _core.SharedModulation(backend, tModel);
-        Tensor blocks = _core.RunBlocks(backend, h, mod, cond, _rope);
+        Tensor blocks = _core.RunBlocks(backend, h, mod, cond, proj, _rope);
         return _core.Project(backend, blocks);
     }
 
