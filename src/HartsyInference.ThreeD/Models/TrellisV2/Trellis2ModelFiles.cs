@@ -3,8 +3,9 @@ using HartsyInference.Core.IO;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
-/// <summary>The files of a TRELLIS.2 shape-only install: the flow set under <c>3D/trellis2</c>, plus the shape VAE decoder and the
-/// DINOv3 encoder, which may sit in their own folders beside it (<c>TRELLIS2-ShapeVAE</c>, <c>DINOv3</c> or <c>Vision/Dinov3</c>).</summary>
+/// <summary>The files of a TRELLIS.2 install: the flow set under <c>3D/trellis2</c>, plus the shape VAE decoder and the DINOv3 encoder,
+/// which may sit in their own folders beside it (<c>TRELLIS2-ShapeVAE</c>, <c>DINOv3</c> or <c>Vision/Dinov3</c>). The texture flows and
+/// decoder are optional: without them the pipeline makes shape-only meshes.</summary>
 public sealed record Trellis2ModelFiles
 {
     public const string PipelineFile = "pipeline.json";
@@ -13,6 +14,9 @@ public sealed record Trellis2ModelFiles
     public const string ShapeFlow512File = "slat_flow_img2shape_dit_1_3B_512_bf16.safetensors";
     public const string ShapeFlow1024File = "slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors";
     public const string ShapeDecoderFile = "shape_dec_next_dc_f16c32_fp16.safetensors";
+    public const string TextureFlow512File = "slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors";
+    public const string TextureFlow1024File = "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors";
+    public const string TextureDecoderFile = "tex_dec_next_dc_f16c32_fp16.safetensors";
     public const string DinoFile = "model.safetensors";
     public const string DinoFolder = "Dinov3";
     public const string MatterFolder = "BiRefNet-matting";
@@ -31,6 +35,18 @@ public sealed record Trellis2ModelFiles
     public required string ShapeDecoder { get; init; }
 
     public required string Dino { get; init; }
+
+    /// <summary>The 512 texture flow (the <c>512</c> pipeline type), or null when it is not installed.</summary>
+    public string? TextureFlow512 { get; init; }
+
+    /// <summary>The 1024 texture flow (the cascades), or null when it is not installed.</summary>
+    public string? TextureFlow1024 { get; init; }
+
+    /// <summary>The texture decoder, or null when it is not installed.</summary>
+    public string? TextureDecoder { get; init; }
+
+    /// <summary>Whether the texture decoder and at least one texture flow are installed.</summary>
+    public bool HasTexture => TextureDecoder is not null && (TextureFlow512 is not null || TextureFlow1024 is not null);
 
     /// <summary>Finds every file from the flow folder (or any file inside it), looking in the sibling folders for the shared ones.</summary>
     /// <exception cref="DirectoryNotFoundException">The folder does not exist.</exception>
@@ -56,6 +72,8 @@ public sealed record Trellis2ModelFiles
             return string.Empty;
         }
 
+        static string? FindOptional(params string[] candidates) => candidates.FirstOrDefault(File.Exists);
+
         Trellis2ModelFiles files = new()
         {
             Pipeline = Find(PipelineFile, Path.Combine(dir, PipelineFile)),
@@ -74,6 +92,12 @@ public sealed record Trellis2ModelFiles
                 Path.Combine(root, "DINOv3", DinoFile),
                 Path.Combine(parent, "DINOv3", DinoFile),
                 VisionCandidate(parent, DinoFolder, DinoFile)),
+            TextureFlow512 = FindOptional(Path.Combine(dir, TextureFlow512File)),
+            TextureFlow1024 = FindOptional(Path.Combine(dir, TextureFlow1024File)),
+            TextureDecoder = FindOptional(
+                Path.Combine(dir, TextureDecoderFile),
+                Path.Combine(parent, "TRELLIS2-ShapeVAE", TextureDecoderFile),
+                Path.Combine(root, "TRELLIS2-ShapeVAE", TextureDecoderFile)),
         };
         if (missing.Count > 0)
             throw new FileNotFoundException("TRELLIS.2 files not found: " + string.Join(" | ", missing));

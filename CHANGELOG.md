@@ -3,6 +3,16 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## Unreleased
+
+- **Added: TRELLIS.2 texture path, validation-pending.** `Trellis2ImageTo3DPipeline.GenerateTextured` samples the texture latent with
+  the texture flow (64 input channels: noise plus the normalized shape latent), decodes it with a texture decoder that follows the
+  shape decoder's subdivisions (`ShapeVaeSubdivisions`, upstream's `guide_subs`), bakes the 6-channel PBR volume through
+  `PbrMeshPostProcessor` and writes a double-sided Y-up PBR GLB (`Trellis2ImageTo3DPipeline.ToGlb`). `ShapeVaeDecoder` now also builds
+  the subdivision-free texture decoder (`ShapeVaeDecoderConfig.Texture`); `pipeline.json`'s `tex_slat_*` entries and the three
+  texture files (`Trellis2ModelFiles`) are optional, so shape-only installs are unchanged. The trilinear sampler's `floor` convention
+  was checked against the FlexGEMM CUDA kernel. Tested on tiny synthetic networks only; no texture checkpoint has run.
+
 ## alpha.422
 
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads

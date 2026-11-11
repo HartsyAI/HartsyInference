@@ -11,6 +11,9 @@ public static class ShapeVaeKeyMap
     /// <summary>Output channels of the decoder: vertex sigmoids (3), intersection logits (3) and the quad-lerp scalar (1).</summary>
     public const int DecoderOutputChannels = 7;
 
+    /// <summary>Output channels of the texture decoder: base color (3), metallic, roughness and alpha, in [-1, 1] before the pipeline's affine map.</summary>
+    public const int TextureOutputChannels = 6;
+
     /// <summary>Hidden expansion of <c>SparseConvNeXtBlock3d</c>'s MLP (upstream <c>mlp_ratio</c> default).</summary>
     public const int ConvNeXtMlpRatio = 4;
 
@@ -48,18 +51,19 @@ public static class ShapeVaeKeyMap
         return specs;
     }
 
-    /// <summary>Every tensor the decoder's checkpoint must contain for <paramref name="config"/>, including the subdivision heads.</summary>
+    /// <summary>Every tensor the decoder's checkpoint must contain for <paramref name="config"/>, including the subdivision heads when it predicts them.</summary>
     public static IReadOnlyList<TensorSpec> Decoder(ShapeVaeDecoderConfig config)
     {
         List<TensorSpec> specs = new();
         int[] channels = config.ModelChannels;
         int levels = channels.Length;
         AddLinear(specs, "from_latent", channels[0], config.LatentChannels);
-        AddLinear(specs, "output_layer", DecoderOutputChannels, channels[levels - 1]);
+        AddLinear(specs, "output_layer", config.OutputChannels, channels[levels - 1]);
         for (int i = 0; i < levels; i++)
         {
             for (int j = 0; j < config.NumBlocks[i]; j++) AddConvNeXt(specs, $"blocks.{i}.{j}", channels[i]);
-            if (i < levels - 1) AddChannelToSpatial(specs, $"blocks.{i}.{config.NumBlocks[i]}", channels[i], channels[i + 1]);
+            if (i < levels - 1)
+                AddChannelToSpatial(specs, $"blocks.{i}.{config.NumBlocks[i]}", channels[i], channels[i + 1], config.PredictSubdivision);
         }
         return specs;
     }
@@ -79,12 +83,13 @@ public static class ShapeVaeKeyMap
         AddSparseConv(specs, $"{p}.conv2", cout, cout);
     }
 
-    private static void AddChannelToSpatial(List<TensorSpec> specs, string p, int cin, int cout)
+    private static void AddChannelToSpatial(List<TensorSpec> specs, string p, int cin, int cout, bool predictSubdivision)
     {
         AddNorm(specs, $"{p}.norm1", cin);
         AddSparseConv(specs, $"{p}.conv1", cin, cout * ShapeVaeConfigRules.ChildGroup);
         AddSparseConv(specs, $"{p}.conv2", cout, cout);
-        AddLinear(specs, $"{p}.to_subdiv", ShapeVaeConfigRules.ChildGroup, cin);
+        if (predictSubdivision)
+            AddLinear(specs, $"{p}.to_subdiv", ShapeVaeConfigRules.ChildGroup, cin);
     }
 
     private static void AddNorm(List<TensorSpec> specs, string p, int c)

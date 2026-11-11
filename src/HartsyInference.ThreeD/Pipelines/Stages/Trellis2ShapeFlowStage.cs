@@ -62,18 +62,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
             backend.FreeWeights(flow.EnumerateWeights());
         }
 
-        Denormalize(latent, _mean, _std);
+        Trellis2LatentNormalization.Denormalize(latent, _mean, _std);
         return new SparseTensor(latent, coords, gridResolution);
-    }
-
-    /// <summary>In place <c>x · std + mean</c> per channel over rows of <c>mean.Length</c> channels.</summary>
-    internal static void Denormalize(Tensor latent, ReadOnlySpan<float> mean, ReadOnlySpan<float> std)
-    {
-        Span<float> values = latent.AsSpan<float>();
-        int channels = mean.Length;
-        if (std.Length != channels || values.Length % channels != 0)
-            throw new ArgumentException($"A latent of {values.Length} values does not hold whole rows of {channels} channels.", nameof(latent));
-        for (int i = 0; i < values.Length; i++)
-            values[i] = values[i] * std[i % channels] + mean[i % channels];
     }
 }

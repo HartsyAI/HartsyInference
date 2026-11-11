@@ -9,6 +9,7 @@ using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
+using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
@@ -16,16 +17,26 @@ using HartsyInference.ThreeD.Pipelines.Stages;
 namespace HartsyInference.ThreeD.Pipelines;
 
 /// <summary>
-/// TRELLIS.2 single-image to shape-only mesh (positions and computed normals, no texture). The stages follow upstream's shape path:
-/// foreground preprocessing, DINOv3 conditioning, the dense structure flow and decoder, the shape flow (once at 512, or the 512 to
-/// 1024 cascade), the shape VAE decode, and dual-grid meshing with the triangle winding unified. Each stage sits behind its
-/// interface, so a test or another model can replace any of them. The output is in glTF's Y-up frame, rotated from TRELLIS.2's
-/// Z-up as upstream's GLB export does.
+/// TRELLIS.2 single-image to mesh. <see cref="Generate"/> follows upstream's shape path: foreground preprocessing, DINOv3
+/// conditioning, the dense structure flow and decoder, the shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE
+/// decode, and dual-grid meshing with the triangle winding unified; its output is positions and computed normals in glTF's Y-up
+/// frame, rotated from TRELLIS.2's Z-up as upstream's GLB export does. <see cref="GenerateTextured"/> adds the texture flow, the
+/// texture decoder guided by the shape decode's subdivisions, and the mesh post-processing that bakes the PBR attributes into a
+/// UV-mapped material. Each stage sits behind its interface, so a test or another model can replace any of them.
 /// </summary>
 public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
 {
     /// <summary>Final dual-grid resolution when a request names none, upstream's default <c>1024_cascade</c>.</summary>
     public const int DefaultGrid = 1024;
+
+    /// <summary>Baked texture edge in texels when a request names none, upstream's <c>to_glb</c> default.</summary>
+    public const int DefaultTextureSize = 2048;
+
+    /// <summary>Face count a textured mesh is decimated to when a request names none, upstream's <c>to_glb</c> default.</summary>
+    public const int DefaultDecimationTarget = 1_000_000;
+
+    /// <summary>Largest texture edge accepted.</summary>
+    public const int MaxTextureSize = 8192;
 
     /// <summary>Largest step override accepted.</summary>
     public const int MaxSteps = 200;
@@ -48,12 +59,16 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     private readonly ISparseShapeUpsampler _upsampler;
     private readonly ISparseShapeDecoder _decoder;
     private readonly IDualGridMesher _mesher;
+    private readonly ITrellis2TextureFlowStage? _textureFlow;
+    private readonly ITrellis2TextureDecoderStage? _textureDecoder;
     private readonly int _maxTokens;
     private readonly List<IDisposable> _owned;
 
     /// <param name="matter">Foreground matter for images without alpha; null requires an alpha channel.</param>
     /// <param name="maxTokens">Cap on the high-resolution flow's tokens; upstream uses <see cref="Trellis2Cascade.DefaultMaxTokens"/>.</param>
     /// <param name="owned">Disposables released with the pipeline: the stages that hold weights, and the matter if it should go too.</param>
+    /// <param name="textureFlow">The texture sampler stage; null leaves the pipeline shape-only. Needs <paramref name="textureDecoder"/>.</param>
+    /// <param name="textureDecoder">The texture decoder stage; the shape <paramref name="decoder"/> must then be an <see cref="ISparseShapeSubdivisionDecoder"/>.</param>
     public Trellis2ImageTo3DPipeline(
         IBackend backend,
         Trellis2PipelineConfig config,
@@ -65,7 +80,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ISparseShapeDecoder decoder,
         IDualGridMesher mesher,
         IEnumerable<IDisposable> owned,
-        int maxTokens = Trellis2Cascade.DefaultMaxTokens) : base(backend)
+        int maxTokens = Trellis2Cascade.DefaultMaxTokens,
+        ITrellis2TextureFlowStage? textureFlow = null,
+        ITrellis2TextureDecoderStage? textureDecoder = null) : base(backend)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(conditioner);
@@ -76,6 +93,12 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ArgumentNullException.ThrowIfNull(mesher);
         ArgumentNullException.ThrowIfNull(owned);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxTokens, 1);
+        if ((textureFlow is null) != (textureDecoder is null))
+            throw new ArgumentException("The texture flow and the texture decoder come together; give both or neither.");
+        if (textureFlow is not null && decoder is not ISparseShapeSubdivisionDecoder)
+            throw new ArgumentException("The texture decoder follows the shape decoder's subdivisions; the shape decoder must record them.", nameof(decoder));
+        _textureFlow = textureFlow;
+        _textureDecoder = textureDecoder;
         _config = config;
         _matter = matter;
         _conditioner = conditioner;
@@ -89,8 +112,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     }
 
     /// <summary>Loads the pipeline from a TRELLIS.2 folder (for example <c>Models/3D/trellis2</c>) or any file in it. The shape VAE decoder
-    /// and DINOv3 may sit in sibling folders (see <see cref="Trellis2ModelFiles"/>). The two shape flows and the structure flow are
-    /// read from disk for each request.</summary>
+    /// and DINOv3 may sit in sibling folders (see <see cref="Trellis2ModelFiles"/>). The two shape flows, the structure flow and the
+    /// texture flows are read from disk for each request. The texture path is enabled when the texture decoder, a texture flow and the
+    /// <c>pipeline.json</c> texture entries are all present.</summary>
     /// <param name="matter">Foreground matter for images without alpha; the pipeline does not own it.</param>
     public static Trellis2ImageTo3DPipeline LoadFromPath(IBackend backend, string path, IForegroundMatter? matter = null)
     {
@@ -111,6 +135,17 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             decoderLoader.Load(files.ShapeDecoder);
             ShapeVaeDecoderStage decoder = new(new ShapeVaeDecoder(ShapeVaeConfig.NextDcF16C32.Decoder, decoderLoader.GetAllTensors()));
             owned.Add(decoder);
+            ITrellis2TextureFlowStage? textureFlow = null;
+            ITrellis2TextureDecoderStage? textureDecoder = null;
+            if (files.HasTexture && config.HasTexture)
+            {
+                CheckTextureFlowConfigs(files);
+                textureFlow = new Trellis2TextureFlowStage(files.TextureFlow512, files.TextureFlow1024, config);
+                Trellis2TextureDecoderStage decoderStage = new(files.TextureDecoder!);
+                owned.Add(decoderStage);
+                textureDecoder = decoderStage;
+            }
+
             return new Trellis2ImageTo3DPipeline(
                 backend,
                 config,
@@ -121,7 +156,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 decoder,
                 decoder,
                 new DualGridMesherStage(),
-                owned);
+                owned,
+                textureFlow: textureFlow,
+                textureDecoder: textureDecoder);
         }
         catch
         {
@@ -130,6 +167,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             throw;
         }
     }
+
+    /// <summary>Whether the texture path is installed: <see cref="GenerateTextured"/> works only then.</summary>
+    public bool HasTexture => _textureFlow is not null;
 
     /// <summary>The pipeline type for a final grid resolution; 0 means <see cref="DefaultGrid"/>.</summary>
     /// <exception cref="ArgumentException">The resolution is not 512, 1024 or 1536.</exception>
@@ -159,6 +199,10 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             throw new ArgumentException($"Seed must not be negative; got {options.Seed}.", nameof(options));
         if (options.Steps < 0 || options.Steps > MaxSteps)
             throw new ArgumentException($"Steps must be within [0, {MaxSteps}]; got {options.Steps}.", nameof(options));
+        if (options.TextureSize != 0 && (options.TextureSize < 16 || options.TextureSize > MaxTextureSize))
+            throw new ArgumentException($"TextureSize must be 0 or within [16, {MaxTextureSize}]; got {options.TextureSize}.", nameof(options));
+        if (options.DecimationTarget < 0)
+            throw new ArgumentException($"DecimationTarget must not be negative; got {options.DecimationTarget}.", nameof(options));
         image.Validate();
         if (!canMatte && !image.HasForegroundAlpha)
         {
@@ -168,10 +212,35 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         }
     }
 
-    /// <summary>Generates the shape mesh for one image.</summary>
+    /// <summary>Generates the shape mesh for one image; <see cref="Trellis2Options.Texture"/> is ignored (see <see cref="GenerateTextured"/>).</summary>
     /// <param name="onProgress">Reports one step per sampler step and per stage; it may throw to cancel, and every tensor is released.</param>
     /// <exception cref="HartsyInferenceException">The sampled structure or shape holds no geometry.</exception>
     public Mesh Generate(Trellis2InputImage image, Trellis2Options? options = null, Action<GenerationProgress>? onProgress = null)
+        => Run(image, options, onProgress, textured: false, CancellationToken.None).Mesh;
+
+    /// <summary>
+    /// Generates a textured PBR model for one image: the shape path, then the texture flow over the shape latent's voxels, the
+    /// texture decoder guided by the shape decode's subdivisions, and <see cref="PbrMeshPostProcessor"/> (clean, decimate, unwrap, bake,
+    /// inpaint). The result is in TRELLIS.2's Z-up frame; <see cref="ToGlb"/> rotates it into glTF's Y-up.
+    /// </summary>
+    /// <param name="onProgress">Reports one step per sampler step and per stage; it may throw to cancel, and every tensor is released.</param>
+    /// <param name="cancellationToken">Checked between the post-processing stages and inside decimation and baking.</param>
+    /// <exception cref="HartsyInferenceException">The texture checkpoints are not installed, or the sampled shape holds no geometry.</exception>
+    public PbrPostProcessResult GenerateTextured(
+        Trellis2InputImage image, Trellis2Options? options = null, Action<GenerationProgress>? onProgress = null,
+        CancellationToken cancellationToken = default)
+        => Run(image, options, onProgress, textured: true, cancellationToken).Textured!;
+
+    /// <summary>Serializes a <see cref="GenerateTextured"/> result: the Z-up frame is rotated to glTF's Y-up and the material is
+    /// double-sided, as upstream's <c>to_glb</c> marks the standard (non-remeshed) path.</summary>
+    public static byte[] ToGlb(PbrPostProcessResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return PbrGlbWriter.Write(result.Mesh, result.Material, new PbrGlbOptions { ConvertZUpToYUp = true, DoubleSided = true });
+    }
+
+    private Trellis2Output Run(Trellis2InputImage image, Trellis2Options? options, Action<GenerationProgress>? onProgress, bool textured,
+        CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(image);
@@ -179,12 +248,17 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ValidateRequest(options, image, _matter is { IsAvailable: true });
         Trellis2PipelineType type = ResolveType(options.Grid);
         bool cascade = type != Trellis2PipelineType.Res512;
+        Trellis2ShapeFlowKind textureKind = cascade ? Trellis2ShapeFlowKind.Res1024 : Trellis2ShapeFlowKind.Res512;
+        if (textured)
+            RequireTexture(textureKind);
         int seed = options.Seed ?? SeedGenerator.RandomSeed();
         Trellis2SamplerParams structureParams = WithSteps(_config.SparseStructureSampler, options.Steps);
         Trellis2SamplerParams shapeParams = WithSteps(_config.ShapeSampler, options.Steps);
+        Trellis2SamplerParams? textureParams = textured ? WithSteps(_config.TextureSampler!, options.Steps) : null;
 
-        // Conditioning, structure, coarse shape, [upsample, fine shape,] decode, mesh.
-        int total = 1 + structureParams.Steps + shapeParams.Steps * (cascade ? 2 : 1) + (cascade ? 1 : 0) + 2;
+        // Conditioning, structure, coarse shape, [upsample, fine shape,] decode, then the mesh, or for texture its flow, decode and bake.
+        int total = 1 + structureParams.Steps + shapeParams.Steps * (cascade ? 2 : 1) + (cascade ? 1 : 0) + 1
+            + (textured ? textureParams!.Steps + 2 : 1);
         int done = 0;
         long started = MonotonicClock.NowNs();
         void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6));
@@ -196,7 +270,8 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
 
         Trellis2PreparedImage prepared = Trellis2ImagePreprocessor.Prepare(Backend, image, _matter);
         Tensor? cond = null, negCond = null, fineCond = null, fineNeg = null;
-        SparseTensor? coarse = null, fine = null;
+        SparseTensor? coarse = null, fine = null, textureLatent = null, textureVoxels = null;
+        ShapeVaeSubdivisions? guides = textured ? new ShapeVaeSubdivisions() : null;
         try
         {
             cond = _conditioner.Encode(Backend, prepared, CoarseConditioning);
@@ -232,19 +307,43 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 resolution = (int)type;
             }
 
-            DualGridField field = _decoder.Decode(Backend, latent);
+            DualGridField field = guides is null
+                ? _decoder.Decode(Backend, latent)
+                : ((ISparseShapeSubdivisionDecoder)_decoder).Decode(Backend, latent, guides);
             done++;
             Report();
             SceneGrid grid = new() { Resolution = resolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / resolution };
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
-            FaceOrientation.Unify(mesh);
-            MeshOps.ComputeVertexNormals(mesh);
-            ToYUp(mesh);
+            if (!textured)
+            {
+                FaceOrientation.Unify(mesh);
+                MeshOps.ComputeVertexNormals(mesh);
+                ToYUp(mesh);
+                done++;
+                Report();
+                return new Trellis2Output(mesh, null);
+            }
+
+            // The post-processor unifies the winding after decimation and recomputes the normals, so the raw dual-grid mesh goes in.
+            Tensor texCond = cascade ? fineCond! : cond;
+            Tensor texNeg = cascade ? fineNeg! : negCond;
+            textureLatent = _textureFlow!.Sample(
+                Backend, textureKind, latent, texCond, texNeg, unchecked(seed + 3), textureParams!, Tick);
+            textureVoxels = _textureDecoder!.Decode(Backend, textureLatent, guides!);
             done++;
             Report();
-            return mesh;
+            SparseAttributeVolume volume = BuildVolume(textureVoxels, resolution);
+            PbrPostProcessOptions post = new()
+            {
+                TextureSize = options.TextureSize > 0 ? options.TextureSize : DefaultTextureSize,
+                DecimationTarget = options.DecimationTarget > 0 ? options.DecimationTarget : DefaultDecimationTarget,
+            };
+            PbrPostProcessResult baked = PbrMeshPostProcessor.Process(mesh, volume, PbrAttributeLayout.Default, post, cancellationToken);
+            done++;
+            Report();
+            return new Trellis2Output(baked.Mesh, baked);
         }
         finally
         {
@@ -255,8 +354,56 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             fineNeg?.Dispose();
             coarse?.Feats.Dispose();
             fine?.Feats.Dispose();
+            textureLatent?.Feats.Dispose();
+            textureVoxels?.Feats.Dispose();
+            guides?.Dispose();
         }
     }
+
+    /// <summary>The texture decoder's voxels as a <see cref="SparseAttributeVolume"/> on the mesh's grid: voxel <c>i</c> spans
+    /// <c>[i, i + 1)</c> voxel units from the corner <c>(-0.5, -0.5, -0.5)</c>, as upstream's <c>MeshWithVoxel</c> places it.</summary>
+    internal static SparseAttributeVolume BuildVolume(SparseTensor textureVoxels, int resolution)
+    {
+        if (textureVoxels.Resolution != resolution)
+        {
+            throw new HartsyInferenceException(
+                $"The texture voxels are on a {textureVoxels.Resolution} grid but the mesh is on {resolution}; the decoders disagree.");
+        }
+
+        int n = textureVoxels.Count;
+        if (textureVoxels.Channels != ShapeVaeKeyMap.TextureOutputChannels)
+            throw new HartsyInferenceException($"The texture voxels hold {textureVoxels.Channels} channels; expected {ShapeVaeKeyMap.TextureOutputChannels}.");
+        int[] coords = new int[n * 3];
+        for (int i = 0; i < n; i++)
+        {
+            coords[i * 3] = textureVoxels.Coords[i * 4 + 1];
+            coords[i * 3 + 1] = textureVoxels.Coords[i * 4 + 2];
+            coords[i * 3 + 2] = textureVoxels.Coords[i * 4 + 3];
+        }
+
+        return new SparseAttributeVolume(
+            coords, textureVoxels.Feats.AsReadOnlySpan<float>().ToArray(), textureVoxels.Channels, (resolution, resolution, resolution),
+            new Vector3(-0.5f), 1f / resolution);
+    }
+
+    private void RequireTexture(Trellis2ShapeFlowKind kind)
+    {
+        if (_textureFlow is null || _textureDecoder is null)
+        {
+            throw new HartsyInferenceException(
+                "TRELLIS.2 texture is not installed: it needs the texture decoder, a texture flow and the pipeline.json texture entries. "
+                + "Place the files named in docs/Research/TRELLIS2_ARCHITECTURE.md beside the shape checkpoints, or request a shape-only mesh.");
+        }
+
+        if (!_textureFlow.Supports(kind))
+        {
+            throw new HartsyInferenceException(
+                $"The {(kind == Trellis2ShapeFlowKind.Res512 ? "512 texture flow, which grid 512" : "1024 texture flow, which grids 1024 and 1536")} "
+                + "need, is not installed.");
+        }
+    }
+
+    private sealed record Trellis2Output(Mesh Mesh, PbrPostProcessResult? Textured);
 
     /// <inheritdoc/>
     protected override void DisposeCore()
@@ -310,6 +457,22 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
 
         if (coarse.Resolution != StructureGrid)
             throw new HartsyInferenceException($"'{files.ShapeFlow512}' is trained for a {coarse.Resolution} grid; expected {StructureGrid}.");
+    }
+
+    // The texture flows take the shape latent as extra input channels and predict a 32-channel latent on the same grids.
+    private static void CheckTextureFlowConfigs(Trellis2ModelFiles files)
+    {
+        int latent = Trellis2PipelineConfig.ShapeLatentChannels;
+        foreach ((string? path, int grid) in new[] { (files.TextureFlow512, StructureGrid), (files.TextureFlow1024, 64) })
+        {
+            if (path is null)
+                continue;
+            Trellis2FlowConfig config = ReadConfig(path);
+            if (config.Dense || config.OutChannels != latent || config.InChannels != 2 * latent)
+                throw new HartsyInferenceException($"'{path}' is not a texture flow ({2 * latent} in, {latent} out channels).");
+            if (config.Resolution != grid)
+                throw new HartsyInferenceException($"'{path}' is trained for a {config.Resolution} grid; expected {grid}.");
+        }
     }
 
     private static Trellis2FlowConfig ReadConfig(string safetensorsPath)
