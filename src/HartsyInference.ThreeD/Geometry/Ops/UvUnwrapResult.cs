@@ -4,7 +4,7 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 public sealed class UvUnwrapResult
 {
     /// <summary>Creates a result; the arrays are referenced, not copied.</summary>
-    public UvUnwrapResult(Mesh mesh, int[] vertexMap, int[] faceChart, int chartCount)
+    public UvUnwrapResult(Mesh mesh, int[] vertexMap, int[] faceChart, int chartCount, double paddingTexels = 0)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         ArgumentNullException.ThrowIfNull(vertexMap);
@@ -13,6 +13,7 @@ public sealed class UvUnwrapResult
         VertexMap = vertexMap;
         FaceChart = faceChart;
         ChartCount = chartCount;
+        PaddingTexels = paddingTexels;
     }
 
     /// <summary>Unwrapped mesh: same faces in the same order as the source, vertices duplicated along chart seams, one UV each in [0,1].</summary>
@@ -26,4 +27,8 @@ public sealed class UvUnwrapResult
 
     /// <summary>Number of charts in the atlas.</summary>
     public int ChartCount { get; }
+
+    /// <summary>The gutter around each chart that the packer kept, in texels of the requested texture size; the requested padding unless the
+    /// charts did not fit, never below the requested minimum.</summary>
+    public double PaddingTexels { get; }
 }

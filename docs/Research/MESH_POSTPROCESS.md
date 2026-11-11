@@ -17,7 +17,7 @@ Every stage is a public type of its own and usable alone.
 |---|---|---|
 | cumesh `simplify` | `MeshDecimator`: Garland-Heckbert quadric edge collapse | Link condition keeps the mesh manifold and its genus; boundary edges get penalty planes and boundary vertices never move; a collapse that turns a neighbor face past `MinNormalDot` is refused. Deterministic: ties break on edge keys. |
 | `remove_duplicate_faces`, `repair_non_manifold_edges`, `remove_small_connected_components`, `fill_holes`, `unify_face_orientations` | `MeshCleaner` | Non-manifold edges keep the consistently wound, largest pair of faces. Components are vertex-connected and judged by area ratio. Holes fill as a triangle or a centroid fan. Orientation floods across manifold edges, then flips closed components with negative signed volume (extra). |
-| cumesh `uv_unwrap` | `UvUnwrapper` | Cone-limited region growing, planar projection per chart, overlap and fold-over validation with re-splitting, MaxRects (up to 256 charts) or shelf packing at uniform texel density. |
+| cumesh `uv_unwrap` | `UvUnwrapper` | Charts grow face by face (`UvChartGrower`): a face joins when its normal is within the cone of the chart's projection normal and its projected triangle overlaps nothing in the chart, so a chart is valid by construction. Small charts dissolve into large neighbours at a wider cone. Planar projection per chart (mean normal when that stays valid), MaxRects (up to 256 charts) or shelf packing at uniform texel density, with a gutter that never drops below `MinPaddingTexels`. |
 | cuBVH `unsigned_distance` | `TriangleBvh` | Median-split BVH, exact closest point and barycentrics, thread-safe queries. |
 | nvdiffrast UV rasterize | `Rasterizer` | CPU, banded over rows, lowest triangle index wins on overlap, so threading never changes the result. |
 | flex_gemm `grid_sample_3d(trilinear)` | `SparseAttributeSampler` | See conventions. |
@@ -58,14 +58,22 @@ Every stage is a public type of its own and usable alone.
 
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the
   cone angle (default 50 degrees, `UvUnwrapOptions`), so texel density on steep parts of a chart is lower than on its flat parts.
-  Charts that fold or overlap are split at half the angle down to single triangles, so the atlas is always overlap-free, but a
-  rough or noisy surface can end in many small charts and a lower packing efficiency. Measured on TRELLIS.2 meshes (1M faces after
-  decimation): about one chart per few triangles (vertices per triangle 0.94 to 1.5), so the bake writes only 5 to 11% of a 2048x2048
-  atlas and the rest is inpainted; the textured GLB shows specks and seams. Time is not the problem: decimating 11M triangles, unwrapping,
-  baking and inpainting took 54 to 68 s.
-- No chart merging and no seam-length minimization; charts are only rotated to the best of 24 bounding-box angles before packing.
+  A chart is grown from its largest unassigned face and a face joins only if it keeps the projection valid (no overlap, normal within
+  the cone), so a noisy surface costs only the facets that really fold, not the whole chart. The first version split a chart at half the cone
+  angle whenever one facet folded, down to single triangles. Charts under `AbsorbBelowFaces` (32) are then dissolved: large charts take their
+  faces at a wider cone (80 degrees), and a last round takes small steep leftovers at 87 degrees (a sliver of texels, inpainted from the
+  neighbours). Faces that fold back on their neighbours (normals past 87 degrees) still end as single-face charts: on the bust 7,575 faces,
+  0.36% of its area.
+  Measured on three TRELLIS.2 meshes of 1M faces (welded), first version -> now: bust at 512, 111,770 -> 12,784 charts, 5.6% -> 22.1% of the
+  2048x2048 atlas covered by triangles, 2.4 s -> 4.3 s; bust at 1024, 275,550 -> 54,815 charts, 9.5% -> 19.4%, 3.0 s -> 4.6 s; mug,
+  126,147 -> 3,563 charts, 9.3% -> 39.0%, 2.0 s -> 4.1 s (CPU, unwrap only). Decimating 11M triangles, unwrapping, baking and inpainting took
+  46 to 68 s.
+- No seam-length minimization and no chart optimization beyond the grow-and-absorb above; charts are only rotated to the best of 24
+  bounding-box angles before packing.
 - Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
-  efficient).
+  efficient). The gutter around each chart is `PaddingTexels` (4); it halves while the charts do not fit at a useful scale but never below
+  `MinPaddingTexels` (1), and a chart whose longest side is under 8 texels keeps the minimum gutter, so thousands of slivers do not each cost
+  a full gutter. `UvUnwrapResult.PaddingTexels` reports what was kept. Sorts break ties on the index, so the atlas is the same on every run.
 - Decimation is quadric collapse only: no attribute-aware metric, no preservation of sharp features beyond the quadric itself, and
   non-manifold edges are locked (vertices where several manifold fans meet are not detected) rather than repaired. Cleaner hole filling does not fair or relax the patch.
 - Inpainting follows Telea's method and OpenCV's structure but is not bit-identical to OpenCV.
