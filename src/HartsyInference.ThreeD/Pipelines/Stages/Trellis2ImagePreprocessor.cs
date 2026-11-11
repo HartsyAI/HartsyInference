@@ -27,10 +27,10 @@ public static class Trellis2ImagePreprocessor
     /// <paramref name="cropScale"/> (upstream's <c>int(size * scale)</c>): 1.0 for TRELLIS.2, 1.1 for Pixal3D.</summary>
     public static Trellis2PreparedImage Prepare(IBackend backend, Trellis2InputImage image, IForegroundMatter? matter, double cropScale)
     {
-        if (!(cropScale >= 1.0))
-            throw new ArgumentOutOfRangeException(nameof(cropScale), cropScale, "The crop scale must be at least 1.");
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(image);
+        if (!(cropScale >= 1.0))
+            throw new ArgumentOutOfRangeException(nameof(cropScale), cropScale, "The crop scale must be at least 1.");
         image.Validate();
         bool hasAlpha = image.HasForegroundAlpha;
         if (!hasAlpha && matter is not { IsAvailable: true })

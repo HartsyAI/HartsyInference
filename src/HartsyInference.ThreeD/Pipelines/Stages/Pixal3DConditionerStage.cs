@@ -38,6 +38,8 @@ public sealed class Pixal3DConditionerStage : IDisposable
     internal static Pixal3DCondition Split(
         Tensor tokens, int imageSize, int gridResolution, ReadOnlySpan<int> coords, Pixal3DView view)
     {
+        if (imageSize <= 0 || imageSize % PatchSize != 0)
+            throw new ArgumentOutOfRangeException(nameof(imageSize), imageSize, $"The image size must be a positive multiple of {PatchSize}.");
         int patches = imageSize / PatchSize, patchCount = patches * patches;
         if (tokens.Shape.Rank != 3 || tokens.Shape[0] != 1 || tokens.Shape[1] <= patchCount)
             throw new ArgumentException($"{tokens.Shape} tokens leave no global tokens beside a {patches}x{patches} patch map.", nameof(tokens));

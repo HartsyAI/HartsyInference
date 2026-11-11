@@ -117,6 +117,7 @@ public sealed class Pixal3DProjectionTests
 
     [Theory]
     [InlineData(0.0, 1.0)]
+    [InlineData(1.5707963267948966, 1.0)]
     [InlineData(3.2, 1.0)]
     [InlineData(0.8, 0.0)]
     public void InvalidViewsAreRejected(double fov, double scale)
