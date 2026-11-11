@@ -7,6 +7,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 - **Added: Hunyuan3D Paint (validation-pending, only the 2.0 UNet has run on real weights).** `hartsy 3d <mesh.glb> --image <ref.png> -m hunyuan3d-paint` (2.0, albedo) and `-m hunyuan3d-paint21` (2.1, albedo + metallic-roughness) texture a mesh: orthographic normal and position maps, a six-view multiview diffusion over a Stable Diffusion 2.1 zero-SNR UNet with reference, multiview, material, DINO and 3D-rotary attention, then back-projection onto the UV atlas, inpainting and a PBR GLB. New in `HartsyInference.ThreeD`: the screen-space rasterizer and view selection (`Paint/`), the UNet, UniPC and Euler-ancestral samplers and pipeline (`Models/Hunyuan3D/Paint/`); the catalog gains `hunyuan3d-paint` and `hunyuan3d-paint21`. The 2.5D UNet is checked against the stock SD UNet and a host transcription of the upstream block on tiny weights. `docs/Research/HUNYUAN3D_PAINT_ARCHITECTURE.md` records the pinned Paint 2.0 and 2.1 sources, file hashes, the reuse map and the Tencent Hunyuan 3D 2.1 licence terms (territory excludes the EU, UK and South Korea, 1M MAU, no training other models).
 
+- **Added: projection mode for the TRELLIS.2 flows (groundwork for Pixal3D, not yet runnable end to end).** `Trellis2FlowConfig` now
+  reads `image_attn_mode` and `proj_in_channels` and accepts the `ElasticSLatFlowModel` sidecar name; a projection flow's blocks add a
+  per-block `proj_linear` of per-token features to the cross-attention output and read the cross-attention tensors under
+  `cross_attn.cross_attn_block`. `Trellis2SparseStructureFlow` and `Trellis2SlatFlow` gain `Forward` overloads that take the features;
+  the existing overloads and TRELLIS.2 results are unchanged. Safetensors headers may now declare `C64`, which can be listed but not
+  materialised, so the Pixal3D structure flow (which saves its RoPE table) opens; `Trellis2FlowWeights.Load` leaves that buffer unread.
+  Header-checked against the real Pixal3D flows (700 F32 tensors each); nothing has been run with them yet.
+
 ## alpha.422
 
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads
