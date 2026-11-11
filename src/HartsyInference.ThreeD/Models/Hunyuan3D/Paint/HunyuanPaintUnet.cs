@@ -82,7 +82,8 @@ public sealed class HunyuanPaintUnet
         if (_convInW.Shape[1] != expectedIn)
             throw new InvalidDataException($"conv_in takes {_convInW.Shape[1]} channels, the configuration expects {expectedIn}.");
         _time.LoadWeights(w, $"{p}time_embedding");
-        if (_config.CameraClasses > 0)
+        // Only the generating stream has the embedding: upstream attaches it after copying the UNet for the reference stream, which ignores class labels.
+        if (_generating && _config.CameraClasses > 0)
             _classEmbedding = w[$"{p}class_embedding.weight"];
         for (int i = 0; i < _levels; i++)
         {
