@@ -15,7 +15,26 @@ public sealed class PackedMoeTests
     private static readonly float[] E2M1 = [0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f];
 
     [Fact]
-    public void PackedExperts_MatchTheF32Dequantization()
+    public void PackedExperts_MatchTheF32Dequantization() => Compare(new CpuBackend());
+
+    // The same MoE on a device backend: the packed projections run through IBackend.Mxfp4LinearF32 there.
+    [Fact]
+    public void Cuda_PackedExperts_MatchTheF32Dequantization()
+    {
+        if (!HartsyInference.Cuda.CudaContext.IsAvailable()) return;
+        using HartsyInference.Cuda.CudaBackend backend = new(0, PtxDir());
+        Compare(backend);
+    }
+
+    [Fact]
+    public void Vulkan_PackedExperts_MatchTheF32Dequantization()
+    {
+        if (!HartsyInference.Vulkan.VulkanContext.IsAvailable()) return;
+        using HartsyInference.Vulkan.VulkanBackend backend = new();
+        Compare(backend);
+    }
+
+    private static void Compare(IBackend device)
     {
         KimiK31Config c = new()
         {
@@ -52,10 +71,9 @@ public sealed class PackedMoeTests
         const int tokens = 3;
         float[] x = new float[tokens * c.Hidden];
         for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
-        IBackend backend = new CpuBackend();
         using Tensor input = Floats(x, 1, tokens, c.Hidden);
-        using Tensor expected = reference.Forward(backend, input, tokens);
-        using Tensor actual = packedMoe.Forward(backend, input, tokens);
+        using Tensor expected = reference.Forward(new CpuBackend(), input, tokens);
+        using Tensor actual = packedMoe.Forward(device, input, tokens);
 
         float[] want = expected.AsReadOnlySpan<float>().ToArray();
         float[] got = actual.AsReadOnlySpan<float>().ToArray();
@@ -63,6 +81,16 @@ public sealed class PackedMoeTests
     }
 
     // Random E2M1 nibbles and E8M0 scales for a [rows, cols] projection; returns the packed view and its exact F32 values.
+    private static string PtxDir()
+    {
+        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            string candidate = Path.Combine(dir.FullName, "src", "HartsyInference.Cuda", "Ptx");
+            if (Directory.Exists(candidate)) return candidate;
+        }
+        return Path.Combine(AppContext.BaseDirectory, "Ptx");
+    }
+
     private static PackedMxfp4Projection Pack(Random rng, int rows, int cols, out float[] values)
     {
         byte[] nibbles = new byte[rows * cols / 2];
