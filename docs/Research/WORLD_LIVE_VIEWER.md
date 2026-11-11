@@ -41,7 +41,9 @@ Only keys the scheme declares are tracked. The window reports key names as they 
 Frames are played at the plan's frame rate. Playback starts after one second of frames (or the whole buffer if smaller), and a
 rebuffer after an underrun resumes at a quarter second. The buffer holds two seconds of video. When it is full the stream waits,
 so generation is held back rather than letting control lag grow. The window shows the buffered seconds, the frames shown and
-generated, and the delivered frame rate against the play rate. Once the buffer is full the stream waits on the viewer, so the
+generated, and the delivered frame rate against the play rate. The brief asked for generation time per chunk; the first live run
+showed that a wait measured on the consumer side reads zero whenever the buffer absorbs the generation, so the window reports the
+delivered rate instead. Seconds per chunk can be read from the rate and the chunk size. Once the buffer is full the stream waits on the viewer, so the
 delivered rate reads at the play rate; it drops below that only when generation is the bottleneck, and then the buffer drains
 and the window says it is waiting for generation.
 
@@ -105,6 +107,10 @@ both `sana-wm-streaming --unbounded --view` with the seed still framed from behi
 - Run 2, the same command: keys `w`, `a` and `l` again, with screenshots taken while each key was held. The HUD read `Held: W`
   and `Held: L` at those moments. The stream delivered about 10 frames per second against 16 to play, so the buffer ran down to
   a tenth of a second and the window showed "Waiting for generation". The run wrote 223 PNGs and a 13.9 s MP4, and Esc stopped it.
+
+![Live window during run 2: w held, HUD reads Held: W](images/world-viewer-w-held.jpg)
+
+![Live window during run 2: l held, playback waiting for generation](images/world-viewer-starved.jpg)
 
 Those figures say the plumbing works: the key state reaches the window, the actions reach the session, and the playback and
 spool agree. They do not say the 4090 keeps up with real time on this seed: it delivered about 10 frames per second, which is

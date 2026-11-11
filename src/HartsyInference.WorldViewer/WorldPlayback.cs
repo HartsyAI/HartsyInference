@@ -6,7 +6,8 @@ namespace HartsyInference.WorldViewer;
 /// <summary>A bounded buffer between a frame stream and a presenter. The stream writes frames as the session delivers them and waits
 /// when the buffer is full, so a slow viewer holds generation back rather than letting control lag grow without limit. The presenter
 /// (on its UI thread) asks <see cref="Step"/> on every clock tick and shows the frame it returns.</summary>
-/// <remarks>Writes come from one stream thread and <see cref="Step"/> and <see cref="Status"/> from one presenter thread.</remarks>
+/// <remarks>Writes come from one stream thread and <see cref="Step"/> and <see cref="Status"/> from one presenter thread. Frames are
+/// not copied: each frame's pixels are a fresh allocation (<c>SanaWmStream.ToRgb24</c>), so the buffer owns them outright.</remarks>
 public sealed class WorldPlayback
 {
     private readonly object _gate = new();
