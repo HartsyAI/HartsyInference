@@ -39,6 +39,7 @@ passed. Detail in the retired 3D build plan (git history).
 | Model | Notes |
 |---|---|
 | **TRELLIS mesh/RF decoders** (flexicubes mesh, radiance field) | Not ported — TRELLIS is GS-splat-only today (see above). |
+| **Hunyuan3D-2.1 shape** | Source spike only (2026-11-10): a new U-ViT DiT with MoE, not the 2.0 architecture. No weights downloaded, no code. ([details](#hunyuan3d-21-shape)) |
 | **Hunyuan3D Paint** (texture/PBR) | Out of scope for the shape pipelines (multiview diffusion + UV bake). |
 
 ## Foundation
@@ -122,6 +123,10 @@ FlashVDM against `FlashVDMVolumeDecoding` on the same latents (127³ grid): 194,
 Renders from four angles: Fast, mini and Turbo give the demo mascot with its sign (Turbo's lettering is softer, as a 5-step distilled model would be); 2mv gives a coherent character from three views.
 
 **Not verified.** One subject and one seed per build, except base. Default steps and grid not run for the variants (Fast 10, Turbo 5 and the 50-step standard builds are upstream gradio and library defaults). 2mv was run with three of four views, no real right view, and only at 8 steps. mini-Fast, mini-Turbo, 2mv-Fast and 2mv-Turbo were not downloaded: mini-Turbo is refused (DINO at 1022 px needs position-embedding interpolation), the others should load from their configs but are untested. FlashVDM was checked only with the turbo VAE and Turbo; its `merge` top-k mode is not implemented, nor is the `dmc` extractor. Turbo's mesh has 3 boundary edges where FlashVDM left a band edge unevaluated; upstream's handling of those cells was not compared. No GPU parity runs beyond the conditioner (the numeric checks are CPU fp32), and no cuDNN. Raw RGBA preprocessing is still not ported (3a), and 2mv has no engine path because `MeshRequest` carries one image: a `Views` list would be a public contract change to agree first.
+
+### Hunyuan3D-2.1 shape
+
+Spike from source and configs, no weights and no code: [HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md](../Research/HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md). The DiT (`HunYuanDiTPlain`) is 21 blocks at width 2048 with U-skips, a time token instead of AdaLN, cross-attention to DINOv2-large and a mixture of experts (8 experts, top 2, one shared expert) in the last 6 blocks, about 3.0 B parameters over 4096 latents. It needs a new C# model; the DINOv2-large conditioner, the VAE decoder, the sampler and the mesher are shared. The LLM MoE feed-forward does not fit (its experts are gated SwiGLU without biases, these are GELU MLPs with biases); only the routing contract is reusable. Both checkpoints are pickle `.ckpt` files (DiT 7.37 GB, VAE 0.66 GB), so they need the safe parser and one repack. Licence: Tencent Hunyuan 3D 2.1 Community License, the 2.0 terms (EU, UK and South Korea excluded, 1M MAU, no training other models). Next step needs an approved download to read the key layout.
 
 ### HairDeck
 
