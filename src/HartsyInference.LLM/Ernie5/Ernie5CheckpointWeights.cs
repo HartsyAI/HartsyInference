@@ -10,7 +10,7 @@ namespace HartsyInference.LLM.Ernie5;
 /// packed; a caller that needs F32 decodes them with <see cref="Ernie5Layer.ReadF32"/>.</summary>
 /// <remarks>The grouped output projection is stored as <c>self_attn.linear_o_group_proj</c> with <c>linear_o_group_proj_scale_inv</c> (no
 /// <c>.weight</c>); the checkpoint reader pairs any F8 tensor with its <c>_scale_inv</c> key, so it reads the same way.
-/// A scale view is borrowed by every weight that names it, so it is cached per weight name and disposed with this source.</remarks>
+/// Each weight keeps its own scale view, cached by weight name so repeated reads share one view; all are disposed with this source.</remarks>
 public sealed class Ernie5CheckpointWeights : IErnie5WeightSource, IDisposable
 {
     private HfQuantCheckpoint? _checkpoint;

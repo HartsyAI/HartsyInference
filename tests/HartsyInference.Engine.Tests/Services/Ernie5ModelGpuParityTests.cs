@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.Vulkan;
@@ -50,6 +51,42 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     [ErnieVulkanFact]
     public void Vulkan_SyntheticErnieFp8_LogitsMatchCpu() =>
         ParityOn(() => new VulkanBackend(), "Vulkan", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.
+    [ErnieCudaFact]
+    public void Cuda_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA");
+
+    [ErnieVulkanFact]
+    public void Vulkan_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new VulkanBackend(), "Vulkan");
+
+    private static void LinearParityOn(Func<IBackend> open, string device)
+    {
+        const int n = 256, k = 384;
+        Random rng = new(11);
+        using Tensor raw = new(new TensorShape(n, k), DType.F8E4M3);
+        Span<byte> bytes = raw.AsSpan<byte>();
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            byte v = (byte)rng.Next(256);
+            if ((v & 0x7F) == 0x7F) v &= 0xFE;
+            bytes[i] = v;
+        }
+        using Tensor scale = new(new TensorShape(2, 3), DType.F32);
+        Span<float> s = scale.AsSpan<float>();
+        for (int i = 0; i < s.Length; i++) s[i] = (float)(0.25 + rng.NextDouble());
+        raw.QuantInfo = new QuantWeightInfo { Format = "fp8_block_scale_inv", Fp8BlockScaleInv = scale, Fp8BlockSize = 128 };
+        using Tensor input = new(new TensorShape(1, k), DType.F32);
+        Span<float> x = input.AsSpan<float>();
+        for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
+
+        using CpuBackend cpu = new();
+        using Tensor want = new(new TensorShape(1, n), DType.F32);
+        cpu.Linear(want, input, raw, null);
+        using IBackend gpu = open();
+        using Tensor got = new(new TensorShape(1, n), DType.F32);
+        gpu.Linear(got, input, raw, null);
+        AssertClose(want.AsReadOnlySpan<float>().ToArray(), got.AsReadOnlySpan<float>().ToArray(), device);
+    }
 
     // Compares the device's logits with the CPU's for the same checkpoint, weights and tokens.
     private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32)

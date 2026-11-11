@@ -80,12 +80,14 @@ public sealed record QuantWeightInfo
         Tensor? fp8Scale = Fp8BlockScaleInv;
         if (fp8Scale is not null)
         {
+            // A window may end inside the last block row of the weight, which the grid's own row count identifies.
             int block = Fp8BlockSize;
-            if (rowOffset % block != 0 || rowCount % block != 0)
+            long firstBlock = rowOffset / block, blocks = (rowCount + block - 1) / block;
+            if (rowOffset % block != 0 || (rowCount % block != 0 && firstBlock + blocks != fp8Scale.Shape[0]))
                 throw new NotSupportedException(
                     $"'{weightKey}' is an FP8 block-scaled weight with {block}-row blocks, and rows [{rowOffset}..{rowOffset + rowCount}) "
-                    + "do not start and end on a block edge. Dequantize it before splitting or windowing the weight.");
-            fp8Scale = fp8Scale.SliceRows(rowOffset / block, rowCount / block);
+                    + "do not start on a block edge or end inside a block that is not the weight's last. Dequantize it before splitting or windowing the weight.");
+            fp8Scale = fp8Scale.SliceRows(firstBlock, blocks);
         }
         return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) && ReferenceEquals(recipe, Recipe) && ReferenceEquals(fp8Scale, Fp8BlockScaleInv)
             ? this : this with { RowScale = rowScale, BlockScale = blockScale, Recipe = recipe, Fp8BlockScaleInv = fp8Scale };
