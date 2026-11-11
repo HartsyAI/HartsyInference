@@ -136,6 +136,14 @@ public sealed class Ernie5Model : IDisposable
     /// row only, or every row when <paramref name="allRows"/>.</summary>
     public float[] Forward(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, bool allRows = false)
     {
+        int rows = allRows ? tokenIds.Length : 1;
+        return Logits(ForwardHidden(tokenIds, state, allRows), rows);
+    }
+
+    /// <summary>Appends <paramref name="tokenIds"/> to <paramref name="state"/> and returns the final normed hidden rows, <c>[rows, hidden]</c>: the
+    /// last row only, or every row when <paramref name="allRows"/>.</summary>
+    public float[] ForwardHidden(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, bool allRows = false)
+    {
         ArgumentNullException.ThrowIfNull(state);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int tokens = tokenIds.Length, d = Config.HiddenSize, hc = Config.HcMult, vocab = Config.VocabSize, startPos = state.Length;
@@ -174,7 +182,17 @@ public sealed class Ernie5Model : IDisposable
         int rows = allRows ? tokens : 1;
         float[] hidden = new float[tokens * d];
         _head.Head(stream, tokens, _headFn, _headScale, _headBase, _finalNorm, hidden);
-        using Tensor hiddenT = HostTensor(hidden.AsSpan((tokens - rows) * d, rows * d), rows, d);
+        return hidden.AsSpan((tokens - rows) * d, rows * d).ToArray();
+    }
+
+    /// <summary>The LM head and multimax over <paramref name="rows"/> hidden rows from <see cref="ForwardHidden"/>, <c>[rows, vocab]</c>.</summary>
+    public float[] Logits(ReadOnlySpan<float> hidden, int rows)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        int d = Config.HiddenSize, vocab = Config.VocabSize;
+        if (rows < 1 || hidden.Length != rows * d)
+            throw new ArgumentException($"hidden must hold {rows} rows of {d} values.", nameof(hidden));
+        using Tensor hiddenT = HostTensor(hidden, rows, d);
         using Tensor logitsT = new(new TensorShape(rows, vocab), DType.F32);
         _backend.Linear(logitsT, hiddenT, _lmHead!, null);
         float[] logits = logitsT.AsReadOnlySpan<float>().ToArray();
