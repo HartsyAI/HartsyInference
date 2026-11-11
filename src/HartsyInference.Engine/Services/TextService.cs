@@ -17,6 +17,7 @@ using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
+using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.OutputParsing;
@@ -411,7 +412,7 @@ public sealed partial class TextService : ITextService, IDisposable
                 continue;
             try
             {
-                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.Looped?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer
+                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.Looped?.Tokenizer ?? slot.HostReference?.Tokenizer
                     ?? slot.MossVl?.Model.Tokenizer;
                 if (tokenizer is not null)
                     return tokenizer.EncodeOrdinary(text).Length;
@@ -678,11 +679,11 @@ public sealed partial class TextService : ITextService, IDisposable
     {
         ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
             : slot.Looped is not null ? slot.Looped.Tokenizer
-            : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Tokenizer
+            : slot.HostReference is not null ? slot.HostReference.Tokenizer
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Tokenizer : slot.Model!.Tokenizer;
         IChatTemplate template = slot.SsmModel is not null ? slot.SsmModel.Template
             : slot.Looped is not null ? slot.Looped.Template
-            : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Template
+            : slot.HostReference is not null ? slot.HostReference.Template
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         bool injectToolPrompt = ShouldInjectToolPrompt(request, rawCompletion, template);
@@ -897,7 +898,7 @@ public sealed partial class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 checkpoint onto the host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
+    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 or ERNIE-5.5 checkpoint onto its host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
@@ -915,13 +916,17 @@ public sealed partial class TextService : ITextService, IDisposable
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
-        ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
+        string modelName = ernie ? "ERNIE-5.5" : "DeepSeek-V4.1";
+        ResidencyPlan? plan = ernie ? null : EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
-        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "DeepSeek-V4.1");
+        else if (ernie)
+            Logs.Warning("[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
+        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, modelName);
         try
         {
-            slot.DeepSeekV41 = HfTextDirectoryLoader.Load(checkpoint, backend);
+            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
         }
         catch
         {
@@ -929,16 +934,16 @@ public sealed partial class TextService : ITextService, IDisposable
             throw;
         }
         slot.Backend = backend;
-        slot.Pipeline = new TextGenerationPipeline(slot.DeepSeekV41.Generation, slot.DeepSeekV41.Tokenizer, slot.DeepSeekV41.Template);
+        slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
         // Host-backed and CPU-only: its rounds run ungated, and its sequence states own their storage (no KV pool).
-        slot.Scheduler = CreateScheduler(slot, slot.DeepSeekV41.Generation, slot.DeepSeekV41.Tokenizer, slot.DeepSeekV41.Template, pool: null, gateOrdinals: []);
+        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null, gateOrdinals: []);
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         slot.ResidencyPlan = plan;
         if (plan?.Verdict == MemoryFitVerdict.Streamed)
-            Logs.Info($"[TextService] DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
-        Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+            Logs.Info($"[TextService] {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
+        Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
     /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
@@ -1197,12 +1202,12 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Whether a load of <paramref name="path"/> keeps the model <paramref name="slot"/> holds. Every load path reloads by this rule, and the lease wait
-    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
+    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a host reference model
     /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
     private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
         string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (slot.MossVl is not null || (hfDirectory
-            ? slot.DeepSeekV41 is not null || slot.SsmModel is not null || slot.Model is not null
-            : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null));
+            ? slot.HostReference is not null || slot.SsmModel is not null || slot.Model is not null
+            : slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.HostReference is not null));
 
     /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing
     /// path frees nothing: the load refuses it first.</summary>
@@ -1747,7 +1752,7 @@ public sealed partial class TextService : ITextService, IDisposable
             catch (Exception ex) { Logs.Debug($"[TextService] Disposing the expert offload failed: {ex.Message}"); }
             slot.ExpertOffload = null;
         }
-        if (slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null
+        if (slot.Model is not null || slot.SsmModel is not null || slot.Looped is not null || slot.TpTransformer is not null || slot.HostReference is not null
             || slot.MossVl is not null)
         {
             if (slot.Backend is not null)
@@ -1776,8 +1781,8 @@ public sealed partial class TextService : ITextService, IDisposable
         slot.Model = null;
         slot.Looped?.Dispose();
         slot.Looped = null;
-        slot.DeepSeekV41?.Dispose();
-        slot.DeepSeekV41 = null;
+        slot.HostReference?.Dispose();
+        slot.HostReference = null;
         slot.MossVl?.Dispose();
         slot.MossVl = null;
         slot.ResidencyPlan = null;
