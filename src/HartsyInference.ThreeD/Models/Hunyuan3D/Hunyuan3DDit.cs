@@ -28,6 +28,8 @@ public sealed unsafe class Hunyuan3DDit
     private Tensor? _condInW, _condInB;        // CondDim → Width
     private Tensor? _timeIn1W, _timeIn1B;      // 256 → Width  (MLPEmbedder in_layer)
     private Tensor? _timeIn2W, _timeIn2B;      // Width → Width (MLPEmbedder out_layer)
+    private Tensor? _guidIn1W, _guidIn1B;      // guidance_in.in_layer (guidance-distilled checkpoints only)
+    private Tensor? _guidIn2W, _guidIn2B;      // guidance_in.out_layer
     private Tensor? _finalNormW;               // final_layer.adaLN_modulation.1 (Width → 2*Width)
     private Tensor? _finalNormB;
     private Tensor? _finalLinW, _finalLinB;    // final_layer.linear (Width → C)
@@ -50,6 +52,11 @@ public sealed unsafe class Hunyuan3DDit
         _condInW = F32(w[$"{p}cond_in.weight"]); _condInB = F32(w[$"{p}cond_in.bias"]);
         _timeIn1W = F32(w[$"{p}time_in.in_layer.weight"]); _timeIn1B = F32(w[$"{p}time_in.in_layer.bias"]);
         _timeIn2W = F32(w[$"{p}time_in.out_layer.weight"]); _timeIn2B = F32(w[$"{p}time_in.out_layer.bias"]);
+        if (_cfg.GuidanceEmbed)
+        {
+            _guidIn1W = F32(w[$"{p}guidance_in.in_layer.weight"]); _guidIn1B = F32(w[$"{p}guidance_in.in_layer.bias"]);
+            _guidIn2W = F32(w[$"{p}guidance_in.out_layer.weight"]); _guidIn2B = F32(w[$"{p}guidance_in.out_layer.bias"]);
+        }
         for (int i = 0; i < _double.Length; i++) _double[i].LoadWeights(w, $"{p}double_blocks.{i}");
         for (int i = 0; i < _single.Length; i++) _single[i].LoadWeights(w, $"{p}single_blocks.{i}");
         _finalNormW = F32(w[$"{p}final_layer.adaLN_modulation.1.weight"]); _finalNormB = F32(w[$"{p}final_layer.adaLN_modulation.1.bias"]);
@@ -59,15 +66,22 @@ public sealed unsafe class Hunyuan3DDit
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] head = [_latentInW, _latentInB, _condInW, _condInB, _timeIn1W, _timeIn1B, _timeIn2W, _timeIn2B,
-            _finalNormW, _finalNormB, _finalLinW, _finalLinB];
+            _finalNormW, _finalNormB, _finalLinW, _finalLinB, _guidIn1W, _guidIn1B, _guidIn2W, _guidIn2B];
         foreach (Tensor? t in head) if (t is not null) yield return t;
         foreach (Hunyuan3DDoubleBlock b in _double) foreach (Tensor t in b.EnumerateWeights()) yield return t;
         foreach (Hunyuan3DSingleBlock b in _single) foreach (Tensor t in b.EnumerateWeights()) yield return t;
     }
 
     /// <summary>Predicts the flow velocity for <paramref name="latent"/> <c>[B,N,C]</c> at <paramref name="timestep"/> ∈ [0,1], conditioned on DINOv2-giant tokens <paramref name="cond"/>.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, Tensor cond, float timestep)
+    /// <param name="guidance">The guidance scale a guidance-distilled checkpoint embeds into the timestep vector; required for those checkpoints and refused for the others.</param>
+    public Tensor Forward(IBackend backend, Tensor latent, Tensor cond, float timestep, float? guidance = null)
     {
+        if (_cfg.GuidanceEmbed != guidance.HasValue)
+        {
+            throw new ArgumentException(_cfg.GuidanceEmbed
+                ? "This checkpoint embeds the guidance scale; pass a guidance value."
+                : "This checkpoint has no guidance embedding; run classifier-free guidance instead.", nameof(guidance));
+        }
         int b = (int)latent.Shape[0], n = (int)latent.Shape[1], width = _cfg.Width;
 
         // latent_in: C → Width.
@@ -85,6 +99,17 @@ public sealed unsafe class Hunyuan3DDit
         Tensor t1 = new(new TensorShape(b, width), DType.F32); backend.Linear(t1, tSin, _timeIn1W!, _timeIn1B!); tSin.Dispose();
         Tensor t1a = new(t1.Shape, DType.F32); backend.Silu(t1a, t1); t1.Dispose();
         Tensor vec = new(new TensorShape(b, width), DType.F32); backend.Linear(vec, t1a, _timeIn2W!, _timeIn2B!); t1a.Dispose();
+        if (guidance.HasValue)
+        {
+            // guidance_in(timestep_embedding(guidance)) is added to the timestep vector with the same sinusoid as the time.
+            Tensor gSin = new(new TensorShape(b, _cfg.TimestepEmbedDim), DType.F32);
+            FluxTimestepEmbedding(gSin, guidance.Value, b, _cfg.TimestepEmbedDim, _cfg.TimeFactor);
+            Tensor g1 = new(new TensorShape(b, width), DType.F32); backend.Linear(g1, gSin, _guidIn1W!, _guidIn1B!); gSin.Dispose();
+            Tensor g1a = new(g1.Shape, DType.F32); backend.Silu(g1a, g1); g1.Dispose();
+            Tensor g2 = new(new TensorShape(b, width), DType.F32); backend.Linear(g2, g1a, _guidIn2W!, _guidIn2B!); g1a.Dispose();
+            Tensor summed = new(vec.Shape, DType.F32); backend.Add(summed, vec, g2); vec.Dispose(); g2.Dispose();
+            vec = summed;
+        }
 
         // ── Step-graph path: capture the 48-block loop + final layer once, replay per step. img/txt/vec (the only
         //    per-step-varying inputs, incl. the timestep) are refreshed into fixed buffers via CopyInto BEFORE each

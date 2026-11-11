@@ -368,9 +368,10 @@ public sealed class MeshService : IMeshService, IDisposable
             try
             {
                 LoadedMesh loaded;
-                if (id == "hunyuan3d")
+                if (MeshModelIds.Hunyuan3D.Contains(id))
                 {
-                    Hunyuan3DShapePipeline hunyuan = Hunyuan3DShapePipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
+                    Hunyuan3DShapePipeline hunyuan = Hunyuan3DShapePipeline.LoadFromPath(
+                        _engine.Backend, spec.LocalPath, flashVdmVaeDir: FlashVdmVaeDirectory(spec));
                     loaded = new LoadedMesh(hunyuan, hunyuan.Generate);
                 }
                 else if (id == "trellis")
@@ -397,6 +398,18 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw;
             }
         }
+    }
+
+    /// <summary>The turbo VAE folder of a build whose catalog assets carry one (Turbo decodes with FlashVDM), else null.</summary>
+    private static string? FlashVdmVaeDirectory(ModelSpec spec)
+    {
+        ModelAsset? vae = spec.Catalog?.Assets?.FirstOrDefault(a => a.Role == Registry.ModelCatalog.Hunyuan3DFlashVdmVaeRole);
+        if (vae is null)
+            return null;
+        string? located = ModelDownloader.FindExisting(vae, ignoreCase: false) ?? ModelDownloader.FindExisting(vae, ignoreCase: true);
+        return located is null
+            ? throw new FileNotFoundException($"'{spec.Catalog!.Id}' decodes with FlashVDM and needs its turbo VAE; fetch it with `hartsy pull {spec.Catalog.Id}`.")
+            : Path.GetDirectoryName(located);
     }
 
     /// <summary>Converts the wire prompt to the pipeline's prompt, checking that exactly one kind is given.</summary>

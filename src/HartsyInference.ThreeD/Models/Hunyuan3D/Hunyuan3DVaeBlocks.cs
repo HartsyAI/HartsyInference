@@ -65,8 +65,10 @@ internal sealed unsafe class Hunyuan3DVaeResBlock
 /// <summary>ShapeVAE <c>geo_decoder</c> (GPU-resident): Fourier-embeds query points, cross-attends them to the latents via precomputed K/V, and projects to a scalar occupancy.</summary>
 internal sealed unsafe class Hunyuan3DGeoDecoder
 {
-    private readonly int _width, _heads, _headDim, _mlpDim;
+    private readonly int _width, _heads, _headDim, _mlpDim, _latentWidth;
+    private readonly bool _lnPost;
     private readonly FourierEmbedSpec _fourier;
+    private Tensor? _latentsProjW, _latentsProjB;
     private Tensor? _qProjW, _qProjB;
     private Tensor? _ln1W, _ln1B, _ln2W, _ln2B, _ln3W, _ln3B;
     private Tensor? _cqW, _ckW, _cvW, _cprojW, _cprojB, _qnW, _qnB, _knW, _knB;
@@ -74,14 +76,21 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     private Tensor? _lnPostW, _lnPostB, _outW, _outB;
     private AttentionLayer? _attn;
 
-    public Hunyuan3DGeoDecoder(int width, int heads, int bands)
+    /// <param name="latentWidth">Width of the processed latents; the decoder is narrower (<paramref name="width"/>) when it projects them down first.</param>
+    /// <param name="lnPost">Whether <c>ln_post</c> and the QK norms exist; the turbo VAE has neither.</param>
+    public Hunyuan3DGeoDecoder(int width, int heads, int bands, int latentWidth, int mlpRatio, bool lnPost)
     {
-        _width = width; _heads = heads; _headDim = width / heads; _mlpDim = 4 * width;
+        _width = width; _heads = heads; _headDim = width / heads; _mlpDim = mlpRatio * width;
+        _latentWidth = latentWidth; _lnPost = lnPost;
         _fourier = new FourierEmbedSpec(InputDims: 3, bands, IncludeInput: true);
     }
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p)
     {
+        if (_latentWidth != _width)
+        {
+            _latentsProjW = F(w, $"{p}.latents_proj.weight"); _latentsProjB = F(w, $"{p}.latents_proj.bias");
+        }
         _qProjW = F(w, $"{p}.query_proj.weight"); _qProjB = F(w, $"{p}.query_proj.bias");
         string c = $"{p}.cross_attn_decoder";
         _ln1W = F(w, $"{c}.ln_1.weight"); _ln1B = F(w, $"{c}.ln_1.bias");
@@ -90,18 +99,21 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         _cqW = F(w, $"{c}.attn.c_q.weight");
         (_ckW, _cvW, _) = Hunyuan3DVaeOps.SplitInterleavedWeight(F(w, $"{c}.attn.c_kv.weight"), 2, _heads, _headDim);
         _cprojW = F(w, $"{c}.attn.c_proj.weight"); _cprojB = F(w, $"{c}.attn.c_proj.bias");
-        _qnW = F(w, $"{c}.attn.attention.q_norm.weight"); _qnB = F(w, $"{c}.attn.attention.q_norm.bias");
-        _knW = F(w, $"{c}.attn.attention.k_norm.weight"); _knB = F(w, $"{c}.attn.attention.k_norm.bias");
+        if (_lnPost)
+        {
+            _qnW = F(w, $"{c}.attn.attention.q_norm.weight"); _qnB = F(w, $"{c}.attn.attention.q_norm.bias");
+            _knW = F(w, $"{c}.attn.attention.k_norm.weight"); _knB = F(w, $"{c}.attn.attention.k_norm.bias");
+            _lnPostW = F(w, $"{p}.ln_post.weight"); _lnPostB = F(w, $"{p}.ln_post.bias");
+        }
         _fcW = F(w, $"{c}.mlp.c_fc.weight"); _fcB = F(w, $"{c}.mlp.c_fc.bias");
         _fcpW = F(w, $"{c}.mlp.c_proj.weight"); _fcpB = F(w, $"{c}.mlp.c_proj.bias");
-        _lnPostW = F(w, $"{p}.ln_post.weight"); _lnPostB = F(w, $"{p}.ln_post.bias");
         _outW = F(w, $"{p}.output_proj.weight"); _outB = F(w, $"{p}.output_proj.bias");
         _attn = new AttentionLayer(new AttentionLayerConfig { Heads = _heads, KvHeads = _heads, HeadDim = _headDim, ComputeDType = DType.F32, AllowF16 = true });
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_qProjW, _qProjB, _ln1W, _ln1B, _ln2W, _ln2B, _ln3W, _ln3B, _cqW, _ckW, _cvW, _cprojW, _cprojB,
+        Tensor?[] all = [_latentsProjW, _latentsProjB, _qProjW, _qProjB, _ln1W, _ln1B, _ln2W, _ln2B, _ln3W, _ln3B, _cqW, _ckW, _cvW, _cprojW, _cprojB,
             _qnW, _qnB, _knW, _knB, _fcW, _fcB, _fcpW, _fcpB, _lnPostW, _lnPostB, _outW, _outB];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
@@ -111,17 +123,34 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
     {
         int nl = (int)latents.Shape[1];
         TensorShape flat = new(1, nl, _width), heads = new(1, nl, _heads, _headDim), mh = new(1, _heads, nl, _headDim);
-        Tensor n2 = new(flat, DType.F32); backend.LayerNorm(n2, latents, _ln2W!, _ln2B!, 1e-6f);
+        Tensor projected = latents;
+        if (_latentsProjW is not null)
+        {
+            projected = new(flat, DType.F32); backend.Linear(projected, latents, _latentsProjW, _latentsProjB!);
+        }
+        Tensor n2 = new(flat, DType.F32); backend.LayerNorm(n2, projected, _ln2W!, _ln2B!, 1e-6f);
+        if (!ReferenceEquals(projected, latents)) projected.Dispose();
         Tensor k = new(heads, DType.F32); backend.Linear(k, n2, _ckW!, null);
         Tensor v = new(heads, DType.F32); backend.Linear(v, n2, _cvW!, null); n2.Dispose();
-        Tensor kn = new(heads, DType.F32); backend.LayerNorm(kn, k, _knW!, _knB!, 1e-6f); k.Dispose();
+        Tensor kn = k;
+        if (_lnPost)
+        {
+            kn = new(heads, DType.F32); backend.LayerNorm(kn, k, _knW!, _knB!, 1e-6f); k.Dispose();
+        }
         Tensor kP = new(mh, DType.F32); backend.Permute0213(kP, kn, nl, _heads, _headDim); kn.Dispose();
         Tensor vP = new(mh, DType.F32); backend.Permute0213(vP, v, nl, _heads, _headDim); v.Dispose();
         return (kP, vP);
     }
 
     /// <summary>Occupancy for query points <c>[count,3]</c> given precomputed (kP, vP). Returns <c>[count]</c>.</summary>
-    public Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, Tensor coords, int count)
+    public Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, Tensor coords, int count) =>
+        Query(backend, kv, coords, count, null);
+
+    /// <summary>As <see cref="Query(IBackend, ValueTuple{Tensor, Tensor}, Tensor, int)"/>, but every query attends only to the <paramref name="topK"/> latents per head whose key best matches the mean of every <paramref name="stride"/>-th query (FlashVDM's adaptive KV selection).</summary>
+    public Tensor QueryTopK(IBackend backend, (Tensor kP, Tensor vP) kv, Hunyuan3DKvHost host, Tensor coords, int count, int stride, int topK) =>
+        Query(backend, kv, coords, count, (q, rows) => host.SelectTopK(q, rows, stride, topK));
+
+    private Tensor Query(IBackend backend, (Tensor kP, Tensor vP) kv, Tensor coords, int count, Func<Tensor, int, (Tensor K, Tensor V)>? select)
     {
         int nl = (int)kv.kP.Shape[2];
         TensorShape flat = new(1, count, _width), heads = new(1, count, _heads, _headDim), qmh = new(1, _heads, count, _headDim);
@@ -134,9 +163,22 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         // cross-attn: q = q_norm(c_q(ln_1(qEmb))); attn(q, kP, vP); x = qEmb + c_proj(attn).
         Tensor n1 = new(flat, DType.F32); backend.LayerNorm(n1, qEmb, _ln1W!, _ln1B!, 1e-6f);
         Tensor q = new(heads, DType.F32); backend.Linear(q, n1, _cqW!, null); n1.Dispose();
-        Tensor qn = new(heads, DType.F32); backend.LayerNorm(qn, q, _qnW!, _qnB!, 1e-6f); q.Dispose();
+        Tensor qn = q;
+        if (_lnPost)
+        {
+            qn = new(heads, DType.F32); backend.LayerNorm(qn, q, _qnW!, _qnB!, 1e-6f); q.Dispose();
+        }
         Tensor qP = new(qmh, DType.F32); backend.Permute0213(qP, qn, count, _heads, _headDim); qn.Dispose();
-        Tensor attn = _attn!.AttendHeadMajorOperands(backend, qP, kv.kP, kv.vP, default, OperandOwnership.Query);
+        Tensor attn;
+        if (select is null)
+        {
+            attn = _attn!.AttendHeadMajorOperands(backend, qP, kv.kP, kv.vP, default, OperandOwnership.Query);
+        }
+        else
+        {
+            (Tensor kSel, Tensor vSel) = select(qP, count);
+            attn = _attn!.AttendHeadMajorOperands(backend, qP, kSel, vSel, default, OperandOwnership.All);
+        }
         Tensor attnFlat = _attn.MergeHeads(backend, attn, flat);
         Tensor proj = new(flat, DType.F32); backend.Linear(proj, attnFlat, _cprojW!, _cprojB!); attnFlat.Dispose();
         Tensor x1 = new(flat, DType.F32); backend.Add(x1, qEmb, proj); qEmb.Dispose(); proj.Dispose();
@@ -148,8 +190,12 @@ internal sealed unsafe class Hunyuan3DGeoDecoder
         Tensor f2 = new(flat, DType.F32); backend.Linear(f2, act, _fcpW!, _fcpB!); act.Dispose();
         Tensor x2 = new(flat, DType.F32); backend.Add(x2, x1, f2); x1.Dispose(); f2.Dispose();
 
-        // ln_post (eps 1e-5) → output_proj (Width → 1).
-        Tensor post = new(flat, DType.F32); backend.LayerNorm(post, x2, _lnPostW!, _lnPostB!, 1e-5f); x2.Dispose();
+        // ln_post (eps 1e-5) when present → output_proj (Width → 1).
+        Tensor post = x2;
+        if (_lnPost)
+        {
+            post = new(flat, DType.F32); backend.LayerNorm(post, x2, _lnPostW!, _lnPostB!, 1e-5f); x2.Dispose();
+        }
         Tensor occ = new(new TensorShape(1, count, 1), DType.F32); backend.Linear(occ, post, _outW!, _outB!); post.Dispose();
         Tensor flatOut = new(new TensorShape(count), DType.F32);
         new ReadOnlySpan<float>((float*)occ.DataPointer, count).CopyTo(new Span<float>((float*)flatOut.DataPointer, count));

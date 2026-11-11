@@ -90,6 +90,28 @@ public static class ModelCatalog
         },
     };
 
+    private const string Hunyuan3DBaseWeightsSha = "360bc281fc956d4acac0c3d36d5ec0ebf8cdddbf4b8892e894d12419388d479b";
+    private const string Hunyuan3DBaseConfigSha = "70bbfcdd18b9686ee56fe011c3a059b222eae1f5450f904577c50f0e107a8a53";
+
+    /// <summary>The weights and config of one Hunyuan3D-2 shape build, in a folder named for its catalog id; the weights come first so they are the primary asset.</summary>
+    private static ModelAsset[] Hunyuan3DAssets(string repo, string folder, string id, string weightsSha, string configSha) =>
+    [
+        new() { Repo = "tencent/" + repo, RepoPath = folder + "/model.fp16.safetensors", TargetSubdir = "3D/" + id, Role = "transformer", Sha256 = weightsSha },
+        new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
+    ];
+
+    /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>
+    private static ModelAsset[] Hunyuan3DFlashVdmVaeAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-vae-v2-0-turbo/model.fp16.safetensors", TargetSubdir = "3D/hunyuan3d-vae-turbo",
+            Role = Hunyuan3DFlashVdmVaeRole, Sha256 = "66b7af697118db2de00c22f63a385c75f9049709739281971837af9e4ce31cb4" },
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-vae-v2-0-turbo/config.yaml", TargetSubdir = "3D/hunyuan3d-vae-turbo",
+            Role = "config", Sha256 = "91355c5acc412149996d19dbe46040d10fab888efd8bb910c76bad3a550f6ceb" },
+    ];
+
+    /// <summary>The <see cref="ModelAsset.Role"/> of the VAE that FlashVDM replaces the bundled one with.</summary>
+    public const string Hunyuan3DFlashVdmVaeRole = "flashvdm vae";
+
     /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
     /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
     private static IReadOnlyList<ModelAsset> SanaWmAssets =>
@@ -2585,7 +2607,25 @@ public static class ModelCatalog
 
             // 3D
             E("triposr", d3, "TripoSR", "triplane / NeRF", st, cli: true),
-            E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
+            E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true)
+                with { Assets = Hunyuan3DAssets("Hunyuan3D-2", "hunyuan3d-dit-v2-0", "hunyuan3d", Hunyuan3DBaseWeightsSha, Hunyuan3DBaseConfigSha) },
+            E("hunyuan3d-fast", d3, "Hunyuan3D-2 Fast", "guidance-distilled Flux MMDiT + VecSet VAE", st, cli: true)
+                with { Assets = Hunyuan3DAssets("Hunyuan3D-2", "hunyuan3d-dit-v2-0-fast", "hunyuan3d-fast",
+                    "fcf91f29922270b4cce5f266099b306c6e140f2a2382a81fc5e47752d4d41e85",
+                    "705d55128ebced9fa35a310e6819a3c1de99483cccd5eda21a697e6b4e5dcce7") },
+            E("hunyuan3d-turbo", d3, "Hunyuan3D-2 Turbo + FlashVDM", "step-distilled Flux MMDiT + FlashVDM turbo VAE", st, cli: true)
+                with { Assets = [.. Hunyuan3DAssets("Hunyuan3D-2", "hunyuan3d-dit-v2-0-turbo", "hunyuan3d-turbo",
+                    "5ee5a81e4df08a1c65b79910bf5b145a90376e526794f4607a4d5d068d62f269",
+                    "4712421fe32d57c678be3be2b608acdb8871985f0b81646a883d136abc63feb7"), .. Hunyuan3DFlashVdmVaeAssets] },
+            // Four-view conditioning needs several images; MeshRequest carries one, so this id downloads but is not CLI-drivable yet.
+            E("hunyuan3d-mv", d3, "Hunyuan3D-2mv (multiview)", "Flux MMDiT + VecSet VAE, four-view DINOv2 conditioning", st)
+                with { Assets = Hunyuan3DAssets("Hunyuan3D-2mv", "hunyuan3d-dit-v2-mv", "hunyuan3d-mv",
+                    "d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c",
+                    "315fd5bf601d1d103130b9fda202f1bd28eda495e68ed1621bc823d5519c5e5b") },
+            E("hunyuan3d-mini", d3, "Hunyuan3D-2mini (0.6B)", "8+16-block Flux MMDiT, 512 latents + VecSet VAE", st, cli: true)
+                with { Assets = Hunyuan3DAssets("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini", "hunyuan3d-mini",
+                    "3cc66f3bea33e4062b7dbc875ffe1d70c4888914aec3e91b60f94e9bd01b522b",
+                    "cabcba7f6115752c8fe5b370e12bf714936f70377a8a80f151872f76c2d64609") },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
