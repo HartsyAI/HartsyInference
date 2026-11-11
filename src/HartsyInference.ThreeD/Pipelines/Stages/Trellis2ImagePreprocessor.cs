@@ -26,7 +26,7 @@ public static class Trellis2ImagePreprocessor
         ArgumentNullException.ThrowIfNull(image);
         image.Validate();
         bool hasAlpha = image.HasForegroundAlpha;
-        if (!hasAlpha && matter is null)
+        if (!hasAlpha && matter is not { IsAvailable: true })
         {
             throw new HartsyInferenceException(
                 "TRELLIS.2 needs the foreground cut out: supply an image with an alpha channel, or place a BiRefNet matting "

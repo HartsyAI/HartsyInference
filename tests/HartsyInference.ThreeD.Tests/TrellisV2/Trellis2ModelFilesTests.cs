@@ -1,8 +1,10 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using Xunit;
 
 namespace HartsyInference.ThreeD.Tests.TrellisV2;
 
+[Collection("Trellis2ModelFolders")]
 public sealed class Trellis2ModelFilesTests
 {
     private static string NewRoot()
@@ -101,5 +103,57 @@ public sealed class Trellis2ModelFilesTests
     {
         string missing = Path.Combine(Path.GetTempPath(), "no-such-" + Guid.NewGuid().ToString("N"));
         Assert.Throws<DirectoryNotFoundException>(() => Trellis2ModelFiles.Resolve(missing));
+    }
+
+    [Fact]
+    public void Resolve_FindsTheDinoEncoderInAnOverriddenVisionFolder()
+    {
+        string root = NewRoot();
+        KnobStore.Set(EngineKnobs.ModelFolderVision, "vision-models");
+        try
+        {
+            string flows = Path.Combine(root, "3D", "trellis2");
+            foreach (string name in new[]
+            {
+                Trellis2ModelFiles.PipelineFile, Trellis2ModelFiles.StructureFlowFile, Trellis2ModelFiles.StructureDecoderFile,
+                Trellis2ModelFiles.ShapeFlow512File, Trellis2ModelFiles.ShapeFlow1024File, Trellis2ModelFiles.ShapeDecoderFile,
+            })
+                Touch(Path.Combine(flows, name));
+            string dino = Path.Combine(root, "vision-models", "Dinov3", Trellis2ModelFiles.DinoFile);
+            Touch(dino);
+
+            Assert.Equal(dino, Trellis2ModelFiles.Resolve(flows).Dino);
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.ModelFolderVision);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void FindMatterFile_HonoursTheVisionFolderSetting()
+    {
+        string root = NewRoot();
+        try
+        {
+            Assert.Null(Trellis2ModelFiles.FindMatterFile(root));
+
+            string defaultPlace = Path.Combine(root, "Vision", Trellis2ModelFiles.MatterFolder, Trellis2ModelFiles.MatterFile);
+            Touch(defaultPlace);
+            Assert.Equal(defaultPlace, Trellis2ModelFiles.FindMatterFile(root));
+
+            File.Delete(defaultPlace);
+            KnobStore.Set(EngineKnobs.ModelFolderVision, "vision-models");
+            Assert.Null(Trellis2ModelFiles.FindMatterFile(root));
+            string moved = Path.Combine(root, "vision-models", Trellis2ModelFiles.MatterFolder, Trellis2ModelFiles.MatterFile);
+            Touch(moved);
+            Assert.Equal(moved, Trellis2ModelFiles.FindMatterFile(root));
+        }
+        finally
+        {
+            KnobStore.Clear(EngineKnobs.ModelFolderVision);
+            Directory.Delete(root, recursive: true);
+        }
     }
 }

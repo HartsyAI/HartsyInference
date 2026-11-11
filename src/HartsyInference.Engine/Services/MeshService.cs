@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
@@ -135,6 +136,7 @@ public sealed class MeshService : IMeshService, IDisposable
             Seed = request.Seed < 0 ? null : (int)request.Seed,
         };
         string modelsRoot = RepoPaths.ModelsRoot();
+        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
         Trellis2ImageTo3DPipeline.ValidateRequest(options, image, Trellis2Runtime.MatterAvailable(modelsRoot));
 
         return Task.Run(
@@ -263,7 +265,7 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         string modelRoot = HairDeckModel.ResolveModelRoot(spec.LocalPath);
-        string visionRoot = Path.Combine(RepoPaths.ModelsRoot(), "Vision");
+        string visionRoot = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.Vision);
         string key = $"{modelRoot}|{visionRoot}";
         lock (_gate)
         {

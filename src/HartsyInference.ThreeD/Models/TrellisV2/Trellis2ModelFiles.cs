@@ -1,3 +1,6 @@
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
+
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
 /// <summary>The files of a TRELLIS.2 shape-only install: the flow set under <c>3D/trellis2</c>, plus the shape VAE decoder and the
@@ -11,6 +14,9 @@ public sealed record Trellis2ModelFiles
     public const string ShapeFlow1024File = "slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors";
     public const string ShapeDecoderFile = "shape_dec_next_dc_f16c32_fp16.safetensors";
     public const string DinoFile = "model.safetensors";
+    public const string DinoFolder = "Dinov3";
+    public const string MatterFolder = "BiRefNet-matting";
+    public const string MatterFile = "model.safetensors";
 
     public required string Pipeline { get; init; }
 
@@ -64,13 +70,36 @@ public sealed record Trellis2ModelFiles
                 Path.Combine(root, "TRELLIS2-ShapeVAE", ShapeDecoderFile)),
             Dino = Find(
                 "DINOv3 " + DinoFile,
-                Path.Combine(root, "Vision", "Dinov3", DinoFile),
+                VisionCandidate(root, DinoFolder, DinoFile),
                 Path.Combine(root, "DINOv3", DinoFile),
                 Path.Combine(parent, "DINOv3", DinoFile),
-                Path.Combine(parent, "Vision", "Dinov3", DinoFile)),
+                VisionCandidate(parent, DinoFolder, DinoFile)),
         };
         if (missing.Count > 0)
             throw new FileNotFoundException("TRELLIS.2 files not found: " + string.Join(" | ", missing));
         return files;
     }
+
+    /// <summary>The checkpoint at <c>Vision/&lt;subfolder&gt;/&lt;file&gt;</c> under <paramref name="modelsRoot"/>, found the way the model downloader
+    /// places it: through <see cref="ModelFolders"/> (so an overridden Vision folder is honoured) and ignoring case on case-sensitive
+    /// filesystems. Null when it is not installed.</summary>
+    public static string? FindVisionFile(string modelsRoot, string subfolder, string file)
+    {
+        foreach (string folder in ModelFolders.Spellings(Path.Combine("Vision", subfolder)))
+        {
+            string path = CaseInsensitivePath.ResolveFile(modelsRoot, Path.Combine(folder, file));
+            if (File.Exists(path))
+                return path;
+        }
+
+        return null;
+    }
+
+    /// <summary>The BiRefNet matting checkpoint the catalog installs for images without alpha, or null when it is not installed.</summary>
+    public static string? FindMatterFile(string modelsRoot) => FindVisionFile(modelsRoot, MatterFolder, MatterFile);
+
+    /// <summary>The installed file, else where the downloader would place it, so a missing-file message names a real location.</summary>
+    private static string VisionCandidate(string modelsRoot, string subfolder, string file) =>
+        FindVisionFile(modelsRoot, subfolder, file)
+        ?? Path.Combine(modelsRoot, ModelFolders.Physical(ModelFolders.Vision), subfolder, file);
 }

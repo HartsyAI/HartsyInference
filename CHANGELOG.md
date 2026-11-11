@@ -10,6 +10,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
   dual-grid meshing, all in C#. `--grid` is the final dual-grid resolution for this model: 512, 1024 (default, `1024_cascade`) or 1536
   (`1536_cascade`); other values are rejected before any weight loads. `--grid` keeps its meaning for the other models. An image with an alpha
+- **Fixed: TRELLIS.2 and HairDeck now find their Vision-folder checkpoints (DINOv3, BiRefNet-matting) through the configured Vision folder, and a matting checkpoint installed after the first TRELLIS.2 load is used without a restart.**
   channel is used as the cutout; one without needs the BiRefNet-matting checkpoint (a stand-in for upstream's RMBG-2.0, which is not used).
 - **Added: config-driven TRELLIS.2 flow classes** (`Trellis2SparseStructureFlow`, `Trellis2SlatFlow`: shared adaLN with a per-block
   modulation, QK RMS norm, 3D RoPE), the guidance-interval FlowEuler sampler with CFG rescale, `pipeline.json` parsing, cascade

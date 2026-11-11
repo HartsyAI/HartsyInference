@@ -176,7 +176,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(image);
         options ??= new Trellis2Options();
-        ValidateRequest(options, image, _matter is not null);
+        ValidateRequest(options, image, _matter is { IsAvailable: true });
         Trellis2PipelineType type = ResolveType(options.Grid);
         bool cascade = type != Trellis2PipelineType.Res512;
         int seed = options.Seed ?? SeedGenerator.RandomSeed();
@@ -205,7 +205,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             Report();
 
             int[] voxels = _structure.Sample(Backend, cond, negCond, seed, structureParams, StructureGrid, Tick);
-            coarse = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res512, voxels, StructureGrid, cond, negCond, seed + 1, shapeParams, Tick);
+            coarse = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res512, voxels, StructureGrid, cond, negCond, unchecked(seed + 1), shapeParams, Tick);
 
             SparseTensor latent;
             int resolution;
@@ -222,7 +222,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 fineNeg = Zeros(fineCond.Shape);
                 fine = _shape.Sample(
                     Backend, Trellis2ShapeFlowKind.Res1024, fineCoords, fineResolution / Trellis2Cascade.LatentStride,
-                    fineCond, fineNeg, seed + 2, shapeParams, Tick);
+                    fineCond, fineNeg, unchecked(seed + 2), shapeParams, Tick);
                 latent = fine;
                 resolution = fineResolution;
             }

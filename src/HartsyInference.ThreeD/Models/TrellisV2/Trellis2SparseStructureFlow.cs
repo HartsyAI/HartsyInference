@@ -52,7 +52,9 @@ public sealed class Trellis2SparseStructureFlow : IDisposable
         using Tensor back = new(new TensorShape(1, _config.OutChannels, tokens), DType.F32);
         backend.Transpose2D(back, projected, tokens, _config.OutChannels);
         Tensor velocity = new(new TensorShape([1L, _config.OutChannels, r, r, r]), DType.F32);
-        backend.CopyInto(velocity, back.Reshape(velocity.Shape));
+        // The copy stays: the caller owns an independent tensor, and a returned view would root `back` until the GC finalised it.
+        using Tensor backGrid = back.Reshape(velocity.Shape);
+        backend.CopyInto(velocity, backGrid);
         return velocity;
     }
 
