@@ -97,6 +97,11 @@ Read from source at the pins above. Each of the 512 and 1024 flows has a texture
   `Trellis2ImageTo3DPipeline.ToGlb` sets `PbrGlbOptions.ConvertZUpToYUp = true` and `DoubleSided = true`; shape-only `Generate` rotates its mesh itself.
 - **Request.** `Trellis2Options.Texture` selects the path for `GenerateTextured` (`Generate` ignores it); `TextureSize` (default 2048) and `DecimationTarget`
   (default 1,000,000 faces) are upstream's `to_glb` defaults. The texture steps use the same step override as the other samplers.
+- **Contract.** The existing request is unchanged; texture is an opt-in on top of it. `hartsy 3d <image.png> -m trellis2 --texture [--texture-size N]`,
+  and `MeshRequest.Texture` / `MeshRequest.TextureSize` for the engine and the native HTTP mesh request, return a textured GLB instead of the
+  shape-only one (`Format` is `glb` either way). `TextureSize` without `Texture`, or either on another model, is rejected, and a texture size
+  outside 16 to 8192 fails before the checkpoints load. The catalog entry still downloads the shape files only: the 6.1 GB of texture files are
+  not part of `hartsy download trellis2` until they are verified on real weights.
 - **Files** (`microsoft/TRELLIS.2-4B` at the pin; sizes in bytes, sha256 from the Hugging Face tree API):
 
   | File | Size | sha256 |

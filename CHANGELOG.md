@@ -11,7 +11,9 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `PbrMeshPostProcessor` and writes a double-sided Y-up PBR GLB (`Trellis2ImageTo3DPipeline.ToGlb`). `ShapeVaeDecoder` now also builds
   the subdivision-free texture decoder (`ShapeVaeDecoderConfig.Texture`); `pipeline.json`'s `tex_slat_*` entries and the three
   texture files (`Trellis2ModelFiles`) are optional, so shape-only installs are unchanged. The trilinear sampler's `floor` convention
-  was checked against the FlexGEMM CUDA kernel. Tested on tiny synthetic networks only; no texture checkpoint has run.
+  was checked against the FlexGEMM CUDA kernel. `hartsy 3d -m trellis2 --texture [--texture-size N]`, `MeshRequest.Texture` and
+  `MeshRequest.TextureSize` select it; the existing request and the shape-only output are unchanged, and the catalog still downloads
+  the shape files only. Tested on tiny synthetic networks only; no texture checkpoint has run.
 
 ## alpha.422
 
