@@ -77,8 +77,23 @@ internal sealed class Trellis2FlowCore : IDisposable
         return mod;
     }
 
-    /// <summary>Runs every block over <paramref name="h"/> and consumes it.</summary>
-    internal Tensor RunBlocks(IBackend backend, Tensor h, Tensor sharedMod, Tensor cond, Trellis2RopeTable rope)
+    /// <summary>Checks the per-token features against the architecture: required as <c>[1, tokens, ProjInChannels]</c> by a
+    /// projection flow, and refused by a plain one so a mismatched caller fails instead of silently dropping them.</summary>
+    internal void CheckProjection(Tensor? proj, long tokens)
+    {
+        if (!_config.HasProjection)
+        {
+            if (proj is not null)
+                throw new ArgumentException("This flow has no projection branch; pass null for the projected features.", nameof(proj));
+            return;
+        }
+
+        if (proj is null || proj.Shape.Rank != 3 || proj.Shape[0] != 1 || proj.Shape[1] != tokens || proj.Shape[2] != _config.ProjInChannels)
+            throw new ArgumentException($"Projected features must be [1, {tokens}, {_config.ProjInChannels}]; got {proj?.Shape.ToString() ?? "null"}.", nameof(proj));
+    }
+
+    /// <summary>Runs every block over <paramref name="h"/> and consumes it; <paramref name="proj"/> is the projection mode's per-token features.</summary>
+    internal Tensor RunBlocks(IBackend backend, Tensor h, Tensor sharedMod, Tensor cond, Tensor? proj, Trellis2RopeTable rope)
     {
         Tensor x = h;
         foreach (Trellis2FlowBlock block in _blocks)
@@ -86,7 +101,7 @@ internal sealed class Trellis2FlowCore : IDisposable
             Tensor next;
             try
             {
-                next = block.Forward(backend, x, sharedMod, cond, rope);
+                next = block.Forward(backend, x, sharedMod, cond, proj, rope);
             }
             catch
             {

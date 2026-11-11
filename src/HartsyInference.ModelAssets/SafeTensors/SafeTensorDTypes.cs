@@ -33,6 +33,7 @@ public static class SafeTensorDTypes
             case "U32": dtype = DType.U32; return true;
             case "U64": dtype = DType.U64; return true;
             case "BOOL": dtype = DType.Bool; return true;
+            case "C64": dtype = DType.C64; return true;
             default: dtype = default; return false;
         }
     }
@@ -48,6 +49,12 @@ public static class SafeTensorDTypes
     /// <summary>Throws for a dtype whose bytes exist in a header but that the engine cannot honestly hand out as a tensor.</summary>
     public static void ThrowIfNotMaterialisable(DType dtype, string tensorName, string filePath)
     {
+        if (dtype.IsComplex)
+        {
+            throw new UnsupportedModelException(
+                $"Tensor '{tensorName}' in '{filePath}' is {dtype.Name}. The engine has no complex tensors; a loader that "
+                + "knows the buffer is derived data must leave it unread.");
+        }
         if (!dtype.IsFnuz)
             return;
         throw new UnsupportedModelException(
