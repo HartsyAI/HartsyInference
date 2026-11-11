@@ -233,17 +233,18 @@ public sealed record Ernie5Config
     public bool IsMtpLayer(int layer) => layer >= NumHiddenLayers && layer < TotalLayers;
 
     /// <summary>
-    /// The values of this config the engine does not implement, one plain-language entry each, for the decoder and MTP layers. Empty means
-    /// the host reference model runs every feature the config names.
+    /// The values of this config the engine does not implement, one plain-language entry each, for the decoder layers and, when
+    /// <paramref name="mtp"/>, the multi-token-prediction layers too. Empty means the host reference model runs every feature the config names.
     /// </summary>
-    public IReadOnlyList<string> UnimplementedFeatures()
+    public IReadOnlyList<string> UnimplementedFeatures(bool mtp = false)
     {
         List<string> missing = [];
+        int layers = mtp ? TotalLayers : NumHiddenLayers;
         if (!string.Equals(HiddenAct, "situ", StringComparison.Ordinal))
             missing.Add($"FFN activation '{HiddenAct}' (only 'situ' is wired)");
-        if (CompressRatios.Length < TotalLayers)
-            missing.Add($"compress_ratios with {CompressRatios.Length} entries for {TotalLayers} decoder and MTP layers");
-        for (int i = 0; i < Math.Min(TotalLayers, CompressRatios.Length); i++)
+        if (CompressRatios.Length < layers)
+            missing.Add($"compress_ratios with {CompressRatios.Length} entries for {layers} {(mtp ? "decoder and MTP" : "decoder")} layers");
+        for (int i = 0; i < Math.Min(layers, CompressRatios.Length); i++)
         {
             int ratio = CompressRatios[i];
             if (ratio != DsaRatio && (ratio < 2 || ratio == 4))
@@ -398,7 +399,8 @@ public sealed record Ernie5Config
     public static Ernie5Config Load(string path) => Parse(File.ReadAllText(path));
 
     /// <summary>Refuses an ERNIE-5.5 checkpoint the Text path cannot run, naming each config value the engine does not implement. The Text
-    /// path skips the multi-token-prediction layers; <see cref="Ernie5Model.MtpForward"/> runs them for a draft.</summary>
+    /// path skips the multi-token-prediction layers, so their values are not checked here; <see cref="Ernie5Model"/> checks them when loaded
+    /// with <see cref="Ernie5LoadOptions.Mtp"/>.</summary>
     /// <exception cref="HartsyInferenceException">The checkpoint has a feature the Text path does not run.</exception>
     public static void RequireRunnable(string root, string configPath)
     {

@@ -11,6 +11,7 @@ public sealed record Ernie5LoadOptions
     public bool ResidentWeights { get; init; }
 
     /// <summary>Maps and loads the multi-token-prediction layers so <see cref="Ernie5Model.MtpForward"/> can draft tokens, and gives every
-    /// sequence state their caches. When false their keys are skipped (<see cref="Ernie5WeightCoverage.SkippedMtp"/>).</summary>
+    /// sequence state their caches. When false their keys are skipped (<see cref="Ernie5WeightCoverage.SkippedMtp"/>). Without
+    /// <see cref="ResidentWeights"/> every draft call reads and dequantizes the whole MTP layer again, its routed experts included.</summary>
     public bool Mtp { get; init; }
 }

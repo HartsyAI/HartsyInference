@@ -93,6 +93,53 @@ public sealed class Ernie5MtpTests : IDisposable
     }
 
     [Fact]
+    public void Mtp_model_refuses_a_state_without_mtp_caches()
+    {
+        string dir = Write("plain-state");
+        using CpuBackend backend = new();
+        using Ernie5Model model = Ernie5Model.Load(dir, backend, Options(resident: false));
+        using Ernie5SequenceState state = new(model.Config, 16);
+        float[] stream = model.ForwardStream(Prompt, state);
+
+        Assert.Throws<ArgumentException>(() => model.MtpForward(Next, stream, state));
+    }
+
+    [Theory]
+    [InlineData("[2, -2, 4]", "layer 2 attention with compress ratio 4")]
+    [InlineData("[2, -2]", "compress_ratios with 2 entries for 3 decoder and MTP layers")]
+    public void Unwired_mtp_layer_is_refused_only_when_mtp_is_loaded(string ratios, string named)
+    {
+        string dir = Write("unwired");
+        string configPath = Path.Combine(dir, "config.json");
+        File.WriteAllText(configPath, Ernie5SyntheticCheckpoint.ConfigJson(new Dictionary<string, string> { ["compress_ratios"] = ratios }));
+        Ernie5Config config = Ernie5Config.Load(configPath);
+        using CpuBackend backend = new();
+        using Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(dir);
+
+        // the Text path skips the MTP layer, so its ratio does not stop it
+        Ernie5Config.RequireRunnable(dir, configPath);
+        using Ernie5Model plain = new(backend, config, weights, new Ernie5LoadOptions { MaxSequenceTokens = 16 });
+        Assert.True(plain.Coverage.SkippedMtp > 0);
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => new Ernie5Model(backend, config, weights, Options(resident: false)));
+        Assert.Contains(named, ex.Message);
+    }
+
+    [Fact]
+    public void Mtp_is_refused_for_other_than_one_mtp_layer()
+    {
+        string dir = Write("two-mtp");
+        Ernie5Config config = Ernie5Config.Parse(Ernie5SyntheticCheckpoint.ConfigJson(new Dictionary<string, string>
+        {
+            ["num_nextn_predict_layers"] = "2", ["compress_ratios"] = "[2, -2, -2, -2]",
+        }));
+        using CpuBackend backend = new();
+        using Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(dir);
+
+        NotSupportedException ex = Assert.Throws<NotSupportedException>(() => new Ernie5Model(backend, config, weights, Options(resident: false)));
+        Assert.Contains("exactly one", ex.Message);
+    }
+
+    [Fact]
     public void Mtp_draft_is_the_same_resident_or_rebuilt_per_call()
     {
         string dir = Write("residency");
@@ -116,26 +163,32 @@ public sealed class Ernie5MtpTests : IDisposable
         Assert.Equal(logits, logitsAgain);
     }
 
+    // Six positions against index_topk 4 and a window of 4, so the DSA indexer selects across steps; then one chained draft step past the target.
     [Fact]
-    public void Mtp_appended_one_position_at_a_time_matches_one_batch()
+    public void Mtp_appended_one_position_at_a_time_and_chained_matches_one_batch()
     {
         using CpuBackend backend = new();
         using Ernie5Model model = Ernie5Model.Load(Write("incremental"), backend, Options(resident: true));
-        int flat = Ernie5SyntheticCheckpoint.Hc * Ernie5SyntheticCheckpoint.Hidden;
+        int flat = Ernie5SyntheticCheckpoint.Hc * Ernie5SyntheticCheckpoint.Hidden, last = (Next.Length - 1) * flat;
+        int[] chained = [8];
 
         using Ernie5SequenceState batchState = model.CreateState(16);
         float[] batch = model.MtpForward(Next, model.ForwardStream(Prompt, batchState), batchState);
+        float[] batchChained = model.MtpForward(chained, batch.AsSpan(last, flat), batchState);
 
         using Ernie5SequenceState stepState = model.CreateState(16);
         float[] target = model.ForwardStream(Prompt, stepState);
+        float[] row = [];
         for (int i = 0; i < Next.Length; i++)
         {
-            float[] row = model.MtpForward(Next.AsSpan(i, 1), target.AsSpan(i * flat, flat), stepState);
-            for (int j = 0; j < flat; j++)
-                Assert.True(Math.Abs(batch[i * flat + j] - row[j]) <= 1e-4f,
-                    string.Create(CultureInfo.InvariantCulture, $"position {i} value {j}: {batch[i * flat + j]} vs {row[j]}"));
+            row = model.MtpForward(Next.AsSpan(i, 1), target.AsSpan(i * flat, flat), stepState);
+            AssertClose(batch.AsSpan(i * flat, flat), row, i);
         }
-        Assert.Equal(Next.Length, stepState.MtpLength);
+        float[] stepChained = model.MtpForward(chained, row, stepState);
+
+        AssertClose(batchChained, stepChained, Next.Length);
+        Assert.Equal((Prompt.Length, Next.Length + 1), (stepState.Length, stepState.MtpLength));
+        Assert.All(model.Logits(model.MtpHidden(stepChained), 1), v => Assert.True(float.IsFinite(v)));
     }
 
     [Theory]
@@ -167,6 +220,14 @@ public sealed class Ernie5MtpTests : IDisposable
         float[] baseline = Draft(zeroed, Next, false);
         float[] varied = tokensIgnored ? Draft(zeroed, otherNext, false) : Draft(zeroed, Next, true);
         Assert.Equal(baseline, varied);
+    }
+
+    private static void AssertClose(ReadOnlySpan<float> expected, ReadOnlySpan<float> actual, int position)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int j = 0; j < expected.Length; j++)
+            Assert.True(Math.Abs(expected[j] - actual[j]) <= 1e-4f,
+                string.Create(CultureInfo.InvariantCulture, $"position {position} value {j}: {expected[j]} vs {actual[j]}"));
     }
 
     private static Ernie5LoadOptions Options(bool resident) => new() { MaxSequenceTokens = 16, ResidentWeights = resident, Mtp = true };

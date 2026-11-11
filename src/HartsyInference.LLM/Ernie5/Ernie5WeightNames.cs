@@ -82,13 +82,10 @@ public static class Ernie5WeightNames
     /// <summary>The key of a dense FFN leaf of layer <paramref name="layer"/>.</summary>
     public static string DenseFfn(int layer, string leaf) => $"{Layer(layer)}.mlp.{leaf}";
 
-    /// <summary>The key of a hyper-connection leaf of decoder layer <paramref name="layer"/>.</summary>
-    public static string Hc(int layer, string module, string leaf) => $"{Layer(layer)}.{module}.{leaf}";
-
     /// <summary>The key of a hyper-connection leaf of layer <paramref name="layer"/>; an MTP layer keeps its hyper-connections under
     /// <see cref="MtpBlock"/>, everything else of its decoder block at the layer root.</summary>
     public static string Hc(Ernie5Config config, int layer, string module, string leaf) =>
-        config.IsMtpLayer(layer) ? $"{Layer(layer)}.{MtpBlock}.{module}.{leaf}" : Hc(layer, module, leaf);
+        config.IsMtpLayer(layer) ? $"{Layer(layer)}.{MtpBlock}.{module}.{leaf}" : $"{Layer(layer)}.{module}.{leaf}";
 
     /// <summary>Sub-prefix of an MTP layer's decoder-block hyper-connections (vLLM <c>ernie5_5_mapper</c> drops it).</summary>
     public const string MtpBlock = "transformer_layer";

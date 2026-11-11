@@ -22,6 +22,8 @@ public sealed class Ernie5SequenceState : IDisposable
         Capacity = capacity;
         _mainLayers = config.NumHiddenLayers;
         int layers = mtp ? config.TotalLayers : config.NumHiddenLayers;
+        if (config.CompressRatios.Length < layers)
+            throw new ArgumentException($"compress_ratios has {config.CompressRatios.Length} entries; the state needs {layers}.", nameof(config));
         _hca = new HcaAttentionState?[layers];
         _dsa = new DsaAttentionState?[layers];
         try
@@ -51,8 +53,11 @@ public sealed class Ernie5SequenceState : IDisposable
     /// <summary>Positions committed to the MTP layers' caches so far; the next <see cref="Ernie5Model.MtpForward"/> starts here.</summary>
     public int MtpLength { get; internal set; }
 
-    /// <summary>Set when a forward failed partway through its layers, so the caches no longer match <see cref="Length"/>.</summary>
+    /// <summary>Set when a forward failed partway through its layers, so the decoder caches no longer match <see cref="Length"/>.</summary>
     internal bool Faulted { get; private set; }
+
+    /// <summary>Set when an MTP forward failed partway through, so the MTP cache no longer matches <see cref="MtpLength"/>.</summary>
+    internal bool MtpFaulted { get; private set; }
 
     /// <summary>The HCA cache of layer <paramref name="layer"/>.</summary>
     internal HcaAttentionState Hca(int layer) => _hca[layer] ?? throw new InvalidOperationException($"Layer {layer} is not an HCA layer.");
@@ -63,12 +68,16 @@ public sealed class Ernie5SequenceState : IDisposable
     /// <summary>Marks the caches as out of step with <see cref="Length"/>; <see cref="Reset"/> clears it.</summary>
     internal void MarkFaulted() => Faulted = true;
 
+    /// <summary>Marks the MTP cache as out of step with <see cref="MtpLength"/>; <see cref="Reset"/> clears it.</summary>
+    internal void MarkMtpFaulted() => MtpFaulted = true;
+
     /// <summary>Forgets the sequence; the next forward starts at position 0.</summary>
     public void Reset()
     {
         Length = 0;
         MtpLength = 0;
         Faulted = false;
+        MtpFaulted = false;
         foreach (HcaAttentionState? s in _hca) s?.Reset();
         foreach (DsaAttentionState? s in _dsa) s?.Reset();
     }

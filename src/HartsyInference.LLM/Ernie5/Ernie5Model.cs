@@ -64,7 +64,7 @@ public sealed class Ernie5Model : IDisposable
         if (backend.Device != DeviceKind.Cpu)
             throw new NotSupportedException($"ERNIE-5.5 runs on the host reference path only; the {backend.Device} backend has no kernels "
                 + "for its 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.");
-        IReadOnlyList<string> missing = config.UnimplementedFeatures();
+        IReadOnlyList<string> missing = config.UnimplementedFeatures(options.Mtp);
         if (missing.Count > 0)
             throw new NotSupportedException($"This ERNIE-5.5 config names features the model does not implement: {string.Join("; ", missing)}.");
         if (options.Mtp && config.NumNextnPredictLayers != 1)
@@ -180,7 +180,7 @@ public sealed class Ernie5Model : IDisposable
         ArgumentNullException.ThrowIfNull(state);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int tokens = tokenIds.Length, d = Config.HiddenSize, hc = Config.HcMult, startPos = state.Length;
-        RequireAppendable(tokenIds, state, startPos);
+        RequireAppendable(tokenIds, state, startPos, state.Faulted, nameof(Forward));
 
         float[] stream = Embed(tokenIds, d, hc);
         bool completed = false;
@@ -226,6 +226,10 @@ public sealed class Ernie5Model : IDisposable
     /// it. Returns the layer's output stream, <c>[tokens, hc, hidden]</c>: <see cref="MtpHidden"/> reads a draft from it, and a further draft
     /// step takes it as <paramref name="previous"/>.
     /// </summary>
+    /// <remarks>Row <c>i</c> runs at rope position <c>MtpLength + i</c>, which must be the position of the target token whose stream it
+    /// reads, as in vLLM, where the draft takes the target's positions. Keeping <see cref="Ernie5SequenceState.MtpLength"/> in step with
+    /// <see cref="Ernie5SequenceState.Length"/> is the caller's job: the first draft covers the positions the target has committed, and each
+    /// chained step adds one past them. A failure here faults only the MTP cache; the target keeps decoding.</remarks>
     /// <exception cref="InvalidOperationException">The model was loaded without <see cref="Ernie5LoadOptions.Mtp"/>.</exception>
     public float[] MtpForward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<float> previous, Ernie5SequenceState state)
     {
@@ -234,7 +238,7 @@ public sealed class Ernie5Model : IDisposable
         RequireMtp();
         if (!state.HasMtp) throw new ArgumentException("The sequence state has no MTP caches; create it with CreateState.", nameof(state));
         int tokens = tokenIds.Length, d = Config.HiddenSize, startPos = state.MtpLength;
-        RequireAppendable(tokenIds, state, startPos);
+        RequireAppendable(tokenIds, state, startPos, state.MtpFaulted, nameof(MtpForward));
         if (StreamRows(previous, nameof(previous)) != tokens)
             throw new ArgumentException($"previous must hold one stream row per token ({tokens}).", nameof(previous));
 
@@ -251,8 +255,8 @@ public sealed class Ernie5Model : IDisposable
         finally
         {
             if (!ReferenceEquals(layer, _mtp)) layer.Dispose();
-            // The MTP cache already advanced; MtpLength no longer matches it.
-            if (!completed) state.MarkFaulted();
+            // The MTP cache already advanced; MtpLength no longer matches it. The target caches are untouched.
+            if (!completed) state.MarkMtpFaulted();
         }
     }
 
@@ -299,10 +303,10 @@ public sealed class Ernie5Model : IDisposable
         return stream;
     }
 
-    private void RequireAppendable(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, int startPos)
+    private void RequireAppendable(ReadOnlySpan<int> tokenIds, Ernie5SequenceState state, int startPos, bool faulted, string call)
     {
-        if (state.Faulted) throw new InvalidOperationException("An earlier Forward on this state failed partway through; call Reset() before reusing it.");
-        if (tokenIds.Length < 1) throw new ArgumentException("Forward needs at least one token.", nameof(tokenIds));
+        if (faulted) throw new InvalidOperationException($"An earlier {call} on this state failed partway through; call Reset() before reusing it.");
+        if (tokenIds.Length < 1) throw new ArgumentException($"{call} needs at least one token.", nameof(tokenIds));
         if (startPos + tokenIds.Length > state.Capacity)
             throw new InvalidOperationException($"The sequence state holds {state.Capacity} tokens; {startPos + tokenIds.Length} were asked for.");
         foreach (int id in tokenIds)
