@@ -65,8 +65,8 @@ Every stage is a public type of its own and usable alone.
   neighbours). Faces that fold back on their neighbours (normals past 87 degrees) still end as single-face charts: on the bust about 5,800 faces,
   0.3% of its area.
   Measured on three TRELLIS.2 meshes of 1M faces (welded), first version -> now: bust at 512, 111,770 -> 11,785 charts, 5.6% -> 22.5% of the
-  2048x2048 atlas covered by triangles, 2.4 s -> 4.6 to 6.3 s; bust at 1024, 275,550 -> 52,167 charts, 9.5% -> 20.5%, 3.0 s -> 4.6 to 5.7 s; mug,
-  126,147 -> 3,261 charts, 9.3% -> 39.3%, 2.0 s -> 4.1 to 4.7 s (CPU, unwrap only, two runs). Decimating 11M triangles, unwrapping, baking and inpainting took
+  2048x2048 atlas covered by triangles, 2.4 s -> 4.6 to 6.6 s; bust at 1024, 275,550 -> 52,167 charts, 9.5% -> 20.5%, 3.0 s -> 4.6 to 5.7 s; mug,
+  126,147 -> 3,261 charts, 9.3% -> 39.3%, 2.0 s -> 4.1 to 5.3 s (CPU, unwrap only, two runs). Decimating 11M triangles, unwrapping, baking and inpainting took
   46 to 68 s.
 - No seam-length minimization and no chart optimization beyond the grow-and-absorb above; charts are only rotated to the best of 24
   bounding-box angles before packing.

@@ -81,9 +81,10 @@ internal sealed class UvChartGrower
     {
         Basis(normal, out double[] t, out double[] b);
         _tx = t[0]; _ty = t[1]; _tz = t[2]; _bx = b[0]; _by = b[1]; _bz = b[2];
-        // The hash cell follows the chart's own scale (twice the longest edge of its first face), and the overlap tolerances follow the two
-        // triangles compared, so a small component sharing a mesh with a much larger one is judged at its own size.
-        _cell = Math.Max(2.0 * LongestEdge(faces[0]), 1e-300);
+        // The hash cell follows the chart's own scale (twice the mean longest edge of its first face and that face's neighbours, so one big
+        // seed face does not oversize it), and the overlap tolerances follow the two triangles compared, so a small component sharing a
+        // mesh with a much larger one is judged at its own size.
+        _cell = Math.Max(2.0 * LocalEdgeScale(faces[0]), 1e-300);
         _head.Clear();
         _next.Clear();
         _item.Clear();
@@ -127,6 +128,22 @@ internal sealed class UvChartGrower
                 frontier.Enqueue(g, (1.0 - dot, g));
             }
         }
+    }
+
+    private double LocalEdgeScale(int f)
+    {
+        double sum = LongestEdge(f);
+        int count = 1;
+        for (int c = 0; c < 3; c++)
+        {
+            int g = _neighbor[f * 3 + c];
+            if (g < 0)
+                continue;
+            sum += LongestEdge(g);
+            count++;
+        }
+
+        return sum / count;
     }
 
     private double LongestEdge(int f)

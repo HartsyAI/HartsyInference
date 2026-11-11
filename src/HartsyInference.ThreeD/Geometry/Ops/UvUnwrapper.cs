@@ -89,7 +89,7 @@ public static class UvUnwrapper
             (double Cos, double MaxArea)[] rounds =
             [
                 (absorbCos, double.MaxValue),
-                (Math.Cos(options.SteepAbsorbConeHalfAngleDegrees * Math.PI / 180.0), options.SteepAbsorbMaxAreaRatio * meanArea),
+                (steepCos, options.SteepAbsorbMaxAreaRatio * meanArea),
             ];
             foreach ((double cos, double maxArea) in rounds)
             {
@@ -282,7 +282,7 @@ public static class UvUnwrapper
         return new UvUnwrapResult(result, map, faceChart, charts.Count, paddingTexels);
     }
 
-    /// <summary>Per-face normals and areas plus edge adjacency, and the adjacency.</summary>
+    /// <summary>Per-face normals and areas plus edge adjacency.</summary>
     private sealed class FaceData
     {
         private readonly int[] _neighbor;
@@ -329,7 +329,6 @@ public static class UvUnwrapper
         }
 
         public int[] Neighbor => _neighbor;
-
 
         public double[] Normal { get; }
 

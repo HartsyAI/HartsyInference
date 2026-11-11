@@ -142,8 +142,9 @@ public sealed class UvUnwrapperNoisyMeshTests
     [Fact]
     public void SmallSelfOverlappingComponent_NextToAVastOne_IsStillSplit()
     {
-        // A helical ramp (about 0.03 per edge) next to one huge triangle (1000 across): tolerances taken from the whole mesh would call every
-        // ramp triangle a sliver and skip its overlap checks, so the ramp would grow into one self-overlapping chart.
+        // A helical ramp (about 0.1 per edge) next to one enormous triangle (1e9 across): a hash cell and tolerances taken from the whole
+        // mesh's mean edge (about 9e5) would call every ramp triangle a sliver and skip its overlap checks, so the ramp would grow into one
+        // self-overlapping chart (checked to fail on the version that used the mesh-wide scale).
         const int segments = 96, turns = 2, across = 3;
         List<float> verts = [];
         for (int s = 0; s <= segments * turns; s++)
@@ -166,7 +167,7 @@ public sealed class UvUnwrapperNoisyMeshTests
         }
 
         int far = verts.Count / 3;
-        verts.AddRange([5000, 5000, 0, 6000, 5000, 0, 5000, 6000, 0]);
+        verts.AddRange([5e9f, 5e9f, 0, 6e9f, 5e9f, 0, 5e9f, 6e9f, 0]);
         idx.AddRange([far, far + 1, far + 2]);
         Mesh mesh = new() { Vertices = [.. verts], Indices = [.. idx] };
 
