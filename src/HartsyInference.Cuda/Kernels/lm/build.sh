@@ -36,6 +36,7 @@ KERNELS=(
     "mul_mat_vec_q2k_q8_1"
     "mul_mat_vec_q3k_q8_1"
     "ssm_prefill_f32"
+    "ssm_channel_decay_prefill_f32"
 )
 # m16n8k16 F16 MMA and cp.async: no Turing build. Turing takes the flash_attn_f32 rows.
 SM80_ONLY=("flash_attn_causal_f16")

@@ -125,10 +125,8 @@ public static class GatedDeltaNetReference
         });
     }
 
-    /// <summary>Host <see cref="IBackend.SsmChannelDecayPrefill"/>: the delta rule with a per-key-channel log-decay (Kimi KDA). Per
-    /// token and value head, <c>S[:, c] ·= exp(logDecay[c])</c>, then the delta update and <c>o = S·q</c>; the output is the raw
-    /// recurrence, so the caller applies the norm and gate.</summary>
-    public static unsafe void ChannelDecayScan(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor logDecay,
+    /// <summary>Validates <see cref="IBackend.SsmChannelDecayPrefill"/>'s operands and returns the token count.</summary>
+    public static int ValidateChannelDecayScan(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor logDecay,
         Tensor betaRaw, int hv, int sv, int sk, int repeat)
     {
         RequireF32(nameof(IBackend.SsmChannelDecayPrefill), output, state, q, k, v, logDecay, betaRaw);
@@ -143,7 +141,16 @@ public static class GatedDeltaNetReference
             throw new ArgumentException($"SsmChannelDecayPrefill operands do not all hold {seq} tokens of {hv}×{sv} values over {keyDim} keys.", nameof(output));
         if (state.ElementCount != valueDim * sk)
             throw new ArgumentException($"SsmChannelDecayPrefill state {state.Shape} does not match hv={hv}, sv={sv}, sk={sk}.", nameof(state));
-        int seqLen = checked((int)seq);
+        return checked((int)seq);
+    }
+
+    /// <summary>Host <see cref="IBackend.SsmChannelDecayPrefill"/>: the delta rule with a per-key-channel log-decay (Kimi KDA). Per
+    /// token and value head, <c>S[:, c] ·= exp(logDecay[c])</c>, then the delta update and <c>o = S·q</c>; the output is the raw
+    /// recurrence, so the caller applies the norm and gate.</summary>
+    public static unsafe void ChannelDecayScan(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor logDecay,
+        Tensor betaRaw, int hv, int sv, int sk, int repeat)
+    {
+        int seqLen = ValidateChannelDecayScan(output, state, q, k, v, logDecay, betaRaw, hv, sv, sk, repeat);
         int keyDimI = hv / repeat * sk, valueDimI = hv * sv, decayDimI = hv * sk;
         float* st = (float*)state.DataPointer;
         float* qp = (float*)q.DataPointer;
