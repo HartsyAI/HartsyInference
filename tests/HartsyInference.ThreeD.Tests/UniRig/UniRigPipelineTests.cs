@@ -51,15 +51,14 @@ public sealed class UniRigPipelineTests
     }
 }
 
-/// <summary>End-to-end run on real weights. Integration lane: set HARTSY_UNIRIG_DIR or place Models/3D/unirig beside the repo.</summary>
+/// <summary>End-to-end run on real weights. Integration lane: skipped unless HARTSY_UNIRIG_DIR holds both checkpoints.</summary>
 [Trait("Category", "Integration")]
 public sealed class UniRigPipelineRealWeightsTests
 {
-    [Fact]
+    [UniRigRealWeightsFact]
     public void Generate_RigsAHumanoidIntoAStructurallyValidGlb()
     {
-        string root = Environment.GetEnvironmentVariable("HARTSY_UNIRIG_DIR") ?? string.Empty;
-        Assert.True(Directory.Exists(root), "Set HARTSY_UNIRIG_DIR to the folder holding the UniRig skeleton/ and skin/ checkpoints.");
+        string root = Environment.GetEnvironmentVariable("HARTSY_UNIRIG_DIR")!;
         using CpuBackend backend = new();
         using UniRigPipeline pipeline = new(backend, root);
         Mesh mesh = Humanoid();
