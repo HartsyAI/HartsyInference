@@ -269,8 +269,9 @@ public sealed class MeshService : IMeshService, IDisposable
             }
             try
             {
-                string dino = Path.Combine(folder, "dino", "model.safetensors"), upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
-                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, File.Exists(dino) ? dino : null, File.Exists(upscaler) ? upscaler : null);
+                string? dino = FindPaintDino(folder);
+                string upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, File.Exists(upscaler) ? upscaler : null);
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -280,6 +281,30 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw;
             }
         }
+    }
+
+    // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
+    private static string? FindPaintDino(string folder)
+    {
+        string own = Path.Combine(folder, "dino", "model.safetensors");
+        if (File.Exists(own))
+        {
+            return own;
+        }
+        string? models3D = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (models3D is null)
+        {
+            return null;
+        }
+        foreach (string relative in new[] { "hunyuan3d2/hunyuan3d-dit-v2-0/model.fp16.safetensors", "hunyuan3d-fast/model.fp16.safetensors", "hunyuan3d-turbo/model.fp16.safetensors" })
+        {
+            string candidate = Path.Combine(models3D, relative);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     // The folder holding unet/ and vae/: the path itself, or the nearest parent of a file (any asset of the model may be the representative one).

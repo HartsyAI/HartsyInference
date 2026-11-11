@@ -72,4 +72,24 @@ public sealed class HunyuanPaintLoaderTests
         Assert.Equal(DType.F16, half.DType);
         Assert.Equal(0f, *(float*)single.DataPointer);
     }
+
+    [Fact]
+    public void StripPrefix_ExposesABundledDinoUnderItsStandaloneNames()
+    {
+        using Tensor cls = Empty(1, 1, 4), other = Empty(2);
+        Dictionary<string, Tensor> bundle = new()
+        {
+            ["conditioner.main_image_encoder.model.embeddings.cls_token"] = cls,
+            ["conditioner.main_image_encoder.model.layernorm.weight"] = other,
+            ["model.double_blocks.0.img_mod.lin.weight"] = other,
+        };
+
+        IReadOnlyDictionary<string, Tensor> stripped = HunyuanPaintLoader.StripPrefix(bundle, HunyuanPaintLoader.BundledDinoPrefix);
+
+        Assert.Equal(2, stripped.Count);
+        Assert.Same(cls, stripped["embeddings.cls_token"]);
+        Assert.Same(bundle, HunyuanPaintLoader.StripPrefix(bundle, "absent."));
+        Dictionary<string, Tensor> standalone = new() { ["embeddings.cls_token"] = cls };
+        Assert.Same(standalone, HunyuanPaintLoader.StripPrefix(standalone, HunyuanPaintLoader.BundledDinoPrefix));
+    }
 }

@@ -61,7 +61,7 @@ public sealed class HunyuanPaintLoader : IDisposable
                 if (dinoPath is null)
                     throw new FileNotFoundException("Paint 2.1 conditions on DINOv2-giant; supply the facebook/dinov2-giant model.safetensors (or its folder).");
                 Dinov2VisionEncoder dino = new(Dinov2Preset.Giant);
-                HunyuanPaintF32Weights dinoWeights = new(Read(File.Exists(dinoPath) ? dinoPath : Path.Combine(dinoPath, "model.safetensors"), owners));
+                HunyuanPaintF32Weights dinoWeights = new(StripPrefix(Read(File.Exists(dinoPath) ? dinoPath : Path.Combine(dinoPath, "model.safetensors"), owners), BundledDinoPrefix));
                 owners.Add(dinoWeights);
                 dino.LoadWeights(dinoWeights);
                 HunyuanPaintF32Weights projection = new(unetWeights);
@@ -83,6 +83,23 @@ public sealed class HunyuanPaintLoader : IDisposable
                 owners[i].Dispose();
             throw;
         }
+    }
+
+    /// <summary>Where the Hunyuan3D shape checkpoints keep their DINOv2-giant image encoder (<c>conditioner.main_image_encoder.model.*</c>, F16 copies of
+    /// <c>facebook/dinov2-giant</c> with identical tensor names): a shape bundle can stand in for the standalone file.</summary>
+    public const string BundledDinoPrefix = "conditioner.main_image_encoder.model.";
+
+    /// <summary>Returns <paramref name="weights"/> with <paramref name="prefix"/> removed from every key when the tensors carry it, else the input unchanged.</summary>
+    public static IReadOnlyDictionary<string, Tensor> StripPrefix(IReadOnlyDictionary<string, Tensor> weights, string prefix)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        if (!weights.Keys.Any(k => k.StartsWith(prefix, StringComparison.Ordinal)))
+            return weights;
+        Dictionary<string, Tensor> stripped = [];
+        foreach ((string key, Tensor tensor) in weights)
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+                stripped[key[prefix.Length..]] = tensor;
+        return stripped;
     }
 
     /// <summary>Reads the generation from the UNet's tensor names and shapes.</summary>
