@@ -245,7 +245,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
             FaceOrientation.Unify(mesh);
             MeshOps.ComputeVertexNormals(mesh);
-            Trellis2ImageTo3DPipeline.ToYUp(mesh);
+            ToExportFrame(mesh);
             Stage();
             return mesh;
         }
@@ -256,6 +256,25 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             negCond?.Dispose();
             coarse?.Feats.Dispose();
             fine?.Feats.Dispose();
+        }
+    }
+
+    /// <summary>Turns the mesh from the frame the flows sample in into the exported one: the upstream export is a half turn about the up axis,
+    /// <c>(x, y, z) -> (-x, y, -z)</c>, for positions and normals. Pixal3D samples with Y up and the camera on +Z, so unlike TRELLIS.2's Z-up frame
+    /// it takes no up-axis conversion, and the half turn keeps the winding.</summary>
+    internal static void ToExportFrame(Mesh mesh)
+    {
+        Rotate(mesh.Vertices);
+        if (mesh.Normals is not null)
+            Rotate(mesh.Normals);
+
+        static void Rotate(float[] values)
+        {
+            for (int i = 0; i < values.Length; i += 3)
+            {
+                values[i] = -values[i];
+                values[i + 2] = -values[i + 2];
+            }
         }
     }
 

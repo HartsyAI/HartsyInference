@@ -82,8 +82,21 @@ public sealed class Pixal3DPipelineTests
         Mesh mesh = rig.Pipeline.Generate(Image(), new Pixal3DOptions { Grid = 1536, Seed = 1 });
 
         Assert.Contains("shape Res1024 grid=64 seed=3 steps=2", rig.Calls);
-        // The first voxel's dual vertex sits half a voxel in from the origin: x = -0.5 + 0.5 / 1024 at the floor resolution.
-        Assert.Equal(-0.5f + 0.5f / 1024f, mesh.Vertices[0], 6);
+        // The first voxel's dual vertex sits half a voxel in from the origin, x = -0.5 + 0.5 / 1024 at the floor resolution, and the export frame
+        // negates x.
+        Assert.Equal(0.5f - 0.5f / 1024f, mesh.Vertices[0], 6);
+    }
+
+    [Fact]
+    public void ToExportFrame_HalfTurnsAboutTheUpAxisForPositionsAndNormals()
+    {
+        Mesh mesh = new() { Vertices = [1f, 2f, 3f, -4f, 5f, -6f], Indices = [0, 1, 0], Normals = [0f, 0f, 1f, 1f, 0f, 0f] };
+
+        Pixal3DImageTo3DPipeline.ToExportFrame(mesh);
+
+        Assert.Equal([-1f, 2f, -3f, 4f, 5f, 6f], mesh.Vertices);
+        Assert.Equal([0f, 0f, -1f, -1f, 0f, 0f], mesh.Normals);
+        Assert.Equal([0, 1, 0], mesh.Indices);
     }
 
     [Fact]
