@@ -730,11 +730,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <summary>Uploads one weight and keeps it resident. Already-resident weights cost nothing.</summary>
-    public void PreloadWeight(Tensor weight)
+    public void PreloadWeight(Tensor weight) => PreloadWeightFromHost(weight);
+
+    /// <summary><see cref="PreloadWeight"/>, reporting whether it allocated a device buffer and filled it from the host. False for a weight that was
+    /// already resident, one left on the host for want of room, and an activation promoted in place: the device buffer of that last one may be the
+    /// only valid copy of its contents, so a caller that gives weights back must not free it.</summary>
+    public bool PreloadWeightFromHost(Tensor weight)
     {
         try
         {
-            PreloadWeightCore(weight);
+            return PreloadWeightCore(weight);
         }
         catch (InvalidOperationException ex) when (IsCorruption(ex))
         {
@@ -742,11 +747,11 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
     }
 
-    private void PreloadWeightCore(Tensor weight)
+    private bool PreloadWeightCore(Tensor weight)
     {
         if (Weights.ContainsKey(weight))
         {
-            return;
+            return false;
         }
         // An activation that is about to become a weight keeps its buffer: the bytes are already there, and the
         // binding it holds would otherwise free the buffer the weight cache is now pointing at.
@@ -755,7 +760,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             weight.ClearGpuBinding(BindingKey);
             Weights[weight] = promoted.Buffer;
             CachedBuffers.Add(promoted.Buffer);
-            return;
+            return false;
         }
         MakeCurrent();
         long bytes = ByteSize(weight);
@@ -764,12 +769,13 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             // Not an error: the weight stays on the host and uploads per op, like a weight nobody preloaded.
             Interlocked.Increment(ref _preloadSkippedWeights);
             Interlocked.Add(ref _preloadSkippedBytes, bytes);
-            return;
+            return false;
         }
         TBuffer buffer = AllocateWeight(bytes);
         Upload(buffer, weight, bytes);
         Weights[weight] = buffer;
         CachedBuffers.Add(buffer);
+        return true;
     }
 
     private long _preloadSkippedWeights, _preloadSkippedBytes;

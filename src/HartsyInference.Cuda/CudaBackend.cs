@@ -8794,23 +8794,38 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// exits, starving every other consumer of the card (including separate processes).</remarks>
     protected override void PreloadExpandedWeights(IEnumerable<Tensor> weights) => PreloadWithRollback(uploaded =>
     {
+        (long skippedBefore, long skippedBytesBefore) = GpuTransferHelper.PreloadSkipped();
+        // The weights that went up from the host, the only ones a full device may take back: an activation promoted in place has no host copy.
+        List<Tensor> fromHostWeights = [];
         foreach (Tensor weight in weights)
         {
             // Only weights this call actually uploaded are rollback candidates — one already resident from
             // an earlier phase (or from vram.keepModels) is not ours to free. PreloadWeight reports this
             // itself so ownership is decided by the same lookup that does the registration.
-            if (GpuTransferHelper.PreloadWeight(weight))
+            if (GpuTransferHelper.PreloadWeight(weight, out bool fromHost))
             {
                 uploaded.Add(weight);
+                if (fromHost)
+                {
+                    fromHostWeights.Add(weight);
+                }
             }
 
             // The device can report itself full a moment after the allocation that caused it (a skipped weight is checked too). The rest of the
             // set then streams per op, and part of what went resident is given back.
-            if (uploaded.Count > 0 && GpuTransferHelper.DeviceReportsFull())
+            if (fromHostWeights.Count > 0 && GpuTransferHelper.DeviceReportsFull())
             {
-                GpuTransferHelper.ReleaseForOvercommit(uploaded);
+                GpuTransferHelper.ReleaseForOvercommit(fromHostWeights, uploaded);
                 break;
             }
+        }
+
+        (long skipped, long skippedBytes) = GpuTransferHelper.PreloadSkipped();
+        if (skipped > skippedBefore)
+        {
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] Left {skipped - skippedBefore} weight(s), {(skippedBytes - skippedBytesBefore) >> 20} MB, on the host "
+                + "(they upload per op): making them resident would have left the device under vram.preloadHeadroomMb free. "
+                + "Lower vram.preloadHeadroomMb, or set vram.overcommitReliefMb to 0, to preload everything.");
         }
     });
 

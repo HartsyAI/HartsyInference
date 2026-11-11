@@ -146,17 +146,19 @@ public static partial class EngineKnobs
         Long("vram.autopromoteHeadroomMb", 1536L, KnobScope.Runtime, KnobDomain.Vram,
             "VRAM headroom in MB kept free when deciding whether to auto-promote a tensor to resident.");
 
-    /// <summary>VRAM headroom in MB that an explicit <c>PreloadWeights</c> leaves free. A weight whose upload would take the free memory
-    /// below it is not made resident and streams per op instead; 0 restores the unconditional preload.</summary>
+    /// <summary>VRAM headroom in MB that an explicit <c>PreloadWeights</c> leaves free, on Windows (where the per-process video-memory budget
+    /// collapses past about 8 GiB). A weight whose upload would take the free memory below it is not made resident and streams per op instead;
+    /// 0, or <c>vram.overcommitReliefMb</c> at 0, restores the unconditional preload. Other platforms preload everything.</summary>
     public static readonly Knob<long> PreloadHeadroomMb =
         Long("vram.preloadHeadroomMb", 2048L, KnobScope.Runtime, KnobDomain.Vram,
-            "VRAM headroom in MB that PreloadWeights leaves free; weights past it stream per op instead of becoming resident (0 = unconditional).");
+            "Windows: VRAM headroom in MB that PreloadWeights leaves free; weights past it stream per op instead of becoming resident (0 = unconditional).");
 
     /// <summary>Device memory in MB an explicit preload gives back when the card reports no free memory while the weights go on: the pool
-    /// and the activations of the forward that follows need that room, and without it the process stalls instead of failing.</summary>
+    /// and the activations of the forward that follows need that room, and without it the process stalls instead of failing. Windows only;
+    /// 0 turns the whole 8 GiB guard off (this relief, the preload headroom, the limit and the pool trim).</summary>
     public static readonly Knob<long> OvercommitReliefMb =
         Long("vram.overcommitReliefMb", 3072L, KnobScope.Runtime, KnobDomain.Vram,
-            "Device memory in MB a preload releases when the device reports no free memory part-way through it (0 = keep everything).");
+            "Windows: device memory in MB a preload releases when the device reports no free memory part-way through it (0 = guard off).");
 
     /// <summary>Cap in MB on the im2col banding buffer for convolutions.</summary>
     public static readonly Knob<long> Im2colBandMb =

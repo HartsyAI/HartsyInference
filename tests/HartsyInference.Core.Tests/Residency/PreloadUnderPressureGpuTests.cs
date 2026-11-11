@@ -50,8 +50,12 @@ public sealed class PreloadUnderPressureGpuTests
             _output.WriteLine($"asked for {(long)count * WeightBytes >> 20} MB of weights on a card with {freeBefore >> 20} MB free of {total >> 20}; "
                 + $"after the preload {freeAfter >> 20} MB free, {preload.Elapsed.TotalSeconds:F1} s");
 
-            // The room left must hold the activations of a large op, which is what stalls on an overcommitted card.
-            Assert.True(freeAfter >= 1536L << 20, $"the preload left the device full: {freeAfter >> 20} MB free");
+            // The room left must hold the activations of a large op, which is what stalls on an overcommitted card. The bound follows from the
+            // 2048 MB vram.preloadHeadroomMb default; the guard is Windows-only, so elsewhere the preload may legitimately fill the card.
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.True(freeAfter >= 1536L << 20, $"the preload left the device full: {freeAfter >> 20} MB free");
+            }
 
             const int n = 12288;
             using Tensor a = Filled(n, 0.5f), b = Filled(n, 0.25f);
