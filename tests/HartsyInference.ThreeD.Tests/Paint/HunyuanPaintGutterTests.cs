@@ -21,15 +21,25 @@ public sealed class HunyuanPaintGutterTests
         PaintTexelSurface surface = PaintTexelSurface.Create(PaintMeshFrame.Create(mesh), mesh.Uvs, Size, Size);
         Assert.True(surface.Count > 50);
         float[] texture = new float[Size * Size * 3];
-        foreach (int texel in surface.Texels)
-            Array.Fill(texture, 1f, texel * 3, 3);
-        int covered = surface.Texels[0], near = 8 * Size + 26, far = 60 * Size + 60;
+        for (int i = 0; i < surface.Texels.Length; i++)
+            Array.Fill(texture, i % 2 == 0 ? 1f : 0.5f, surface.Texels[i] * 3, 3);
+        double mean = 0;
+        for (int i = 0; i < surface.Texels.Length; i++)
+            mean += i % 2 == 0 ? 1.0 : 0.5;
+        mean /= surface.Texels.Length;
+        HashSet<int> covered = [.. surface.Texels];
+        int inside = surface.Texels[0], far = 60 * Size + 60, near = inside;
+        while (covered.Contains(near))
+            near++;
+        near += 2; // a few texels past the island's edge on the same row: within reach, not covered
+        Assert.DoesNotContain(near, covered);
+        Assert.DoesNotContain(far, covered);
 
         HunyuanPaintPipeline.FlattenFarGutter(texture, surface, Size);
 
-        Assert.Equal(1f, texture[covered * 3]);
+        Assert.Equal(1f, texture[inside * 3]);
         Assert.Equal(0f, texture[near * 3]);
-        Assert.Equal(1f, texture[far * 3]);
-        Assert.Equal(1f, texture[far * 3 + 2]);
+        Assert.Equal(mean, texture[far * 3], 4);
+        Assert.Equal(mean, texture[far * 3 + 2], 4);
     }
 }
