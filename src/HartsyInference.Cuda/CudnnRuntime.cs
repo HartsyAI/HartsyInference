@@ -7,6 +7,10 @@ namespace HartsyInference.Cuda;
 /// <summary>Locates, version-guards, and (on first use) auto-provisions the cuDNN runtime so the conv/SDPA fast paths engage across OS / CUDA-version / GPU combos WITHOUT the user hand-installing it. <para>cuDNN is a ~1 GB, <b>CUDA-major-specific</b>, OS-specific set of libraries, so it is NOT shipped inside the DLL folder (that would be ~6 GB across CUDA 11/12/13 × Windows/Linux). Instead the matching build is resolved from, in order: <c>paths.cudnnDir</c> → the per-user engine cache → a <c>cudnn/</c> folder beside the assembly (an optional bundled deploy) → the OS default (a system install). If none is found and <c>paths.cudnnAutofetch</c> is on, the matching redist is downloaded once, the first time a model asks for a cuDNN path (<see cref="EnsureAvailable"/>), not at engine start. A cuDNN built for a different CUDA major than the running driver is <b>REJECTED</b> — that exact mismatch (a CUDA-12 cuDNN on a CUDA-13 runtime) previously hung the engine mid-inference.</para></summary>
 public static class CudnnRuntime
 {
+    /// <summary>The Windows dispatcher and the sub-libraries it loads by name.</summary>
+    internal static readonly string[] WindowsLibraries =
+        ["cudnn64_9.dll", "cudnn_graph64_9.dll", "cudnn_ops64_9.dll", "cudnn_cnn64_9.dll", "cudnn_adv64_9.dll"];
+
     private static volatile bool _available;
 
     /// <summary>True when a version-matched cuDNN loaded and passed the CUDA-major guard.</summary>
@@ -165,13 +169,33 @@ public static class CudnnRuntime
         return false;
     }
 
-    /// <summary>The first search dir (env / cache / bundled) that actually holds the cuDNN dispatcher, or null.</summary>
+    /// <summary>True when <paramref name="dir"/> holds the cuDNN 9 dispatcher and, on Windows, every sub-library it loads.</summary>
+    internal static bool HasLibraries(string? dir)
+    {
+        if (string.IsNullOrEmpty(dir))
+        {
+            return false;
+        }
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return File.Exists(Path.Combine(dir, "libcudnn.so.9"));
+        }
+        foreach (string name in WindowsLibraries)
+        {
+            if (!File.Exists(Path.Combine(dir, name)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>The first search dir (env / cache / bundled) that holds a complete cuDNN, or null.</summary>
     private static string? ResolveExistingDir(int cudaMajor)
     {
-        string soname = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cudnn64_9.dll" : "libcudnn.so.9";
         foreach (string? dir in new[] { EngineKnobs.CudnnDir.Value, CacheLibDir(cudaMajor), BundledDir() })
         {
-            if (!string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, soname)))
+            if (HasLibraries(dir))
             {
                 return dir;
             }
