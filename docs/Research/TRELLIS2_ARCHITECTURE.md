@@ -192,7 +192,7 @@ for its stage and released. Attention runs through `IBackend.ScaledDotProductAtt
 
 ## Open items
 
-- No Python reference dumps exist, so no stage is parity-verified; see the status row.
+- No Python reference dumps exist, so no stage is parity-verified; see the status row. The one exception is the DINOv3 conditioning, checked against HF `DINOv3ViTModel` on the CPU on the marble bust: correlation 0.999995 at 512 (1029 tokens) and 0.999996 at 1024 (4101 tokens), max abs 0.10 and 0.17.
 - The shape VAE's parity in CoLa3D used a naive convolution shim and an assumed kernel-axis convention; the TRELLIS.2 shape path inherits that caveat.
 - The texture path has run on real weights (headers match, 512 and 1024 chains complete, GLBs render), but nothing is compared with Python (see the run above).
 - The mesh post-processing is CPU and approximates cumesh, nvdiffrast and OpenCV (see [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)); its UV atlas fragments on these meshes.
