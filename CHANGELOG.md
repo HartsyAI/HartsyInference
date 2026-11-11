@@ -5,6 +5,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
+- **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
 - **Added: UniRig skeleton generation (stage 1 of the auto-rigger), validation-pending.** `HartsyInference.ThreeD.Models.UniRig`
   ports the `VAST-AI/UniRig` articulation-xl skeleton stage: the Michelangelo-style point encoder (65,536 points with normals, 1,024
   farthest-point queries), the OPT decoder hosted on `GenericTransformer` with the checkpoint's keys remapped, the 256-bin

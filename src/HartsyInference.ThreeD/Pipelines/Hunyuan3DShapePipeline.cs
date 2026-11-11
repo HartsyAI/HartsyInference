@@ -98,18 +98,22 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Probe("dinov2-cond");
         Tensor uncond = new(cond.Shape, DType.F32); // zero (null) conditioning for CFG
 
-        // 2. Flow-match denoise the VecSet latent. hy3dgen FlowMatchEulerDiscreteScheduler (shift 1): sigmas
-        //    ASCEND [~0→1] (linspace(1,1000,steps)/1000, + a trailing 1.0); the DiT is fed t = sigma·1000, and the
-        //    Euler update is prev = x + (sigma_next − sigma)·noise_pred. init latent = pure noise (init_noise_sigma 1).
-        float[] sigmas = new float[steps + 1];
-        for (int i = 0; i < steps; i++) sigmas[i] = (steps > 1 ? (1f + i * (999f / (steps - 1))) : 1f) / 1000f;
-        sigmas[steps] = 1f;
+        // 2. Flow-match denoise the VecSet latent (hy3dgen FlowMatchEulerDiscreteScheduler, shift 1): ascending sigmas,
+        //    prev = x + (sigma_next − sigma)·v, initial latent = pure noise.
+        float[] sigmas = Hunyuan3DFlowSchedule.Sigmas(steps);
 
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(1, _cfg.LatentTokens, _cfg.LatentChannels), seed);
         Backend.PreloadWeights(_dit.EnumerateWeights());
         for (int k = 0; k < steps; k++)
         {
-            float t = sigmas[k] * 1000f, dt = sigmas[k + 1] - sigmas[k];
+            float dt = sigmas[k + 1] - sigmas[k];
+            if (dt == 0f)
+            {
+                // The last step has zero width, so its velocity cannot change the latent.
+                onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
+                continue;
+            }
+            float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
             Tensor vCond = _dit.Forward(Backend, latents, cond, t);
             Tensor vUncond = _dit.Forward(Backend, latents, uncond, t);
             // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
@@ -124,7 +128,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond.Dispose();
-        Probe($"dit-loop ({steps} steps x2 CFG)");
+        Probe($"dit-loop ({steps - 1} evals x2 CFG)");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
         float inv = 1f / _cfg.VaeScaleFactor;
@@ -137,7 +141,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         latents.Dispose();
         Probe($"vae-decode ({gridRes}^3)");
 
-        Mesh mesh = MeshOps.ComputeVertexNormals(MarchingCubes.Extract(field, request.IsoLevel != 0f ? request.IsoLevel : _cfg.IsoLevel));
+        Mesh mesh = Hunyuan3DSurface.Extract(field, request.IsoLevel != 0f ? request.IsoLevel : _cfg.IsoLevel);
         Probe("marching-cubes");
         return new ThreeDResult { Mesh = mesh, Seed = seed };
     }
