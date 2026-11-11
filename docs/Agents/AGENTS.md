@@ -55,10 +55,14 @@ Work through these steps in order:
      CUDA picks the F32 attention route and tile height (and MiniMax-H3 its chunk rows) from free VRAM. A change that
      frees memory earlier can therefore move bits on a card near the threshold. Before you call an identity failure a
      bug, rerun both arms with `vram.sdpaForceTiled=true`, `numerics.sdpaTile=256` and `vram.h3ChunkRows=1000000` pinned.
-4. **Final pass.** Clean up comments and docs. Bump the version only for a new feature or a large bug fix. Such a bump
-   needs a `## alpha.N` section in `CHANGELOG.md` and the matching `VersionSuffix` in `Directory.Build.props`, one bump
-   per PR. Small changes, docs-only ones included, skip both. A merge to `main` that touches `src/` publishes whatever
-   version is already set, so a small change ships with the next bump and its changelog section.
+4. **Final pass.** Clean up comments and docs. The changelog is for what a user would want to know, and each thing is
+   written once, as one line: "added support for model X", or "added feature Y to model X". Fixes, refactors, tests, docs,
+   spikes, review follow-ups and the intermediate PRs of a series get no entry, and nothing goes under an `## Unreleased`
+   heading, because every PR adding there conflicts with every other. Bump the version only for a new feature or a large
+   bug fix. Such a bump needs a `## alpha.N` section in `CHANGELOG.md` and the matching `VersionSuffix` in
+   `Directory.Build.props`, one bump per PR. Small changes, docs-only ones included, skip both. In a multi-PR series
+   leave both alone until the last PR, which carries the series' one line. A merge to `main` that touches `src/`
+   publishes whatever version is already set, so a small change ships with the next bump and its changelog section.
 5. **Mark the PR ready for review.** `claude-code-review.yml` reviews on open, on each push and on ready. The Codex
    connector reviews separately. If Codex reports a usage limit, no review happened: comment `@claude review pr` on the
    PR and wait for `claude[bot]`.

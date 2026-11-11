@@ -147,7 +147,8 @@ checkout is shared. Use a worktree. Each PR in the suggested stack is tested and
 
 Engine conventions: pure C#, `IBackend` only, zero GC on hot paths, and owned-tensor disposal (leaks hide in position-id and
 temporary tensors). Use no per-model environment switches. Bump the version once per stacked batch, on its last PR:
-add a `CHANGELOG.md` section and update `Directory.Build.props`. Earlier `src/` merges in the batch ride along with that
+add a one-line `CHANGELOG.md` section ("added support for <model>") and update `Directory.Build.props`; earlier PRs of the
+batch touch neither, and nothing goes under `## Unreleased`. Earlier `src/` merges in the batch ride along with that
 bump, per the owner's rule and the AGENTS.md note that a small change ships with the next bump. When review conflicts
 appear, resolve them by merging `origin/main`. Interface contracts move, so re-check `IRecipePipeline` and
 `ImageEffectiveSettings` after every merge.
