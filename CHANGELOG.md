@@ -26,6 +26,21 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   and the top four influences per vertex (`SkinnedGlbWriter`, separate from the hair-card writer). Pass the folder holding
   `skeleton/articulation-xl_quantization_256/model.ckpt` and `skin/articulation-xl/model.ckpt` with `--model-path`; `--steps` and
   `--grid` are rejected. Validation-pending: no Python reference was run, so parity is not claimed.
+- **Added: TRELLIS.2 shape-only image to mesh.** `hartsy 3d <image.png> -m trellis2` and `POST /v1/native/mesh` (model `trellis2`) turn one
+  image into a GLB with positions and computed normals (no texture, no UVs). The chain is foreground preprocessing, DINOv3 conditioning,
+  the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
+  dual-grid meshing, all in C#. `--grid` is the final dual-grid resolution for this model: 512, 1024 (default, `1024_cascade`) or 1536
+  (`1536_cascade`); other values are rejected before any weight loads. `--grid` keeps its meaning for the other models. An image with an alpha
+  channel is used as the cutout; one without needs the BiRefNet-matting checkpoint (a stand-in for upstream's RMBG-2.0, which is not used).
+- **Fixed: TRELLIS.2 and HairDeck now find their Vision-folder checkpoints (DINOv3, BiRefNet-matting) through the configured Vision folder, and a matting checkpoint installed after the first TRELLIS.2 load is used without a restart.**
+- **Added: config-driven TRELLIS.2 flow classes** (`Trellis2SparseStructureFlow`, `Trellis2SlatFlow`: shared adaLN with a per-block
+  modulation, QK RMS norm, 3D RoPE), the guidance-interval FlowEuler sampler with CFG rescale, `pipeline.json` parsing, cascade
+  token-cap logic, and `ShapeVaeDecoder.Upsample` (the decoder's first levels, returning coordinates). The existing full decode is unchanged.
+- **Fixed: TRELLIS.2 meshes shaded with dark vertical streaks and speckle.** A dual-grid quad is wound the same way whichever side of the surface
+  is inside, so about half of a raw mesh's triangles faced inward and the vertex normals averaged across them were wrong. The pipeline now
+  unifies the winding (`FaceOrientation.Unify`, as upstream's `unify_face_orientations` does) before computing normals. CoLa3D shares the
+  dual-grid mesher and is unchanged.
+- Parity: the DINOv3 conditioning, the 512 shape flow forward and the guided sampler match the upstream Python on the CPU (correlation 0.99993 or better); the structure stage is not checked. The catalog entry is Structural and the status row is 🔧.
 - **Added: a model-independent mesh post-processing and PBR baking toolkit in `HartsyInference.ThreeD`.** `MeshDecimator`
   (quadric edge collapse with the upstream 3x-then-target schedule), `MeshCleaner`, `TriangleBvh`, `UvUnwrapper` (chart
   segmentation, planar projection, atlas packing), `Rasterizer`, `SparseAttributeVolume` with `SparseAttributeSampler`,

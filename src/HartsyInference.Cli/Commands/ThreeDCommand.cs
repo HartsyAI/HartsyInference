@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D or TRELLIS, one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -15,12 +15,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d and unirig.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb mesh (cola3d, unirig).")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis, trellis2) or a .obj/.glb mesh (cola3d, unirig). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, trellis, cola3d, unirig, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d, trellis, trellis2, cola3d, unirig, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, trellis, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d, trellis, trellis2, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
@@ -55,7 +55,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Marching-cubes grid resolution (0 = model default).</summary>
         [CommandOption("--grid")]
-        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256, or 1024 with --prompt-point).")]
+        [Description("Grid resolution (0 = model default; cola3d: dual-grid voxels per axis, a multiple of 16, at most 1024, default 256, or 1024 with --prompt-point; trellis2: final dual-grid resolution, 512, 1024 or 1536, default 1024; 512 is one flow, 1024 and 1536 run the 512-to-1024 cascade).")]
         public int Grid { get; init; }
 
         /// <summary>Mask PNGs for cola3d, one per object (repeatable); all the same size, red channel is the coverage.</summary>
@@ -70,9 +70,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("cola3d: a point per object as x,y,z in the scene mesh's units (repeatable). Runs on the 1024 grid unless --grid is set, which is slow on CPU. Excludes --prompt-mask.")]
         public string[]? PromptPoints { get; init; }
 
-        /// <summary>Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).</summary>
+        /// <summary>Denoising steps (Hunyuan3D, TRELLIS, TRELLIS.2 and HairDeck; 0 = default; trellis2: 12).</summary>
         [CommandOption("--steps")]
-        [Description("Denoising steps (Hunyuan3D, TRELLIS and HairDeck; 0 = default).")]
+        [Description("Denoising steps (Hunyuan3D, TRELLIS, TRELLIS.2 and HairDeck; 0 = default; trellis2: 12).")]
         public int Steps { get; init; }
 
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>

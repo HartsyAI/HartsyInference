@@ -4,7 +4,7 @@ namespace HartsyInference.Engine.Services;
 public static class MeshModelIds
 {
     /// <summary>Image-to-3D models: their request carries <see cref="Requests.MeshRequest.Image"/>.</summary>
-    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", "hunyuan3d", "trellis"];
+    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", "hunyuan3d", "trellis", "trellis2"];
 
     /// <summary>Scene-decomposition models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/>.</summary>
     public static readonly IReadOnlyList<string> SceneMesh = ["cola3d"];

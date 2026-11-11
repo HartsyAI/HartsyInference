@@ -21,7 +21,7 @@ public sealed record MeshRequest
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
-    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt).</summary>
+    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt; trellis2: the final dual-grid resolution, 512, 1024 or 1536, default 1024, any other value is rejected before a checkpoint loads).</summary>
     public int GridResolution { get; init; }
 
     /// <summary>RNG seed; negative means a random seed.</summary>
