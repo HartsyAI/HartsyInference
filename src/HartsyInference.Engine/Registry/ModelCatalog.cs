@@ -264,6 +264,46 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>Pixal3D (TencentARC/Pixal3D), shape-only image to mesh: TRELLIS.2's cascade with the image reaching each flow as global DINOv3 tokens plus
+    /// per-voxel features read at the voxel's projected position (NAF-upsampled for the shape flows). The asset set is the shape path of the main branch:
+    /// the three projection-mode flows with their configs, <c>pipeline.json</c>, the two decoders (byte-identical to TRELLIS.2's, repeated here so the
+    /// entry stands alone), the DINOv3 encoder shared with TRELLIS.2 and an optional BiRefNet matting checkpoint. The hashes pin revision
+    /// b0cb2e1b794cab9aa0ac38a95d794a4d9337437f (an asset carries no revision field, so a changed file fails the hash check); the safetensors hashes are the repository's LFS oids, the small files' hashes were computed from the downloaded
+    /// bytes. NAF (<c>naf_release.pth</c>, valeoai/NAF release <c>model</c>, 2664431 bytes, sha256 c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f)
+    /// is a GitHub release asset the catalog cannot fetch: place it in <c>3D/pixal3d</c>. Texture, multi-view and MoGe are not part of this entry.
+    /// Licences: Pixal3D code and weights MIT; DINOv3 under the DINOv3 License (Meta, custom, gated); BiRefNet-matting MIT; the NAF weights' licence is not stated.</summary>
+    private static CatalogEntry Pixal3D() => new CatalogEntry
+    {
+        Id = "pixal3d", Modality = Modality.Mesh, DisplayName = "Pixal3D (shape-only image to mesh; naf_release.pth placed by hand)",
+        Architecture = "TRELLIS.2 cascade with view-aligned projected DINOv3 features (NAF-upsampled), 1.3B projection-mode flows, shape VAE with dual-grid meshing",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "TencentARC/Pixal3D",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "pipeline.json", TargetSubdir = "3D/pixal3d", Role = "config",
+                Sha256 = "1647217de06e32477702d14895e826fea73497d94537b809a53637f13482a237" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "structure flow", Sha256 = "6d0147bb347eb61fa81c304cc68c7fd69d447e91870357a549b47e1d0fd77242" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "structure flow config", Sha256 = "2b3ef4c63b72a3de8adf745bd9d9d36b7960bdd7ba3740a6fa4d18fea6c475dd" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 512", Sha256 = "63569838c1da93f010e2fa805b202ecf802cc758830230abac202a81b70e5b45" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 512 config", Sha256 = "2f7b736e8535aae96e7c41e8d123c24a14ee809fc25bea76eeac72643d21b997" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 1024", Sha256 = "3e6d1df0e62bc5bc863320d1d63d6b996235eef4abb8b851e878c88f316369f1" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 1024 config", Sha256 = "f47fca56311959a643e8cfd2750229a2c53cbab0027406d8426cd564ce4fb5bc" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_dec_conv3d_16l8_fp16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "structure decoder", Sha256 = "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape VAE decoder", Sha256 = "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581" },
+            new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
+                Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting (optional)", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+        },
+    };
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -2630,6 +2670,7 @@ public static class ModelCatalog
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
+            Pixal3D(),
             HairDeck(),
 
             // Interactive / world models
