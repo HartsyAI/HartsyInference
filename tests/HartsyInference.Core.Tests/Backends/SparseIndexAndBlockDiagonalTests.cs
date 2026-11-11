@@ -121,9 +121,14 @@ public sealed class SparseIndexAndBlockDiagonalTests
             using Tensor gy = new(new TensorShape(m, r), DType.F32);
             cpu.Fp8BlockLinear(gy, gx, gw, gs, null, block, block);
             float[] want = gy.AsReadOnlySpan<float>().ToArray();
+            // The CPU block linear is a vectorized GEMM over the decoded weight, while the grouped reference accumulates in double,
+            // so the two agree to float rounding rather than bit for bit.
             for (int i = 0; i < m; i++)
                 for (int j = 0; j < r; j++)
-                    Assert.Equal(BitConverter.SingleToInt32Bits(want[i * r + j]), BitConverter.SingleToInt32Bits(y[i * groups * r + g * r + j]));
+                {
+                    float a = y[i * groups * r + g * r + j], b = want[i * r + j];
+                    Assert.True(MathF.Abs(a - b) <= 1e-5f * MathF.Max(1f, MathF.Abs(b)), $"group {g} row {i} col {j}: grouped {a}, linear {b}.");
+                }
         }
     }
 

@@ -44,6 +44,14 @@ public sealed record QuantWeightInfo
     /// unpack's precision to the backend.</remarks>
     public DType? DenseDType { get; init; }
 
+    /// <summary>The F32 block-scale grid of a DeepSeek-style FP8 E4M3 weight (<c>weight_scale_inv</c>), <c>[ceil(N / Fp8BlockSize), ceil(K / Fp8BlockSize)]</c>,
+    /// one scale per square block of the weight. Null for every other format. A linear on such a weight runs <c>IBackend.Fp8BlockLinear</c>
+    /// (see <c>Fp8BlockDispatch</c>), so any projection that reaches <c>IBackend.Linear</c> with it needs no model-specific branch.</summary>
+    public Tensor? Fp8BlockScaleInv { get; init; }
+
+    /// <summary>Edge length of one <see cref="Fp8BlockScaleInv"/> block in weight elements (128 for DeepSeek-V3/V4 and ERNIE-5.5).</summary>
+    public int Fp8BlockSize { get; init; } = 128;
+
     /// <summary>Returns these companions narrowed to a contiguous run of weight rows, for a caller splitting a fused weight (QKV) or consuming one in windows.</summary>
     /// <remarks><para><see cref="RowScale"/> is indexed by output row, so a row slice of the weight needs the matching
     /// slice of the scale; a per-tensor scale (one element) covers every row and is shared as-is. <see cref="ConvRotGroupSize"/>
@@ -68,8 +76,21 @@ public sealed record QuantWeightInfo
             blockScale = blockScale.SliceRows(rowOffset, rowCount);
         }
         Tensor? rowScale = RowScale is null || RowScale.ElementCount == 1 ? RowScale : RowScale.SliceRows(rowOffset, rowCount);
-        return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) && ReferenceEquals(recipe, Recipe)
-            ? this : this with { RowScale = rowScale, BlockScale = blockScale, Recipe = recipe };
+        // An FP8 block grid is indexed by block row, so a window must start and end on a block edge to keep its scales.
+        Tensor? fp8Scale = Fp8BlockScaleInv;
+        if (fp8Scale is not null)
+        {
+            // A window may end inside the last block row of the weight, which the grid's own row count identifies.
+            int block = Fp8BlockSize;
+            long firstBlock = rowOffset / block, blocks = (rowCount + block - 1) / block;
+            if (rowOffset % block != 0 || (rowCount % block != 0 && firstBlock + blocks != fp8Scale.Shape[0]))
+                throw new NotSupportedException(
+                    $"'{weightKey}' is an FP8 block-scaled weight with {block}-row blocks, and rows [{rowOffset}..{rowOffset + rowCount}) "
+                    + "do not start on a block edge or end inside a block that is not the weight's last. Dequantize it before splitting or windowing the weight.");
+            fp8Scale = fp8Scale.SliceRows(firstBlock, blocks);
+        }
+        return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) && ReferenceEquals(recipe, Recipe) && ReferenceEquals(fp8Scale, Fp8BlockScaleInv)
+            ? this : this with { RowScale = rowScale, BlockScale = blockScale, Recipe = recipe, Fp8BlockScaleInv = fp8Scale };
     }
 
     /// <summary>Rows per swizzle tile of a block-scale companion (cuBLASLt's blocked layout: 128 rows × 4 block columns, tiles ordered by tile-row).</summary>

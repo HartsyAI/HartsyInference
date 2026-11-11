@@ -85,16 +85,30 @@ internal static class Ernie5SyntheticCheckpoint
         return "{" + string.Join(",\n", fields.Select(kv => $"\"{kv.Key}\": {kv.Value}")) + "}";
     }
 
+    /// <summary>How the weights are stored: all F32; the ERNIE FP8 layout, where each linear is E4M3 with a <c>weight_scale_inv</c> grid; or the
+    /// same values as <see cref="Fp8Dequantized"/>, every linear decoded to F32, the reference an FP8 run is compared with.</summary>
+    internal enum Storage { F32, Fp8, Fp8Dequantized }
+
+    /// <summary>The 128x128 block-FP8 <c>quantization_config</c> of the real checkpoint.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> Fp8Overrides = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["quantization_config"] = "{\"quant_method\": \"fp8\", \"fmt\": \"e4m3\", \"weight_block_size\": [128, 128]}",
+    };
+
+    /// <summary>The FP8 block edge, as the real checkpoint stores it.</summary>
+    internal const int Fp8Block = 128;
+
     /// <summary>Writes a complete checkpoint into <paramref name="directory"/> (created if absent) with weights from <paramref name="seed"/>.</summary>
-    internal static void Write(string directory, int seed = 7)
+    internal static void Write(string directory, int seed = 7, Storage storage = Storage.F32)
     {
         Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson());
+        string configJson = ConfigJson(storage == Storage.Fp8 ? Fp8Overrides : null);
+        File.WriteAllText(Path.Combine(directory, "config.json"), configJson);
         File.WriteAllText(Path.Combine(directory, "tokenizer.json"), TokenizerJson());
         File.WriteAllText(Path.Combine(directory, "tokenizer_config.json"), "{\"bos_token\": \"<s>\", \"eos_token\": \"</s>\"}");
         File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
-        Ernie5Config config = Ernie5Config.Parse(ConfigJson());
-        WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed);
+        Ernie5Config config = Ernie5Config.Parse(configJson);
+        WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed, storage);
     }
 
     /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials.</summary>
@@ -134,26 +148,44 @@ internal static class Ernie5SyntheticCheckpoint
         return map;
     }
 
-    private static void WriteSafetensors(string path, Ernie5Config config, int seed)
+    private sealed record Entry(string Name, string DType, int[] Shape, byte[] Data);
+
+    private static void WriteSafetensors(string path, Ernie5Config config, int seed, Storage storage)
     {
         Random rng = new(seed);
-        List<(string Name, int[] Shape, float[] Values)> tensors = [];
+        List<Entry> entries = [];
         foreach (string key in Ernie5WeightMap.ExpectedKeys(config).Concat(Ernie5WeightMap.ExpectedMtpKeys(config)))
         {
             int[] shape = ShapeOf(key, config);
             int count = shape.Aggregate(1, (a, n) => a * n);
-            tensors.Add((key, shape, ValuesOf(key, count, rng)));
+            if (storage == Storage.F32 || !IsFp8Linear(key, shape))
+            {
+                entries.Add(new Entry(key, "F32", shape, FloatBytes(ValuesOf(key, count, rng))));
+                continue;
+            }
+            // Same draw order for both FP8 storages, so the dequantized twin holds exactly the values the FP8 file decodes to.
+            byte[] raw = Fp8BytesOf(count, rng);
+            float[] scale = ScaleValues(shape, rng);
+            if (storage == Storage.Fp8)
+            {
+                entries.Add(new Entry(key, "F8_E4M3", shape, raw));
+                entries.Add(new Entry(key + Ernie5WeightNames.ScaleSuffix, "F32", ScaleShape(shape), FloatBytes(scale)));
+            }
+            else
+            {
+                entries.Add(new Entry(key, "F32", shape, FloatBytes(DequantizedValues(raw, scale, shape))));
+            }
         }
-        tensors.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        entries.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
 
         StringBuilder header = new("{");
         long offset = 0;
-        for (int i = 0; i < tensors.Count; i++)
+        for (int i = 0; i < entries.Count; i++)
         {
-            (string name, int[] shape, float[] values) = tensors[i];
-            long bytes = (long)values.Length * sizeof(float);
+            Entry e = entries[i];
+            long bytes = e.Data.LongLength;
             if (i > 0) header.Append(',');
-            header.Append($"\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{string.Join(",", shape)}],\"data_offsets\":[{offset},{offset + bytes}]}}");
+            header.Append($"\"{e.Name}\":{{\"dtype\":\"{e.DType}\",\"shape\":[{string.Join(",", e.Shape)}],\"data_offsets\":[{offset},{offset + bytes}]}}");
             offset += bytes;
         }
         header.Append('}');
@@ -165,8 +197,70 @@ internal static class Ernie5SyntheticCheckpoint
         using BinaryWriter writer = new(stream);
         writer.Write((long)headerBytes.Length);
         writer.Write(headerBytes);
-        foreach ((string _, int[] _, float[] values) in tensors)
-            foreach (float v in values) writer.Write(v);
+        foreach (Entry e in entries) writer.Write(e.Data);
+    }
+
+    private static byte[] FloatBytes(float[] values)
+    {
+        byte[] bytes = new byte[values.Length * sizeof(float)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    // The FP8 linears: the 2-D projections the real checkpoint stores as E4M3. Routers, the hyper-connection mappings, the compressor and
+    // indexer projections it keeps BF16 or F32, and the embedding and LM head, stay F32 here.
+    private static bool IsFp8Linear(string key, int[] shape)
+    {
+        if (shape.Length != 2) return false;
+        if (!(key.EndsWith(".weight", StringComparison.Ordinal) || key.EndsWith("linear_o_group_proj", StringComparison.Ordinal))) return false;
+        return !(key.Contains("embed_tokens", StringComparison.Ordinal) || key.Contains("lm_head", StringComparison.Ordinal)
+            || key.Contains("gate.weight", StringComparison.Ordinal) || key.Contains("mapping_proj", StringComparison.Ordinal)
+            || key.Contains("compressor.linear_w", StringComparison.Ordinal) || key.Contains("indexer.wk.", StringComparison.Ordinal)
+            || key.Contains("weights_proj", StringComparison.Ordinal));
+    }
+
+    // Any byte is a finite E4M3 value except the two NaN codes, 0x7F and 0xFF, which map to their neighbours.
+    private static byte[] Fp8BytesOf(int count, Random rng)
+    {
+        byte[] bytes = new byte[count];
+        for (int i = 0; i < count; i++)
+        {
+            byte v = (byte)rng.Next(256);
+            if ((v & 0x7F) == 0x7F) v &= 0xFE;
+            bytes[i] = v;
+        }
+        return bytes;
+    }
+
+    private static int[] ScaleShape(int[] shape) => [(shape[0] + Fp8Block - 1) / Fp8Block, (shape[1] + Fp8Block - 1) / Fp8Block];
+
+    private static float[] ScaleValues(int[] shape, Random rng)
+    {
+        int[] grid = ScaleShape(shape);
+        float[] scale = new float[grid[0] * grid[1]];
+        for (int i = 0; i < scale.Length; i++) scale[i] = (float)(0.001 + rng.NextDouble() * 0.009);
+        return scale;
+    }
+
+    // Decodes the bytes with their block scales: W[r, c] = e4m3(raw[r, c]) * scale[r / 128, c / 128], the F32 weight the FP8 file stands for.
+    private static float[] DequantizedValues(byte[] raw, float[] scale, int[] shape)
+    {
+        int rows = shape[0], cols = shape[1], gridCols = ScaleShape(shape)[1];
+        float[] values = new float[rows * cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                values[r * cols + c] = E4m3ToFloat(raw[r * cols + c]) * scale[(r / Fp8Block) * gridCols + c / Fp8Block];
+        return values;
+    }
+
+    // IEEE-style E4M3: 1 sign, 4 exponent bits (bias 7), 3 mantissa bits; exponent 0 is subnormal.
+    private static float E4m3ToFloat(byte b)
+    {
+        int sign = b >> 7, exponent = (b >> 3) & 0xF, mantissa = b & 0x7;
+        float magnitude = exponent == 0
+            ? mantissa / 8f * MathF.Pow(2, -6)
+            : (1 + mantissa / 8f) * MathF.Pow(2, exponent - 7);
+        return sign == 1 ? -magnitude : magnitude;
     }
 
     private static float[] ValuesOf(string key, int count, Random rng)
