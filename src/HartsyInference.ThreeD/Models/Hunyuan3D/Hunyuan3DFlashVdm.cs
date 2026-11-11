@@ -30,6 +30,12 @@ internal static class Hunyuan3DFlashVdm
         list.Reverse();
         int[] levels = [.. list];
         levels[0] = (int)Math.Round(levels[0] / (double)miniGridNum, MidpointRounding.ToEven) * miniGridNum - 1;
+        if (levels[0] < miniGridNum - 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(octreeResolution), octreeResolution, $"FlashVDM needs a resolution of at least {miniGridNum - 1}.");
+        }
+
         for (int i = 1; i < levels.Length; i++)
             levels[i] = levels[0] * (1 << i);
         return levels;
