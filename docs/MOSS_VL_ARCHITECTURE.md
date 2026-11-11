@@ -94,10 +94,21 @@ preprocessing, stored-precision loads, the GGUF vision tower, and the Engine/CLI
 4. Performance (alpha.415): each cross-attention image group attends only its own rows, so a video's prefill no longer grows with
    frames squared (64 frames: 378 s to 10.2 s on Vulkan). The vision tower (about 325 ms per 256×256 frame on Vulkan) bounds a live
    session near 3 frames per second; decode slows past about 32 frames held (20 tok/s at 64). Neither is optimized yet.
-5. CUDA has not run here: cuBLAS 13 is missing (the cuBLAS autofetch in #707, `paths.cublasAutofetch`, downloads it on first
-   CUDA use once merged). Full BF16 generation needs about 21 GB of device memory; the 12 GB RTX 3060 runs the GGUF.
+5. CUDA has not run here: cuBLAS 13 is missing (the cuBLAS autofetch, `paths.cublasAutofetch`, downloads it on first CUDA use; it
+   has not been run against the real redist). Full BF16 generation needs about 21 GB of device memory; the 12 GB RTX 3060 runs the GGUF.
 6. The GGUF embeds no tokenizer; `tokenizer.json` must sit beside it (the catalog fetches it). Its `config.json` is optional:
    `MossVlConfig.FromGguf` reads the `moss_vl.*` metadata and matches `config.json` exactly.
+7. Host integration (alpha.420), for an app that lists and drives local models without a CLI:
+   - `TextService.InputCapabilities(path)` reads a GGUF header or a checkpoint folder's `config.json` and answers
+     `(Images, Video, RealtimeSession)`; MOSS-VL is all three with no `mmproj` sidecar. It loads nothing and never throws.
+   - `TextService.LoadedPlacements` lists a loaded MOSS-VL model (a single-device placement made for the purpose) so a host's
+     "loaded, and where" badge works the same as for a GGUF the planner placed.
+   - Variants are downloadable: `ModelDownloader.DownloadVariantAsync(entry, "nf4" | "fp8" | "bf16" | "gguf-q4k", progress, ct)`,
+     `hartsy pull moss-vl-realtime --variant nf4`, or `POST /admin/models/pull {"model":"moss-vl-realtime","variant":"nf4"}`. A
+     folder variant is fetched at its pinned revision into `LLM/moss-vl-realtime-<variant>/` (each folder apart, since a folder
+     holding both a GGUF and a shard index is ambiguous), every file SHA-256-verified, and every shard its index names is checked.
+   - Video decode needs ffmpeg and ffprobe: on `PATH`, or in the folder named by `paths.ffmpegDir`. A caller that decodes video
+     itself can pass `TextMessage.VideoFrames` and skip ffmpeg.
 
 ## Status
 

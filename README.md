@@ -170,7 +170,7 @@ NVIDIA's cuBLAS redist for the driver's CUDA version once, about 0.4 GB on Windo
 `~/.cache/hartsyinference/cublas/`. cuDNN is fetched the same way, about 1 GB, the first time a convolution or attention
 path asks for it. Settings: `paths.cublasAutofetch` and `paths.cudnnAutofetch` turn the downloads off;
 `paths.cublasDir`/`paths.cudnnDir` point at an existing install; `paths.cublasUrl`/`paths.cudnnUrl` take a mirror URL or a
-local archive.
+local archive. Video input and output launch ffmpeg and ffprobe from `PATH`, or from the folder `paths.ffmpegDir` names.
 Vulkan requires a compatible runtime and the features queried by the backend; AMD/Intel hardware
 validation remains open. CPU has no GPU dependency.
 
