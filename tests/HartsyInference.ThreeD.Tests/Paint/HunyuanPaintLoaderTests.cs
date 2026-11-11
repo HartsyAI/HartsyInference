@@ -92,4 +92,26 @@ public sealed class HunyuanPaintLoaderTests
         Dictionary<string, Tensor> standalone = new() { ["embeddings.cls_token"] = cls };
         Assert.Same(standalone, HunyuanPaintLoader.StripPrefix(standalone, HunyuanPaintLoader.BundledDinoPrefix));
     }
+
+    [Fact]
+    public void ModernizeVaeKeys_RenamesTheLegacyMidBlockAttention()
+    {
+        using Tensor q = Empty(2, 2), other = Empty(2);
+        Dictionary<string, Tensor> legacy = new()
+        {
+            ["encoder.mid_block.attentions.0.query.weight"] = q,
+            ["encoder.mid_block.attentions.0.proj_attn.bias"] = other,
+            ["encoder.mid_block.attentions.0.group_norm.weight"] = other,
+            ["decoder.up_blocks.0.resnets.0.conv1.weight"] = other,
+        };
+
+        IReadOnlyDictionary<string, Tensor> modern = HunyuanPaintLoader.ModernizeVaeKeys(legacy);
+
+        Assert.Same(q, modern["encoder.mid_block.attentions.0.to_q.weight"]);
+        Assert.True(modern.ContainsKey("encoder.mid_block.attentions.0.to_out.0.bias"));
+        Assert.True(modern.ContainsKey("encoder.mid_block.attentions.0.group_norm.weight"));
+        Assert.True(modern.ContainsKey("decoder.up_blocks.0.resnets.0.conv1.weight"));
+        Dictionary<string, Tensor> current = new() { ["encoder.mid_block.attentions.0.to_q.weight"] = q };
+        Assert.Same(current, HunyuanPaintLoader.ModernizeVaeKeys(current));
+    }
 }
