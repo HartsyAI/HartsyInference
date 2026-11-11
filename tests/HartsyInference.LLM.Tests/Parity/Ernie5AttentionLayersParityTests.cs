@@ -97,6 +97,8 @@ public sealed class Ernie5AttentionLayersParityTests
             Values(rng, hq, 2f).CopyTo(sink.AsSpan<float>());
             using Tensor want = new(new TensorShape(batch, hq, sq, dim), DType.F32), got = new(new TensorShape(batch, hq, sq, dim), DType.F32);
             AttentionCall call = AttentionCall.FromFlashAttention(want, q, k, v, kvLen, false, 0, 0.09f, softcap, sink, 0, null);
+            AttentionPlan plan = device.PlanAttention(in call);
+            Assert.True(plan.Row is not null && plan.RowId != "host.reference", $"sink flash must run on a device row: {plan.Describe()}");
             AttentionHostReference.Run(in call);
             device.FlashAttention(got, q, k, v, kvLen, hq / hkv, false, 0, 0.09f, softcap, sink);
             AssertClose(want.AsReadOnlySpan<float>().ToArray(), got.AsReadOnlySpan<float>().ToArray(), 1e-4f, $"sink flash softcap {softcap}");

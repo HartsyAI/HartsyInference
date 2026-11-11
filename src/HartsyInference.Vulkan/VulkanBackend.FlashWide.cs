@@ -38,6 +38,7 @@ public sealed partial class VulkanBackend
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)((long)batch * hq * sq * d * sizeof(float)));
         try
         {
+            // FlashWideAdmits requires sinks today; the sink-less arm (and the shader's hasSink == 0 path) is kept for a wider admit.
             VulkanBuffer sinkBuf = sink is null ? Placeholder(temps) : GetBuffer(sink);
             VulkanKernel kernel = GetKernel("sdpa_flash_wide", storageBufferCount: 5, ReadOnlySpan<SpecConstant>.Empty);
             Span<ulong> bufs = stackalloc ulong[] { GetBuffer(q).Handle, GetBuffer(k).Handle, GetBuffer(v).Handle, sinkBuf.Handle, outBuf.Handle };
