@@ -211,6 +211,37 @@ public sealed class CudaRedistProvisionerTests : IDisposable
         Assert.Equal("real", File.ReadAllText(Path.Combine(libDir, "libcublas.so.13")));
     }
 
+    [Fact]
+    public void CudnnFolderMissingASubLibraryIsSkipped()
+    {
+        string dir = Path.Combine(_root, "cudnn");
+        Directory.CreateDirectory(dir);
+        foreach (string name in Windows ? CudnnRuntime.WindowsLibraries : ["libcudnn.so.9"])
+        {
+            File.WriteAllText(Path.Combine(dir, name), "cudnn");
+        }
+
+        Assert.True(CudnnRuntime.HasLibraries(dir));
+        Assert.False(CudnnRuntime.HasLibraries(null));
+        if (Windows)
+        {
+            File.Delete(Path.Combine(dir, "cudnn_graph64_9.dll"));
+            Assert.False(CudnnRuntime.HasLibraries(dir));
+        }
+    }
+
+    [Fact]
+    public void PathWithDirFirst_PrependsUnlessAlreadyFirst()
+    {
+        char sep = Path.PathSeparator;
+        string dir = Path.Combine(_root, "cudnn");
+
+        Assert.Equal(dir, CudaLibraryResolver.PathWithDirFirst(null, dir));
+        Assert.Equal($"{dir}{sep}a{sep}b", CudaLibraryResolver.PathWithDirFirst($"a{sep}b", dir));
+        Assert.Equal($"{dir}{sep}a{sep}{dir}", CudaLibraryResolver.PathWithDirFirst($"a{sep}{dir}", dir));
+        Assert.Null(CudaLibraryResolver.PathWithDirFirst($"{dir}{Path.DirectorySeparatorChar}{sep}a", dir));
+    }
+
     private static CudaRedistSpec Spec(string url, string? sha) => new(
         Component: "cublas",
         Label: "cuBLAS",

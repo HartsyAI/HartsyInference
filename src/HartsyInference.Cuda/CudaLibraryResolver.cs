@@ -107,6 +107,46 @@ public static class CudaLibraryResolver
         return NativeLibrary.Load(sonames[0]);
     }
 
+    /// <summary>Loads cudnn64_9.dll from the first probe dir holding the complete cuDNN set, with that dir first on PATH: the
+    /// dispatcher loads its sub-libraries by bare name, not from its own folder, and exits the process when one is missing.</summary>
+    private static nint LoadCudnnWindows()
+    {
+        foreach (string dir in ProbeDirs)
+        {
+            if (!CudnnRuntime.HasLibraries(dir))
+            {
+                continue;
+            }
+            string? path = PathWithDirFirst(Environment.GetEnvironmentVariable("PATH"), dir);
+            if (path is not null)
+            {
+                Environment.SetEnvironmentVariable("PATH", path);
+            }
+            if (NativeLibrary.TryLoad(Path.Combine(dir, "cudnn64_9.dll"), out nint handle))
+            {
+                return handle;
+            }
+        }
+        // A system install keeps its folder on PATH, so its sub-libraries resolve beside it.
+        return NativeLibrary.Load("cudnn64_9.dll");
+    }
+
+    /// <summary><paramref name="path"/> with <paramref name="dir"/> as its first entry, or null when it already is.</summary>
+    internal static string? PathWithDirFirst(string? path, string dir)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return dir;
+        }
+        int end = path.IndexOf(Path.PathSeparator);
+        string first = (end < 0 ? path : path[..end]).Trim().TrimEnd('\\', '/');
+        if (string.Equals(first, dir.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return dir + Path.PathSeparator + path;
+    }
+
     /// <summary>Availability probe for <see cref="CudaContext.IsAvailable"/>: can cuBLAS be loaded (probe dirs included)? Keeps the availability check and the actual resolution on the SAME search logic — a duplicated bare-soname probe here previously reported CUDA unavailable whenever LD_LIBRARY_PATH was missing, even though the resolver could load everything from the probe dirs.</summary>
     public static bool CublasLoadable()
     {
@@ -154,7 +194,7 @@ public static class CudaLibraryResolver
         if (libraryName == "cudnn")
         {
             if (windows)
-                return LoadFirst("cudnn64_9.dll");
+                return LoadCudnnWindows();
             else if (linux)
                 return LoadFirst("libcudnn.so.9");
         }
