@@ -59,7 +59,10 @@ Every stage is a public type of its own and usable alone.
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the
   cone angle (default 50 degrees, `UvUnwrapOptions`), so texel density on steep parts of a chart is lower than on its flat parts.
   Charts that fold or overlap are split at half the angle down to single triangles, so the atlas is always overlap-free, but a
-  rough or noisy surface can end in many small charts and a lower packing efficiency.
+  rough or noisy surface can end in many small charts and a lower packing efficiency. Measured on TRELLIS.2 meshes (1M faces after
+  decimation): about one chart per few triangles (vertices per triangle 0.94 to 1.5), so the bake writes only 5 to 11% of a 2048x2048
+  atlas and the rest is inpainted; the textured GLB shows specks and seams. Time is not the problem: decimating 11M triangles, unwrapping,
+  baking and inpainting took 54 to 68 s.
 - No chart merging and no seam-length minimization; charts are only rotated to the best of 24 bounding-box angles before packing.
 - Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
   efficient).

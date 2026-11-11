@@ -41,6 +41,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(coords);
+        Trellis2DeviceMemory.ReleaseBetweenStages(backend);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path);
         using Trellis2SlatFlow flow = new(weights);
         int n = coords.Length / 4;

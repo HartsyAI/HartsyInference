@@ -113,6 +113,51 @@ Read from source at the pins above. Each of the 512 and 1024 flows has a texture
   Each flow has a small `.json` sidecar next to it (the 1024 flow is required for the cascades, the 512 flow only for `--grid 512`).
   `Trellis2ModelFiles` finds them beside the shape flows; without them `GenerateTextured` fails before any stage runs.
 
+### Real-weight run (RTX 3060 12 GB, CUDA, seed 1, 2026-11-11)
+
+Header check: the 512 and 1024 texture flows (640 BF16 tensors each, in 64, out 32) and the texture decoder (no `to_subdiv` keys) match
+`Trellis2FlowKeyMap` and `ShapeVaeKeyMap.Decoder(ShapeVaeDecoderConfig.Texture)` exactly (`Trellis2RealWeightsTests`). Files were fetched from
+`microsoft/TRELLIS.2-4B` at the pin, sizes and sha256 as in the table above, sidecars by size (458, 458, 705 bytes).
+
+A real example image (a marble bust, 1052 px RGBA) and a flat synthetic mug, full 12-step samplers, `--texture`, default 2048 texels and
+1,000,000 faces. Stage times come from the progress stamps of one process per run; peak VRAM is the card's `memory.used`, which includes about
+1.3 to 1.8 GB held by other processes.
+
+| Stage | `--grid 512` bust | `--grid 1024` bust (cascade) |
+|---|---|---|
+| conditioning and structure flow | 60 s | 109 s (first start of the process) |
+| coarse shape flow (12 steps) | 27 s | 57 s |
+| upsample, fine conditioning and fine shape flow (12 steps, 10,785 tokens) | | 229 s |
+| shape decode and meshing | | 32 s |
+| texture flow (12 steps, one pass each) | 17 s | 131 s |
+| texture decode (guided) | 7 s | 61 s |
+| decimate, unwrap, bake, inpaint (CPU) | 22 s | 54 to 68 s |
+| total | 140 s | 700 s |
+| peak VRAM (whole card) | 7.7 GB | 9.1 GB |
+
+Findings:
+
+- **Device memory left behind by one stage made the next flow 6 to 35 times slower, with no error and no log line.** Before the fix a
+  `--grid 1024` run spent 5 fine shape steps at 650 to 775 s each and every texture step at 360 to 460 s (a 1024 run was stopped at step 50 of
+  53 after 2 hours); the same steps take 15 to 20 s when the pool is trimmed. The per-op profile with a stream sync after every op showed
+  the same code at full speed, the SDPA kernels were fast in isolation, and the process was CPU-bound in the driver (half of its CPU time in
+  the kernel). What fixed it: returning the stream-ordered pool, cached activations and attention plans to the driver before each flow
+  (`Trellis2DeviceMemory.ReleaseBetweenStages`, shape flows), and dropping every cached device weight before the texture flow
+  (`ReleaseAll`; the shape decoder never preloads, so the backend promotes its weights on its own and keeps them, 1.5 to 1.8 GB). The cause
+  inside the CUDA backend (which route the slow path takes when the pool is large) was not isolated; the shape-only pipeline had the same
+  slow first high-resolution steps (see the status row's "first high-resolution step took 12 minutes").
+- **The CPU bake is not the bottleneck.** Decimating a 11M-triangle 1024 mesh to 1M faces, unwrapping, baking and inpainting took 54 to 68 s;
+  the 512 mesh took 19 to 22 s.
+- **The 512 type's look is plausible; the 1024 cascade's is not yet.** The 512 bust is cream and tan with roughness 0.91 and metallic 0
+  (the input is white marble); the 1024 bust of the same input and seed came out copper and teal with mean metallic 0.2. The cascade
+  uses the 1024-token DINOv3 conditioning for both the fine shape flow and the texture flow, which is the part of the chain that has no
+  parity check, so a conditioning or cascade defect is a suspect before the texture model is. A flat synthetic mug gave a saturated red
+  (R 0.94, G 0.03, B 0.03; roughness 0.87) at 512 from a copper-brown image. No Python reference exists for any texture tensor.
+- **The atlas is the weak part of the textured GLB.** On both meshes `UvUnwrapper` ended with roughly one chart per few triangles (vertices
+  per triangle 0.94 to 1.5, against about 0.5 for a connected mesh), so only 5 to 11% of the 2048x2048 texels are written by the bake and
+  the rest is inpainted. The render shows dark specks and thin seams. This is the limitation `MESH_POSTPROCESS.md` already lists
+  ("a rough or noisy surface can end in many small charts"), a property of the shared post-processor and not of this path.
+
 ## Differences that remain from upstream
 
 - Noise comes from the repository's `SeedGenerator`, not `torch.manual_seed`/`randn`; the same seed gives a different latent than Python.
@@ -141,6 +186,6 @@ for its stage and released. Attention runs through `IBackend.ScaledDotProductAtt
 
 - No Python reference dumps exist, so no stage is parity-verified; see the status row.
 - The shape VAE's parity in CoLa3D used a naive convolution shim and an assumed kernel-axis convention; the TRELLIS.2 shape path inherits that caveat.
-- The texture path is exercised only on tiny synthetic networks: the texture checkpoints' safetensors headers have not been read against `Trellis2FlowKeyMap` and the texture decoder key map, no real weights have run, and no rendered look has been checked.
-- The mesh post-processing is CPU and approximates cumesh, nvdiffrast and OpenCV (see [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)); full-size time and memory are unmeasured.
+- The texture path has run on real weights (headers match, 512 and 1024 chains complete, GLBs render), but nothing is compared with Python, and the 1024 cascade's colors are implausible for the input (see the run above).
+- The mesh post-processing is CPU and approximates cumesh, nvdiffrast and OpenCV (see [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)); its UV atlas fragments on these meshes.
 - The texture latent and the texture decode use this repository's noise generator and F32 compute, like the shape stages.
