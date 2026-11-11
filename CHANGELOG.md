@@ -52,6 +52,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
+## alpha.421
+
+- **Added: Vulkan `LeakyRelu` and `AdaInstanceNorm1d`.** Both threw "not yet implemented" on the Vulkan backend, which stopped
+  Kokoro, StyleTTS 2 and CosyVoice 2 from running there. The same stubs also blocked the CAM++ speaker encoder, the AuK VAE
+  encoder, Silero VAD and other callers on Vulkan. `LeakyRelu` is an elementwise op; `AdaInstanceNorm1d` is a new two-pass kernel
+  that matches the CPU and CUDA semantics.
+
 ## alpha.420
 
 - **Added: host APIs for MOSS-VL-Realtime**, so an app that lists and drives local models (the SwarmUI LLMAssistant extension)
@@ -83,6 +90,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   with the error until it is closed. Ctrl+C on an unbounded run keeps its files and reports the run, not "Cancelled.". Oasis and
   DIAMOND take one action per step, so their window buffers two frames rather than two seconds, and they stop after `--frames`.
 - **Added: a where-the-time-went breakdown** printed at the end of every `--view` run, and under `diagnostics.stageProfile`.
+>
 ## alpha.418
 
 - **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,

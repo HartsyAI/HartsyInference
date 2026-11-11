@@ -180,6 +180,9 @@ for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
 done
 
+# F32-only kernel. The backend asks for it with the _f32 suffix it uses for every dtype variant.
+compile_one "adain1d" -- "_f32"
+
 # Generic strided copy and pad: one module per word width (IBackend.CopyStrided / Pad; docs/BACKEND_OPS.md).
 for k in copy_strided pad_strided; do
     compile_one "$k" -DWIDTH=2 -- "_u16"
