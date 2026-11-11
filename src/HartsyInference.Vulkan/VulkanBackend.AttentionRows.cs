@@ -44,7 +44,15 @@ public sealed partial class VulkanBackend
     public void Attention(in AttentionCall call)
     {
         if (call.LegacyGap() is { } gap)
+        {
+            // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
+            if (AttentionFlashLowering.Gap(in call) is null)
+            {
+                AttentionFlashLowering.Run(this, in call);
+                return;
+            }
             throw new AttentionUnsupportedException($"Vulkan attention serves a call its legacy entry point can carry; this one has {gap}.");
+        }
         Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
         switch (call.Route)
         {
