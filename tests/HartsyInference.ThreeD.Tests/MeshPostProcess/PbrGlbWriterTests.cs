@@ -143,6 +143,7 @@ public sealed class PbrGlbWriterTests
         Parsed p = Parse(PbrGlbWriter.Write(TexturedTriangle(), material));
 
         JsonElement mat = p.Root.GetProperty("materials")[0];
+        Assert.Equal(material.Name, mat.GetProperty("name").GetString());
         Assert.Equal("OPAQUE", mat.GetProperty("alphaMode").GetString());
         Assert.False(mat.GetProperty("doubleSided").GetBoolean());
         JsonElement pbr = mat.GetProperty("pbrMetallicRoughness");

@@ -51,7 +51,7 @@ public static class PbrGlbWriter
         AddView(bin, views, baseColor);
         AddView(bin, views, metallicRoughness);
 
-        byte[] json = BuildJson(options, views, vertexCount, mesh.Indices.Length, positions);
+        byte[] json = BuildJson(options, material.Name, views, vertexCount, mesh.Indices.Length, positions);
         return GlbContainer.Assemble(json, bin.ToArray());
     }
 
@@ -146,7 +146,7 @@ public static class PbrGlbWriter
             bin.WriteByte(0);
     }
 
-    private static byte[] BuildJson(PbrGlbOptions options, List<(int Offset, int Length)> views, int vertexCount, int indexCount,
+    private static byte[] BuildJson(PbrGlbOptions options, string materialName, List<(int Offset, int Length)> views, int vertexCount, int indexCount,
         float[] positions)
     {
         using MemoryStream ms = new();
@@ -192,7 +192,7 @@ public static class PbrGlbWriter
 
             w.WriteStartArray("materials");
             w.WriteStartObject();
-            w.WriteString("name", "pbr");
+            w.WriteString("name", materialName);
             w.WriteBoolean("doubleSided", options.DoubleSided);
             w.WriteString("alphaMode", options.AlphaMode switch
             {

@@ -64,7 +64,7 @@ Every stage is a public type of its own and usable alone.
 - Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
   efficient).
 - Decimation is quadric collapse only: no attribute-aware metric, no preservation of sharp features beyond the quadric itself, and
-  non-manifold edges or vertices are locked rather than repaired. Cleaner hole filling does not fair or relax the patch.
+  non-manifold edges are locked (vertices where several manifold fans meet are not detected) rather than repaired. Cleaner hole filling does not fair or relax the patch.
 - Inpainting follows Telea's method and OpenCV's structure but is not bit-identical to OpenCV.
 - Everything is CPU. A full-size run (1M faces, 2048 texture) has not been measured; see the pull request for what was.
 
