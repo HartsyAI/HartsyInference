@@ -13,7 +13,7 @@ namespace HartsyInference.LLM.Tests.Kimi;
 /// state advances one token per call.</summary>
 public sealed class KimiK31ModelTests
 {
-    private static readonly KimiK31Config Config = new()
+    internal static readonly KimiK31Config Config = new()
     {
         Hidden = 16, Vocab = 20, Layers = 4, DenseLayers = 1, DenseIntermediate = 24,
         Heads = 2, KdaHeadDim = 8, KdaForgetRank = 4, FullAttentionLayers = new HashSet<int> { 1, 3 },
@@ -52,7 +52,7 @@ public sealed class KimiK31ModelTests
         return model.Forward(tokens, state);
     }
 
-    private static KimiK31Weights RandomWeights(Random rng)
+    internal static KimiK31Weights RandomWeights(Random rng)
     {
         KimiK31Config c = Config;
         int keyDim = c.Heads * c.KdaHeadDim;
