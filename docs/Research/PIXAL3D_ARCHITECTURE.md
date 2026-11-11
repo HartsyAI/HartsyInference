@@ -48,11 +48,11 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 
 | Stage | Upstream (Pixal3D) | Existing C# | Verdict |
 |---|---|---|---|
-| Preprocess | `preprocess_image`: long edge at most 1024, RMBG-2.0 unless alpha, crop around alpha > 0.8 with 10 % margin, RGB over **black** | `Trellis2ImagePreprocessor` + `IForegroundMatter` / `Trellis2LazyMatter` | 1:1 (same function as TRELLIS.2; black background is its default) |
+| Preprocess | `preprocess_image`: long edge at most 1024, RMBG-2.0 unless alpha, crop around alpha > 0.8 with 10 % margin, RGB over **black** | `Trellis2ImagePreprocessor` + `IForegroundMatter` / `Trellis2LazyMatter` | config change: the crop square is widened to `int(size * 1.1)` where TRELLIS.2 uses `int(size * 1)` (`Trellis2ImagePreprocessor.Prepare(..., cropScale)`); black background is the default in both |
 | Camera | `distance_from_fov`, FOV from MoGe-2 or `--fov` | none | new, small (formulas below); MoGe not ported |
 | Global tokens | DINOv3 ViT-L/16, all tokens after the last block, `F.layer_norm`, no final norm; keeps class + 4 register tokens | `Trellis2ImageConditioner.Encode` (same call returns every token) | 1:1; take the first 5 tokens |
 | Patch grid | the remaining tokens as `[h, w, 1024]`, `h = w = size / 16` | the same tokens, row-major | 1:1, needs a view |
-| NAF upsample | `valeoai/NAF`, `[1024, 32 or 64]^2` to `[1024, 512 or 1024]^2` guided by the RGB image | none | new (cross-scale neighbourhood attention; see [NAF](#naf-the-natten-dependency)) |
+| NAF upsample | `valeoai/NAF`, `[1024, 32 or 64]^2` to `[1024, 512 or 1024]^2` guided by the RGB image | none | new: `Pixal3DNaf` (cell-window attention evaluated where sampled; see [NAF](#naf-the-natten-dependency)) |
 | Projection | `ProjGrid`: grid points, pinhole projection, `grid_sample` (bilinear, border padding, `align_corners=False`) | none (`TriplaneGridSample` is a different op) | new: 2D bilinear gather op plus the camera math |
 | Structure flow | `SparseStructureFlowModel`, `image_attn_mode="proj"`, `proj_in_channels` defaults to 1024 | `Trellis2SparseStructureFlow`, `Trellis2FlowBlock`, `Trellis2FlowConfig`, `Trellis2FlowKeyMap` | config change: proj branch in block + key map; checkpoint also holds a `rope_phases` buffer |
 | Structure decode | `ss_dec_conv3d_16l8_fp16` | `SparseStructureDecoder` | 1:1, same file (sha256 `1c76d4a4...`) |
@@ -70,7 +70,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 | `shape_dec_next_dc_f16c32_fp16.safetensors` | `Models/TRELLIS2-ShapeVAE/` | yes, sha256 `e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581` |
 | `ss_dec_conv3d_16l8_fp16.safetensors` | `Models/3D/trellis2/` | yes, sha256 `1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a` |
 | DINOv3 `model.safetensors` (camenduru mirror) | `Models/DINOv3/` | yes, sha256 `dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179` |
-| `pipeline.json` | `Models/3D/trellis2/pipeline.json` | no (name, rembg and `default_pipeline_type` differ), but the two samplers and both normalizations are equal |
+| `pipeline.json` | `Models/3D/trellis2/pipeline.json` | no (`rembg_model` and `default_pipeline_type` differ, 1536 against 1024), but the `name` is the same `Trellis2ImageTo3DPipeline` and the two samplers and both normalizations are equal, so `Trellis2PipelineConfig` parses it |
 
 ## Checkpoint layouts (safetensors headers)
 
@@ -168,22 +168,24 @@ NAF (dim 256, 4 attention heads, 4 RoPE heads, kernel 9) is small:
 - `na2d(q, k, v, kernel_size=(9, 9), dilation=output / lowres)` with scale `head_dim^-0.5`: 2D neighbourhood attention over the output grid with
   a dilation of 16 (512 / 32 or 1024 / 64) or 8 (512 / 64). Output is the 1024-channel feature map, which `ProjGrid` samples.
 
-The engine already has `IBackend.NeighborhoodAttention` (window slides inward at borders, NATTEN's rule, window depth/height/width over a
-`[batch, T, H, W, heads, headDim]` tensor). Dilation `d` splits the map into `d * d` interleaved sub-grids and applies the same rule inside each;
-that is a permute into the batch axis (with `T = 1`) and back, valid because the maps are multiples of `d`. The permute copies data; it is not a
-free reshape.
+Because keys and values are constant inside each low-resolution cell, the dilated 9 x 9 window over the upsampled maps is exactly the 9 x 9 block of
+feature cells around the pixel's own cell (window slid inward at the borders, as NATTEN does, inside the pixel's dilation sub-grid). So the port does
+not need `natten`, `IBackend.NeighborhoodAttention`, the head-width contract workaround or the 1 to 4 GiB upsampled maps: `Pixal3DNaf` computes the
+query map once (the conv encoder, which has to see the whole image because of its GroupNorms), averages it down to the feature size for the keys, and
+evaluates the attention only at the four pixels each projected cell samples (4 heads, 81 keys of 64 channels, values of 256 channels per head). The
+checkpoint holds only the encoder; the attention has no weights.
 
-Two things stop this from being a drop-in. `NeighborhoodAttentionContract` requires q, k and v to have one shape, but here q and k are the
-256-channel encoder map (head width 64 with 4 heads) and v is the 1024-channel DINOv3 map (head width 256). Either q and k are zero-padded to
-v's head width with `scale = 64^-0.5` passed explicitly (scores unchanged, about 4x the q.k work), or the contract is relaxed so v has its own
-head width. The tiled CUDA path handles `HeadDim == 64` only, so a 256-wide head runs on the generic kernel. Whether that is fast enough is
-not measured.
-Cost to plan for: a 512 or 1024 output with 1024 channels is 1 GiB or 4 GiB in F32, and the sub-grid permute copies it, so a port should
-evaluate NAF only where the projection samples it, or in tiles.
+`naf_release.pth` is a pickle. It is read only with the safe-subset reader (`PytorchPickleLoader`, which executes nothing) and, for the Python reference
+dump, a restricted unpickler that allows only `OrderedDict` and torch's tensor rebuild call. It holds 37 F32 tensors: `image_encoder.encoder` and
+`image_encoder.sem_encoder` (a conv 3 -> 128 and two blocks of `norm1`, `conv1`, `norm2`, `conv2` each, kernel 1 and 3), and
+`image_encoder.rope.periods` `[16]`; no attention, shortcut or other weights.
 
-`naf_release.pth` is a pickle. Never execute it; the repository has a safe-subset reader (`PytorchPickleLoader`, used for the UniRig checkpoint)
-that is the intended way in, after the file is listed for approval. Its tensor names and shapes are therefore **not** verified here; the
-module layout above comes from the source.
+Verified against upstream's own modules (`tests/python-reference/dump_pixal3d_naf.py`, torch 2.6, the real weights, `natten.na2d` replaced by a
+brute-force transcription of NATTEN's dilated definition because `natten` is not installable here): the query map and the upsampled features agree
+(worst absolute difference 1.1e-5, test bound 3e-5) at output sizes 32 and 48 with dilations 2 and 4 and with border sliding. The transcription is the author's
+reading of NATTEN, not NATTEN itself, so that one assumption (the border window rule) is not independently confirmed. Also unconfirmed: that upstream feeds NAF the
+PIL-Lanczos-resized image as `Trellis2ImageConditioner.Pixels(..., normalize: false)` produces it (the fixture feeds the image tensor directly). Memory: the query map is
+256 · outputSize² floats on the host (1 GiB at 1024) and the encoder runs at the guide's resolution, so a 1024 guide peaks at a few GiB of backend memory during the conv stack.
 
 ## MoGe
 
@@ -218,7 +220,7 @@ Proposed split (each a draft PR; the first two are generalisations with TRELLIS.
    `ITrellis2ShapeFlowStage`, and a parameterised `QuantizeUnique` that keeps TRELLIS.2's result.
 3. **Projection ops.** Camera math, 2D bilinear gather (CPU reference and an `IBackend` hook with the generic fallback), DINOv3 patch-grid view.
    Structure stage end to end first: it needs no NAF and only the 5.4 GB structure flow, so it can be checked with real weights early.
-4. **NAF.** Encoder, RoPE, dilated neighbourhood attention through the existing op, `.pth` through the safe-subset reader.
+4. **NAF.** Encoder, RoPE and the cell-window attention evaluated where sampled (no `natten`, no neighbourhood-attention op), `.pth` through the safe-subset reader.
 5. **Pipeline and service.** `Pixal3DImageTo3DPipeline` (shape-only), `MeshService` id `pixal3d`, catalog entry, CLI help, status row.
 6. Later, separate: texture flow and decoder, multi-view, MoGe.
 
@@ -231,6 +233,6 @@ sibling folders, matting through `Trellis2LazyMatter` / `Trellis2ModelFiles.Find
 
 - The three shape-only flows and `naf_release.pth` are downloaded and size and sha256 checked; the flow layouts come from their headers and
   the source, and nothing has been loaded through the engine yet.
-- NAF's tensor names and shapes (pickle not read), its weights licence, and the speed of 256-wide heads on the generic kernel.
-- Whether `Trellis2PipelineConfig.Load` accepts Pixal3D's `pipeline.json` as is (the fields it reads are equal to the local TRELLIS.2 file).
+- NAF's weights licence (the repository is Apache-2.0; the release asset states none), the speed of NAF on a GPU backend (the attention is a host loop), and
+  NATTEN's own border behaviour (see above).
 - Any numerical agreement with the Python reference; no reference dumps exist.

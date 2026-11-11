@@ -835,6 +835,7 @@ public static class GenerationDispatch
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
             Seed = parameters.GetInt("seed", -1),
+            FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
             Samples = parameters.GetInt("samples", 1),
             Rigged = parameters.GetBool("rigged", false),
             Colors = parameters.GetBool("no-colors", false) ? false : null,

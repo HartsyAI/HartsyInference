@@ -21,8 +21,12 @@ public sealed record MeshRequest
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
-    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt; trellis2: the final dual-grid resolution, 512, 1024 or 1536, default 1024, any other value is rejected before a checkpoint loads).</summary>
+    /// <summary>Grid / voxel resolution; 0 uses the model default (cola3d: 256, or 1024 for a point prompt; trellis2: the final dual-grid resolution, 512, 1024 or 1536, default 1024; pixal3d: the same without 512; any other value is rejected before a checkpoint loads).</summary>
     public int GridResolution { get; init; }
+
+    /// <summary>pixal3d: the photo's horizontal field of view in radians, in (0, pi/2); null uses upstream's default of 0.8576 (about 49 degrees).
+    /// Upstream estimates it with MoGe, which is not ported, so a photo with strong perspective needs it set. Other models reject a value.</summary>
+    public double? FieldOfViewRadians { get; init; }
 
     /// <summary>RNG seed; negative means a random seed.</summary>
     public long Seed { get; init; } = -1;

@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <None Include="CoLa3D\Fixtures\*.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Pixal3D\Fixtures\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

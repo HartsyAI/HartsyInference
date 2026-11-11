@@ -5,6 +5,7 @@ using HartsyInference.LLM.Transformer.Compression;
 using HartsyInference.LLM.Transformer.Dsa;
 using HartsyInference.LLM.Transformer.Mhc;
 using HartsyInference.LLM.Transformer.Sparse;
+using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.Ernie5;
 
@@ -273,7 +274,8 @@ internal sealed class Ernie5Layer : IDisposable
     {
         Tensor t = source.Read(name);
         if (t.DType == DType.F32) return t;
-        using (t) return t.CastTo(DType.F32);
+        // EnsureF32 decodes a block-scaled FP8 weight through its grid, and casts the others.
+        using (t) return ProjectionOps.EnsureF32(t);
     }
 
     /// <summary>A weight copied to a host F32 array.</summary>
