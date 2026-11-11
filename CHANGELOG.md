@@ -5,8 +5,17 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: Hunyuan3D-2 Fast, Turbo, mini and multiview builds.** `hartsy 3d -m hunyuan3d-fast|hunyuan3d-turbo|hunyuan3d-mini` (each its own catalog id and download set; `hunyuan3d-mv` downloads but has no CLI path yet because a request carries one image). The checkpoint's own `config.yaml` sets the architecture: Fast and Turbo embed the guidance scale and run one forward per step, Turbo samples sigmas from its consistency table (5 steps by default), mini has 8+16 blocks and 512 latents, and Turbo decodes with FlashVDM (turbo VAE, hierarchical grid with adaptive KV selection). Against the upstream Python the DiT velocity correlates 1.00000000 for every build (relative L2 4e-6 to 4e-5) and the FlashVDM field 0.99999979. `Hunyuan3DShapePipeline.GenerateMultiView` takes one to four views for 2mv checkpoints. mini-turbo (DINO at 1022) is refused. See the status doc.
 - **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
 - **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
+
+## alpha.418
+
+- **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,
+  `Ernie5Model` loads layer 43 and drafts the token after next: `ForwardStream` returns the target's pre-head stream,
+  `MtpForward` runs the MTP layer on it (chained steps feed its output back), and `MtpHidden` plus `Logits` read the draft through
+  the shared LM head. Verified on a synthetic checkpoint only; the Text path does not draft yet. A checkpoint is no longer refused
+  for having MTP layers.
 
 ## alpha.417
 

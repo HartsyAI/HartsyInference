@@ -836,7 +836,7 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
-            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model) and catalog row; the Text path runs it on the CPU and refuses MTP by name (Ernie5Config.RequireRunnable).
+            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the CPU without MTP.
             Ernie5Catalog.Build(),
 
             // Text / LLM — MOSS-VL-Realtime: cross-attention VLM; GGUF (vision inside) or the official BF16 checkpoint.
