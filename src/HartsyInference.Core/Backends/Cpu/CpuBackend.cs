@@ -49,6 +49,7 @@ public sealed partial class CpuBackend : IBackend
     public unsafe void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         ThrowIfDisposed();
+        if (Fp8BlockDispatch.TryLinear(this, output, input, weight, bias)) return;
         MatMulKernels.LinearTransB(output, input, weight, bias);
         if (weight.LowRankAdjunct is { IsActive: true } adjunct)
         {
