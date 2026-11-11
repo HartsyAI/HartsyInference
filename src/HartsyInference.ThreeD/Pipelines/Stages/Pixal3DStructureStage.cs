@@ -11,7 +11,7 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// projected DINOv3 features, then <see cref="Trellis2StructureDecoder"/> (the same decoder checkpoint as TRELLIS.2) turns it into occupied
 /// voxels on the shape flow's grid. The 1.3B flow is read from disk for each request and released afterwards.
 /// </summary>
-public sealed class Pixal3DStructureStage : IDisposable
+public sealed class Pixal3DStructureStage : IPixal3DStructureStage, IDisposable
 {
     private readonly string _flowPath;
     private readonly Trellis2StructureDecoder _decoder;
@@ -32,8 +32,7 @@ public sealed class Pixal3DStructureStage : IDisposable
         return new Pixal3DStructureStage(flowPath, Trellis2StructureDecoder.Load(decoderPath));
     }
 
-    /// <summary>Voxels <c>(0, x, y, z)</c> on an <paramref name="outputResolution"/> grid. The caller keeps ownership of both conditionings.</summary>
-    /// <param name="onStep">Called after each sampler step; it may throw to cancel.</param>
+    /// <inheritdoc/>
     public int[] Sample(
         IBackend backend,
         Pixal3DCondition cond,

@@ -52,6 +52,19 @@ public sealed class Pixal3DRealWeightsTests
         }
     }
 
+    [Pixal3DRealWeightsFact]
+    public void PipelineJson_IsParsedByTheTrellis2ConfigParser()
+    {
+        // Pixal3D's pipeline.json keeps the Trellis2ImageTo3DPipeline name and the sampler and normalization blocks the shared parser reads.
+        Trellis2PipelineConfig config = Trellis2PipelineConfig.Load(Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, "pipeline.json"));
+
+        Assert.Equal(12, config.SparseStructureSampler.Steps);
+        Assert.Equal(7.5f, config.SparseStructureSampler.GuidanceStrength);
+        Assert.Equal(12, config.ShapeSampler.Steps);
+        Assert.Equal(Trellis2PipelineConfig.ShapeLatentChannels, config.ShapeLatentMean.Length);
+        Assert.Equal("1536_cascade", config.DefaultPipelineType);
+    }
+
     [Pixal3DRealWeightsFact(StructureFlow + ".safetensors", StructureFlow + ".json")]
     public void StoredRopePhases_MatchTheRebuiltDenseRopeTable()
     {

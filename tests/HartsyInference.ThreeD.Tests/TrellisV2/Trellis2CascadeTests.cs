@@ -70,6 +70,52 @@ public sealed class Trellis2CascadeTests
     }
 
     [Fact]
+    public void RoundToCornersQuantizer_MatchesPixal3DsFloatFormulaForEveryCoordinate()
+    {
+        // Upstream: ((c + 0.5) / 512 * (grid - 1)).round().int() in float32, round half to even; the products are exact in float32.
+        foreach (int hr in new[] { 1024, 1152, 1280, 1408, 1536 })
+        {
+            int cells = hr / 16;
+            for (int c = 0; c < 512; c++)
+            {
+                int expected = (int)MathF.Round((c + 0.5f) / 512f * (cells - 1), MidpointRounding.ToEven);
+                int[] coords = Trellis2Cascade.QuantizeUnique([0, c, c, c], 512, hr, Trellis2CascadeQuantizer.RoundToCorners);
+                Assert.Equal([0, expected, expected, expected], coords);
+            }
+        }
+    }
+
+    [Fact]
+    public void RoundToCornersQuantizer_NeverTiesForTheSupportedGrids()
+    {
+        // A tie needs (2c + 1) * (grid - 1) = 512 (mod 1024); grids are multiples of 8, so grid - 1 and the product are odd.
+        foreach (int hr in new[] { 1024, 1152, 1280, 1408, 1536 })
+        {
+            for (int c = 0; c < 512; c++)
+                Assert.NotEqual(512, (2 * c + 1) * (hr / 16 - 1) % 1024);
+        }
+    }
+
+    [Fact]
+    public void RoundToCornersQuantizer_BreaksATieToEvenWhereTheFormulaCanTie()
+    {
+        // Coarse 2 and grid 3: c = 1 gives (2 * 1 + 1) * 2 / 4 = 1.5, which rounds to the even 2; c = 0 gives 0.5, which rounds to the even 0.
+        Assert.Equal(2, Trellis2Cascade.QuantizeUnique([0, 1, 0, 0], 2, 48, Trellis2CascadeQuantizer.RoundToCorners)[1]);
+        Assert.Equal(0, Trellis2Cascade.QuantizeUnique([0, 0, 0, 0], 2, 48, Trellis2CascadeQuantizer.RoundToCorners)[1]);
+    }
+
+    [Fact]
+    public void FitTokenCap_RetreatsUnderTheChosenQuantizer()
+    {
+        int[] upsampled = [0, 0, 0, 0, 0, 100, 100, 100, 0, 200, 200, 200];
+
+        (int[] coords, int resolution) = Trellis2Cascade.FitTokenCap(upsampled, 512, 1536, maxTokens: 4, Trellis2CascadeQuantizer.RoundToCorners);
+
+        Assert.Equal(1536, resolution);
+        Assert.Equal(3, coords.Length / 4);
+    }
+
+    [Fact]
     public void FitTokenCap_KeepsTheTargetWhenTheCountIsUnderTheCap()
     {
         int[] upsampled = [0, 0, 0, 0, 0, 100, 100, 100, 0, 200, 200, 200];
