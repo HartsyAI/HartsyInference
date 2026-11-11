@@ -15,12 +15,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb scene mesh for cola3d.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d, trellis) or a .obj/.glb scene mesh (cola3d).")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis) or a .obj/.glb scene mesh (cola3d).")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, cola3d, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d, trellis, cola3d, or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, cola3d, or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>

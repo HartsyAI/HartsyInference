@@ -50,6 +50,28 @@ public sealed record Hunyuan3DConfig
     /// <summary>ShapeVAE latent scale (config <c>scale_factor</c>); the sampled latent is divided by this before decode.</summary>
     public float VaeScaleFactor { get; init; } = 1.0f;
 
+    /// <summary>Geo-decoder width divisor (the turbo VAE halves it to 512 and projects the latents down first).</summary>
+    public int GeoDownsample { get; init; } = 1;
+
+    /// <summary>Geo-decoder MLP expansion (the turbo VAE uses 1).</summary>
+    public int GeoMlpRatio { get; init; } = 4;
+
+    /// <summary>Whether the geo-decoder applies <c>ln_post</c>; without it QK-norm is off too.</summary>
+    public bool GeoLnPost { get; init; } = true;
+
+    // --- Distilled and multiview variants ---
+    /// <summary>The DiT adds a guidance embedding to the timestep vector and runs one forward per step instead of CFG (Fast, Turbo).</summary>
+    public bool GuidanceEmbed { get; init; }
+
+    /// <summary>Sigma schedule of the checkpoint's scheduler.</summary>
+    public Hunyuan3DScheduler Scheduler { get; init; } = Hunyuan3DScheduler.FlowMatchEuler;
+
+    /// <summary>The consistency scheduler's <c>pcm_timesteps</c>; read only when <see cref="Scheduler"/> is consistency.</summary>
+    public int PcmTimesteps { get; init; } = 50;
+
+    /// <summary>Number of conditioning views (4 for the multiview checkpoints, else 1).</summary>
+    public int ViewCount { get; init; } = 1;
+
     // --- Sampling / extraction defaults ---
     /// <summary>Default flow-match denoise steps.</summary>
     public int NumInferenceSteps { get; init; } = 50;
