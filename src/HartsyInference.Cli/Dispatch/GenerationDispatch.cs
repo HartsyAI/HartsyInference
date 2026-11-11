@@ -909,7 +909,8 @@ public static class GenerationDispatch
         string slug = Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"'));
         // A streaming session writes each frame to disk as it arrives, so a long or unbounded run holds none of its pixels and keeps
         // what it generated if it stops early. A batch rollout hands over all its frames at once, and they are collected.
-        StreamingFrameWriter? spool = plan.Streaming ? new StreamingFrameWriter(outputDir ?? RepoPaths.OutputRoot(), slug) : null;
+        // Disposed on every exit: a frame the writer has accepted is written before the process can end, even on a failure.
+        using StreamingFrameWriter? spool = plan.Streaming ? new StreamingFrameWriter(outputDir ?? RepoPaths.OutputRoot(), slug) : null;
         List<VideoFrame> frames = new List<VideoFrame>();
         int received = 0;
         using IWorldSession session = engine.World.Open(spec, plan.Request);
@@ -973,7 +974,9 @@ public static class GenerationDispatch
             }
             catch when (spool is { Count: > 0 })
             {
-                // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where.
+                // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where. The writer is
+                // drained first, so the frames it accepted are on disk before the count is reported.
+                spool.Dispose();
                 Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
                 throw;
             }
