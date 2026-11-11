@@ -5,6 +5,15 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: UniRig skeleton generation (stage 1 of the auto-rigger), validation-pending.** `HartsyInference.ThreeD.Models.UniRig`
+  ports the `VAST-AI/UniRig` articulation-xl skeleton stage: the Michelangelo-style point encoder (65,536 points with normals, 1,024
+  farthest-point queries), the OPT decoder hosted on `GenericTransformer` with the checkpoint's keys remapped, the 256-bin
+  skeleton-tree tokenizer and its grammar as a sampler step, and mesh preparation (welding, normalization, upstream's `mix` point
+  sampler) in pure C#. The `.ckpt` is read with the safe-subset pickle loader. Not yet wired to `hartsy 3d` or `MeshService`; skinning
+  and rigged-GLB export follow in later PRs. Deviations from upstream: one sampled sequence instead of 15-beam sampling, a seeded
+  Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
+  `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
+  fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
 - **Added: TRELLIS.2 shape-only image to mesh.** `hartsy 3d <image.png> -m trellis2` and `POST /v1/native/mesh` (model `trellis2`) turn one
   image into a GLB with positions and computed normals (no texture, no UVs). The chain is foreground preprocessing, DINOv3 conditioning,
   the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
