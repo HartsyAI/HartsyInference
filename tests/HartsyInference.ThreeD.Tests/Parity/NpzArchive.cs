@@ -43,6 +43,9 @@ internal sealed class NpzArchive
         return new NpzArchive(arrays);
     }
 
+    /// <summary>True when the fixture holds an array named <paramref name="name"/>.</summary>
+    internal bool Has(string name) => _arrays.ContainsKey(name);
+
     /// <summary>The named array; throws when the fixture does not hold it.</summary>
     internal NpzArray Get(string name)
     {
