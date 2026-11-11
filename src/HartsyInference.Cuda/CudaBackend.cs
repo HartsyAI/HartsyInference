@@ -8823,9 +8823,18 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         (long skipped, long skippedBytes) = GpuTransferHelper.PreloadSkipped();
         if (skipped > skippedBefore)
         {
-            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] Left {skipped - skippedBefore} weight(s), {(skippedBytes - skippedBytesBefore) >> 20} MB, on the host "
+            // The same weights are skipped again on every later preload (once per generation for a block-streamed model): say it once.
+            string message = $"[Cuda] Left {skipped - skippedBefore} weight(s), {(skippedBytes - skippedBytesBefore) >> 20} MB, on the host "
                 + "(they upload per op): making them resident would have left the device under vram.preloadHeadroomMb free. "
-                + "Lower vram.preloadHeadroomMb, or set vram.overcommitReliefMb to 0, to preload everything.");
+                + "Lower vram.preloadHeadroomMb, or set vram.overcommitReliefMb to 0, to preload everything.";
+            if (System.Threading.Interlocked.Exchange(ref _preloadSkipWarned, 1) == 0)
+            {
+                HartsyInference.Core.Logging.Logs.Warning(message);
+            }
+            else
+            {
+                HartsyInference.Core.Logging.Logs.Debug(message);
+            }
         }
     });
 
@@ -8840,6 +8849,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             uploaded.AddRange(GpuTransferHelper.PreloadWeightGroup(group));
         }
     });
+
+    private static int _preloadSkipWarned;
 
     /// <summary>Runs a preload pass; if it throws, frees every weight it reported as uploaded, then rethrows.</summary>
     private static void PreloadWithRollback(Action<List<Tensor>> pass)

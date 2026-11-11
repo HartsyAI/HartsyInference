@@ -1395,7 +1395,13 @@ internal static unsafe class GpuTransferHelper
             if (now - System.Threading.Volatile.Read(ref _lastOvercommitTrimTicks) >= 1000)
             {
                 System.Threading.Volatile.Write(ref _lastOvercommitTrimTicks, now);
-                TrimPool();
+                // The allocating thread may be the upload stream's, so a capture on the compute stream can open between the flag check above and
+                // here: ask the driver, right before the stream sync that a capture cannot survive.
+                State s = CurrentState;
+                if (s.StreamHandle == 0 || (CudaDriverApi.cuStreamIsCapturing(s.StreamHandle, out int captureStatus) == 0 && captureStatus == 0))
+                {
+                    TrimPool();
+                }
             }
 
             if (System.Threading.Interlocked.Exchange(ref _overcommitWarned, 1) == 0)
@@ -1419,7 +1425,7 @@ internal static unsafe class GpuTransferHelper
     private static bool UnderOvercommitLimit(State s, long extraBytes)
     {
         long limit = System.Threading.Volatile.Read(ref s.OvercommitLimitBytes);
-        if (limit == 0)
+        if (limit == 0 || !OvercommitGuardActive)
         {
             return true;
         }
@@ -1453,7 +1459,11 @@ internal static unsafe class GpuTransferHelper
 
             Tensor weight = placed[^1];
             placed.RemoveAt(placed.Count - 1);
-            rollback.Remove(weight);
+            int at = rollback.LastIndexOf(weight);
+            if (at >= 0)
+            {
+                rollback.RemoveAt(at);
+            }
             long bytes = (long)ByteSize(weight);
             s.FreeWeights([weight]);
             released += bytes;
