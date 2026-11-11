@@ -1,3 +1,4 @@
+using System.Buffers;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Layers.Attention;
 using HartsyInference.Core.Tensors;
@@ -63,28 +64,49 @@ public sealed class SamPointPatchEmbed
         ArgumentNullException.ThrowIfNull(backend);
         if (height <= 0 || width <= 0 || pointmap.Length != 3 * height * width)
             throw new ArgumentException($"A pointmap is 3 x {height} x {width} values; got {pointmap.Length}.", nameof(pointmap));
-        int size = _config.InputSize, pixels = size * size, d = _config.EmbedDim;
+        int size = _config.InputSize, pixels = size * size;
 
-        float[] xyz = new float[pixels * 3];
-        for (int c = 0; c < 3; c++)
-        {
-            float[] plane = SamPointmapNormalizer.ResizeNearest(pointmap.Slice(c * height * width, height * width), height, width, size, size);
-            for (int i = 0; i < pixels; i++)
-                xyz[i * 3 + c] = plane[i];
-        }
-
-        bool[] valid = new bool[pixels];
-        for (int i = 0; i < pixels; i++)
-        {
-            valid[i] = float.IsFinite(xyz[i * 3]) && float.IsFinite(xyz[i * 3 + 1]) && float.IsFinite(xyz[i * 3 + 2]);
-            if (!valid[i])
-                xyz.AsSpan(i * 3, 3).Clear();
-        }
-
-        SamPointRemapper.Apply(xyz, _config.Remap);
-
+        // Scratch lives in unmanaged tensor storage; only the per-pixel validity flags are managed metadata, and those come from the shared pool.
         using Tensor points = new(new TensorShape(1, pixels, 3), DType.F32);
-        xyz.CopyTo(points.AsSpan<float>());
+        Span<float> xyz = points.AsSpan<float>();
+        bool[] valid = ArrayPool<bool>.Shared.Rent(pixels);
+        try
+        {
+            ResizeNearestInterleaved(pointmap, height, width, size, xyz, valid);
+            SamPointRemapper.Apply(xyz, _config.Remap);
+            return Project(backend, points, valid);
+        }
+        finally
+        {
+            ArrayPool<bool>.Shared.Return(valid);
+        }
+    }
+
+    /// <summary>Nearest-neighbour resize of the planar map into interleaved <c>x, y, z</c> (<c>floor(dst · src / dst size)</c>, torch's rule), flagging pixels with a
+    /// non-finite coordinate and zeroing them, as upstream does before the remap.</summary>
+    private static void ResizeNearestInterleaved(ReadOnlySpan<float> pointmap, int height, int width, int size, Span<float> xyz, bool[] valid)
+    {
+        int plane = height * width;
+        for (int y = 0; y < size; y++)
+        {
+            int sy = Math.Min(height - 1, (int)((long)y * height / size));
+            for (int x = 0; x < size; x++)
+            {
+                int source = sy * width + Math.Min(width - 1, (int)((long)x * width / size));
+                int pixel = y * size + x;
+                float px = pointmap[source], py = pointmap[plane + source], pz = pointmap[2 * plane + source];
+                bool finite = float.IsFinite(px) && float.IsFinite(py) && float.IsFinite(pz);
+                valid[pixel] = finite;
+                xyz[pixel * 3] = finite ? px : 0f;
+                xyz[pixel * 3 + 1] = finite ? py : 0f;
+                xyz[pixel * 3 + 2] = finite ? pz : 0f;
+            }
+        }
+    }
+
+    private Tensor Project(IBackend backend, Tensor points, bool[] valid)
+    {
+        int pixels = _config.InputSize * _config.InputSize, d = _config.EmbedDim;
         using Tensor projected = new(new TensorShape(1, pixels, d), DType.F32);
         backend.Linear(projected, points, _projWeight, _projBias);
 
