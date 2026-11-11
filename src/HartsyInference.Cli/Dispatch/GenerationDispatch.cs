@@ -1025,7 +1025,13 @@ public static class GenerationDispatch
     {
         if (!string.IsNullOrWhiteSpace(actionsOption))
         {
-            return actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            string[] actions = actionsOption.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            // A value like "," names nothing, and a rollout indexes the plan modulo its length.
+            if (actions.Length == 0)
+            {
+                throw new ArgumentException($"--actions \"{actionsOption}\" names no action; give a comma-separated list such as \"w-24,d-24\".");
+            }
+            return actions;
         }
         return string.Equals(catalogId, "diamond", StringComparison.OrdinalIgnoreCase)
             ? ["fire", "right", "right", "right", "right", "left", "left", "left", "left"] : ["forward"];
