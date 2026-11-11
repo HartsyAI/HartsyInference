@@ -22,6 +22,7 @@ Detail in the retired 3D build plan (git history).
 | **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
 | **Hunyuan3D-2** | Image → mesh (`tencent/Hunyuan3D-2`). The melting-wax defect is root-caused and fixed; one image and 20 steps are checked, so it is not yet re-promoted. ([details](#hunyuan3d-2)) |
 | **Hunyuan3D-2.1 shape** | 🔧 Ported 2026-11-11: new C# DiT with MoE, checked against the Python (final velocity included) and rendered on one image. No catalog id yet. ([details](#hunyuan3d-21-shape)) |
+| **Hunyuan3D Paint** (2.0 albedo, 2.1 PBR texturing of a mesh) | 🔧 Source spike and licence recorded 2026-11-11; the C# pieces are in progress and nothing has run on real weights. ([details](#hunyuan3d-paint)) |
 | **Hunyuan3D-2 variants** (Fast, Turbo + FlashVDM, mini, 2mv) | Each build matches the Python reference stage by stage and renders a clean mesh on one image; one subject, one seed, 2mv with three views, no cuDNN. Not ✅. ([details](#hunyuan3d-2-variants)) |
 | **CoLa3D decomposer (q20)** | Implemented; parity pending [#694](https://github.com/HartsyAI/HartsyInference/pull/694). Not verified against the Python reference. |
 | **UniRig** (mesh → skeleton + skin weights → rigged GLB) | Skeleton, skinning, rigged-GLB export and `hartsy 3d -m unirig` implemented in `ThreeD/Models/UniRig`; both real checkpoints load with exact key maps and produce plausible rigs (CPU F32; skeleton also on CUDA). No Python reference, so nothing is parity-checked. ([details](#unirig)) |
@@ -42,7 +43,6 @@ passed. Detail in the retired 3D build plan (git history).
 | Model | Notes |
 |---|---|
 | **TRELLIS mesh/RF decoders** (flexicubes mesh, radiance field) | Not ported — TRELLIS is GS-splat-only today (see above). |
-| **Hunyuan3D Paint** (texture/PBR) | Out of scope for the shape pipelines (multiview diffusion + UV bake). |
 
 ## Foundation
 
@@ -78,7 +78,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Cache the cross-attention keys and values per block, keep the flows resident or in BF16, and tile attention for the 1024/1536 high-resolution step.
 
 ### Other models / features
-- [ ] Hunyuan3D Paint (texture / PBR).
+- [ ] Hunyuan3D Paint: real-weight run, parity against the Python reference, view bake on a real mesh (see [details](#hunyuan3d-paint)). Hunyuan3D Part and Omni follow as their own spikes.
 - [ ] Splat rasterizer.
 - [ ] `ForegroundComposite` helper + CLI wiring (currently `TODO(3D/no-python)`).
 
@@ -142,6 +142,14 @@ Source spike, checkpoint inspection and port, all 2026-11-10 to 11-11: [HUNYUAN3
 Evidence against the upstream Python (`hy3dshape` `82920d64`, fp32 CPU, `demo.png` on white, seed 0, sigma 0.35, one forward with the image tokens): the timestep token (relative L2 2.9e-7) and latent embedding (1.6e-7) correlate 1.00000000; block outputs correlate 1.00000000 at relative L2 1.2e-5 (block 0, dense), 2.0e-5 (block 10, dense), 6.1e-5 (block 15, the first MoE block) and 2.0e-5 (block 20); the final velocity correlates 1.00000000 (relative L2 2.4e-5). The bundled VAE occupancy at 2000 grid points correlates 0.99999392 (relative L2 2.0e-4; measured before the GELU change, which does not touch the VAE). Through a scratch probe on the RTX 3060 (F16 matrices, F32 activations, no cuDNN) the pipeline makes a 10-step, grid-128 mesh in 34 s: 76,656 triangles, watertight, 3 components (largest 76,634), rendered from four angles as the demo mascot with a legible sign.
 
 **Not verified.** Only the first sigma (one forward, 32 minutes on the CPU) was compared; the unconditional pass and the second sigma were not re-run. One subject and one seed; the 10-step GPU run has no Python counterpart; F16 weights against fp32 references were not compared numerically. MoE routing is on the host and unoptimised. There is no catalog id: the repository's checkpoint is a pickle, which the downloader cannot use, so a repacked file or a repack-on-fetch step is needed first. Raw RGBA preprocessing is not ported (3a).
+
+### Hunyuan3D Paint
+
+Source spike, pins, file sizes and hashes, licence and reuse map: [HUNYUAN3D_PAINT_ARCHITECTURE.md](../Research/HUNYUAN3D_PAINT_ARCHITECTURE.md). Paint 2.0 (`tencent/Hunyuan3D-2`) and 2.1 (`tencent/Hunyuan3D-2.1`) are one family: Stable Diffusion 2.1-base (zero terminal SNR, v-prediction) with multiview, reference-image and (2.1) material, DINO and 3D-rotary attention, six to twelve views, then a back-projection bake.
+
+**Licence (read from `Hunyuan3D-2.1` `LICENSE` at `82920d64`).** Tencent Hunyuan 3D 2.1 Community License: not valid in the European Union, United Kingdom and South Korea (use or display of the Works **or Output** there is unlicensed); more than 1 million monthly active users needs a separate Tencent licence; no use of the Works or Output to improve another AI model; Tencent claims no rights in Outputs; a service built on it must name its real provider and disclaim Tencent affiliation (section 3e, absent from `hy3dpaint/LICENSE`); the Acceptable Use Policy applies. The paint UNet is built on SD 2.1-base (CreativeML Open RAIL++-M use restrictions), DINOv2 is Apache-2.0, Real-ESRGAN BSD-3-Clause. The 2.0 paint files carry the 2.0 agreement with the same territory, scale, output and training terms.
+
+**Not verified.** No weights are on disk; no stage has been compared with the Python reference.
 
 ### HairDeck
 

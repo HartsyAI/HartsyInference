@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## Unreleased
+
+- **Added: Hunyuan3D Paint source spike.** `docs/Research/HUNYUAN3D_PAINT_ARCHITECTURE.md` records the pinned Paint 2.0 and 2.1 sources, file hashes, the 2.5D UNet, the renderer and bake, the reuse map and the Tencent Hunyuan 3D 2.1 licence terms (territory excludes the EU, UK and South Korea, 1M MAU, no training other models).
+
 ## alpha.422
 
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads
