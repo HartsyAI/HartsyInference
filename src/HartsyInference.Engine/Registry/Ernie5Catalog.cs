@@ -9,11 +9,11 @@ internal static class Ernie5Catalog
     /// <summary>Builds the entry. It has no <see cref="CatalogEntry.Assets"/>, so the CLI never offers the ~288 GB download for it.</summary>
     internal static CatalogEntry Build() => new()
     {
-        // Ernie5Model implements the architecture on the host and the Text path serves it on the CPU, but no real-weight run has verified
-        // it and the MTP layers are refused by name (Ernie5Config.RequireRunnable), hence Structural.
+        // Ernie5Model implements the architecture, MTP layer included, on the host and the Text path serves it on the CPU, but no
+        // real-weight run has verified it, hence Structural.
         Id = Id, Modality = Modality.Text, DisplayName = "ERNIE-5.5-Flash-Base",
         Architecture = "37 HCA + 6 DSA attention layers, mHC (hc 4), SiTU-GLU latent MoE (512 routed experts, 10 active), multimax head; "
-            + "1 MTP layer (not loaded)",
+            + "1 MTP layer (host reference; not used by the Text path)",
         Status = ModelStatus.Structural, CliDrivable = false, HuggingFaceRepo = "baidu/ERNIE-5.5-Flash-Base",
         Variants =
         [
