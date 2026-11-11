@@ -62,11 +62,13 @@ public sealed class MiniMaxH3ImageVaeConfigTests
     }
 
     [Fact]
-    public void DecoderRefusesTheSingleFrameConfigUntilDecodeLands()
+    public void DecoderAcceptsTheSingleFrameConfig()
     {
         MiniMaxH3VideoVaeConfig config = MiniMaxH3VideoVaeConfig.Detect(Fixture(postQuantRank: 4, projOutRows: 768));
 
-        Assert.Throws<NotSupportedException>(() => new MiniMaxH3VideoVaeDecoder(config));
+        using MiniMaxH3VideoVaeDecoder decoder = new(config);
+
+        Assert.Equal(1, config.TemporalPatch);
     }
 
     /// <summary>Minimal decoder with one block of width <see cref="Width"/> and the key names the detector reads.</summary>

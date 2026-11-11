@@ -53,6 +53,20 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
+## alpha.420
+
+- **Added: host APIs for MOSS-VL-Realtime**, so an app that lists and drives local models (the SwarmUI LLMAssistant extension)
+  needs no model-family knowledge. `TextService.InputCapabilities(path)` answers whether a GGUF or checkpoint folder takes images,
+  video and live sessions from its header or `config.json` alone (MOSS-VL has no `mmproj` sidecar, so the old sidecar test called it
+  text-only); it loads nothing and never throws. `TextService.LoadedPlacements` now lists a loaded MOSS-VL model with a
+  single-device placement, so "loaded, and where" works for it.
+- **Added: the NF4 and FP8 releases, and the BF16 folder, are catalog variants you can download.** `ModelDownloader.DownloadVariantAsync`,
+  `hartsy pull moss-vl-realtime --variant nf4|fp8|bf16` and `POST /admin/models/pull` with `variant` fetch a folder at its pinned
+  revision into `LLM/moss-vl-realtime-<variant>/`, verify every file's SHA-256, and check that every shard the index names is on
+  disk. The BF16 variant moved from the GGUF's folder to its own, because a folder holding both a GGUF and a shard index is ambiguous.
+- **Added: `paths.ffmpegDir`.** Video decode and encode now look for `ffmpeg` and `ffprobe` in that folder before `PATH`, and the
+  error for a missing ffmpeg names the setting.
+
 ## alpha.419
 
 - **Added: a live window for world models, `hartsy world --view`.** It plays frames at the plan's frame rate as the session generates

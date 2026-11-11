@@ -131,6 +131,31 @@ public static class AdminEndpoints
             if (entry.Assets.Count == 0)
                 return Results.Ok(new { model = entry.Id, pulled = false, reason = "no preset assets for this catalog entry" });
 
+            if (!string.IsNullOrWhiteSpace(req.Variant))
+            {
+                CatalogVariant variant;
+                try
+                {
+                    variant = ModelDownloader.FindVariant(entry, req.Variant);
+                }
+                catch (ArgumentException ex)
+                {
+                    return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "invalid_request_error");
+                }
+                int absent = ModelDownloader.VariantAssets(entry, variant.Id).Count(a => !File.Exists(ModelDownloader.TargetPath(a)));
+                if (absent == 0)
+                    return Results.Ok(new { model = entry.Id, variant = variant.Id, pulled = false, reason = "already present" });
+                try
+                {
+                    await ModelDownloader.DownloadVariantAsync(entry, variant.Id, onProgress: null, ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status502BadGateway, ex.Message, "download_error");
+                }
+                return Results.Ok(new { model = entry.Id, variant = variant.Id, pulled = true, files = absent });
+            }
+
             IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(entry);
             if (missing.Count == 0)
                 return Results.Ok(new { model = entry.Id, pulled = false, reason = "already present" });
