@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
@@ -12,17 +13,19 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS) turn an image into GLB (mesh) or PLY (splat); the scene model
+/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2) turn an image into GLB (mesh) or PLY (splat); the scene model
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
     private const string HairDeckId = "hairdeck";
+    private const string Trellis2Id = "trellis2";
 
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -49,6 +52,8 @@ public sealed class MeshService : IMeshService, IDisposable
             return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
         }
         HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (id == Trellis2Id)
+            return GenerateTrellis2Async(spec, request, progress, cancel);
         return Task.Run(
             () =>
             {
@@ -114,6 +119,76 @@ public sealed class MeshService : IMeshService, IDisposable
                 return new MeshResult { Data = GlbWriter.Write(result.Objects), Format = "glb" };
             },
             cancel);
+    }
+
+    /// <summary>TRELLIS.2 shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or
+    /// 1536; 0 is 1024), checked with the image and seed before the checkpoints load.</summary>
+    private Task<MeshResult> GenerateTrellis2Async(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        ImageData source = request.Image!;
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The TRELLIS.2 seed must be at most {int.MaxValue}.");
+        Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
+        Trellis2Options options = new()
+        {
+            Grid = request.GridResolution,
+            Steps = request.Steps,
+            Seed = request.Seed < 0 ? null : (int)request.Seed,
+        };
+        string modelsRoot = RepoPaths.ModelsRoot();
+        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
+        Trellis2ImageTo3DPipeline.ValidateRequest(options, image, Trellis2Runtime.MatterAvailable(modelsRoot));
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                Trellis2Runtime runtime = GetOrLoadTrellis2(spec, modelsRoot);
+                // One run at a time per loaded model; a queued request gives up when its own cancellation fires.
+                runtime.Gate.Wait(cancel);
+                try
+                {
+                    if (runtime.IsDisposed)
+                        throw new ModelUnloadedException("The TRELLIS.2 model was unloaded while this request was queued; retry the request.");
+                    Mesh mesh = runtime.Pipeline.Generate(image, options, p =>
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    });
+                    return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
+                }
+                finally
+                {
+                    runtime.Gate.Release();
+                }
+            },
+            cancel);
+    }
+
+    /// <summary>Loads (or returns the cached) TRELLIS.2 pipeline for <paramref name="spec"/>.</summary>
+    private Trellis2Runtime GetOrLoadTrellis2(ModelSpec spec, string modelsRoot)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                "No checkpoint found for 'trellis2'. Download the catalog assets or supply the model directory as the local path.");
+        }
+        lock (_gate)
+        {
+            if (_trellis2.TryGetValue(spec.LocalPath, out Trellis2Runtime? cached))
+                return cached;
+            try
+            {
+                Trellis2Runtime runtime = Trellis2Runtime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                _trellis2[spec.LocalPath] = runtime;
+                return runtime;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to load the 'trellis2' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
     }
 
     private static bool IsHairDeck(ModelSpec spec) =>
@@ -190,7 +265,7 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         string modelRoot = HairDeckModel.ResolveModelRoot(spec.LocalPath);
-        string visionRoot = Path.Combine(RepoPaths.ModelsRoot(), "Vision");
+        string visionRoot = ModelFolders.Under(RepoPaths.ModelsRoot(), ModelFolders.Vision);
         string key = $"{modelRoot}|{visionRoot}";
         lock (_gate)
         {
@@ -362,14 +437,17 @@ public sealed class MeshService : IMeshService, IDisposable
         List<LoadedMesh> pipelines;
         List<CoLa3DPipeline> scenePipelines;
         List<HairDeckRuntime> hairDecks;
+        List<Trellis2Runtime> trellis2Runtimes;
         lock (_gate)
         {
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
             hairDecks = _hairDecks.Values.ToList();
+            trellis2Runtimes = _trellis2.Values.ToList();
             _pipelines.Clear();
             _scenePipelines.Clear();
             _hairDecks.Clear();
+            _trellis2.Clear();
         }
         foreach (LoadedMesh loaded in pipelines)
         {
@@ -380,6 +458,10 @@ public sealed class MeshService : IMeshService, IDisposable
             pipeline.Dispose();
         }
         foreach (HairDeckRuntime runtime in hairDecks)
+        {
+            runtime.Dispose();
+        }
+        foreach (Trellis2Runtime runtime in trellis2Runtimes)
         {
             runtime.Dispose();
         }
