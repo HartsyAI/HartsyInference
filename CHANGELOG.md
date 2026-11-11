@@ -13,7 +13,6 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
   [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
 
-
 ## alpha.417
 
 - **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session
