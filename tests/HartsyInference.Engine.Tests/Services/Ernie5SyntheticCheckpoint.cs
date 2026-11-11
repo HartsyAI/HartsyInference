@@ -221,7 +221,7 @@ internal static class Ernie5SyntheticCheckpoint
             "self_attn.linear_q_up_proj.weight" => [c.NumAttentionHeads * c.HeadDim, c.QLoraRank],
             "self_attn.linear_kv_proj.weight" => [c.HeadDim, c.HiddenSize],
             "self_attn.kv_layernorm.weight" => [c.HeadDim],
-            "self_attn.linear_o_group_proj" => [grouped * groupDim],
+            "self_attn.linear_o_group_proj" => [grouped, groupDim],
             "self_attn.o_proj.weight" => [c.HiddenSize, grouped],
             "self_attn.core_attention.attn_sink" => [c.NumAttentionHeads],
             "self_attn.core_attention.compressor.linear_wkv.weight" => [c.HeadDim, c.HiddenSize],
