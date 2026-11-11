@@ -36,6 +36,9 @@ internal sealed class OneShotWorldSession : IWorldSession
     }
 
     /// <inheritdoc/>
+    public bool DefersDeviceWork => true;
+
+    /// <inheritdoc/>
     public void SendAction(string action)
     {
         ArgumentNullException.ThrowIfNull(action);

@@ -77,8 +77,10 @@ public sealed class SanaWmDit : IDisposable
                 _blocks[i] = new SanaWmBlock(backend, config, i, weights);
             if (!backend.Device.IsCpu)
             {
-                backend.PreloadWeights(EnumerateWeights());
+                // Set first: an upload that runs out of memory partway has already put some weights on the device, and Dispose
+                // must free those (FreeWeights skips a weight that is not resident).
                 _preloaded = true;
+                backend.PreloadWeights(EnumerateWeights());
             }
 
             built = true;

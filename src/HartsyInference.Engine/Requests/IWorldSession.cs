@@ -12,4 +12,9 @@ public interface IWorldSession : IDisposable
     /// during that run ends the stream with <see cref="OperationCanceledException"/> and no frames. A batch session streams once,
     /// so a second enumeration throws <see cref="InvalidOperationException"/>.</summary>
     IAsyncEnumerable<VideoFrame> StreamAsync(CancellationToken cancel);
+
+    /// <summary>True when opening the session reserved no device state and its stream does the whole job: it loads the model and
+    /// runs it, a clip at a time or a chunk at a time. A host that arbitrates the device (the HTTP server's long-running queue)
+    /// holds its gate for such a stream. False for a session that reserved its resources when it opened.</summary>
+    bool DefersDeviceWork => false;
 }

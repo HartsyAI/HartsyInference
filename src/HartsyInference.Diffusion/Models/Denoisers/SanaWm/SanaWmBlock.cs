@@ -353,7 +353,7 @@ public sealed class SanaWmBlock : IDisposable
             Tensor main;
             using (StageProfiler.Begin(_backend, _profileTag, "attn.main"))
                 main = scratch.Track(_softmaxAttention!.ForwardItem(a, tokens, context.RopeCos, context.RopeSin, projection,
-                    stream?.MainWindow, commit ? frames : 0));
+                    stream?.MainWindow, commit ? frames : 0, _profileTag));
             branch = main;
             if (_softmaxCamera is not null)
             {

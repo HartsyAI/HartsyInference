@@ -8,14 +8,17 @@ internal readonly record struct DepthwiseConv2dGeometry(int Batch, int Channels,
 /// <summary>The depthwise Conv2D shape contract, shared by the host reference and the device backends so they cannot disagree on geometry.</summary>
 internal static class DepthwiseConv2dContract
 {
-    /// <summary>Checks NCHW input and output, the <c>[C, 1, kH, kW]</c> weight and the optional <c>[C]</c> bias agree on channels.</summary>
-    /// <exception cref="ArgumentException">A tensor has the wrong rank, weight layout, or channel or bias count.</exception>
+    /// <summary>Checks NCHW input and output, the <c>[C, 1, kH, kW]</c> weight and the optional <c>[C]</c> bias agree on channels, and that
+    /// input and output hold the same batch.</summary>
+    /// <exception cref="ArgumentException">A tensor has the wrong rank, weight layout, or batch, channel or bias count.</exception>
     internal static DepthwiseConv2dGeometry Validate(Tensor input, Tensor weight, Tensor? bias, Tensor output)
     {
         if (input.Shape.Rank != 4 || output.Shape.Rank != 4)
             throw new ArgumentException($"Conv2dDepthwise requires [N, C, H, W] tensors; got input {input.Shape} / output {output.Shape}.");
         if (weight.Shape.Rank != 4 || weight.Shape[1] != 1)
             throw new ArgumentException($"Conv2dDepthwise weight must be [C, 1, kH, kW]; got {weight.Shape}.");
+        if (input.Shape[0] != output.Shape[0])
+            throw new ArgumentException($"Conv2dDepthwise requires input and output to hold the same batch; got input {input.Shape} / output {output.Shape}.");
         if (input.Shape[1] != weight.Shape[0] || output.Shape[1] != weight.Shape[0])
             throw new ArgumentException("Conv2dDepthwise requires input/output channel count to equal weight channel count.");
         if (bias is not null && bias.ElementCount != weight.Shape[0])
