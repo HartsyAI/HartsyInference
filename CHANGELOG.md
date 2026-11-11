@@ -3,6 +3,15 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.423
+
+- **Added: Kimi K3.1 decoder on CUDA and Vulkan, synthetic checkpoints only (real weights not run).** `KimiK31Model` runs KDA and NoPE
+  multi-head latent attention with the DSA indexer, a dense SiTU first layer, latent SiTU MoE layers, and block attention residuals. The KDA
+  recurrence is a new per-key-channel delta op (`IBackend.SsmChannelDecayPrefill`, with CUDA and Vulkan kernels). The row softmax
+  (`SoftmaxRows`) and the attention residual (`AttentionResidual`) are shared. ERNIE's multimax head, dense GLU FFN and hyper-connection
+  sublayer moved to shared owners. A synthetic decoder matches the CPU on CUDA and Vulkan. The checkpoint loader and config reader are not
+  built yet, so the real model is not run.
+
 ## Unreleased
 
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
