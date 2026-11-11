@@ -48,6 +48,7 @@ public sealed class Hunyuan3DFlowScheduleTests
         foreach (float sigma in Hunyuan3DFlowSchedule.Sigmas(50))
         {
             float t = Hunyuan3DFlowSchedule.DitTimestep(sigma);
+            Assert.Equal(sigma, t);
             Assert.InRange(t, 0f, 1f);
         }
     }

@@ -128,7 +128,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond.Dispose();
-        Probe($"dit-loop ({steps} steps x2 CFG)");
+        Probe($"dit-loop ({steps - 1} evals x2 CFG)");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
         float inv = 1f / _cfg.VaeScaleFactor;
