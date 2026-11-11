@@ -59,6 +59,9 @@ public sealed record Hunyuan3DConfig
     /// <summary>Whether the geo-decoder applies <c>ln_post</c>; without it QK-norm is off too.</summary>
     public bool GeoLnPost { get; init; } = true;
 
+    /// <summary>Set for the Hunyuan3D-2.1 <c>HunYuanDiTPlain</c> denoiser; null for the 2.0 Flux-style DiT.</summary>
+    public Hunyuan3DPlainDitConfig? PlainDit { get; init; }
+
     // --- Distilled and multiview variants ---
     /// <summary>The DiT adds a guidance embedding to the timestep vector and runs one forward per step instead of CFG (Fast, Turbo).</summary>
     public bool GuidanceEmbed { get; init; }

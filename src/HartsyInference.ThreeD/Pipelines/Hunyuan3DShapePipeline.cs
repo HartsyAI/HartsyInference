@@ -20,7 +20,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
 {
     private readonly Dinov2VisionEncoder _dino;
     private readonly Dinov2ImagePreprocessor _preprocessor;
-    private readonly Hunyuan3DDit _dit;
+    private readonly IHunyuan3DDenoiser _dit;
     private readonly Hunyuan3DShapeVae _vae;
     private readonly Hunyuan3DConfig _cfg;
     private readonly bool _flashVdm;
@@ -29,6 +29,12 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
     /// <param name="flashVdm">Decode with FlashVDM hierarchical volume decoding; <paramref name="vae"/> must then be the turbo VAE.</param>
     public Hunyuan3DShapePipeline(
         IBackend backend, Dinov2VisionEncoder dino, Hunyuan3DDit dit, Hunyuan3DShapeVae vae, Hunyuan3DConfig cfg, bool flashVdm = false)
+        : this(backend, dino, (IHunyuan3DDenoiser)dit, vae, cfg, flashVdm)
+    {
+    }
+
+    private Hunyuan3DShapePipeline(
+        IBackend backend, Dinov2VisionEncoder dino, IHunyuan3DDenoiser dit, Hunyuan3DShapeVae vae, Hunyuan3DConfig cfg, bool flashVdm)
         : base(backend)
     {
         _dino = dino;
@@ -44,7 +50,6 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         IBackend backend, string modelPath, Hunyuan3DConfig? cfg = null, Dinov2Preset? dinoPreset = null, string? flashVdmVaeDir = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        Dinov2Preset dp = dinoPreset ?? Dinov2Preset.Giant;   // Hunyuan3D-2 conditions on DINOv2-giant (1536-dim)
 
         string[] files = Directory.Exists(modelPath)
             ? Directory.GetFiles(modelPath, "*.safetensors", SearchOption.AllDirectories) : [modelPath];
@@ -67,8 +72,23 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         }
 
         Hunyuan3DCheckpointConverter.ConvertedWeights w = Hunyuan3DCheckpointConverter.Convert(all);
+        // Hunyuan3D-2 conditions on DINOv2-giant (1536-dim); 2.1 on DINOv2-large (1024-dim).
+        Dinov2Preset dp = dinoPreset ?? (config.CondDim == 1024 ? Dinov2Preset.Large : Dinov2Preset.Giant);
         Dinov2VisionEncoder dino = new(dp); dino.LoadWeights(w.Dinov2);
-        Hunyuan3DDit dit = new(config); dit.LoadWeights(w.Dit);
+        IHunyuan3DDenoiser dit;
+        if (config.PlainDit is not null)
+        {
+            Hunyuan3DPlainDit plain = new(config);
+            plain.LoadWeights(w.Dit, halfWeights: backend.Device != DeviceKind.Cpu);
+            dit = plain;
+        }
+        else
+        {
+            Hunyuan3DDit flux = new(config);
+            flux.LoadWeights(w.Dit);
+            dit = flux;
+        }
+
         Hunyuan3DShapeVae vae = new(config); vae.LoadWeights(w.ShapeVae);
         if (flashVdmVaeDir is not null)
         {

@@ -6,7 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
 /// <summary>Hunyuan3D-2 shape DiT: a <b>Flux</b> transformer over a VecSet latent, image-conditioned via joint attention to DINOv2-giant tokens, with <b>no RoPE</b> since a VecSet is permutation-invariant.</summary>
-public sealed unsafe class Hunyuan3DDit
+public sealed unsafe class Hunyuan3DDit : IHunyuan3DDenoiser
 {
     // ── CUDA-graph step capture. The 48-block DiT forward is per-op-host-overhead-bound (GEMM_F16 = 0%);
     //    capturing the device-resident block loop once and replaying it with a single cuGraphLaunch per step

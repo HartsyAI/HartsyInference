@@ -1,8 +1,8 @@
-# Hunyuan3D-2.1 shape model: source spike
+# Hunyuan3D-2.1 shape model: architecture, checkpoint and port
 
-Read 2026-11-10 from source and configs only. **No weights were downloaded and no model code was written**, so nothing here is
-verified against a checkpoint. The status doc row is [MODEL_STATUS_3D.md](../Checklists/MODEL_STATUS_3D.md#hunyuan3d-21-shape).
-The 2.0 family is in [HUNYUAN3D_ARCHITECTURE.md](HUNYUAN3D_ARCHITECTURE.md).
+Source spike read 2026-11-10, then the checkpoint keys were read and the DiT was ported the same day (sections marked "checked"). The
+status doc row is [MODEL_STATUS_3D.md](../Checklists/MODEL_STATUS_3D.md#hunyuan3d-21-shape). The 2.0 family is in
+[HUNYUAN3D_ARCHITECTURE.md](HUNYUAN3D_ARCHITECTURE.md).
 
 ## Pins
 
@@ -13,9 +13,16 @@ The 2.0 family is in [HUNYUAN3D_ARCHITECTURE.md](HUNYUAN3D_ARCHITECTURE.md).
 | DiT | `hunyuan3d-dit-v2-1/model.fp16.ckpt`, 7,366,389,768 bytes, plus `config.yaml` (2,078 B) |
 | VAE | `hunyuan3d-vae-v2-1/model.fp16.ckpt`, 655,648,152 bytes (includes the encoder), plus `config.yaml` (409 B) |
 
-**Both checkpoints are pickles (`.ckpt`); the repository has no safetensors for the shape model.** They must go through the
-safe-subset pickle parser and be repacked to safetensors once; nothing may execute them. Key names are not known until a file is
-inspected, which needs an approved download.
+**Both checkpoints are pickles (`.ckpt`); the repository has no safetensors for the shape model.** They go through the safe-subset
+pickle parser (`PytorchPickleLoader`, nothing executes) and `PickleCheckpointRepacker` once. Files downloaded 2026-11-10 with sha256
+checked: DiT `6b519fc7242f78e9b5f47ea4d55668fe3d944a2d27332f4ca68d29a6ff603f5e`, VAE `5cbe97f25e6e7abd4bccc80ab07524ec0c86d24118486a9ba49bb5dfb070288a`.
+
+**Checked: the DiT file is a bundle, like 2.0.** 1601 tensors, all F16, in three groups: `model.*` (752, the DiT), `conditioner.*` (439,
+DINOv2-large under `conditioner.main_image_encoder.model.`) and `vae.*` (410, the full VAE with its encoder). That accounts for the 7.37 GB
+against about 6 GB for the DiT alone, so the separate VAE download is not needed to run the model. The `vae.*` decoder keys and shapes
+are identical to the 2.0 bundled VAE (266 keys, no differences), so `Hunyuan3DShapeVae` loads them from a config with 4096 latents and
+scale 1.0039506. The DiT key names are exactly the ones in the source (`blocks.N.attn1.to_q.weight`, `moe.experts.E.net.0.proj.*`, ...)
+and the shapes match the config (for example `t_embedder.mlp.0.weight` 8192 x 2048, `attn2.to_k.weight` 2048 x 1024, 192 expert tensors).
 
 ## Licence: Tencent Hunyuan 3D 2.1 Community License Agreement
 
@@ -80,18 +87,18 @@ numbers; unverified.
 | MoE FFN | **Does not fit.** The LLM `MoeFeedForward` and `ExpertProgram` compute `down(act(gate(x)) * up(x))` (three matrices, no bias); these experts are two-matrix GELU MLPs with biases. The router part (softmax, top-k, no renormalisation, ungated shared expert) is expressible in `RouterDescriptor`, so the routing contract can be reused while the expert body is written for this model. At 4096 tokens a gathered per-expert `Linear` is enough; the LLM device-resident decode path is irrelevant. |
 | Checkpoint load | Safe pickle parse and one repack to safetensors. |
 
-## Plan, if approved
+## Port (checked 2026-11-10)
 
-1. Download the VAE `.ckpt` first (0.66 GB), inspect keys through the safe parser, repack, and check `Hunyuan3DShapeVae` runs it.
-2. Download the DiT `.ckpt` (7.4 GB), inspect keys, repack to F16 safetensors.
-3. `Hunyuan3D21Dit` (new): blocks, time token, skips, cross-attention, MLP and MoE, in F32 first; per-block parity against `hy3dshape`
-   on CPU (the Python needs `timm` and `diffusers` stand-ins for `FeedForward`; neither is in the reference venv).
-4. Catalog id `hunyuan3d-21`, config reader extension, GPU run, render, then status.
+`Hunyuan3DPlainDit` and `Hunyuan3DPlainBlock` implement the DiT; `Hunyuan3DConfigFile` reads the 2.1 config (including its YAML
+anchors); `Hunyuan3DShapePipeline` picks the denoiser and DINOv2-large from the config. The MoE routes on the host (softmax, top 2,
+unnormalised weights), gathers rows per expert with `GatherRows`, runs the GELU experts with `Linear`, and combines with
+`ScatterAddRows`; the shared expert runs on every token. Against the Python reference on the CPU in fp32 (see the status doc for the
+numbers) the DiT and the bundled VAE are compared by `Hunyuan3D21ShapeParityTests`, fed by `dump_shape21_reference.py`.
 
 ## Open questions and risks
 
-- Checkpoint key layout, top-level groups and whether the DiT file holds EMA weights: unknown until inspected.
-- Memory on the 12 GB card: 6 GB of F16 weights plus the MoE gather buffers; F32 on the CPU reference needs about 12 GB for the DiT alone.
+- The file holds one set of weights (no EMA or optimizer copy was found); which training stage they are from is not stated.
+- Memory on the 12 GB card: about 6 GB of F16 weights plus the MoE gather buffers (the F32 CPU path needs about 12 GB for the DiT alone).
 - `topk(sorted=False)` ordering and near-ties can flip an expert between backends; the combine is order-independent, but parity wants a
   tolerance on the MoE outputs.
 - The 2.1 repository also ships a Paint pipeline (PBR texture) that this spike does not cover.
