@@ -7,7 +7,7 @@ using Xunit;
 
 namespace HartsyInference.Engine.Tests.Services;
 
-/// <summary>The whole ERNIE-5.5 host model on a GPU backend against the CPU: the synthetic checkpoint's logits after a prefill chunk,
+/// <summary>The whole ERNIE-5.5 host model on a GPU backend against the CPU: the synthetic checkpoint's logits after a prefill chunk and a decode step,
 /// through every decoder layer's device attention and MoE, must match the CPU run. Each test is reported as skipped (never passed)
 /// when its device or kernels are absent.</summary>
 [Trait("Category", "GpuIntegration")]
@@ -31,6 +31,9 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     [ErnieVulkanFact]
     public void Vulkan_SyntheticErnie_LogitsMatchCpu() => ParityOn(() => new VulkanBackend(), "Vulkan", resident: false);
 
+    [ErnieVulkanFact]
+    public void Vulkan_SyntheticErnie_ResidentWeights_LogitsMatchCpu() => ParityOn(() => new VulkanBackend(), "Vulkan", resident: true);
+
     // The FP8 checkpoint keeps its linears packed: each runs IBackend.Fp8BlockLinear on the device, against the CPU running the same file.
     [ErnieCudaFact]
     public void Cuda_SyntheticErnieFp8_LogitsMatchCpu() =>
@@ -44,7 +47,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     public void Vulkan_SyntheticErnieFp8_LogitsMatchCpu() =>
         ParityOn(() => new VulkanBackend(), "Vulkan", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
 
-    // Prefill then one decode step on the same state, so the HCA and DSA caches are read across steps as well as written.
+    // Compares the device's logits with the CPU's for the same checkpoint, weights and tokens.
     private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32)
     {
         string dir = WriteCheckpoint(storage);
