@@ -36,6 +36,9 @@ internal static class ProjectionOps
     {
         if (t.DType == DType.F32) return t;
         if (t.DType.IsQuantized) return HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
+        // A block-scaled FP8 weight decodes through its own grid; a plain cast would drop the scales.
+        if (t.DType == DType.F8E4M3 && t.QuantInfo?.Fp8BlockScaleInv is { } scaleInv)
+            return HartsyInference.ModelAssets.BlockScale.Fp8BlockF32Codec.Dequantize(t, scaleInv, t.QuantInfo.Fp8BlockSize, t.QuantInfo.Fp8BlockSize);
         if (t.DType == DType.I8 && t.QuantInfo is { RowScale: not null } int8)
         {
             using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(t, int8.RowScale, int8.ConvRotGroupSize);

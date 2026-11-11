@@ -3,8 +3,8 @@ using HartsyInference.ThreeD.Models.TrellisV2;
 namespace HartsyInference.ThreeD.Models.Pixal3D;
 
 /// <summary>The files of a Pixal3D shape-only install: the projection-mode flows, <c>pipeline.json</c> and NAF in <c>3D/pixal3d</c>; the structure
-/// decoder, shape VAE decoder and DINOv3 encoder are the TRELLIS.2 files (byte-identical), found in the same folder or beside it
-/// (<c>3D/trellis2</c>, <c>TRELLIS2-ShapeVAE</c>, <c>DINOv3</c> or <c>Vision/Dinov3</c>).</summary>
+/// decoder, shape VAE decoder and DINOv3 encoder are the TRELLIS.2 files (byte-identical): the decoders are found in the same folder or beside it
+/// (<c>3D/trellis2</c>, <c>TRELLIS2-ShapeVAE</c>), DINOv3 under <c>Vision/Dinov3</c> or <c>DINOv3</c>, never inside this folder.</summary>
 public sealed record Pixal3DModelFiles
 {
     /// <summary>The released NAF upsampler weights (<c>valeoai/NAF</c>, release <c>model</c>).</summary>

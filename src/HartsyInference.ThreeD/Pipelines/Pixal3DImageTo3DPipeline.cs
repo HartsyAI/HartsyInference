@@ -39,6 +39,9 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
     private const int StructureImage = 512, CoarseImage = 512, FineImage = 1024, NafSize = 512;
     private const int StructureConditioningGrid = 16, UpsampleLevels = 4;
 
+    // Channels of the dense structure latent, and the grid the 1024 flow was trained on (it serves up to 96 cells: its RoPE reads integer coordinates).
+    private const int StructureLatentChannels = 8, FineTrainingGrid = 64;
+
     private readonly Trellis2PipelineConfig _config;
     private readonly IForegroundMatter? _matter;
     private readonly IPixal3DConditioner _conditioner;
@@ -194,17 +197,13 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         int done = 0;
         long started = MonotonicClock.NowNs();
         void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6));
-        void Tick(int step)
-        {
-            done++;
-            Report();
-        }
-
         void Stage()
         {
             done++;
             Report();
         }
+
+        void Tick(int _) => Stage();
 
         Trellis2PreparedImage prepared = Trellis2ImagePreprocessor.Prepare(Backend, image, _matter, CropScale);
         Pixal3DCondition? cond = null, negCond = null;
@@ -234,8 +233,11 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             negCond = cond.ZerosLike();
             Stage();
             fine = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res1024, fineCoords, fineGrid, cond, negCond, unchecked(seed + 2), shapeParams, Tick);
+            DisposeConditioning(ref cond, ref negCond);
 
             DualGridField field = _decoder.Decode(Backend, fine);
+            fine.Feats.Dispose();
+            fine = null;
             Stage();
             SceneGrid grid = new() { Resolution = fineResolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / fineResolution };
             Mesh mesh = _mesher.Extract(field, grid);
@@ -284,7 +286,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         Trellis2FlowConfig structure = ReadConfig(files.StructureFlow);
         Trellis2FlowConfig coarse = ReadConfig(files.ShapeFlow512);
         Trellis2FlowConfig fine = ReadConfig(files.ShapeFlow1024);
-        if (!structure.Dense || structure.Resolution != StructureConditioningGrid || structure.InChannels != 8 || !structure.HasProjection)
+        if (!structure.Dense || structure.Resolution != StructureConditioningGrid || structure.InChannels != StructureLatentChannels || !structure.HasProjection)
             throw new HartsyInferenceException($"'{files.StructureFlow}' is not the 16^3 x 8 channel projection structure flow.");
         foreach ((Trellis2FlowConfig config, string path) in new[] { (coarse, files.ShapeFlow512), (fine, files.ShapeFlow1024) })
         {
@@ -295,6 +297,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
 
         if (coarse.Resolution != StructureGrid)
             throw new HartsyInferenceException($"'{files.ShapeFlow512}' is trained for a {coarse.Resolution} grid; expected {StructureGrid}.");
+        if (fine.Resolution != FineTrainingGrid)
+            throw new HartsyInferenceException($"'{files.ShapeFlow1024}' is trained for a {fine.Resolution} grid; expected {FineTrainingGrid}.");
     }
 
     private static Trellis2FlowConfig ReadConfig(string safetensorsPath)

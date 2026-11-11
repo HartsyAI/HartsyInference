@@ -73,8 +73,8 @@ public static class Trellis2Cascade
 
     /// <summary>
     /// The unique high-resolution flow voxels for a coarse latent upsampled to <paramref name="coarseResolution"/>: each voxel maps to
-    /// <c>floor((c + 0.5) / coarseResolution · (hrResolution / 16))</c> per axis and duplicates collapse. Rows are <c>(batch, x, y, z)</c> in
-    /// lexicographic order, as <c>unique(dim=0)</c> gives.
+    /// <c>floor((c + 0.5) / coarseResolution · (hrResolution / 16))</c> per axis and duplicates collapse (the TRELLIS.2 mapping; see
+    /// <see cref="Trellis2CascadeQuantizer"/> for the other). Rows are <c>(batch, x, y, z)</c> in lexicographic order, as <c>unique(dim=0)</c> gives.
     /// </summary>
     public static int[] QuantizeUnique(ReadOnlySpan<int> upsampled, int coarseResolution, int hrResolution)
         => QuantizeUnique(upsampled, coarseResolution, hrResolution, Trellis2CascadeQuantizer.Floor);

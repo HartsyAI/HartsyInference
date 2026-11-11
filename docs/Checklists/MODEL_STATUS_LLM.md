@@ -188,8 +188,8 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 
 ### Architecture coverage frontier
 - [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
-- [ ] ERNIE-5.5-Flash-Base (`ernie-5.5-flash-base`, 288 GB FP8, `model_type` `ernie5_5_moe`): structural. `Ernie5Model` is a CPU
-  host reference of the whole forward (37 HCA + 6 DSA layers, mHC, SiTU dense and latent MoE, multimax head) and maps every
+- [ ] ERNIE-5.5-Flash-Base (`ernie-5.5-flash-base`, 288 GB FP8, `model_type` `ernie5_5_moe`): structural. `Ernie5Model` runs the whole
+  forward on the CPU, CUDA or Vulkan backend (every op goes through `IBackend`; the residual stream and layer glue are host arrays, so each op round-trips). FP8 linears stay E4M3 with their 128x128 F32 `weight_scale_inv` grid on the weight and run `Fp8BlockLinear` on every backend (`Fp8BlockDispatch`); MoE experts run per expert through the same linear. The packed weights are not kept in VRAM: CUDA uploads each one on every call, so a forward is PCIe-bound, and the CPU decodes each one into a transient F32 copy per call. No real-checkpoint GPU run has been done. `Ernie5ModelGpuParityTests` checks the synthetic FP8 and F32 checkpoints' logits against the CPU on CUDA and Vulkan, and `Ernie5Fp8ReferenceTests` checks the FP8 path against its dequantized F32 twin. It covers all layers (37 HCA + 6 DSA layers, mHC, SiTU dense and latent MoE, multimax head) and maps every
   key of the real index. With `Ernie5LoadOptions.Mtp` it also runs MTP layer 43 (`Ernie5Model.MtpForward` / `MtpHidden`: e/h
   projections, a DSA + latent-MoE block under mHC, its own hc head and `shared_head.norm`, the shared LM head); otherwise its keys
   are skipped. The Text path loads it on the CPU through `Ernie5TextModel` (tokenizer, chat template, `Ernie5GenerationModel`

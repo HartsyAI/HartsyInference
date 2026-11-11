@@ -13,6 +13,21 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   0.8576 rad is used otherwise). `naf_release.pth` must be placed in `3D/pixal3d` by hand (a GitHub release asset the catalog cannot fetch).
   Not verified on real weights end to end; texture, multi-view and MoGe are not implemented.
 
+- **Added: Pixal3D shape-only pipeline (not yet a model id).** `Pixal3DImageTo3DPipeline` runs the cascade over stub-testable stages
+  (`IPixal3DConditioner`, `IPixal3DStructureStage`, `IPixal3DShapeFlowStage`): the structure flow at 16, the 512 shape flow on the pooled voxels with
+  NAF-upsampled features, the shape VAE upsample, Pixal3D's rounding quantizer (`Trellis2CascadeQuantizer.RoundToCorners`) and token cap, the 1024
+  flow on 64 or 96 cells, decode and dual-grid meshing. The grid is 1024 (default) or 1536 and the camera a field of view. `Pixal3DModelFiles`
+  finds the flows and NAF in `3D/pixal3d` and the shared decoders and DINOv3 beside it; `ShapeVaeDecoderStage.LoadNextDcF16C32` and the
+  `Trellis2ModelFiles` candidate lists are now shared with TRELLIS.2. Orchestration is tested over stubs; the stages have not been run on real
+  weights end to end.
+
+- **Added: NAF feature upsampler for Pixal3D (not yet a model id).** `Pixal3DNaf` loads `naf_release.pth` with the safe-subset pickle reader (37 F32
+  tensors, nothing executed) and runs the guide-image conv encoder and axial RoPE on the backend, then evaluates NAF's neighbourhood attention only
+  at the pixels the projection samples. It does not use `natten`: keys and values are constant inside each low-resolution cell, so the dilated
+  window is the 9 x 9 block of feature cells around the pixel's own cell. The query map and upsampled features match upstream's own NAF modules on the
+  real weights (worst absolute difference 1.1e-5, test bound 3e-5; `tests/python-reference/dump_pixal3d_naf.py`; `natten` replaced by a brute-force transcription of its dilated definition).
+  `Pixal3DConditionerStage` can append the NAF samples after the patch-map samples, giving the 2048-channel features the shape flows read.
+
 - **Added: Pixal3D structure stage building blocks (not yet a model id).** `Pixal3DView` and `Pixal3DProjection` reproduce
   Pixal3D's camera (distance from the field of view) and view-aligned feature lookup: grid cells projected through the pinhole and read from
   the DINOv3 patch map with a bilinear, border-clamped `grid_sample` (`GridSampler.GridSampleRowsBorder`). The coordinates and the sampler
@@ -32,6 +47,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.422
 
+- **Added: the ERNIE-5.5 host model runs on the CUDA and Vulkan backends, with its FP8 weights kept packed (synthetic checkpoint only).** `Ernie5Model` accepts a GPU backend instead of refusing it, and every op dispatches through `IBackend`. A block-scaled FP8 weight now carries its F32 `weight_scale_inv` grid on `Tensor.QuantInfo`, and every backend's `Linear` routes it to `Fp8BlockLinear` (`Fp8BlockDispatch`), so the linears and MoE experts of an FP8 checkpoint run without dequantizing to F32. The residual stream and layer glue stay host arrays, so each op still round-trips through the host. Residency is not improved: on CUDA each packed weight is uploaded on every call, so a forward is PCIe-bound, and on the CPU each FP8 linear decodes its weight into a transient F32 copy first. No real-checkpoint GPU run has been done. `Ernie5ModelGpuParityTests` checks the synthetic F32 and FP8 checkpoints' logits against the CPU on CUDA and Vulkan, and `Ernie5Fp8ReferenceTests` checks the FP8 path against its dequantized F32 twin.
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads
   `cudnn_graph64_9.dll` and its other sub-libraries by bare name through the normal Windows search, which skips its own folder,
   and calls `exit()` when one is missing ("Invalid handle. Cannot load symbol cudnnGetCudartVersion", exit code 9). The engine
