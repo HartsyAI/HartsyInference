@@ -23,14 +23,19 @@ public interface IKimiK31WeightSource
 /// <see cref="KimiK31Weights"/>. KDA's q, k and v are fused and its forget gate is folded (see <see cref="KdaLayer.FoldForgetGate"/>), and
 /// the MLA output gate reads the hidden state. Routed experts are MXFP4-packed in the published checkpoint; the loader refuses them by name
 /// before it reads anything, because the packed-expert MoE path is not wired yet.</summary>
-public static class KimiK31WeightLoader
+public sealed class KimiK31WeightLoader
 {
     private const string Root = "language_model.model.";
+
+    /// <summary>Loads every tensor of the decoder. The result owns the tensors the loader created (<see cref="KimiK31Weights.Owned"/>); dispose them with the model.</summary>
+    public static KimiK31Weights Load(KimiK31Config c, IKimiK31WeightSource src) => new KimiK31WeightLoader().LoadAll(c, src);
+
+    private readonly List<Tensor> _owned = new();
 
     /// <summary>Loads every tensor of the decoder.</summary>
     /// <exception cref="NotSupportedException">A routed expert is MXFP4-packed, which the decoder cannot run yet.</exception>
     /// <exception cref="InvalidDataException">A tensor's shape does not match the config.</exception>
-    public static KimiK31Weights Load(KimiK31Config c, IKimiK31WeightSource src)
+    private KimiK31Weights LoadAll(KimiK31Config c, IKimiK31WeightSource src)
     {
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(src);
@@ -44,10 +49,11 @@ public static class KimiK31WeightLoader
             OutputResQuery = Column(src, Root + "output_attn_res_proj.weight", c.Hidden),
             OutputResNorm = F32(src, Root + "output_attn_res_norm.weight", c.Hidden),
             Layers = layers,
+            Owned = _owned,
         };
     }
 
-    private static KimiK31LayerWeights LoadLayer(KimiK31Config c, int i, IKimiK31WeightSource src)
+    private KimiK31LayerWeights LoadLayer(KimiK31Config c, int i, IKimiK31WeightSource src)
     {
         string p = Layer(i);
         bool mla = c.IsMla(i), dense = c.IsDense(i);
@@ -70,7 +76,7 @@ public static class KimiK31WeightLoader
         };
     }
 
-    private static KdaWeights LoadKda(KimiK31Config c, int i, IKimiK31WeightSource src)
+    private KdaWeights LoadKda(KimiK31Config c, int i, IKimiK31WeightSource src)
     {
         string p = Layer(i) + "self_attn.";
         int key = c.KeyDim, h = c.Hidden, k = c.ConvKernel, rank = c.KdaForgetRank;
@@ -104,7 +110,7 @@ public static class KimiK31WeightLoader
             OutProj: F32(src, p + "o_proj.weight", h, key));
     }
 
-    private static DsaAttentionWeights LoadMla(KimiK31Config c, int i, IKimiK31WeightSource src)
+    private DsaAttentionWeights LoadMla(KimiK31Config c, int i, IKimiK31WeightSource src)
     {
         string p = Layer(i) + "self_attn.";
         int h = c.Hidden, qk = c.QkNopeDim + c.QkRopeDim, heads = c.Heads;
@@ -130,7 +136,7 @@ public static class KimiK31WeightLoader
     }
 
     // Engine-side names as MoeFeedForward.LoadWeights reads them, under the layer's prefix.
-    private static Dictionary<string, Tensor> LoadMoe(KimiK31Config c, int i, IKimiK31WeightSource src)
+    private Dictionary<string, Tensor> LoadMoe(KimiK31Config c, int i, IKimiK31WeightSource src)
     {
         string block = Layer(i) + "block_sparse_moe.", mlp = Prefix(i) + ".mlp";
         int h = c.Hidden, ls = c.LatentSize, mi = c.MoeIntermediate, sh = c.SharedExperts * c.MoeIntermediate;
@@ -219,12 +225,12 @@ public static class KimiK31WeightLoader
         }
     }
 
-    private static Tensor F32(IKimiK31WeightSource src, string name, params long[] dims) => Make(Host(src, name, dims), dims);
+    private Tensor F32(IKimiK31WeightSource src, string name, params long[] dims) => Make(Host(src, name, dims), dims);
 
     // A [1, n] pseudo-query becomes the [n, 1] column the attention residual takes.
-    private static Tensor Column(IKimiK31WeightSource src, string name, long n) => Make(Host(src, name, 1L, n), n, 1L);
+    private Tensor Column(IKimiK31WeightSource src, string name, long n) => Make(Host(src, name, 1L, n), n, 1L);
 
-    private static Tensor Make(float[] values, params long[] shape)
+    private Tensor Make(float[] values, params long[] shape)
     {
         Tensor t = new(new TensorShape(shape), DType.F32);
         values.CopyTo(t.AsSpan<float>());

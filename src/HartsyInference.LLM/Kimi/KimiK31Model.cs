@@ -77,6 +77,9 @@ public sealed record KimiK31Weights
 
     /// <summary>Per-layer weights, one per decoder layer.</summary>
     public required IReadOnlyList<KimiK31LayerWeights> Layers { get; init; }
+
+    /// <summary>The tensors the loader created for this decoder; the owner disposes them after the model.</summary>
+    public IReadOnlyList<Tensor> Owned { get; init; } = [];
 }
 
 /// <summary>The per-sequence state of a Kimi K3.1 decoder: each KDA layer's conv and recurrent state, each MLA layer's latent and

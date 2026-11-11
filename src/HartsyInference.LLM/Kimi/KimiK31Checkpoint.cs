@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Kimi;
 
@@ -8,6 +9,7 @@ public sealed class KimiK31Checkpoint : IDisposable
 {
     private KimiK31CheckpointWeights? _weights;
     private KimiK31Model? _model;
+    private IReadOnlyList<Tensor> _owned = [];
 
     private KimiK31Checkpoint(KimiK31Config config, KimiK31CheckpointWeights weights, KimiK31Model model)
     {
@@ -35,7 +37,9 @@ public sealed class KimiK31Checkpoint : IDisposable
         {
             KimiK31Weights loaded = KimiK31WeightLoader.Load(config, weights);
             KimiK31Model model = new(backend, config, loaded, maxPositions);
-            return new KimiK31Checkpoint(config, weights, model);
+            KimiK31Checkpoint checkpoint = new(config, weights, model);
+            checkpoint._owned = loaded.Owned;
+            return checkpoint;
         }
         catch
         {
@@ -49,6 +53,8 @@ public sealed class KimiK31Checkpoint : IDisposable
     {
         _model?.Dispose();
         _model = null;
+        foreach (Tensor t in _owned) t.Dispose();
+        _owned = [];
         _weights?.Dispose();
         _weights = null;
     }
