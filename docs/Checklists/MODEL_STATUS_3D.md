@@ -43,6 +43,7 @@ passed. Detail in the retired 3D build plan (git history).
 |---|---|
 | **TRELLIS mesh/RF decoders** (flexicubes mesh, radiance field) | Not ported — TRELLIS is GS-splat-only today (see above). |
 | **Hunyuan3D Paint** (texture/PBR) | Out of scope for the shape pipelines (multiview diffusion + UV bake). |
+| **SAM 3D Objects** (image + mask → Gaussian splat or mesh, with pose) | Research dossier only (source read at `facebookresearch/sam-3d-objects@f91db411`); nothing implemented. Weights and configs are gated (SAM License, manual Hugging Face approval) and unread, so every config value is unverified. Layout optimisation is dropped, the feed-forward pose is kept. ([research](../Research/SAM3D_OBJECTS_ARCHITECTURE.md)) |
 
 ## Foundation
 
