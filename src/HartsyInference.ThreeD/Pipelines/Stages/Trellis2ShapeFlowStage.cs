@@ -41,6 +41,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(coords);
+        Trellis2DeviceMemory.ReleaseBetweenStages(backend, cond, negCond);
         return SampleFlow(
             backend,
             kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path,
@@ -96,7 +97,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
 
         try
         {
-            Denormalize(latent, mean, std);
+            Trellis2LatentNormalization.Denormalize(latent, mean, std);
             return new SparseTensor(latent, coords, gridResolution);
         }
         catch
@@ -104,16 +105,5 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
             latent.Dispose();
             throw;
         }
-    }
-
-    /// <summary>In place <c>x · std + mean</c> per channel over rows of <c>mean.Length</c> channels.</summary>
-    internal static void Denormalize(Tensor latent, ReadOnlySpan<float> mean, ReadOnlySpan<float> std)
-    {
-        Span<float> values = latent.AsSpan<float>();
-        int channels = mean.Length;
-        if (std.Length != channels || values.Length % channels != 0)
-            throw new ArgumentException($"A latent of {values.Length} values does not hold whole rows of {channels} channels.", nameof(latent));
-        for (int i = 0; i < values.Length; i++)
-            values[i] = values[i] * std[i % channels] + mean[i % channels];
     }
 }

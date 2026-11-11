@@ -80,6 +80,50 @@ public sealed class Trellis2RealWeightsTests
     }
 
     [Trellis2RealWeightsFact]
+    public void TextureFlowHeaders_MatchTheKeyMapExactly()
+    {
+        string folder = Trellis2RealWeightsFactAttribute.FindFolder()!;
+        foreach (string name in new[] { Trellis2ModelFiles.TextureFlow512File, Trellis2ModelFiles.TextureFlow1024File })
+        {
+            string path = Path.Combine(folder, name);
+            if (!File.Exists(path))
+                continue;
+
+            Trellis2FlowConfig config = Trellis2FlowConfig.FromJson(File.ReadAllText(Path.ChangeExtension(path, ".json")));
+            Dictionary<string, (string DType, long[] Shape)> header = ReadHeader(path);
+            IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs = Trellis2FlowKeyMap.Specs(config);
+
+            Assert.Equal(64, config.InChannels);
+            Assert.Equal(32, config.OutChannels);
+            Assert.Equal(specs.Select(s => s.CheckpointKey).Order(StringComparer.Ordinal), header.Keys.Order(StringComparer.Ordinal));
+            foreach (ShapeVaeKeyMap.TensorSpec spec in specs)
+            {
+                Assert.Equal(spec.Shape, header[spec.CheckpointKey].Shape);
+                Assert.Equal("BF16", header[spec.CheckpointKey].DType);
+            }
+
+            _output.WriteLine($"{name}: {specs.Count} tensors match (in {config.InChannels}, out {config.OutChannels}, resolution {config.Resolution}).");
+        }
+    }
+
+    [Trellis2RealWeightsFact]
+    public void TextureDecoderHeader_MatchesTheTextureKeyMap()
+    {
+        string path = Path.Combine(Trellis2RealWeightsFactAttribute.FindFolder()!, Trellis2ModelFiles.TextureDecoderFile);
+        if (!File.Exists(path))
+            return;
+
+        Dictionary<string, (string DType, long[] Shape)> header = ReadHeader(path);
+        IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs = ShapeVaeKeyMap.Decoder(ShapeVaeDecoderConfig.Texture);
+
+        Assert.Equal(specs.Select(s => s.CheckpointKey).Order(StringComparer.Ordinal), header.Keys.Order(StringComparer.Ordinal));
+        foreach (ShapeVaeKeyMap.TensorSpec spec in specs)
+            Assert.Equal(spec.Shape, header[spec.CheckpointKey].Shape);
+        Assert.DoesNotContain(header.Keys, k => k.Contains("to_subdiv"));
+        _output.WriteLine($"{Trellis2ModelFiles.TextureDecoderFile}: {specs.Count} tensors match; dtypes {string.Join(",", header.Values.Select(v => v.DType).Distinct())}.");
+    }
+
+    [Trellis2RealWeightsFact]
     public void ModelFiles_ResolveEveryFileAndPipelineJsonParses()
     {
         Trellis2ModelFiles files = Trellis2ModelFiles.Resolve(Trellis2RealWeightsFactAttribute.FindFolder()!);

@@ -27,9 +27,25 @@ public sealed record ShapeVaeDecoderConfig
     /// <summary>Upstream <c>use_fp16</c>. The CPU reference always computes in F32.</summary>
     public required bool UseFp16 { get; init; }
 
+    /// <summary>Head width (<c>out_channels</c>): 7 for the shape decoder, 6 for the texture decoder.</summary>
+    public int OutputChannels { get; init; } = ShapeVaeKeyMap.DecoderOutputChannels;
+
+    /// <summary>Upstream <c>pred_subdiv</c>. False drops each upsample's <c>to_subdiv</c> head: the children come from another
+    /// decoder's subdivisions (<c>guide_subs</c>), as in the texture decoder.</summary>
+    public bool PredictSubdivision { get; init; } = true;
+
+    /// <summary>The shipped <c>tex_dec_next_dc_f16c32_fp16</c> architecture: the shape decoder's body with a 6-channel PBR head and
+    /// no subdivision heads.</summary>
+    public static ShapeVaeDecoderConfig Texture => ShapeVaeConfig.NextDcF16C32.Decoder with
+    {
+        OutputChannels = ShapeVaeKeyMap.TextureOutputChannels,
+        PredictSubdivision = false,
+    };
+
     /// <summary>Throws <see cref="ArgumentException"/> when the architecture cannot be realized by the blocks.</summary>
     public void Validate()
     {
+        if (OutputChannels <= 0) throw new ArgumentException($"decoder output channels must be positive, got {OutputChannels}.");
         ShapeVaeConfigRules.ValidateLevels("decoder", ModelChannels, NumBlocks, BlockType, UseCheckpoint);
         ShapeVaeConfigRules.ValidateTransitionTypes("decoder", UpBlockType, ModelChannels.Length - 1, ShapeVaeConfigRules.ChannelToSpatialBlock);
         if (LatentChannels <= 0) throw new ArgumentException($"decoder latent channels must be positive, got {LatentChannels}.");

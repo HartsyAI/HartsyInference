@@ -1,7 +1,8 @@
-# TRELLIS.2 architecture (shape-only image to mesh)
+# TRELLIS.2 architecture (image to mesh, with optional PBR texture)
 
-Research dossier for the shape path of `microsoft/TRELLIS.2`, as implemented by `Trellis2ImageTo3DPipeline`. Status and what has
-been verified are in [MODEL_STATUS_3D.md](../Checklists/MODEL_STATUS_3D.md). Texture and PBR are not part of this port.
+Research dossier for `microsoft/TRELLIS.2`, as implemented by `Trellis2ImageTo3DPipeline`: the shape path (`Generate`) and the texture
+path (`GenerateTextured`, [below](#texture-path)). Status and what has been verified are in
+[MODEL_STATUS_3D.md](../Checklists/MODEL_STATUS_3D.md).
 
 ## Pins
 
@@ -17,6 +18,8 @@ Source files read: `trellis2/models/{sparse_structure_flow,structured_latent_flo
 `modules/transformer/{blocks,modulated}.py`, `modules/attention/{modules,rope,full_attn}.py`, `modules/sparse/attention/{modules,rope}.py`,
 `modules/sparse/transformer/modulated.py`, `modules/sparse/basic.py`, `modules/image_feature_extractor.py`,
 `pipelines/trellis2_image_to_3d.py`, `pipelines/samplers/*`, `pipelines/rembg/BiRefNet.py`, `o-voxel/o_voxel/postprocess.py`.
+Texture sampling and baking also read `JeffreyXiang/FlexGEMM` commit `6dd94a859c26ee8246888502eada3dd8ad85532e`
+(`flex_gemm/kernels/cuda/grid_sample/grid_sample.cu`, `flex_gemm/ops/grid_sample/*`).
 
 ## Stage map (pipeline types `512`, `1024_cascade`, `1536_cascade`)
 
@@ -31,6 +34,9 @@ Source files read: `trellis2/models/{sparse_structure_flow,structured_latent_flo
 | Shape decode | `FlexiDualGridVaeDecoder` with `set_resolution(res)`, vertices `(1 + 2m) sigmoid - m`, intersected `> 0`, quad lerp `softplus` | `ShapeVaeDecoder` + `ShapeVaeHead.Split` (shared with CoLa3D) |
 | Mesh | `flexible_dual_grid_to_mesh`, aabb `[-0.5, 0.5]^3` | `DualGridMesherStage` (origin -0.5, voxel size 1/res), then `Trellis2ImageTo3DPipeline.ToYUp` |
 | GLB | `to_glb` swaps `y, z = z, -y` | the same rotation is applied to positions and normals |
+| Texture flow | `sample_tex_slat`: shape latent re-normalized, 32-channel noise, `concat_cond` | `Trellis2TextureFlow`, `Trellis2TextureFlowStage` |
+| Texture decode | `tex_slat_decoder(slat, guide_subs=subs) * 0.5 + 0.5` | `ShapeVaeDecoder` with `ShapeVaeDecoderConfig.Texture`, `Trellis2TextureDecoderStage` |
+| Bake | `o_voxel.postprocess.to_glb` | `PbrMeshPostProcessor` then `PbrGlbWriter` ([MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)) |
 
 `pipeline.json` is parsed at load: samplers (steps 12; structure guidance 7.5, rescale 0.7, interval [0.6, 1.0], `rescale_t` 5.0;
 shape 7.5, 0.5, [0.6, 1.0], 3.0; `sigma_min` 1e-5) and the 32-channel shape normalization.
@@ -63,11 +69,111 @@ uses the negative only). With `guidance_rescale r > 0`: `x0 = (1 - sigma_min) x 
 the guided prediction, the guided `x0` is scaled by `std(x0_pos) / std(x0_cfg)` over all elements, blended with weight `r`, and converted back.
 Upstream's sparse path computes a population std and its dense path an unbiased one; the ratio is the same, and the port uses one.
 
+## Texture path
+
+Read from source at the pins above. Each of the 512 and 1024 flows has a texture twin; the shape flows are unchanged.
+
+| Item | Value |
+|---|---|
+| Texture flows | `slat_flow_imgshape2tex_dit_1_3B_{512,1024}_bf16`: `SLatFlowModel`, grid 32 / 64, 64 input channels, 32 output, otherwise the shape flow's architecture (width 1536, 30 blocks, 12 heads, `mlp_ratio` 5.3334) |
+| Input | `sparse_cat([x_t, concat_cond], dim=-1)` at every call: 32 noise channels then the 32 shape-latent channels |
+| `concat_cond` | the sampled shape latent re-normalized: `(shape_slat - shape_mean) / shape_std`; the noise is `randn` over the same coordinates |
+| Conditioning | the 512 type uses the 512-token DINOv3 conditioning with the 512 texture flow; both cascades use the 1024-token conditioning with the 1024 texture flow, over the fine shape latent's voxels. There is no 1536 texture flow |
+| Sampler | `FlowEulerGuidanceIntervalSampler`, 12 steps, strength 1.0 (one conditional pass; the interval is never used), rescale 0.0, interval [0.6, 0.9], `rescale_t` 3.0, `sigma_min` 1e-5 |
+| Output | `slat * tex_std + tex_mean` with `tex_slat_normalization` from `pipeline.json` (32 values each) |
+| Decoder | `tex_dec_next_dc_f16c32_fp16`: `SparseUnetVaeDecoder`, the shape decoder's body (channels 1024-512-256-128-64, blocks 4-16-8-4-0), `out_channels` 6, `pred_subdiv` false, so no `to_subdiv` weights |
+| Guidance | each `SparseResBlockC2S3d` takes `subdiv = guide_subs[i]` from the shape decode's `return_subs` and keeps the children whose logit is `> 0`; `ShapeVaeSubdivisions` records those logits per level, and a guide from other coordinates is rejected |
+| Head | `F.layer_norm` (eps 1e-5), `output_layer`, then `* 0.5 + 0.5`; channels base color 0..2, metallic 3, roughness 4, alpha 5 |
+| Volume | `MeshWithVoxel(origin = -0.5, voxel_size = 1 / resolution, coords = voxel coords, attrs = decoded features)` |
+
+`to_glb` then runs `fill_holes`, two decimation passes, `unify_face_orientations`, UV unwrap, a rasterized bake with
+`flex_gemm.grid_sample_3d(mode='trilinear')` at snapped surface points, `cv2.inpaint`, and a double-sided material (non-remesh path).
+
+- **Sampler convention (checked).** The CUDA kernel behind `grid_sample_3d(trilinear)` takes `base = floor(q - 0.5)` per axis, weighs
+  neighbor `x` by `1 - |q - x - 0.5|`, drops unoccupied neighbors and divides by `max(w_sum, 1e-12)`. `SparseAttributeSampler` matches that
+  (it uses `floor`). The torch fallback `grid_sample_torch.py` truncates with `.int()`, which differs only for samples within half a voxel
+  of the grid's minimum faces; the pipeline uses the CUDA behavior.
+- **Frame.** Texture voxels, the mesh and the bake all live in TRELLIS.2's Z-up cube `[-0.5, 0.5]^3`. `GenerateTextured` returns that frame and
+  `Trellis2ImageTo3DPipeline.ToGlb` sets `PbrGlbOptions.ConvertZUpToYUp = true` and `DoubleSided = true`; shape-only `Generate` rotates its mesh itself.
+- **Request.** `Trellis2Options.Texture` selects the path for `GenerateTextured` (`Generate` ignores it); `TextureSize` (default 2048) and `DecimationTarget`
+  (default 1,000,000 faces) are upstream's `to_glb` defaults. The texture steps use the same step override as the other samplers.
+- **Contract.** The existing request is unchanged; texture is an opt-in on top of it. `hartsy 3d <image.png> -m trellis2 --texture [--texture-size N]`,
+  and `MeshRequest.Texture` / `MeshRequest.TextureSize` for the engine and the native HTTP mesh request, return a textured GLB instead of the
+  shape-only one (`Format` is `glb` either way). `TextureSize` without `Texture`, or either on another model, is rejected, and a texture size
+  outside 16 to 8192 fails before the checkpoints load. The catalog entry still downloads the shape files only: the 6.1 GB of texture files are
+  not part of `hartsy download trellis2` until they are verified on real weights.
+- **Files** (`microsoft/TRELLIS.2-4B` at the pin; sizes in bytes, sha256 from the Hugging Face tree API):
+
+  | File | Size | sha256 |
+  |---|---|---|
+  | `ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors` | 2,584,672,728 | `8371aa1c5d13be79dcd5ddfd2cf3835e902e204dc34427169a1c702828e1a94d` |
+  | `ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors` | 2,584,672,728 | `580401269059a339b8318ab9ced459a13ba63391721c83a6c383198c29e77686` |
+  | `ckpts/tex_dec_next_dc_f16c32_fp16.safetensors` | 948,458,812 | `97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c` |
+
+  Each flow has a small `.json` sidecar next to it (the 1024 flow is required for the cascades, the 512 flow only for `--grid 512`).
+  `Trellis2ModelFiles` finds them beside the shape flows; without them `GenerateTextured` fails before any stage runs.
+
+### Real-weight run (RTX 3060 12 GB, CUDA, seed 1, 2026-11-11)
+
+Header check: the 512 and 1024 texture flows (640 BF16 tensors each, in 64, out 32) and the texture decoder (no `to_subdiv` keys) match
+`Trellis2FlowKeyMap` and `ShapeVaeKeyMap.Decoder(ShapeVaeDecoderConfig.Texture)` exactly (`Trellis2RealWeightsTests`). Files were fetched from
+`microsoft/TRELLIS.2-4B` at the pin, sizes and sha256 as in the table above, sidecars by size (458, 458, 705 bytes).
+
+A real example image (a marble bust, 1052 px RGBA) and a flat synthetic mug, full 12-step samplers, `--texture`, default 2048 texels and
+1,000,000 faces. Stage times come from the progress stamps of one process per run; peak VRAM is the card's `memory.used`, which includes about
+1.3 to 1.8 GB held by other processes.
+
+| Stage | `--grid 512` bust | `--grid 1024` bust (cascade) |
+|---|---|---|
+| conditioning and structure flow | 190 s (cold file cache; 60 s warm) | 71 s |
+| coarse shape flow (12 steps) | 28 s | 29 s |
+| upsample, fine conditioning and fine shape flow (12 steps, 10,955 tokens) | | 227 s |
+| shape decode and meshing | | 23 s |
+| texture flow (12 steps, one pass each) | 23 s | 133 s |
+| texture decode (guided) | 7 s | 27 s |
+| decimate, unwrap, bake, inpaint (CPU) | 21 to 29 s | 46 to 54 s |
+| total | 269 s (140 s warm) | 564 s |
+| peak VRAM (whole card) | 7.7 to 11.8 GB (see note) | 9.3 GB |
+
+The 512 peak of 11.8 GB belongs to the run that also had other processes resident; the whole-card figure includes about 1.3 to 1.8 GB that is
+not ours, and the two 512 runs (7.7 GB and 11.8 GB) differ by what else held the card.
+
+Findings:
+
+- **Device memory left behind by one stage made the next flow 6 to 35 times slower, with no error and no log line.** Before the fix a
+  `--grid 1024` run spent 5 fine shape steps at 650 to 775 s each and every texture step at 360 to 460 s (a 1024 run was stopped at step 50 of
+  53 after 2 hours); the same steps take 15 to 20 s when the pool is trimmed. The per-op profile with a stream sync after every op showed
+  the same code at full speed, the SDPA kernels were fast in isolation, and the process was CPU-bound in the driver (half of its CPU time in
+  the kernel). What fixed it: returning the stream-ordered pool, cached activations and attention plans to the driver before each flow
+  (`Trellis2DeviceMemory.ReleaseBetweenStages`, shape flows), and dropping every cached device weight before the texture flow
+  (`ReleaseAll`; the shape decoder never preloads, so the backend promotes its weights on its own and keeps them, 1.5 to 1.8 GB). The cause
+  inside the CUDA backend (which route the slow path takes when the pool is large) was not isolated; the shape-only pipeline had the same
+  slow first high-resolution steps (see the status row's "first high-resolution step took 12 minutes").
+- **The CPU bake is not the bottleneck.** Decimating a 11M-triangle 1024 mesh to 1M faces, unwrapping, baking and inpainting took 54 to 68 s;
+  the 512 mesh took 19 to 22 s.
+- **Sweeping the device is not a read-back, and it zeroed the conditioning.** The first version of the release above came out copper and
+  teal (mean metallic 0.2 at 1024 and 0.36 at 512, mesh 937,485 vertices instead of 938,050 at 512) for the marble bust. `FreeActivations` and
+  `FreeAllDeviceMemory` drop the device copy of every activation without reading it back, and a tensor an op produced that nobody read on
+  the host, the DINOv3 conditioning among them, has only a zero-filled host buffer (its host sum reads 0.0, 461,844 after
+  `OffloadActivation`). The next flow then ran on zero conditioning. Every sweep now offloads the tensors a later stage still reads
+  (`Trellis2DeviceMemory`: conditioning, the shape latent, the subdivision guides) first; the 512 bust is then byte-identical (vertices and
+  base color) to the run made before any sweep existed (cream and tan, roughness 0.91, metallic 0.0). The sweep stays in the TRELLIS.2 stages,
+  not in the `SampleFlow` that Pixal3D shares, because Pixal3D's own device-only tensors would need the same offload first. The texture
+  stage's `ReleaseAll` also evicts the DINOv3 and decoder weights that a warm second request would otherwise find cached; the timings above
+  include that re-upload and it pays for itself, so it should not be optimised away without a measurement. The sweeps assume one generation at
+  a time on the engine's backend, as the other pipelines' `FreeActivations` calls do. A flat
+  synthetic mug gave a saturated red (R 0.94, G 0.03, B 0.03; roughness 0.87) at 512 from a copper-brown image, before any sweep existed;
+  it is unexplained. No Python reference exists for any texture tensor.
+- **The atlas is the weak part of the textured GLB.** On both meshes `UvUnwrapper` ended with roughly one chart per few triangles (vertices
+  per triangle 0.94 to 1.5, against about 0.5 for a connected mesh), so only 5 to 11% of the 2048x2048 texels are written by the bake and
+  the rest is inpainted. The render shows dark specks and thin seams. This is the limitation `MESH_POSTPROCESS.md` already lists
+  ("a rough or noisy surface can end in many small charts"), a property of the shared post-processor and not of this path.
+
 ## Differences that remain from upstream
 
 - Noise comes from the repository's `SeedGenerator`, not `torch.manual_seed`/`randn`; the same seed gives a different latent than Python.
 - Compute is F32 on CPU (and the CUDA backend); upstream runs the flows in BF16 and the VAE in FP16.
-- `m.fill_holes()` (CuMesh, in `decode_latent`) is not applied: the raw dual-grid mesh may have small holes.
+- `m.fill_holes()` (CuMesh, in `decode_latent`) is not applied to the shape-only mesh: the raw dual-grid mesh may have small holes. The texture path fills holes inside `PbrMeshPostProcessor`.
 - The winding is unified by `FaceOrientation.Unify` (a breadth-first flip over shared edges, then each patch turned outward by its signed volume) where upstream calls CuMesh's `unify_face_orientations` in `to_glb`.
 - RMBG-2.0 is replaced by the BiRefNet-matting checkpoint the repository already supports, and only when the image has no alpha.
 - The direct `1024` pipeline type (64^3 structure grid) is not exposed.
@@ -89,6 +195,8 @@ for its stage and released. Attention runs through `IBackend.ScaledDotProductAtt
 
 ## Open items
 
-- No Python reference dumps exist, so no stage is parity-verified; see the status row.
+- No Python reference dumps exist, so no stage is parity-verified; see the status row. The one exception is the DINOv3 conditioning, checked against HF `DINOv3ViTModel` on the CPU on the marble bust: correlation 0.999995 at 512 (1029 tokens) and 0.999996 at 1024 (4101 tokens), max abs 0.10 and 0.17.
 - The shape VAE's parity in CoLa3D used a naive convolution shim and an assumed kernel-axis convention; the TRELLIS.2 shape path inherits that caveat.
-- Texture and PBR (texture flow with 64 input channels, texture decoder with guide subdivisions, GLB baking) are a later PR.
+- The texture path has run on real weights (headers match, 512 and 1024 chains complete, GLBs render), but nothing is compared with Python (see the run above).
+- The mesh post-processing is CPU and approximates cumesh, nvdiffrast and OpenCV (see [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)); its UV atlas fragments on these meshes.
+- The texture latent and the texture decode use this repository's noise generator and F32 compute, like the shape stages.
