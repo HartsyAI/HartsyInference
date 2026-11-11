@@ -1,10 +1,9 @@
-namespace HartsyInference.LLM.Ernie5;
+namespace HartsyInference.LLM.Transformer.Heads;
 
-/// <summary>ERNIE-5.5's learned logit transform after the LM head (vLLM-ERNIE <c>Ernie5_5ParallelLMHead.multimax</c>, config
-/// <c>multimax: "lm_head"</c>):
-/// <c>l + t0·relu(r0 - l) + t1·relu(l - r1) + t2·relu(r2 - l)² + t3·relu(l - r3)²</c>, with <c>r</c> = <c>multimax_ranges</c> and
-/// <c>t</c> = <c>multimax_ts</c> read from the checkpoint. Computed in F32, as the reference's <c>head_dtype</c> is.</summary>
-public static class Ernie5Multimax
+/// <summary>A learned piecewise logit transform applied after the LM head (vLLM-ERNIE <c>multimax</c>):
+/// <c>l + t0·relu(r0 − l) + t1·relu(l − r1) + t2·relu(r2 − l)² + t3·relu(l − r3)²</c>, with <c>r</c> the four thresholds and <c>t</c> the
+/// four gains from the checkpoint. Computed in F32. Model-agnostic: any family with the same head supplies its own ranges and gains.</summary>
+public static class MultimaxHead
 {
     /// <summary>Transforms <paramref name="logits"/> in place.</summary>
     /// <param name="ranges">The four thresholds <c>r0..r3</c>.</param>

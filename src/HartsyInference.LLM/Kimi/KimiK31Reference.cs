@@ -76,49 +76,6 @@ public static class KimiK31Reference
     }
 
     /// <summary>
-    /// Block attention residual mix (Kimi AttnRes) for one token. <paramref name="sources"/> are the completed block
-    /// summaries plus the current partial block sum (the embedding is the first source), each of width d. Keys are
-    /// <c>RMSNorm(source)</c> with <paramref name="normWeight"/>; the logit of source n is the dot of its normalized key
-    /// with <paramref name="query"/> (the layer's learned pseudo-query, <c>proj.weight</c>). The output is the softmax-
-    /// weighted sum of the raw sources over the depth axis.
-    /// </summary>
-    public static void AttnResMix(IReadOnlyList<float[]> sources, ReadOnlySpan<float> normWeight, ReadOnlySpan<float> query,
-        Span<float> output, float eps = 1e-6f)
-    {
-        if (sources.Count == 0) throw new ArgumentException("At least one source is required.", nameof(sources));
-        int d = sources[0].Length;
-        if (normWeight.Length != d || query.Length != d || output.Length != d)
-            throw new ArgumentException($"normWeight, query and output must have width {d}.");
-        Span<float> logits = stackalloc float[sources.Count];
-        float max = float.NegativeInfinity;
-        for (int n = 0; n < sources.Count; n++)
-        {
-            ReadOnlySpan<float> s = sources[n];
-            if (s.Length != d) throw new ArgumentException("All sources must have the same width.", nameof(sources));
-            float ss = 0f;
-            for (int j = 0; j < d; j++) ss += s[j] * s[j];
-            float inv = 1f / MathF.Sqrt(ss / d + eps);
-            float logit = 0f;
-            for (int j = 0; j < d; j++) logit += s[j] * inv * normWeight[j] * query[j];
-            logits[n] = logit;
-            max = MathF.Max(max, logit);
-        }
-        float total = 0f;
-        for (int n = 0; n < sources.Count; n++)
-        {
-            logits[n] = MathF.Exp(logits[n] - max);
-            total += logits[n];
-        }
-        output.Clear();
-        for (int n = 0; n < sources.Count; n++)
-        {
-            float p = logits[n] / total;
-            ReadOnlySpan<float> s = sources[n];
-            for (int j = 0; j < d; j++) output[j] += p * s[j];
-        }
-    }
-
-    /// <summary>
     /// DSA indexer score of one query position against one key position:
     /// <c>Σ_h relu(q_h · k) · w_h</c>, where <paramref name="headWeights"/> are <c>weights_proj(x)</c> already multiplied by
     /// the score scale (<c>(index_head_dim · index_num_heads)^-0.5</c>). <paramref name="query"/> is <c>[heads, dim]</c>.
