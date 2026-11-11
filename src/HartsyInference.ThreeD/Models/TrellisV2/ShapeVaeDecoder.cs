@@ -55,13 +55,43 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ShapeVaeOps.RequireInput(latent, _latentChannels, nameof(latent));
 
+        SparseTensor cur = RunStages(backend, latent, _levels);
+        int m = cur.Count;
+        Tensor normed = ShapeVaeOps.LayerNormNoAffine(backend, cur.Feats, m, cur.Channels, ShapeVaeOps.OutputNormEps);
+        cur.Feats.Dispose();
+        Tensor head = ShapeVaeOps.Linear(backend, normed, _outputW, _outputB, m, ShapeVaeKeyMap.DecoderOutputChannels);
+        normed.Dispose();
+        return new SparseTensor(head, cur.Coords, cur.Resolution);
+    }
+
+    /// <summary>
+    /// Upstream <c>upsample(x, upsample_times)</c>: runs the first <paramref name="times"/> levels, each with its subdivision step,
+    /// and returns the coordinates <c>(batch, x, y, z)</c> of the voxels they create on the grid <c>2^times</c> times finer. It stops
+    /// before the output head, so it costs what the decode costs up to that level and no more.
+    /// </summary>
+    /// <param name="times">Levels to run, from 1 to one below the level count.</param>
+    public int[] Upsample(IBackend backend, SparseTensor latent, int times)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (times < 1 || times > _levels - 1)
+            throw new ArgumentOutOfRangeException(nameof(times), times, $"Upsample times must be within [1, {_levels - 1}].");
+        ShapeVaeOps.RequireInput(latent, _latentChannels, nameof(latent));
+        SparseTensor cur = RunStages(backend, latent, times);
+        cur.Feats.Dispose();
+        return cur.Coords;
+    }
+
+    /// <summary>The from-latent projection and the first <paramref name="levels"/> levels with their upsample blocks (none after the last level). The caller owns the returned features.</summary>
+    private SparseTensor RunStages(IBackend backend, SparseTensor latent, int levels)
+    {
         int n = latent.Count;
         Tensor h = ShapeVaeOps.Linear(backend, latent.Feats, _fromLatentW, _fromLatentB, n, _firstChannels);
         SparseTensor cur = latent.Replace(h);
 
         try
         {
-            for (int i = 0; i < _levels; i++)
+            for (int i = 0; i < levels; i++)
             {
                 foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = ShapeVaeOps.Advance(cur, block.Forward(backend, cur));
                 if (i < _levels - 1) cur = ShapeVaeOps.Advance(cur, _ups[i]!.Forward(backend, cur));
@@ -74,12 +104,7 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
             throw;
         }
 
-        int m = cur.Count;
-        Tensor normed = ShapeVaeOps.LayerNormNoAffine(backend, cur.Feats, m, cur.Channels, ShapeVaeOps.OutputNormEps);
-        cur.Feats.Dispose();
-        Tensor head = ShapeVaeOps.Linear(backend, normed, _outputW, _outputB, m, ShapeVaeKeyMap.DecoderOutputChannels);
-        normed.Dispose();
-        return new SparseTensor(head, cur.Coords, cur.Resolution);
+        return cur;
     }
 
     public void Dispose()

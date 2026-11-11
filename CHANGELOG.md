@@ -3,13 +3,93 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
-## alpha.419
+## Unreleased
+
+- **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
+- **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
+- **Added: UniRig skeleton generation (stage 1 of the auto-rigger), validation-pending.** `HartsyInference.ThreeD.Models.UniRig`
+  ports the `VAST-AI/UniRig` articulation-xl skeleton stage: the Michelangelo-style point encoder (65,536 points with normals, 1,024
+  farthest-point queries), the OPT decoder hosted on `GenericTransformer` with the checkpoint's keys remapped, the 256-bin
+  skeleton-tree tokenizer and its grammar as a sampler step, and mesh preparation (welding, normalization, upstream's `mix` point
+  sampler) in pure C#. The `.ckpt` is read with the safe-subset pickle loader. Not yet wired to `hartsy 3d` or `MeshService`; skinning
+  and rigged-GLB export follow in later PRs. Deviations from upstream: one sampled sequence instead of 15-beam sampling, a seeded
+  Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
+  `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
+  fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
+- **Added: UniRig skinning (stage 2), validation-pending.** The skin network of `VAST-AI/UniRig` in pure C#: UniRig's point
+  transformer (k=5 sparse-conv stem with BatchNorm, QK-norm patch attention, no pooling; `UtoniaEncoder` was checked and does not
+  fit), the global point encoder shared with stage 1, bone encoder, mesh-to-bone cross-attention and the per-bone scoring head, the
+  geometric voxel prior (grid 196, geodesic distances over mesh edges and interior voxels, no pyrender), and upstream's `reskin`
+  (nearest-sample median, one diffusion step, small-weight cut-off). Weights are non-negative and each row sums to 1. Runs on the CPU
+  backend in minutes (Horse, 494 vertices, 32 joints: 400 s); GPU timing is not measured.
+- **Added: `hartsy 3d -m unirig`, mesh in, rigged GLB out.** `MeshService` routes the new `unirig` id (`MeshModelIds.RigMesh`) through
+  the existing `MeshRequest.SceneMesh` input and the GLB `MeshResult`; no request or result field changed. The pipeline reads one stage's
+  checkpoint at a time (1.4 GB skeleton, 4.4 GB skin, F32), writes bones named `bone_0…`, tails in node `extras`, inverse bind matrices
+  and the top four influences per vertex (`SkinnedGlbWriter`, separate from the hair-card writer). Pass the folder holding
+  `skeleton/articulation-xl_quantization_256/model.ckpt` and `skin/articulation-xl/model.ckpt` with `--model-path`; `--steps` and
+  `--grid` are rejected. Validation-pending: no Python reference was run, so parity is not claimed.
+- **Added: TRELLIS.2 shape-only image to mesh.** `hartsy 3d <image.png> -m trellis2` and `POST /v1/native/mesh` (model `trellis2`) turn one
+  image into a GLB with positions and computed normals (no texture, no UVs). The chain is foreground preprocessing, DINOv3 conditioning,
+  the 1.3B dense structure flow and decoder, the sparse shape flow (once at 512, or the 512 to 1024 cascade), the shape VAE decode and
+  dual-grid meshing, all in C#. `--grid` is the final dual-grid resolution for this model: 512, 1024 (default, `1024_cascade`) or 1536
+  (`1536_cascade`); other values are rejected before any weight loads. `--grid` keeps its meaning for the other models. An image with an alpha
+  channel is used as the cutout; one without needs the BiRefNet-matting checkpoint (a stand-in for upstream's RMBG-2.0, which is not used).
+- **Fixed: TRELLIS.2 and HairDeck now find their Vision-folder checkpoints (DINOv3, BiRefNet-matting) through the configured Vision folder, and a matting checkpoint installed after the first TRELLIS.2 load is used without a restart.**
+- **Added: config-driven TRELLIS.2 flow classes** (`Trellis2SparseStructureFlow`, `Trellis2SlatFlow`: shared adaLN with a per-block
+  modulation, QK RMS norm, 3D RoPE), the guidance-interval FlowEuler sampler with CFG rescale, `pipeline.json` parsing, cascade
+  token-cap logic, and `ShapeVaeDecoder.Upsample` (the decoder's first levels, returning coordinates). The existing full decode is unchanged.
+- **Fixed: TRELLIS.2 meshes shaded with dark vertical streaks and speckle.** A dual-grid quad is wound the same way whichever side of the surface
+  is inside, so about half of a raw mesh's triangles faced inward and the vertex normals averaged across them were wrong. The pipeline now
+  unifies the winding (`FaceOrientation.Unify`, as upstream's `unify_face_orientations` does) before computing normals. CoLa3D shares the
+  dual-grid mesher and is unchanged.
+- Parity: the DINOv3 conditioning, the 512 shape flow forward and the guided sampler match the upstream Python on the CPU (correlation 0.99993 or better); the structure stage is not checked. The catalog entry is Structural and the status row is 🔧.
+- **Added: a model-independent mesh post-processing and PBR baking toolkit in `HartsyInference.ThreeD`.** `MeshDecimator`
+  (quadric edge collapse with the upstream 3x-then-target schedule), `MeshCleaner`, `TriangleBvh`, `UvUnwrapper` (chart
+  segmentation, planar projection, atlas packing), `Rasterizer`, `SparseAttributeVolume` with `SparseAttributeSampler`,
+  `TextureBaker`, `Inpainter` (Telea) and `PbrGlbWriter` (embedded PNG textures, glTF metallic-roughness packing, optional Z-up
+  to Y-up). `PbrMeshPostProcessor` chains them for a mesh plus a sparse attribute volume. Pure C#, no model dependency, and
+  `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
+  [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
+
+## alpha.421
 
 - **Added: Vulkan `LeakyRelu` and `AdaInstanceNorm1d`.** Both threw "not yet implemented" on the Vulkan backend, which stopped
   Kokoro, StyleTTS 2 and CosyVoice 2 from running there. The same stubs also blocked the CAM++ speaker encoder, the AuK VAE
   encoder, Silero VAD and other callers on Vulkan. `LeakyRelu` is an elementwise op; `AdaInstanceNorm1d` is a new two-pass kernel
   that matches the CPU and CUDA semantics.
 
+## alpha.420
+
+- **Added: host APIs for MOSS-VL-Realtime**, so an app that lists and drives local models (the SwarmUI LLMAssistant extension)
+  needs no model-family knowledge. `TextService.InputCapabilities(path)` answers whether a GGUF or checkpoint folder takes images,
+  video and live sessions from its header or `config.json` alone (MOSS-VL has no `mmproj` sidecar, so the old sidecar test called it
+  text-only); it loads nothing and never throws. `TextService.LoadedPlacements` now lists a loaded MOSS-VL model with a
+  single-device placement, so "loaded, and where" works for it.
+- **Added: the NF4 and FP8 releases, and the BF16 folder, are catalog variants you can download.** `ModelDownloader.DownloadVariantAsync`,
+  `hartsy pull moss-vl-realtime --variant nf4|fp8|bf16` and `POST /admin/models/pull` with `variant` fetch a folder at its pinned
+  revision into `LLM/moss-vl-realtime-<variant>/`, verify every file's SHA-256, and check that every shard the index names is on
+  disk. The BF16 variant moved from the GGUF's folder to its own, because a folder holding both a GGUF and a shard index is ambiguous.
+- **Added: `paths.ffmpegDir`.** Video decode and encode now look for `ffmpeg` and `ffprobe` in that folder before `PATH`, and the
+  error for a missing ffmpeg names the setting.
+
+## alpha.419
+
+- **Added: a live window for world models, `hartsy world --view`.** It plays frames at the plan's frame rate as the session generates
+  them, and steers the run from held keys: hold a key to move, release it to stop. Esc or Q, or closing the window, ends the run the
+  way `q` does, so the PNGs and the MP4 are still written. The window needs a display and cannot be combined with `--interactive`. It is
+  built on Avalonia 11.3.22, the version already in the local NuGet cache; the rest of the engine has no window dependency.
+- **Added: control schemes for world models.** `IWorldControlScheme` maps held keys to the action a session takes, and a model declares
+  one with `WorldCapabilities.LiveControls`. Built in: the SANA-WM camera (`wasd`, `ijkl`), Oasis (WASD, space, shift, ctrl, arrows
+  for the camera) and DIAMOND (fire and left or right). A model with no live control (SANA-WM stage 1) plays its clip when the run
+  completes. A new world model adds a scheme and nothing else; `docs/Research/WORLD_LIVE_VIEWER.md` has the steps.
+- **Changed: streamed frames are written by background PNG writers.** PNG encoding took about 110 ms per 1280x704 frame on the consumer
+  thread, so a 24-frame chunk spent 2.7 s writing and the model waited on it. Four writers now encode in parallel behind a queue of
+  32 frames, and the stream waits only when that queue is full. The frames and the MP4 are byte-identical to before.
+- **Fixed: a live window closes on every exit, and a failed run says so.** A failed stream is reported to the window, which stays up
+  with the error until it is closed. Ctrl+C on an unbounded run keeps its files and reports the run, not "Cancelled.". Oasis and
+  DIAMOND take one action per step, so their window buffers two frames rather than two seconds, and they stop after `--frames`.
+- **Added: a where-the-time-went breakdown** printed at the end of every `--view` run, and under `diagnostics.stageProfile`.
+>
 ## alpha.418
 
 - **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,

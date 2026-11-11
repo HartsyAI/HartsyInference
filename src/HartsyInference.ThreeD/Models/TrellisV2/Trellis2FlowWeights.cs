@@ -1,0 +1,94 @@
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.SafeTensors;
+
+namespace HartsyInference.ThreeD.Models.TrellisV2;
+
+/// <summary>The F32 weights of one TRELLIS.2 flow checkpoint, checked against its <see cref="Trellis2FlowConfig"/>. Checkpoint
+/// tensors are BF16; each is widened once at load, which is exact. Owns the safetensors mapping and every widened copy.</summary>
+public sealed class Trellis2FlowWeights : IDisposable
+{
+    private readonly List<IDisposable> _loaders;
+    private readonly List<Tensor> _owned;
+    private bool _disposed;
+
+    private Trellis2FlowWeights(Trellis2FlowConfig config, Dictionary<string, Tensor> tensors, List<IDisposable> loaders, List<Tensor> owned)
+    {
+        Config = config;
+        Tensors = tensors;
+        _loaders = loaders;
+        _owned = owned;
+    }
+
+    public Trellis2FlowConfig Config { get; }
+
+    /// <summary>The tensors by upstream checkpoint key, all F32.</summary>
+    public IReadOnlyDictionary<string, Tensor> Tensors { get; }
+
+    /// <summary>Opens <paramref name="safetensorsPath"/> with the architecture in its <c>.json</c> sidecar and checks every tensor.</summary>
+    /// <exception cref="FileNotFoundException">The checkpoint or its sidecar is missing.</exception>
+    /// <exception cref="HartsyInferenceException">A tensor is missing, mis-shaped, or not in the architecture.</exception>
+    public static Trellis2FlowWeights Load(string safetensorsPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(safetensorsPath);
+        if (!File.Exists(safetensorsPath))
+            throw new FileNotFoundException($"TRELLIS.2 flow checkpoint not found: '{safetensorsPath}'.", safetensorsPath);
+        string sidecar = Path.ChangeExtension(safetensorsPath, ".json");
+        if (!File.Exists(sidecar))
+            throw new FileNotFoundException($"TRELLIS.2 flow config not found beside the checkpoint: '{sidecar}'.", sidecar);
+        Trellis2FlowConfig config = Trellis2FlowConfig.FromJson(File.ReadAllText(sidecar));
+
+        SafeTensorsLoader loader = new();
+        List<Tensor> owned = [];
+        try
+        {
+            loader.Load(safetensorsPath);
+            return FromTensors(config, loader.GetAllTensors(), [loader], owned);
+        }
+        catch
+        {
+            foreach (Tensor t in owned)
+                t.Dispose();
+            loader.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Checks and widens already-loaded <paramref name="tensors"/>; <paramref name="loaders"/> are released with the result.</summary>
+    public static Trellis2FlowWeights FromTensors(
+        Trellis2FlowConfig config, IReadOnlyDictionary<string, Tensor> tensors, IEnumerable<IDisposable>? loaders = null)
+        => FromTensors(config, tensors, [.. loaders ?? []], []);
+
+    private static Trellis2FlowWeights FromTensors(
+        Trellis2FlowConfig config, IReadOnlyDictionary<string, Tensor> tensors, List<IDisposable> loaders, List<Tensor> owned)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(tensors);
+        IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs = Trellis2FlowKeyMap.Specs(config);
+        HashSet<string> expected = new(specs.Select(s => s.CheckpointKey), StringComparer.Ordinal);
+        foreach (string key in tensors.Keys)
+        {
+            if (!expected.Contains(key))
+                throw new HartsyInferenceException($"TRELLIS.2 flow checkpoint holds '{key}', which the architecture does not use.");
+        }
+
+        Dictionary<string, Tensor> resolved = ShapeVaeWeights.Resolve(specs, tensors, owned, "TRELLIS.2 flow");
+        return new Trellis2FlowWeights(config, resolved, loaders, owned);
+    }
+
+    /// <summary>The tensor <paramref name="key"/>, which <see cref="Load"/> has already shape-checked.</summary>
+    internal Tensor this[string key] => Tensors[key];
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        foreach (Tensor t in _owned)
+            t.Dispose();
+        _owned.Clear();
+        foreach (IDisposable loader in _loaders)
+            loader.Dispose();
+        _loaders.Clear();
+    }
+}

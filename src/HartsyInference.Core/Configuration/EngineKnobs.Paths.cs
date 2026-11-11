@@ -8,6 +8,10 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> CudaLibDir =
         Str("paths.cudaLibDir", null, KnobScope.Construction, KnobDomain.Paths, "Directory prepended to the CUDA userspace library probe list (cuBLAS/cuBLASLt/cuDNN/cudart).");
 
+    /// <summary>Directory holding the <c>ffmpeg</c> and <c>ffprobe</c> binaries the engine launches for video decode and encode.</summary>
+    public static readonly Knob<string?> FfmpegDir =
+        Str("paths.ffmpegDir", null, KnobScope.Runtime, KnobDomain.Paths, "Directory holding the ffmpeg and ffprobe binaries used for video input and output. Unset (or a folder without them) uses the ones on PATH.");
+
     /// <summary>Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error naming the repo.</summary>
     public static readonly Knob<bool> SideModelAutofetch =
         Bool("paths.sideModelAutofetch", true, KnobScope.Runtime, KnobDomain.Paths, "Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error.");

@@ -6,11 +6,11 @@ namespace HartsyInference.Video.Encoding;
 /// <summary>Decodes a video container to raw RGB24 frames by shelling out to <c>ffprobe</c>/<c>ffmpeg</c>
 /// (child processes — the pure-C# rule bans native LIBRARIES, and <see cref="FfmpegProcessEncoder"/> set
 /// the subprocess precedent). Throws a clear install hint when the binaries are missing. Uses PATH binaries
-/// by default.</summary>
-public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ffprobePath = "ffprobe")
+/// by default, or the folder named by the <c>paths.ffmpegDir</c> setting (see <see cref="FfmpegLocator"/>).</summary>
+public sealed class FfmpegProcessDecoder(string? ffmpegPath = null, string? ffprobePath = null)
 {
-    private readonly string _ffmpegPath = ffmpegPath;
-    private readonly string _ffprobePath = ffprobePath;
+    private readonly string _ffmpegPath = ffmpegPath ?? FfmpegLocator.Resolve("ffmpeg");
+    private readonly string _ffprobePath = ffprobePath ?? FfmpegLocator.Resolve("ffprobe");
 
     /// <summary>Decoded clip: frames are row-major RGB24, all the same size.</summary>
     public sealed record Result(List<byte[]> Frames, int Width, int Height, double Fps);
@@ -258,7 +258,7 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
         catch (Exception ex) when (ex is not InvalidOperationException)
         {
             throw new InvalidOperationException(
-                $"Failed to launch '{binary}'. Video restoration input requires ffmpeg — install it (e.g. apt install ffmpeg). {ex.Message}", ex);
+                $"Failed to launch '{binary}'. Video input requires ffmpeg. {FfmpegLocator.InstallHint} {ex.Message}", ex);
         }
     }
 }

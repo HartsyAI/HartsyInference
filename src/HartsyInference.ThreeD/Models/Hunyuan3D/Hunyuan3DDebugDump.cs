@@ -5,7 +5,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
 /// <summary>Layer-activation dump hooks for the Hunyuan3D reference-diff harness; a no-op unless
 /// <c>diagnostics.hunyuan3dDebugDir</c> is set, so it's free on the hot path in normal runs.</summary>
-/// <remarks>Deliberately unwired: the parity pass it feeds is planned but not yet run (docs/Research/HUNYUAN3D_2_ARCHITECTURE.md names these hooks as its mechanism), unlike the sibling *DebugDump classes whose models are already validated.</remarks>
+/// <remarks>Currently unwired: parity runs against the Python dump from tests/python-reference/hunyuan3d_reference instead.</remarks>
 public static unsafe class Hunyuan3DDebugDump
 {
     /// <summary>Dump root directory, or null when dumping is disabled.</summary>
