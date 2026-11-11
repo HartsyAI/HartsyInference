@@ -12,6 +12,12 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
     private bool _half;
     private Tensor? _xW, _xB, _t1W, _t1B, _t2W, _t2B, _finalNormW, _finalNormB, _finalW, _finalB;
 
+    /// <summary>Test hook: called with each block's output.</summary>
+    internal Action<int, Tensor>? BlockProbe { get; set; }
+
+    /// <summary>Test hook: <see cref="Forward"/> returns the hidden state after this block instead of the velocity.</summary>
+    internal int StopAfterBlock { get; set; } = int.MaxValue;
+
     /// <summary>Creates the model for a config read from a 2.1 checkpoint (<see cref="Hunyuan3DConfig.PlainDit"/> must be set).</summary>
     public Hunyuan3DPlainDit(Hunyuan3DConfig cfg)
     {
@@ -63,6 +69,44 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
         if (latent.Shape.Rank != 3 || latent.Shape[0] != 1 || cond.Shape[0] != 1)
             throw new ArgumentException($"Batch 1 only; got latent {latent.Shape} and cond {cond.Shape}.");
         int n = (int)latent.Shape[1], width = _cfg.Width;
+        Tensor x = Embed(backend, latent, timestep);
+
+        Stack<Tensor> skips = new();
+        int half = _plain.Depth / 2;
+        for (int layer = 0; layer < _blocks.Length; layer++)
+        {
+            Tensor? skip = layer > half ? skips.Pop() : null;
+            Tensor next = _blocks[layer].Forward(backend, x, cond, skip);
+            skip?.Dispose();
+            if (layer < half)
+            {
+                // The block output is both the next block's input and a skip value: keep a copy for the skip.
+                Tensor copy = new(next.Shape, DType.F32);
+                backend.CopyInto(copy, next);
+                skips.Push(copy);
+            }
+
+            x = next;
+            BlockProbe?.Invoke(layer, x);
+            if (layer == StopAfterBlock) return x;
+        }
+
+        Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNorm(normed, x, _finalNormW!, _finalNormB!, 1e-6f);
+        x.Dispose();
+        Tensor body = new(new TensorShape(1, n, width), DType.F32);
+        backend.SliceRows(body, normed, 1);
+        normed.Dispose();
+        Tensor velocity = new(new TensorShape(1, n, _cfg.LatentChannels), DType.F32);
+        backend.Linear(velocity, body, _finalW!, _finalB!);
+        body.Dispose();
+        return velocity;
+    }
+
+    /// <summary>The timestep token prepended to the embedded latent: <c>[1, N + 1, W]</c>.</summary>
+    internal Tensor Embed(IBackend backend, Tensor latent, float timestep)
+    {
+        int n = (int)latent.Shape[1], width = _cfg.Width;
 
         // Timestep token: sin/cos(t * freqs) -> Linear -> GELU -> Linear, prepended to the embedded latent.
         Tensor sin = new(new TensorShape(1, width), DType.F32);
@@ -83,35 +127,7 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
         backend.Concat(x, [token, embedded], 1);
         token.Dispose();
         embedded.Dispose();
-
-        Stack<Tensor> skips = new();
-        int half = _plain.Depth / 2;
-        for (int layer = 0; layer < _blocks.Length; layer++)
-        {
-            Tensor? skip = layer > half ? skips.Pop() : null;
-            Tensor next = _blocks[layer].Forward(backend, x, cond, skip);
-            skip?.Dispose();
-            if (layer < half)
-            {
-                // The block output is both the next block's input and a skip value: keep a copy for the skip.
-                Tensor copy = new(next.Shape, DType.F32);
-                backend.CopyInto(copy, next);
-                skips.Push(copy);
-            }
-
-            x = next;
-        }
-
-        Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, _finalNormW!, _finalNormB!, 1e-6f);
-        x.Dispose();
-        Tensor body = new(new TensorShape(1, n, width), DType.F32);
-        backend.SliceRows(body, normed, 1);
-        normed.Dispose();
-        Tensor velocity = new(new TensorShape(1, n, _cfg.LatentChannels), DType.F32);
-        backend.Linear(velocity, body, _finalW!, _finalB!);
-        body.Dispose();
-        return velocity;
+        return x;
     }
 
     // diffusers-style Timesteps(width): frequencies exp(-ln(10000) * i / half), sine block then cosine block, no extra scale.

@@ -39,10 +39,14 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         _n1W = F(w, $"{p}.norm1.weight"); _n1B = F(w, $"{p}.norm1.bias");
         _n2W = F(w, $"{p}.norm2.weight"); _n2B = F(w, $"{p}.norm2.bias");
         _n3W = F(w, $"{p}.norm3.weight"); _n3B = F(w, $"{p}.norm3.bias");
-        _sqW = F(w, $"{p}.attn1.to_q.weight"); _skW = F(w, $"{p}.attn1.to_k.weight"); _svW = F(w, $"{p}.attn1.to_v.weight");
+        // Upstream concatenates the projections and views the result as (heads, 3 * headDim), so a head's "q", "k" and "v" are three
+        // consecutive channel groups of the fused row, not the head's own slices of q, k and v. The weights were trained that way; the
+        // rows are regrouped once here so plain per-projection Linears reproduce it.
+        (_sqW, _skW, _svW) = Regroup(F(w, $"{p}.attn1.to_q.weight"), F(w, $"{p}.attn1.to_k.weight"), F(w, $"{p}.attn1.to_v.weight"), 3);
         _sqNorm = F(w, $"{p}.attn1.q_norm.weight"); _skNorm = F(w, $"{p}.attn1.k_norm.weight");
         _soW = F(w, $"{p}.attn1.out_proj.weight"); _soB = F(w, $"{p}.attn1.out_proj.bias");
-        _cqW = F(w, $"{p}.attn2.to_q.weight"); _ckW = F(w, $"{p}.attn2.to_k.weight"); _cvW = F(w, $"{p}.attn2.to_v.weight");
+        _cqW = F(w, $"{p}.attn2.to_q.weight");
+        (_ckW, _cvW, _) = Regroup(F(w, $"{p}.attn2.to_k.weight"), F(w, $"{p}.attn2.to_v.weight"), null, 2);
         _cqNorm = F(w, $"{p}.attn2.q_norm.weight"); _ckNorm = F(w, $"{p}.attn2.k_norm.weight");
         _coW = F(w, $"{p}.attn2.out_proj.weight"); _coB = F(w, $"{p}.attn2.out_proj.bias");
         if (_skip)
@@ -248,6 +252,32 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         }
 
         return output;
+    }
+
+    /// <summary>Regroups the rows of <paramref name="parts"/> stacked as one fused projection so that head <c>h</c> reads channels
+    /// <c>[h * parts * headDim, (h + 1) * parts * headDim)</c> of the fused row as its <paramref name="parts"/> consecutive groups.</summary>
+    private (Tensor First, Tensor Second, Tensor? Third) Regroup(Tensor a, Tensor b, Tensor? c, int parts)
+    {
+        Tensor[] sources = c is null ? [a, b] : [a, b, c];
+        int rows = (int)a.Shape[0], cols = (int)a.Shape[1];
+        long rowBytes = cols * a.DType.SizeInBytes;
+        Tensor[] outputs = new Tensor[parts];
+        for (int part = 0; part < parts; part++)
+        {
+            outputs[part] = new Tensor(new TensorShape(rows, cols), a.DType);
+            for (int head = 0; head < _heads; head++)
+            {
+                for (int j = 0; j < _headDim; j++)
+                {
+                    int fused = head * parts * _headDim + part * _headDim + j;
+                    Tensor source = sources[fused / rows];
+                    Buffer.MemoryCopy((byte*)source.DataPointer + (long)(fused % rows) * rowBytes,
+                        (byte*)outputs[part].DataPointer + ((long)head * _headDim + j) * rowBytes, rowBytes, rowBytes);
+                }
+            }
+        }
+
+        return (outputs[0], outputs[1], parts > 2 ? outputs[2] : null);
     }
 
     // Matrices stay F16 when the backend multiplies F16 weights directly; vectors (biases, norms) are always F32.
