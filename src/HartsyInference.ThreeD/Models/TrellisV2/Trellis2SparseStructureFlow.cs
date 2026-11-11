@@ -31,7 +31,11 @@ public sealed class Trellis2SparseStructureFlow : IDisposable
 
     /// <summary>Velocity for <paramref name="latent"/> <c>[1, C, R, R, R]</c> at model timestep <paramref name="tModel"/> (<c>1000 · t</c>),
     /// attending to <paramref name="cond"/> <c>[1, L, condChannels]</c>. The caller owns the result.</summary>
-    public Tensor Forward(IBackend backend, Tensor latent, float tModel, Tensor cond)
+    public Tensor Forward(IBackend backend, Tensor latent, float tModel, Tensor cond) => Forward(backend, latent, tModel, cond, null);
+
+    /// <summary>As <see cref="Forward(IBackend, Tensor, float, Tensor)"/> for a projection flow, which also takes <paramref name="proj"/>
+    /// <c>[1, R³, ProjInChannels]</c>, one feature row per cell in the latent's x-major order.</summary>
+    public Tensor Forward(IBackend backend, Tensor latent, float tModel, Tensor cond, Tensor? proj)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
@@ -40,6 +44,7 @@ public sealed class Trellis2SparseStructureFlow : IDisposable
             || latent.Shape[4] != r)
             throw new ArgumentException($"Latent must be [1, {cin}, {r}, {r}, {r}]; got {latent.Shape}.", nameof(latent));
         RequireCond(cond);
+        _core.CheckProjection(proj, tokens);
 
         using Tensor channelsFirst = latent.Reshape(new TensorShape(1, cin, tokens));
         using Tensor rows = new(new TensorShape(1, tokens, cin), DType.F32);
@@ -47,7 +52,7 @@ public sealed class Trellis2SparseStructureFlow : IDisposable
         Tensor h = _core.Embed(backend, rows);
         _rope ??= Trellis2RopeTable.Build(_config.HeadDim, Trellis2RopeTable.DenseGridPositions(r), tokens);
         using Tensor mod = _core.SharedModulation(backend, tModel);
-        Tensor blocks = _core.RunBlocks(backend, h, mod, cond, _rope);
+        Tensor blocks = _core.RunBlocks(backend, h, mod, cond, proj, _rope);
         using Tensor projected = _core.Project(backend, blocks);
         using Tensor back = new(new TensorShape(1, _config.OutChannels, tokens), DType.F32);
         backend.Transpose2D(back, projected, tokens, _config.OutChannels);

@@ -21,9 +21,26 @@ internal static unsafe class Trellis2TestData
         "initialization": "scaled", "qk_rms_norm": true, "qk_rms_norm_cross": true, "dtype": "bfloat16"}}
         """;
 
+    /// <summary>Pixal3D's shipped structure flow sidecar (<c>ss_flow_img_dit_1_3B_64_bf16.json</c>).</summary>
+    internal const string Pixal3DStructureFlowJson = """
+        {"name": "SparseStructureFlowModel", "args": {"resolution": 16, "in_channels": 8, "out_channels": 8, "model_channels": 1536,
+        "cond_channels": 1024, "num_blocks": 30, "num_heads": 12, "mlp_ratio": 5.3334, "pe_mode": "rope", "share_mod": true,
+        "initialization": "scaled", "qk_rms_norm": true, "qk_rms_norm_cross": true, "image_attn_mode": "proj", "dtype": "bfloat16"}}
+        """;
+
+    /// <summary>Pixal3D's shipped 512 shape flow sidecar (<c>slat_flow_img2shape_dit_1_3B_512_bf16.json</c>).</summary>
+    internal const string Pixal3DShapeFlow512Json = """
+        {"name": "ElasticSLatFlowModel", "args": {"resolution": 32, "in_channels": 32, "out_channels": 32, "model_channels": 1536,
+        "cond_channels": 1024, "num_blocks": 30, "num_heads": 12, "mlp_ratio": 5.3334, "pe_mode": "rope", "share_mod": true,
+        "initialization": "scaled", "qk_rms_norm": true, "qk_rms_norm_cross": true, "image_attn_mode": "proj",
+        "proj_in_channels": 2048, "dtype": "bfloat16"}}
+        """;
+
     /// <summary>Width 16 over 2 heads gives head width 8: one RoPE pair per axis (6 rotated channels) and 2 that pass through.</summary>
-    internal static Trellis2FlowConfig Tiny(bool dense) => new()
+    internal static Trellis2FlowConfig Tiny(bool dense, int projChannels = 0) => new()
     {
+        ImageAttentionMode = projChannels > 0 ? Trellis2FlowConfig.ProjectionAttentionMode : Trellis2FlowConfig.CrossAttentionMode,
+        ProjInChannels = projChannels,
         Dense = dense,
         Resolution = dense ? 4 : 8,
         InChannels = 4,

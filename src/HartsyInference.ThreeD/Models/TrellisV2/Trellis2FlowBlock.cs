@@ -9,7 +9,8 @@ namespace HartsyInference.ThreeD.Models.TrellisV2;
 /// block's own <c>modulation</c> parameter is added to the model-wide adaLN output and chunked into shift, scale and gate for
 /// the self-attention and for the MLP. Self-attention (non-affine norm1, QK RMS norm, 3D RoPE) and the MLP (non-affine norm3,
 /// tanh GELU) are modulated and gated; the cross-attention to the image tokens (affine norm2, QK RMS norm) is ungated and
-/// has no rotation. Borrows its weights from <see cref="Trellis2FlowWeights"/>.
+/// has no rotation. In Pixal3D's projection mode the cross-attention output also gains <c>proj_linear(proj)</c>, a per-token
+/// linear of view-aligned image features. Borrows its weights from <see cref="Trellis2FlowWeights"/>.
 /// </summary>
 internal sealed class Trellis2FlowBlock : IDisposable
 {
@@ -21,6 +22,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
     private readonly Tensor _modulation;
     private readonly Tensor _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B;
     private readonly Tensor _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB, _mlp0W, _mlp0B, _mlp2W, _mlp2B;
+    private readonly Tensor? _projW, _projB;
     private readonly Tensor? _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma;
     private int _disposed;
 
@@ -44,12 +46,18 @@ internal sealed class Trellis2FlowBlock : IDisposable
         _outB = weights[p + "self_attn.to_out.bias"];
         _norm2W = weights[p + "norm2.weight"];
         _norm2B = weights[p + "norm2.bias"];
-        _qW = weights[p + "cross_attn.to_q.weight"];
-        _qB = weights[p + "cross_attn.to_q.bias"];
-        _kvW = weights[p + "cross_attn.to_kv.weight"];
-        _kvB = weights[p + "cross_attn.to_kv.bias"];
-        _crossOutW = weights[p + "cross_attn.to_out.weight"];
-        _crossOutB = weights[p + "cross_attn.to_out.bias"];
+        string cross = p + config.CrossAttentionScope + ".";
+        _qW = weights[cross + "to_q.weight"];
+        _qB = weights[cross + "to_q.bias"];
+        _kvW = weights[cross + "to_kv.weight"];
+        _kvB = weights[cross + "to_kv.bias"];
+        _crossOutW = weights[cross + "to_out.weight"];
+        _crossOutB = weights[cross + "to_out.bias"];
+        if (config.HasProjection)
+        {
+            _projW = weights[p + "cross_attn.proj_linear.weight"];
+            _projB = weights[p + "cross_attn.proj_linear.bias"];
+        }
         _mlp0W = weights[p + "mlp.mlp.0.weight"];
         _mlp0B = weights[p + "mlp.mlp.0.bias"];
         _mlp2W = weights[p + "mlp.mlp.2.weight"];
@@ -62,8 +70,8 @@ internal sealed class Trellis2FlowBlock : IDisposable
 
         if (config.QkRmsNormCross)
         {
-            _crossQGamma = weights[p + "cross_attn.q_rms_norm.gamma"];
-            _crossKGamma = weights[p + "cross_attn.k_rms_norm.gamma"];
+            _crossQGamma = weights[cross + "q_rms_norm.gamma"];
+            _crossKGamma = weights[cross + "k_rms_norm.gamma"];
         }
     }
 
@@ -73,7 +81,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
         Tensor?[] all =
         [
             _ones, _modulation, _qkvW, _qkvB, _outW, _outB, _norm2W, _norm2B, _qW, _qB, _kvW, _kvB, _crossOutW, _crossOutB,
-            _mlp0W, _mlp0B, _mlp2W, _mlp2B, _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma,
+            _mlp0W, _mlp0B, _mlp2W, _mlp2B, _projW, _projB, _selfQGamma, _selfKGamma, _crossQGamma, _crossKGamma,
         ];
         foreach (Tensor? t in all)
         {
@@ -83,8 +91,9 @@ internal sealed class Trellis2FlowBlock : IDisposable
     }
 
     /// <summary>One block over <c>x [1, N, C]</c>. <paramref name="sharedMod"/> is the model-wide adaLN output <c>[1, 6C]</c> and
-    /// <paramref name="cond"/> the image tokens <c>[1, L, condChannels]</c>. Returns a new tensor; borrows every input.</summary>
-    internal Tensor Forward(IBackend backend, Tensor x, Tensor sharedMod, Tensor cond, Trellis2RopeTable rope)
+    /// <paramref name="cond"/> the image tokens <c>[1, L, condChannels]</c>. <paramref name="proj"/> is the per-token feature rows
+    /// <c>[1, N, projChannels]</c> of a projection block and null otherwise. Returns a new tensor; borrows every input.</summary>
+    internal Tensor Forward(IBackend backend, Tensor x, Tensor sharedMod, Tensor cond, Tensor? proj, Trellis2RopeTable rope)
     {
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int n = (int)x.Shape[1];
@@ -93,7 +102,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
         {
             // m: shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp.
             Tensor x1 = SelfAttention(backend, x, n, m[0], m[1], m[2], rope);
-            Tensor x2 = CrossAttention(backend, x1, n, cond);
+            Tensor x2 = CrossAttention(backend, x1, n, cond, proj);
             x1.Dispose();
             Tensor x3 = FeedForward(backend, x2, n, m[3], m[4], m[5]);
             x2.Dispose();
@@ -173,7 +182,7 @@ internal sealed class Trellis2FlowBlock : IDisposable
 
     // Cross-attention keys and values are recomputed per call because one block sees both the conditional and the
     // unconditional tokens at every step.
-    private Tensor CrossAttention(IBackend backend, Tensor x, int n, Tensor cond)
+    private Tensor CrossAttention(IBackend backend, Tensor x, int n, Tensor cond, Tensor? projected)
     {
         int lc = (int)cond.Shape[1];
         Tensor h = new(x.Shape, DType.F32);
@@ -191,9 +200,23 @@ internal sealed class Trellis2FlowBlock : IDisposable
         Tensor ctx = Attend(backend, q, k, v, n);
         Tensor proj = Linear(backend, ctx, _crossOutW, _crossOutB, _width);
         ctx.Dispose();
+        if (_projW is not null && _projB is not null)
+            proj = AddProjection(backend, proj, projected, _projW, _projB);
         Tensor sum = new(x.Shape, DType.F32);
         backend.Add(sum, x, proj);
         proj.Dispose();
+        return sum;
+    }
+
+    // Upstream sums proj_linear(proj) + cross_attn(x); a block with no projection weights ignores the features.
+    private Tensor AddProjection(IBackend backend, Tensor attended, Tensor? projected, Tensor weight, Tensor bias)
+    {
+        using Tensor owned = attended;
+        if (projected is null)
+            throw new ArgumentException("A projection block needs per-token projected features.", nameof(projected));
+        using Tensor lifted = Linear(backend, projected, weight, bias, _width);
+        Tensor sum = new(owned.Shape, DType.F32);
+        backend.Add(sum, lifted, owned);
         return sum;
     }
 
