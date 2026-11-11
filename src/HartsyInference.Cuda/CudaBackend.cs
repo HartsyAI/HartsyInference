@@ -1862,7 +1862,10 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>Supports mixed F32/F16/F8 dtypes. For a quantized weight the dequantized F16 cast is cached per
     /// preloaded weight (fast, but the cast occupies F16-sized VRAM).</remarks>
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
-        => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
+    {
+        if (Fp8BlockDispatch.TryLinear(this, output, input, weight, bias)) return;
+        LinearImpl(output, input, weight, bias, cacheWeightCast: true);
+    }
 
     /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>numerics.ltx2Gatefuse=false</c>).</summary>
     internal static bool FuseHeadGateIntoQuant => EngineKnobs.Ltx2Gatefuse.Value;

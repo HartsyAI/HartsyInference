@@ -31,25 +31,38 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     [ErnieVulkanFact]
     public void Vulkan_SyntheticErnie_LogitsMatchCpu() => ParityOn(() => new VulkanBackend(), "Vulkan", resident: false);
 
+    // The FP8 checkpoint keeps its linears packed: each runs IBackend.Fp8BlockLinear on the device, against the CPU running the same file.
+    [ErnieCudaFact]
+    public void Cuda_SyntheticErnieFp8_LogitsMatchCpu() =>
+        ParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    [ErnieCudaFact]
+    public void Cuda_SyntheticErnieFp8_ResidentWeights_LogitsMatchCpu() =>
+        ParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA", resident: true, Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    [ErnieVulkanFact]
+    public void Vulkan_SyntheticErnieFp8_LogitsMatchCpu() =>
+        ParityOn(() => new VulkanBackend(), "Vulkan", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
+
     // Prefill then one decode step on the same state, so the HCA and DSA caches are read across steps as well as written.
-    private void ParityOn(Func<IBackend> open, string device, bool resident)
+    private void ParityOn(Func<IBackend> open, string device, bool resident, Ernie5SyntheticCheckpoint.Storage storage = Ernie5SyntheticCheckpoint.Storage.F32)
     {
-        string dir = WriteCheckpoint();
+        string dir = WriteCheckpoint(storage);
         using CpuBackend cpu = new();
         float[] want = Logits(dir, cpu, resident);
         using IBackend gpu = open();
         AssertClose(want, Logits(dir, gpu, resident), device);
     }
 
-    private string WriteCheckpoint()
+    private string WriteCheckpoint(Ernie5SyntheticCheckpoint.Storage storage)
     {
         string dir = Path.Combine(_root, Guid.NewGuid().ToString("N"));
-        Ernie5SyntheticCheckpoint.Write(dir);
+        Ernie5SyntheticCheckpoint.Write(dir, storage: storage);
         return dir;
     }
 
     // A prefill chunk with every row's logits, then one decode step on the same state; both are compared, not just the last token.
-    private static float[] Logits(string dir, IBackend backend, bool resident)
+    internal static float[] Logits(string dir, IBackend backend, bool resident)
     {
         using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions
         {
@@ -62,7 +75,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     }
 
     // Tolerance for F32 weights, where the device and the CPU differ only in accumulation order. FP8 weights will need a looser bound.
-    private static void AssertClose(float[] want, float[] got, string device)
+    internal static void AssertClose(float[] want, float[] got, string device)
     {
         Assert.Equal(want.Length, got.Length);
         for (int i = 0; i < want.Length; i++)
