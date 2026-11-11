@@ -74,8 +74,9 @@ public sealed class Trellis2ImageConditioner : IDisposable
         return cond;
     }
 
-    /// <summary>The network input <c>[1, 3, R, R]</c>: PIL-style Lanczos resize to 8 bits, then <c>(x / 255 − mean) / std</c>.</summary>
-    internal static unsafe Tensor Pixels(ReadOnlySpan<byte> rgb, int width, int height, int resolution)
+    /// <summary>The network input <c>[1, 3, R, R]</c>: PIL-style Lanczos resize to 8 bits, then <c>(x / 255 − mean) / std</c>; with
+    /// <paramref name="normalize"/> false the values stay in <c>[0, 1]</c>, the guide image Pixal3D's NAF upsampler reads.</summary>
+    internal static unsafe Tensor Pixels(ReadOnlySpan<byte> rgb, int width, int height, int resolution, bool normalize = true)
     {
         if (width <= 0 || height <= 0 || rgb.Length != width * height * 3)
             throw new ArgumentException($"RGB buffer of {rgb.Length} bytes does not fit {width}x{height}.", nameof(rgb));
@@ -89,7 +90,7 @@ public sealed class Trellis2ImageConditioner : IDisposable
             for (int c = 0; c < 3; c++)
             {
                 float level = Math.Clamp((int)(resized[i * 3 + c] + 0.5f), 0, 255);
-                p[c * plane + i] = (level / 255f - Mean[c]) / Std[c];
+                p[c * plane + i] = normalize ? (level / 255f - Mean[c]) / Std[c] : level / 255f;
             }
         }
 

@@ -52,6 +52,11 @@ def projected_coordinates(ns, proj, fov, distance, mesh_scale, image_size):
     return captured["uv"][0]
 
 
+def flat(tensor):
+    """Row-major values at float32's round-trip precision (9 significant digits), which keeps the fixtures small."""
+    return [float(f"{v:.9g}") for v in tensor.reshape(-1).tolist()]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream", required=True)
@@ -100,9 +105,9 @@ def main():
             "width": width,
             "channels": channels,
             # Row-major pixels with channels fastest, the layout of DINOv3 patch tokens.
-            "rows": fmap[0].permute(1, 2, 0).reshape(-1).tolist(),
-            "uv": grid[0].reshape(-1).tolist(),
-            "expected": out.permute(1, 0).reshape(-1).tolist(),
+            "rows": flat(fmap[0].permute(1, 2, 0)),
+            "uv": flat(grid[0]),
+            "expected": flat(out.permute(1, 0)),
         })
 
     with open(args.out, "w", encoding="utf-8") as handle:

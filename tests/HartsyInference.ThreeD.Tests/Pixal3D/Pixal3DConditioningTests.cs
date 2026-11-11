@@ -70,6 +70,41 @@ public sealed class Pixal3DConditioningTests
     }
 
     [Fact]
+    public void Split_WithANafQueryMapAppendsTheUpsampledSamplesAfterThePatchSamples()
+    {
+        // A 144 px image has 9x9 patches, the smallest map NAF's 9-cell window fits; the query map is 18x18 (dilation 2).
+        const int size = 144, patches = 9, nafSize = 18, globals = 5, width = 8;
+        Tensor tokens = new(new TensorShape(1, globals + patches * patches, width), DType.F32);
+        Random rng = new(3);
+        foreach (ref float v in tokens.AsSpan<float>())
+            v = (float)(rng.NextDouble() * 2 - 1);
+        Tensor query = new(new TensorShape(1, Pixal3DNaf.Dim, nafSize, nafSize), DType.F32);
+        foreach (ref float v in query.AsSpan<float>())
+            v = (float)(rng.NextDouble() * 2 - 1);
+        int[] coords = [0, 1, 2, 3, 0, 14, 5, 9];
+        using (tokens)
+        using (query)
+        {
+            using Pixal3DCondition plain = Pixal3DConditionerStage.Split(tokens, size, 16, coords, Pixal3DView.Default);
+            using Pixal3DCondition joined = Pixal3DConditionerStage.Split(tokens, size, 16, coords, Pixal3DView.Default, query, nafSize);
+
+            Assert.Equal(new TensorShape(1, 2, 2 * width), joined.Proj.Shape);
+            float[] uv = Pixal3DProjection.CellCoordinates(coords, 16, Pixal3DView.Default, size);
+            using Tensor expectedNaf = Pixal3DNaf.SampleUpsampled(
+                query.AsReadOnlySpan<float>(), nafSize, nafSize, tokens.AsReadOnlySpan<float>()[(globals * width)..], patches, patches, width, uv);
+            ReadOnlySpan<float> a = plain.Proj.AsReadOnlySpan<float>(), b = expectedNaf.AsReadOnlySpan<float>(), actual = joined.Proj.AsReadOnlySpan<float>();
+            for (int row = 0; row < 2; row++)
+            {
+                for (int c = 0; c < width; c++)
+                {
+                    Assert.Equal(a[row * width + c], actual[row * 2 * width + c]);
+                    Assert.Equal(b[row * width + c], actual[row * 2 * width + width + c]);
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void Split_RejectsTokensThatLeaveNoGlobalRows()
     {
         using Tensor patchesOnly = new(new TensorShape(1, Patches * Patches, Channels), DType.F32);
