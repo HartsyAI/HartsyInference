@@ -3,6 +3,15 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## Unreleased
+
+- **Added: SAM 3D Objects building blocks (not wired to a pipeline).** `HartsyInference.ThreeD.Models.Sam3dObjects` holds the parts the public
+  source and the released YAMLs fully specify, each with unit tests on tiny synthetic inputs and no checkpoint: `SamFlowSampler` (Euler over
+  `t = 0 → 1` on a named set of latents, `rescale_t` warp, guidance `(1 + s)·cond − s·uncond` on every latent inside a scaled-time interval,
+  the shortcut step input), `SamPoseDecoder` (6D rotation, `ScaleShiftInvariant` composition in PyTorch3D's row-vector convention),
+  `SamSparseStructure` (`prune_sparse_structure` and `downsample_sparse_structure`), `SamPointmapNormalizer` (`ObjectCentricSSI`) and
+  `SamMaskCrop` (crop and pad geometry). Gated weights are not read; the embedder, the mixture-of-transformers flow and the decoders follow.
+
 ## alpha.422
 
 - **Fixed: Windows processes exited at CUDA start when cuDNN was in the engine cache.** NVIDIA's `cudnn64_9.dll` loads
