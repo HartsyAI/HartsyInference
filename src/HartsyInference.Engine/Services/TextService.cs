@@ -193,10 +193,21 @@ public sealed partial class TextService : ITextService, IDisposable
             .Select(entry => new LoadedModelResidency(entry.Key, entry.Value.LoadedPath!, entry.Value.ResidencyPlan!))];
 
     /// <inheritdoc/>
-    /// <remarks>Read without the slot lock, like <see cref="LoadedResidency"/>.</remarks>
-    public IReadOnlyList<LoadedModelPlacement> LoadedPlacements =>
-        [.. _slots.Where(entry => entry.Value.PlannedPlacement is not null && entry.Value.LoadedPath is not null)
-            .Select(entry => new LoadedModelPlacement(entry.Key, entry.Value.LoadedPath!, entry.Value.PlannedPlacement!))];
+    /// <remarks>Read without the slot lock, like <see cref="LoadedResidency"/>. A MOSS-VL model has no planner decision (it loads on the
+    /// one device its key names), so it is listed with a placement made for the purpose: <see cref="TextPlacementMode.Gpu"/>,
+    /// feasible, zero byte accounts and a reason saying so. A host can then show "loaded, and where" the same way for every model,
+    /// and the slot's real planning state is left alone.</remarks>
+    public IReadOnlyList<LoadedModelPlacement> LoadedPlacements => PlacementsOf(_slots);
+
+    /// <summary>The placements <see cref="LoadedPlacements"/> reports for <paramref name="slots"/>.</summary>
+    internal static IReadOnlyList<LoadedModelPlacement> PlacementsOf(IEnumerable<KeyValuePair<string, TextDeviceSlot>> slots) =>
+        [.. slots.Where(entry => entry.Value.LoadedPath is not null && (entry.Value.PlannedPlacement is not null || entry.Value.MossVl is not null))
+            .Select(entry => new LoadedModelPlacement(entry.Key, entry.Value.LoadedPath!, entry.Value.PlannedPlacement ?? SingleDevicePlacement(entry.Key)))];
+
+    /// <summary>The placement reported for a model that loads on one device without a planner: it follows the slot's device key.</summary>
+    private static TextPlacement SingleDevicePlacement(string deviceKey) =>
+        new(TextPlacementMode.Gpu, Feasible: true, Devices: [deviceKey], ExpertBudgetBytes: 0, RequiredBytes: 0, AvailableBytes: 0,
+            Reason: "MOSS-VL loads on one device.");
 
     /// <inheritdoc/>
     public DeploymentCapacity? Capacity(string deploymentId)
@@ -1877,6 +1888,37 @@ public sealed partial class TextService : ITextService, IDisposable
         using GgufLoader probe = new GgufLoader();
         probe.Load(path);
         return probe.Metadata.GetString("general.architecture") ?? "";
+    }
+
+    /// <summary>What the model at <paramref name="localPath"/> takes besides text, from its file or folder alone (nothing is loaded and
+    /// no device is touched). A GGUF is read by its header; a Hugging Face checkpoint folder by its <c>config.json</c>. A MOSS-VL
+    /// model (<c>moss_vl</c>) takes images, video and live sessions with no sidecar; any other GGUF takes images when a sidecar
+    /// <c>mmproj</c> sits beside it (<see cref="FindMmproj"/>). A missing, unreadable or unknown path is
+    /// <see cref="TextInputCapabilities.None"/>; this never throws.</summary>
+    public static TextInputCapabilities InputCapabilities(string? localPath)
+    {
+        if (string.IsNullOrWhiteSpace(localPath))
+            return TextInputCapabilities.None;
+        try
+        {
+            if (Directory.Exists(localPath))
+            {
+                return HfCheckpointDirectory.TryProbe(localPath)?.ModelType == LLM.Models.MossVl.MossVlConfig.ModelType
+                    ? new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true)
+                    : TextInputCapabilities.None;
+            }
+            if (!File.Exists(localPath) || !localPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
+                return TextInputCapabilities.None;
+            if (PeekArchitecture(localPath) == LLM.Models.MossVl.MossVlConfig.ModelType)
+                return new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true);
+            return new TextInputCapabilities(Images: FindMmproj(localPath) is not null, Video: false, RealtimeSession: false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A corrupt header or config surfaces as whichever exception the parser raises; a capability query must not throw for any.
+            Logs.Debug($"[TextService] Could not read the input capabilities of '{localPath}': {ex.Message}");
+            return TextInputCapabilities.None;
+        }
     }
 
     /// <summary>Finds a sidecar mmproj GGUF paired with a text model: prefers a candidate whose real (symlink-resolved) source directory matches the text model's own — this is the authoritative signal and survives a flat model directory where every file is a symlink back into its own real per-model subfolder. Once that check has a real directory to compare against, its answer is final (match or no match) — it is never overridden by the flat-folder guess below, because <see cref="ResolveRealDirectory"/> succeeds for any existing file (symlink or not), so "no match" here already means "no companion mmproj exists", not "inconclusive". Falling through anyway (the pre-2026-07-25-fix-round-two behavior) mislabeled every plain text model in a symlinked model layout as vision-capable, since the flat-folder guess matches ANY mmproj symlink sharing the directory, regardless of which family it actually belongs to — confirmed live testing 2026-07-25 second pass (every model in <c>Models/llm/</c> reported <c>vision: true</c>). The flat-folder fallback is now reached only when real-path resolution itself fails outright (I/O error, permission denial) — a true "no signal at all" case, unlike a clean negative from the primary check.</summary>

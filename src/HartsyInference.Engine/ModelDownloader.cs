@@ -139,6 +139,98 @@ public static class ModelDownloader
         }
     }
 
+    /// <summary>The variant of <paramref name="entry"/> named <paramref name="variantId"/> (case-insensitive).</summary>
+    /// <exception cref="ArgumentException">The entry has no such variant; the message lists the ones it has.</exception>
+    public static CatalogVariant FindVariant(CatalogEntry entry, string variantId)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return entry.Variants.FirstOrDefault(v => string.Equals(v.Id, variantId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new ArgumentException(
+                $"'{entry.Id}' has no variant '{variantId}'. Variants: {string.Join(", ", entry.Variants.Select(v => v.Id))}.", nameof(variantId));
+    }
+
+    /// <summary>The files a folder variant downloads (its index, weight shards and support files), each pinned to the variant's
+    /// revision and carrying the hash the set lists for it. A variant without an index set, such as a single GGUF, is the entry's
+    /// default asset set instead (<see cref="CatalogEntry.Assets"/>).</summary>
+    public static IReadOnlyList<ModelAsset> VariantAssets(CatalogEntry entry, string variantId)
+    {
+        CatalogShardSet set = FindVariant(entry, variantId).Source;
+        if (set.IndexFile is null && set.SupportFiles.Count == 0)
+            return entry.Assets;
+        return [.. set.AllFiles().Select(file => new ModelAsset
+        {
+            Repo = set.Repo, RepoPath = file, TargetSubdir = set.TargetSubdir,
+            Role = file.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase) ? "transformer" : "variant file",
+            Sha256 = set.Sha256ByFile.TryGetValue(file, out string? sha) ? sha : null,
+        })];
+    }
+
+    /// <summary>The folder a downloaded folder variant lives in (where a loader is pointed), or null for a variant that is a single
+    /// file (use <see cref="PrimaryLocalPath"/>) or whose index is not on disk yet.</summary>
+    public static string? VariantFolder(CatalogEntry entry, string variantId)
+    {
+        CatalogShardSet set = FindVariant(entry, variantId).Source;
+        if (set.IndexFile is null) return null;
+        ModelAsset? index = VariantAssets(entry, variantId).FirstOrDefault(a => a.RepoPath == set.IndexFile);
+        string? path = index is null ? null : TargetPath(index);
+        return path is not null && File.Exists(path) ? Path.GetDirectoryName(path) : null;
+    }
+
+    /// <summary>Downloads <paramref name="variantId"/> of <paramref name="entry"/>: a folder variant's files at the variant's pinned
+    /// revision into its own folder, a single-file variant the entry's default set. Files already present are kept; each download
+    /// is staged to a <c>.tmp</c> file, SHA-256-verified when the set lists a hash, and moved into place under a per-target lock.
+    /// When it finishes, every shard the index names is checked to exist.</summary>
+    /// <param name="onProgress">Called with each file and its 0..1 progress.</param>
+    /// <exception cref="InvalidDataException">The index names a shard that is not on disk after the download.</exception>
+    public static async Task DownloadVariantAsync(CatalogEntry entry, string variantId, Action<ModelAsset, double>? onProgress,
+        CancellationToken ct)
+    {
+        CatalogShardSet set = FindVariant(entry, variantId).Source;
+        if (set.IndexFile is null && set.SupportFiles.Count == 0)
+        {
+            await DownloadAsync(MissingAssets(entry), onProgress, ct).ConfigureAwait(false);
+            return;
+        }
+        using HuggingFaceClient client = new();
+        foreach (ModelAsset asset in VariantAssets(entry, variantId))
+            await EnsureRevisionAsync(client, asset, set.Revision, onProgress, ct).ConfigureAwait(false);
+        VerifyIndexedShards(entry, variantId);
+    }
+
+    /// <summary>Downloads one file at a pinned revision under the per-target lock, unless it is already present.</summary>
+    private static async Task EnsureRevisionAsync(HuggingFaceClient client, ModelAsset asset, string revision,
+        Action<ModelAsset, double>? onProgress, CancellationToken ct)
+    {
+        string target = TargetPath(asset);
+        SemaphoreSlim gate = _gates.GetOrAdd(target, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (File.Exists(target)) return;
+            IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));
+            await client.DownloadRevisionAsync(asset.Repo, asset.RepoPath, revision, target, progress, asset.Sha256, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Checks that every file the folder variant's safetensors index names is on disk.</summary>
+    private static void VerifyIndexedShards(CatalogEntry entry, string variantId)
+    {
+        string? folder = VariantFolder(entry, variantId);
+        string? indexFile = FindVariant(entry, variantId).Source.IndexFile;
+        if (folder is null || indexFile is null) return;
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(Path.Combine(folder, indexFile)));
+        if (!doc.RootElement.TryGetProperty("weight_map", out System.Text.Json.JsonElement map)) return;
+        foreach (string shard in map.EnumerateObject().Select(p => p.Value.GetString()!).Distinct(StringComparer.Ordinal))
+        {
+            if (!File.Exists(Path.Combine(folder, shard)))
+                throw new InvalidDataException($"The index of '{entry.Id}' variant '{variantId}' names '{shard}', which is not in '{folder}'.");
+        }
+    }
+
     private static string? Existing(string root, string relativePath, bool ignoreCase)
     {
         string path = ignoreCase

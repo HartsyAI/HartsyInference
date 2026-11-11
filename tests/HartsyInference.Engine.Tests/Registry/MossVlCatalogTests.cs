@@ -37,7 +37,7 @@ public sealed class MossVlCatalogTests
     {
         CatalogEntry entry = ModelCatalog.Find("moss-vl-realtime")!;
 
-        Assert.Equal(["gguf-q4k", "bf16"], entry.Variants.Select(v => v.Id).ToArray());
+        Assert.Equal(["gguf-q4k", "bf16", "nf4", "fp8"], entry.Variants.Select(v => v.Id).ToArray());
         Assert.All(entry.Variants, v => Assert.Matches(Commit, v.Source.Revision));
         Assert.All(entry.Variants, v => Assert.True(v.Source.TotalBytes > 0 && v.Source.FileCount > 0));
         Assert.All(entry.Variants, v => Assert.True(v.Components.HasFlag(CatalogComponents.Vision)));

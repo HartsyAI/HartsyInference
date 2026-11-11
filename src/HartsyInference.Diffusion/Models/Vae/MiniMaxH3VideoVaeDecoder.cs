@@ -26,10 +26,9 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     public MiniMaxH3VideoVaeDecoder(MiniMaxH3VideoVaeConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
-        if (config.Decoder2D)
-            throw new NotSupportedException("MiniMax-H3 single-frame (2D) VAE decode is not implemented yet.");
-        if (config.RopeDim % 6 != 0)
-            throw new ArgumentException($"Rope width {config.RopeDim} must be divisible by 2×3 axes.", nameof(config));
+        if (config.RopeDim % (2 * config.RopeAxes) != 0)
+            throw new ArgumentException(
+                $"Rope width {config.RopeDim} must be divisible by 2×{config.RopeAxes} axes.", nameof(config));
         if (config.RopeDim > config.DimHead)
             throw new ArgumentException($"Rope width {config.RopeDim} exceeds head dim {config.DimHead}.", nameof(config));
         if (config.LatentsMean.Length != config.LatentChannels || config.LatentsStd.Length != config.LatentChannels)
@@ -108,6 +107,8 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
             throw new ArgumentException($"latent channels {latent.Shape[1]} != {_config.LatentChannels}.", nameof(latent));
 
         int zt = (int)latent.Shape[2], zh = (int)latent.Shape[3], zw = (int)latent.Shape[4];
+        if (_config.Decoder2D && zt != 1)
+            throw new ArgumentException($"The 2D decoder takes one latent frame; got {zt}.", nameof(latent));
         using Tensor z = Denormalize(backend, latent, zt, zh, zw);
         if (zt > 1)
         {
@@ -116,7 +117,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
 
         int height = zh * _config.VaeRatio, width = zw * _config.VaeRatio;
         using Tensor single = AdaptiveDecode(backend, z, 1, zh, zw);
-        return SliceFrames(single, _config.VaeRatioT, height, width, _config.VaeRatioT - 1, 1, asRank5: true);
+        return SliceFrames(single, _config.TemporalPatch, height, width, _config.TemporalPatch - 1, 1, asRank5: true);
     }
 
     /// <summary>Frames <see cref="Decode"/> emits for a latent of <paramref name="latentFrames"/> tokens.</summary>
@@ -308,7 +309,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
             return DecodePixels(backend, z, zt, zh, zw);
         }
 
-        int planes = _config.OutChannels * zt * _config.VaeRatioT;
+        int planes = _config.OutChannels * zt * _config.TemporalPatch;
         int latentPlanes = _config.LatentChannels * zt;
         Tensor canvas = new Tensor(new TensorShape(1, planes, height, width), DType.F32);
         using Tensor zView = new Tensor((void*)z.DataPointer, new TensorShape(1, latentPlanes, zh, zw), DType.F32);
@@ -424,7 +425,8 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     {
         int n = zt * zh * zw;
         int seq = n + _config.NumSuffixTokens;
-        double[] positions = new double[(long)seq * 3];
+        int axes = _config.RopeAxes;
+        double[] positions = new double[(long)seq * axes];
         const double TwoPi = 2.0 * Math.PI;
         int idx = 0;
         for (int t = 0; t < zt; t++)
@@ -435,13 +437,17 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
                 double cy = TwoPi * Coord(y, zh);
                 for (int x = 0; x < zw; x++)
                 {
-                    positions[idx++] = ct;
+                    // The single-frame decoder has no time axis: its tokens carry (h, w) only.
+                    if (axes == 3)
+                    {
+                        positions[idx++] = ct;
+                    }
                     positions[idx++] = cy;
                     positions[idx++] = TwoPi * Coord(x, zw);
                 }
             }
         }
-        return MiniMaxH3Rope.BuildTables(positions, _invFreq, _config.DimHead);
+        return MiniMaxH3Rope.BuildTables(positions, _invFreq, _config.DimHead, axes);
     }
 
     private static double Coord(int index, int size) => 2.0 * ((index + 0.5) / size) - 1.0;
@@ -450,7 +456,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     /// this 8-D permute, so it is a run-length memory move (one <c>pw</c>-wide copy per row), not element math.</summary>
     private Tensor Unpatchify(Tensor patches, int zt, int zh, int zw)
     {
-        int c = _config.OutChannels, pt = _config.VaeRatioT, p = _config.VaeRatio, patchDim = _config.PatchDim;
+        int c = _config.OutChannels, pt = _config.TemporalPatch, p = _config.VaeRatio, patchDim = _config.PatchDim;
         int frames = zt * pt, height = zh * p, width = zw * p;
         Tensor outT = new Tensor(new TensorShape(1, (long)c * frames, height, width), DType.F32);
         float* src = (float*)patches.DataPointer;
@@ -601,7 +607,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         try
         {
             int rows = (int)source.Shape[0], cols = (int)source.Shape[1];
-            int perChannel = _config.VaeRatioT * _config.VaeRatio * _config.VaeRatio;
+            int perChannel = _config.TemporalPatch * _config.VaeRatio * _config.VaeRatio;
             Tensor folded = new Tensor(new TensorShape(rows, cols), DType.F32);
             Tensor bias = new Tensor(new TensorShape(rows), DType.F32);
             _owned.Add(folded);

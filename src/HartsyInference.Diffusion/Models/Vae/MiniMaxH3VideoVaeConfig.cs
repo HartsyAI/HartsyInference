@@ -121,8 +121,11 @@ public sealed record MiniMaxH3VideoVaeConfig
     /// <summary>Inverse frequencies per axis.</summary>
     public int RopeInvFreqLen => RopeDim / (2 * RopeAxes);
 
+    /// <summary>Frames per decoder token: <see cref="VaeRatioT"/> on the video decoder, one on the 2D decoder.</summary>
+    public int TemporalPatch => Decoder2D ? 1 : VaeRatioT;
+
     /// <summary>Width of a <c>proj_out</c> row: one pixel patch, with one frame per token on the 2D decoder.</summary>
-    public int PatchDim => OutChannels * (Decoder2D ? 1 : VaeRatioT) * VaeRatio * VaeRatio;
+    public int PatchDim => OutChannels * TemporalPatch * VaeRatio * VaeRatio;
 
     /// <summary>Register tokens plus the zero cls row.</summary>
     public int NumSuffixTokens => NumRegisterTokens + 1;
