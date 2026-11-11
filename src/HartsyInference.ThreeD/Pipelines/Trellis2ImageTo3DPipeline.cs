@@ -106,10 +106,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             owned.Add(conditioner);
             Trellis2StructureStage structure = Trellis2StructureStage.Load(files.StructureFlow, files.StructureDecoder);
             owned.Add(structure);
-            SafeTensorsLoader decoderLoader = new();
-            owned.Add(decoderLoader);
-            decoderLoader.Load(files.ShapeDecoder);
-            ShapeVaeDecoderStage decoder = new(new ShapeVaeDecoder(ShapeVaeConfig.NextDcF16C32.Decoder, decoderLoader.GetAllTensors()));
+            ShapeVaeDecoderStage decoder = ShapeVaeDecoderStage.LoadNextDcF16C32(files.ShapeDecoder, owned);
             owned.Add(decoder);
             return new Trellis2ImageTo3DPipeline(
                 backend,

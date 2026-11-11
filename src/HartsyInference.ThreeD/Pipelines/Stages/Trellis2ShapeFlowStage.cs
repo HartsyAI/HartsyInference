@@ -41,7 +41,44 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(coords);
-        using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path);
+        return SampleFlow(
+            backend,
+            kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path,
+            coords,
+            gridResolution,
+            seed,
+            parameters,
+            onStep,
+            _mean,
+            _std,
+            requireProjection: false,
+            (flow, x, tModel, conditional) => flow.Forward(backend, x, coords, tModel, conditional ? cond : negCond));
+    }
+
+    /// <summary>The sequence both TRELLIS.2 and Pixal3D shape stages run: load the flow, sample a latent over <paramref name="coords"/> with
+    /// <paramref name="forward"/> as the model, release the flow, denormalize. <paramref name="requireProjection"/> says which kind of flow the stage
+    /// expects, so a checkpoint of the other model fails before any step runs. The latent is released if a step throws.</summary>
+    internal static SparseTensor SampleFlow(
+        IBackend backend,
+        string flowPath,
+        int[] coords,
+        int gridResolution,
+        int seed,
+        Trellis2SamplerParams parameters,
+        Action<int>? onStep,
+        ReadOnlySpan<float> mean,
+        ReadOnlySpan<float> std,
+        bool requireProjection,
+        Func<Trellis2SlatFlow, Tensor, float, bool, Tensor> forward)
+    {
+        using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(flowPath);
+        if (weights.Config.HasProjection != requireProjection)
+        {
+            throw new InvalidOperationException(
+                $"'{flowPath}' {(weights.Config.HasProjection ? "is" : "is not")} a projection flow; this stage needs a "
+                + $"{(requireProjection ? "Pixal3D projection" : "TRELLIS.2 plain")} flow.");
+        }
+
         using Trellis2SlatFlow flow = new(weights);
         int n = coords.Length / 4;
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, n, flow.Config.InChannels), seed);
@@ -49,12 +86,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
         backend.PreloadWeights(flow.EnumerateWeights());
         try
         {
-            latent = Trellis2FlowSampler.Sample(
-                backend,
-                noise,
-                parameters,
-                (x, tModel, conditional) => flow.Forward(backend, x, coords, tModel, conditional ? cond : negCond),
-                onStep);
+            latent = Trellis2FlowSampler.Sample(backend, noise, parameters, (x, tModel, conditional) => forward(flow, x, tModel, conditional), onStep);
         }
         finally
         {
@@ -62,8 +94,16 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
             backend.FreeWeights(flow.EnumerateWeights());
         }
 
-        Denormalize(latent, _mean, _std);
-        return new SparseTensor(latent, coords, gridResolution);
+        try
+        {
+            Denormalize(latent, mean, std);
+            return new SparseTensor(latent, coords, gridResolution);
+        }
+        catch
+        {
+            latent.Dispose();
+            throw;
+        }
     }
 
     /// <summary>In place <c>x · std + mean</c> per channel over rows of <c>mean.Length</c> channels.</summary>

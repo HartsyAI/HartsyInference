@@ -41,8 +41,6 @@ public sealed record Trellis2ModelFiles
         string dir = File.Exists(path) ? Path.GetDirectoryName(Path.GetFullPath(path))! : Path.GetFullPath(path);
         if (!Directory.Exists(dir))
             throw new DirectoryNotFoundException($"TRELLIS.2 model directory not found: '{dir}'.");
-        string parent = Path.GetFullPath(Path.Combine(dir, ".."));
-        string root = Path.GetFullPath(Path.Combine(dir, "..", ".."));
         List<string> missing = [];
         string Find(string name, params string[] candidates)
         {
@@ -63,22 +61,30 @@ public sealed record Trellis2ModelFiles
             StructureDecoder = Find(StructureDecoderFile, Path.Combine(dir, StructureDecoderFile)),
             ShapeFlow512 = Find(ShapeFlow512File, Path.Combine(dir, ShapeFlow512File)),
             ShapeFlow1024 = Find(ShapeFlow1024File, Path.Combine(dir, ShapeFlow1024File)),
-            ShapeDecoder = Find(
-                ShapeDecoderFile,
-                Path.Combine(dir, ShapeDecoderFile),
-                Path.Combine(parent, "TRELLIS2-ShapeVAE", ShapeDecoderFile),
-                Path.Combine(root, "TRELLIS2-ShapeVAE", ShapeDecoderFile)),
-            Dino = Find(
-                "DINOv3 " + DinoFile,
-                VisionCandidate(root, DinoFolder, DinoFile),
-                Path.Combine(root, "DINOv3", DinoFile),
-                Path.Combine(parent, "DINOv3", DinoFile),
-                VisionCandidate(parent, DinoFolder, DinoFile)),
+            ShapeDecoder = Find(ShapeDecoderFile, ShapeDecoderCandidates(dir)),
+            Dino = Find("DINOv3 " + DinoFile, DinoCandidates(dir)),
         };
         if (missing.Count > 0)
             throw new FileNotFoundException("TRELLIS.2 files not found: " + string.Join(" | ", missing));
         return files;
     }
+
+    /// <summary>Where the shape VAE decoder may sit for a model folder <paramref name="dir"/>: the folder itself, then <c>TRELLIS2-ShapeVAE</c> beside it or at the models root.</summary>
+    internal static string[] ShapeDecoderCandidates(string dir) =>
+    [
+        Path.Combine(dir, ShapeDecoderFile),
+        Path.Combine(Parent(dir), "TRELLIS2-ShapeVAE", ShapeDecoderFile),
+        Path.Combine(Root(dir), "TRELLIS2-ShapeVAE", ShapeDecoderFile),
+    ];
+
+    /// <summary>Where the DINOv3 encoder may sit for a model folder <paramref name="dir"/>: under <c>Vision/Dinov3</c> or <c>DINOv3</c> at the models root or beside it.</summary>
+    internal static string[] DinoCandidates(string dir) =>
+    [
+        VisionCandidate(Root(dir), DinoFolder, DinoFile),
+        Path.Combine(Root(dir), "DINOv3", DinoFile),
+        Path.Combine(Parent(dir), "DINOv3", DinoFile),
+        VisionCandidate(Parent(dir), DinoFolder, DinoFile),
+    ];
 
     /// <summary>The checkpoint at <c>Vision/&lt;subfolder&gt;/&lt;file&gt;</c> under <paramref name="modelsRoot"/>, found the way the model downloader
     /// places it: through <see cref="ModelFolders"/> (so an overridden Vision folder is honoured) and ignoring case on case-sensitive
@@ -97,6 +103,10 @@ public sealed record Trellis2ModelFiles
 
     /// <summary>The BiRefNet matting checkpoint the catalog installs for images without alpha, or null when it is not installed.</summary>
     public static string? FindMatterFile(string modelsRoot) => FindVisionFile(modelsRoot, MatterFolder, MatterFile);
+
+    private static string Parent(string dir) => Path.GetFullPath(Path.Combine(dir, ".."));
+
+    private static string Root(string dir) => Path.GetFullPath(Path.Combine(dir, "..", ".."));
 
     /// <summary>The installed file, else where the downloader would place it, so a missing-file message names a real location.</summary>
     private static string VisionCandidate(string modelsRoot, string subfolder, string file) =>

@@ -6,6 +6,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 ## alpha.423
 
 - **Fixed: Vulkan `ConvTranspose1d` rejected grouped and depthwise weights.** The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so the depthwise pool in Kokoro's AdainResBlk1d and the grouped calls in Mimi, PocketTTS and AntiAliasedSnake failed on Vulkan. The shader now takes `groups` with weight `[C_in, C_out/groups, K]`, and dense calls sum in the same order as before. `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference. Kokoro and StyleTTS 2 are not yet re-run end to end on Vulkan.
+- **Added: Pixal3D shape-only pipeline (not yet a model id).** `Pixal3DImageTo3DPipeline` runs the cascade over stub-testable stages
+  (`IPixal3DConditioner`, `IPixal3DStructureStage`, `IPixal3DShapeFlowStage`): the structure flow at 16, the 512 shape flow on the pooled voxels with
+  NAF-upsampled features, the shape VAE upsample, Pixal3D's rounding quantizer (`Trellis2CascadeQuantizer.RoundToCorners`) and token cap, the 1024
+  flow on 64 or 96 cells, decode and dual-grid meshing. The grid is 1024 (default) or 1536 and the camera a field of view. `Pixal3DModelFiles`
+  finds the flows and NAF in `3D/pixal3d` and the shared decoders and DINOv3 beside it; `ShapeVaeDecoderStage.LoadNextDcF16C32` and the
+  `Trellis2ModelFiles` candidate lists are now shared with TRELLIS.2. Orchestration is tested over stubs; the stages have not been run on real
+  weights end to end.
 - **Added: NAF feature upsampler for Pixal3D (not yet a model id).** `Pixal3DNaf` loads `naf_release.pth` with the safe-subset pickle reader (37 F32
   tensors, nothing executed) and runs the guide-image conv encoder and axial RoPE on the backend, then evaluates NAF's neighbourhood attention only
   at the pixels the projection samples. It does not use `natten`: keys and values are constant inside each low-resolution cell, so the dilated

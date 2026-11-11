@@ -11,37 +11,39 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// projected position. With a <see cref="Pixal3DNaf"/> the sample is <c>[patch map ‖ NAF-upsampled map]</c>, as the shape and texture flows expect.
 /// The encoders' weights are resident on the backend only while they run.
 /// </summary>
-public sealed class Pixal3DConditionerStage : IDisposable
+public sealed class Pixal3DConditionerStage : IPixal3DConditioner, IDisposable
 {
     /// <summary>Pixels per DINOv3 patch edge.</summary>
     private const int PatchSize = 16;
 
     private readonly Trellis2ImageConditioner _conditioner;
+    private readonly Pixal3DNaf? _naf;
 
     /// <param name="conditioner">This stage owns it.</param>
-    public Pixal3DConditionerStage(Trellis2ImageConditioner conditioner)
-        => _conditioner = conditioner ?? throw new ArgumentNullException(nameof(conditioner));
-
-    /// <summary>The conditioning for <paramref name="image"/> encoded at <paramref name="imageSize"/> pixels: <paramref name="coords"/> are
-    /// <c>(batch, x, y, z)</c> rows on a <paramref name="gridResolution"/> grid, or empty for the dense grid. With <paramref name="naf"/> the
-    /// features are also upsampled to <paramref name="nafSize"/> pixels first (the structure flow has no NAF). The caller owns the result.</summary>
-    public Pixal3DCondition Encode(
-        IBackend backend,
-        Trellis2PreparedImage image,
-        int imageSize,
-        int gridResolution,
-        ReadOnlySpan<int> coords,
-        Pixal3DView view,
-        Pixal3DNaf? naf = null,
-        int nafSize = 0)
+    /// <param name="naf">The NAF upsampler the shape stages need; null serves the structure stage only. This stage owns it.</param>
+    public Pixal3DConditionerStage(Trellis2ImageConditioner conditioner, Pixal3DNaf? naf = null)
     {
-        ArgumentNullException.ThrowIfNull(backend);
-        using Tensor tokens = EncodeTokens(backend, image, imageSize);
-        using Tensor? query = naf is null ? null : NafQueryMap(backend, naf, image, imageSize, nafSize);
-        return Split(tokens, imageSize, gridResolution, coords, view, query, nafSize);
+        _conditioner = conditioner ?? throw new ArgumentNullException(nameof(conditioner));
+        _naf = naf;
     }
 
-    public void Dispose() => _conditioner.Dispose();
+    /// <inheritdoc/>
+    /// <remarks>A positive <see cref="Pixal3DConditionSpec.NafSize"/> also upsamples the patch map with NAF first (the structure flow has none).</remarks>
+    public Pixal3DCondition Encode(IBackend backend, Trellis2PreparedImage image, Pixal3DConditionSpec spec, Pixal3DView view)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (spec.NafSize > 0 && _naf is null)
+            throw new InvalidOperationException("This conditioner was built without NAF, which the requested conditioning needs.");
+        using Tensor tokens = EncodeTokens(backend, image, spec.ImageSize);
+        using Tensor? query = spec.NafSize > 0 ? NafQueryMap(backend, _naf!, image, spec.ImageSize, spec.NafSize) : null;
+        return Split(tokens, spec.ImageSize, spec.GridResolution, spec.Coords, view, query, spec.NafSize);
+    }
+
+    public void Dispose()
+    {
+        _conditioner.Dispose();
+        _naf?.Dispose();
+    }
 
     /// <summary>Splits DINOv3 <paramref name="tokens"/> <c>[1, globals + patches², C]</c> into the global tokens and the cell-aligned samples
     /// of the <c>patches × patches</c> map; <paramref name="imageSize"/> is the encoded image's edge and fixes the patch count. A
