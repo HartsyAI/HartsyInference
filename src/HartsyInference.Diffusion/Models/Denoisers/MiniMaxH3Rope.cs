@@ -10,7 +10,7 @@ public static class MiniMaxH3Rope
 {
     /// <summary>Head dims the rotary covers: t/h/w each contribute <paramref name="invFreqLen"/> angles, duplicated
     /// across the split-half pair.</summary>
-    public static int RotaryDim(int invFreqLen) => 3 * invFreqLen * 2;
+    public static int RotaryDim(int invFreqLen, int axes = 3) => axes * invFreqLen * 2;
 
     /// <summary>Reference inverse frequencies when the checkpoint's buffer is unavailable (structural tests only) —
     /// the real values ship as <c>rope.inv_freq</c> and must be used when present.</summary>
@@ -29,16 +29,25 @@ public static class MiniMaxH3Rope
     /// <c>[t | h | w]</c>, then duplicated into the upper pair half so index <c>i</c> and <c>i + rotaryDim/2</c>
     /// carry the same angle — which is what makes the split-half rotation a true 2-D rotation. Dims beyond
     /// <c>rotaryDim</c> are left zero and are never read.</summary>
-    public static (Tensor Cos, Tensor Sin) BuildTables(double[] positionIds, float[] invFreq, int headDim)
+    public static (Tensor Cos, Tensor Sin) BuildTables(double[] positionIds, float[] invFreq, int headDim, int axes = 3)
     {
         ArgumentNullException.ThrowIfNull(positionIds);
         ArgumentNullException.ThrowIfNull(invFreq);
-        int seq = positionIds.Length / 3;
-        int rotaryDim = RotaryDim(invFreq.Length);
+        if (axes < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(axes), "A rotary table needs at least one axis.");
+        }
+        if (positionIds.Length % axes != 0)
+        {
+            throw new ArgumentException($"Position ids must hold {axes} values per token.", nameof(positionIds));
+        }
+
+        int seq = positionIds.Length / axes;
+        int rotaryDim = RotaryDim(invFreq.Length, axes);
         if (rotaryDim > headDim)
         {
             throw new ArgumentException(
-                $"MiniMax-H3 rotary width {rotaryDim} (3 axes x {invFreq.Length} freqs x 2) exceeds head dim {headDim}.");
+                $"MiniMax-H3 rotary width {rotaryDim} ({axes} axes x {invFreq.Length} freqs x 2) exceeds head dim {headDim}.");
         }
         int half = rotaryDim / 2;
         int perAxis = invFreq.Length;
@@ -52,11 +61,11 @@ public static class MiniMaxH3Rope
             for (int s = 0; s < seq; s++)
             {
                 long row = (long)s * headDim;
-                for (int axis = 0; axis < 3; axis++)
+                for (int axis = 0; axis < axes; axis++)
                 {
                     // Angles are accumulated in double: the position grids span thousands of units and the
                     // area-normalized coordinates are fractional, so float here drifts on long sequences.
-                    double pos = positionIds[s * 3 + axis];
+                    double pos = positionIds[s * axes + axis];
                     for (int i = 0; i < perAxis; i++)
                     {
                         int slot = axis * perAxis + i;
