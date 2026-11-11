@@ -33,9 +33,10 @@ public sealed class KimiK31Checkpoint : IDisposable
         ArgumentException.ThrowIfNullOrEmpty(directory);
         KimiK31Config config = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));
         KimiK31CheckpointWeights weights = KimiK31CheckpointWeights.Open(directory);
+        KimiK31Weights? loaded = null;
         try
         {
-            KimiK31Weights loaded = KimiK31WeightLoader.Load(config, weights);
+            loaded = KimiK31WeightLoader.Load(config, weights);
             KimiK31Model model = new(backend, config, loaded, maxPositions);
             KimiK31Checkpoint checkpoint = new(config, weights, model);
             checkpoint._owned = loaded.Owned;
@@ -43,6 +44,8 @@ public sealed class KimiK31Checkpoint : IDisposable
         }
         catch
         {
+            // The model was never handed out, so the tensors it would have owned are released here.
+            if (loaded is not null) foreach (Tensor t in loaded.Owned) t.Dispose();
             weights.Dispose();
             throw;
         }

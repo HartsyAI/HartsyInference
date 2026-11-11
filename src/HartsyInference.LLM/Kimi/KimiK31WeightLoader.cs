@@ -21,8 +21,8 @@ public interface IKimiK31WeightSource
 
 /// <summary>Maps a Kimi K3.1 checkpoint's tensor names and shapes (verified against the published index) onto
 /// <see cref="KimiK31Weights"/>. KDA's q, k and v are fused and its forget gate is folded (see <see cref="KdaLayer.FoldForgetGate"/>), and
-/// the MLA output gate reads the hidden state. Routed experts are MXFP4-packed in the published checkpoint; the loader refuses them by name
-/// before it reads anything, because the packed-expert MoE path is not wired yet.</summary>
+/// the MLA output gate reads the hidden state. Routed experts load as MXFP4-packed weights when the checkpoint stores them packed, and as F32
+/// otherwise. The tensors the loader creates are listed in <see cref="KimiK31Weights.Owned"/>.</summary>
 public sealed class KimiK31WeightLoader
 {
     private const string Root = "language_model.model.";
@@ -33,12 +33,13 @@ public sealed class KimiK31WeightLoader
     private readonly List<Tensor> _owned = new();
 
     /// <summary>Loads every tensor of the decoder.</summary>
-    /// <exception cref="NotSupportedException">A routed expert is MXFP4-packed, which the decoder cannot run yet.</exception>
     /// <exception cref="InvalidDataException">A tensor's shape does not match the config.</exception>
     private KimiK31Weights LoadAll(KimiK31Config c, IKimiK31WeightSource src)
     {
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(src);
+        try
+        {
         List<KimiK31LayerWeights> layers = new(c.Layers);
         for (int i = 0; i < c.Layers; i++) layers.Add(LoadLayer(c, i, src));
         return new KimiK31Weights
@@ -51,6 +52,14 @@ public sealed class KimiK31WeightLoader
             Layers = layers,
             Owned = _owned,
         };
+        }
+        catch
+        {
+            // A failed load releases what it already created; the caller never sees the partial weights.
+            foreach (Tensor t in _owned) t.Dispose();
+            _owned.Clear();
+            throw;
+        }
     }
 
     private KimiK31LayerWeights LoadLayer(KimiK31Config c, int i, IKimiK31WeightSource src)
@@ -167,7 +176,7 @@ public sealed class KimiK31WeightLoader
 
     // The MXFP4-packed routed experts of layer i: w1 is the gate, w3 the up and w2 the down projection, each a U8 weight with its E8M0
     // scales. Null when the checkpoint stores F32 experts.
-    private static IReadOnlyList<PackedMxfp4Expert>? LoadPackedExperts(KimiK31Config c, int i, IKimiK31WeightSource src)
+    private IReadOnlyList<PackedMxfp4Expert>? LoadPackedExperts(KimiK31Config c, int i, IKimiK31WeightSource src)
     {
         string block = Layer(i) + "block_sparse_moe.";
         if (!src.Has($"{block}experts.0.w1.weight_packed")) return null;
@@ -184,9 +193,12 @@ public sealed class KimiK31WeightLoader
         return experts;
     }
 
-    private static PackedMxfp4Projection Projection(IKimiK31WeightSource src, string expert, string proj, int rows, int cols)
+    private PackedMxfp4Projection Projection(IKimiK31WeightSource src, string expert, string proj, int rows, int cols)
     {
         Tensor packed = src.Read($"{expert}.{proj}.weight_packed"), scale = src.Read($"{expert}.{proj}.weight_scale");
+        // The packed model keeps these views for the decoder's lifetime; the loader's owned list releases them with the model.
+        _owned.Add(packed);
+        _owned.Add(scale);
         Expect(packed, $"{expert}.{proj}.weight_packed", DType.U8, rows, cols / 2);
         Expect(scale, $"{expert}.{proj}.weight_scale", DType.U8, rows, cols / 32);
         return new PackedMxfp4Projection(packed, new QuantRecipe
