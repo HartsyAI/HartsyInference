@@ -49,6 +49,19 @@ public sealed class PbrMeshPostProcessorTests
     }
 
     [Fact]
+    public void Process_AcceptsAZeroPaddingRequest()
+    {
+        // PaddingTexels = 0 was a valid request before the unwrapper had a minimum gutter; it must keep working through the PBR options.
+        Mesh sphere = SyntheticMeshes.Icosphere(3, Radius);
+
+        PbrPostProcessResult result = PbrMeshPostProcessor.Process(
+            sphere, ShellVolume(), PbrAttributeLayout.Default, new PbrPostProcessOptions { DecimationTarget = 300, TextureSize = 128, PaddingTexels = 0 });
+
+        Assert.True(result.CoveredTexels > 0);
+        foreach (float uv in result.Mesh.Uvs!) Assert.InRange(uv, 0f, 1f);
+    }
+
+    [Fact]
     public void Process_BakesTheVolumeColorAtEveryCoveredTexel()
     {
         Mesh sphere = SyntheticMeshes.Icosphere(4, Radius);
