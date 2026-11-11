@@ -35,7 +35,8 @@ public sealed record UniRigShapeEncoderConfig
         if (Width <= 0 || Heads <= 0 || Width % Heads != 0 || Layers < 0 || NumFreqs < 0 || PointFeats < 0 || TokenNum <= 0)
         {
             throw new HartsyInferenceException(
-                $"UniRig shape encoder config is invalid: width {Width}, heads {Heads}, layers {Layers}, freqs {NumFreqs}, feats {PointFeats}, tokens {TokenNum}.");
+                $"UniRig shape encoder config is invalid: width {Width}, heads {Heads}, layers {Layers}, freqs {NumFreqs}, "
+                + $"feats {PointFeats}, tokens {TokenNum}.");
         }
     }
 }

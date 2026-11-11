@@ -15,7 +15,7 @@ public static class UniRigMeshPrep
             throw new HartsyInferenceException("UniRig needs a mesh with at least one triangle.");
         }
 
-        (float[] vertices, int[] faces) = Weld(mesh);
+        (float[] vertices, int[] faces, int[] sourceVertex) = Weld(mesh);
         float[] lo = [float.MaxValue, float.MaxValue, float.MaxValue];
         float[] hi = [float.MinValue, float.MinValue, float.MinValue];
         for (int i = 0; i < vertices.Length; i++)
@@ -44,12 +44,13 @@ public static class UniRigMeshPrep
             Faces = faces,
             VertexNormals = vertexNormals,
             FaceNormals = faceNormals,
+            SourceVertex = sourceVertex,
             Center = center,
             Scale = scale,
         };
     }
 
-    private static (float[] Vertices, int[] Faces) Weld(Mesh mesh)
+    private static (float[] Vertices, int[] Faces, int[] SourceVertex) Weld(Mesh mesh)
     {
         Dictionary<(int, int, int), int> index = new(mesh.VertexCount);
         int[] remap = new int[mesh.VertexCount];
@@ -96,7 +97,7 @@ public static class UniRigMeshPrep
 
         return faces.Count == 0
             ? throw new HartsyInferenceException("UniRig mesh has no finite triangles.")
-            : ([.. vertices], [.. faces]);
+            : ([.. vertices], [.. faces], remap);
     }
 
     private static (float[] VertexNormals, float[] FaceNormals) Normals(float[] vertices, int[] faces)

@@ -24,7 +24,10 @@ public static class ModelCatalog
 
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
-    private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10 };
+    private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
+
+    /// <summary>DIAMOND keeps the default capabilities; only its live controls are declared.</summary>
+    private static WorldCapabilities DiamondWorld => new WorldCapabilities { LiveControls = DiamondControlScheme.Instance };
 
     /// <summary>SANA-WM stage 1 (<c>flow_euler_ltx</c>, no refiner): CUDA and BF16 only, 16 fps because the camera smoothing is
     /// defined per frame at 16 fps, 9 to 161 frames on the 8n+1 grid with off-grid counts refused, a camera path given as poses
@@ -71,6 +74,7 @@ public static class ModelCatalog
         CameraRequired = true,
         Intrinsics = WorldIntrinsicsPolicy.Required,
         Samplers = ["self_forcing"],
+        LiveControls = SanaWmControlScheme.Instance,
         SupportsGuidance = true,
         SupportsFlowShift = false,
         SupportsRefiner = true,
@@ -86,8 +90,6 @@ public static class ModelCatalog
         },
     };
 
-    /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
-    /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
     private const string Hunyuan3DBaseWeightsSha = "360bc281fc956d4acac0c3d36d5ec0ebf8cdddbf4b8892e894d12419388d479b";
     private const string Hunyuan3DBaseConfigSha = "70bbfcdd18b9686ee56fe011c3a059b222eae1f5450f904577c50f0e107a8a53";
 
@@ -110,6 +112,8 @@ public static class ModelCatalog
     /// <summary>The <see cref="ModelAsset.Role"/> of the VAE that FlashVDM replaces the bundled one with.</summary>
     public const string Hunyuan3DFlashVdmVaeRole = "flashvdm vae";
 
+    /// <summary>SANA-WM's release files in the upstream layout under <c>World/SanaWm</c>: the DiT (primary), the LTX-2 VAE, and
+    /// the Gemma-2-2B-it text encoder with its tokenizer.</summary>
     private static IReadOnlyList<ModelAsset> SanaWmAssets =>
     [
         new() { Repo = "Efficient-Large-Model/SANA-WM_bidirectional", RepoPath = "dit/sana_wm_1600m_720p.safetensors",
@@ -2624,6 +2628,7 @@ public static class ModelCatalog
                     "cabcba7f6115752c8fe5b370e12bf714936f70377a8a80f151872f76c2d64609") },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
+            E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
             HairDeck(),
 
@@ -2632,7 +2637,7 @@ public static class ModelCatalog
             E("matrix-game-3", act, "Matrix-Game 3.0", "5B (+28B MoE) memory-augmented", vp),
             E("matrix-game-2", act, "Matrix-Game 2.0", "Wan2.1-lineage 1.8B", vp),
             E("oasis", act, "Oasis-500m", "axial-attention DiT", vp, cli: true) with { World = OasisWorld },
-            E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true),
+            E("diamond", act, "DIAMOND (Atari-100k)", "EDM diffusion U-Net", vp, cli: true) with { World = DiamondWorld },
             E("sana-wm", act, "SANA-WM (stage 1)", "2.6B GDN/softmax camera DiT + LTX-2 VAE", vp, cli: true)
                 with { World = SanaWmWorld, Assets = SanaWmAssets },
             E("sana-wm-streaming", act, "SANA-WM streaming", "chunk-causal distilled GDN/softmax camera DiT + causal LTX-2 VAE, optional chunk-causal LTX-2 refiner",

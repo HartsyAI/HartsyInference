@@ -123,11 +123,11 @@ public sealed unsafe class Hunyuan3DShapeVae
         Tensor processed = ProcessLatents(backend, latent);
         (Tensor kNorm, Tensor v) kv = _geo.PrepareKv(backend, processed);
         processed.Dispose();
-        Hunyuan3DKvHost host = new(kv.kNorm, kv.v);
-        int latents = host.Latents;
-        int topK = latents == 3072 ? 1024 : latents == 512 ? 256 : latents / 3;
         try
         {
+            Hunyuan3DKvHost host = new(kv.kNorm, kv.v);
+            int latents = host.Latents;
+            int topK = latents == 3072 ? 1024 : latents == 512 ? 256 : latents / 3;
             return Hunyuan3DFlashVdm.Decode((ReadOnlySpan<float> coords, int count, int stride, Span<float> logits) =>
             {
                 Tensor coordsT = new(new TensorShape(count, 3), DType.F32);
