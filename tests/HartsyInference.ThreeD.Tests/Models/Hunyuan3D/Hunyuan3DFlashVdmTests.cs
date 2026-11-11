@@ -19,6 +19,21 @@ public sealed class Hunyuan3DFlashVdmTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Resolutions_RefuseAResolutionTooSmallForOneBlock(int octree)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => Hunyuan3DFlashVdm.Resolutions(octree));
+    }
+
+    [Fact]
+    public void Resolutions_AcceptTheSmallestBlockedGrid()
+    {
+        Assert.Equal([3], Hunyuan3DFlashVdm.Resolutions(3));
+    }
+
+    [Theory]
     [InlineData(0f)]
     [InlineData(2.5f)]
     public void Decode_EvaluatesEveryCellThatCrossesTheLevelItWasGivenAsItsBand(float iso)

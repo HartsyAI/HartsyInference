@@ -217,6 +217,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
 
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(1, _cfg.LatentTokens, _cfg.LatentChannels), seed);
         Backend.PreloadWeights(_dit.EnumerateWeights());
+        int evaluations = 0;
         for (int k = 0; k < steps; k++)
         {
             float dt = sigmas[k + 1] - sigmas[k];
@@ -227,6 +228,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
                 continue;
             }
             float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
+            evaluations++;
             if (uncond is null)
             {
                 Tensor velocity = _dit.Forward(Backend, latents, cond, t, guidance);
@@ -249,7 +251,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond?.Dispose();
-        Probe($"dit-loop ({steps - 1} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");
+        Probe($"dit-loop ({evaluations} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
         Tensor scaled = new(latents.Shape, DType.F32);
