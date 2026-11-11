@@ -107,7 +107,8 @@ internal sealed class Trellis2FlowBlock : IDisposable
             Tensor x3 = FeedForward(backend, x2, n, m[3], m[4], m[5]);
             x2.Dispose();
             // A projection block queues a long run of operations with nothing waiting on them. Left unsynchronized, a 1024 flow over a real
-            // structure (16k tokens) did not finish a step in 400 s on a 12 GB card, where the same forward with a sync here takes 18 s.
+            // structure (16k tokens) did not finish a step in 400 s on a 12 GB card, with the card's memory climbing to 11.8 GB at full utilization;
+            // the same forward with a sync here takes 18 s. The cause is probably memory held by freed temporaries until the next sync (not proven).
             if (_projW is not null)
                 backend.Sync();
             return x3;

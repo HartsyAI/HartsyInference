@@ -205,7 +205,7 @@ Source spike and licences: [`UNIRIG_ARCHITECTURE.md`](../Research/UNIRIG_ARCHITE
   | 512 shape flow | 43.4 s (3,962 voxels), 7.7 GB | 30.5 s (2,980 voxels), 7.3 GB |
   | upsample ×4 | 7.2 s, 2.9 GB | 7.6 s, 2.9 GB |
   | DINOv3 at 1024 + NAF | 3.9 s, 5.6 GB | 5.9 s, 5.6 GB |
-  | 1024 shape flow | 374.7 s (16,215 voxels), 9.3 GB | 256.9 s (13,030 voxels), 8.7 GB |
+  | 1024 shape flow | 374.7 s (16,215 voxels; another run of the same request gave 16,231, the GPU sampling is not bit-reproducible), 9.3 GB | 256.9 s (13,030 voxels), 8.7 GB |
   | shape VAE decode | 29.7 s, 8.9 GB | 32.4 s, 8.3 GB |
   | total | 510 s, 4.24 M vertices, 8.42 M triangles | 386 s, 3.82 M vertices, 7.67 M triangles |
 

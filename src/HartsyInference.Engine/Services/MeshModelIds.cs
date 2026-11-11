@@ -3,7 +3,7 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Catalog ids of the 3D models with a wired pipeline, grouped by the input they take.</summary>
 public static class MeshModelIds
 {
-    /// <summary>Pixal3D: shape-only image to mesh with projected DINOv3 features.</summary>
+    /// <summary>Pixal3D: image to mesh, shape-only or textured, with projected DINOv3 features.</summary>
     public const string Pixal3D = "pixal3d";
 
     /// <summary>The Hunyuan3D-2 shape builds: each id is its own checkpoint folder, and the checkpoint's <c>config.yaml</c> sets the architecture.</summary>
