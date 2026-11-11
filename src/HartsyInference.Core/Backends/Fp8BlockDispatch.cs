@@ -13,6 +13,9 @@ public static class Fp8BlockDispatch
         ArgumentNullException.ThrowIfNull(backend);
         QuantWeightInfo? quant = weight.QuantInfo;
         if (weight.DType != DType.F8E4M3 || quant?.Fp8BlockScaleInv is not { } scale) return false;
+        // The block GEMM does not apply a low-rank adjunct, so refuse rather than drop it silently.
+        if (weight.LowRankAdjunct is { IsActive: true })
+            throw new NotSupportedException("A block-scaled FP8 weight cannot also carry an active low-rank adjunct; the FP8 linear does not apply it.");
         backend.Fp8BlockLinear(output, input, weight, scale, bias, quant.Fp8BlockSize, quant.Fp8BlockSize);
         return true;
     }

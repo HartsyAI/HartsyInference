@@ -78,4 +78,38 @@ public sealed class Ernie5Fp8ReferenceTests : IDisposable
         }
         Assert.True(checkedWeights > 0, "The FP8 checkpoint holds no block-scaled weight.");
     }
+
+    // The synthetic checkpoint has one scale block per matrix. This weight spans two block rows and three block columns with
+    // different scales, so a wrong grid stride or a transposed index would change the output.
+    [Fact]
+    public void Cpu_Fp8LinearWithMultipleBlocks_MatchesDequantizedF32()
+    {
+        const int n = 256, k = 384;
+        Random rng = new(11);
+        using Tensor raw = new(new TensorShape(n, k), DType.F8E4M3);
+        Span<byte> bytes = raw.AsSpan<byte>();
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            byte v = (byte)rng.Next(256);
+            if ((v & 0x7F) == 0x7F) v &= 0xFE;
+            bytes[i] = v;
+        }
+        using Tensor scale = new(new TensorShape(2, 3), DType.F32);
+        Span<float> s = scale.AsSpan<float>();
+        for (int i = 0; i < s.Length; i++) s[i] = (float)(0.25 + rng.NextDouble());
+        raw.QuantInfo = new QuantWeightInfo { Format = "fp8_block_scale_inv", Fp8BlockScaleInv = scale, Fp8BlockSize = 128 };
+
+        using Tensor twin = Fp8BlockF32Codec.Dequantize(raw, scale, 128, 128);
+        using Tensor input = new(new TensorShape(1, k), DType.F32);
+        Span<float> x = input.AsSpan<float>();
+        for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
+        using CpuBackend cpu = new();
+        using Tensor packed = new(new TensorShape(1, n), DType.F32);
+        using Tensor plain = new(new TensorShape(1, n), DType.F32);
+        cpu.Linear(packed, input, raw, null);
+        cpu.Linear(plain, input, twin, null);
+        ReadOnlySpan<float> a = packed.AsReadOnlySpan<float>(), b = plain.AsReadOnlySpan<float>();
+        for (int i = 0; i < n; i++)
+            Assert.True(MathF.Abs(a[i] - b[i]) <= 1e-4f * MathF.Max(1f, MathF.Abs(b[i])), $"output {i}: packed {a[i]}, twin {b[i]}.");
+    }
 }

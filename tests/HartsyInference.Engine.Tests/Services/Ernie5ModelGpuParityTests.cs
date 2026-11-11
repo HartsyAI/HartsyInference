@@ -44,6 +44,10 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
         ParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA", resident: true, Ernie5SyntheticCheckpoint.Storage.Fp8);
 
     [ErnieVulkanFact]
+    public void Vulkan_SyntheticErnieFp8_ResidentWeights_LogitsMatchCpu() =>
+        ParityOn(() => new VulkanBackend(), "Vulkan", resident: true, Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    [ErnieVulkanFact]
     public void Vulkan_SyntheticErnieFp8_LogitsMatchCpu() =>
         ParityOn(() => new VulkanBackend(), "Vulkan", resident: false, Ernie5SyntheticCheckpoint.Storage.Fp8);
 
@@ -77,7 +81,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
         return [.. prefill, .. decode];
     }
 
-    // Tolerance for F32 weights, where the device and the CPU differ only in accumulation order. FP8 weights will need a looser bound.
+    // Tolerance for both the F32 and the FP8 checkpoints: each side runs the same weights, so only accumulation order differs.
     internal static void AssertClose(float[] want, float[] got, string device)
     {
         Assert.Equal(want.Length, got.Length);
