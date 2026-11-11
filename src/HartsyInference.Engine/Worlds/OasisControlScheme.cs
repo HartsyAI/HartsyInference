@@ -6,29 +6,32 @@ namespace HartsyInference.Engine.Worlds;
 /// <c>+</c>-joined action such as <c>forward+camera:1,0</c>, the form Oasis's action parser reads.</summary>
 public sealed class OasisControlScheme : IWorldControlScheme
 {
-    private static readonly WorldControl[] ControlList =
+    /// <summary>One key, its legend label, and the action term it adds while held. The arrow keys have no term of their own: they
+    /// feed the camera term, which is why their term is null.</summary>
+    private sealed record Binding(string Key, string Label, string? Term);
+
+    // The legend and the action both read this table, so a reordered or added key cannot drift from its action.
+    private static readonly Binding[] Bindings =
     [
-        new WorldControl("W", "forward"),
-        new WorldControl("S", "back"),
-        new WorldControl("A", "left"),
-        new WorldControl("D", "right"),
-        new WorldControl("Space", "jump"),
-        new WorldControl("LeftShift", "sneak"),
-        new WorldControl("LeftCtrl", "sprint"),
-        new WorldControl("F", "attack"),
-        new WorldControl("E", "use"),
-        new WorldControl("G", "drop"),
-        new WorldControl("Tab", "inventory"),
-        new WorldControl("Left", "look left"),
-        new WorldControl("Right", "look right"),
-        new WorldControl("Up", "look up"),
-        new WorldControl("Down", "look down"),
+        new("W", "forward", "forward"),
+        new("S", "back", "back"),
+        new("A", "left", "left"),
+        new("D", "right", "right"),
+        new("Space", "jump", "jump"),
+        new("LeftShift", "sneak", "sneak"),
+        new("LeftCtrl", "sprint", "sprint"),
+        new("F", "attack", "attack"),
+        new("E", "use", "use"),
+        new("G", "drop", "drop"),
+        new("Tab", "inventory", "inventory"),
+        new("Left", "look left", null),
+        new("Right", "look right", null),
+        new("Up", "look up", null),
+        new("Down", "look down", null),
     ];
 
-    private static readonly string[] KeyActions =
-    [
-        "forward", "back", "left", "right", "jump", "sneak", "sprint", "attack", "use", "drop", "inventory",
-    ];
+    private static readonly WorldControl[] ControlList =
+        Bindings.Select(binding => new WorldControl(binding.Key, binding.Label)).ToArray();
 
     /// <summary>The shared instance; the scheme has no state.</summary>
     public static OasisControlScheme Instance { get; } = new();
@@ -50,12 +53,12 @@ public sealed class OasisControlScheme : IWorldControlScheme
     public string ActionFor(IReadOnlyCollection<string> heldKeys)
     {
         ArgumentNullException.ThrowIfNull(heldKeys);
-        List<string> terms = new(KeyActions.Length + 1);
-        for (int i = 0; i < KeyActions.Length; i++)
+        List<string> terms = new(Bindings.Length + 1);
+        foreach (Binding binding in Bindings)
         {
-            if (WorldControlKeys.IsHeld(heldKeys, ControlList[i].Key))
+            if (binding.Term is not null && WorldControlKeys.IsHeld(heldKeys, binding.Key))
             {
-                terms.Add(KeyActions[i]);
+                terms.Add(binding.Term);
             }
         }
         int x = (WorldControlKeys.IsHeld(heldKeys, "Right") ? 1 : 0) - (WorldControlKeys.IsHeld(heldKeys, "Left") ? 1 : 0);

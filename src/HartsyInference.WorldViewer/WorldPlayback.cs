@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Worlds;
 
 namespace HartsyInference.WorldViewer;
 
@@ -21,6 +22,18 @@ public sealed class WorldPlayback
     private long _received;
     private int _shown;
     private long _firstWriteTimestamp = -1;
+    private long _completeTimestamp = -1;
+
+    /// <summary>How many frames a window may run ahead of the frames it has shown. A stream that takes one action per step gets two
+    /// frames, so a key press reaches the picture after about one step; any other stream gets two seconds of video.</summary>
+    public static int DefaultBufferFrames(int fps, WorldControlCadence? cadence)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(fps, 1);
+        return cadence == WorldControlCadence.PerStep ? PerStepBufferFrames : 2 * fps;
+    }
+
+    /// <summary>Frames a per-step stream may run ahead of the window: the buffer is the control lag, so it is kept to two frames.</summary>
+    public const int PerStepBufferFrames = 2;
 
     /// <summary>Creates a buffer that holds <paramref name="bufferFrames"/> frames and plays at <paramref name="fps"/>. Playback starts
     /// after one second of frames, or the whole buffer if it is smaller.</summary>
@@ -64,6 +77,11 @@ public sealed class WorldPlayback
     {
         lock (_gate)
         {
+            if (!_complete)
+            {
+                // The delivered rate is measured up to here, so a window that stays open after the run reads the run's rate.
+                _completeTimestamp = Stopwatch.GetTimestamp();
+            }
             _complete = true;
             _error ??= error;
         }
@@ -103,6 +121,7 @@ public sealed class WorldPlayback
         long received;
         int shown;
         long firstWrite;
+        long completed;
         lock (_gate)
         {
             buffered = _frames.Count;
@@ -111,6 +130,7 @@ public sealed class WorldPlayback
             received = _received;
             shown = _shown;
             firstWrite = _firstWriteTimestamp;
+            completed = _completeTimestamp;
         }
         WorldPlaybackPhase phase;
         if (error is not null)
@@ -129,7 +149,8 @@ public sealed class WorldPlayback
         {
             phase = _pacer.Playing ? WorldPlaybackPhase.Playing : WorldPlaybackPhase.Rebuffering;
         }
-        double elapsed = firstWrite < 0 ? 0 : Stopwatch.GetElapsedTime(firstWrite).TotalSeconds;
+        double elapsed = firstWrite < 0 ? 0
+            : (completed >= 0 ? Stopwatch.GetElapsedTime(firstWrite, completed) : Stopwatch.GetElapsedTime(firstWrite)).TotalSeconds;
         double delivered = elapsed > 0 ? received / elapsed : 0;
         return new WorldPlaybackStatus(phase, _fps, buffered, _capacity, shown, received, delivered, error);
     }

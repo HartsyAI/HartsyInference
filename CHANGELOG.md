@@ -13,6 +13,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   one with `WorldCapabilities.LiveControls`. Built in: the SANA-WM camera (`wasd`, `ijkl`), Oasis (WASD, space, shift, ctrl, arrows
   for the camera) and DIAMOND (fire and left or right). A model with no live control (SANA-WM stage 1) plays its clip when the run
   completes. A new world model adds a scheme and nothing else; `docs/Research/WORLD_LIVE_VIEWER.md` has the steps.
+- **Changed: streamed frames are written by background PNG writers.** PNG encoding took about 110 ms per 1280x704 frame on the consumer
+  thread, so a 24-frame chunk spent 2.7 s writing and the model waited on it. Four writers now encode in parallel behind a queue of
+  32 frames, and the stream waits only when that queue is full. The frames and the MP4 are byte-identical to before.
+- **Fixed: a live window closes on every exit, and a failed run says so.** A failed stream is reported to the window, which stays up
+  with the error until it is closed. Ctrl+C on an unbounded run keeps its files and reports the run, not "Cancelled.". Oasis and
+  DIAMOND take one action per step, so their window buffers two frames rather than two seconds, and they stop after `--frames`.
+- **Added: a where-the-time-went breakdown** printed at the end of every `--view` run, and under `diagnostics.stageProfile`.
 
 ## alpha.417
 

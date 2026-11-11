@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
+using HartsyInference.Core.Diagnostics;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Worlds;
@@ -189,7 +190,10 @@ internal sealed class ChunkedWorldSession : IWorldSession
         while (!stream.Completed && (_plan.Unbounded || delivered < _plan.Frames))
         {
             // Room first, then the chunk: it is generated as late as the consumer allows, under the newest actions.
-            if (!writer.WaitToWriteAsync(stop).AsTask().GetAwaiter().GetResult())
+            long roomStart = WorldStageTimings.Start();
+            bool room = writer.WaitToWriteAsync(stop).AsTask().GetAwaiter().GetResult();
+            WorldStageTimings.Record(WorldStage.ChunkWaitForRoom, roomStart);
+            if (!room)
             {
                 return;
             }

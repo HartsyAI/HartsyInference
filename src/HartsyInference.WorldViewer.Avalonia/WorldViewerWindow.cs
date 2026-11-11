@@ -7,6 +7,7 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using HartsyInference.Core.Diagnostics;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.WorldViewer.Avalonia;
@@ -83,6 +84,7 @@ internal sealed class WorldViewerWindow : Window
 
     private void Draw(VideoFrame frame)
     {
+        long drawStart = WorldStageTimings.Start();
         WriteableBitmap bitmap = _bitmap is { } current && current.PixelSize.Width == frame.Width && current.PixelSize.Height == frame.Height
             ? current
             : CreateBitmap(frame.Width, frame.Height);
@@ -105,6 +107,7 @@ internal sealed class WorldViewerWindow : Window
             }
         }
         _image.InvalidateVisual();
+        WorldStageTimings.Record(WorldStage.WindowDraw, drawStart);
     }
 
     private WriteableBitmap CreateBitmap(int width, int height)

@@ -5,7 +5,7 @@ namespace HartsyInference.WorldViewer.Avalonia;
 
 /// <summary>Opens the live window on its own UI thread, so the caller's generation and spool code run unchanged. Closing the window,
 /// or pressing Esc or Q, requests the run's stop the same way <c>q</c> does in the terminal, so the run's output is still saved.</summary>
-public sealed class WorldViewerHost : IDisposable
+public sealed class WorldViewerHost : IWorldWindow
 {
     private readonly WorldSteering _steering;
     private readonly WorldPlayback _playback;
@@ -31,7 +31,9 @@ public sealed class WorldViewerHost : IDisposable
 
     /// <summary>Opens the window and returns once it is on screen. Throws <see cref="InvalidOperationException"/> when no display is
     /// reachable or the window cannot start.</summary>
-    /// <remarks>Pass the run's stop source. Dispose the host before that source, since closing the window cancels it.</remarks>
+    /// <remarks>Pass the run's stop source. Dispose the host before that source, since closing the window cancels it. Call this once
+    /// per process: the first host sets up the process's Avalonia application and its UI thread, and a second host in the same
+    /// process is not tested.</remarks>
     public static WorldViewerHost Start(WorldSteering steering, WorldPlayback playback, CancellationTokenSource stop)
     {
         EnsureDisplay();
@@ -54,7 +56,7 @@ public sealed class WorldViewerHost : IDisposable
         return host;
     }
 
-    /// <summary>Completes when the window has closed.</summary>
+    /// <summary>Completes when the window has closed. A cancelled <paramref name="cancel"/> ends the wait and leaves the window open.</summary>
     public Task WaitUntilClosedAsync(CancellationToken cancel) => _closed.Task.WaitAsync(cancel);
 
     /// <summary>Closes the window and waits for its thread to finish. Nothing reaches the stop source after this returns.</summary>

@@ -59,6 +59,22 @@ public sealed class WorldControlSchemeTests
     }
 
     [Fact]
+    public void Oasis_legend_and_actions_come_from_one_table()
+    {
+        IWorldControlScheme scheme = OasisControlScheme.Instance;
+
+        // Keys at the start, middle and end of the legend: each names the action its legend row carries.
+        Assert.Equal("forward", scheme.ActionFor(["W"]));
+        Assert.Equal("sprint", scheme.ActionFor(["LeftCtrl"]));
+        Assert.Equal("inventory", scheme.ActionFor(["Tab"]));
+        Assert.Equal(["W", "S", "A", "D", "Space", "LeftShift", "LeftCtrl", "F", "E", "G", "Tab", "Left", "Right", "Up", "Down"],
+            scheme.Controls.Select(control => control.Key).ToArray());
+        Assert.Equal("look left", scheme.Controls[11].Label);
+        // The arrow keys add no term of their own; they only feed the camera.
+        Assert.Equal("camera:-1,0", scheme.ActionFor(["Left"]));
+    }
+
+    [Fact]
     public void Diamond_gives_one_discrete_action_per_step()
     {
         IWorldControlScheme scheme = DiamondControlScheme.Instance;

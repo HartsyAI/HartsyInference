@@ -1,6 +1,8 @@
 using System.Globalization;
 using System.Text;
 using HartsyInference.Cli.Infra;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Diagnostics;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Audio;
@@ -22,8 +24,6 @@ namespace HartsyInference.Cli.Dispatch;
 /// per branch.</remarks>
 public static class GenerationDispatch
 {
-    /// <summary>How far a live window may run ahead of the frames it has shown: its buffer, in seconds of video.</summary>
-    private const int ViewerBufferSeconds = 2;
 
     /// <summary>Runs one generation for <paramref name="spec"/>.</summary>
     /// <remarks><paramref name="prompt"/> is the text prompt for the generative modalities and an input file path for
@@ -871,6 +871,7 @@ public static class GenerationDispatch
         string? actions = parameters.GetStringOrNull("actions");
         bool view = parameters.GetBool("view", false);
         bool interactive = parameters.GetBool("interactive", false);
+        WorldStageTimings.Reset();
         if (view && interactive)
         {
             throw new ArgumentException("--view and --interactive both steer the run; use the window or the terminal, not both.");
@@ -928,14 +929,16 @@ public static class GenerationDispatch
         WorldSteering steering = new WorldSteering(session, scheme);
         WorldPlayback? playback = null;
         WorldViewerHost? viewer = null;
+        WorldRunPump? pump = null;
         GeneratedArtifact artifact;
         try
         {
             IAsyncEnumerable<VideoFrame> stream;
             if (view)
             {
-                // The window plays frames at the plan's rate from a buffer of ViewerBufferSeconds: a full buffer holds generation back.
-                playback = new WorldPlayback(plan.Fps, ViewerBufferSeconds * plan.Fps);
+                // The window plays frames at the plan's rate from a buffer: a full buffer holds generation back. Its size is the control
+                // lag, so a per-step stream gets a short one.
+                playback = new WorldPlayback(plan.Fps, WorldPlayback.DefaultBufferFrames(plan.Fps, scheme?.Cadence));
                 viewer = WorldViewerHost.Start(steering, playback, userStop);
                 stream = new WorldFrameStream(session, steering, plan.Unbounded ? 0 : plan.Frames).StreamAsync(userStop.Token);
             }
@@ -943,77 +946,74 @@ public static class GenerationDispatch
             {
                 stream = session.StreamAsync(userStop.Token);
             }
-            await foreach (VideoFrame frame in stream.ConfigureAwait(false))
+            pump = new WorldRunPump(steering, playback, viewer);
+            try
             {
-                if (spool is not null)
+                await pump.RunAsync(stream, frame =>
                 {
-                    spool.Add(frame.Rgb, frame.Width, frame.Height);
-                }
-                else
-                {
-                    frames.Add(frame);
-                }
-                received++;
-                if (playback is not null)
-                {
-                    await playback.WriteAsync(frame, userStop.Token).ConfigureAwait(false);
-                }
-                progress?.Report(new StepPreview { Step = received, TotalSteps = plan.Unbounded ? received : plan.Frames });
+                    if (spool is not null)
+                    {
+                        long spoolStart = WorldStageTimings.Start();
+                        spool.Add(frame.Rgb, frame.Width, frame.Height);
+                        WorldStageTimings.Record(WorldStage.FrameSpoolHandoff, spoolStart);
+                    }
+                    else
+                    {
+                        frames.Add(frame);
+                    }
+                    received++;
+                    progress?.Report(new StepPreview { Step = received, TotalSteps = plan.Unbounded ? received : plan.Frames });
+                }, userStop.Token).ConfigureAwait(false);
             }
-        }
-        catch (OperationCanceledException) when (received > 0 && userStop.IsCancellationRequested
-            && (!cancel.IsCancellationRequested || plan.Unbounded))
-        {
-            // The stream was ended on purpose, so what it generated up to then is kept: from the keyboard (q), or with Ctrl+C when the
-            // run has no frame count to reach (--unbounded, which is stopped that way), or by closing the window.
-        }
-        catch when (spool is { Count: > 0 })
-        {
-            // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where.
-            Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
-            throw;
-        }
-        catch (Exception ex) when (playback is not null && ex is not OperationCanceledException)
-        {
-            playback.Complete(ex.Message);
-            throw;
-        }
-        finally
-        {
-            // Keys pressed after this change nothing, so the session is never steered once it is being torn down.
-            steering.Close();
-            userStop.Cancel();
-            if (keyboard is not null)
+            catch (OperationCanceledException) when (received > 0 && userStop.IsCancellationRequested
+                && (!cancel.IsCancellationRequested || plan.Unbounded))
             {
-                await keyboard.ConfigureAwait(false);
+                // The stream was ended on purpose, so what it generated up to then is kept: from the keyboard (q), or with Ctrl+C when the
+                // run has no frame count to reach (--unbounded, which is stopped that way), or by closing the window.
             }
-            playback?.Complete();
-            progress?.Finish();
-        }
-        try
-        {
+            catch when (spool is { Count: > 0 })
+            {
+                // A bounded run that is interrupted or fails part-way still has every frame it wrote on disk; say where.
+                Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
+                throw;
+            }
+            finally
+            {
+                // Keys pressed after this change nothing, so the session is never steered once it is being torn down.
+                userStop.Cancel();
+                if (keyboard is not null)
+                {
+                    await keyboard.ConfigureAwait(false);
+                }
+                progress?.Finish();
+            }
             if (spool is not null)
             {
                 if (spool.Count == 0)
                 {
                     throw new InvalidOperationException("The world pipeline produced no frames.");
                 }
+                long muxStart = WorldStageTimings.Start();
                 VideoOutputWriter.Written written = spool.Complete(null, plan.Fps);
+                WorldStageTimings.Record(WorldStage.Mux, muxStart);
                 artifact = DescribeFrames(spool.Count, spool.Width, spool.Height, spool.FirstFrame!, written, null);
             }
             else
             {
                 artifact = FrameArtifact(frames, outputDir, slug, "world", null, plan.Fps);
             }
-            // The files are written; a window still playing its buffer stays open until the viewer is closed.
-            if (viewer is not null)
-            {
-                await viewer.WaitUntilClosedAsync(cancel).ConfigureAwait(false);
-            }
+            // The files are written; a window still playing its buffer stays open until it is closed. A Ctrl+C here keeps the files
+            // and closes the window rather than reporting the run as cancelled.
+            await pump.WaitForCloseAsync(cancel).ConfigureAwait(false);
         }
         finally
         {
-            viewer?.Dispose();
+            // The window closes on every exit, and before userStop is disposed, since a window left open would cancel a disposed source.
+            pump?.Dispose();
+        }
+        if (view || EngineKnobs.StageProfile.Value)
+        {
+            Logs.Info("[World] Where the time went:\n" + WorldStageTimings.Report());
         }
         artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
