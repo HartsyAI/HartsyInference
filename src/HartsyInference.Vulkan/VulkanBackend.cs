@@ -2619,18 +2619,16 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
-        // The shipped conv_transpose1d.comp.glsl has no groups field at all — its inner loop sums
-        // over the full cIn range assuming dense [cIn, cOut, K] weights. Depthwise (groups>1, e.g.
-        // BigVGAN anti-aliased upsampling) would silently read the wrong weight slice if dispatched
-        // through this path, so fail loudly instead of producing wrong output.
-        if (groups != 1)
-            throw new NotSupportedException(
-                $"Vulkan ConvTranspose1d: groups={groups} not supported — the shipped shader only handles dense (groups=1) weights. " +
-                "Use the CPU backend for depthwise transposed conv (e.g. BigVGAN upsampling).");
-        using OpScope _op = EnterOp();
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
-        int cOut = (int)weight.Shape[1], kernel = (int)weight.Shape[2];
-        int tOut = (int)output.Shape[2];
+        int outPerGroup = (int)weight.Shape[1], kernel = (int)weight.Shape[2];
+        int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2];
+        int tOutExpected = (tIn - 1) * stride + dilation * (kernel - 1) + 1 - padLeft - padRight;
+        if (groups < 1 || cIn % groups != 0 || outPerGroup * groups != cOut || (int)weight.Shape[0] != cIn
+            || tOut != tOutExpected || (int)output.Shape[0] != batch)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose1d: input {input.Shape}, weight {weight.Shape}, output {output.Shape} do not match "
+                + $"(groups={groups}, stride={stride}, padLeft={padLeft}, padRight={padRight}, dilation={dilation}).");
+        using OpScope _op = EnterOp();
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer wBuf = GetBuffer(weight);
         VulkanBuffer biasBuf = bias is null ? inBuf : GetBuffer(bias);
@@ -2641,7 +2639,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             string shader = "conv_transpose1d" + DtypeSuffix(output.DType);
             SpecConstant[] spec = { _default1DSpec[0], _default1DSpec[1], _default1DSpec[2], SpecConstant.Bool(10, bias is not null) };
             VulkanKernel k = GetKernel(shader, 4, spec);
-            Span<byte> pc = stackalloc byte[9 * 4];
+            Span<byte> pc = stackalloc byte[10 * 4];
             BinaryWriteUInt(pc, 0, (uint)batch);
             BinaryWriteUInt(pc, 4, (uint)cIn);
             BinaryWriteUInt(pc, 8, (uint)cOut);
@@ -2651,6 +2649,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             BinaryWriteUInt(pc, 24, (uint)stride);
             BinaryWriteUInt(pc, 28, unchecked((uint)padLeft));
             BinaryWriteUInt(pc, 32, (uint)dilation);
+            BinaryWriteUInt(pc, 36, (uint)groups);
             Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, wBuf.Handle, biasBuf.Handle, outBuf.Handle };
             Dispatch(k, bufs, pc, GroupCount(output.ElementCount, LocalX1D));
             CacheOutput(output, outBuf);

@@ -124,6 +124,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Build / validation status
 - [ ] Validate missing audio backend operations per target model; compiled audio kernels already ship.
 - [ ] Codec STOI validation (pending checkpoints).
+- [x] Vulkan audio window on alpha.421 (2026-11-11, RTX 4090): WER 0 on 8 of 11 providers (Qwen3-TTS, CosyVoice 2, FishSpeech, F5-TTS, VibeVoice, Orpheus, MeloTTS, Spark-TTS). Kokoro and StyleTTS 2 stopped on depthwise `ConvTranspose1d`; the op fix is in the alpha.423 PR, and their end-to-end Vulkan re-run waits for the publish. Drama 3 needs CUDA. CUDA on the same engine: WER 0 on all 11 rows.
 
 ### Not-started ASR / TTS models
 - [ ] NVIDIA NeMo family: Parakeet CTC / RNN-T / TDT, Canary, FastConformer.
