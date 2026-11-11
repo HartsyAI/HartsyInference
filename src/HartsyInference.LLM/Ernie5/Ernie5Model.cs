@@ -11,8 +11,9 @@ namespace HartsyInference.LLM.Ernie5;
 /// RMS norm, the LM head, and multimax. With <see cref="Ernie5LoadOptions.Mtp"/> it also runs the multi-token-prediction layer
 /// (vLLM-ERNIE <c>Ernie5_5MTP</c>) that drafts the token after next.</summary>
 /// <remarks>
-/// <para>Every op runs through <see cref="IBackend"/> on the CPU backend. Device backends are refused by name: no CUDA or Vulkan kernel takes the
-/// checkpoint's 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.</para>
+/// <para>Every op runs through <see cref="IBackend"/>, so the model runs on the CPU, CUDA or Vulkan backend. The residual stream, the
+/// sublayer glue and the attention caches stay host arrays, and each backend op takes them as host tensors; the device attention path is
+/// the one the GPU parity tests cover.</para>
 /// <para>FP8 weights are dequantized to F32 when a layer is built. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer;
 /// otherwise each layer is built and dropped per forward. Not thread-safe: run one sequence at a time.</para>
 /// </remarks>
@@ -61,9 +62,8 @@ public sealed class Ernie5Model : IDisposable
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxSequenceTokens, 1);
-        if (backend.Device != DeviceKind.Cpu)
-            throw new NotSupportedException($"ERNIE-5.5 runs on the host reference path only; the {backend.Device} backend has no kernels "
-                + "for its 128x128 block-FP8 weights, and the DSA indexer's Hadamard and FP8x128 round trip are host-only.");
+        if (backend.Device.IsGpu && !backend.Device.IsCuda && !backend.Device.IsVulkan)
+            throw new NotSupportedException($"ERNIE-5.5 has no path on the {backend.Device} backend; it runs on the CPU, CUDA and Vulkan backends.");
         IReadOnlyList<string> missing = config.UnimplementedFeatures(options.Mtp);
         if (missing.Count > 0)
             throw new NotSupportedException($"This ERNIE-5.5 config names features the model does not implement: {string.Join("; ", missing)}.");
