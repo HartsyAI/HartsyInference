@@ -45,7 +45,7 @@ public sealed class Pixal3DStructureStage : IPixal3DStructureStage, IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cond);
         ArgumentNullException.ThrowIfNull(negCond);
-        Pixal3DDeviceMemory.ReleaseAll(backend, cond, negCond);
+        Trellis2DeviceMemory.ReleaseAll(backend, cond.Global, cond.Proj, negCond.Global, negCond.Proj);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(_flowPath);
         if (!weights.Config.HasProjection)
             throw new InvalidOperationException($"'{_flowPath}' is not a projection flow; Pixal3D's structure flow has image_attn_mode \"proj\".");

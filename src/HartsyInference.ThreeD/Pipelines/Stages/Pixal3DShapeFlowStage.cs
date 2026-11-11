@@ -42,7 +42,7 @@ public sealed class Pixal3DShapeFlowStage : IPixal3DShapeFlowStage
         ArgumentNullException.ThrowIfNull(coords);
         ArgumentNullException.ThrowIfNull(cond);
         ArgumentNullException.ThrowIfNull(negCond);
-        Pixal3DDeviceMemory.ReleaseAll(backend, cond, negCond);
+        Trellis2DeviceMemory.ReleaseAll(backend, cond.Global, cond.Proj, negCond.Global, negCond.Proj);
         return Trellis2ShapeFlowStage.SampleFlow(
             backend,
             kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path,
