@@ -80,8 +80,8 @@ public sealed class SamMotFlow
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latents);
-        if (cond.DType != DType.F32 || cond.Shape.Rank != 3 || cond.Shape[0] != 1 || cond.Shape[2] != _config.CondChannels)
-            throw new ArgumentException($"Expected F32 condition tokens [1, n, {_config.CondChannels}]; got {cond.DType} {cond.Shape}.", nameof(cond));
+        if (cond.DType != DType.F32 || cond.Shape.Rank != 3 || cond.Shape[0] != 1 || cond.Shape[1] == 0 || cond.Shape[2] != _config.CondChannels)
+            throw new ArgumentException($"Expected F32 condition tokens [1, n > 0, {_config.CondChannels}]; got {cond.DType} {cond.Shape}.", nameof(cond));
         if (stepSize is not null && _step is null)
             throw new ArgumentException("This flow is not a shortcut model and takes no step size.", nameof(stepSize));
         foreach (SamMotLatent latent in _config.Latents)
@@ -103,7 +103,7 @@ public sealed class SamMotFlow
                 {
                     foreach (string member in members)
                         inputs.Add(_projections[member].ToInput(backend, latents[member]));
-                    streams[stream] = inputs.Count == 1 ? inputs[0] : SamMotOps.Concat(inputs);
+                    streams[stream] = inputs.Count == 1 ? inputs[0] : SamMotOps.Concat(backend, inputs);
                 }
                 finally
                 {
@@ -143,7 +143,7 @@ public sealed class SamMotFlow
                     }
                     else
                     {
-                        using Tensor part = SamMotOps.Tokens(hidden, start, projection.Tokens);
+                        using Tensor part = SamMotOps.Tokens(backend, hidden, start, projection.Tokens);
                         velocities[latent.Name] = projection.ToOutput(backend, part);
                     }
                 }

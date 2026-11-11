@@ -104,6 +104,8 @@ public sealed record SamMotFlowConfig(
         IReadOnlyList<string> streams = StreamNames;
         if (streams.Distinct().Count() != streams.Count)
             throw new ArgumentException("A group key collides with the name of an ungrouped latent.");
+        if (Protected.Distinct().Count() != Protected.Count)
+            throw new ArgumentException("A stream is listed as protected more than once.");
         foreach (string name in Protected)
         {
             if (!streams.Contains(name))

@@ -34,31 +34,22 @@ internal static class SamMotOps
         return result;
     }
 
-    /// <summary>The parts joined on the token axis, in order; the parts are not touched.</summary>
-    public static Tensor Concat(IReadOnlyList<Tensor> parts)
+    /// <summary>The parts joined on the token axis, in order, on the backend; the parts are not touched.</summary>
+    public static Tensor Concat(IBackend backend, IReadOnlyList<Tensor> parts)
     {
-        long width = parts[0].Shape[2];
         long tokens = 0;
         foreach (Tensor part in parts)
             tokens += part.Shape[1];
-        Tensor result = new(new TensorShape(1, tokens, width), DType.F32);
-        Span<float> target = result.AsSpan<float>();
-        int offset = 0;
-        foreach (Tensor part in parts)
-        {
-            part.AsReadOnlySpan<float>().CopyTo(target[offset..]);
-            offset += (int)part.Shape.ElementCount;
-        }
-
+        Tensor result = new(new TensorShape(1, tokens, parts[0].Shape[2]), DType.F32);
+        backend.Concat(result, parts.ToArray(), 1);
         return result;
     }
 
-    /// <summary>A copy of <paramref name="count"/> tokens from <paramref name="start"/>.</summary>
-    public static Tensor Tokens(Tensor source, int start, int count)
+    /// <summary>A copy of <paramref name="count"/> tokens from <paramref name="start"/>, on the backend.</summary>
+    public static Tensor Tokens(IBackend backend, Tensor source, int start, int count)
     {
-        int width = (int)source.Shape[2];
-        Tensor result = new(new TensorShape(1, count, width), DType.F32);
-        source.AsReadOnlySpan<float>().Slice(start * width, count * width).CopyTo(result.AsSpan<float>());
+        Tensor result = new(new TensorShape(1, count, source.Shape[2]), DType.F32);
+        backend.SliceRows(result, source, start);
         return result;
     }
 }

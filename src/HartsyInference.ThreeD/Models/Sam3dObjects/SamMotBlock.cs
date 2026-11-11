@@ -18,7 +18,8 @@ namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 internal sealed class SamMotBlock
 {
     private const float NormEps = 1e-6f;
-    private const float RmsNoEps = 0f;
+    // F.normalize clamps the L2 norm at 1e-12 so an all-zero head gives 0; RmsNorm adds eps to the mean square, so 1e-24 / head_dim is the same clamp.
+    private const float RmsClampSquared = 1e-24f;
 
     private readonly SamMotFlowConfig _config;
     private readonly IReadOnlyList<string> _streams;
@@ -175,15 +176,15 @@ internal sealed class SamMotBlock
         {
             // The other streams' queries see every other-stream token plus the protected streams' (kept before they are consumed below).
             List<string> keyOrder = [.. others, .. _config.Protected];
-            Tensor allQ = SamMotOps.Concat(others.Select(s => q[s]).ToList());
-            Tensor allK = SamMotOps.Concat(keyOrder.Select(s => k[s]).ToList());
-            Tensor allV = SamMotOps.Concat(keyOrder.Select(s => v[s]).ToList());
+            Tensor allQ = SamMotOps.Concat(backend, others.Select(s => q[s]).ToList());
+            Tensor allK = SamMotOps.Concat(backend, keyOrder.Select(s => k[s]).ToList());
+            Tensor allV = SamMotOps.Concat(backend, keyOrder.Select(s => v[s]).ToList());
             using Tensor joint = Attend(backend, allQ, allK, allV);
             int start = 0;
             foreach (string s in others)
             {
                 int count = (int)q[s].Shape[1];
-                attended[s] = SamMotOps.Tokens(joint, start, count);
+                attended[s] = SamMotOps.Tokens(backend, joint, start, count);
                 start += count;
                 q[s].Dispose();
                 k[s].Dispose();
@@ -234,12 +235,12 @@ internal sealed class SamMotBlock
         return SamMotOps.ToTokenMajor(backend, output);
     }
 
-    /// <summary>Upstream <c>MultiHeadRMSNorm</c>: per head, <c>x / rms(x) · gamma</c> (<c>normalize(x) · sqrt(head_dim) · gamma</c>); <paramref name="flat"/> is disposed.</summary>
+    /// <summary>Upstream <c>MultiHeadRMSNorm</c>: per head, <c>x / rms(x) · gamma</c> (<c>normalize(x) · sqrt(head_dim) · gamma</c>, with the 1e-12 norm clamp of <c>F.normalize</c>); <paramref name="flat"/> is disposed.</summary>
     private Tensor QkNorm(IBackend backend, Tensor flat, Tensor gammaFlat)
     {
         int tokens = (int)flat.Shape[1];
         Tensor normed = new(new TensorShape(1, tokens, _config.Heads, _config.HeadDim), DType.F32);
-        backend.RmsNorm(normed, flat.Reshape(normed.Shape), _onesHeadDim, RmsNoEps);
+        backend.RmsNorm(normed, flat.Reshape(normed.Shape), _onesHeadDim, RmsClampSquared / _config.HeadDim);
         flat.Dispose();
         Tensor scaled = new(new TensorShape(1, tokens, _config.ModelChannels), DType.F32);
         backend.AffineBroadcastLastDim(scaled, normed.Reshape(scaled.Shape), gammaFlat, null);

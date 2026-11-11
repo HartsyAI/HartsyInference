@@ -19,7 +19,7 @@ public sealed class SamMotFlowTests
         Protected: ["shape"],
         IsShortcut: true);
 
-    private static readonly Dictionary<string, int> Tokens = new() { ["rot"] = 1, ["shape"] = 8, ["trans"] = 1 };
+    private static readonly Dictionary<string, int> Tokens = new() { ["rot"] = 1, ["shape"] = 8, ["trans"] = 1, ["a"] = 1, ["b"] = 2, ["c"] = 3 };
 
     private sealed class Owned(params IEnumerable<Tensor>[] sets) : IDisposable
     {
@@ -365,6 +365,37 @@ public sealed class SamMotFlowTests
     }
 
     [Fact]
+    public void Forward_MatchesTheReferenceWithSeveralUnprotectedStreamsAndMultiTokenMembers()
+    {
+        // Streams: shape (protected), c (ungrouped, 3 tokens) and ga (a + b, 3 tokens), so the joint attention concatenates and splits more than one other stream.
+        SamMotFlowConfig wide = new(
+            ModelChannels: 8,
+            Heads: 2,
+            NumBlocks: 2,
+            CondChannels: 6,
+            MlpRatio: 2.0,
+            Latents: [new SamMotLatent("a", 2), new SamMotLatent("shape", 3), new SamMotLatent("c", 2), new SamMotLatent("b", 4)],
+            Groups: new Dictionary<string, IReadOnlyList<string>> { ["ga"] = ["a", "b"] },
+            Protected: ["shape"],
+            IsShortcut: false);
+        Assert.Equal(["shape", "c", "ga"], wide.StreamNames);
+        Random rng = new(19);
+        Dictionary<string, Tensor> w = Weights(rng, wide);
+        Dictionary<string, Tensor> latents = Latents(rng, wide);
+        Tensor cond = Filled(rng, 2.0, 1, 4, wide.CondChannels);
+        using Owned owned = new(w.Values, latents.Values, [cond]);
+        using CpuBackend backend = new();
+        SamMotFlow flow = new(wide, w);
+
+        Dictionary<string, Tensor> velocity = flow.Forward(backend, latents, 640f, cond);
+        using Owned results = new(velocity.Values);
+
+        Dictionary<string, double[][]> expected = Reference(wide, w, latents, 640.0, cond, null);
+        foreach (SamMotLatent latent in wide.Latents)
+            AssertClose(expected[latent.Name], velocity[latent.Name]);
+    }
+
+    [Fact]
     public void Forward_StepSizeChangesTheOutputAndMatchesTheReferenceWhenNonZero()
     {
         Random rng = new(12);
@@ -461,6 +492,8 @@ public sealed class SamMotFlowTests
         missing.Remove("trans");
         Assert.Throws<ArgumentException>(() => flow.Forward(backend, missing, 1f, cond, 0f));
         Assert.Throws<ArgumentException>(() => flow.Forward(backend, latents, 1f, wrongWidth, 0f));
+        using Tensor noTokens = new(new TensorShape(1, 0, Config.CondChannels), DType.F32);
+        Assert.Throws<ArgumentException>(() => flow.Forward(backend, latents, 1f, noTokens, 0f));
 
         SamMotFlowConfig plain = Config with { IsShortcut = false };
         SamMotFlow plainFlow = new(plain, w);
@@ -553,5 +586,6 @@ public sealed class SamMotFlowTests
         Assert.Throws<ArgumentException>(() => (Config with { Groups = new Dictionary<string, IReadOnlyList<string>> { ["rot"] = ["rot", "trans"], ["g2"] = ["trans"] } }).Validate());
         Assert.Throws<ArgumentException>(() => (Config with { Protected = ["missing"] }).Validate());
         Assert.Throws<ArgumentException>(() => (Config with { Heads = 3 }).Validate());
+        Assert.Throws<ArgumentException>(() => (Config with { Protected = ["shape", "shape"] }).Validate());
     }
 }
