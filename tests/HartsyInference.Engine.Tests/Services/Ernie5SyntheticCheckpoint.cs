@@ -245,6 +245,7 @@ internal static class Ernie5SyntheticCheckpoint
 
     // The tensors the real checkpoint stores BF16: the embedding and LM head, the routers, the compressor and the indexer projections.
     private static bool IsBf16Tensor(string key) =>
+        // "block_sparse_moe.gate.weight" also matches the split-feature second router, gate.weight_1, which must stay BF16 too.
         key == Ernie5WeightNames.Embedding || key == Ernie5WeightNames.LmHead || key.Contains("block_sparse_moe.gate.weight", StringComparison.Ordinal)
         || key.Contains("compressor.linear_w", StringComparison.Ordinal) || key.Contains("indexer.wk.", StringComparison.Ordinal)
         || key.Contains("indexer.weights_proj", StringComparison.Ordinal);
@@ -269,8 +270,8 @@ internal static class Ernie5SyntheticCheckpoint
         return bytes;
     }
 
-    // The FP8 linears: the 2-D projections the real checkpoint stores as E4M3. Routers, the hyper-connection mappings, the compressor and
-    // indexer projections it keeps BF16 or F32, and the embedding and LM head, stay F32 here.
+    // The FP8 linears: the 2-D projections the real checkpoint stores as E4M3. The hyper-connection mappings and the other F32 tensors stay F32;
+    // the tensors listed in IsBf16Tensor (embedding, LM head, routers, compressor and indexer projections) are BF16 and are handled first.
     private static bool IsFp8Linear(string key, int[] shape)
     {
         if (shape.Length != 2) return false;
@@ -363,8 +364,9 @@ internal static class Ernie5SyntheticCheckpoint
         // the attention output gate reads the q LoRA; its width is the grouped o-projection's (HCA) or the heads' value width (DSA)
         if (c.UseGatedAttn && leaf == "self_attn." + Ernie5WeightNames.AttnGate)
             return c.IsDsaLayer(layer) ? [c.MlaHeads * c.MlaVHeadDim, c.MlaQLoraRank] : [c.OGroups * c.OLoraRank, c.QLoraRank];
+        // the VHA post-mix matrices are [heads, 16] with the MLA head count, as Ernie5Layer folds them
         if (c.UseVhaAttention && Ernie5WeightNames.VhaLeaves.Any(v => leaf == "self_attn." + v))
-            return [c.NumAttentionHeads, 16];
+            return [c.MlaHeads, 16];
         if (leaf.StartsWith("self_attn.", StringComparison.Ordinal))
             return c.IsDsaLayer(layer) ? DsaShape(leaf, c) : HcaShape(leaf, c);
         if (leaf.StartsWith("mlp.", StringComparison.Ordinal) && layer < c.FirstKDenseReplace)

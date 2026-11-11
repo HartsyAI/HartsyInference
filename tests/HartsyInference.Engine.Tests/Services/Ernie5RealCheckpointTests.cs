@@ -36,18 +36,26 @@ public sealed class Ernie5RealCheckpointTests
         {
             string? dir = Environment.GetEnvironmentVariable(DirVariable);
             if (string.IsNullOrEmpty(dir)) Skip = $"SKIPPED: {DirVariable} is not set; the real-weight check did not run.";
-            else if (MissingShards(dir) is { } missing) Skip = $"SKIPPED: {missing} shard file(s) are not on disk in {dir}; the forward check did not run.";
+            else Skip = SkipReason(dir);
         }
 
-        private static int? MissingShards(string dir)
+        // Returns why the forward check cannot run, or null when every shard is present. Never throws: a discovery error would hide the reason.
+        private static string? SkipReason(string dir)
         {
             string index = Path.Combine(dir, "model.safetensors.index.json");
-            if (!File.Exists(index)) return 1;
-            using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(index));
-            int missing = 0;
-            foreach (string shard in doc.RootElement.GetProperty("weight_map").EnumerateObject().Select(p => p.Value.GetString()!).Distinct())
-                if (!File.Exists(Path.Combine(dir, shard))) missing++;
-            return missing == 0 ? null : missing;
+            if (!File.Exists(index)) return $"SKIPPED: {index} is not on disk; the forward check did not run.";
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(index));
+                int missing = 0;
+                foreach (string shard in doc.RootElement.GetProperty("weight_map").EnumerateObject().Select(p => p.Value.GetString()!).Distinct())
+                    if (!File.Exists(Path.Combine(dir, shard))) missing++;
+                return missing == 0 ? null : $"SKIPPED: {missing} shard file(s) are not on disk in {dir}; the forward check did not run.";
+            }
+            catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or IOException)
+            {
+                return $"SKIPPED: {index} is unreadable ({ex.GetType().Name}: {ex.Message}); the forward check did not run.";
+            }
         }
     }
 
@@ -71,10 +79,11 @@ public sealed class Ernie5RealCheckpointTests
         string device = (Environment.GetEnvironmentVariable("ERNIE_REAL_DEVICE") ?? "cuda").ToLowerInvariant();
         int[] tokens = (Environment.GetEnvironmentVariable("ERNIE_REAL_TOKENS") ?? "1,2,3,4,5")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse).ToArray();
+        // Reference precision, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
         using IBackend backend = device switch
         {
-            "cuda" => new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory()),
-            "vulkan" => new VulkanBackend(),
+            "cuda" => new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true },
+            "vulkan" => new VulkanBackend { EnableF16Gemm = false },
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"ERNIE_REAL_DEVICE must be cuda, vulkan or cpu, not '{device}'."),
         };
@@ -101,7 +110,8 @@ public sealed class Ernie5RealCheckpointTests
 
     private static void AssertHealthy(float[] logits, int vocab, string stage)
     {
-        Assert.Equal(0, logits.Length % vocab);
+        // One row of vocab logits: Argmax needs exactly one row, or its index would not be a token id.
+        Assert.Equal(vocab, logits.Length);
         float min = float.PositiveInfinity, max = float.NegativeInfinity;
         for (int i = 0; i < logits.Length; i++)
         {

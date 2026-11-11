@@ -20,9 +20,9 @@ Checkpoint: `baidu/ERNIE-5.5-Flash-Base` at revision `028544b2ffceea189b2d8768ed
   `sum_h w_h * ReLU(q_h . k)` form.
 - Real-weight numerics. Nothing here compares against a reference run of the real model.
 - Production precision. CUDA GEMMs default to TF32 and Vulkan GEMMs round inputs to F16 (`EnableF16Gemm`), about 1e-3 relative
-  to F32. For the verification run, pin the `reference` knob profile (`KnobProfiles.Reference`, which sets `HighPrecisionGemm` on and
-  `VkF16Gemm` off). The real-dimension parity tests set those two directly. How a profile is activated from the environment is not
-  checked here.
+  to F32. `Ernie5RealCheckpointTests` pins the same two settings as the `reference` knob profile
+  (`KnobProfiles.Reference`: `HighPrecisionGemm` on, `VkF16Gemm` off), so the verification run needs no extra configuration. Production
+  defaults (TF32, F16 GEMM) are not measured by this harness.
 
 ## Run
 
