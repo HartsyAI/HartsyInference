@@ -119,30 +119,97 @@ public static class GatedDeltaNetReference
                 float* qv = qp + (long)s * keyDim + (long)kh * sk;
                 float* vv = vp + (long)s * valueDim + (long)h * sv;
                 float* ov = o + (long)s * valueDim + (long)h * sv;
-                for (long i = 0; i < (long)sv * sk; i++) hs[i] *= gExp;
-                for (int row = 0; row < sv; row++)
-                {
-                    float* rb = hs + (long)row * sk;
-                    float acc = 0f;
-                    for (int col = 0; col < sk; col++) acc += rb[col] * kv[col];
-                    rowDot[row] = acc;
-                }
-                for (int row = 0; row < sv; row++)
-                {
-                    float* rb = hs + (long)row * sk;
-                    float delta = (vv[row] - rowDot[row]) * b;
-                    for (int col = 0; col < sk; col++) rb[col] += kv[col] * delta;
-                }
-                for (int row = 0; row < sv; row++)
-                {
-                    float* rb = hs + (long)row * sk;
-                    float acc = 0f;
-                    for (int col = 0; col < sk; col++) acc += rb[col] * qv[col];
-                    ov[row] = acc;
-                }
+                DeltaStep(hs, sv, sk, gExp, null, b, kv, qv, vv, ov, rowDot);
                 GatedNorm(ov, zp + (long)s * valueDim + (long)h * sv, nw, sv, eps);
             }
         });
+    }
+
+    /// <summary>Host <see cref="IBackend.SsmChannelDecayPrefill"/>: the delta rule with a per-key-channel log-decay (Kimi KDA). Per
+    /// token and value head, <c>S[:, c] ·= exp(logDecay[c])</c>, then the delta update and <c>o = S·q</c>; the output is the raw
+    /// recurrence, so the caller applies the norm and gate.</summary>
+    public static unsafe void ChannelDecayScan(Tensor output, Tensor state, Tensor q, Tensor k, Tensor v, Tensor logDecay,
+        Tensor betaRaw, int hv, int sv, int sk, int repeat)
+    {
+        RequireF32(nameof(IBackend.SsmChannelDecayPrefill), output, state, q, k, v, logDecay, betaRaw);
+        if (hv < 1 || sv < 1 || sk < 1 || repeat < 1 || hv % repeat != 0)
+            throw new ArgumentException($"SsmChannelDecayPrefill needs positive dims with hv divisible by repeat, got hv={hv}, sv={sv}, sk={sk}, repeat={repeat}.");
+        long valueDim = (long)hv * sv, keyDim = (long)(hv / repeat) * sk, decayDim = (long)hv * sk;
+        if (betaRaw.ElementCount % hv != 0)
+            throw new ArgumentException($"SsmChannelDecayPrefill betaRaw {betaRaw.Shape} is not a whole number of {hv}-wide rows.", nameof(betaRaw));
+        long seq = betaRaw.ElementCount / hv;
+        if (logDecay.ElementCount != seq * decayDim || output.ElementCount != seq * valueDim || v.ElementCount != seq * valueDim
+            || q.ElementCount != seq * keyDim || k.ElementCount != seq * keyDim)
+            throw new ArgumentException($"SsmChannelDecayPrefill operands do not all hold {seq} tokens of {hv}×{sv} values over {keyDim} keys.", nameof(output));
+        if (state.ElementCount != valueDim * sk)
+            throw new ArgumentException($"SsmChannelDecayPrefill state {state.Shape} does not match hv={hv}, sv={sv}, sk={sk}.", nameof(state));
+        int seqLen = checked((int)seq);
+        int keyDimI = hv / repeat * sk, valueDimI = hv * sv, decayDimI = hv * sk;
+        float* st = (float*)state.DataPointer;
+        float* qp = (float*)q.DataPointer;
+        float* kp = (float*)k.DataPointer;
+        float* vp = (float*)v.DataPointer;
+        float* gp = (float*)logDecay.DataPointer;
+        float* beta = (float*)betaRaw.DataPointer;
+        float* o = (float*)output.DataPointer;
+        Parallel.For(0, hv, h =>
+        {
+            int kh = h / repeat;
+            float* hs = st + (long)h * sv * sk;
+            float* rowDot = stackalloc float[sv];
+            float* decay = stackalloc float[sk];
+            for (int s = 0; s < seqLen; s++)
+            {
+                float* g = gp + (long)s * decayDimI + (long)h * sk;
+                for (int c = 0; c < sk; c++) decay[c] = MathF.Exp(g[c]);
+                float b = 1f / (1f + MathF.Exp(-beta[(long)s * hv + h]));
+                float* kv = kp + (long)s * keyDimI + (long)kh * sk;
+                float* qv = qp + (long)s * keyDimI + (long)kh * sk;
+                float* vv = vp + (long)s * valueDimI + (long)h * sv;
+                float* ov = o + (long)s * valueDimI + (long)h * sv;
+                DeltaStep(hs, sv, sk, 1f, decay, b, kv, qv, vv, ov, rowDot);
+            }
+        });
+    }
+
+    /// <summary>One token of the delta rule for one value head: decay the state by the scalar <paramref name="gExp"/>, or per key
+    /// channel through <paramref name="channelDecay"/> (length <paramref name="sk"/>) when it is not null; then read <c>S·k</c>,
+    /// write <c>k ⊗ ((v − S·k)·b)</c>, and form <c>o = S·q</c>. Shared by the Qwen3.5 scan and the channel-decay scan.</summary>
+    private static unsafe void DeltaStep(float* hs, int sv, int sk, float gExp, float* channelDecay, float b,
+        float* kv, float* qv, float* vv, float* ov, float* rowDot)
+    {
+        if (channelDecay is null)
+        {
+            for (long i = 0; i < (long)sv * sk; i++) hs[i] *= gExp;
+        }
+        else
+        {
+            for (int row = 0; row < sv; row++)
+            {
+                float* rb = hs + (long)row * sk;
+                for (int col = 0; col < sk; col++) rb[col] *= channelDecay[col];
+            }
+        }
+        for (int row = 0; row < sv; row++)
+        {
+            float* rb = hs + (long)row * sk;
+            float acc = 0f;
+            for (int col = 0; col < sk; col++) acc += rb[col] * kv[col];
+            rowDot[row] = acc;
+        }
+        for (int row = 0; row < sv; row++)
+        {
+            float* rb = hs + (long)row * sk;
+            float delta = (vv[row] - rowDot[row]) * b;
+            for (int col = 0; col < sk; col++) rb[col] += kv[col] * delta;
+        }
+        for (int row = 0; row < sv; row++)
+        {
+            float* rb = hs + (long)row * sk;
+            float acc = 0f;
+            for (int col = 0; col < sk; col++) acc += rb[col] * qv[col];
+            ov[row] = acc;
+        }
     }
 
     /// <summary>Shifts the conv carry left by this call's rows and appends its last pre-conv rows.</summary>
