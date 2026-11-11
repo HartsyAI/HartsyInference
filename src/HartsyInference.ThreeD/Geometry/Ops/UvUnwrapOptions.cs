@@ -28,6 +28,7 @@ public sealed record UvUnwrapOptions
     /// <see cref="MinPaddingTexels"/> (the atlas scale shrinks instead), so a bilinear fetch or a dilation never reads a neighbouring chart.</summary>
     public int PaddingTexels { get; init; } = 4;
 
-    /// <summary>Floor of the gutter in texels; at least 1 keeps the charts apart by one texel on each side.</summary>
+    /// <summary>Floor of the gutter in texels; at least 1 keeps the charts apart by one texel on each side. A <see cref="PaddingTexels"/> below it
+    /// (0 asks for an unpadded atlas) lowers the floor to that value.</summary>
     public int MinPaddingTexels { get; init; } = 1;
 }

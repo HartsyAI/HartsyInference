@@ -108,11 +108,35 @@ public sealed class UvUnwrapperNoisyMeshTests
     }
 
     [Fact]
-    public void RejectsAMinimumPaddingAboveThePadding()
+    public void ARequestedPaddingBelowTheDefaultMinimumIsStillHonoured()
     {
+        // An unpadded atlas was a valid request before the minimum existed; the minimum follows the padding down instead of throwing.
         Mesh grid = SyntheticMeshes.Grid(2);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => UvUnwrapper.Unwrap(grid, new UvUnwrapOptions { PaddingTexels = 2, MinPaddingTexels = 3 }));
+        UvUnwrapResult none = UvUnwrapper.Unwrap(grid, new UvUnwrapOptions { PaddingTexels = 0 });
+        UvUnwrapResult two = UvUnwrapper.Unwrap(grid, new UvUnwrapOptions { PaddingTexels = 2, MinPaddingTexels = 3 });
+
+        Assert.Equal(0.0, none.PaddingTexels);
+        Assert.Equal(2.0, two.PaddingTexels);
+        Assert.Throws<ArgumentOutOfRangeException>(() => UvUnwrapper.Unwrap(grid, new UvUnwrapOptions { MinPaddingTexels = -1 }));
+    }
+
+    [Fact]
+    public void SeedOnASharpFold_KeepsItsOwnProjection()
+    {
+        // The area-weighted mean of the seed and its neighbour is perpendicular to the second triangle: projected along it, that triangle would
+        // have no UV area and the bake would skip it. The seed falls back to its own normal, so both triangles keep a positive UV area.
+        Mesh fold = new()
+        {
+            Vertices = [0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 1, 1],
+            Indices = [0, 1, 2, 1, 0, 3],
+        };
+
+        UvUnwrapResult result = UvUnwrapper.Unwrap(fold);
+
+        Assert.Equal(2, result.ChartCount);
+        Assert.True(UvArea(result.Mesh, 0) > 1e-9);
+        Assert.True(UvArea(result.Mesh, 1) > 1e-9);
     }
 
     private static float GridStep(Mesh grid)

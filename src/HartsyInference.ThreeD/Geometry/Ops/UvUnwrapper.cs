@@ -23,12 +23,12 @@ public static class UvUnwrapper
             if ((uint)i >= (uint)mesh.VertexCount)
                 throw new ArgumentException("A triangle index lies outside the vertex array.", nameof(mesh));
         if (options.ConeHalfAngleDegrees is <= 0 or >= 90 || options.AbsorbConeHalfAngleDegrees is <= 0 or >= 90 || options.SteepAbsorbConeHalfAngleDegrees is <= 0 or >= 90 || options.SteepAbsorbMaxAreaRatio < 0 || options.AbsorbBelowFaces < 0
-            || options.TextureSize <= 0 || options.PaddingTexels < 0 || options.MinPaddingTexels < 0 || options.MinPaddingTexels > options.PaddingTexels)
-            throw new ArgumentOutOfRangeException(nameof(options), "Cone angles must be in (0,90), sizes must be positive and the minimum padding at most the padding.");
+            || options.TextureSize <= 0 || options.PaddingTexels < 0 || options.MinPaddingTexels < 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "Cone angles must be in (0,90) and sizes must be positive.");
 
         FaceData data = new(mesh);
         List<UvChart> charts = BuildCharts(mesh, data, options, cancellationToken);
-        double padding = UvAtlasPacker.Pack(charts, options.PaddingTexels, options.MinPaddingTexels, options.TextureSize);
+        double padding = UvAtlasPacker.Pack(charts, options.PaddingTexels, Math.Min(options.MinPaddingTexels, options.PaddingTexels), options.TextureSize);
         return Assemble(mesh, charts, padding);
     }
 
@@ -65,7 +65,7 @@ public static class UvUnwrapper
                 int id = chartFaces.Count;
                 List<int> members = [seed];
                 chartOf[seed] = id;
-                double[] normal = grower.SeedNormal(seed);
+                double[] normal = grower.SeedNormal(seed, coneCos);
                 grower.Grow(members, normal, coneCos, f => chartOf[f] < 0, f => chartOf[f] = id, cancellationToken);
                 chartFaces.Add(members);
                 chartNormal.Add(normal);

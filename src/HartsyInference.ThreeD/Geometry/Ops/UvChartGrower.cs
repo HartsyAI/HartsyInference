@@ -39,8 +39,10 @@ internal sealed class UvChartGrower
     }
 
     /// <summary>The unit normal a chart seeded at <paramref name="seed"/> projects along: the area-weighted mean of the seed face and its
-    /// edge neighbours, so one noisy facet does not tilt a whole chart. Falls back to the seed's own normal.</summary>
-    public double[] SeedNormal(int seed)
+    /// edge neighbours, so one noisy facet does not tilt a whole chart. The seed joins without the cone check later faces get, so when the
+    /// mean leaves the seed's own cone (a sharp fold: the mean can even be perpendicular to the seed, which would project it to nothing),
+    /// the seed's own normal is used instead.</summary>
+    public double[] SeedNormal(int seed, double coneCos)
     {
         double x = _normal[seed * 3] * _area[seed], y = _normal[seed * 3 + 1] * _area[seed], z = _normal[seed * 3 + 2] * _area[seed];
         for (int c = 0; c < 3; c++)
@@ -51,9 +53,10 @@ internal sealed class UvChartGrower
             x += _normal[g * 3] * _area[g]; y += _normal[g * 3 + 1] * _area[g]; z += _normal[g * 3 + 2] * _area[g];
         }
 
+        double sx = _normal[seed * 3], sy = _normal[seed * 3 + 1], sz = _normal[seed * 3 + 2];
         double len = Math.Sqrt(x * x + y * y + z * z);
-        if (len < 1e-300)
-            return [_normal[seed * 3], _normal[seed * 3 + 1], _normal[seed * 3 + 2]];
+        if (len < 1e-300 || (x * sx + y * sy + z * sz) / len < coneCos)
+            return [sx, sy, sz];
         return [x / len, y / len, z / len];
     }
 
