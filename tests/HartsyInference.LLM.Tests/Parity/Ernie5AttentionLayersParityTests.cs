@@ -56,6 +56,12 @@ public sealed class Ernie5AttentionLayersParityTests
     [VulkanFact]
     public void Vulkan_LoweredErnieAttention_PlansADeviceRow() => PlansOnDevice(Vulkan);
 
+    [CudaFact]
+    public void Cuda_SinkFlashAttention_MatchesHostReference() => SinkFlashParity(Cuda);
+
+    [VulkanFact]
+    public void Vulkan_SinkFlashAttention_MatchesHostReference() => SinkFlashParity(Vulkan);
+
     private static IBackend Cuda() => new CudaBackend(0, CudaPtxDirectory.Resolve());
 
     private static IBackend Vulkan() => new VulkanBackend();
@@ -74,6 +80,34 @@ public sealed class Ernie5AttentionLayersParityTests
             AttentionPlan plan = device.PlanAttention(in call);
             Assert.True(plan.Row is not null && plan.RowId != "host.reference", $"head dim {dim}: {plan.Describe()}");
         }
+    }
+
+    // The unmasked sink flash calls Vulkan's wide row and CUDA's decode kernels take, past the layer tests' shapes: two batch items,
+    // several query rows, GQA with two key/value heads, a capacity past the valid length, a head width off 128, with and without
+    // a soft-cap; against the contract reference.
+    private static void SinkFlashParity(Func<IBackend> open)
+    {
+        const int batch = 2, hq = 8, hkv = 2, sq = 3, capacity = 50, kvLen = 47, dim = 160;
+        Random rng = new(53);
+        using IBackend device = open();
+        foreach (float softcap in new[] { 0f, 5f })
+        {
+            using Tensor q = Make4(rng, batch, hq, sq, dim), k = Make4(rng, batch, hkv, capacity, dim), v = Make4(rng, batch, hkv, capacity, dim);
+            using Tensor sink = new(new TensorShape(hq), DType.F32);
+            Values(rng, hq, 2f).CopyTo(sink.AsSpan<float>());
+            using Tensor want = new(new TensorShape(batch, hq, sq, dim), DType.F32), got = new(new TensorShape(batch, hq, sq, dim), DType.F32);
+            AttentionCall call = AttentionCall.FromFlashAttention(want, q, k, v, kvLen, false, 0, 0.09f, softcap, sink, 0, null);
+            AttentionHostReference.Run(in call);
+            device.FlashAttention(got, q, k, v, kvLen, hq / hkv, false, 0, 0.09f, softcap, sink);
+            AssertClose(want.AsReadOnlySpan<float>().ToArray(), got.AsReadOnlySpan<float>().ToArray(), 1e-4f, $"sink flash softcap {softcap}");
+        }
+    }
+
+    private static Tensor Make4(Random rng, int a, int b, int c, int d)
+    {
+        Tensor t = new(new TensorShape(a, b, c, d), DType.F32);
+        Values(rng, a * b * c * d, 1f).CopyTo(t.AsSpan<float>());
+        return t;
     }
 
     private static void HcaParity(Func<IBackend> open, bool fp8, int headDim)

@@ -5,23 +5,28 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vulkan;
 
-// The wide flash row (Shaders/sdpa_flash_wide.comp.glsl): unmasked F32 FlashAttention calls past sdpa_flash's head width or
-// with the soft-cap and sinks it lacks, such as the HCA and DSA calls AttentionFlashLowering stages.
+// The wide flash row (Shaders/sdpa_flash_wide.comp.glsl): unmasked F32 FlashAttention calls with sinks, which sdpa_flash lacks,
+// at any head width up to 1024 and with an optional soft-cap, such as the HCA and DSA calls AttentionFlashLowering stages.
 public sealed partial class VulkanBackend
 {
     /// <summary>Widest head <c>sdpa_flash_wide</c> holds; must equal its <c>MAX_D</c>.</summary>
     private const int FlashWideMaxHeadDim = 1024;
 
-    /// <summary>Whether <c>sdpa_flash_wide</c> computes <paramref name="c"/>: F32, unmasked, host positions, no ALiBi, equal
-    /// query/key and value widths up to <see cref="FlashWideMaxHeadDim"/>, and a grid within the device limits.</summary>
+    private bool? _flashWideBuilt;
+
+    /// <summary>Whether <c>sdpa_flash_wide</c> computes <paramref name="c"/>: F32, unmasked, host positions, sinks, no ALiBi,
+    /// equal query/key and value widths up to <see cref="FlashWideMaxHeadDim"/>, and a grid within the device limits.</summary>
+    /// <remarks>Sinks are required so the row takes only the sink calls the host reference used to compute (the HCA and DSA
+    /// layers through AttentionFlashLowering); every sink-less call keeps the route it had.</remarks>
     private bool FlashWideAdmits(in AttentionCall c) =>
-        !c.Mask.Causal && c.Mask.LegacySlidingWindow == 0 && c.Mask.Bias is null && c.Logits.AlibiSlopes is null && !c.Positions.OnDevice
+        c.Logits.Sinks is not null && !c.Mask.Causal && c.Mask.LegacySlidingWindow == 0 && c.Mask.Bias is null
+        && c.Logits.AlibiSlopes is null && !c.Positions.OnDevice
         && c.Query.DType == DType.F32 && c.Key.DType == DType.F32 && c.Value.DType == DType.F32 && c.Output.DType == DType.F32
         && c.QkHeadDim <= FlashWideMaxHeadDim && c.ValueHeadDim == c.QkHeadDim
         && c.Positions.KvLength >= 1 && c.Positions.KvLength <= c.KeyTokens
         && (uint)c.QueryTokens <= Vk.MaxComputeWorkGroupCountX && (uint)c.Heads <= Vk.MaxComputeWorkGroupCountY
         && (uint)c.Batch <= Vk.MaxComputeWorkGroupCountZ
-        && File.Exists(Path.Combine(_spvDir, "sdpa_flash_wide.spv"));
+        && (_flashWideBuilt ??= File.Exists(Path.Combine(_spvDir, "sdpa_flash_wide.spv")));
 
     // One workgroup per (query row, head, batch) over head-major operands; the output is a fresh buffer.
     private void DispatchFlashWide(in AttentionCall c)
