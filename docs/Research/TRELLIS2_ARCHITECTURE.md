@@ -125,15 +125,18 @@ A real example image (a marble bust, 1052 px RGBA) and a flat synthetic mug, ful
 
 | Stage | `--grid 512` bust | `--grid 1024` bust (cascade) |
 |---|---|---|
-| conditioning and structure flow | 60 s | 109 s (first start of the process) |
-| coarse shape flow (12 steps) | 27 s | 57 s |
-| upsample, fine conditioning and fine shape flow (12 steps, 10,785 tokens) | | 229 s |
-| shape decode and meshing | | 32 s |
-| texture flow (12 steps, one pass each) | 17 s | 131 s |
-| texture decode (guided) | 7 s | 61 s |
-| decimate, unwrap, bake, inpaint (CPU) | 22 s | 54 to 68 s |
-| total | 140 s | 700 s |
-| peak VRAM (whole card) | 7.7 GB | 9.1 GB |
+| conditioning and structure flow | 190 s (cold file cache; 60 s warm) | 71 s |
+| coarse shape flow (12 steps) | 28 s | 29 s |
+| upsample, fine conditioning and fine shape flow (12 steps, 10,955 tokens) | | 227 s |
+| shape decode and meshing | | 23 s |
+| texture flow (12 steps, one pass each) | 23 s | 133 s |
+| texture decode (guided) | 7 s | 27 s |
+| decimate, unwrap, bake, inpaint (CPU) | 21 to 29 s | 46 to 54 s |
+| total | 269 s (140 s warm) | 564 s |
+| peak VRAM (whole card) | 7.7 to 11.8 GB (see note) | 9.3 GB |
+
+The 512 peak of 11.8 GB belongs to the run that also had other processes resident; the whole-card figure includes about 1.3 to 1.8 GB that is
+not ours, and the two 512 runs (7.7 GB and 11.8 GB) differ by what else held the card.
 
 Findings:
 
@@ -149,7 +152,7 @@ Findings:
 - **The CPU bake is not the bottleneck.** Decimating a 11M-triangle 1024 mesh to 1M faces, unwrapping, baking and inpainting took 54 to 68 s;
   the 512 mesh took 19 to 22 s.
 - **Sweeping the device is not a read-back, and it zeroed the conditioning.** The first version of the release above came out copper and
-  teal (mean metallic 0.09 to 0.2, mesh 937,485 vertices instead of 938,050) for the marble bust. `FreeActivations` and
+  teal (mean metallic 0.2 at 1024 and 0.36 at 512, mesh 937,485 vertices instead of 938,050 at 512) for the marble bust. `FreeActivations` and
   `FreeAllDeviceMemory` drop the device copy of every activation without reading it back, and a tensor an op produced that nobody read on
   the host, the DINOv3 conditioning among them, has only a zero-filled host buffer (its host sum reads 0.0, 461,844 after
   `OffloadActivation`). The next flow then ran on zero conditioning. Every sweep now offloads the tensors a later stage still reads
