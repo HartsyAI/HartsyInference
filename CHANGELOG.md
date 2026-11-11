@@ -5,6 +5,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: NAF feature upsampler for Pixal3D (not yet a model id).** `Pixal3DNaf` loads `naf_release.pth` with the safe-subset pickle reader (37 F32
+  tensors, nothing executed) and runs the guide-image conv encoder and axial RoPE on the backend, then evaluates NAF's neighbourhood attention only
+  at the pixels the projection samples. It does not use `natten`: keys and values are constant inside each low-resolution cell, so the dilated
+  window is the 9 x 9 block of feature cells around the pixel's own cell. The query map and upsampled features match upstream's own NAF modules on the
+  real weights to 1e-5 (`tests/python-reference/dump_pixal3d_naf.py`; `natten` replaced by a brute-force transcription of its dilated definition).
+  `Pixal3DConditionerStage` can append the NAF samples after the patch-map samples, giving the 2048-channel features the shape flows read.
+
 - **Added: Pixal3D structure stage building blocks (not yet a model id).** `Pixal3DView` and `Pixal3DProjection` reproduce
   Pixal3D's camera (distance from the field of view) and view-aligned feature lookup: grid cells projected through the pinhole and read from
   the DINOv3 patch map with a bilinear, border-clamped `grid_sample` (`GridSampler.GridSampleRowsBorder`). The coordinates and the sampler
