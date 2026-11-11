@@ -48,7 +48,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 
 | Stage | Upstream (Pixal3D) | Existing C# | Verdict |
 |---|---|---|---|
-| Preprocess | `preprocess_image`: long edge at most 1024, RMBG-2.0 unless alpha, crop around alpha > 0.8 with 10 % margin, RGB over **black** | `Trellis2ImagePreprocessor` + `IForegroundMatter` / `Trellis2LazyMatter` | 1:1 (same function as TRELLIS.2; black background is its default) |
+| Preprocess | `preprocess_image`: long edge at most 1024, RMBG-2.0 unless alpha, crop around alpha > 0.8 with 10 % margin, RGB over **black** | `Trellis2ImagePreprocessor` + `IForegroundMatter` / `Trellis2LazyMatter` | config change: the crop square is widened to `int(size * 1.1)` where TRELLIS.2 uses `int(size * 1)` (`Trellis2ImagePreprocessor.Prepare(..., cropScale)`); black background is the default in both |
 | Camera | `distance_from_fov`, FOV from MoGe-2 or `--fov` | none | new, small (formulas below); MoGe not ported |
 | Global tokens | DINOv3 ViT-L/16, all tokens after the last block, `F.layer_norm`, no final norm; keeps class + 4 register tokens | `Trellis2ImageConditioner.Encode` (same call returns every token) | 1:1; take the first 5 tokens |
 | Patch grid | the remaining tokens as `[h, w, 1024]`, `h = w = size / 16` | the same tokens, row-major | 1:1, needs a view |
