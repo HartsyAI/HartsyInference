@@ -195,9 +195,11 @@ public sealed class KimiK31WeightLoader
 
     private PackedMxfp4Projection Projection(IKimiK31WeightSource src, string expert, string proj, int rows, int cols)
     {
-        Tensor packed = src.Read($"{expert}.{proj}.weight_packed"), scale = src.Read($"{expert}.{proj}.weight_scale");
-        // The packed model keeps these views for the decoder's lifetime; the loader's owned list releases them with the model.
+        // The packed model keeps these views for the decoder's lifetime; the loader's owned list releases each one as it is read, so a
+        // failure on the second read still releases the first.
+        Tensor packed = src.Read($"{expert}.{proj}.weight_packed");
         _owned.Add(packed);
+        Tensor scale = src.Read($"{expert}.{proj}.weight_scale");
         _owned.Add(scale);
         Expect(packed, $"{expert}.{proj}.weight_packed", DType.U8, rows, cols / 2);
         Expect(scale, $"{expert}.{proj}.weight_scale", DType.U8, rows, cols / 32);
@@ -246,6 +248,7 @@ public sealed class KimiK31WeightLoader
     {
         Tensor t = new(new TensorShape(shape), DType.F32);
         values.CopyTo(t.AsSpan<float>());
+        _owned.Add(t);
         return t;
     }
 
