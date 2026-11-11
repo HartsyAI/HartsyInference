@@ -109,6 +109,12 @@ Read with the safe-subset loader: 585 tensors, all F32, root `state_dict.model.*
 
 Open items 1–3 below are answered for the skeleton file; the skin file is still unread.
 
+## Checked against the real skin checkpoint (2026-11-09)
+
+1,164 pickle tensors: 1,155 `state_dict.model.*` F32 weights, one BatchNorm `num_batches_tracked` (I64, skipped), and Lightning callback bookkeeping that is not read. Verified: `mesh_encoder.embedding.stem.conv.weight` `[32, 5, 5, 5, 9]` (spconv `[out, kx, ky, kz, in]`, same layout `SparseOps` slices), BN weight/bias/running mean/var, `res_linear`, stage linears `enc{s}.0`, blocks `enc{s}.block{i}` with `cpe.0/1/2`, `norm1.0`, `norm2.0`, `attn.qkv/proj` (chunked `[q|k|v]`, not head-interleaved) and `mlp.0.fc1/fc2`; `feat_map.0/1`; the global encoder under `global_encoder.encoder` (same keys as stage 1); `out_proj.0/1`; `bone_encoder.bone_encoder.{1,2,4,5,7,8}` (first linear `[1024, 39]` = 3·(2·6+1)); `bone_encoder.attn.{0..7}` and `mesh_bone_attn.{0..15}` with flash-attn `MHA` names (`Wq`, `Wkv` `[1536, 768]` as k-then-v, `out_proj`, `ffn.0/2`, `norm1/2`); `qmesh`/`kmesh` `[12288, 768]`; `voxel_skin_embed`, `voxel_skin_norm`, `attn_skin_norm`, `downscale.0/1`, `skinweight_pred.net.{0,1,3,4,6,7,9,10,12}`.
+
+Reading `unirig_skin.py`: in eval the parent-summed `skin_mask` adds only each joint's own original value to its parent (children have larger indices, so grandchildren never propagate), which the port reproduces.
+
 ## Open questions (need the real files)
 
 1. Exact tensor names, shapes and dtypes in both `.ckpt` files (OPT dims, whether `lm_head` exists or is tied, BN running stats in the skin PTv3, `flash_attn` MHA parameter names, Michelangelo key prefixes).

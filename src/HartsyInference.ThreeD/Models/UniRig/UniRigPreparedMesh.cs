@@ -15,6 +15,9 @@ public sealed record UniRigPreparedMesh
     /// <summary>Unit face normals, length <c>3 * FaceCount</c>.</summary>
     public required float[] FaceNormals { get; init; }
 
+    /// <summary>For each vertex of the source mesh, its vertex here after welding, or <c>-1</c> when the source vertex was dropped as non-finite.</summary>
+    public required int[] SourceVertex { get; init; }
+
     /// <summary>Centre of the source bounding box: <c>source = normalized * Scale + Center</c>.</summary>
     public required float[] Center { get; init; }
 

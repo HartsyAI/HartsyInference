@@ -102,7 +102,8 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
 
         /// <summary>Number of frames to roll out, counting the seed frame; null uses the model default.</summary>
         [CommandOption("--frames")]
-        [Description("Frames to roll out, counting the seed frame (default: the model's own count, 16 for Oasis and DIAMOND).")]
+        [Description("Frames to roll out, counting the seed frame (default: the model's own count, 16 for Oasis and DIAMOND). "
+            + "Oasis and DIAMOND cannot run unbounded, so with --view they stop after this many frames; the window stays open to show them.")]
         public int? Frames { get; init; }
 
         /// <summary>Output frame rate; null uses the model default.</summary>
@@ -185,6 +186,14 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         [Description("Streaming: steer from the keyboard while generating. wasdijkl toggle the held controls, space releases "
             + "them, q or Esc ends the stream and saves what was generated.")]
         public bool Interactive { get; init; }
+
+        /// <summary>Open a live window that plays frames as they are generated and steers them from the keyboard.</summary>
+        [CommandOption("--view")]
+        [Description("Open a live window that plays frames as they are generated. Hold keys to steer (SANA-WM streaming: wasd, ijkl); "
+            + "release to stop. Esc or Q, or closing the window, ends the run and saves what was generated. Needs a display. "
+            + "Cannot be combined with --interactive. Oasis and DIAMOND take one action per step and stop after --frames frames; "
+            + "a model with no live controls plays its clip when the run completes.")]
+        public bool View { get; init; }
     }
 
     /// <inheritdoc/>
@@ -256,6 +265,7 @@ public sealed class WorldCommand : Command<WorldCommand.Settings>
         parameters.Put("streaming", settings.Streaming ? "true" : "false");
         parameters.Put("unbounded", settings.Unbounded ? "true" : "false");
         parameters.Put("interactive", settings.Interactive ? "true" : "false");
+        parameters.Put("view", settings.View ? "true" : "false");
         parameters.Put("refiner", settings.Refiner ? "true" : "false");
 
         Dictionary<string, string> aux = new Dictionary<string, string>();

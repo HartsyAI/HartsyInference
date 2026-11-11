@@ -82,7 +82,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Flow-match timestep shift.</summary>
     public float FlowShift { get; init; } = 1.0f;
 
-    /// <summary>Default marching-cubes grid resolution per axis.</summary>
+    /// <summary>Default marching-cubes grid resolution per axis: the number of samples, one fewer than upstream's <c>octree_resolution + 1</c> for the same value.</summary>
     public int GridResolution { get; init; } = 256;
 
     /// <summary>Iso level for surface extraction from the decoded field.</summary>

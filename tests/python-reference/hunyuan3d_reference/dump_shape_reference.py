@@ -51,7 +51,8 @@ from transformers import Dinov2Model, Dinov2Config
 from PIL import Image
 import torchvision.transforms as T
 
-cfg = yaml.safe_load(open(args.config))
+with open(args.config) as config_file:
+    cfg = yaml.safe_load(config_file)
 sd = load_file(args.ckpt, device="cpu")
 
 
@@ -108,6 +109,7 @@ else:
 sigmas = np.concatenate([sig, [1.0]]).astype(np.float32)
 latents = torch.randn(1, *vae.latent_shape, generator=torch.Generator().manual_seed(args.seed))
 out["noise"] = latents.numpy()
+assert args.steps >= 4, "the saved steps need at least four steps"
 saved = sorted({args.steps // 4, args.steps // 2, args.steps - 2})
 out["steps"] = np.array([args.steps], dtype=np.int32)
 out["octree_resolution"] = np.array([args.res], dtype=np.int32)
