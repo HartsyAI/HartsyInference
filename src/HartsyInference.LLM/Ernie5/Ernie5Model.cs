@@ -12,8 +12,8 @@ namespace HartsyInference.LLM.Ernie5;
 /// (vLLM-ERNIE <c>Ernie5_5MTP</c>) that drafts the token after next.</summary>
 /// <remarks>
 /// <para>Every op runs through <see cref="IBackend"/>, so the model runs on the CPU, CUDA or Vulkan backend. The residual stream, the
-/// sublayer glue and the attention caches stay host arrays, and each backend op takes them as host tensors; the device attention path is
-/// the one the GPU parity tests cover.</para>
+/// sublayer glue and the attention caches stay host arrays, and each backend op takes them as host tensors. On a GPU backend,
+/// <c>Ernie5ModelGpuParityTests</c> covers one prefill chunk and one decode step with weights rebuilt per forward; MTP is not covered on a device.</para>
 /// <para>FP8 weights are dequantized to F32 when a layer is built. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer;
 /// otherwise each layer is built and dropped per forward. Not thread-safe: run one sequence at a time.</para>
 /// </remarks>
@@ -42,12 +42,12 @@ public sealed class Ernie5Model : IDisposable
     private Tensor? _lmHead;
     private int _disposed;
 
-    /// <param name="backend">The CPU backend.</param>
+    /// <param name="backend">The CPU, CUDA or Vulkan backend.</param>
     /// <param name="config">The checkpoint's config.</param>
     /// <param name="source">The weights; every key must map (<see cref="Ernie5WeightMap"/>). Not owned unless loaded through
     /// <see cref="Load"/>.</param>
     /// <param name="options">Sequence length and weight residency.</param>
-    /// <exception cref="NotSupportedException">The backend is not the CPU, the config names a feature the model does not implement, or
+    /// <exception cref="NotSupportedException">The backend is not CPU, CUDA or Vulkan, the config names a feature the model does not implement, or
     /// <see cref="Ernie5LoadOptions.Mtp"/> asks for MTP on a checkpoint with other than one MTP layer.</exception>
     /// <exception cref="InvalidDataException">A checkpoint key maps to nothing, or a parameter has no key.</exception>
     public Ernie5Model(IBackend backend, Ernie5Config config, IErnie5WeightSource source, Ernie5LoadOptions options)

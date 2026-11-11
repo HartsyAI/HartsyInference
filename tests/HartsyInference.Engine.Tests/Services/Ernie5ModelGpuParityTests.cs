@@ -23,21 +23,22 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     }
 
     [ErnieCudaFact]
-    public void Cuda_SyntheticErnie_LogitsMatchCpu()
-    {
-        string dir = WriteCheckpoint();
-        float[] want = Logits(dir, new CpuBackend());
-        using IBackend device = new CudaBackend(0, PtxDirectory());
-        AssertClose(want, Logits(dir, device), "CUDA");
-    }
+    public void Cuda_SyntheticErnie_LogitsMatchCpu() => ParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA", resident: false);
+
+    [ErnieCudaFact]
+    public void Cuda_SyntheticErnie_ResidentWeights_LogitsMatchCpu() => ParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA", resident: true);
 
     [ErnieVulkanFact]
-    public void Vulkan_SyntheticErnie_LogitsMatchCpu()
+    public void Vulkan_SyntheticErnie_LogitsMatchCpu() => ParityOn(() => new VulkanBackend(), "Vulkan", resident: false);
+
+    // Prefill then one decode step on the same state, so the HCA and DSA caches are read across steps as well as written.
+    private void ParityOn(Func<IBackend> open, string device, bool resident)
     {
         string dir = WriteCheckpoint();
-        float[] want = Logits(dir, new CpuBackend());
-        using IBackend device = new VulkanBackend();
-        AssertClose(want, Logits(dir, device), "Vulkan");
+        using CpuBackend cpu = new();
+        float[] want = Logits(dir, cpu, resident);
+        using IBackend gpu = open();
+        AssertClose(want, Logits(dir, gpu, resident), device);
     }
 
     private string WriteCheckpoint()
@@ -47,14 +48,20 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
         return dir;
     }
 
-    // One prefill chunk; every row's logits, so the whole stream is compared, not just the last token.
-    private static float[] Logits(string dir, IBackend backend)
+    // A prefill chunk with every row's logits, then one decode step on the same state; both are compared, not just the last token.
+    private static float[] Logits(string dir, IBackend backend, bool resident)
     {
-        using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = Tokens.Length });
-        using Ernie5SequenceState state = model.CreateState(Tokens.Length);
-        return model.Forward(Tokens, state, allRows: true);
+        using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions
+        {
+            MaxSequenceTokens = Tokens.Length + 1, ResidentWeights = resident,
+        });
+        using Ernie5SequenceState state = model.CreateState(Tokens.Length + 1);
+        float[] prefill = model.Forward(Tokens, state, allRows: true);
+        float[] decode = model.Forward([Tokens[^1] + 1], state);
+        return [.. prefill, .. decode];
     }
 
+    // Tolerance for F32 weights, where the device and the CPU differ only in accumulation order. FP8 weights will need a looser bound.
     private static void AssertClose(float[] want, float[] got, string device)
     {
         Assert.Equal(want.Length, got.Length);
@@ -78,6 +85,10 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
         }
         throw new DirectoryNotFoundException("No CUDA PTX directory beside the test assembly or in the repository.");
     }
+
+    // Probed once per test run; each attribute reads the cached result instead of opening a device during discovery.
+    private static readonly Lazy<string?> CudaFailure = new(CudaProbe);
+    private static readonly Lazy<string?> VulkanFailure = new(VulkanProbe);
 
     private static string? CudaProbe()
     {
@@ -116,7 +127,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     {
         public ErnieCudaFactAttribute()
         {
-            string? failure = CudaProbe();
+            string? failure = CudaFailure.Value;
             if (failure is not null) Skip = $"SKIPPED: no usable CUDA device or block-op PTX ({failure}); GPU check did not run.";
         }
     }
@@ -126,7 +137,7 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     {
         public ErnieVulkanFactAttribute()
         {
-            string? failure = VulkanProbe();
+            string? failure = VulkanFailure.Value;
             if (failure is not null) Skip = $"SKIPPED: no usable Vulkan device or block-op SPIR-V ({failure}); GPU check did not run.";
         }
     }
