@@ -1088,6 +1088,7 @@ public sealed partial class CudaKernels : IDisposable
         LoadDitNormActKernels();
         LoadSsmPrefillKernels();
         LoadChannelDecayPrefillKernel();
+        LoadMxfp4LinearKernel();
         LoadFrameScanKernels();
         LoadDepthwiseGluKernels();
         LoadUcpeKernels();

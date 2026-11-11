@@ -471,14 +471,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         int mi = _moe.MoeIntermediateSize;
         Tensor gate = new(new TensorShape(1, rows, mi), DType.F32);
         Tensor up = new(new TensorShape(1, rows, mi), DType.F32);
-        PackedMxfp4Linear.Apply(gate, x, w.Gate.Packed, w.Gate.Recipe);
-        PackedMxfp4Linear.Apply(up, x, w.Up.Packed, w.Up.Recipe);
+        backend.Mxfp4LinearF32(gate, x, w.Gate.Packed, w.Gate.Recipe);
+        backend.Mxfp4LinearF32(up, x, w.Up.Packed, w.Up.Recipe);
         Tensor act = GatedFfn.SwiGlu(backend, _moe.Activation, gate, up, _moe.SwigluLimit, _moe.SwigluAlpha,
             _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
         Tensor output = new(new TensorShape(1, rows, _hidden), DType.F32);
         try
         {
-            PackedMxfp4Linear.Apply(output, act, w.Down.Packed, w.Down.Recipe);
+            backend.Mxfp4LinearF32(output, act, w.Down.Packed, w.Down.Recipe);
         }
         catch
         {
