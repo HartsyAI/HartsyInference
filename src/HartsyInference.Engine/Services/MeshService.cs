@@ -21,7 +21,6 @@ public sealed class MeshService : IMeshService, IDisposable
 {
     private const string HairDeckId = "hairdeck";
     private const string Trellis2Id = "trellis2";
-    private const string Pixal3DId = "pixal3d";
 
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -41,6 +40,7 @@ public sealed class MeshService : IMeshService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+        Pixal3DRequestMapper.RejectForOtherModels(request, id);
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
@@ -58,11 +58,9 @@ public sealed class MeshService : IMeshService, IDisposable
             return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
         }
         HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.FieldOfViewRadians is not null && id != Pixal3DId)
-            throw new NotSupportedException($"3D model '{id}' takes no field of view; FieldOfViewRadians applies to pixal3d.");
         if (id == Trellis2Id)
             return GenerateTrellis2Async(spec, request, progress, cancel);
-        if (id == Pixal3DId)
+        if (id == MeshModelIds.Pixal3D)
             return GeneratePixal3DAsync(spec, request, progress, cancel);
         return Task.Run(
             () =>
@@ -241,16 +239,8 @@ public sealed class MeshService : IMeshService, IDisposable
     private Task<MeshResult> GeneratePixal3DAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         ImageData source = request.Image!;
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Pixal3D seed must be at most {int.MaxValue}.");
+        Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
-        Pixal3DOptions options = new()
-        {
-            Grid = request.GridResolution,
-            Steps = request.Steps,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
-            FovRadians = request.FieldOfViewRadians,
-        };
         string modelsRoot = RepoPaths.ModelsRoot();
         // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
         Pixal3DImageTo3DPipeline.ValidateRequest(options, image, Pixal3DRuntime.MatterAvailable(modelsRoot));
@@ -260,25 +250,30 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 Pixal3DRuntime runtime = GetOrLoadPixal3D(spec, modelsRoot);
-                // One run at a time per loaded model; a queued request gives up when its own cancellation fires.
-                runtime.Gate.Wait(cancel);
-                try
+                return RunGated(runtime, "Pixal3D", cancel, pipeline => pipeline.Generate(image, options, p =>
                 {
-                    if (runtime.IsDisposed)
-                        throw new ModelUnloadedException("The Pixal3D model was unloaded while this request was queued; retry the request.");
-                    Mesh mesh = runtime.Pipeline.Generate(image, options, p =>
-                    {
-                        cancel.ThrowIfCancellationRequested();
-                        progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-                    });
-                    return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
-                }
-                finally
-                {
-                    runtime.Gate.Release();
-                }
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }));
             },
             cancel);
+    }
+
+    /// <summary>Runs one generation on <paramref name="runtime"/>, one at a time per loaded model; a queued request gives up when its own cancellation fires.</summary>
+    private static MeshResult RunGated<TPipeline>(
+        MatterGatedRuntime<TPipeline> runtime, string label, CancellationToken cancel, Func<TPipeline, Mesh> generate) where TPipeline : IDisposable
+    {
+        runtime.Gate.Wait(cancel);
+        try
+        {
+            if (runtime.IsDisposed)
+                throw new ModelUnloadedException($"The {label} model was unloaded while this request was queued; retry the request.");
+            return new MeshResult { Data = GlbWriter.Write(generate(runtime.Pipeline)), Format = "glb" };
+        }
+        finally
+        {
+            runtime.Gate.Release();
+        }
     }
 
     /// <summary>Loads (or returns the cached) Pixal3D pipeline for <paramref name="spec"/>.</summary>

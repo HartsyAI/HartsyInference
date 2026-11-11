@@ -267,8 +267,8 @@ public static class ModelCatalog
     /// <summary>Pixal3D (TencentARC/Pixal3D), shape-only image to mesh: TRELLIS.2's cascade with the image reaching each flow as global DINOv3 tokens plus
     /// per-voxel features read at the voxel's projected position (NAF-upsampled for the shape flows). The asset set is the shape path of the main branch:
     /// the three projection-mode flows with their configs, <c>pipeline.json</c>, the two decoders (byte-identical to TRELLIS.2's, repeated here so the
-    /// entry stands alone), the DINOv3 encoder shared with TRELLIS.2 and an optional BiRefNet matting checkpoint. Pinned to revision
-    /// b0cb2e1b794cab9aa0ac38a95d794a4d9337437f; the safetensors hashes are the repository's LFS oids, the small files' hashes were computed from the downloaded
+    /// entry stands alone), the DINOv3 encoder shared with TRELLIS.2 and an optional BiRefNet matting checkpoint. The hashes pin revision
+    /// b0cb2e1b794cab9aa0ac38a95d794a4d9337437f (an asset carries no revision field, so a changed file fails the hash check); the safetensors hashes are the repository's LFS oids, the small files' hashes were computed from the downloaded
     /// bytes. NAF (<c>naf_release.pth</c>, valeoai/NAF release <c>model</c>, 2664431 bytes, sha256 c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f)
     /// is a GitHub release asset the catalog cannot fetch: place it in <c>3D/pixal3d</c>. Texture, multi-view and MoGe are not part of this entry.
     /// Licences: Pixal3D code and weights MIT; DINOv3 under the DINOv3 License (Meta, custom, gated); BiRefNet-matting MIT; the NAF weights' licence is not stated.</summary>
