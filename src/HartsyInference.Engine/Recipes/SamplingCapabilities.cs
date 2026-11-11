@@ -101,6 +101,7 @@ public static class SamplingCapabilities
         ["ltx-video-2"] = SolverOwned,
         ["ltx-2.5-distilled"] = SolverOwned,
         ["minimax-h3"] = SolverOwned,
+        ["minimax-h3-image"] = SolverOwned,
     };
 
     /// <summary>What the image family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>
