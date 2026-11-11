@@ -2615,7 +2615,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // OOMed Qwen3-4B. 4 GB caches the hottest few GB of casts and never starves transients.
                     long headroom = weight.DType.IsQuantized ? Math.Max(4L << 30, totalBytes / 3)
                         : Math.Max(2L << 30, totalBytes / 8);
-                    if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
+                    if ((freeBytes > 0 && freeBytes - (long)castBytes < headroom) || !GpuTransferHelper.UnderOvercommitLimit((long)castBytes))
                     {
                         System.Threading.Interlocked.Increment(ref _castTransientGated);
                         weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
@@ -8802,6 +8802,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             if (GpuTransferHelper.PreloadWeight(weight))
             {
                 uploaded.Add(weight);
+            }
+
+            // The device can report itself full a moment after the allocation that caused it (a skipped weight is checked too). The rest of the
+            // set then streams per op, and part of what went resident is given back.
+            if (uploaded.Count > 0 && GpuTransferHelper.DeviceReportsFull())
+            {
+                GpuTransferHelper.ReleaseForOvercommit(uploaded);
+                break;
             }
         }
     });

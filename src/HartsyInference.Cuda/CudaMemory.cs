@@ -180,6 +180,7 @@ public static class CudaMemory
         int result = CudaDriverApi.cuMemAllocAsync(out ulong dptr, byteSize, stream);
         if (result == 0)
         {
+            GpuTransferHelper.NoteLargeAllocation(byteSize);
             GpuTransferHelper.State s = GpuTransferHelper.CurrentState;
             if (s.TrackCaptureWindow)
             {

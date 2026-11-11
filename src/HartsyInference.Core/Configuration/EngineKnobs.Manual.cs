@@ -146,6 +146,18 @@ public static partial class EngineKnobs
         Long("vram.autopromoteHeadroomMb", 1536L, KnobScope.Runtime, KnobDomain.Vram,
             "VRAM headroom in MB kept free when deciding whether to auto-promote a tensor to resident.");
 
+    /// <summary>VRAM headroom in MB that an explicit <c>PreloadWeights</c> leaves free. A weight whose upload would take the free memory
+    /// below it is not made resident and streams per op instead; 0 restores the unconditional preload.</summary>
+    public static readonly Knob<long> PreloadHeadroomMb =
+        Long("vram.preloadHeadroomMb", 2048L, KnobScope.Runtime, KnobDomain.Vram,
+            "VRAM headroom in MB that PreloadWeights leaves free; weights past it stream per op instead of becoming resident (0 = unconditional).");
+
+    /// <summary>Device memory in MB an explicit preload gives back when the card reports no free memory while the weights go on: the pool
+    /// and the activations of the forward that follows need that room, and without it the process stalls instead of failing.</summary>
+    public static readonly Knob<long> OvercommitReliefMb =
+        Long("vram.overcommitReliefMb", 3072L, KnobScope.Runtime, KnobDomain.Vram,
+            "Device memory in MB a preload releases when the device reports no free memory part-way through it (0 = keep everything).");
+
     /// <summary>Cap in MB on the im2col banding buffer for convolutions.</summary>
     public static readonly Knob<long> Im2colBandMb =
         Long("vram.im2colBandMb", 1024L, KnobScope.Runtime, KnobDomain.Vram,
