@@ -1,6 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Engine.Placement;
-using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Multimodal;
@@ -48,10 +47,10 @@ internal sealed class TextDeviceSlot
     /// <summary>The loaded GGUF looped (latent-recurrent) model (Dory), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter.</summary>
     public LoopedLanguageModel? Looped { get; set; }
 
-    /// <summary>The loaded DeepSeek-V4.1 host reference model, or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
-    public DeepSeekV41TextModel? DeepSeekV41 { get; set; }
+    /// <summary>The loaded host reference model (DeepSeek-V4.1 or ERNIE-5.5), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
+    public IHostReferenceTextModel? HostReference { get; set; }
 
-    /// <summary>The host residency plan the <see cref="DeepSeekV41"/> load was admitted under, or null when the free memory was unknown or nothing is loaded.</summary>
+    /// <summary>The host residency plan the <see cref="HostReference"/> load was admitted under, or null when the free memory was unknown or nothing is loaded.</summary>
     public ResidencyPlan? ResidencyPlan { get; set; }
 
     /// <summary>The continuous-batching scheduler serving the loaded model, or null when its requests run through <see cref="Pipeline"/>. Owned by the slot: disposed (with <see cref="SchedulerPool"/>) before the model it drives.</summary>

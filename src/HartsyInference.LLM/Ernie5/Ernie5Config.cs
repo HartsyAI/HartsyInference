@@ -18,10 +18,6 @@ public sealed record Ernie5Config
     /// <summary>The <c>compress_ratios</c> entry of a DSA layer.</summary>
     public const int DsaRatio = -2;
 
-    /// <summary>Why the Text path still refuses a checkpoint whose features are all implemented.</summary>
-    public const string TextPathGap = "no tokenizer, chat template or generation-model adapter is wired for it, and no real-weight run "
-        + "has verified the host reference model (Ernie5Model)";
-
     /// <summary>Vocabulary size (<c>vocab_size</c>).</summary>
     public required int VocabSize { get; init; }
 
@@ -395,19 +391,20 @@ public sealed record Ernie5Config
     public static Ernie5Config Load(string path) => Parse(File.ReadAllText(path));
 
     /// <summary>
-    /// Refuses an ERNIE-5.5 checkpoint on the Text path. A config value the engine does not implement is named first; a config with
-    /// none still throws, naming <see cref="TextPathGap"/>, because nothing serves the host reference model on the Text path yet.
+    /// Refuses an ERNIE-5.5 checkpoint the Text path cannot run, naming each reason: a config value the engine does not implement, or the
+    /// multi-token-prediction layers (track 4), which the Text path does not run.
     /// </summary>
-    /// <exception cref="HartsyInferenceException">Always: the Text path cannot serve the checkpoint.</exception>
+    /// <exception cref="HartsyInferenceException">The checkpoint has a feature the Text path does not run.</exception>
     public static void RequireRunnable(string root, string configPath)
     {
-        IReadOnlyList<string> missing = Load(configPath).UnimplementedFeatures();
+        Ernie5Config config = Load(configPath);
+        List<string> missing = [.. config.UnimplementedFeatures()];
+        if (config.NumNextnPredictLayers > 0)
+            missing.Add($"{config.NumNextnPredictLayers} multi-token-prediction layer(s) from layer {config.NumHiddenLayers} "
+                + "(num_nextn_predict_layers; MTP is not implemented)");
         if (missing.Count > 0)
             throw new HartsyInferenceException(
-                $"'{root}' is an ERNIE-5.5 checkpoint (model_type '{ModelType}') with features the engine does not implement: "
+                $"'{root}' is an ERNIE-5.5 checkpoint (model_type '{ModelType}') with features the Text path does not run: "
                 + $"{string.Join("; ", missing)}.");
-        throw new HartsyInferenceException(
-            $"'{root}' is an ERNIE-5.5 checkpoint (model_type '{ModelType}'). Its architecture is implemented, but the Text path cannot "
-            + $"serve it: {TextPathGap}.");
     }
 }
