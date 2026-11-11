@@ -1,7 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
-using HartsyInference.LLM.Transformer.Sparse;
 
 namespace HartsyInference.LLM.Transformer.Dsa;
 
@@ -118,12 +117,9 @@ public sealed class DsaIndexer : IDisposable
         using Tensor weightT = HostMath.Tensor(weights, tokens, nh);
         using Tensor limitT = HostMath.Tensor(limits, tokens);
         _backend.IndexerScores(scores, queryT, new LatentSource(LatentEncoding.F32, keys, null, keyRows, hd), weightT, limitT, null, 1f);
-
-        ReadOnlySpan<float> all = scores.AsReadOnlySpan<float>();
-        int[] picked = new int[tokens * width];
-        for (int t = 0; t < tokens; t++)
-            SparseTopK.SelectSorted(all.Slice(t * keyRows, keyRows), limits[t], _s.TopK, 0, picked.AsSpan(t * width, width));
-        return picked;
+        using Tensor picked = new(new TensorShape(tokens, width), DType.I32);
+        _backend.SparseTopK(picked, scores, limitT, _s.TopK, 0);
+        return picked.AsReadOnlySpan<int>().ToArray();
     }
 
     private void RequireRope(int endPos)
