@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.LLM.Transformer.Quant;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Dsa;
@@ -32,12 +34,6 @@ public static class KimiK31WeightLoader
     {
         ArgumentNullException.ThrowIfNull(c);
         ArgumentNullException.ThrowIfNull(src);
-        for (int i = c.DenseLayers; i < c.Layers; i++)
-        {
-            string packed = $"{Layer(i)}block_sparse_moe.experts.0.w1.weight_packed";
-            if (src.Has(packed))
-                throw new NotSupportedException($"Layer {i}'s routed experts are MXFP4-packed ({packed}); the packed-expert MoE path is not wired, so this checkpoint cannot load yet.");
-        }
         List<KimiK31LayerWeights> layers = new(c.Layers);
         for (int i = 0; i < c.Layers; i++) layers.Add(LoadLayer(c, i, src));
         return new KimiK31Weights
@@ -69,6 +65,7 @@ public static class KimiK31WeightLoader
             DenseUp = dense ? F32(src, p + "mlp.up_proj.weight", c.DenseIntermediate, c.Hidden) : null,
             DenseDown = dense ? F32(src, p + "mlp.down_proj.weight", c.Hidden, c.DenseIntermediate) : null,
             Moe = dense ? null : LoadMoe(c, i, src),
+            PackedExperts = dense ? null : LoadPackedExperts(c, i, src),
             MoePrefix = Prefix(i),
         };
     }
@@ -148,14 +145,55 @@ public static class KimiK31WeightLoader
             [$"{mlp}.shared_expert.up_proj.weight"] = F32(src, block + "shared_experts.up_proj.weight", sh, h),
             [$"{mlp}.shared_expert.down_proj.weight"] = F32(src, block + "shared_experts.down_proj.weight", h, sh),
         };
+        // A packed checkpoint's experts load through LoadPackedExperts; F32 experts are read here.
+        if (!src.Has($"{block}experts.0.w1.weight_packed"))
+        {
+            for (int e = 0; e < c.Experts; e++)
+            {
+                string x = $"{block}experts.{e}";
+                w[$"{mlp}.experts.{e}.gate_proj.weight"] = F32(src, $"{x}.w1.weight", mi, ls);
+                w[$"{mlp}.experts.{e}.up_proj.weight"] = F32(src, $"{x}.w3.weight", mi, ls);
+                w[$"{mlp}.experts.{e}.down_proj.weight"] = F32(src, $"{x}.w2.weight", ls, mi);
+            }
+        }
+        return w;
+    }
+
+    // The MXFP4-packed routed experts of layer i: w1 is the gate, w3 the up and w2 the down projection, each a U8 weight with its E8M0
+    // scales. Null when the checkpoint stores F32 experts.
+    private static IReadOnlyList<PackedMxfp4Expert>? LoadPackedExperts(KimiK31Config c, int i, IKimiK31WeightSource src)
+    {
+        string block = Layer(i) + "block_sparse_moe.";
+        if (!src.Has($"{block}experts.0.w1.weight_packed")) return null;
+        int ls = c.LatentSize, mi = c.MoeIntermediate;
+        List<PackedMxfp4Expert> experts = new(c.Experts);
         for (int e = 0; e < c.Experts; e++)
         {
             string x = $"{block}experts.{e}";
-            w[$"{mlp}.experts.{e}.gate_proj.weight"] = F32(src, $"{x}.w1.weight", mi, ls);
-            w[$"{mlp}.experts.{e}.up_proj.weight"] = F32(src, $"{x}.w3.weight", mi, ls);
-            w[$"{mlp}.experts.{e}.down_proj.weight"] = F32(src, $"{x}.w2.weight", ls, mi);
+            experts.Add(new PackedMxfp4Expert(
+                Projection(src, x, "w1", mi, ls),
+                Projection(src, x, "w3", mi, ls),
+                Projection(src, x, "w2", ls, mi)));
         }
-        return w;
+        return experts;
+    }
+
+    private static PackedMxfp4Projection Projection(IKimiK31WeightSource src, string expert, string proj, int rows, int cols)
+    {
+        Tensor packed = src.Read($"{expert}.{proj}.weight_packed"), scale = src.Read($"{expert}.{proj}.weight_scale");
+        Expect(packed, $"{expert}.{proj}.weight_packed", DType.U8, rows, cols / 2);
+        Expect(scale, $"{expert}.{proj}.weight_scale", DType.U8, rows, cols / 32);
+        return new PackedMxfp4Projection(packed, new QuantRecipe
+        {
+            Encoding = QuantEncoding.Mxfp4E8M0, Geometry = new BlockGeometry(1, 32), ScaleDType = DType.U8,
+            LogicalRows = rows, LogicalCols = cols, Scale = scale,
+        });
+    }
+
+    private static void Expect(Tensor t, string name, DType dtype, long rows, long cols)
+    {
+        if (t.DType != dtype || t.Shape.Rank != 2 || t.Shape[0] != rows || t.Shape[1] != cols)
+            throw new InvalidDataException($"Tensor '{name}' must be {dtype} [{rows}, {cols}], got {t.DType} {t.Shape}.");
     }
 
     private static string Layer(int i) => $"{Root}layers.{i}.";

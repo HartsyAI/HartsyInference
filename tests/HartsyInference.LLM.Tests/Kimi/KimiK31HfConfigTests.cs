@@ -105,16 +105,16 @@ public sealed class KimiK31HfConfigTests
     }
 
     [Fact]
-    public void Load_RefusesPackedExpertsBeforeReadingAnything()
+    public void Load_ReadsTheCheckpointTensorsAndFailsOnTheMissingOne()
     {
         KimiK31Config c = KimiK31HfConfig.Parse(PublishedConfig);
         RecordingSource source = new();
-        NotSupportedException error = Assert.Throws<NotSupportedException>(() => KimiK31WeightLoader.Load(c, source));
-        Assert.Contains("MXFP4-packed", error.Message, StringComparison.Ordinal);
-        Assert.Equal(0, source.ReadCount);
+        // The source holds nothing, so the first read fails by name; the loader no longer refuses packed experts up front.
+        Assert.Throws<KeyNotFoundException>(() => KimiK31WeightLoader.Load(c, source));
+        Assert.True(source.ReadCount > 0);
     }
 
-    /// <summary>A source that claims every packed expert exists and counts any read; the loader must refuse before reading.</summary>
+    /// <summary>A source that claims every packed expert exists and counts reads.</summary>
     private sealed class RecordingSource : IKimiK31WeightSource
     {
         public int ReadCount { get; private set; }

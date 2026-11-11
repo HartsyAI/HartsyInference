@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.LLM.Transformer.Quant;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -47,6 +49,9 @@ public sealed record KimiK31LayerWeights
 
     /// <summary>The latent MoE block's weights keyed as <see cref="MoeFeedForward.LoadWeights"/> reads them, under <see cref="MoePrefix"/>.</summary>
     public IReadOnlyDictionary<string, Tensor>? Moe { get; init; }
+
+    /// <summary>MXFP4-packed routed experts, one per expert, when the checkpoint stores them packed; null for F32 experts.</summary>
+    public IReadOnlyList<PackedMxfp4Expert>? PackedExperts { get; init; }
 
     /// <summary>Key prefix of <see cref="Moe"/>.</summary>
     public string MoePrefix { get; init; } = "layer";
@@ -164,6 +169,7 @@ public sealed class KimiK31Model : IDisposable
                     if (lw.Moe is null) throw new ArgumentException($"Layer {i} is MoE but has no MoE weights.", nameof(weights));
                     _moe[i] = new MoeFeedForward(MoeSettings(config), config.Hidden, lowVram: false);
                     _moe[i]!.LoadWeights(lw.Moe, lw.MoePrefix);
+                    if (lw.PackedExperts is not null) _moe[i]!.LoadPackedExperts(lw.PackedExperts);
                 }
                 else if (lw.DenseGate is null || lw.DenseUp is null || lw.DenseDown is null)
                 {

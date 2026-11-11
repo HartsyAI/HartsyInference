@@ -121,7 +121,7 @@ public sealed class KimiK31ModelTests
         };
     }
 
-    private static Dictionary<string, Tensor> MoeWeights(Random rng, KimiK31Config c, string p)
+    internal static Dictionary<string, Tensor> MoeWeights(Random rng, KimiK31Config c, string p)
     {
         string mlp = $"{p}.mlp";
         Dictionary<string, Tensor> w = new(StringComparer.Ordinal)
