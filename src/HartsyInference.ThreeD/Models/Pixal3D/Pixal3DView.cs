@@ -16,11 +16,12 @@ public readonly record struct Pixal3DView(double FovRadians, double MeshScale)
     /// extended pixels, for the grid corner <c>(-1, 0, 0)</c> landing on the image's left edge.</summary>
     public double Distance => 1.0 / (2.0 * MeshScale * Math.Tan(FovRadians / 2.0));
 
-    /// <summary>Throws when the field of view is not in (0, π) radians or the mesh scale is not positive.</summary>
+    /// <summary>Throws when the field of view is not in (0, π/2) radians or the mesh scale is not positive. From 90° the camera sits at or inside the
+    /// cube's near face, so cells there would project through zero or negative depth.</summary>
     public void Validate()
     {
-        if (!(FovRadians > 0.0 && FovRadians < Math.PI))
-            throw new ArgumentOutOfRangeException(nameof(FovRadians), FovRadians, "The field of view must be in (0, pi) radians.");
+        if (!(FovRadians > 0.0 && FovRadians < Math.PI / 2.0))
+            throw new ArgumentOutOfRangeException(nameof(FovRadians), FovRadians, "The field of view must be in (0, pi/2) radians.");
         if (!(MeshScale > 0.0))
             throw new ArgumentOutOfRangeException(nameof(MeshScale), MeshScale, "The mesh scale must be positive.");
     }
