@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\HartsyInference.Diffusion\HartsyInference.Diffusion.csproj" />
     <ProjectReference Include="..\HartsyInference.Vision\HartsyInference.Vision.csproj" />
+    <ProjectReference Include="..\HartsyInference.LLM\HartsyInference.LLM.csproj" />
   </ItemGroup>
 
   <ItemGroup>

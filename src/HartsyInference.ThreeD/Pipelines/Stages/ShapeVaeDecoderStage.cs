@@ -5,8 +5,9 @@ using HartsyInference.ThreeD.Models.TrellisV2;
 
 namespace HartsyInference.ThreeD.Pipelines.Stages;
 
-/// <summary>Shape-VAE latent to dual-grid field: runs <see cref="ShapeVaeDecoder"/> and splits its head.</summary>
-public sealed class ShapeVaeDecoderStage : ISparseShapeDecoder, IDisposable
+/// <summary>Shape-VAE latent to dual-grid field: runs <see cref="ShapeVaeDecoder"/> and splits its head. It also serves TRELLIS.2's
+/// cascade, which asks the decoder only where its first four levels put voxels.</summary>
+public sealed class ShapeVaeDecoderStage : ISparseShapeDecoder, ISparseShapeUpsampler, IDisposable
 {
     private readonly ShapeVaeDecoder _decoder;
     private bool _disposed;
@@ -29,6 +30,9 @@ public sealed class ShapeVaeDecoderStage : ISparseShapeDecoder, IDisposable
             head.Feats.Dispose();
         }
     }
+
+    /// <inheritdoc/>
+    public int[] Upsample(IBackend backend, SparseTensor latent, int times) => _decoder.Upsample(backend, latent, times);
 
     /// <summary>Releases the decoder and its weights.</summary>
     public void Dispose()
