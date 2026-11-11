@@ -62,11 +62,11 @@ Every stage is a public type of its own and usable alone.
   the cone), so a noisy surface costs only the facets that really fold, not the whole chart. The first version split a chart at half the cone
   angle whenever one facet folded, down to single triangles. Charts under `AbsorbBelowFaces` (32) are then dissolved: large charts take their
   faces at a wider cone (80 degrees), and a last round takes small steep leftovers at 87 degrees (a sliver of texels, inpainted from the
-  neighbours). Faces that fold back on their neighbours (normals past 87 degrees) still end as single-face charts: on the bust 7,575 faces,
-  0.36% of its area.
-  Measured on three TRELLIS.2 meshes of 1M faces (welded), first version -> now: bust at 512, 111,770 -> 12,784 charts, 5.6% -> 22.1% of the
-  2048x2048 atlas covered by triangles, 2.4 s -> 4.3 s; bust at 1024, 275,550 -> 54,815 charts, 9.5% -> 19.4%, 3.0 s -> 4.6 s; mug,
-  126,147 -> 3,563 charts, 9.3% -> 39.0%, 2.0 s -> 4.1 s (CPU, unwrap only). Decimating 11M triangles, unwrapping, baking and inpainting took
+  neighbours). Faces that fold back on their neighbours (normals past 87 degrees) still end as single-face charts: on the bust about 5,800 faces,
+  0.3% of its area.
+  Measured on three TRELLIS.2 meshes of 1M faces (welded), first version -> now: bust at 512, 111,770 -> 11,785 charts, 5.6% -> 22.5% of the
+  2048x2048 atlas covered by triangles, 2.4 s -> 4.6 s; bust at 1024, 275,550 -> 52,167 charts, 9.5% -> 20.5%, 3.0 s -> 4.6 s; mug,
+  126,147 -> 3,261 charts, 9.3% -> 39.3%, 2.0 s -> 4.1 s (CPU, unwrap only). Decimating 11M triangles, unwrapping, baking and inpainting took
   46 to 68 s.
 - No seam-length minimization and no chart optimization beyond the grow-and-absorb above; charts are only rotated to the best of 24
   bounding-box angles before packing.
