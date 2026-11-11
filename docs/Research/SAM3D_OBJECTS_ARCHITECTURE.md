@@ -303,8 +303,9 @@ What stays is the **feed-forward pose**, which is closed-form and specified abov
 `doc/setup.md` requires "a NVIDIA GPU with at least 32 Gb of VRAM", Linux 64-bit, Python environment with CUDA 12.1, PyTorch 2.5.1, spconv,
 xformers 0.0.28, kaolin 0.17, gsplat, pytorch3d and flash-attn (flash-attn is selected automatically on A100, H100, H200 only). The checkpoint
 sizes in the next section give 6.69 GB for the structure generator and 4.91 GB for the SLAT generator on disk; the stored dtype is unverified
-(the configured compute dtype is float16, which would put the generators near 3.3 B and 2.5 B parameters if the files are 16-bit, or about half that if F32;
-the generator files also hold the embedders, DINO included, and Lightning state beyond the weights).
+(the configured compute dtype is float16, which would put the generators near 3.3 B and 2.5 B parameters if the files are 16-bit weights only, or about half that if F32;
+the generator files also hold the embedders, DINO included, and a Lightning `.ckpt` can carry optimiser moments or EMA copies as well, in which case file size overstates the
+parameter count, so treat these figures as upper bounds until the tensor list is read).
 The 12 GB RTX 3060 is a later concern; the existing pattern (each flow read from disk for its stage and released, as for TRELLIS.2) is the likely starting point.
 
 ## What the user must provide
@@ -336,12 +337,12 @@ The configs are read (see "Configs read"). What remains is the checkpoints, whic
    Not needed for inference: `slat_decoder_gs_4` (170,269,801), `ss_encoder.*` (119,085,402 plus a `.safetensors` the listing shows with size 0), `slat_encoder.ckpt` (173,263,986); the encoders are for
    latent-space work (`notebook/demo_ss_encoder.ipynb`) and are out of scope.
 3. **The MoGe checkpoint**, `Ruicheng/moge-vitl` per `pipeline.yaml` (size and licence not read), only for the pose path.
-4. **A decision on destination and approval to download**, relayed by the parent session. The expected destination is `Models/3D/sam3d-objects/` (the folder is never touched by agents otherwise), with the
-   `LICENSE` beside the files. Nothing further is downloaded until the user says yes with the repository, files, sizes, sha256, licence and purpose in front of them.
+4. **A destination and an explicit approval to download.** The expected destination is `Models/3D/sam3d-objects/` with the `LICENSE` beside the files. Nothing further is
+   downloaded until the user approves with the repository, files, sizes, sha256, licence and purpose in front of them.
 
 **Pickle handling.** All released weights are Lightning `.ckpt` files and the upstream loader calls `torch.load(..., weights_only=False)`. This repository must never execute a pickle:
 the files go through the existing safe `PytorchPickleLoader` (a pickle machine that builds tensors without running arbitrary callables) and are repacked to safetensors by
-`PickleCheckpointRepacker`. A `.ckpt` also carries non-tensor state (hyper-parameters, optimiser state); the repack keeps `state_dict` entries under the prefixes used by the pipeline
+`PickleCheckpointRepacker` (its `recursiveFlatten` and a key map that returns `null` to drop a key already cover a Lightning top-level `state_dict` and a prefix filter). A `.ckpt` also carries non-tensor state (hyper-parameters, optimiser state); the repack keeps `state_dict` entries under the prefixes used by the pipeline
 (`_base_models.generator.`, `_base_models.condition_embedder.`) and drops the rest. Whether the loader copes with these particular files is unverified. The `LICENSE`'s redistribution rule applies to any repacked copy the user shares.
 
 ## Validation plan (when weights exist)
