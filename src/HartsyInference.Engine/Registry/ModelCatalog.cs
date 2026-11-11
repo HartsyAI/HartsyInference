@@ -100,6 +100,28 @@ public static class ModelCatalog
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
     ];
 
+    /// <summary>Hunyuan3D Paint 2.0 (<c>tencent/Hunyuan3D-2</c> at <c>9cd649ba</c>): the multiview UNet and the SD VAE, both safetensors, in the diffusers layout the loader reads.</summary>
+    private static ModelAsset[] Hunyuan3DPaintAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-paint-v2-0/unet/diffusion_pytorch_model.safetensors", TargetSubdir = "3D/hunyuan3d-paint",
+            TargetName = "unet/diffusion_pytorch_model.safetensors", Role = "transformer", Sha256 = "1c5ce434ba976b30bbb51a080917ecd39f8d8761691887b5df3be765ef4bd9e9" },
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-paint-v2-0/vae/diffusion_pytorch_model.safetensors", TargetSubdir = "3D/hunyuan3d-paint",
+            TargetName = "vae/diffusion_pytorch_model.safetensors", Role = "vae", Sha256 = "abcec86e499e1ce9f05d1630725d386dc533b61fe0947ab034f07f89042e7a61" },
+    ];
+
+    /// <summary>Hunyuan3D Paint 2.1 (<c>tencent/Hunyuan3D-2.1</c> at <c>0b946776</c>): the PBR UNet and VAE (pickles, read by the safe parser only), DINOv2-giant and Real-ESRGAN x4plus.</summary>
+    private static ModelAsset[] Hunyuan3DPaint21Assets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
+            TargetName = "unet/diffusion_pytorch_model.bin", Role = "transformer", Sha256 = "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8" },
+        new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
+            TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc" },
+        new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
+            Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
+        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", Role = "upscaler",
+            Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
+    ];
+
     /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>
     private static ModelAsset[] Hunyuan3DFlashVdmVaeAssets =>
     [
@@ -2666,6 +2688,10 @@ public static class ModelCatalog
                 with { Assets = Hunyuan3DAssets("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini", "hunyuan3d-mini",
                     "3cc66f3bea33e4062b7dbc875ffe1d70c4888914aec3e91b60f94e9bd01b522b",
                     "cabcba7f6115752c8fe5b370e12bf714936f70377a8a80f151872f76c2d64609") },
+            E("hunyuan3d-paint", d3, "Hunyuan3D-2 Paint (albedo texturing)", "SD 2.1 zero-SNR UNet + multiview and reference attention, back-projected", st, cli: true)
+                with { Assets = Hunyuan3DPaintAssets },
+            E("hunyuan3d-paint21", d3, "Hunyuan3D-2.1 Paint (PBR texturing)", "SD 2.1 zero-SNR UNet + material, DINO and rotary multiview attention, back-projected", st, cli: true)
+                with { Assets = Hunyuan3DPaint21Assets },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),

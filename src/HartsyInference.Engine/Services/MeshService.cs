@@ -8,6 +8,7 @@ using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
+using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
 
@@ -26,6 +27,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UniRigPipeline> _rigPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HunyuanPaintLoader> _paintPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
@@ -45,6 +47,8 @@ public sealed class MeshService : IMeshService, IDisposable
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
             return GenerateRiggedAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.PaintMesh.Contains(id))
+            return GeneratePaintAsync(spec, id, request, progress, cancel);
 
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
@@ -188,6 +192,106 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw;
             }
         }
+    }
+
+    /// <summary>Texturing: one GLB holding the input mesh with a baked PBR material painted from the reference image. <see cref="MeshRequest.Steps"/> is the sampler step
+    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
+    private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.SceneMesh is null || request.Image is null)
+        {
+            throw new NotSupportedException(
+                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.");
+        }
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Paint seed must be at most {int.MaxValue}.");
+        if (request.Steps < 0 || request.GridResolution < 0)
+            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.");
+        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        ImageData reference = request.Image;
+        byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
+        HunyuanPaintOptions options = new()
+        {
+            Steps = request.Steps == 0 ? null : request.Steps,
+            TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
+            Seed = request.Seed < 0 ? null : (int)request.Seed,
+        };
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
+                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }, cancel);
+                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb" };
+            },
+            cancel);
+    }
+
+    /// <summary>The reference composited on white, as the Paint pipelines expect.</summary>
+    private static byte[] CompositeOnWhite(ImageData image)
+    {
+        byte[] result = new byte[image.Rgb.Length];
+        for (int i = 0; i < image.Alpha!.Length; i++)
+        {
+            float a = image.Alpha[i] / 255f;
+            for (int c = 0; c < 3; c++)
+                result[i * 3 + c] = (byte)Math.Round(image.Rgb[i * 3 + c] * a + 255f * (1f - a));
+        }
+        return result;
+    }
+
+    /// <summary>Returns the cached Paint pipeline for <paramref name="spec"/>: the folder holding <c>unet/</c> and <c>vae/</c> (and, for 2.1, <c>dino/model.safetensors</c>
+    /// and <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
+    private HunyuanPaintLoader GetOrLoadPaint(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding unet/ and vae/ as the local path.");
+        }
+        string folder = PaintFolder(spec.LocalPath);
+        lock (_gate)
+        {
+            if (_paintPipelines.TryGetValue(folder, out HunyuanPaintLoader? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                string dino = Path.Combine(folder, "dino", "model.safetensors"), upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, File.Exists(dino) ? dino : null, File.Exists(upscaler) ? upscaler : null);
+                _paintPipelines[folder] = loader;
+                return loader;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to prepare the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
+    }
+
+    // The folder holding unet/ and vae/: the path itself, or the nearest parent of a file (any asset of the model may be the representative one).
+    private static string PaintFolder(string localPath)
+    {
+        if (!File.Exists(localPath))
+        {
+            return localPath;
+        }
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(localPath));
+        while (directory is not null && !Directory.Exists(Path.Combine(directory, "unet")))
+        {
+            directory = Path.GetDirectoryName(directory);
+        }
+        return directory ?? throw new DirectoryNotFoundException($"No unet/ folder above '{localPath}'.");
     }
 
     /// <summary>TRELLIS.2 shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or
@@ -574,6 +678,7 @@ public sealed class MeshService : IMeshService, IDisposable
         List<LoadedMesh> pipelines;
         List<CoLa3DPipeline> scenePipelines;
         List<UniRigPipeline> rigPipelines;
+        List<HunyuanPaintLoader> paintPipelines;
         List<HairDeckRuntime> hairDecks;
         List<Trellis2Runtime> trellis2Runtimes;
         List<Pixal3DRuntime> pixal3dRuntimes;
@@ -582,12 +687,14 @@ public sealed class MeshService : IMeshService, IDisposable
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
             rigPipelines = _rigPipelines.Values.ToList();
+            paintPipelines = _paintPipelines.Values.ToList();
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
             pixal3dRuntimes = _pixal3d.Values.ToList();
             _pipelines.Clear();
             _scenePipelines.Clear();
             _rigPipelines.Clear();
+            _paintPipelines.Clear();
             _hairDecks.Clear();
             _trellis2.Clear();
             _pixal3d.Clear();
@@ -603,6 +710,10 @@ public sealed class MeshService : IMeshService, IDisposable
         foreach (UniRigPipeline pipeline in rigPipelines)
         {
             pipeline.Dispose();
+        }
+        foreach (HunyuanPaintLoader loader in paintPipelines)
+        {
+            loader.Dispose();
         }
         foreach (HairDeckRuntime runtime in hairDecks)
         {
