@@ -131,10 +131,14 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> OrpheusProf =
         Bool("diagnostics.orpheusProf", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Times the Orpheus TTS decode loop's logits/sample/forward phases with per-step device syncs.");
 
-    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the model stage timer
-    /// (<see cref="Backends.StageProfiler"/>), which syncs the device around each stage.</summary>
+    /// <summary>Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.</summary>
     public static readonly Knob<bool> Profile =
-        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op, and the device-synced model stage timer (StageProfiler).");
+        Bool("diagnostics.profile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the per-label CPU wall-time accumulator over every NvtxRange-wrapped op.");
+
+    /// <summary>Enables the model stage timer (<see cref="Backends.StageProfiler"/>), which syncs the device around each stage. Independent of
+    /// <see cref="Profile"/>, so turning the per-op table on does not add those syncs.</summary>
+    public static readonly Knob<bool> StageProfile =
+        Bool("diagnostics.stageProfile", false, KnobScope.Runtime, KnobDomain.Diagnostics, "Enables the device-synced model stage timer (StageProfiler), which syncs the device around each model stage.");
 
     /// <summary>Dumps the accumulated per-op profile table at every backend Sync (per generation) to diagnostics.profileOut.</summary>
     public static readonly Knob<bool> ProfileEach =

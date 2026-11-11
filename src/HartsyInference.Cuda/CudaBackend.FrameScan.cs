@@ -89,7 +89,8 @@ public sealed partial class CudaBackend
                 _kernels.LaunchFrameScanScaleKeys(scaled, pK, pBeta, frames, spatial, heads, keyDim, _stream.Handle);
 
             int type = CublasApi.CUDA_R_32F;
-            int compute = Compute32F(type);
+            // Not Compute32F: the scan's Gram errors compound over the frame recurrence, so numerics.gemmF16 must not reach it.
+            int compute = Compute32FNoFast16(type);
             float alpha = 1f, zero = 0f;
             // Column-major views of the token-major operands: a frame's head slice [spatial, dim] (row stride heads·dim) is the
             // column-major [dim, spatial] matrix with leading dimension heads·dim.

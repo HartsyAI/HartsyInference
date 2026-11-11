@@ -15,6 +15,17 @@ public sealed class ChunkedWorldSessionTests
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public void AChunkedSession_DefersItsDeviceWorkToTheStream()
+    {
+        using InferenceEngine engine = new("cpu");
+        WorldService service = new(engine);
+        ScriptedPipeline pipeline = new(_ => new ScriptedStream(25, 25, 24));
+        using IWorldSession session = service.OpenChunked(pipeline, Plan(25));
+
+        Assert.True(session.DefersDeviceWork);
+    }
+
+    [Fact]
     public async Task Bounded_DeliversEveryChunkInOrder_AndReleases()
     {
         using InferenceEngine engine = new("cpu");

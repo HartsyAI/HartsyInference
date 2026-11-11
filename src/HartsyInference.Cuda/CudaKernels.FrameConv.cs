@@ -9,7 +9,7 @@ public sealed partial class CudaKernels
     /// <summary>True when frame_conv.ptx loaded.</summary>
     public bool HasFrameConvKernels => _depthwiseConvFrames != 0;
 
-    // Optional module: its absence leaves DepthwiseConvFrames on the host reference instead of failing construction.
+    // Optional module: a missing PTX does not fail construction; DepthwiseConvFrames then throws NotSupportedException when it is called.
     private void LoadFrameConvKernels()
     {
         string path = Ptx("frame_conv");

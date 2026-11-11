@@ -71,6 +71,7 @@ public sealed class SanaWmStreamingDitGpuTests(ITestOutputHelper output)
                 if (profile && pass == 1)
                 {
                     KnobStore.Set(EngineKnobs.Profile, true);
+                    KnobStore.Set(EngineKnobs.StageProfile, true);
                     KnobStore.Set(EngineKnobs.ProfileSync, true);
                     StageProfiler.Reset();
                 }
@@ -84,6 +85,7 @@ public sealed class SanaWmStreamingDitGpuTests(ITestOutputHelper output)
                     output.WriteLine($"stage profile, chunk {start}..{end}, passes 2-4:");
                     output.WriteLine(StageProfiler.Report());
                     KnobStore.Clear(EngineKnobs.Profile);
+                    KnobStore.Clear(EngineKnobs.StageProfile);
                     KnobStore.Clear(EngineKnobs.ProfileSync);
                 }
                 ReadOnlySpan<float> expected = Host32(reference.GetTensor($"call{i:D2}_out"), owned).AsReadOnlySpan<float>();
