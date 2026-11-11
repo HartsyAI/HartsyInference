@@ -54,7 +54,7 @@ public sealed class SamPoseDecoderTests
     [Fact]
     public void Decode_QuaternionRealPartIsNonNegative()
     {
-        // A 270° turn about z has w = −cos 135° = +0.38 after standardisation, never negative.
+        // A −90° turn about z: the quaternion keeps a positive real part and the sign moves to z.
         SamPose pose = SamPoseDecoder.Decode(Normalize6d([0, -1, 0, 1, 0, 0]), Zeros, Zeros, Ones, Zeros);
 
         Assert.True(pose.QuatW >= 0f);
@@ -83,6 +83,16 @@ public sealed class SamPoseDecoderTests
         Assert.Equal(12f, pose.TranslationX, 5);
         Assert.Equal(24f, pose.TranslationY, 5);
         Assert.Equal(36f, pose.TranslationZ, 5);
+    }
+
+    [Fact]
+    public void Decode_RejectsANonUniformOrNonPositiveSceneScale()
+    {
+        float[] r = Normalize6d([1, 0, 0, 0, 1, 0]);
+
+        Assert.Throws<ArgumentException>(() => SamPoseDecoder.Decode(r, Zeros, Zeros, [1f, 2f, 1f], Zeros));
+        Assert.Throws<ArgumentException>(() => SamPoseDecoder.Decode(r, Zeros, Zeros, [0f, 0f, 0f], Zeros));
+        Assert.Throws<ArgumentException>(() => SamPoseDecoder.Decode(r, Zeros, Zeros, [-1f, -1f, -1f], Zeros));
     }
 
     [Fact]

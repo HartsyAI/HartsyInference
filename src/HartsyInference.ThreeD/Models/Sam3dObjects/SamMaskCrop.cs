@@ -8,7 +8,8 @@ public static class SamMaskCrop
 {
     /// <summary>
     /// The square box around the non-zero pixels of <paramref name="mask"/>: its centre, side <c>int(max(w, h, 2) · factor)</c>, as
-    /// <c>x1, y1, x2, y2</c> with <c>x2 − x1 = 2 · (side / 2)</c>. May reach outside the image.
+    /// <c>x1, y1, x2, y2</c>. Each corner truncates toward zero as Python's <c>int()</c> does, so a box reaching past the top or left edge can be one
+    /// cell narrower than <c>2 · (side / 2)</c>. May reach outside the image.
     /// </summary>
     public static (int X1, int Y1, int X2, int Y2) ComputeBox(ReadOnlySpan<float> mask, int height, int width, float boxSizeFactor)
     {
@@ -34,7 +35,7 @@ public static class SamMaskCrop
         int boxW = maxX - minX, boxH = maxY - minY;
         if (boxW < 2 || boxH < 2)
             throw new InvalidOperationException("Bounding box dimensions must be at least 2x2.");
-        int side = (int)(Math.Max(Math.Max(boxW, boxH), 2) * boxSizeFactor);
+        int side = (int)(Math.Max(boxW, boxH) * boxSizeFactor);
         int half = side / 2;
         return ((int)(centerX - half), (int)(centerY - half), (int)(centerX + half), (int)(centerY + half));
     }

@@ -54,13 +54,16 @@ public static class SamSparseStructure
     /// <summary>
     /// Returns the voxels unchanged with factor 1 when there are at most <paramref name="maxCoords"/>; otherwise shrinks the grid about
     /// its centre by <paramref name="factor"/>, rounds half to even, clamps, removes duplicates (sorted) and, if still above the cap, keeps
-    /// a random subset chosen by <paramref name="seed"/> (upstream's permutation is not reproducible).
+    /// a random subset chosen by <paramref name="seed"/> (upstream's permutation is not reproducible). An axis with no extent maps to its
+    /// grid centre here, where upstream divides by zero.
     /// </summary>
     public static (int[] Coords, int Factor) Downsample(ReadOnlySpan<int> coords, int maxCoords = MaxCoords, int factor = 2, int seed = 0)
     {
         RequireTriples(coords);
-        if (maxCoords <= 0 || factor <= 0)
-            throw new ArgumentOutOfRangeException(nameof(maxCoords), "The cap and the factor must be positive.");
+        if (maxCoords <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxCoords), maxCoords, "The cap must be positive.");
+        if (factor <= 0)
+            throw new ArgumentOutOfRangeException(nameof(factor), factor, "The factor must be positive.");
         int count = coords.Length / 3;
         if (count <= maxCoords)
             return (coords.ToArray(), 1);

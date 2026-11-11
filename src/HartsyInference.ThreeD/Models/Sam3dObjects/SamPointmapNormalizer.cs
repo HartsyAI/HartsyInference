@@ -30,6 +30,7 @@ public static class SamPointmapNormalizer
             shift[axis] = values.Count > 0 ? LowerMedian(values) : 0f;
         }
 
+        // Upstream logs a warning and returns scale_factor with a zero shift when the mask holds no finite point.
         if (counts[0] + counts[1] + counts[2] == 0)
             return ([scaleFactor, scaleFactor, scaleFactor], [0f, 0f, 0f]);
         if (counts[0] == 0 || counts[1] == 0 || counts[2] == 0)

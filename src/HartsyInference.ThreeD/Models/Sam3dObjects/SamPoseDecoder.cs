@@ -20,7 +20,7 @@ public static class SamPoseDecoder
     /// <summary>
     /// Decodes one object. <paramref name="rotation6dNormalized"/> has 6 values, <paramref name="translation"/> and
     /// <paramref name="logScale"/> 3 each; <paramref name="sceneScale"/> and <paramref name="sceneShift"/> are the pointmap scale and shift.
-    /// <paramref name="downsampleFactor"/> is the factor <see cref="SamSparseStructure.Downsample"/> returned (1 when it did nothing).
+    /// <paramref name="sceneScale"/> must be uniform (a non-uniform one would make the rotation rows non-orthogonal). <paramref name="downsampleFactor"/> is the factor <see cref="SamSparseStructure.Downsample"/> returned (1 when it did nothing).
     /// </summary>
     public static SamPose Decode(
         ReadOnlySpan<float> rotation6dNormalized, ReadOnlySpan<float> translation, ReadOnlySpan<float> logScale,
@@ -28,6 +28,8 @@ public static class SamPoseDecoder
     {
         if (rotation6dNormalized.Length != 6 || translation.Length != 3 || logScale.Length != 3 || sceneScale.Length != 3 || sceneShift.Length != 3)
             throw new ArgumentException("Expected 6 rotation values and 3 each of translation, log scale, scene scale and scene shift.");
+        if (!(sceneScale[0] > 0f) || sceneScale[0] != sceneScale[1] || sceneScale[1] != sceneScale[2])
+            throw new ArgumentException("The scene scale must be positive and equal on all three axes, as the pointmap normaliser produces it.");
         Span<double> r = stackalloc double[9];
         RotationFromSixD(rotation6dNormalized, r);
 
@@ -58,7 +60,10 @@ public static class SamPoseDecoder
             (float)meanScale, (float)meanScale, (float)meanScale);
     }
 
-    /// <summary>Row-major 3x3 matrix whose columns are the Gram-Schmidt basis of the de-normalised 6D rotation.</summary>
+    /// <summary>
+    /// Row-major 3x3 matrix whose columns are the Gram-Schmidt basis of the de-normalised 6D rotation. <c>inference_utils.py</c> (<c>pose_decoder</c>)
+    /// writes its own conversion and stacks <c>[b1, b2, b3]</c> on <c>dim=-1</c>, so these are columns, unlike PyTorch3D's <c>rotation_6d_to_matrix</c>.
+    /// </summary>
     internal static void RotationFromSixD(ReadOnlySpan<float> normalized, Span<double> matrix)
     {
         Span<double> v = stackalloc double[6];

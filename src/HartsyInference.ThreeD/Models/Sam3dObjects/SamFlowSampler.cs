@@ -12,7 +12,7 @@ namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 /// </summary>
 public static class SamFlowSampler
 {
-    /// <summary>Model velocities per latent for <c>(latents, scaled t, scaled d, unconditional)</c>; the sampler disposes the result.</summary>
+    /// <summary>Model velocities per latent for <c>(latents, scaled t, scaled d, unconditional)</c>; the sampler disposes the result, so every tensor must be a distinct object.</summary>
     public delegate IReadOnlyDictionary<string, Tensor> Predict(
         IReadOnlyDictionary<string, Tensor> x, float tModel, float dModel, bool unconditional);
 
@@ -125,7 +125,7 @@ public static class SamFlowSampler
     {
         if (!velocities.TryGetValue(name, out Tensor? v))
             throw new InvalidOperationException($"The model returned no velocity for latent '{name}'.");
-        if (v.DType != DType.F32 || v.Shape.ElementCount != latent.Shape.ElementCount)
+        if (v.DType != DType.F32 || v.Shape != latent.Shape)
             throw new InvalidOperationException($"The model returned {v.DType} {v.Shape} for latent '{name}' of {latent.Shape}.");
         return v;
     }
