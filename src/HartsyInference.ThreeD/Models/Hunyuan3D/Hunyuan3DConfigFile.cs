@@ -71,7 +71,13 @@ public static class Hunyuan3DConfigFile
         RequireValue(values, EncoderPrefix + "kwargs.config.num_hidden_layers", "24", "the DINOv2 variant (only large is implemented for 2.1)");
         RequireValue(values, EncoderPrefix + "kwargs.config.use_swiglu_ffn", "false", "the DINOv2 feed-forward");
         RequireValue(values, EncoderPrefix + "type", "DinoImageEncoder", "the conditioner");
-        RequireValue(values, ModelPrefix + "qk_norm_type", "'rms'", "the Q/K norm");
+        string normType = Require(values, ModelPrefix + "qk_norm_type").Trim('\'', '"');
+        if (normType != "rms")
+            throw new UnsupportedModelException($"Hunyuan3D config {ModelPrefix}qk_norm_type={normType} is not supported: the Q/K norm must be rms.");
+        if (values.TryGetValue(ModelPrefix + "guidance_cond_proj_dim", out string? guidanceProj) && guidanceProj is not ("null" or "None" or "~" or ""))
+            throw new UnsupportedModelException("Hunyuan3D-2.1 guidance_cond_proj_dim is not supported (no guidance embedding is implemented for the plain DiT).");
+        double mlpRatio = values.ContainsKey(ModelPrefix + "mlp_ratio")
+            ? double.Parse(Require(values, ModelPrefix + "mlp_ratio"), CultureInfo.InvariantCulture) : 4.0; // upstream default
         foreach (string off in new[] { "with_decoupled_ca", "use_attention_pooling", "use_pos_emb" })
         {
             if (Flag(values, ModelPrefix + off, defaultValue: false))
@@ -90,7 +96,7 @@ public static class Hunyuan3DConfigFile
             LatentChannels = Int(values, ModelPrefix + "in_channels"),
             CondDim = Int(values, ModelPrefix + "context_dim"),
             Width = width,
-            MlpDim = width * 4,
+            MlpDim = (int)(width * mlpRatio),
             NumHeads = heads,
             PlainDit = new Hunyuan3DPlainDitConfig(
                 Int(values, ModelPrefix + "depth"), Int(values, ModelPrefix + "num_moe_layers"),
@@ -114,6 +120,7 @@ public static class Hunyuan3DConfigFile
     }
 
     /// <summary>Flattens nested mappings to dotted keys (<c>model.params.depth</c>), dropping comments and resolving <c>&amp;name</c> and <c>*name</c> anchors; flow lists stay as text.</summary>
+    /// <remarks>Only scalar anchors work (<c>&amp;name 4096</c> then <c>*name</c>); an anchor on a mapping or a merge key (<c>&lt;&lt;: *name</c>) is not expanded.</remarks>
     internal static Dictionary<string, string> Flatten(string yaml)
     {
         Dictionary<string, string> values = new(StringComparer.Ordinal);

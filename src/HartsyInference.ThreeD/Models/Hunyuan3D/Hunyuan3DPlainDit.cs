@@ -115,7 +115,7 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
         backend.Linear(t1, sin, _t1W!, _t1B!);
         sin.Dispose();
         Tensor t1a = new(t1.Shape, DType.F32);
-        backend.Gelu(t1a, t1);
+        backend.GeluErf(t1a, t1); // nn.GELU() in upstream's t_embedder: exact erf form
         t1.Dispose();
         Tensor token = new(new TensorShape(1, 1, width), DType.F32);
         backend.Linear(token, t1a, _t2W!, _t2B!);

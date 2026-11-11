@@ -185,7 +185,7 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         Tensor h = new(new TensorShape(1, rows, hidden), DType.F32);
         backend.Linear(h, input, fc1W, fc1B);
         Tensor act = new(h.Shape, DType.F32);
-        backend.Gelu(act, h);
+        backend.GeluErf(act, h); // upstream FeedForward uses torch's exact (erf) GELU, not the tanh form
         h.Dispose();
         Tensor o = new(new TensorShape(1, rows, _width), DType.F32);
         backend.Linear(o, act, fc2W, fc2B);
@@ -194,7 +194,7 @@ internal sealed unsafe class Hunyuan3DPlainBlock
     }
 
     /// <summary>Shared expert on every token plus, per token, its top-k routed experts weighted by the softmax gate scores (not renormalised).</summary>
-    private Tensor Moe(IBackend backend, Tensor input, int s)
+    internal Tensor Moe(IBackend backend, Tensor input, int s)
     {
         Tensor logits = new(new TensorShape(1, s, _experts), DType.F32);
         backend.Linear(logits, input, _gateW!, null);

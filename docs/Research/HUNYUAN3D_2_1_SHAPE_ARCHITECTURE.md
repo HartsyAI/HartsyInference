@@ -47,7 +47,7 @@ content, high-stakes automated decisions and the rest). The full terms are summa
 | Conditioning | DINOv2-large at 518 px, no registers, no SwiGLU: 1370 tokens x 1024 (`context_dim`, `text_len`); unconditional input is zeros |
 | Time | `Timesteps(2048)`: sin then cos of `t` in [0, 1] (no `time_factor`), max period 10000, then `Linear(2048, 8192)`, GELU, `Linear(8192, 2048)`. The vector is **prepended as one extra token**; there is no AdaLN. `final_layer` drops it again. |
 | Block | `x = skip_norm(skip_linear(cat[skip, x]))` on blocks 11 to 20 (U-skips from blocks 0 to 9); `x += self_attn(LN(x))`; `x += cross_attn(LN(x), dino)`; `x += mlp_or_moe(LN(x))`. LayerNorm eps 1e-6. |
-| Attention | Q, K, V without bias, RMSNorm on Q and K per head (eps 1e-6), no RoPE, no position embedding (`use_pos_emb: false`); cross-attention K and V project 1024 to 2048. Decoupled cross-attention and attention pooling are off. |
+| Attention | Q, K, V without bias, RMSNorm on Q and K per head (eps 1e-6), no RoPE, no position embedding (`use_pos_emb: false`); cross-attention K and V project 1024 to 2048. Decoupled cross-attention and attention pooling are off. **Head split (checked against `hy3dshape/models/denoisers/hunyuandit.py` at `82920d64`):** the module concatenates the Q, K and V projections (`cat(q, k, v)` for self-attention, `cat(k, v)` for cross-attention) and views the result as `(heads, 3 * head_dim)` (`2 *` for cross), so a head's Q, K and V are three consecutive channel groups of the fused row, not that head's own slices of each projection. The released weights were trained that way; the engine regroups the projection rows once at load (`Hunyuan3DPlainBlock.Regroup`). Without it block 0 has correlation 0.17 against the reference; with it, 1.0000. |
 | MoE | the last 6 blocks (15 to 20): 8 experts, top 2, plus one shared expert |
 | Output | `LayerNorm`, drop the time token, `Linear(2048, 64)` |
 
@@ -92,13 +92,13 @@ numbers; unverified.
 `Hunyuan3DPlainDit` and `Hunyuan3DPlainBlock` implement the DiT; `Hunyuan3DConfigFile` reads the 2.1 config (including its YAML
 anchors); `Hunyuan3DShapePipeline` picks the denoiser and DINOv2-large from the config. The MoE routes on the host (softmax, top 2,
 unnormalised weights), gathers rows per expert with `GatherRows`, runs the GELU experts with `Linear`, and combines with
-`ScatterAddRows`; the shared expert runs on every token. Against the Python reference on the CPU in fp32 (see the status doc for the
+`ScatterAddRows`; the shared expert runs on every token. Every GELU here (time embedder, dense MLPs, shared and routed experts) is the exact erf form, `backend.GeluErf`, as in torch's `nn.GELU()` and diffusers' `gelu` activation; the 2.0 Flux blocks keep the tanh form. Against the Python reference on the CPU in fp32 (see the status doc for the
 numbers) the DiT and the bundled VAE are compared by `Hunyuan3D21ShapeParityTests`, fed by `dump_shape21_reference.py`.
 
 ## Open questions and risks
 
 - The file holds one set of weights (no EMA or optimizer copy was found); which training stage they are from is not stated.
-- Memory on the 12 GB card: about 6 GB of F16 weights plus the MoE gather buffers (the F32 CPU path needs about 12 GB for the DiT alone).
+- Memory on the 12 GB card: about 6 GB of F16 weights plus the MoE gather buffers (the F32 CPU path needs about 12 GB for the DiT alone). This is an estimate: the DiT has only been run on the CPU backend (one forward), not on CUDA or Vulkan at scale.
 - `topk(sorted=False)` ordering and near-ties can flip an expert between backends; the combine is order-independent, but parity wants a
   tolerance on the MoE outputs.
 - The 2.1 repository also ships a Paint pipeline (PBR texture) that this spike does not cover.

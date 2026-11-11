@@ -122,6 +122,24 @@ public sealed class Hunyuan3DConfigFileTests
             () => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("with_decoupled_ca: false", "with_decoupled_ca: true")));
     }
 
+    [Fact]
+    public void Parse_AcceptsADoubleQuotedRmsNormAndReadsTheMlpRatio()
+    {
+        string yaml = PlainYaml.Replace("qk_norm_type: 'rms'", "qk_norm_type: \"rms\"").Replace("moe_top_k: 2", "moe_top_k: 2\n    mlp_ratio: 2.0");
+
+        Hunyuan3DConfig config = Hunyuan3DConfigFile.Parse(yaml);
+
+        Assert.Equal(4096, config.MlpDim);
+    }
+
+    [Fact]
+    public void Parse_RefusesAPlainDitWithAnotherNormOrAGuidanceProjection()
+    {
+        Assert.Throws<UnsupportedModelException>(() => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("'rms'", "'layer'")));
+        Assert.Throws<UnsupportedModelException>(
+            () => Hunyuan3DConfigFile.Parse(PlainYaml.Replace("moe_top_k: 2", "moe_top_k: 2\n    guidance_cond_proj_dim: 256")));
+    }
+
     private const string PlainYaml =
         """
         model:

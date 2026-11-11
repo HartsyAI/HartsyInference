@@ -11,7 +11,7 @@ namespace HartsyInference.ThreeD.Tests.Parity;
 /// <summary>Hunyuan3D-2.1 DiT velocity and bundled-VAE occupancy against the fp32 CPU reference from <c>dump_shape21_reference.py</c>.</summary>
 /// <remarks>Integration lane: needs <c>HARTSY_PARITY_DIR</c> holding <c>hunyuan3d_21_shape_fp32.npz</c> and <c>3D/hunyuan3d-21/dit</c>
 /// (<c>model.fp16.safetensors</c> repacked from the upstream pickle, and <c>config.yaml</c>) under a Models folder above the test binary or
-/// under <c>HARTSY_MODELS_DIR</c>. The fp32 model needs about 12 GB of memory and the one forward takes about 12 minutes on the CPU backend.</remarks>
+/// under <c>HARTSY_MODELS_DIR</c>. The fp32 model needs about 12 GB of memory and the one forward takes about 30 minutes on the CPU backend.</remarks>
 [Trait("Category", "Integration")]
 public sealed class Hunyuan3D21ShapeParityTests
 {
@@ -47,6 +47,15 @@ public sealed class Hunyuan3D21ShapeParityTests
             if (fixture.Has($"block{layer}"))
                 Check($"block {layer} output", ToArray(hidden), fixture.Get($"block{layer}").ToFloat32(), minCorrelation: 0.9999, maxRelativeL2: 5e-2);
         };
+        // The embedding stage alone (timestep token + x_embedder, upstream's t_token and x_embedded) is cheap and localises an early divergence.
+        using (Tensor embedded = dit.Embed(backend, ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), sigmas[0]))
+        {
+            float[] all = ToArray(embedded);
+            int width = config.Width;
+            Check("t_token", all[..width], fixture.Get("t_token").ToFloat32(), minCorrelation: 0.99999, maxRelativeL2: 1e-3);
+            Check("x_embedded", all[width..], fixture.Get("x_embedded").ToFloat32(), minCorrelation: 0.99999, maxRelativeL2: 1e-3);
+        }
+
         // One forward is enough: it checks the embedding and four block outputs, which is where the fused-QKV regrouping and the MoE show up.
         Tensor velocity = dit.Forward(backend, ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), ToTensor(condValues, condArray.Shape), sigmas[0]);
         Check($"image tokens, sigma {sigmas[0]:F2}", ToArray(velocity), fixture.Get("velocity_cond_0").ToFloat32(), minCorrelation: 0.9999, maxRelativeL2: 5e-2);
