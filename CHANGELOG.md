@@ -15,6 +15,29 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
   fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
 
+## alpha.417
+
+- **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session
+  reserves nothing, so its stream loads the model and runs it; it now takes a long-running slot like any other generation (or gets
+  a 429 when the queue is full), where before it could share the GPU with an image or video job and run out of memory. An
+  interactive session is unchanged. `IWorldSession` gains `DefersDeviceWork` (default false) for this.
+- **Fixed: a world stream that failed left nothing in the server log, and a client that disconnected made the error handler throw a
+  second time.** Failures are logged and sent to the client as an error event; a disconnect ends the stream quietly. An action sent
+  to a session closed a moment earlier now returns 404, not 500, and `hartsy world --actions ","` is refused with a message.
+- **Fixed: a SANA-WM DiT whose weight upload ran out of memory partway kept the weights it had already put on the GPU.** On the
+  12 GB card a failed load now frees them.
+- **Fixed: `Conv2dDepthwise` accepted an output with another batch than its input and wrote past the end of it.** The shared shape
+  contract now refuses it.
+- **Fixed: `DepthwiseConvGlu` failed to launch on an input with more than 65,535 frame rows.** The vectorized kernel puts them on the
+  grid's y axis, and the general kernel now takes over past the cap. The frame scan refuses more than 65,535 heads with a clear
+  message.
+- **Changed: the frame scan's GEMMs ignore `numerics.gemmF16`.** Its Gram errors compound over the recurrence, so it keeps TF32
+  (or plain F32) whatever that setting says. Default settings are unchanged.
+- **Changed: the model stage timer has its own setting, `diagnostics.stageProfile`.** `diagnostics.profile` no longer adds the
+  device syncs around every stage, and the SANA-WM softmax blocks report one row each, as the GDN blocks do.
+- **Fixed: `HartsyInference.Engine.Tests` did not compile** against the Cuda project, which now grants it access to
+  `CudaRedistProvisioner`'s internal override.
+
 ## alpha.416
 
 - **Added: SANA-WM stage 1 (`sana-wm`).** `hartsy world -m sana-wm --image <png> --prompt-file <txt> --intrinsics fx,fy,cx,cy

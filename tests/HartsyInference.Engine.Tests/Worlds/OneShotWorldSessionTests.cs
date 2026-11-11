@@ -89,6 +89,18 @@ public sealed class OneShotWorldSessionTests
     private static readonly TimeSpan Patience = TimeSpan.FromSeconds(5);
 
     [Fact]
+    public void ABatchSession_DefersItsDeviceWorkToTheStream()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        WorldService service = new WorldService(engine);
+        ScriptedClipPipeline pipeline = new ScriptedClipPipeline((request, cancel) => ClipFrames(request.Plan.Frames));
+        using IWorldSession session = service.OpenOneShot(pipeline, ClipPlan(4));
+
+        Assert.True(session.DefersDeviceWork);
+        Assert.Equal(0, pipeline.StartCount);
+    }
+
+    [Fact]
     public async Task Stream_DeliversTheWholeClipInOrder_OnceTheRunCompletes()
     {
         using InferenceEngine engine = new InferenceEngine("cpu");

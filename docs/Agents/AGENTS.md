@@ -26,9 +26,19 @@ commit messages, PR bodies and the changelog.
 
 Work through these steps in order:
 
-1. **Branch, then push as soon as you have commits.** Unpushed non-`main` branches get reaped. The checkout is shared
-   with other agents, so run `git branch --show-current` before every commit. If a commit lands on someone else's
-   branch, rescue it with a cherry-pick. Never rewrite their branch.
+1. **Create a worktree and branch, then push as soon as you have commits.** Unpushed non-`main` branches get reaped.
+   Never edit in the main checkout: it is shared with other agents. Work in your own worktree, created from a fresh
+   `origin/main` in the repo's gitignored `.claude/worktrees/` folder and named after the branch:
+
+   ```bash
+   git fetch origin
+   git worktree add -b <type>/<short-name> .claude/worktrees/<short-name> origin/main
+   cd .claude/worktrees/<short-name>
+   ```
+
+   Do not create worktrees as sibling folders of the repo (`../HartsyInference-<name>`); they are the ones that get
+   forgotten. Run `git branch --show-current` before every commit. If a commit lands on someone else's branch, rescue
+   it with a cherry-pick. Never rewrite their branch.
 2. **Open a draft PR early**, before the work is finished, so reviewers and the bots can see progress.
 3. **Finish the implementation and test it against the PR.**
    - Run the CPU lane and the tests that cover the changed area. The trait filters are in [testing](../CODE_STYLE.md#testing).
@@ -63,6 +73,27 @@ Work through these steps in order:
    Reply to each thread, then resolve it with the GraphQL `resolveReviewThread` mutation. `gh pr` has no resolve command.
 7. **Merge one PR at a time**, once CI is green and every thread is resolved. Each merge makes the others' version bump
    and changelog insert stale. A single push that carries several merges publishes only the top version.
+8. **Clean up after the merge.** Once your PR is merged, delete your own worktree and branch in the same task. The
+   user has authorized this for branches and worktrees you created for that PR, so no extra confirmation is needed.
+   Stale worktrees and branches pile up otherwise. Run these from the main checkout, not from inside the worktree:
+
+   ```bash
+   gh pr view <N> --json state,mergedAt --jq '.state'        # must print MERGED, otherwise stop
+   git worktree remove .claude/worktrees/<short-name>        # add --force only after checking nothing is unpushed
+   git branch -d <type>/<short-name>                         # use -D only when gh reported MERGED (squash merges)
+   git push origin --delete <type>/<short-name>              # skip if GitHub already auto-deleted the remote branch
+   git worktree prune
+   git fetch --prune origin
+   ```
+
+   Then confirm with `git worktree list` that your entry is gone. Rules:
+   - Delete only what you created for this PR. Another agent's or the user's worktree or branch is not yours, even when
+     it looks stale: list it and ask.
+   - Never delete a branch whose PR is open, closed unmerged or missing, or one that has commits not on `origin`.
+   - A `locked` worktree belongs to a running or crashed agent. Do not unlock it yourself; report it.
+   - If the folder survives `git worktree remove` on Windows (open handles, long `obj` paths), close what holds it and
+     delete the folder, then run `git worktree prune`.
+   - A stack of PRs gets cleaned up one PR at a time, as each merges, not all at the end.
 
 Report in plain language. Keep answers short, do not restate what the diff already shows, and close a long answer or a
 research session with a short plain-English TL;DR.
