@@ -124,7 +124,9 @@ public sealed record Trellis2FlowConfig
         int numHeads = args.TryGetProperty("num_heads", out JsonElement heads) && heads.ValueKind == JsonValueKind.Number
             ? heads.GetInt32()
             : args.GetProperty("model_channels").GetInt32() / (args.TryGetProperty("num_head_channels", out JsonElement hc) ? hc.GetInt32() : 64);
-        string mode = args.TryGetProperty("image_attn_mode", out JsonElement attn) ? attn.GetString() ?? CrossAttentionMode : CrossAttentionMode;
+        string mode = args.TryGetProperty("image_attn_mode", out JsonElement attn) && attn.ValueKind == JsonValueKind.String
+            ? attn.GetString()!
+            : CrossAttentionMode;
         int condChannels = args.GetProperty("cond_channels").GetInt32();
         Trellis2FlowConfig config = new()
         {
@@ -135,7 +137,9 @@ public sealed record Trellis2FlowConfig
             ModelChannels = args.GetProperty("model_channels").GetInt32(),
             CondChannels = condChannels,
             ImageAttentionMode = mode,
-            ProjInChannels = args.TryGetProperty("proj_in_channels", out JsonElement proj) ? proj.GetInt32() : condChannels,
+            ProjInChannels = args.TryGetProperty("proj_in_channels", out JsonElement proj) && proj.ValueKind == JsonValueKind.Number
+                ? proj.GetInt32()
+                : condChannels,
             NumBlocks = args.GetProperty("num_blocks").GetInt32(),
             NumHeads = numHeads,
             MlpRatio = args.TryGetProperty("mlp_ratio", out JsonElement ratio) ? ratio.GetDouble() : 4.0,

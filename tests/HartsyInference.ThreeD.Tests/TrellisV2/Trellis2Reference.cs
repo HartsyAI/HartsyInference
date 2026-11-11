@@ -23,6 +23,8 @@ internal sealed class Trellis2Reference
     /// holds one feature row per token for a projection flow.</summary>
     internal double[][] Forward(double[][] input, double[][] positions, double tModel, double[][] cond, double[][]? proj = null)
     {
+        if (_config.HasProjection != (proj is not null))
+            throw new ArgumentException("A projection flow needs its feature rows and a plain flow takes none.", nameof(proj));
         int c = _config.ModelChannels;
         double[] freq = new double[256];
         for (int i = 0; i < 128; i++)
@@ -42,7 +44,8 @@ internal sealed class Trellis2Reference
 
     private double[][] Block(double[][] x, string p, double[] shared, double[][] positions, double[][] cond, double[][]? proj)
     {
-        string scope = $"{p}.{_config.CrossAttentionScope}";
+        // Written out, not read from the config, so a wrong scope in the engine's key map cannot cancel against itself here.
+        string scope = _config.HasProjection ? $"{p}.cross_attn.cross_attn_block" : $"{p}.cross_attn";
         int c = _config.ModelChannels, heads = _config.NumHeads, hd = _config.HeadDim, n = x.Length;
         double[] mod = new double[6 * c];
         for (int i = 0; i < mod.Length; i++)

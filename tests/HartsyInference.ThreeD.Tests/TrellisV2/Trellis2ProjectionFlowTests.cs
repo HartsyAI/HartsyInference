@@ -45,6 +45,18 @@ public sealed class Trellis2ProjectionFlowTests
         Assert.Equal("cross_attn", config.CrossAttentionScope);
     }
 
+    [Fact]
+    public void JsonNullsFallBackToTheDefaults()
+    {
+        string json = Trellis2TestData.Pixal3DShapeFlow512Json.Replace("\"proj_in_channels\": 2048", "\"proj_in_channels\": null", StringComparison.Ordinal);
+        string plain = Trellis2TestData.ShippedShapeFlow512Json.Replace("\"dtype\"", "\"image_attn_mode\": null, \"dtype\"", StringComparison.Ordinal);
+
+        Trellis2FlowConfig projection = Trellis2FlowConfig.FromJson(json);
+
+        Assert.Equal(1024, projection.ProjInChannels);
+        Assert.False(Trellis2FlowConfig.FromJson(plain).HasProjection);
+    }
+
     [Theory]
     [InlineData("\"image_attn_mode\": \"proj\"", "\"image_attn_mode\": \"gated_proj\"")]
     [InlineData("\"image_attn_mode\": \"proj\"", "\"image_attn_mode\": \"other\"")]

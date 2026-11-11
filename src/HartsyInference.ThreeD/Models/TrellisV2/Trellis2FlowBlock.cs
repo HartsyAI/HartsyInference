@@ -209,12 +209,12 @@ internal sealed class Trellis2FlowBlock : IDisposable
     }
 
     // Upstream sums proj_linear(proj) + cross_attn(x); a block with no projection weights ignores the features.
-    private static Tensor AddProjection(IBackend backend, Tensor attended, Tensor? projected, Tensor weight, Tensor bias)
+    private Tensor AddProjection(IBackend backend, Tensor attended, Tensor? projected, Tensor weight, Tensor bias)
     {
         using Tensor owned = attended;
         if (projected is null)
             throw new ArgumentException("A projection block needs per-token projected features.", nameof(projected));
-        using Tensor lifted = Linear(backend, projected, weight, bias, owned.Shape[2]);
+        using Tensor lifted = Linear(backend, projected, weight, bias, _width);
         Tensor sum = new(owned.Shape, DType.F32);
         backend.Add(sum, lifted, owned);
         return sum;
