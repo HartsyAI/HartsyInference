@@ -3,6 +3,7 @@
 //   0=add(a,b)  1=mul(a,b)  2=scale(a,scalar)  3=silu(a)  4=gelu_exact(a)
 //   5=gelu_tanh(a)  6=sigmoid(a)  7=clamp(a,minVal,maxVal)
 //   8=tanh(a)   9=elu(a, alpha=scalar)  10=add_scalar(a,scalar)
+//   11=mish(a)  12=leaky_relu(a, slope=scalar)
 // (Audio additions for SEANet/EnCodec/DAC/Mimi codecs and LSTM-using TTS models.
 //  After modifying this file, recompile with `glslc elementwise.comp.glsl -o elementwise_f32.spv`
 //  and the f16 variant via -DUSE_FP16=1.)
@@ -81,6 +82,7 @@ void main() {
     else if (ELEMENTWISE_OP == 8u) r = tanh(av);
     else if (ELEMENTWISE_OP == 9u) r = (av >= 0.0) ? av : (pc.scalar * (exp(av) - 1.0));
     else if (ELEMENTWISE_OP == 10u) r = av + pc.scalar;
-    else /* 11 */                   r = mish(av);
+    else if (ELEMENTWISE_OP == 11u) r = mish(av);
+    else /* 12 */                   r = (av >= 0.0) ? av : (pc.scalar * av);
     out_[i] = FROM_F32(r);
 }
