@@ -29,6 +29,8 @@ internal sealed class HunyuanPaintSpatialTransformer
         _block.LoadWeights(w, $"{prefix}.transformer_blocks.0");
     }
 
+    internal void Dispose() => _block.Dispose();
+
     internal IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor? t in new[] { _normW, _normB, _projInW, _projInB, _projOutW, _projOutB })

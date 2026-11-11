@@ -18,6 +18,7 @@ internal sealed unsafe class HunyuanPaintBlock
     private HunyuanPaintAttention? _cross, _multiview, _dino;
     private HunyuanPaintAttention[] _reference = [];
     private readonly List<Tensor> _owned = [];
+    private readonly List<Tensor> _regrouped = [];
 
     internal HunyuanPaintBlock(HunyuanPaintConfig config, int channels, int heads, bool extended, string name)
     {
@@ -56,6 +57,15 @@ internal sealed unsafe class HunyuanPaintBlock
     }
 
     internal IEnumerable<Tensor> EnumerateWeights() => _owned;
+
+    /// <summary>Releases the tensors this block built itself (the regrouped reference values); checkpoint tensors belong to the caller.</summary>
+    internal void Dispose()
+    {
+        foreach (Tensor t in _regrouped)
+            t.Dispose();
+        _regrouped.Clear();
+        _owned.Clear();
+    }
 
     /// <summary>Runs the block over every material's <paramref name="x"/> (consumed); returns the new activations.</summary>
     internal Tensor[] Forward(IBackend backend, Tensor[] x, HunyuanPaintBlockState state)
@@ -181,6 +191,7 @@ internal sealed unsafe class HunyuanPaintBlock
         {
             Tensor regrouped = RegroupValues(values, m);
             _owned.Add(regrouped);
+            _regrouped.Add(regrouped);
             Tensor o = Own(m == 0 ? w[$"{prefix}.to_out.0.weight"] : w[$"{prefix}.processor.to_out_{_config.Materials[m]}.0.weight"]);
             Tensor b = Own(m == 0 ? w[$"{prefix}.to_out.0.bias"] : w[$"{prefix}.processor.to_out_{_config.Materials[m]}.0.bias"]);
             result[m] = new HunyuanPaintAttention(_heads, _headDim, q, k, regrouped, o, b);

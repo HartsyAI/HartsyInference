@@ -13,6 +13,12 @@ public sealed class HunyuanPaintSamplerTests
         Assert.Equal(30, HunyuanPaintSchedule.TrailingTimesteps(30).Length);
         Assert.Equal(999, HunyuanPaintSchedule.TrailingTimesteps(30)[0]);
         Assert.Throws<ArgumentOutOfRangeException>(() => HunyuanPaintSchedule.TrailingTimesteps(0));
+        for (int steps = 1; steps <= 1000; steps++)
+        {
+            int[] timesteps = HunyuanPaintSchedule.TrailingTimesteps(steps);
+            Assert.Equal(steps, timesteps.Length);
+            Assert.All(timesteps, t => Assert.InRange(t, 0, 999));
+        }
     }
 
     [Fact]

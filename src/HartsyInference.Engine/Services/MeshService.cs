@@ -213,7 +213,7 @@ public sealed class MeshService : IMeshService, IDisposable
         {
             Steps = request.Steps == 0 ? null : request.Steps,
             TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
-            Seed = request.Seed < 0 ? 0 : (int)request.Seed,
+            Seed = request.Seed < 0 ? null : (int)request.Seed,
         };
 
         return Task.Run(
@@ -253,7 +253,7 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new FileNotFoundException(
                 $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding unet/ and vae/ as the local path.");
         }
-        string folder = File.Exists(spec.LocalPath) ? Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(spec.LocalPath)))! : spec.LocalPath;
+        string folder = PaintFolder(spec.LocalPath);
         lock (_gate)
         {
             if (_paintPipelines.TryGetValue(folder, out HunyuanPaintLoader? cached))
@@ -273,6 +273,21 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw;
             }
         }
+    }
+
+    // The folder holding unet/ and vae/: the path itself, or the nearest parent of a file (any asset of the model may be the representative one).
+    private static string PaintFolder(string localPath)
+    {
+        if (!File.Exists(localPath))
+        {
+            return localPath;
+        }
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(localPath));
+        while (directory is not null && !Directory.Exists(Path.Combine(directory, "unet")))
+        {
+            directory = Path.GetDirectoryName(directory);
+        }
+        return directory ?? throw new DirectoryNotFoundException($"No unet/ folder above '{localPath}'.");
     }
 
     /// <summary>TRELLIS.2 shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or

@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 /// channels, multiview, reference and, for 2.1, material and DINO attention) and another, built with <c>generating: false</c>, is the reference stream
 /// (<c>unet_dual</c>: four input channels, plain blocks that record their features). Every method takes one activation per material, each
 /// <c>[views, channels, height, width]</c> F32.</summary>
-public sealed class HunyuanPaintUnet
+public sealed class HunyuanPaintUnet : IDisposable
 {
     private readonly HunyuanPaintConfig _config;
     private readonly bool _generating;
@@ -116,6 +116,21 @@ public sealed class HunyuanPaintUnet
         }
         _normOutW = w[$"{p}conv_norm_out.weight"]; _normOutB = w[$"{p}conv_norm_out.bias"];
         _convOutW = w[$"{p}conv_out.weight"]; _convOutB = w[$"{p}conv_out.bias"];
+    }
+
+    /// <summary>Releases the F32 copies and regrouped tensors made by <see cref="LoadWeights"/> (and their GPU residency); the checkpoint is not touched.</summary>
+    public void Dispose()
+    {
+        foreach (HunyuanPaintSpatialTransformer?[] level in _downAttn)
+            foreach (HunyuanPaintSpatialTransformer? transformer in level)
+                transformer?.Dispose();
+        foreach (HunyuanPaintSpatialTransformer?[] level in _upAttn)
+            foreach (HunyuanPaintSpatialTransformer? transformer in level)
+                transformer?.Dispose();
+        _midAttn.Dispose();
+        _weights?.Dispose();
+        _weights = null;
+        _convInW = _convInB = _classEmbedding = _normOutW = _normOutB = _convOutW = _convOutB = null;
     }
 
     /// <summary>Runs one pass. <paramref name="samples"/> holds one <c>[views, inChannels, H, W]</c> tensor per material (borrowed);

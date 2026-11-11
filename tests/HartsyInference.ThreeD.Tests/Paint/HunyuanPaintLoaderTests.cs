@@ -55,4 +55,21 @@ public sealed class HunyuanPaintLoaderTests
         Assert.Equal(new TensorShape(1, cfg.TextTokens, cfg.CrossAttentionDim), tokens.PerMaterial[0].Shape);
         Assert.Equal(tokens.PerMaterial[0].Shape, tokens.Reference.Shape);
     }
+
+    [Fact]
+    public unsafe void F32Weights_ConvertHalfPrecisionOnceAndReleaseOnlyTheCopies()
+    {
+        using Tensor half = Empty(2, 3).CastTo(DType.F16), single = Empty(2);
+        HunyuanPaintF32Weights view = new(new Dictionary<string, Tensor> { ["half"] = half, ["single"] = single });
+
+        Tensor converted = view["half"];
+        Assert.Equal(DType.F32, converted.DType);
+        Assert.Same(converted, view["half"]);
+        Assert.Same(single, view["single"]);
+
+        view.Dispose();
+
+        Assert.Equal(DType.F16, half.DType);
+        Assert.Equal(0f, *(float*)single.DataPointer);
+    }
 }

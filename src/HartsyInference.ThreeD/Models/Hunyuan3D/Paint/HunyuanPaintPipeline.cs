@@ -81,8 +81,10 @@ public sealed class HunyuanPaintPipeline
             throw new ArgumentException("The view resolution must be a multiple of 64 (the checkpoints were trained at 512 and 768).", nameof(options));
         if (options.MaxViews < FixedViews || options.MaxViews > 12)
             throw new ArgumentException("MaxViews must be between 6 and 12.", nameof(options));
-        if (options.RenderResolution < options.ViewResolution || options.TextureSize < 16)
+        if (options.RenderResolution < options.ViewResolution)
             throw new ArgumentException("Render resolution must be at least the view resolution.", nameof(options));
+        if (options.TextureSize < 16)
+            throw new ArgumentException("Texture size must be at least 16.", nameof(options));
     }
 
     private (byte[][] Normal, byte[][] Position) RenderConditions(PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, HunyuanPaintOptions o,
@@ -123,28 +125,31 @@ public sealed class HunyuanPaintPipeline
         using Tensor referenceLatent = _codec.Encode(_backend, referenceImage);
 
         HunyuanPaintBlockState write = new() { Write = true, Text = [_prompts.Reference] };
-        int[] referenceClass = _config.CameraClasses > 0 ? [0] : [];
-        foreach (Tensor t in _reference.Forward(_backend, [referenceLatent], 0f, referenceClass, write))
-            t.Dispose();
-
-        using Tensor? dino = _conditioner?.Tokens(_backend, reference, size, size);
-        using Tensor? zeroDino = dino is null ? null : new Tensor(dino.Shape, DType.F32);
-        Dictionary<int, (Tensor Cos, Tensor Sin)>? rotation = _config.UsePoseRope ? BuildRotation(positionMaps, n, size, latent) : null;
-        int[] classes = _config.CameraClasses > 0 ? [.. views.Select(v => CameraClass(v.Elevation, v.Azimuth))] : [];
-        (float Scale, bool Dino)[] branches = _config.UsePoseRope ? [(0f, false), (1f, false), (1f, true)] : [(0f, false), (1f, false)];
-
-        Random random = new(o.Seed);
-        long perMaterial = (long)n * 4 * latent * latent;
-        float[][] latents = new float[materials][];
-        for (int m = 0; m < materials; m++)
-        {
-            latents[m] = new float[perMaterial];
-            for (long i = 0; i < perMaterial; i++)
-                latents[m][i] = (float)(Gaussian(random) * sampler.InitialNoiseScale);
-        }
-
+        Dictionary<int, (Tensor Cos, Tensor Sin)>? rotation = null;
+        Tensor? dino = null, zeroDino = null;
         try
         {
+            int[] referenceClass = _config.CameraClasses > 0 ? [0] : [];
+            foreach (Tensor t in _reference.Forward(_backend, [referenceLatent], 0f, referenceClass, write))
+                t.Dispose();
+
+            dino = _conditioner?.Tokens(_backend, reference, size, size);
+            zeroDino = dino is null ? null : new Tensor(dino.Shape, DType.F32);
+            rotation = _config.UsePoseRope ? BuildRotation(positionMaps, n, size, latent) : null;
+            int[] classes = _config.CameraClasses > 0 ? [.. views.Select(v => CameraClass(v.Elevation, v.Azimuth))] : [];
+            // 2.1 guides u + g s (r - u) + g s (f - r); with one s per view the reference-only prediction r cancels, so only (u, f) are run.
+            (float Scale, bool Dino)[] branches = _config.UsePoseRope ? [(0f, false), (1f, true)] : [(0f, false), (1f, false)];
+
+            Random random = o.Seed is int seed ? new Random(seed) : new Random();
+            long perMaterial = (long)n * 4 * latent * latent;
+            float[][] latents = new float[materials][];
+            for (int m = 0; m < materials; m++)
+            {
+                latents[m] = new float[perMaterial];
+                for (long i = 0; i < perMaterial; i++)
+                    latents[m][i] = (float)(Gaussian(random) * sampler.InitialNoiseScale);
+            }
+
             DateTime started = DateTime.UtcNow;
             for (int step = 0; step < steps; step++)
             {
@@ -152,17 +157,31 @@ public sealed class HunyuanPaintPipeline
                 float[][][] predictions = new float[branches.Length][][];
                 for (int b = 0; b < branches.Length; b++)
                 {
-                    Tensor[] inputs = new Tensor[materials];
-                    for (int m = 0; m < materials; m++)
-                        inputs[m] = Concatenate(samplers[m].ScaleModelInput(latents[m], step), normalLatent, positionLatent, n, latent);
-                    HunyuanPaintBlockState state = new()
+                    Tensor?[] inputs = new Tensor?[materials];
+                    try
                     {
-                        Embeds = write.Embeds, ReferenceScale = branches[b].Scale, Text = _prompts.PerMaterial, Dino = branches[b].Dino ? dino : zeroDino, Rotation = rotation,
-                    };
-                    Tensor[] outputs = _unet.Forward(_backend, inputs, sampler.Timesteps[step], classes, state);
-                    predictions[b] = outputs.Select(HunyuanPaintImages.ToArray).ToArray();
-                    foreach (Tensor t in inputs.Concat(outputs))
-                        t.Dispose();
+                        for (int m = 0; m < materials; m++)
+                            inputs[m] = Concatenate(samplers[m].ScaleModelInput(latents[m], step), normalLatent, positionLatent, n, latent);
+                        HunyuanPaintBlockState state = new()
+                        {
+                            Embeds = write.Embeds, ReferenceScale = branches[b].Scale, Text = _prompts.PerMaterial, Dino = branches[b].Dino ? dino : zeroDino, Rotation = rotation,
+                        };
+                        Tensor[] outputs = _unet.Forward(_backend, [.. inputs!], sampler.Timesteps[step], classes, state);
+                        try
+                        {
+                            predictions[b] = outputs.Select(HunyuanPaintImages.ToArray).ToArray();
+                        }
+                        finally
+                        {
+                            foreach (Tensor t in outputs)
+                                t.Dispose();
+                        }
+                    }
+                    finally
+                    {
+                        foreach (Tensor? t in inputs)
+                            t?.Dispose();
+                    }
                 }
                 for (int m = 0; m < materials; m++)
                 {
@@ -185,6 +204,8 @@ public sealed class HunyuanPaintPipeline
         }
         finally
         {
+            dino?.Dispose();
+            zeroDino?.Dispose();
             foreach (Tensor t in write.Embeds.Values)
                 t.Dispose();
             if (rotation is not null)
@@ -229,7 +250,7 @@ public sealed class HunyuanPaintPipeline
         return HunyuanPaintImages.FromArray(merged, views, 12, latent, latent);
     }
 
-    // 2.1: u + g s (r - u) + g s (f - r) per view; 2.0: u + g (c - u).
+    // u + g s (b - u) per view with s from the azimuth (2.1: b is the full prediction, see Diffuse) and s = 1 for 2.0.
     private float[] Guide(float[][] branch, IReadOnlyList<PaintViewCandidate> views, float guidance, int n, int latent)
     {
         int plane = latent * latent * 4;
@@ -239,7 +260,7 @@ public sealed class HunyuanPaintPipeline
             float s = _config.UsePoseRope ? guidance * ViewScale(views[v].Azimuth) : guidance;
             for (int i = v * plane; i < (v + 1) * plane; i++)
                 result[i] = _config.UsePoseRope
-                    ? branch[0][i] + s * (branch[1][i] - branch[0][i]) + s * (branch[2][i] - branch[1][i])
+                    ? branch[0][i] + s * (branch[1][i] - branch[0][i])
                     : branch[0][i] + s * (branch[1][i] - branch[0][i]);
         }
         return result;

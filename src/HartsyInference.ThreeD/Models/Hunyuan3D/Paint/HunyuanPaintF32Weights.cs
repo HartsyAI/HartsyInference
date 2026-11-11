@@ -3,8 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 
-/// <summary>A read-only view of a checkpoint that hands out every tensor as F32, converting on first use and keeping the copy; the source is untouched.</summary>
-internal sealed class HunyuanPaintF32Weights : IReadOnlyDictionary<string, Tensor>
+/// <summary>A read-only view of a checkpoint that hands out every tensor as F32, converting on first use and keeping the copy; the source is untouched.
+/// Disposing releases the converted copies (and their GPU residency) but never the source tensors.</summary>
+internal sealed class HunyuanPaintF32Weights : IReadOnlyDictionary<string, Tensor>, IDisposable
 {
     private readonly IReadOnlyDictionary<string, Tensor> _source;
     private readonly Dictionary<string, Tensor> _converted = [];
@@ -19,6 +20,15 @@ internal sealed class HunyuanPaintF32Weights : IReadOnlyDictionary<string, Tenso
                 _converted[key] = tensor = Hunyuan3DShapeVae.F32(_source[key]);
             return tensor;
         }
+    }
+
+    /// <summary>Releases every converted copy; tensors that passed through unconverted belong to the source and stay.</summary>
+    public void Dispose()
+    {
+        foreach ((string key, Tensor tensor) in _converted)
+            if (!ReferenceEquals(tensor, _source[key]))
+                tensor.Dispose();
+        _converted.Clear();
     }
 
     public IEnumerable<string> Keys => _source.Keys;

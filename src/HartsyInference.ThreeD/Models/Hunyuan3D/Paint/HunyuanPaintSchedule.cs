@@ -43,7 +43,7 @@ public sealed class HunyuanPaintSchedule
         if (steps <= 0 || steps > TrainSteps)
             throw new ArgumentOutOfRangeException(nameof(steps));
         double ratio = (double)TrainSteps / steps;
-        int count = (int)Math.Ceiling(TrainSteps / ratio);
+        int count = steps;
         int[] timesteps = new int[count];
         for (int i = 0; i < count; i++)
             timesteps[i] = (int)Math.Round(TrainSteps - i * ratio, MidpointRounding.ToEven) - 1;

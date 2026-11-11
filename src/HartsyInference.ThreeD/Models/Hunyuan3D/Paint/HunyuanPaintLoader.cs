@@ -43,7 +43,11 @@ public sealed class HunyuanPaintLoader : IDisposable
             reference.LoadWeights(unetWeights, "unet_dual");
             HunyuanPaintPromptTokens prompts = HunyuanPaintPromptTokens.FromWeights(unetWeights, config, "unet");
 
-            Dictionary<string, Tensor> vaeWeights = Read(Find(folder, "vae"), owners);
+            owners.Add(unet);
+            owners.Add(reference);
+            // The released VAE is F16 and the VAE kernels read F32: convert once, and release the copies with the loader.
+            HunyuanPaintF32Weights vaeWeights = new(Read(Find(folder, "vae"), owners));
+            owners.Add(vaeWeights);
             VaeConfig vaeConfig = VaeConfig.Sd15;
             VaeEncoder encoder = new(vaeConfig);
             encoder.LoadWeights(vaeWeights);
@@ -57,9 +61,13 @@ public sealed class HunyuanPaintLoader : IDisposable
                 if (dinoPath is null)
                     throw new FileNotFoundException("Paint 2.1 conditions on DINOv2-giant; supply the facebook/dinov2-giant model.safetensors (or its folder).");
                 Dinov2VisionEncoder dino = new(Dinov2Preset.Giant);
-                dino.LoadWeights(Read(File.Exists(dinoPath) ? dinoPath : Path.Combine(dinoPath, "model.safetensors"), owners));
-                conditioner = new PaintDinoConditioner(dino, unetWeights["unet.image_proj_model_dino.proj.weight"], unetWeights["unet.image_proj_model_dino.proj.bias"],
-                    unetWeights["unet.image_proj_model_dino.norm.weight"], unetWeights["unet.image_proj_model_dino.norm.bias"]);
+                HunyuanPaintF32Weights dinoWeights = new(Read(File.Exists(dinoPath) ? dinoPath : Path.Combine(dinoPath, "model.safetensors"), owners));
+                owners.Add(dinoWeights);
+                dino.LoadWeights(dinoWeights);
+                HunyuanPaintF32Weights projection = new(unetWeights);
+                owners.Add(projection);
+                conditioner = new PaintDinoConditioner(dino, projection["unet.image_proj_model_dino.proj.weight"], projection["unet.image_proj_model_dino.proj.bias"],
+                    projection["unet.image_proj_model_dino.norm.weight"], projection["unet.image_proj_model_dino.norm.bias"]);
                 if (upscalerPath is not null)
                     upscale = BuildUpscaler(backend, upscalerPath, owners);
             }

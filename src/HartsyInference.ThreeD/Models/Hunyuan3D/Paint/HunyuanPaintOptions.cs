@@ -18,8 +18,8 @@ public sealed record HunyuanPaintOptions
     /// <summary>Guidance scale, or null for the generation default.</summary>
     public float? GuidanceScale { get; init; }
 
-    /// <summary>Seed of the initial noise (it does not reproduce Python's noise).</summary>
-    public int Seed { get; init; }
+    /// <summary>Seed of the initial noise; null picks a random one (it does not reproduce Python's noise).</summary>
+    public int? Seed { get; init; }
 
     /// <summary>Side at which geometry maps are rendered and generated views are baked.</summary>
     public int RenderResolution { get; init; } = 2048;
