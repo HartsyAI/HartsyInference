@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only, or textured with --texture), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -15,13 +15,18 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d and unirig.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d) or a .obj/.glb mesh (cola3d, unirig). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
         /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig (mesh in, rigged GLB out), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), or hairdeck.")]
         public string Model { get; init; } = "triposr";
+
+        /// <summary>Reference image for the texturing models (hunyuan3d-paint, hunyuan3d-paint21).</summary>
+        [CommandOption("--image")]
+        [Description("Reference image (PNG) the texturing models paint the input mesh from (hunyuan3d-paint, hunyuan3d-paint21). With --grid it sets the texture size (default 2048) and --steps the sampler steps (default 30 for hunyuan3d-paint, 15 for hunyuan3d-paint21).")]
+        public string? Image { get; init; }
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
         [CommandOption("-n|--samples")]
@@ -42,6 +47,16 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [CommandOption("--no-chains")]
         [Description("Skip the spring-bone chains (hairdeck only).")]
         public bool NoChains { get; init; }
+
+        /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 only).</summary>
+        [CommandOption("--texture")]
+        [Description("Texture the mesh with baked PBR textures (trellis2 only; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md).")]
+        public bool Texture { get; init; }
+
+        /// <summary>Baked texture edge in texels (TRELLIS.2 with --texture).</summary>
+        [CommandOption("--texture-size")]
+        [Description("Baked texture size in texels, 16 to 8192 (trellis2 with --texture; 0 = 2048).")]
+        public int TextureSize { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>
         [CommandOption("--model-path")]
@@ -121,6 +136,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("prompt-mask", string.Join('\n', settings.PromptMasks));
         if (settings.PromptPoints is { Length: > 0 })
             parameters.Put("prompt-point", string.Join('\n', settings.PromptPoints));
+        if (settings.Image is not null)
+            parameters.Put("image", settings.Image);
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
@@ -130,6 +147,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("rigged", settings.Rigged ? "true" : "false");
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
         parameters.Put("no-chains", settings.NoChains ? "true" : "false");
+        parameters.Put("texture", settings.Texture ? "true" : "false");
+        parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Input, parameters, settings.Backend, settings.Quiet,

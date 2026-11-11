@@ -31,13 +31,13 @@ Every stage is a public type of its own and usable alone.
   weights `1 - |center - p|`; empty neighbors are dropped and the remaining weights renormalized; no occupied neighbor gives zeros
   (and an uncovered texel). This follows `flex_gemm/ops/grid_sample/grid_sample_torch.py`. That file truncates corner coordinates
   with `.int()`, which differs from `floor` only for samples within half a voxel of the grid's minimum faces; this code uses
-  `floor`.
+  `floor`, which is what the CUDA kernel behind `grid_sample_3d(mode='trilinear')` runs (`floor(q - 0.5)`, FlexGEMM `6dd94a85`).
 - **UV and texel.** Texel `(x, y)` samples UV `((x + 0.5) / W, (y + 0.5) / H)`; image row 0 is first in the PNG and v = 0. This is
   glTF's convention, so the writer emits UVs as they are. Upstream flips V in `to_glb`, but trimesh flips it again on glTF export,
   so the file's UV equals the internal one (inferred from trimesh behavior, not re-read from its source). `PbrGlbOptions.FlipV`
   exists for callers whose UVs have v pointing up.
 - **Z-up to Y-up.** `PbrGlbOptions.ConvertZUpToYUp` applies `(x, y, z) -> (x, z, -y)` to positions and normals (a rotation, so
-  winding is unchanged). It is off by default; the TRELLIS.2 pipeline should set it.
+  winding is unchanged). It is off by default; `Trellis2ImageTo3DPipeline.ToGlb` sets it, and `DoubleSided`.
 - **Material packing.** Texture 0 is base color RGB, with alpha in the fourth channel when the material has alpha; texture 1 is
   `R = 0, G = roughness, B = metallic`; both factors 1. `AlphaMode` defaults to OPAQUE as upstream does.
 - **Attribute range.** Volume attributes are expected in [0,1] and are quantized as `clamp(round(v * 255))`.
@@ -59,7 +59,10 @@ Every stage is a public type of its own and usable alone.
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the
   cone angle (default 50 degrees, `UvUnwrapOptions`), so texel density on steep parts of a chart is lower than on its flat parts.
   Charts that fold or overlap are split at half the angle down to single triangles, so the atlas is always overlap-free, but a
-  rough or noisy surface can end in many small charts and a lower packing efficiency.
+  rough or noisy surface can end in many small charts and a lower packing efficiency. Measured on TRELLIS.2 meshes (1M faces after
+  decimation): about one chart per few triangles (vertices per triangle 0.94 to 1.5), so the bake writes only 5 to 11% of a 2048x2048
+  atlas and the rest is inpainted; the textured GLB shows specks and seams. Time is not the problem: decimating 11M triangles, unwrapping,
+  baking and inpainting took 54 to 68 s.
 - No chart merging and no seam-length minimization; charts are only rotated to the best of 24 bounding-box angles before packing.
 - Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
   efficient).

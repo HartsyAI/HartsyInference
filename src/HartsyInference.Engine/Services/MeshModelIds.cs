@@ -18,6 +18,10 @@ public static class MeshModelIds
     /// <summary>Rigging models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/> and the result is a rigged GLB.</summary>
     public static readonly IReadOnlyList<string> RigMesh = ["unirig"];
 
+    /// <summary>Texturing models (Hunyuan3D Paint 2.0 albedo and 2.1 PBR): their request carries both <see cref="Requests.MeshRequest.SceneMesh"/> and
+    /// <see cref="Requests.MeshRequest.Image"/> and the result is a textured GLB.</summary>
+    public static readonly IReadOnlyList<string> PaintMesh = ["hunyuan3d-paint", "hunyuan3d-paint21"];
+
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
-    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh];
+    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh];
 }

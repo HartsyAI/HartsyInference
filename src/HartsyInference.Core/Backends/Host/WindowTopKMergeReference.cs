@@ -12,7 +12,7 @@ public static class WindowTopKMergeReference
         ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(topk);
         ArgumentNullException.ThrowIfNull(positions);
-        ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(window);
         if (topk.DType != DType.I32 || topk.Shape.Rank != 2)
             throw new ArgumentException($"MergeWindowTopK topk must be I32 [tokens, cols]; got {topk.Shape} {topk.DType.Name}.", nameof(topk));
         long tokens = topk.Shape[0], cols = topk.Shape[1];
@@ -39,7 +39,7 @@ public static class WindowTopKMergeReference
     public static int MergeRow(ReadOnlySpan<int> topk, int topkWidth, int position, int window, Span<int> row)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(position);
-        ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(window);
         ArgumentOutOfRangeException.ThrowIfNegative(topkWidth);
         if (row.Length < topkWidth + window) throw new ArgumentException("row must hold topkWidth + window entries.", nameof(row));
         int seq = position + 1;

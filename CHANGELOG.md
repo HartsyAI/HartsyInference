@@ -3,13 +3,26 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
-## alpha.423
+## alpha.424
 
 - **Fixed: Vulkan `ConvTranspose1d` rejected grouped and depthwise weights.** The shader had no `groups` field and the backend threw `NotSupportedException` for any `groups != 1`, so the depthwise pool in Kokoro's AdainResBlk1d and the grouped calls in Mimi, PocketTTS and AntiAliasedSnake failed on Vulkan. The shader now takes `groups` with weight `[C_in, C_out/groups, K]`, and dense calls sum in the same order as before. `VulkanConvTranspose1dParityTests` checks dense, depthwise and grouped cases against the CPU reference. Kokoro and StyleTTS 2 are not yet re-run end to end on Vulkan.
+
+## alpha.423
+
+- **Added: Kimi K3.1 decoder on CUDA and Vulkan, synthetic checkpoints only (real weights not run).** `KimiK31Model` runs KDA and NoPE
+  multi-head latent attention with the DSA indexer, a dense SiTU first layer, latent SiTU MoE layers, and block attention residuals. The KDA
+  recurrence is a new per-key-channel delta op (`IBackend.SsmChannelDecayPrefill`, with CUDA and Vulkan kernels). The row softmax
+  (`SoftmaxRows`) and the attention residual (`AttentionResidual`) are shared. ERNIE's multimax head, dense GLU FFN and hyper-connection
+  sublayer moved to shared owners. A synthetic decoder matches the CPU on CUDA and Vulkan. The checkpoint loader and config reader are not
+  built yet, so the real model is not run.
+
+## Unreleased
+
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)
   matches the CPU on CUDA and Vulkan. The real index maps every key, and the multimax matches the reference. `Ernie5RealCheckpointTests` runs
   on `ERNIE_REAL_DIR` (skipped otherwise), and `docs/Checklists/ERNIE55_REAL_WEIGHTS.md` is the runbook. The indexer ReLU stays unverified.
+
 - **Added: `hartsy 3d -m pixal3d`, Pixal3D shape-only image to mesh (🔧, parity pending).** `Pixal3DImageTo3DPipeline` runs the cascade with the
   projection-mode flows: DINOv3 tokens split into global tokens and a patch map sampled at each voxel's projected position (NAF-upsampled for the
   shape flows), the structure flow and decoder, the 512 shape flow, the upsample, the rounding quantizer, the 1024 flow at 1024 or 1536, the shape VAE
@@ -18,6 +31,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   0.8576 rad is used otherwise). `naf_release.pth` must be placed in `3D/pixal3d` by hand (a GitHub release asset the catalog cannot fetch).
   Not verified on real weights end to end; texture, multi-view and MoGe are not implemented. `Trellis2Runtime` and the new `Pixal3DRuntime` now
   share one matter-and-gate lifecycle (`MatterGatedRuntime<TPipeline>`); a field of view on any other model is rejected before it dispatches.
+
 - **Added: Pixal3D shape-only pipeline (not yet a model id).** `Pixal3DImageTo3DPipeline` runs the cascade over stub-testable stages
   (`IPixal3DConditioner`, `IPixal3DStructureStage`, `IPixal3DShapeFlowStage`): the structure flow at 16, the 512 shape flow on the pooled voxels with
   NAF-upsampled features, the shape VAE upsample, Pixal3D's rounding quantizer (`Trellis2CascadeQuantizer.RoundToCorners`) and token cap, the 1024
@@ -25,12 +39,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   finds the flows and NAF in `3D/pixal3d` and the shared decoders and DINOv3 beside it; `ShapeVaeDecoderStage.LoadNextDcF16C32` and the
   `Trellis2ModelFiles` candidate lists are now shared with TRELLIS.2. Orchestration is tested over stubs; the stages have not been run on real
   weights end to end.
+
 - **Added: NAF feature upsampler for Pixal3D (not yet a model id).** `Pixal3DNaf` loads `naf_release.pth` with the safe-subset pickle reader (37 F32
   tensors, nothing executed) and runs the guide-image conv encoder and axial RoPE on the backend, then evaluates NAF's neighbourhood attention only
   at the pixels the projection samples. It does not use `natten`: keys and values are constant inside each low-resolution cell, so the dilated
   window is the 9 x 9 block of feature cells around the pixel's own cell. The query map and upsampled features match upstream's own NAF modules on the
   real weights (worst absolute difference 1.1e-5, test bound 3e-5; `tests/python-reference/dump_pixal3d_naf.py`; `natten` replaced by a brute-force transcription of its dilated definition).
   `Pixal3DConditionerStage` can append the NAF samples after the patch-map samples, giving the 2048-channel features the shape flows read.
+
 - **Added: Pixal3D structure stage building blocks (not yet a model id).** `Pixal3DView` and `Pixal3DProjection` reproduce
   Pixal3D's camera (distance from the field of view) and view-aligned feature lookup: grid cells projected through the pinhole and read from
   the DINOv3 patch map with a bilinear, border-clamped `grid_sample` (`GridSampler.GridSampleRowsBorder`). The coordinates and the sampler
@@ -39,6 +55,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   `Pixal3DStructureStage` samples the projection-mode structure flow and decodes it with the TRELLIS.2 decoder, now shared through
   `Trellis2StructureDecoder` (TRELLIS.2 behaviour unchanged). `Trellis2ImagePreprocessor.Prepare` gains a `cropScale` overload for
   Pixal3D's 1.1 crop margin.
+
 - **Added: projection mode for the TRELLIS.2 flows (groundwork for Pixal3D, not yet runnable end to end).** `Trellis2FlowConfig` now
   reads `image_attn_mode` and `proj_in_channels` and accepts the `ElasticSLatFlowModel` sidecar name; a projection flow's blocks add a
   per-block `proj_linear` of per-token features to the cross-attention output and read the cross-attention tensors under

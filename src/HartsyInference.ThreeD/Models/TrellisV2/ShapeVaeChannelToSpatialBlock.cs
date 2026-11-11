@@ -6,17 +6,19 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
 /// <summary>
-/// Upstream <c>SparseResBlockC2S3d</c> with <c>pred_subdiv=True</c>: a subdivision head picks which children exist,
-/// conv1 emits <c>8·cout</c> channels that are split onto those children, and the skip repeats the input's channels.
+/// Upstream <c>SparseResBlockC2S3d</c>: a subdivision head (<c>pred_subdiv=True</c>) or a caller-supplied guide (<c>pred_subdiv=False</c>)
+/// picks which children exist, conv1 emits <c>8·cout</c> channels that are split onto those children, and the skip repeats the
+/// input's channels.
 /// </summary>
 internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
 {
-    private readonly Tensor _norm1W, _norm1B, _conv1B, _conv2B, _subdivW, _subdivB;
+    private readonly Tensor _norm1W, _norm1B, _conv1B, _conv2B;
+    private readonly Tensor? _subdivW, _subdivB;
     private readonly Tensor[] _conv1Slices, _conv2Slices;   // owned
     private readonly int _cin, _cout;
     private bool _disposed;
 
-    internal ShapeVaeChannelToSpatialBlock(IReadOnlyDictionary<string, Tensor> w, string p, int cin, int cout)
+    internal ShapeVaeChannelToSpatialBlock(IReadOnlyDictionary<string, Tensor> w, string p, int cin, int cout, bool predictSubdivision = true)
     {
         _cin = cin;
         _cout = cout;
@@ -26,17 +28,50 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
         _conv1B = w[$"{p}.conv1.bias"];
         _conv2Slices = SparseOps.ConvWeightSlices(w[$"{p}.conv2.weight"]);
         _conv2B = w[$"{p}.conv2.bias"];
-        _subdivW = w[$"{p}.to_subdiv.weight"];
-        _subdivB = w[$"{p}.to_subdiv.bias"];
+        if (predictSubdivision)
+        {
+            _subdivW = w[$"{p}.to_subdiv.weight"];
+            _subdivB = w[$"{p}.to_subdiv.bias"];
+        }
     }
 
-    internal SparseTensor Forward(IBackend backend, SparseTensor x)
+    /// <summary>Runs the block. A predicting block derives the child logits itself and hands them to <paramref name="record"/> when
+    /// given; a guided block takes level <paramref name="level"/> of <paramref name="guides"/>, recorded by a predicting decoder over the
+    /// same voxels.</summary>
+    internal SparseTensor Forward(
+        IBackend backend, SparseTensor x, ShapeVaeSubdivisions? guides = null, int level = 0, ShapeVaeSubdivisions? record = null)
     {
         int n = x.Count, children = ShapeVaeConfigRules.ChildGroup;
 
-        Tensor logits = ShapeVaeOps.Linear(backend, x.Feats, _subdivW, _subdivB, n, children);
+        Tensor logits;
+        bool predicted = _subdivW is not null;
+        if (predicted)
+        {
+            logits = ShapeVaeOps.Linear(backend, x.Feats, _subdivW!, _subdivB!, n, children);
+        }
+        else
+        {
+            if (guides is null)
+                throw new ArgumentException("A decoder without subdivision heads needs the guide logits of every upsample level.", nameof(guides));
+            if (!guides.Matches(level, x.Coords))
+            {
+                throw new ArgumentException(
+                    $"Guide level {level} was not recorded over this level's {n} voxels. The guide must come from a decoder run over the same coordinates.",
+                    nameof(guides));
+            }
+
+            logits = guides.Level(level);
+        }
+
         SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanChannelToSpatial(x.Coords, x.Resolution, 2, logits);
-        logits.Dispose();
+        if (predicted)
+        {
+            if (record is not null)
+                record.Add(logits, x.Coords);
+            else
+                logits.Dispose();
+        }
+
         int m = plan.Coords.Length / 4;
         if (m == 0)
         {

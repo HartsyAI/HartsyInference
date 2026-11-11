@@ -144,15 +144,7 @@ internal sealed class Ernie5Layer : IDisposable
     };
 
     private void RunSublayer(HyperConnection hc, Tensor norm, float[] stream, int tokens, float[] x, float[] sub, Action<float[], float[]> body)
-    {
-        int h = hc.Hc;
-        float[] pre = new float[tokens * h], post = new float[tokens * h], comb = new float[tokens * h * h];
-        hc.Mixes(stream, tokens, pre, post, comb);
-        hc.Collapse(stream, pre, tokens, x);
-        HostOps.RmsNorm(_backend, x, _cfg.HiddenSize, norm, (float)_cfg.RmsNormEps);
-        body(x, sub);
-        hc.Expand(sub, stream, post, comb, tokens, stream);
-    }
+        => HyperConnectionSublayer.Run(_backend, hc, norm, _cfg.HiddenSize, (float)_cfg.RmsNormEps, stream, tokens, x, sub, body);
 
     private void Ffn(float[] x, int tokens, float[] y)
     {
@@ -164,14 +156,9 @@ internal sealed class Ernie5Layer : IDisposable
             routed.AsReadOnlySpan<float>().CopyTo(y);
             return;
         }
-        int inner = _cfg.IntermediateSize;
-        Tensor gate = new(new TensorShape(1, tokens, inner), DType.F32);
-        Tensor up = new(new TensorShape(1, tokens, inner), DType.F32);
-        ProjectionOps.Project(_backend, gate, input, _denseGate!, null, lowVram: false);
-        ProjectionOps.Project(_backend, up, input, _denseUp!, null, lowVram: false);
-        using Tensor act = GatedFfn.SituGlu(_backend, gate, up, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta);
         using Tensor output = new(new TensorShape(1, tokens, d), DType.F32);
-        ProjectionOps.Project(_backend, output, act, _denseDown!, null, lowVram: false);
+        DenseGluFfn.Apply(_backend, input, _denseGate!, _denseUp!, _denseDown!, output, _cfg.IntermediateSize,
+            ActivationKind.Situ, _cfg.ActivationSituBeta, _cfg.ActivationSituLinearBeta);
         output.AsReadOnlySpan<float>().CopyTo(y);
     }
 

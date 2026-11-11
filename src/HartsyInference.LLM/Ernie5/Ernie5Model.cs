@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Heads;
 using HartsyInference.LLM.Transformer.Mhc;
 
 namespace HartsyInference.LLM.Ernie5;
@@ -291,7 +292,7 @@ public sealed class Ernie5Model : IDisposable
         using Tensor logitsT = new(new TensorShape(rows, vocab), DType.F32);
         _backend.Linear(logitsT, hiddenT, _lmHead!, null);
         float[] logits = logitsT.AsReadOnlySpan<float>().ToArray();
-        if (_multimaxRanges is not null) Ernie5Multimax.Apply(logits, _multimaxRanges, _multimaxGains!);
+        if (_multimaxRanges is not null) MultimaxHead.Apply(logits, _multimaxRanges, _multimaxGains!);
         return logits;
     }
 
