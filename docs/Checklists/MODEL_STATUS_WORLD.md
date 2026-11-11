@@ -72,7 +72,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Overall ~75% built / low validated; numeric validation is checkpoint-gated for MatrixGame2/3, Oasis, GameCraft, DIAMOND.
 
 ### Live / streaming
-- [ ] SANA-WM streaming: a live viewer. `--interactive` steers the stream and frames are written as they arrive, but nothing shows the video while it generates.
+- [x] SANA-WM streaming: a live viewer. `--view` plays frames as they are generated and steers the run from held keys; see [Research/WORLD_LIVE_VIEWER.md](../Research/WORLD_LIVE_VIEWER.md). Verified on the RTX 4090 through the window with real key events; the evidence is in that PR.
 - [ ] SANA-WM streaming refiner: run it on a GPU and compare it with upstream. That needs the release's BF16 Gemma-3-12B (24.4 GB) and block streaming for the 19B transformer on a 24 GB card.
 - [ ] SANA-WM and SANA-WM streaming through SwarmUI. There is no route yet, and the catalog status stays `ValidationPending` until there is one.
 - [ ] `MatrixGame3InteractivePipeline`.
@@ -142,4 +142,4 @@ NVIDIA's `Efficient-Large-Model/SANA-WM_streaming`: the same model distilled to 
 - Time per 24-frame chunk after the first: **1.75 s** on the 4090 (upstream: 1.16 s sampling plus 0.97 s decode) and **7.7 s** on the 3060 (upstream runs out of memory while loading there). Peak device memory 13.1 GB and 10.8 GB. The 3060 holds the carried state in BF16 (`vram.sanaWmStreamState=auto` picks that on cards of 16 GiB or less).
 - The whole `Category=GpuIntegration` set ran on the 4090 under the GPU lock, one class at a time: 29 passed, 0 failed, 5 skipped (the MOSS-VL tests, which need weights and reference dumps that are not configured here).
 
-**Limits.** CLI only. The CLI writes each frame to disk as it arrives, but there is no live viewer. The refiner (`--refiner`) is a separate row and is unverified: it has never run on a GPU, and not on real weights. The weights are non-commercial.
+**Limits.** CLI only, with a live window behind `--view` (no HTTP client yet). The CLI writes each frame to disk as it arrives. The refiner (`--refiner`) is a separate row and is unverified: it has never run on a GPU, and not on real weights. The weights are non-commercial.

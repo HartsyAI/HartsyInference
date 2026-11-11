@@ -3,6 +3,17 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.418
+
+- **Added: a live window for world models, `hartsy world --view`.** It plays frames at the plan's frame rate as the session generates
+  them, and steers the run from held keys: hold a key to move, release it to stop. Esc or Q, or closing the window, ends the run the
+  way `q` does, so the PNGs and the MP4 are still written. The window needs a display and cannot be combined with `--interactive`. It is
+  built on Avalonia 11.3.22, the version already in the local NuGet cache; the rest of the engine has no window dependency.
+- **Added: control schemes for world models.** `IWorldControlScheme` maps held keys to the action a session takes, and a model declares
+  one with `WorldCapabilities.LiveControls`. Built in: the SANA-WM camera (`wasd`, `ijkl`), Oasis (WASD, space, shift, ctrl, arrows
+  for the camera) and DIAMOND (fire and left or right). A model with no live control (SANA-WM stage 1) plays its clip when the run
+  completes. A new world model adds a scheme and nothing else; `docs/Research/WORLD_LIVE_VIEWER.md` has the steps.
+
 ## alpha.417
 
 - **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session

@@ -11,6 +11,8 @@ using HartsyInference.Engine.Worlds;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.Vision.Codec;
+using HartsyInference.WorldViewer;
+using HartsyInference.WorldViewer.Avalonia;
 using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Cli.Dispatch;
@@ -20,6 +22,9 @@ namespace HartsyInference.Cli.Dispatch;
 /// per branch.</remarks>
 public static class GenerationDispatch
 {
+    /// <summary>How far a live window may run ahead of the frames it has shown: its buffer, in seconds of video.</summary>
+    private const int ViewerBufferSeconds = 2;
+
     /// <summary>Runs one generation for <paramref name="spec"/>.</summary>
     /// <remarks><paramref name="prompt"/> is the text prompt for the generative modalities and an input file path for
     /// transcribe / vision / 3d / world. Frame sequences (video, world) are written under <paramref name="outputDir"/>
@@ -864,6 +869,12 @@ public static class GenerationDispatch
     {
         bool scriptCamera = spec.Catalog?.World?.CameraModes.Contains(WorldCameraMode.ActionScript) == true;
         string? actions = parameters.GetStringOrNull("actions");
+        bool view = parameters.GetBool("view", false);
+        bool interactive = parameters.GetBool("interactive", false);
+        if (view && interactive)
+        {
+            throw new ArgumentException("--view and --interactive both steer the run; use the window or the terminal, not both.");
+        }
         WorldRequestOptions options = new WorldRequestOptions
         {
             Prompt = parameters.GetStringOrNull("world-prompt"),
@@ -885,6 +896,14 @@ public static class GenerationDispatch
         WorldRequest request = options.ToRequest(LoadImage(prompt), ParseVramOverrides(parameters));
         WorldPlan plan = WorldPlanResolver.Resolve(spec, request, engine.BackendSelector);
 
+        // A live window steers from the keyboard, so it queues no demo plan: a per-step model is driven one action per frame.
+        IWorldControlScheme? scheme = spec.Catalog?.World?.LiveControls;
+        bool liveSteering = view && scheme is not null;
+        if (liveSteering && scheme is { Cadence: WorldControlCadence.PerStep } && actions is not null)
+        {
+            throw new ArgumentException($"--actions does not apply to '{spec.Catalog?.Id}' with --view; steer it with the keys.");
+        }
+
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("rollout");
         string slug = Path.GetFileNameWithoutExtension(prompt.Trim().Trim('"'));
         // A streaming session writes each frame to disk as it arrives, so a long or unbounded run holds none of its pixels and keeps
@@ -893,7 +912,7 @@ public static class GenerationDispatch
         List<VideoFrame> frames = new List<VideoFrame>();
         int received = 0;
         using IWorldSession session = engine.World.Open(spec, plan.Request);
-        if (!scriptCamera)
+        if (!scriptCamera && !(liveSteering && actions is null))
         {
             string[] actionPlan = ResolveActionPlan(actions, spec.Catalog?.Id);
             for (int i = 0; i < plan.ActionCount; i++)
@@ -903,12 +922,28 @@ public static class GenerationDispatch
         }
         // A streaming session can be ended from the keyboard; what it generated up to then is still saved.
         using CancellationTokenSource userStop = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        Task? keyboard = plan.Streaming && parameters.GetBool("interactive", false) && !Console.IsInputRedirected
+        Task? keyboard = plan.Streaming && interactive && !Console.IsInputRedirected
             ? Task.Run(() => DriveWorldFromKeyboard(session, userStop), CancellationToken.None)
             : null;
+        WorldSteering steering = new WorldSteering(session, scheme);
+        WorldPlayback? playback = null;
+        WorldViewerHost? viewer = null;
+        GeneratedArtifact artifact;
         try
         {
-            await foreach (VideoFrame frame in session.StreamAsync(userStop.Token).ConfigureAwait(false))
+            IAsyncEnumerable<VideoFrame> stream;
+            if (view)
+            {
+                // The window plays frames at the plan's rate from a buffer of ViewerBufferSeconds: a full buffer holds generation back.
+                playback = new WorldPlayback(plan.Fps, ViewerBufferSeconds * plan.Fps);
+                viewer = WorldViewerHost.Start(steering, playback, userStop);
+                stream = new WorldFrameStream(session, steering, plan.Unbounded ? 0 : plan.Frames).StreamAsync(userStop.Token);
+            }
+            else
+            {
+                stream = session.StreamAsync(userStop.Token);
+            }
+            await foreach (VideoFrame frame in stream.ConfigureAwait(false))
             {
                 if (spool is not null)
                 {
@@ -919,6 +954,10 @@ public static class GenerationDispatch
                     frames.Add(frame);
                 }
                 received++;
+                if (playback is not null)
+                {
+                    await playback.WriteAsync(frame, userStop.Token).ConfigureAwait(false);
+                }
                 progress?.Report(new StepPreview { Step = received, TotalSteps = plan.Unbounded ? received : plan.Frames });
             }
         }
@@ -926,7 +965,7 @@ public static class GenerationDispatch
             && (!cancel.IsCancellationRequested || plan.Unbounded))
         {
             // The stream was ended on purpose, so what it generated up to then is kept: from the keyboard (q), or with Ctrl+C when the
-            // run has no frame count to reach (--unbounded, which is stopped that way).
+            // run has no frame count to reach (--unbounded, which is stopped that way), or by closing the window.
         }
         catch when (spool is { Count: > 0 })
         {
@@ -934,28 +973,47 @@ public static class GenerationDispatch
             Logs.Warning($"[World] The stream ended after {spool.Count} frames; they are saved in {spool.OutputDirectory}.");
             throw;
         }
+        catch (Exception ex) when (playback is not null && ex is not OperationCanceledException)
+        {
+            playback.Complete(ex.Message);
+            throw;
+        }
         finally
         {
+            // Keys pressed after this change nothing, so the session is never steered once it is being torn down.
+            steering.Close();
             userStop.Cancel();
             if (keyboard is not null)
             {
                 await keyboard.ConfigureAwait(false);
             }
+            playback?.Complete();
             progress?.Finish();
         }
-        GeneratedArtifact artifact;
-        if (spool is not null)
+        try
         {
-            if (spool.Count == 0)
+            if (spool is not null)
             {
-                throw new InvalidOperationException("The world pipeline produced no frames.");
+                if (spool.Count == 0)
+                {
+                    throw new InvalidOperationException("The world pipeline produced no frames.");
+                }
+                VideoOutputWriter.Written written = spool.Complete(null, plan.Fps);
+                artifact = DescribeFrames(spool.Count, spool.Width, spool.Height, spool.FirstFrame!, written, null);
             }
-            VideoOutputWriter.Written written = spool.Complete(null, plan.Fps);
-            artifact = DescribeFrames(spool.Count, spool.Width, spool.Height, spool.FirstFrame!, written, null);
+            else
+            {
+                artifact = FrameArtifact(frames, outputDir, slug, "world", null, plan.Fps);
+            }
+            // The files are written; a window still playing its buffer stays open until the viewer is closed.
+            if (viewer is not null)
+            {
+                await viewer.WaitUntilClosedAsync(cancel).ConfigureAwait(false);
+            }
         }
-        else
+        finally
         {
-            artifact = FrameArtifact(frames, outputDir, slug, "world", null, plan.Fps);
+            viewer?.Dispose();
         }
         artifact.Meta["fps"] = plan.Fps.ToString(CultureInfo.InvariantCulture);
         artifact.Meta["seed"] = plan.Seed.ToString(CultureInfo.InvariantCulture);
