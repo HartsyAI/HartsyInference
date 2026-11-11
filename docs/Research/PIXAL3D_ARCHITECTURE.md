@@ -52,7 +52,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 | Camera | `distance_from_fov`, FOV from MoGe-2 or `--fov` | none | new, small (formulas below); MoGe not ported |
 | Global tokens | DINOv3 ViT-L/16, all tokens after the last block, `F.layer_norm`, no final norm; keeps class + 4 register tokens | `Trellis2ImageConditioner.Encode` (same call returns every token) | 1:1; take the first 5 tokens |
 | Patch grid | the remaining tokens as `[h, w, 1024]`, `h = w = size / 16` | the same tokens, row-major | 1:1, needs a view |
-| NAF upsample | `valeoai/NAF`, `[1024, 32 or 64]^2` to `[1024, 512 or 1024]^2` guided by the RGB image | none | new (cross-scale neighbourhood attention; see [NAF](#naf)) |
+| NAF upsample | `valeoai/NAF`, `[1024, 32 or 64]^2` to `[1024, 512 or 1024]^2` guided by the RGB image | none | new (cross-scale neighbourhood attention; see [NAF](#naf-the-natten-dependency)) |
 | Projection | `ProjGrid`: grid points, pinhole projection, `grid_sample` (bilinear, border padding, `align_corners=False`) | none (`TriplaneGridSample` is a different op) | new: 2D bilinear gather op plus the camera math |
 | Structure flow | `SparseStructureFlowModel`, `image_attn_mode="proj"`, `proj_in_channels` defaults to 1024 | `Trellis2SparseStructureFlow`, `Trellis2FlowBlock`, `Trellis2FlowConfig`, `Trellis2FlowKeyMap` | config change: proj branch in block + key map; checkpoint also holds a `rope_phases` buffer |
 | Structure decode | `ss_dec_conv3d_16l8_fp16` | `SparseStructureDecoder` | 1:1, same file (sha256 `1c76d4a4...`) |
@@ -80,11 +80,11 @@ why they are 5.5 GB where the TRELLIS.2 files are 2.6 GB: the parameter count is
 | Property | TRELLIS.2 flow | Pixal3D flow |
 |---|---|---|
 | Storage dtype | BF16 | F32 (`Trellis2FlowWeights` already widens through `TensorCasts.EnsureF32`, F32 is borrowed) |
-| Tensors | 640 (10 model-level, 21 per block) | 700 (10 model-level, 23 per block) |
+| Tensors | 640 (10 model-level, 21 per block) | 700 (10 model-level, 23 per block); the structure flow file holds 701 (the 700 plus `rope_phases`), headers read after download |
 | Cross-attention keys | `blocks.N.cross_attn.{to_q,to_kv,to_out,q_rms_norm,k_rms_norm}` | `blocks.N.cross_attn.cross_attn_block.<same>` plus `blocks.N.cross_attn.proj_linear.{weight,bias}` |
 | `proj_linear` | none | `[1536, 2048]` + `[1536]` in the three shape/texture flows; `[1536, 1024]` + `[1536]` in the structure flow |
 | Sidecar `name` | `SLatFlowModel`, `SparseStructureFlowModel` | `ElasticSLatFlowModel`, `SparseStructureFlowModel`; extra args `image_attn_mode: "proj"`, `proj_in_channels` (2048; absent in the structure flow, so it defaults to `cond_channels` 1024) |
-| Other tensors | none | structure flow only: `rope_phases`, dtype **C64** (complex64) `[4096, 64]`; `SafeTensorDTypes` has no C64 |
+| Other tensors | none | structure flow only: `rope_phases`, dtype **C64** (complex64) `[4096, 64]`; `SafeTensorDTypes` has no C64, so `SafeTensorHeaderReader.ReadTensor` throws while parsing the header and the file cannot be opened at all |
 | Config | width 1536, 30 blocks, 12 heads, `mlp_ratio` 5.3334, RoPE, shared modulation, QK RMS norm | identical; `cond_channels` 1024 |
 
 Texture flow: `in_channels` 64, `out_channels` 32, otherwise identical. `_mv` flows have exactly the same keys, shapes and sidecar as the
@@ -102,7 +102,9 @@ Files (revision `b0cb2e1b`, sizes in bytes, LFS sha256):
 | `*_mv` variants of the four flows | same sizes | `ss` `e7ce6305...`, `512` `043a0d7f...`, `1024` `37f75c8f...`, `tex` `887fed61...` |
 | `naf_release.pth` (GitHub `valeoai/NAF`, release `model`) | 2664431 | `c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f` (GitHub asset digest) |
 
-The non-`_mv` Pixal3D set is 24.04 GB (the reported ~24 GB). The shape-only set that is not already on disk is the three flows, 16.45 GB, plus
+The non-`_mv` Pixal3D set is 24.04 GB (the reported ~24 GB): the four flows and the texture decoder above (22.95 GB) plus the two shared
+decoders, `ss_dec_conv3d_16l8_fp16.safetensors` (147591972) and `shape_dec_next_dc_f16c32_fp16.safetensors` (948490494), which are already local.
+The shape-only set that is not already on disk is the three flows, 16.45 GB, plus
 NAF (2.7 MB); the texture flow and decoder add 6.5 GB.
 
 ## Camera and projection (from `inference.py` and `image_conditioned_proj.py`)
@@ -144,10 +146,13 @@ floor of 1024 are TRELLIS.2's. The quantizer differs:
 |---|---|---|
 | HR voxel from an upsampled voxel `c` | `int((c + 0.5) / 512 * (res / 16))` | `round((c + 0.5) / 512 * (res / 16 - 1)).int()` |
 
-`Trellis2Cascade.QuantizeUnique` implements the first in exact integer arithmetic; the second needs a parameterised form (and its tie
-behaviour: `torch.round` rounds half to even). The corner-inclusive projection grid is why Pixal3D uses `res/16 - 1`.
+`Trellis2Cascade.QuantizeUnique` implements the first in exact integer arithmetic; the second needs a parameterised form. The
+corner-inclusive projection grid is why Pixal3D uses `res/16 - 1`. With `k = res/16 - 1` (63 or 95) the argument is `(2c + 1) k / 1024`,
+exact in F32 (a power-of-two divisor, and `(2c + 1) k` below 2^24), so the spec is integer: `n = (2c + 1) k`, `q = n div 1024`, `r = n mod 1024`;
+the result is `q + 1` when `r > 512`, `q` when `r < 512`, and at the tie `r = 512` it is the even one of `q` and `q + 1`
+(`torch.round` is half to even). That is what PR 2 tests against.
 
-## NAF (the `natten` dependency) <a id="naf"></a>
+## NAF (the `natten` dependency)
 
 `natten` is **not** imported anywhere in Pixal3D's own code (the only mention is a wheel in `requirements-hfdemo.txt`). It comes in through
 NAF, which Pixal3D's `DinoV3ProjFeatureExtractor` loads with `torch.hub.load("valeoai/NAF", "naf", pretrained=True)` when `use_naf_upsample` is
@@ -165,15 +170,22 @@ NAF (dim 256, 4 attention heads, 4 RoPE heads, kernel 9) is small:
 
 The engine already has `IBackend.NeighborhoodAttention` (window slides inward at borders, NATTEN's rule, window depth/height/width over a
 `[batch, T, H, W, heads, headDim]` tensor). Dilation `d` splits the map into `d * d` interleaved sub-grids and applies the same rule inside each;
-that is a reshape into the batch axis (with `T = 1`) and back, valid because the maps are multiples of `d`. No new attention kernel is needed.
-Cost to plan for: a 512 or 1024 output with 1024 channels is 1 GiB or 4 GiB in F32, so a port should evaluate NAF only where the projection
-samples it, or in tiles.
+that is a permute into the batch axis (with `T = 1`) and back, valid because the maps are multiples of `d`. The permute copies data; it is not a
+free reshape.
+
+Two things stop this from being a drop-in. `NeighborhoodAttentionContract` requires q, k and v to have one shape, but here q and k are the
+256-channel encoder map (head width 64 with 4 heads) and v is the 1024-channel DINOv3 map (head width 256). Either q and k are zero-padded to
+v's head width with `scale = 64^-0.5` passed explicitly (scores unchanged, about 4x the q.k work), or the contract is relaxed so v has its own
+head width. The tiled CUDA path handles `HeadDim == 64` only, so a 256-wide head runs on the generic kernel. Whether that is fast enough is
+not measured.
+Cost to plan for: a 512 or 1024 output with 1024 channels is 1 GiB or 4 GiB in F32, and the sub-grid permute copies it, so a port should
+evaluate NAF only where the projection samples it, or in tiles.
 
 `naf_release.pth` is a pickle. Never execute it; the repository has a safe-subset reader (`PytorchPickleLoader`, used for the UniRig checkpoint)
 that is the intended way in, after the file is listed for approval. Its tensor names and shapes are therefore **not** verified here; the
 module layout above comes from the source.
 
-## MoGe <a id="moge"></a>
+## MoGe
 
 MoGe-2 (`Ruicheng/moge-2-vitl`, 1.3 GB `model.pt`, a pickle) is used only to estimate the horizontal field of view in `inference.py`: `fx_norm`
 from its intrinsics gives `fov = 2 atan(1 / (2 fx_norm))`, run on the already preprocessed image. Passing `--fov` (radians) skips it entirely;
@@ -186,8 +198,10 @@ with a documented default.
 1. The conditioning is no longer one token tensor: each flow takes a pair (5 global tokens `[1, 5, 1024]`, per-voxel features
    `[N, 1024 or 2048]`). `ITrellis2Conditioner`, the stage interfaces and the flow `Forward` signatures carry a single `Tensor cond`.
 2. Weights are F32 and 2x the TRELLIS.2 files; each is read from disk per stage, as the TRELLIS.2 stages already do.
-3. The structure flow's `rope_phases` (C64) makes `SafeTensorsLoader` reject the file today; the table is rebuilt in C# anyway
-   (`Trellis2RopeTable`), so the tensor should be skipped by name and its shape checked.
+3. The structure flow's `rope_phases` (C64) makes the file unopenable today: `SafeTensorHeaderReader.ReadTensor` throws on the unknown dtype
+   while parsing the header, before any tensor is looked up, so it cannot be skipped by name. The header reader needs a change: either parse
+   `C64` into a descriptor that cannot be materialised (guarded like FNUZ in `SafeTensorDTypes.ThrowIfNotMaterialisable`), or take an ignore
+   list. The extent's overlap and length validation stays either way. The RoPE table is rebuilt in C# anyway (`Trellis2RopeTable`).
 4. `Trellis2FlowConfig.FromJson` rejects `ElasticSLatFlowModel` and ignores `image_attn_mode` and `proj_in_channels`; `Trellis2FlowKeyMap` and
    `Trellis2FlowBlock` use `cross_attn.*` names.
 5. The cascade quantizer differs (above), and `mesh` scale conventions are TRELLIS.2's, so `ToYUp` is reused.
@@ -198,7 +212,7 @@ with a documented default.
 Proposed split (each a draft PR; the first two are generalisations with TRELLIS.2 numerics pinned by tests):
 
 1. **Flow proj mode.** `Trellis2FlowConfig` reads `image_attn_mode` / `proj_in_channels` and accepts `ElasticSLatFlowModel`; the key map and
-   block take an optional per-block `proj_linear` and the `cross_attn_block` prefix; `rope_phases` is skipped. The flows' `Forward` takes a
+   block take an optional per-block `proj_linear` and the `cross_attn_block` prefix; the safetensors header reader accepts `C64` as a non-materialisable dtype so `rope_phases` can be left unread. The flows' `Forward` takes a
    condition pair. TRELLIS.2 forward outputs are asserted bit-equal before and after on tiny networks.
 2. **Condition type and cascade quantizer.** A small record for (global, per-voxel) conditioning through `ITrellis2StructureStage` /
    `ITrellis2ShapeFlowStage`, and a parameterised `QuantizeUnique` that keeps TRELLIS.2's result.
@@ -215,7 +229,8 @@ sibling folders, matting through `Trellis2LazyMatter` / `Trellis2ModelFiles.Find
 
 ## Not verified
 
-- No weight was downloaded: the flow and NAF layouts come from headers and source, not from loading them.
-- NAF's tensor names and shapes (pickle not read), and its weights licence.
+- The three shape-only flows and `naf_release.pth` are downloaded and size and sha256 checked; the flow layouts come from their headers and
+  the source, and nothing has been loaded through the engine yet.
+- NAF's tensor names and shapes (pickle not read), its weights licence, and the speed of 256-wide heads on the generic kernel.
 - Whether `Trellis2PipelineConfig.Load` accepts Pixal3D's `pipeline.json` as is (the fields it reads are equal to the local TRELLIS.2 file).
 - Any numerical agreement with the Python reference; no reference dumps exist.
