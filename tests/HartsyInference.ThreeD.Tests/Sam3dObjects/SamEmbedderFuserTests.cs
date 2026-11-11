@@ -159,7 +159,11 @@ public sealed class SamEmbedderFuserTests
 
         Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, new Dictionary<string, Tensor> { ["image"] = tokens["image"] }));
         Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, tokens));
-        Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, tokens, new HashSet<string> { "typo" }));
+        // On a valid token set, so only the keyword check can be what throws.
+        Dictionary<string, Tensor> valid = new() { ["image"] = tokens["image"], ["rgb_image"] = Filled(rng, 1, 4), ["pointmap"] = tokens["pointmap"] };
+        using Owned ownedValid = new(new Dictionary<string, Tensor> { ["rgb_image"] = valid["rgb_image"] });
+        ArgumentException typo = Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, valid, new HashSet<string> { "typo" }));
+        Assert.Equal("forceDrop", typo.ParamName);
         w.Remove("idx_emb");
         Assert.Throws<InvalidOperationException>(() => new SamEmbedderFuser(Embedders, Fused, w));
     }
