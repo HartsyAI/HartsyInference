@@ -73,7 +73,7 @@ public sealed class SamMotFlow
     /// <summary>
     /// The velocity of every latent. <paramref name="latents"/> holds an F32 <c>[1, tokens, channels]</c> tensor per modality, <paramref name="t"/> is the model
     /// timestep (<c>1000 · t</c>), <paramref name="cond"/> the condition tokens F32 <c>[1, n, cond]</c> and <paramref name="stepSize"/> the shortcut <c>d</c>
-    /// (0 at inference; required by a shortcut model, upstream adds <c>d_embedder(d)</c> whenever a <c>d</c> is passed). Returns tensors of the latents'
+    /// (0 at inference, and what a shortcut model uses when it is omitted: upstream adds <c>d_embedder(d)</c> whenever a <c>d</c> is passed). Returns tensors of the latents'
     /// shapes, owned by the caller; the inputs are not touched.
     /// </summary>
     public Dictionary<string, Tensor> Forward(IBackend backend, IReadOnlyDictionary<string, Tensor> latents, float t, Tensor cond, float? stepSize = null)
@@ -90,7 +90,8 @@ public sealed class SamMotFlow
                 throw new ArgumentException($"No latent was given for '{latent.Name}'.", nameof(latents));
         }
 
-        Tensor timeEmbedding = TimeEmbedding(backend, t, stepSize);
+        // Upstream adds d_embedder(d) whenever a d is passed and inference passes 0, so a shortcut model always adds it (an omitted step size means 0).
+        Tensor timeEmbedding = TimeEmbedding(backend, t, stepSize ?? (_step is not null ? 0f : null));
         Dictionary<string, Tensor> streams = [];
         try
         {

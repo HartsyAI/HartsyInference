@@ -386,6 +386,24 @@ public sealed class SamMotFlowTests
     }
 
     [Fact]
+    public void Forward_AnOmittedStepSizeMeansZeroOnAShortcutModel()
+    {
+        Random rng = new(18);
+        Dictionary<string, Tensor> w = Weights(rng, Config);
+        Dictionary<string, Tensor> latents = Latents(rng, Config);
+        Tensor cond = Filled(rng, 2.0, 1, 3, Config.CondChannels);
+        using Owned owned = new(w.Values, latents.Values, [cond]);
+        using CpuBackend backend = new();
+        SamMotFlow flow = new(Config, w);
+
+        Dictionary<string, Tensor> omitted = flow.Forward(backend, latents, 250f, cond);
+        Dictionary<string, Tensor> zero = flow.Forward(backend, latents, 250f, cond, 0f);
+        using Owned results = new(omitted.Values, zero.Values);
+
+        Assert.Equal(zero["shape"].AsReadOnlySpan<float>().ToArray(), omitted["shape"].AsReadOnlySpan<float>().ToArray());
+    }
+
+    [Fact]
     public void Forward_TheProtectedShapeStreamIgnoresThePoseLatentsButNotTheOtherWayAround()
     {
         Random rng = new(13);
