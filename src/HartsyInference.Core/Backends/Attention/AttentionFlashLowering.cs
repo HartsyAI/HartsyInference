@@ -23,7 +23,8 @@ public static class AttentionFlashLowering
             return "a non-F32 operand";
         if (call.KvHeads <= 0 || call.Heads % call.KvHeads != 0) return "query heads that are not a multiple of the key/value heads";
         if (call.Key.HeadDim != call.QkHeadDim || call.ValueHeadDim > call.QkHeadDim) return "a value wider than the query/key";
-        if (call.Value.Tokens != call.Key.Tokens || call.Value.Heads != call.KvHeads || call.Value.Batch != call.Batch || call.Key.Batch != call.Batch)
+        if (call.Value.Tokens != call.Key.Tokens || call.Value.Heads != call.KvHeads || call.Value.Batch != call.Batch
+            || call.Key.Batch != call.Batch)
             return "key and value operands of different extents";
         if (call.Output.Heads != call.Heads || call.Output.Tokens != call.QueryTokens || call.Output.HeadDim != call.ValueHeadDim
             || call.Output.Batch != call.Batch)

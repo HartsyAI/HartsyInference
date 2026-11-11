@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Attention;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
@@ -49,9 +50,31 @@ public sealed class Ernie5AttentionLayersParityTests
     public void Vulkan_DsaAttention_Fp8Indexer_StaysCloseToCpu() =>
         DsaParity(Vulkan, LatentEncoding.Fp8E4M3Ue8m0x128, kvLoraRank: 32, ropeDim: 8);
 
+    [CudaFact]
+    public void Cuda_LoweredErnieAttention_PlansADeviceRow() => PlansOnDevice(Cuda);
+
+    [VulkanFact]
+    public void Vulkan_LoweredErnieAttention_PlansADeviceRow() => PlansOnDevice(Vulkan);
+
     private static IBackend Cuda() => new CudaBackend(0, CudaPtxDirectory.Resolve());
 
     private static IBackend Vulkan() => new VulkanBackend();
+
+    // The flash calls the lowering stages for ERNIE's widest layers (HCA head dim 512; DSA latent 576 with V padded to it), with sinks,
+    // must plan onto a device kernel row, never the host reference.
+    private static void PlansOnDevice(Func<IBackend> open)
+    {
+        using IBackend device = open();
+        foreach ((int heads, int dim, int keys) in new[] { (64, 512, 135), (64, 576, 2181) })
+        {
+            using Tensor q = new(new TensorShape(1, heads, 1, dim), DType.F32), o = new(new TensorShape(1, heads, 1, dim), DType.F32);
+            using Tensor k = new(new TensorShape(1, 1, keys, dim), DType.F32), v = new(new TensorShape(1, 1, keys, dim), DType.F32);
+            using Tensor sink = new(new TensorShape(heads), DType.F32);
+            AttentionCall call = AttentionCall.FromFlashAttention(o, q, k, v, keys, false, 0, 0.05f, 0f, sink, 0, null);
+            AttentionPlan plan = device.PlanAttention(in call);
+            Assert.True(plan.Row is not null && plan.RowId != "host.reference", $"head dim {dim}: {plan.Describe()}");
+        }
+    }
 
     private static void HcaParity(Func<IBackend> open, bool fp8, int headDim)
     {

@@ -22,6 +22,7 @@ internal static class HostOps
     /// <paramref name="weight"/> is <c>[groups * rank, groupDim]</c>, F32 or F8E4M3 with <paramref name="weightScaleInv"/>.</summary>
     public static float[] BlockDiagonal(IBackend backend, ReadOnlySpan<float> x, int rows, int groups, Tensor weight, Tensor? weightScaleInv)
     {
+        if (rows < 1 || x.Length % rows != 0) throw new ArgumentException($"x must hold {rows} whole rows.", nameof(x));
         using Tensor input = HostMath.Tensor(x, rows, x.Length / rows);
         using Tensor output = new(new TensorShape(rows, weight.Shape[0]), DType.F32);
         backend.BlockDiagonalLinear(output, input, weight, weightScaleInv, groups);

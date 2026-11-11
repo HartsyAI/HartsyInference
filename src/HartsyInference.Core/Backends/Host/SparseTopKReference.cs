@@ -63,6 +63,17 @@ public static class SparseTopKReference
         }
     }
 
+    /// <summary>The indices of the <paramref name="k"/> best values, best first, under the same order as <see cref="SelectRow"/>.</summary>
+    public static int[] Best(float[] values, int k)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        if ((uint)k > (uint)values.Length) throw new ArgumentOutOfRangeException(nameof(k));
+        int[] idx = new int[values.Length];
+        for (int i = 0; i < idx.Length; i++) idx[i] = i;
+        idx.AsSpan().Sort(new BestFirst(values));
+        return idx.AsSpan(0, k).ToArray();
+    }
+
     // Larger value first under float.CompareTo (NaN lowest, -0 == +0), then the lower index: a total order, so any sort agrees.
     private readonly struct BestFirst(float[] values) : IComparer<int>
     {

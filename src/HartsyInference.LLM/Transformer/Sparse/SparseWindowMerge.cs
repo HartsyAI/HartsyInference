@@ -22,6 +22,7 @@ public static class SparseWindowMerge
         ArgumentOutOfRangeException.ThrowIfNegative(position);
         ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
         int n = Math.Min(Math.Max(position + 1 - window, 0), Math.Max(topkWidth, 0));
+        // Range-check the entries present; a topk shorter than n is MergeRow's error.
         for (int i = 0; i < n && i < topk.Length; i++)
         {
             if ((uint)topk[i] >= (uint)(position + 1 - window))

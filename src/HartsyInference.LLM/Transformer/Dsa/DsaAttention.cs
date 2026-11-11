@@ -172,8 +172,15 @@ public sealed class DsaAttention : IDisposable
         float[] latentOut = new float[tokens * h * kvr];
         for (int t = 0; t < tokens; t++)
         {
-            int seq = positions[t] + 1;
-            int count = Math.Min(Math.Max(seq - win, 0), rowCols) + Math.Min(seq, win);
+            int seq = positions[t] + 1, picked = Math.Min(Math.Max(seq - win, 0), rowCols);
+            int count = picked + Math.Min(seq, win);
+            // A NaN indexer score ranks below the masked tail and can leave a -1 among the picks; name it here, not in GatherRows.
+            for (int i = 0; i < picked; i++)
+            {
+                if ((uint)rows[t * rowWidth + i] >= (uint)(seq - win))
+                    throw new InvalidOperationException($"DSA top-k entry {rows[t * rowWidth + i]} for position {positions[t]} is "
+                        + $"outside [0, {seq - win}); the indexer scores held a NaN.");
+            }
             using Tensor keys = new(new TensorShape(count, latent), DType.F32);
             _backend.GatherRows(keys, state.Latent, rows.AsSpan(t * rowWidth, count));
             using Tensor qT = HostMath.Tensor(query.AsSpan(t * h * latent, h * latent), 1, h * latent);

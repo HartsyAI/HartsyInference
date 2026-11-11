@@ -24,17 +24,5 @@ public static class SparseTopK
     }
 
     /// <summary>The indices of the <paramref name="k"/> largest values, best first, ties toward the lower index.</summary>
-    public static int[] Best(float[] values, int k)
-    {
-        ArgumentNullException.ThrowIfNull(values);
-        if ((uint)k > (uint)values.Length) throw new ArgumentOutOfRangeException(nameof(k));
-        int[] idx = new int[values.Length];
-        for (int i = 0; i < idx.Length; i++) idx[i] = i;
-        Array.Sort(idx, (a, b) =>
-        {
-            int c = values[b].CompareTo(values[a]);
-            return c != 0 ? c : a.CompareTo(b);
-        });
-        return idx.AsSpan(0, k).ToArray();
-    }
+    public static int[] Best(float[] values, int k) => SparseTopKReference.Best(values, k);
 }

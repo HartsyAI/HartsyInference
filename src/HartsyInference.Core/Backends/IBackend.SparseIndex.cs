@@ -20,7 +20,8 @@ public partial interface IBackend
     /// window, then that window. See <see cref="Host.WindowTopKMergeReference"/>.</summary>
     /// <param name="rows">I32 <c>[tokens, width]</c> with <c>width >= topkCols + window</c>.</param>
     /// <param name="topk">I32 <c>[tokens, topkCols]</c>; entries are copied as given.</param>
-    /// <param name="positions">I32 <c>[tokens]</c> absolute query positions, non-negative.</param>
+    /// <param name="positions">I32 <c>[tokens]</c> absolute query positions, non-negative. A negative one is a caller error the
+    /// CPU reference throws on; a device cannot raise and writes that query's row as all -1.</param>
     void MergeWindowTopK(Tensor rows, Tensor topk, Tensor positions, int window) =>
         throw NotSupportedPrimitive(nameof(MergeWindowTopK));
 }
