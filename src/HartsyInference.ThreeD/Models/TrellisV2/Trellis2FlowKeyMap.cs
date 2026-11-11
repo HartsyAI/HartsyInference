@@ -31,11 +31,14 @@ public static class Trellis2FlowKeyMap
         AddLinear(specs, $"{p}.self_attn.to_out", c, c);
         Add(specs, $"{p}.norm2.weight", c);
         Add(specs, $"{p}.norm2.bias", c);
-        AddLinear(specs, $"{p}.cross_attn.to_q", c, c);
-        AddLinear(specs, $"{p}.cross_attn.to_kv", 2 * c, config.CondChannels);
+        string cross = $"{p}.{config.CrossAttentionScope}";
+        AddLinear(specs, $"{cross}.to_q", c, c);
+        AddLinear(specs, $"{cross}.to_kv", 2 * c, config.CondChannels);
         if (config.QkRmsNormCross)
-            AddGammas(specs, $"{p}.cross_attn", config);
-        AddLinear(specs, $"{p}.cross_attn.to_out", c, c);
+            AddGammas(specs, cross, config);
+        AddLinear(specs, $"{cross}.to_out", c, c);
+        if (config.HasProjection)
+            AddLinear(specs, $"{p}.cross_attn.proj_linear", c, config.ProjInChannels);
         AddLinear(specs, $"{p}.mlp.mlp.0", config.MlpHidden, c);
         AddLinear(specs, $"{p}.mlp.mlp.2", c, config.MlpHidden);
     }

@@ -5,7 +5,7 @@ namespace HartsyInference.ThreeD.Tests.TrellisV2;
 
 /// <summary>
 /// A scalar double-precision transcription of the upstream TRELLIS.2 flow forward (ModulatedTransformerCrossBlock with share_mod,
-/// QK RMS norm, 3D RoPE and the model-level embedder), written from the upstream Python independently of the engine's ops. It shares
+/// QK RMS norm, 3D RoPE and the model-level embedder; plus Pixal3D's projection branch), written from the upstream Python independently of the engine's ops. It shares
 /// this repository's reading of upstream and is not a parity reference; it catches wiring mistakes in the engine's block.
 /// </summary>
 internal sealed class Trellis2Reference
@@ -19,8 +19,9 @@ internal sealed class Trellis2Reference
         _w = weights.ToDictionary(p => p.Key, p => Trellis2TestData.ToArray(p.Value));
     }
 
-    /// <summary>Velocity rows <c>[tokens][out]</c> for input rows <c>[tokens][in]</c> at positions <c>[tokens][3]</c>.</summary>
-    internal double[][] Forward(double[][] input, double[][] positions, double tModel, double[][] cond)
+    /// <summary>Velocity rows <c>[tokens][out]</c> for input rows <c>[tokens][in]</c> at positions <c>[tokens][3]</c>; <paramref name="proj"/>
+    /// holds one feature row per token for a projection flow.</summary>
+    internal double[][] Forward(double[][] input, double[][] positions, double tModel, double[][] cond, double[][]? proj = null)
     {
         int c = _config.ModelChannels;
         double[] freq = new double[256];
@@ -35,12 +36,13 @@ internal sealed class Trellis2Reference
         double[] shared = Linear(emb.Select(Silu).ToArray(), "adaLN_modulation.1", 6 * c);
         double[][] x = input.Select(row => Linear(row, "input_layer", c)).ToArray();
         for (int b = 0; b < _config.NumBlocks; b++)
-            x = Block(x, $"blocks.{b}", shared, positions, cond);
+            x = Block(x, $"blocks.{b}", shared, positions, cond, proj);
         return x.Select(row => Linear(LayerNorm(row, null, null, 1e-5), "out_layer", _config.OutChannels)).ToArray();
     }
 
-    private double[][] Block(double[][] x, string p, double[] shared, double[][] positions, double[][] cond)
+    private double[][] Block(double[][] x, string p, double[] shared, double[][] positions, double[][] cond, double[][]? proj)
     {
+        string scope = $"{p}.{_config.CrossAttentionScope}";
         int c = _config.ModelChannels, heads = _config.NumHeads, hd = _config.HeadDim, n = x.Length;
         double[] mod = new double[6 * c];
         for (int i = 0; i < mod.Length; i++)
@@ -68,17 +70,18 @@ internal sealed class Trellis2Reference
         }
 
         double[][] hc = x.Select(row => LayerNorm(row, _w[$"{p}.norm2.weight"], _w[$"{p}.norm2.bias"], 1e-6)).ToArray();
-        double[][] cq = hc.Select(row => Linear(row, $"{p}.cross_attn.to_q", c)).ToArray();
-        double[][] ckv = cond.Select(row => Linear(row, $"{p}.cross_attn.to_kv", 2 * c)).ToArray();
-        cq = HeadNorm(cq, $"{p}.cross_attn.q_rms_norm.gamma");
-        double[][] ck = HeadNorm(ckv.Select(r => r[..c]).ToArray(), $"{p}.cross_attn.k_rms_norm.gamma");
+        double[][] cq = hc.Select(row => Linear(row, $"{scope}.to_q", c)).ToArray();
+        double[][] ckv = cond.Select(row => Linear(row, $"{scope}.to_kv", 2 * c)).ToArray();
+        cq = HeadNorm(cq, $"{scope}.q_rms_norm.gamma");
+        double[][] ck = HeadNorm(ckv.Select(r => r[..c]).ToArray(), $"{scope}.k_rms_norm.gamma");
         double[][] cv = ckv.Select(r => r[c..]).ToArray();
         double[][] cross = Attention(cq, ck, cv, heads, hd);
         for (int t = 0; t < n; t++)
         {
-            double[] o = Linear(cross[t], $"{p}.cross_attn.to_out", c);
+            double[] o = Linear(cross[t], $"{scope}.to_out", c);
+            double[]? lifted = proj is null ? null : Linear(proj[t], $"{p}.cross_attn.proj_linear", c);
             for (int i = 0; i < c; i++)
-                x[t][i] += o[i];
+                x[t][i] += o[i] + (lifted?[i] ?? 0.0);
         }
 
         for (int t = 0; t < n; t++)
