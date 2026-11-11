@@ -12,9 +12,9 @@ public sealed class UniRigCheckpoint : IDisposable
 {
     private const string EnvelopePrefix = "state_dict.model.";
 
-    private readonly PytorchPickleLoader _loader;
+    private readonly PytorchPickleLoader? _loader;
 
-    private UniRigCheckpoint(PytorchPickleLoader loader, Dictionary<string, Tensor> tensors)
+    private UniRigCheckpoint(PytorchPickleLoader? loader, IReadOnlyDictionary<string, Tensor> tensors)
     {
         _loader = loader;
         Tensors = tensors;
@@ -23,7 +23,7 @@ public sealed class UniRigCheckpoint : IDisposable
     /// <summary>Tensors by upstream module path, e.g. <c>mesh_encoder.encoder.input_proj.weight</c>.</summary>
     public IReadOnlyDictionary<string, Tensor> Tensors { get; }
 
-    /// <summary>Reads <paramref name="path"/>, requiring every tensor to be F32 under the <c>state_dict.model.</c> envelope.</summary>
+    /// <summary>Reads <paramref name="path"/>, requiring every tensor to be F32 (BatchNorm step counters are skipped) under the <c>state_dict.model.</c> envelope.</summary>
     public static UniRigCheckpoint Load(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
@@ -36,6 +36,11 @@ public sealed class UniRigCheckpoint : IDisposable
             foreach (KeyValuePair<string, Tensor> pair in raw)
             {
                 if (!pair.Key.StartsWith(EnvelopePrefix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (pair.Key.EndsWith(".num_batches_tracked", StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -62,6 +67,13 @@ public sealed class UniRigCheckpoint : IDisposable
         }
     }
 
+    /// <summary>Wraps tensors already in memory (keyed by module path); the caller keeps ownership of them.</summary>
+    public static UniRigCheckpoint FromTensors(IReadOnlyDictionary<string, Tensor> tensors)
+    {
+        ArgumentNullException.ThrowIfNull(tensors);
+        return new UniRigCheckpoint(null, tensors);
+    }
+
     /// <summary>Returns the named tensor after checking its exact shape.</summary>
     public Tensor Get(string name, params long[] shape) => Get(Tensors, name, shape);
 
@@ -79,5 +91,5 @@ public sealed class UniRigCheckpoint : IDisposable
             : throw new HartsyInferenceException($"UniRig weight '{name}' has shape {tensor.Shape}, expected {expected}.");
     }
 
-    public void Dispose() => _loader.Dispose();
+    public void Dispose() => _loader?.Dispose();
 }
