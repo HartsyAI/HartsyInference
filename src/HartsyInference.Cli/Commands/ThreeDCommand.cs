@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only, or textured with --texture), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -47,6 +47,16 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [CommandOption("--no-chains")]
         [Description("Skip the spring-bone chains (hairdeck only).")]
         public bool NoChains { get; init; }
+
+        /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 only).</summary>
+        [CommandOption("--texture")]
+        [Description("Texture the mesh with baked PBR textures (trellis2 only; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md).")]
+        public bool Texture { get; init; }
+
+        /// <summary>Baked texture edge in texels (TRELLIS.2 with --texture).</summary>
+        [CommandOption("--texture-size")]
+        [Description("Baked texture size in texels, 16 to 8192 (trellis2 with --texture; 0 = 2048).")]
+        public int TextureSize { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>
         [CommandOption("--model-path")]
@@ -137,6 +147,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("rigged", settings.Rigged ? "true" : "false");
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
         parameters.Put("no-chains", settings.NoChains ? "true" : "false");
+        parameters.Put("texture", settings.Texture ? "true" : "false");
+        parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Input, parameters, settings.Backend, settings.Quiet,

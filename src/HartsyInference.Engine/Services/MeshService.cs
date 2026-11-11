@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
@@ -14,7 +15,7 @@ using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, Pixal3D) turn an image into GLB (mesh) or PLY (splat); the scene model
+/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, which can also texture, Pixal3D) turn an image into GLB (mesh) or PLY (splat); the scene model
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
 /// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
@@ -42,6 +43,8 @@ public sealed class MeshService : IMeshService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+        if (id != Trellis2Id)
+            Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
@@ -294,20 +297,16 @@ public sealed class MeshService : IMeshService, IDisposable
         return directory ?? throw new DirectoryNotFoundException($"No unet/ folder above '{localPath}'.");
     }
 
-    /// <summary>TRELLIS.2 shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or
-    /// 1536; 0 is 1024), checked with the image and seed before the checkpoints load.</summary>
+    /// <summary>TRELLIS.2 image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or 1536; 0 is
+    /// 1024), checked with the image, seed and texture size before the checkpoints load. A shape-only request returns the mesh; with
+    /// <see cref="MeshRequest.Texture"/> it returns a textured PBR GLB.</summary>
     private Task<MeshResult> GenerateTrellis2Async(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         ImageData source = request.Image!;
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The TRELLIS.2 seed must be at most {int.MaxValue}.");
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
-        Trellis2Options options = new()
-        {
-            Grid = request.GridResolution,
-            Steps = request.Steps,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
-        };
+        Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
+        if (!request.Texture && request.TextureSize != 0)
+            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only TRELLIS.2 mesh.");
         string modelsRoot = RepoPaths.ModelsRoot();
         // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
         Trellis2ImageTo3DPipeline.ValidateRequest(options, image, Trellis2Runtime.MatterAvailable(modelsRoot));
@@ -323,11 +322,18 @@ public sealed class MeshService : IMeshService, IDisposable
                 {
                     if (runtime.IsDisposed)
                         throw new ModelUnloadedException("The TRELLIS.2 model was unloaded while this request was queued; retry the request.");
-                    Mesh mesh = runtime.Pipeline.Generate(image, options, p =>
+                    Action<GenerationProgress> report = p =>
                     {
                         cancel.ThrowIfCancellationRequested();
                         progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-                    });
+                    };
+                    if (options.Texture)
+                    {
+                        PbrPostProcessResult textured = runtime.Pipeline.GenerateTextured(image, options, report, cancel);
+                        return new MeshResult { Data = Trellis2ImageTo3DPipeline.ToGlb(textured), Format = "glb" };
+                    }
+
+                    Mesh mesh = runtime.Pipeline.Generate(image, options, report);
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
                 }
                 finally

@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 
 /// <summary>Shape-VAE latent to dual-grid field: runs <see cref="ShapeVaeDecoder"/> and splits its head. It also serves TRELLIS.2's
 /// cascade, which asks the decoder only where its first four levels put voxels.</summary>
-public sealed class ShapeVaeDecoderStage : ISparseShapeDecoder, ISparseShapeUpsampler, IDisposable
+public sealed class ShapeVaeDecoderStage : ISparseShapeSubdivisionDecoder, ISparseShapeUpsampler, IDisposable
 {
     private readonly ShapeVaeDecoder _decoder;
     private bool _disposed;
@@ -29,11 +29,20 @@ public sealed class ShapeVaeDecoderStage : ISparseShapeDecoder, ISparseShapeUpsa
     }
 
     /// <inheritdoc/>
-    public DualGridField Decode(IBackend backend, SparseTensor latent)
+    public DualGridField Decode(IBackend backend, SparseTensor latent) => DecodeCore(backend, latent, null);
+
+    /// <inheritdoc/>
+    public DualGridField Decode(IBackend backend, SparseTensor latent, ShapeVaeSubdivisions record)
+    {
+        ArgumentNullException.ThrowIfNull(record);
+        return DecodeCore(backend, latent, record);
+    }
+
+    private DualGridField DecodeCore(IBackend backend, SparseTensor latent, ShapeVaeSubdivisions? record)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latent);
-        SparseTensor head = _decoder.Decode(backend, latent);
+        SparseTensor head = _decoder.Decode(backend, latent, record);
         try
         {
             return ShapeVaeHead.Split(head);

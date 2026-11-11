@@ -43,6 +43,13 @@ public sealed record MeshRequest
     /// <summary>HairDeck: rigged output, skinned to the spring chains with head-motion clips; needs chains (the default). Other models reject it.</summary>
     public bool Rigged { get; init; }
 
+    /// <summary>TRELLIS.2: also generate the PBR texture (base color, metallic, roughness) and return a textured GLB. It needs the texture
+    /// checkpoints beside the shape ones; without them the request fails before any stage runs. Other models reject it.</summary>
+    public bool Texture { get; init; }
+
+    /// <summary>TRELLIS.2 with <see cref="Texture"/>: baked texture edge in texels, 16 to 8192; 0 uses 2048. Other models reject a value.</summary>
+    public int TextureSize { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 
