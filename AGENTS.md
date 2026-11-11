@@ -34,6 +34,9 @@ These apply to every task.
   or changelog entries, whatever a tool's default is. The project records one author of record.
 - **Ship work as a draft PR.** Open it early, and merge it only after it is tested, reviewed by the bots, and every
   comment is resolved. The full sequence is in [Shipping a change](docs/Agents/AGENTS.md#shipping-a-change).
+- **Work in your own worktree and clean it up.** Create a worktree under `.claude/worktrees/` for every change, and
+  after the PR merges delete that worktree and its local and remote branch. Commands are in
+  [Shipping a change](docs/Agents/AGENTS.md#shipping-a-change), steps 1 and 8.
 - **Reuse before writing.** Check the existing `IBackend` operations and shared utilities before adding any helper.
   Keep new code modular, generic and parameterized, so callers share one implementation rather than each keeping a copy.
 </rules>
@@ -43,7 +46,7 @@ These apply to every task.
 - Make the change and run the checks yourself when the task asks for a change. Propose a diff only when the task asks
   for a recommendation.
 - Confirm with the user before any action that is hard to reverse or visible to other people: force-pushes, deleting
-  branches, discarding files you did not create, posting to PRs or external services, or restarting shared GPU or
+  branches or worktrees you did not create for the PR you just merged, discarding files you did not create, posting to PRs or external services, or restarting shared GPU or
   Swarm state. Local, reversible actions such as editing files and running tests need no confirmation.
 - Keep answers short. Lead with the result, and do not restate what the diff already shows.
 - End a long answer or a research session with a short plain-English TL;DR.

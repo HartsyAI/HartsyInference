@@ -8,6 +8,29 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 - **Fixed: Hunyuan3D-2 meshes were melted blobs facing inward.** The sampler passed the DiT `sigma*1000` where it expects `sigma`, so the DiT saw a time 1000 times too large at every step (velocity correlation with upstream 0.53 to 0.73, now 1.00000000), and the marching-cubes triangles faced inward. On the same image and seed a 20-step, grid-128 mesh goes from 228k triangles in 101 pieces to 77k triangles in one watertight piece, matching the upstream Python mesh. The schedule now starts at sigma 0 as upstream does and skips the final zero-width step. Hunyuan3D-2 stays in the validation-pending table: one image checked, see the status doc.
 - **Added: Hunyuan3D architecture dossier** with the Tencent Hunyuan 3D 2.0 Community License terms (territory excludes the EU, UK and South Korea; no training other models on outputs) and a real-weight reference dump script.
 
+## alpha.417
+
+- **Fixed: a SANA-WM stream over HTTP ran its whole job outside the long-running queue.** Opening a batch or chunked world session
+  reserves nothing, so its stream loads the model and runs it; it now takes a long-running slot like any other generation (or gets
+  a 429 when the queue is full), where before it could share the GPU with an image or video job and run out of memory. An
+  interactive session is unchanged. `IWorldSession` gains `DefersDeviceWork` (default false) for this.
+- **Fixed: a world stream that failed left nothing in the server log, and a client that disconnected made the error handler throw a
+  second time.** Failures are logged and sent to the client as an error event; a disconnect ends the stream quietly. An action sent
+  to a session closed a moment earlier now returns 404, not 500, and `hartsy world --actions ","` is refused with a message.
+- **Fixed: a SANA-WM DiT whose weight upload ran out of memory partway kept the weights it had already put on the GPU.** On the
+  12 GB card a failed load now frees them.
+- **Fixed: `Conv2dDepthwise` accepted an output with another batch than its input and wrote past the end of it.** The shared shape
+  contract now refuses it.
+- **Fixed: `DepthwiseConvGlu` failed to launch on an input with more than 65,535 frame rows.** The vectorized kernel puts them on the
+  grid's y axis, and the general kernel now takes over past the cap. The frame scan refuses more than 65,535 heads with a clear
+  message.
+- **Changed: the frame scan's GEMMs ignore `numerics.gemmF16`.** Its Gram errors compound over the recurrence, so it keeps TF32
+  (or plain F32) whatever that setting says. Default settings are unchanged.
+- **Changed: the model stage timer has its own setting, `diagnostics.stageProfile`.** `diagnostics.profile` no longer adds the
+  device syncs around every stage, and the SANA-WM softmax blocks report one row each, as the GDN blocks do.
+- **Fixed: `HartsyInference.Engine.Tests` did not compile** against the Cuda project, which now grants it access to
+  `CudaRedistProvisioner`'s internal override.
+
 ## alpha.416
 
 - **Added: SANA-WM stage 1 (`sana-wm`).** `hartsy world -m sana-wm --image <png> --prompt-file <txt> --intrinsics fx,fy,cx,cy
