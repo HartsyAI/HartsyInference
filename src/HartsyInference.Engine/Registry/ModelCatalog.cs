@@ -195,6 +195,49 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>TRELLIS.2 (microsoft/TRELLIS.2-4B), shape-only image to mesh. The asset set is the shape path: the structure, 512 and 1024
+    /// shape flows with their configs, <c>pipeline.json</c>, the sparse-structure decoder (from TRELLIS-image-large), the shape VAE decoder,
+    /// the DINOv3 encoder and an optional BiRefNet matting checkpoint for images without alpha. Pinned to TRELLIS.2-4B revision
+    /// af44b45f2e35a493886929c6d786e563ec68364d and TRELLIS-image-large 25e0d31ffbebe4b5a97464dd851910efc3002d96; the safetensors hashes are the
+    /// repositories' LFS oids, the small config files' hashes were computed from the downloaded bytes. Texture and PBR are not part of this entry.
+    /// Licences: TRELLIS.2 and TRELLIS-image-large weights MIT; DINOv3 under the DINOv3 License (Meta, custom, gated); BiRefNet-matting MIT.
+    /// Upstream preprocessing uses briaai/RMBG-2.0 (CC BY-NC 4.0, gated), which is not used here.</summary>
+    private static CatalogEntry Trellis2() => new CatalogEntry
+    {
+        Id = "trellis2", Modality = Modality.Mesh, DisplayName = "TRELLIS.2 (shape-only image to mesh)",
+        Architecture = "DINOv3 conditioning, 1.3B dense structure flow, sparse shape flows (512/1024 cascade), shape VAE with dual-grid meshing",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "microsoft/TRELLIS.2-4B",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "pipeline.json", TargetSubdir = "3D/trellis2", Role = "config",
+                Sha256 = "222c359ab1ed9bc6735a640a34f95d47f8681b9bc4aaa101bfb80274676253c6" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors", TargetSubdir = "3D/trellis2",
+                Role = "structure flow", Sha256 = "ca01377c485bec418076d38ee80166d32dc776d744f2553b835cba1e97a7abf6" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.json", TargetSubdir = "3D/trellis2",
+                Role = "structure flow config", Sha256 = "6cdfb636854f60ffcadd8c49244169cd449f34c5ccdb55b5ff7c04678f9c399e" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors", TargetSubdir = "3D/trellis2",
+                Role = "shape flow 512", Sha256 = "ec5e0917ef9b7e25ad51dffc7d19687a42019871f94239f2fa7f86264c55b70f" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json", TargetSubdir = "3D/trellis2",
+                Role = "shape flow 512 config", Sha256 = "ddbd7a1d34ce9a8e7af2f6ef9ae686d9ab49f69e62dacb98d8409b511cdbd5e2" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors", TargetSubdir = "3D/trellis2",
+                Role = "shape flow 1024", Sha256 = "07cd0596f634c5adc1890023d16023afc5eed02fb84b22bb23aff5bf0030fbbd" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json", TargetSubdir = "3D/trellis2",
+                Role = "shape flow 1024 config", Sha256 = "7ebd6d367393f52fee9e92c2b3d727a9026a338549c6a6fa84c7ea122140ffdd" },
+            new() { Repo = "microsoft/TRELLIS-image-large", RepoPath = "ckpts/ss_dec_conv3d_16l8_fp16.safetensors", TargetSubdir = "3D/trellis2",
+                Role = "structure decoder", Sha256 = "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a" },
+            new() { Repo = "microsoft/TRELLIS-image-large", RepoPath = "ckpts/ss_dec_conv3d_16l8_fp16.json", TargetSubdir = "3D/trellis2",
+                Role = "structure decoder config", Sha256 = "646781293f1cda74720de85d1cef50a957fb4aebd9a4bd014e454e32f2330ac5" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors", TargetSubdir = "3D/trellis2",
+                Role = "shape VAE decoder", Sha256 = "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581" },
+            new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/shape_dec_next_dc_f16c32_fp16.json", TargetSubdir = "3D/trellis2",
+                Role = "shape VAE decoder config", Sha256 = "5f1b856dffce79466fb18f5f0eefc08f08c673b24b3c05b20359c0b6d318a209" },
+            new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
+                Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting (optional)", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+        },
+    };
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -2541,6 +2584,7 @@ public static class ModelCatalog
             E("hunyuan3d", d3, "Hunyuan3D-2 (Shape)", "Flux MMDiT + VecSet VAE", st, cli: true),
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
+            Trellis2(),
             HairDeck(),
 
             // Interactive / world models
