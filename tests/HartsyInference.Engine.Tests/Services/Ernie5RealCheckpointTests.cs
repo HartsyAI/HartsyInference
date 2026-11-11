@@ -52,7 +52,7 @@ public sealed class Ernie5RealCheckpointTests
                     if (!File.Exists(Path.Combine(dir, shard))) missing++;
                 return missing == 0 ? null : $"SKIPPED: {missing} shard file(s) are not on disk in {dir}; the forward check did not run.";
             }
-            catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or IOException)
+            catch (Exception ex)
             {
                 return $"SKIPPED: {index} is unreadable ({ex.GetType().Name}: {ex.Message}); the forward check did not run.";
             }

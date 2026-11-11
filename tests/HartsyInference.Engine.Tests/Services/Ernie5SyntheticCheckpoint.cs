@@ -364,9 +364,9 @@ internal static class Ernie5SyntheticCheckpoint
         // the attention output gate reads the q LoRA; its width is the grouped o-projection's (HCA) or the heads' value width (DSA)
         if (c.UseGatedAttn && leaf == "self_attn." + Ernie5WeightNames.AttnGate)
             return c.IsDsaLayer(layer) ? [c.MlaHeads * c.MlaVHeadDim, c.MlaQLoraRank] : [c.OGroups * c.OLoraRank, c.QLoraRank];
-        // the VHA post-mix matrices are [heads, 16] with the MLA head count, as Ernie5Layer folds them
+        // the VHA post-mix matrices are [heads, 16], with the head count Ernie5Layer folds them with: MLA heads on DSA layers, attention heads on HCA
         if (c.UseVhaAttention && Ernie5WeightNames.VhaLeaves.Any(v => leaf == "self_attn." + v))
-            return [c.MlaHeads, 16];
+            return [c.IsDsaLayer(layer) ? c.MlaHeads : c.NumAttentionHeads, 16];
         if (leaf.StartsWith("self_attn.", StringComparison.Ordinal))
             return c.IsDsaLayer(layer) ? DsaShape(leaf, c) : HcaShape(leaf, c);
         if (leaf.StartsWith("mlp.", StringComparison.Ordinal) && layer < c.FirstKDenseReplace)
