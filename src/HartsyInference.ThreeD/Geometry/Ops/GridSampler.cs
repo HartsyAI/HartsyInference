@@ -67,5 +67,23 @@ public static class GridSampler
         }
     }
 
+    /// <summary>Samples feature rows <c>[h · w, channels]</c> (row-major pixels, channels fastest) like PyTorch <c>F.grid_sample(align_corners=False,
+    /// padding_mode="border", mode="bilinear")</c>: coords in [−1,1], and a source position outside the image is clamped to the edge pixel.</summary>
+    public static void GridSampleRowsBorder(ReadOnlySpan<float> rows, int channels, int h, int w, float gx, float gy, Span<float> dst)
+    {
+        float fx = Math.Clamp(((gx + 1f) * w - 1f) * 0.5f, 0f, w - 1f);
+        float fy = Math.Clamp(((gy + 1f) * h - 1f) * 0.5f, 0f, h - 1f);
+        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
+        int x1 = Math.Min(x0 + 1, w - 1), y1 = Math.Min(y0 + 1, h - 1);
+        float tx = fx - x0, ty = fy - y0;
+        ReadOnlySpan<float> r00 = rows.Slice((y0 * w + x0) * channels, channels), r10 = rows.Slice((y0 * w + x1) * channels, channels);
+        ReadOnlySpan<float> r01 = rows.Slice((y1 * w + x0) * channels, channels), r11 = rows.Slice((y1 * w + x1) * channels, channels);
+        for (int c = 0; c < channels; c++)
+        {
+            float top = r00[c] + (r10[c] - r00[c]) * tx, bottom = r01[c] + (r11[c] - r01[c]) * tx;
+            dst[c] = top + (bottom - top) * ty;
+        }
+    }
+
     private static int Lin(int x, int y, int z, int resX, int resY) => x + resX * (y + resY * z);
 }

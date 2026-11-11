@@ -46,6 +46,41 @@ public sealed class Trellis2PreprocessorTests
         Assert.Equal((4, 4), (prepared.Width, prepared.Height));
     }
 
+    [Theory]
+    [InlineData(1.0, 40)]
+    [InlineData(1.1, 44)]
+    [InlineData(1.25, 50)]
+    public void Crop_WidensTheSquareByTruncatingSizeTimesScale(double scale, int expected)
+    {
+        // Foreground x 10..50 is 40 wide (upstream's max bbox extent); Pixal3D crops int(size * 1.1), TRELLIS.2 int(size * 1).
+        byte[] alpha = new byte[100 * 100];
+        for (int y = 10; y <= 50; y++)
+        {
+            for (int x = 10; x <= 50; x++)
+                alpha[y * 100 + x] = 255;
+        }
+
+        Trellis2PreparedImage prepared = Trellis2ImagePreprocessor.Crop(new byte[100 * 100 * 3], alpha, 100, 100, scale);
+
+        Assert.Equal((expected, expected), (prepared.Width, prepared.Height));
+    }
+
+    [Fact]
+    public void Crop_WithAnOddWidenedSizeDropsTheTrailingPixelLikePilsHalfSizeBox()
+    {
+        // Foreground x 10..50 is 40 wide, so a 1.125 scale gives int(45) = 45; size // 2 = 22 puts the box at (center ± 22), a 44 px crop.
+        byte[] alpha = new byte[100 * 100];
+        for (int y = 10; y <= 50; y++)
+        {
+            for (int x = 10; x <= 50; x++)
+                alpha[y * 100 + x] = 255;
+        }
+
+        Trellis2PreparedImage prepared = Trellis2ImagePreprocessor.Crop(new byte[100 * 100 * 3], alpha, 100, 100, 1.125);
+
+        Assert.Equal((44, 44), (prepared.Width, prepared.Height));
+    }
+
     [Fact]
     public void Crop_ThresholdIsStrictlyAboveZeroPointEightOfFullAlpha()
     {
