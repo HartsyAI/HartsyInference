@@ -182,8 +182,10 @@ dump, a restricted unpickler that allows only `OrderedDict` and torch's tensor r
 
 Verified against upstream's own modules (`tests/python-reference/dump_pixal3d_naf.py`, torch 2.6, the real weights, `natten.na2d` replaced by a
 brute-force transcription of NATTEN's dilated definition because `natten` is not installable here): the query map and the upsampled features agree
-to 1e-5 at output sizes 32 and 48 with dilations 2 and 4 and with border sliding. The transcription is the author's reading of NATTEN, not NATTEN itself,
-so that one assumption (the border window rule) is not independently confirmed.
+(worst absolute difference 1.1e-5, test bound 3e-5) at output sizes 32 and 48 with dilations 2 and 4 and with border sliding. The transcription is the author's
+reading of NATTEN, not NATTEN itself, so that one assumption (the border window rule) is not independently confirmed. Also unconfirmed: that upstream feeds NAF the
+PIL-Lanczos-resized image as `Trellis2ImageConditioner.Pixels(..., normalize: false)` produces it (the fixture feeds the image tensor directly). Memory: the query map is
+256 · outputSize² floats on the host (1 GiB at 1024) and the encoder runs at the guide's resolution, so a 1024 guide peaks at a few GiB of backend memory during the conv stack.
 
 ## MoGe
 

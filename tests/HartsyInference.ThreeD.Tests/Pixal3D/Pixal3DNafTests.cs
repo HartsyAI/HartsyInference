@@ -75,8 +75,8 @@ public sealed class Pixal3DNafTests
             }
 
             _output.WriteLine($"S={size} out={output} features={feature}x{feature}x{channels}: query probe worst {worstQuery:E2}, upsampled worst {worst:E2}.");
-            Assert.True(worstQuery < 2e-4, $"query map differs from upstream by {worstQuery:E2}");
-            Assert.True(worst < 2e-4, $"upsampled features differ from upstream by {worst:E2}");
+            Assert.True(worstQuery < 3e-5, $"query map differs from upstream by {worstQuery:E2}");
+            Assert.True(worst < 3e-5, $"upsampled features differ from upstream by {worst:E2}");
         }
     }
 
@@ -113,9 +113,15 @@ public sealed class Pixal3DNafTests
         float[] rows = new float[8 * 8 * 4];
         float[] uv = [0f, 0f];
 
-        // 8 feature cells per axis is below the 9-cell window; 16 is not divisible by 5.
+        // 8 feature cells per axis is below the 9-cell window; 9 cells fit the window but 16 is not divisible by 9.
         Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(map, 16, 16, rows, 8, 8, 4, uv));
-        Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(map, 16, 16, new float[5 * 5 * 4], 5, 5, 4, uv));
+        Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(map, 16, 16, new float[9 * 9 * 4], 9, 9, 4, uv));
+        Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(map, 18, 16, new float[9 * 9 * 4], 9, 9, 4, uv));
+        // A coordinate that is not finite would floor to a wild index in the pointer-based attention.
+        float[] mapOk = new float[Pixal3DNaf.Dim * 18 * 18];
+        float[] rowsOk = new float[9 * 9 * 4];
+        Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(mapOk, 18, 18, rowsOk, 9, 9, 4, [float.NaN, 0f]));
+        Assert.Throws<ArgumentException>(() => Pixal3DNaf.SampleUpsampled(mapOk, 18, 18, rowsOk, 9, 9, 4, [0f, float.PositiveInfinity]));
     }
 
     [Fact]

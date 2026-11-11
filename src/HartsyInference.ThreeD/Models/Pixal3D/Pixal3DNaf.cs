@@ -90,7 +90,9 @@ public sealed class Pixal3DNaf : IDisposable
     public IEnumerable<Tensor> EnumerateWeights() => _weights.Values;
 
     /// <summary>The query map <c>[1, 256, outputSize, outputSize]</c> for the guide <paramref name="image"/> <c>[1, 3, S, S]</c> in <c>[0, 1]</c>:
-    /// both conv branches at the image's size, averaged down to <paramref name="outputSize"/>, then the axial RoPE. The caller owns the result.</summary>
+    /// both conv branches at the image's size, averaged down to <paramref name="outputSize"/>, then the axial RoPE. The output size must divide
+    /// the image size and be at least a quarter of it (Pixal3D uses 512 and 1024 guides for 512 outputs). The caller owns the result, which is
+    /// 256 · outputSize² floats (1 GiB at 1024).</summary>
     public Tensor QueryMap(IBackend backend, Tensor image, int outputSize)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -100,23 +102,34 @@ public sealed class Pixal3DNaf : IDisposable
         int size = (int)image.Shape[2];
         if (outputSize <= 0 || size % outputSize != 0 || size > 4 * outputSize)
             throw new ArgumentOutOfRangeException(nameof(outputSize), outputSize, $"The output size must divide the {size} px image and be at least a quarter of it.");
-        using Tensor pointwise = Branch(backend, image, "encoder", 1);
-        using Tensor spatial = Branch(backend, image, "sem_encoder", 3);
-        Tensor joined = new(new TensorShape(1, Dim, size, size), DType.F32);
+        Tensor? pointwise = null, spatial = null, joined = null, map = null;
         try
         {
+            pointwise = Branch(backend, image, "encoder", 1);
+            spatial = Branch(backend, image, "sem_encoder", 3);
+            joined = new Tensor(new TensorShape(1, Dim, size, size), DType.F32);
             backend.Concat(joined, [pointwise, spatial], 1);
             backend.Sync();
-            Tensor map = size == outputSize ? joined : AveragePool(joined, size / outputSize);
+            pointwise.Dispose();
+            spatial.Dispose();
+            map = size == outputSize ? joined : AveragePool(joined, size / outputSize);
             if (!ReferenceEquals(map, joined))
                 joined.Dispose();
             ApplyRope(map, outputSize, outputSize);
-            return map;
+            Tensor result = map;
+            map = null;
+            return result;
         }
         catch
         {
-            joined.Dispose();
+            map?.Dispose();
+            joined?.Dispose();
             throw;
+        }
+        finally
+        {
+            pointwise?.Dispose();
+            spatial?.Dispose();
         }
     }
 
@@ -134,20 +147,27 @@ public sealed class Pixal3DNaf : IDisposable
             throw new ArgumentException($"{queryMap.Length} values do not form a [{Dim}, {height}, {width}] query map.", nameof(queryMap));
         if (featureHeight < Kernel || featureWidth < Kernel || height % featureHeight != 0 || width % featureWidth != 0)
             throw new ArgumentException(
-                $"A {featureHeight}x{featureWidth} feature map must hold at least {Kernel} cells per axis and divide the {height}x{width} output.");
+                $"A {featureHeight}x{featureWidth} feature map must hold at least {Kernel} cells per axis and divide the {height}x{width} output.",
+                nameof(featureHeight));
         if (channels <= 0 || channels % Heads != 0 || featureRows.Length != (long)featureHeight * featureWidth * channels)
             throw new ArgumentException($"{featureRows.Length} values do not form {featureHeight}x{featureWidth} feature rows of {channels} channels.", nameof(featureRows));
         if (uv.Length % 2 != 0)
             throw new ArgumentException("Sampling coordinates must be (u, v) pairs.", nameof(uv));
+        // The attention reads through raw pointers, so a coordinate that floors to a wild index must not get that far.
+        foreach (float value in uv)
+        {
+            if (!float.IsFinite(value))
+                throw new ArgumentException("Sampling coordinates must be finite.", nameof(uv));
+        }
 
         int cells = uv.Length / 2;
         Tensor result = new(new TensorShape(1, cells, channels), DType.F32);
-        float[] keys = PoolKeys(queryMap, height, width, featureHeight, featureWidth);
+        using Tensor keys = PoolKeys(queryMap, height, width, featureHeight, featureWidth);
         float[] uvValues = uv.ToArray();
         // Spans cannot be captured by the parallel body, so it works from the pinned addresses of the inputs and of the result.
         fixed (float* queryPointer = queryMap, rowsPointer = featureRows, outputPointer = result.AsSpan<float>())
         {
-            nint query = (nint)queryPointer, rows = (nint)rowsPointer, output = (nint)outputPointer;
+            nint query = (nint)queryPointer, rows = (nint)rowsPointer, output = (nint)outputPointer, keyAddress = (nint)keys.DataPointer;
             Parallel.For(0, cells, () => new Scratch(channels), (cell, _, scratch) =>
             {
                 BorderTapsFor(uvValues[cell * 2], uvValues[cell * 2 + 1], height, width, scratch);
@@ -158,7 +178,8 @@ public sealed class Pixal3DNaf : IDisposable
                     float weight = scratch.Weights[tap];
                     if (weight == 0f)
                         continue;
-                    Attend((float*)query, height, width, keys, (float*)rows, featureHeight, featureWidth, channels, scratch.Y[tap], scratch.X[tap], scratch);
+                    Attend(
+                        (float*)query, height, width, (float*)keyAddress, (float*)rows, featureHeight, featureWidth, channels, scratch.Y[tap], scratch.X[tap], scratch);
                     for (int c = 0; c < channels; c++)
                         row[c] += weight * scratch.Out[c];
                 }
@@ -187,9 +208,12 @@ public sealed class Pixal3DNaf : IDisposable
             using Tensor current = h;
             using Tensor a = new(current.Shape, DType.F32);
             backend.GroupNormSilu(a, current, _weights[b + "norm1.weight"], _weights[b + "norm1.bias"], GroupCount, GroupNormEps);
+            current.Dispose();
             using Tensor c1 = Conv(backend, a, _weights[b + "conv1.weight"], _weights[b + "conv1.bias"], kernel);
+            a.Dispose();
             using Tensor d = new(c1.Shape, DType.F32);
             backend.GroupNormSilu(d, c1, _weights[b + "norm2.weight"], _weights[b + "norm2.bias"], GroupCount, GroupNormEps);
+            c1.Dispose();
             h = Conv(backend, d, _weights[b + "conv2.weight"], _weights[b + "conv2.bias"], kernel);
         }
 
@@ -222,31 +246,11 @@ public sealed class Pixal3DNaf : IDisposable
         }
     }
 
-    private static Tensor AveragePool(Tensor map, int factor)
+    private static unsafe Tensor AveragePool(Tensor map, int factor)
     {
         int size = (int)map.Shape[2], target = size / factor;
         Tensor pooled = new(new TensorShape(1, Dim, target, target), DType.F32);
-        ReadOnlySpan<float> source = map.AsReadOnlySpan<float>();
-        Span<float> output = pooled.AsSpan<float>();
-        float inverse = 1f / (factor * factor);
-        for (int c = 0; c < Dim; c++)
-        {
-            for (int y = 0; y < target; y++)
-            {
-                for (int x = 0; x < target; x++)
-                {
-                    float sum = 0f;
-                    for (int dy = 0; dy < factor; dy++)
-                    {
-                        for (int dx = 0; dx < factor; dx++)
-                            sum += source[(c * size + y * factor + dy) * size + x * factor + dx];
-                    }
-
-                    output[(c * target + y) * target + x] = sum * inverse;
-                }
-            }
-        }
-
+        PoolBlocks((float*)map.DataPointer, size, size, target, target, (float*)pooled.DataPointer, cellMajor: false);
         return pooled;
     }
 
@@ -255,33 +259,21 @@ public sealed class Pixal3DNaf : IDisposable
     private unsafe void ApplyRope(Tensor map, int height, int width)
     {
         float[] periods = _weights[Prefix + "rope.periods"].AsReadOnlySpan<float>().ToArray();
-        float[] rowAngle = new float[height * PeriodCount], columnAngle = new float[width * PeriodCount];
-        for (int i = 0; i < height; i++)
-        {
-            float coord = ((i + 0.5f) / height) * 2f - 1f;
-            for (int k = 0; k < PeriodCount; k++)
-                rowAngle[i * PeriodCount + k] = 2f * MathF.PI * coord / periods[k];
-        }
-
-        for (int j = 0; j < width; j++)
-        {
-            float coord = ((j + 0.5f) / width) * 2f - 1f;
-            for (int k = 0; k < PeriodCount; k++)
-                columnAngle[j * PeriodCount + k] = 2f * MathF.PI * coord / periods[k];
-        }
-
+        (float[] rowCos, float[] rowSin) = AngleTables(height, periods);
+        (float[] columnCos, float[] columnSin) = AngleTables(width, periods);
         int plane = height * width, half = HeadDim / 2;
-        float* data = (float*)map.DataPointer;
+        nint address = (nint)map.DataPointer;
         Parallel.For(0, Heads * half, index =>
         {
+            float* data = (float*)address;
             int head = index / half, m = index % half;
             int first = (head * HeadDim + m) * plane, second = (head * HeadDim + m + half) * plane;
             for (int i = 0; i < height; i++)
             {
                 for (int j = 0; j < width; j++)
                 {
-                    float angle = m < PeriodCount ? rowAngle[i * PeriodCount + m] : columnAngle[j * PeriodCount + m - PeriodCount];
-                    float cos = MathF.Cos(angle), sin = MathF.Sin(angle);
+                    float cos = m < PeriodCount ? rowCos[i * PeriodCount + m] : columnCos[j * PeriodCount + m - PeriodCount];
+                    float sin = m < PeriodCount ? rowSin[i * PeriodCount + m] : columnSin[j * PeriodCount + m - PeriodCount];
                     int p = i * width + j;
                     float x1 = data[first + p], x2 = data[second + p];
                     data[first + p] = x1 * cos - x2 * sin;
@@ -291,37 +283,59 @@ public sealed class Pixal3DNaf : IDisposable
         });
     }
 
-    // adaptive_avg_pool2d of the query map to the feature size: the mean of each d x d block (sizes divide).
-    private static unsafe float[] PoolKeys(ReadOnlySpan<float> queryMap, int height, int width, int featureHeight, int featureWidth)
+    // cos and sin of 2 pi · coord / period for each position along one axis (coord = (i + 0.5) / n · 2 - 1) and each of the 16 periods.
+    private static (float[] Cos, float[] Sin) AngleTables(int length, float[] periods)
     {
-        int dh = height / featureHeight, dw = width / featureWidth, plane = height * width;
-        float[] keys = new float[featureHeight * featureWidth * Dim];
-        float inverse = 1f / (dh * dw);
-        fixed (float* pinned = queryMap)
+        float[] cos = new float[length * PeriodCount], sin = new float[length * PeriodCount];
+        for (int i = 0; i < length; i++)
         {
-            nint address = (nint)pinned;
-            Parallel.For(0, Dim, c =>
+            float coord = ((i + 0.5f) / length) * 2f - 1f;
+            for (int k = 0; k < PeriodCount; k++)
             {
-                float* map = (float*)address;
-                for (int y = 0; y < featureHeight; y++)
-                {
-                    for (int x = 0; x < featureWidth; x++)
-                    {
-                        float sum = 0f;
-                        for (int dy = 0; dy < dh; dy++)
-                        {
-                            int row = c * plane + (y * dh + dy) * width + x * dw;
-                            for (int dx = 0; dx < dw; dx++)
-                                sum += map[row + dx];
-                        }
-
-                        keys[(y * featureWidth + x) * Dim + c] = sum * inverse;
-                    }
-                }
-            });
+                float angle = 2f * MathF.PI * coord / periods[k];
+                cos[i * PeriodCount + k] = MathF.Cos(angle);
+                sin[i * PeriodCount + k] = MathF.Sin(angle);
+            }
         }
 
+        return (cos, sin);
+    }
+
+    // adaptive_avg_pool2d of the query map to the feature size: the mean of each d x d block (sizes divide), as feature-cell rows [cells, 256].
+    private static unsafe Tensor PoolKeys(ReadOnlySpan<float> queryMap, int height, int width, int featureHeight, int featureWidth)
+    {
+        Tensor keys = new(new TensorShape(featureHeight * featureWidth, Dim), DType.F32);
+        fixed (float* pinned = queryMap)
+            PoolBlocks(pinned, height, width, featureHeight, featureWidth, (float*)keys.DataPointer, cellMajor: true);
         return keys;
+    }
+
+    // Mean of each (height / targetHeight) x (width / targetWidth) block of every channel of a channel-major [Dim, height, width] map; the output is
+    // channel-major, or, with cellMajor, rows of Dim channels per target cell.
+    private static unsafe void PoolBlocks(float* source, int height, int width, int targetHeight, int targetWidth, float* output, bool cellMajor)
+    {
+        int dh = height / targetHeight, dw = width / targetWidth, plane = height * width;
+        float inverse = 1f / (dh * dw);
+        nint input = (nint)source, destination = (nint)output;
+        Parallel.For(0, Dim, c =>
+        {
+            float* map = (float*)input, target = (float*)destination;
+            for (int y = 0; y < targetHeight; y++)
+            {
+                for (int x = 0; x < targetWidth; x++)
+                {
+                    float sum = 0f;
+                    for (int dy = 0; dy < dh; dy++)
+                    {
+                        int row = c * plane + (y * dh + dy) * width + x * dw;
+                        for (int dx = 0; dx < dw; dx++)
+                            sum += map[row + dx];
+                    }
+
+                    target[cellMajor ? (y * targetWidth + x) * Dim + c : (c * targetHeight + y) * targetWidth + x] = sum * inverse;
+                }
+            }
+        });
     }
 
     private static void BorderTapsFor(float u, float v, int height, int width, Scratch scratch)
@@ -336,7 +350,7 @@ public sealed class Pixal3DNaf : IDisposable
     // One output pixel: per head, softmax over the 9 x 9 feature cells around the pixel's own cell (window slid inward at the borders, as NATTEN does),
     // scores q · k / sqrt(64), output the weighted sum of the cells' value channels for that head.
     private static unsafe void Attend(
-        float* queryMap, int height, int width, float[] keys, float* rows, int featureHeight, int featureWidth, int channels, int y, int x, Scratch scratch)
+        float* queryMap, int height, int width, float* keys, float* rows, int featureHeight, int featureWidth, int channels, int y, int x, Scratch scratch)
     {
         int cellY = y / (height / featureHeight), cellX = x / (width / featureWidth);
         int startY = Math.Clamp(cellY - Kernel / 2, 0, featureHeight - Kernel), startX = Math.Clamp(cellX - Kernel / 2, 0, featureWidth - Kernel);
