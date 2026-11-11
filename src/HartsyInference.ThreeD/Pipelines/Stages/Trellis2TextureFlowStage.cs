@@ -12,6 +12,9 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// noise at every step, the 512 or 1024 texture flow samples the 32-channel texture latent, and that is denormalized with the texture
 /// statistics. Each 1.3B flow is read from disk for the call and released afterwards.
 /// </summary>
+/// <remarks>Before it starts, a call drops every cached device weight on the backend (<see cref="Trellis2DeviceMemory.ReleaseAll"/>), the shape
+/// decoder's included: left in place they slowed this flow 20 times on a 12 GB card. Weights of an outside caller on the same backend upload
+/// again on their next use.</remarks>
 public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
 {
     private readonly string? _flow512Path, _flow1024Path;

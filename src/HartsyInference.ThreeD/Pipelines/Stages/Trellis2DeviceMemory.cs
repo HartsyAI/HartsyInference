@@ -11,7 +11,10 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// instead of 10 s.
 /// <para>Sweeping activations is not a read-back: a tensor an op produced and nobody read on the host (the DINOv3 conditioning is one)
 /// exists only on the device, and a sweep would leave its host buffer, which is zeros, to be uploaded by the next flow. Every tensor
-/// that is still needed is therefore offloaded to the host first.</para>
+/// that is still needed is therefore offloaded to the host first (<c>DeviceSweepOffloadGpuTests</c> pins that contract on CUDA).</para>
+/// <para>The sweeps act on the whole backend, not on TRELLIS.2's tensors: like the other pipelines that call <c>FreeActivations</c> on the
+/// engine's backend between stages, they assume one generation at a time on it, and <see cref="ReleaseAll"/> also drops the cached weights
+/// of anything else loaded there, which uploads again on its next use.</para>
 /// </summary>
 internal static class Trellis2DeviceMemory
 {

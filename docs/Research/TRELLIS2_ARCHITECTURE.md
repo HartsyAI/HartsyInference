@@ -158,7 +158,10 @@ Findings:
   `OffloadActivation`). The next flow then ran on zero conditioning. Every sweep now offloads the tensors a later stage still reads
   (`Trellis2DeviceMemory`: conditioning, the shape latent, the subdivision guides) first; the 512 bust is then byte-identical (vertices and
   base color) to the run made before any sweep existed (cream and tan, roughness 0.91, metallic 0.0). The sweep stays in the TRELLIS.2 stages,
-  not in the `SampleFlow` that Pixal3D shares, because Pixal3D's own device-only tensors would need the same offload first. A flat
+  not in the `SampleFlow` that Pixal3D shares, because Pixal3D's own device-only tensors would need the same offload first. The texture
+  stage's `ReleaseAll` also evicts the DINOv3 and decoder weights that a warm second request would otherwise find cached; the timings above
+  include that re-upload and it pays for itself, so it should not be optimised away without a measurement. The sweeps assume one generation at
+  a time on the engine's backend, as the other pipelines' `FreeActivations` calls do. A flat
   synthetic mug gave a saturated red (R 0.94, G 0.03, B 0.03; roughness 0.87) at 512 from a copper-brown image, before any sweep existed;
   it is unexplained. No Python reference exists for any texture tensor.
 - **The atlas is the weak part of the textured GLB.** On both meshes `UvUnwrapper` ended with roughly one chart per few triangles (vertices
