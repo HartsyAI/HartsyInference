@@ -56,7 +56,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
         if (shape.Feats.Shape.ElementCount != (long)n * _shapeMean.Length)
             throw new ArgumentException($"The shape latent must hold {_shapeMean.Length} channels per voxel; got {shape.Feats.Shape}.", nameof(shape));
 
-        Trellis2DeviceMemory.ReleaseAll(backend);
+        Trellis2DeviceMemory.ReleaseAll(backend, cond, negCond, shape.Feats);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(path);
         using Trellis2TextureFlow flow = new(weights);
         if (flow.ConcatChannels != _shapeMean.Length || flow.LatentChannels != _textureMean.Length)

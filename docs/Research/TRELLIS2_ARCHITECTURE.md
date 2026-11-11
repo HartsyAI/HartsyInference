@@ -148,11 +148,16 @@ Findings:
   slow first high-resolution steps (see the status row's "first high-resolution step took 12 minutes").
 - **The CPU bake is not the bottleneck.** Decimating a 11M-triangle 1024 mesh to 1M faces, unwrapping, baking and inpainting took 54 to 68 s;
   the 512 mesh took 19 to 22 s.
-- **The 512 type's look is plausible; the 1024 cascade's is not yet.** The 512 bust is cream and tan with roughness 0.91 and metallic 0
-  (the input is white marble); the 1024 bust of the same input and seed came out copper and teal with mean metallic 0.2. The cascade
-  uses the 1024-token DINOv3 conditioning for both the fine shape flow and the texture flow, which is the part of the chain that has no
-  parity check, so a conditioning or cascade defect is a suspect before the texture model is. A flat synthetic mug gave a saturated red
-  (R 0.94, G 0.03, B 0.03; roughness 0.87) at 512 from a copper-brown image. No Python reference exists for any texture tensor.
+- **Sweeping the device is not a read-back, and it zeroed the conditioning.** The first version of the release above came out copper and
+  teal (mean metallic 0.09 to 0.2, mesh 937,485 vertices instead of 938,050) for the marble bust. `FreeActivations` and
+  `FreeAllDeviceMemory` drop the device copy of every activation without reading it back, and a tensor an op produced that nobody read on
+  the host, the DINOv3 conditioning among them, has only a zero-filled host buffer (its host sum reads 0.0, 461,844 after
+  `OffloadActivation`). The next flow then ran on zero conditioning. Every sweep now offloads the tensors a later stage still reads
+  (`Trellis2DeviceMemory`: conditioning, the shape latent, the subdivision guides) first; the 512 bust is then byte-identical (vertices and
+  base color) to the run made before any sweep existed (cream and tan, roughness 0.91, metallic 0.0). The sweep stays in the TRELLIS.2 stages,
+  not in the `SampleFlow` that Pixal3D shares, because Pixal3D's own device-only tensors would need the same offload first. A flat
+  synthetic mug gave a saturated red (R 0.94, G 0.03, B 0.03; roughness 0.87) at 512 from a copper-brown image, before any sweep existed;
+  it is unexplained. No Python reference exists for any texture tensor.
 - **The atlas is the weak part of the textured GLB.** On both meshes `UvUnwrapper` ended with roughly one chart per few triangles (vertices
   per triangle 0.94 to 1.5, against about 0.5 for a connected mesh), so only 5 to 11% of the 2048x2048 texels are written by the bake and
   the rest is inpainted. The render shows dark specks and thin seams. This is the limitation `MESH_POSTPROCESS.md` already lists
@@ -186,6 +191,6 @@ for its stage and released. Attention runs through `IBackend.ScaledDotProductAtt
 
 - No Python reference dumps exist, so no stage is parity-verified; see the status row.
 - The shape VAE's parity in CoLa3D used a naive convolution shim and an assumed kernel-axis convention; the TRELLIS.2 shape path inherits that caveat.
-- The texture path has run on real weights (headers match, 512 and 1024 chains complete, GLBs render), but nothing is compared with Python, and the 1024 cascade's colors are implausible for the input (see the run above).
+- The texture path has run on real weights (headers match, 512 and 1024 chains complete, GLBs render), but nothing is compared with Python (see the run above).
 - The mesh post-processing is CPU and approximates cumesh, nvdiffrast and OpenCV (see [MESH_POSTPROCESS.md](MESH_POSTPROCESS.md)); its UV atlas fragments on these meshes.
 - The texture latent and the texture decode use this repository's noise generator and F32 compute, like the shape stages.

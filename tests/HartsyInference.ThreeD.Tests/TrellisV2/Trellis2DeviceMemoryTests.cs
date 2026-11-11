@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using Xunit;
 
@@ -13,8 +14,13 @@ public sealed class Trellis2DeviceMemoryTests
     {
         using CpuBackend backend = new();
 
+        using Tensor live = new(new TensorShape(1, 4), DType.F32);
+        live.AsSpan<float>().Fill(3f);
+
+        Trellis2DeviceMemory.ReleaseBetweenStages(backend, live);
+        Trellis2DeviceMemory.ReleaseAll(backend, live);
         Trellis2DeviceMemory.ReleaseBetweenStages(backend);
-        Trellis2DeviceMemory.ReleaseAll(backend);
-        Trellis2DeviceMemory.ReleaseBetweenStages(backend);
+
+        Assert.All(live.AsReadOnlySpan<float>().ToArray(), v => Assert.Equal(3f, v));
     }
 }

@@ -41,6 +41,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(coords);
+        Trellis2DeviceMemory.ReleaseBetweenStages(backend, cond, negCond);
         return SampleFlow(
             backend,
             kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path,
@@ -71,7 +72,6 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
         bool requireProjection,
         Func<Trellis2SlatFlow, Tensor, float, bool, Tensor> forward)
     {
-        Trellis2DeviceMemory.ReleaseBetweenStages(backend);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(flowPath);
         if (weights.Config.HasProjection != requireProjection)
         {

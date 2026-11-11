@@ -347,6 +347,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             // The post-processor unifies the winding after decimation and recomputes the normals, so the raw dual-grid mesh goes in.
             Tensor texCond = cascade ? fineCond! : cond;
             Tensor texNeg = cascade ? fineNeg! : negCond;
+            // The texture flow stage sweeps the device before it starts; the guides the texture decoder reads later must survive that.
+            for (int level = 0; level < guides!.Count; level++)
+                Backend.OffloadActivation(guides.Level(level));
             textureLatent = _textureFlow!.Sample(
                 Backend, textureKind, latent, texCond, texNeg, unchecked(seed + 3), textureParams!, Tick);
             textureVoxels = _textureDecoder!.Decode(Backend, textureLatent, guides!);
