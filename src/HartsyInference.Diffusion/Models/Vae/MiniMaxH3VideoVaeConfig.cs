@@ -45,6 +45,22 @@ public sealed record MiniMaxH3VideoVaeConfig
     /// <summary>Frames per latent token; also the ViT temporal patch size.</summary>
     public int VaeRatioT { get; init; } = 4;
 
+    /// <summary>True for the single-frame image decoder: one 16x16 patch per token, two rope axes, no temporal patch.
+    /// Serves both the image and video builds; the class names are kept for now.</summary>
+    public bool Decoder2D { get; init; }
+
+    /// <summary>The image build's baseline: 16 heads of 64, 24 layers, rope over half the head, no token drop.</summary>
+    public static MiniMaxH3VideoVaeConfig ImageBaseline => new()
+    {
+        Decoder2D = true,
+        Heads = 16,
+        DimHead = 64,
+        NumLayers = 24,
+        RopeDimRatio = 0.5f,
+        RopeTheta = 100.0,
+        TokenDrop = 0,
+    };
+
     /// <summary>Frames the encoder consumed per clip; drives the whole temporal-chunk schedule.</summary>
     public int ClipLength { get; init; } = 17;
 
@@ -99,11 +115,14 @@ public sealed record MiniMaxH3VideoVaeConfig
     /// <summary>Rotated head dims: 3 axes x <see cref="RopeInvFreqLen"/> freqs x 2 pair halves.</summary>
     public int RopeDim => (int)(DimHead * RopeDimRatio);
 
-    /// <summary>Inverse frequencies per axis.</summary>
-    public int RopeInvFreqLen => RopeDim / 6;
+    /// <summary>Rope axes: (t, h, w) for the video decoder, (h, w) for the image decoder.</summary>
+    public int RopeAxes => Decoder2D ? 2 : 3;
 
-    /// <summary>Width of a <c>proj_out</c> row: one full pixel patch.</summary>
-    public int PatchDim => OutChannels * VaeRatioT * VaeRatio * VaeRatio;
+    /// <summary>Inverse frequencies per axis.</summary>
+    public int RopeInvFreqLen => RopeDim / (2 * RopeAxes);
+
+    /// <summary>Width of a <c>proj_out</c> row: one pixel patch, with one frame per token on the 2D decoder.</summary>
+    public int PatchDim => OutChannels * (Decoder2D ? 1 : VaeRatioT) * VaeRatio * VaeRatio;
 
     /// <summary>Register tokens plus the zero cls row.</summary>
     public int NumSuffixTokens => NumRegisterTokens + 1;
@@ -195,6 +214,19 @@ public sealed record MiniMaxH3VideoVaeConfig
             && weights.ContainsKey("decoder.transformer_blocks.0.attn.to_qkv.weight");
     }
 
+    /// <summary>True for the single-frame decoder: a rank-4 <c>post_quant_conv</c>, or a <c>proj_out</c> that emits one
+    /// 16x16 RGB patch per token.</summary>
+    public static bool IsTwoDimensional(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+        if (weights.TryGetValue("post_quant_conv.weight", out Tensor? postQuant) && postQuant.Shape.Rank == 4)
+        {
+            return true;
+        }
+        return weights.TryGetValue("decoder.proj_out.weight", out Tensor? projOut)
+            && projOut.Shape[0] == 3L * 16 * 16;
+    }
+
     /// <summary>Recovers everything the checkpoint shapes expose (width, depth, channels, FFN multiplier, register
     /// token count, latent statistics) on top of <paramref name="baseline"/>, which supplies the head split and the
     /// rope/eps constants that no tensor shape encodes.</summary>
@@ -208,7 +240,9 @@ public sealed record MiniMaxH3VideoVaeConfig
                 "Not a MiniMax-H3 video VAE: 'decoder.x_embedder.weight', 'decoder.proj_out.weight' and "
                 + "'decoder.transformer_blocks.0.attn.to_qkv.weight' are all required.");
         }
-        MiniMaxH3VideoVaeConfig baseConfig = baseline ?? new MiniMaxH3VideoVaeConfig();
+        bool twoD = IsTwoDimensional(weights);
+        MiniMaxH3VideoVaeConfig baseConfig = (baseline ?? (twoD ? ImageBaseline : new MiniMaxH3VideoVaeConfig()))
+            with { Decoder2D = twoD };
 
         Tensor xEmbed = Require(weights, "decoder.x_embedder.weight");
         int dim = (int)xEmbed.Shape[0];
