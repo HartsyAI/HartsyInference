@@ -9,12 +9,13 @@ using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
+using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, which can also texture) turn an image into GLB (mesh) or PLY (splat); the scene model
+/// <summary>3D service. Image models (TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, which can also texture, Pixal3D) turn an image into GLB (mesh) or PLY (splat); the scene model
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
 /// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
@@ -27,8 +28,10 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, UniRigPipeline> _rigPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HunyuanPaintLoader> _paintPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
 
     /// <summary>Creates the service bound to its owning engine.</summary>
@@ -42,10 +45,13 @@ public sealed class MeshService : IMeshService, IDisposable
         string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         if (id != Trellis2Id)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
+        Pixal3DRequestMapper.RejectForOtherModels(request, id);
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
             return GenerateRiggedAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.PaintMesh.Contains(id))
+            return GeneratePaintAsync(spec, id, request, progress, cancel);
 
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
@@ -61,6 +67,8 @@ public sealed class MeshService : IMeshService, IDisposable
         HairDeckRequestMapper.RejectForOtherModels(request, id);
         if (id == Trellis2Id)
             return GenerateTrellis2Async(spec, request, progress, cancel);
+        if (id == MeshModelIds.Pixal3D)
+            return GeneratePixal3DAsync(spec, request, progress, cancel);
         return Task.Run(
             () =>
             {
@@ -189,6 +197,106 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
+    /// <summary>Texturing: one GLB holding the input mesh with a baked PBR material painted from the reference image. <see cref="MeshRequest.Steps"/> is the sampler step
+    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
+    private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.SceneMesh is null || request.Image is null)
+        {
+            throw new NotSupportedException(
+                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.");
+        }
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Paint seed must be at most {int.MaxValue}.");
+        if (request.Steps < 0 || request.GridResolution < 0)
+            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.");
+        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        ImageData reference = request.Image;
+        byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
+        HunyuanPaintOptions options = new()
+        {
+            Steps = request.Steps == 0 ? null : request.Steps,
+            TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
+            Seed = request.Seed < 0 ? null : (int)request.Seed,
+        };
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
+                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }, cancel);
+                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb" };
+            },
+            cancel);
+    }
+
+    /// <summary>The reference composited on white, as the Paint pipelines expect.</summary>
+    private static byte[] CompositeOnWhite(ImageData image)
+    {
+        byte[] result = new byte[image.Rgb.Length];
+        for (int i = 0; i < image.Alpha!.Length; i++)
+        {
+            float a = image.Alpha[i] / 255f;
+            for (int c = 0; c < 3; c++)
+                result[i * 3 + c] = (byte)Math.Round(image.Rgb[i * 3 + c] * a + 255f * (1f - a));
+        }
+        return result;
+    }
+
+    /// <summary>Returns the cached Paint pipeline for <paramref name="spec"/>: the folder holding <c>unet/</c> and <c>vae/</c> (and, for 2.1, <c>dino/model.safetensors</c>
+    /// and <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
+    private HunyuanPaintLoader GetOrLoadPaint(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding unet/ and vae/ as the local path.");
+        }
+        string folder = PaintFolder(spec.LocalPath);
+        lock (_gate)
+        {
+            if (_paintPipelines.TryGetValue(folder, out HunyuanPaintLoader? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                string dino = Path.Combine(folder, "dino", "model.safetensors"), upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, File.Exists(dino) ? dino : null, File.Exists(upscaler) ? upscaler : null);
+                _paintPipelines[folder] = loader;
+                return loader;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to prepare the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
+    }
+
+    // The folder holding unet/ and vae/: the path itself, or the nearest parent of a file (any asset of the model may be the representative one).
+    private static string PaintFolder(string localPath)
+    {
+        if (!File.Exists(localPath))
+        {
+            return localPath;
+        }
+        string? directory = Path.GetDirectoryName(Path.GetFullPath(localPath));
+        while (directory is not null && !Directory.Exists(Path.Combine(directory, "unet")))
+        {
+            directory = Path.GetDirectoryName(directory);
+        }
+        return directory ?? throw new DirectoryNotFoundException($"No unet/ folder above '{localPath}'.");
+    }
+
     /// <summary>TRELLIS.2 image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (512, 1024 or 1536; 0 is
     /// 1024), checked with the image, seed and texture size before the checkpoints load. A shape-only request returns the mesh; with
     /// <see cref="MeshRequest.Texture"/> it returns a textured PBR GLB.</summary>
@@ -234,6 +342,74 @@ public sealed class MeshService : IMeshService, IDisposable
                 }
             },
             cancel);
+    }
+
+    /// <summary>Pixal3D shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (1024 or 1536; 0 is 1024; 512
+    /// has no Pixal3D pipeline), <see cref="MeshRequest.FieldOfViewRadians"/> the camera; all checked with the image and seed before the checkpoints load.</summary>
+    private Task<MeshResult> GeneratePixal3DAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        ImageData source = request.Image!;
+        Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
+        Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
+        string modelsRoot = RepoPaths.ModelsRoot();
+        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
+        Pixal3DImageTo3DPipeline.ValidateRequest(options, image, Pixal3DRuntime.MatterAvailable(modelsRoot));
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                Pixal3DRuntime runtime = GetOrLoadPixal3D(spec, modelsRoot);
+                return RunGated(runtime, "Pixal3D", cancel, pipeline => pipeline.Generate(image, options, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }));
+            },
+            cancel);
+    }
+
+    /// <summary>Runs one generation on <paramref name="runtime"/>, one at a time per loaded model; a queued request gives up when its own cancellation fires.</summary>
+    private static MeshResult RunGated<TPipeline>(
+        MatterGatedRuntime<TPipeline> runtime, string label, CancellationToken cancel, Func<TPipeline, Mesh> generate) where TPipeline : IDisposable
+    {
+        runtime.Gate.Wait(cancel);
+        try
+        {
+            if (runtime.IsDisposed)
+                throw new ModelUnloadedException($"The {label} model was unloaded while this request was queued; retry the request.");
+            return new MeshResult { Data = GlbWriter.Write(generate(runtime.Pipeline)), Format = "glb" };
+        }
+        finally
+        {
+            runtime.Gate.Release();
+        }
+    }
+
+    /// <summary>Loads (or returns the cached) Pixal3D pipeline for <paramref name="spec"/>.</summary>
+    private Pixal3DRuntime GetOrLoadPixal3D(ModelSpec spec, string modelsRoot)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                "No checkpoint found for 'pixal3d'. Download the catalog assets (and place naf_release.pth beside them) or supply the model directory as the local path.");
+        }
+        lock (_gate)
+        {
+            if (_pixal3d.TryGetValue(spec.LocalPath, out Pixal3DRuntime? cached))
+                return cached;
+            try
+            {
+                Pixal3DRuntime runtime = Pixal3DRuntime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                _pixal3d[spec.LocalPath] = runtime;
+                return runtime;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to load the 'pixal3d' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
     }
 
     /// <summary>Loads (or returns the cached) TRELLIS.2 pipeline for <paramref name="spec"/>.</summary>
@@ -508,20 +684,26 @@ public sealed class MeshService : IMeshService, IDisposable
         List<LoadedMesh> pipelines;
         List<CoLa3DPipeline> scenePipelines;
         List<UniRigPipeline> rigPipelines;
+        List<HunyuanPaintLoader> paintPipelines;
         List<HairDeckRuntime> hairDecks;
         List<Trellis2Runtime> trellis2Runtimes;
+        List<Pixal3DRuntime> pixal3dRuntimes;
         lock (_gate)
         {
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
             rigPipelines = _rigPipelines.Values.ToList();
+            paintPipelines = _paintPipelines.Values.ToList();
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
+            pixal3dRuntimes = _pixal3d.Values.ToList();
             _pipelines.Clear();
             _scenePipelines.Clear();
             _rigPipelines.Clear();
+            _paintPipelines.Clear();
             _hairDecks.Clear();
             _trellis2.Clear();
+            _pixal3d.Clear();
         }
         foreach (LoadedMesh loaded in pipelines)
         {
@@ -535,11 +717,19 @@ public sealed class MeshService : IMeshService, IDisposable
         {
             pipeline.Dispose();
         }
+        foreach (HunyuanPaintLoader loader in paintPipelines)
+        {
+            loader.Dispose();
+        }
         foreach (HairDeckRuntime runtime in hairDecks)
         {
             runtime.Dispose();
         }
         foreach (Trellis2Runtime runtime in trellis2Runtimes)
+        {
+            runtime.Dispose();
+        }
+        foreach (Pixal3DRuntime runtime in pixal3dRuntimes)
         {
             runtime.Dispose();
         }

@@ -100,6 +100,28 @@ public static class ModelCatalog
         new() { Repo = "tencent/" + repo, RepoPath = folder + "/config.yaml", TargetSubdir = "3D/" + id, Role = "config", Sha256 = configSha },
     ];
 
+    /// <summary>Hunyuan3D Paint 2.0 (<c>tencent/Hunyuan3D-2</c> at <c>9cd649ba</c>): the multiview UNet and the SD VAE, both safetensors, in the diffusers layout the loader reads.</summary>
+    private static ModelAsset[] Hunyuan3DPaintAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-paint-v2-0/unet/diffusion_pytorch_model.safetensors", TargetSubdir = "3D/hunyuan3d-paint",
+            TargetName = "unet/diffusion_pytorch_model.safetensors", Role = "transformer", Sha256 = "1c5ce434ba976b30bbb51a080917ecd39f8d8761691887b5df3be765ef4bd9e9" },
+        new() { Repo = "tencent/Hunyuan3D-2", RepoPath = "hunyuan3d-paint-v2-0/vae/diffusion_pytorch_model.safetensors", TargetSubdir = "3D/hunyuan3d-paint",
+            TargetName = "vae/diffusion_pytorch_model.safetensors", Role = "vae", Sha256 = "abcec86e499e1ce9f05d1630725d386dc533b61fe0947ab034f07f89042e7a61" },
+    ];
+
+    /// <summary>Hunyuan3D Paint 2.1 (<c>tencent/Hunyuan3D-2.1</c> at <c>0b946776</c>): the PBR UNet and VAE (pickles, read by the safe parser only), DINOv2-giant and Real-ESRGAN x4plus.</summary>
+    private static ModelAsset[] Hunyuan3DPaint21Assets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
+            TargetName = "unet/diffusion_pytorch_model.bin", Role = "transformer", Sha256 = "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8" },
+        new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
+            TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc" },
+        new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
+            Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
+        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", Role = "upscaler",
+            Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
+    ];
+
     /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>
     private static ModelAsset[] Hunyuan3DFlashVdmVaeAssets =>
     [
@@ -257,6 +279,46 @@ public static class ModelCatalog
                 Role = "shape VAE decoder", Sha256 = "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581" },
             new() { Repo = "microsoft/TRELLIS.2-4B", RepoPath = "ckpts/shape_dec_next_dc_f16c32_fp16.json", TargetSubdir = "3D/trellis2",
                 Role = "shape VAE decoder config", Sha256 = "5f1b856dffce79466fb18f5f0eefc08f08c673b24b3c05b20359c0b6d318a209" },
+            new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
+                Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
+            new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
+                Role = "matting (optional)", Sha256 = "a9875de5b1e6c8eb5fdaa8c727a82927ce442cdc87ba3abee6a77e6fa46c25bb" },
+        },
+    };
+
+    /// <summary>Pixal3D (TencentARC/Pixal3D), shape-only image to mesh: TRELLIS.2's cascade with the image reaching each flow as global DINOv3 tokens plus
+    /// per-voxel features read at the voxel's projected position (NAF-upsampled for the shape flows). The asset set is the shape path of the main branch:
+    /// the three projection-mode flows with their configs, <c>pipeline.json</c>, the two decoders (byte-identical to TRELLIS.2's, repeated here so the
+    /// entry stands alone), the DINOv3 encoder shared with TRELLIS.2 and an optional BiRefNet matting checkpoint. The hashes pin revision
+    /// b0cb2e1b794cab9aa0ac38a95d794a4d9337437f (an asset carries no revision field, so a changed file fails the hash check); the safetensors hashes are the repository's LFS oids, the small files' hashes were computed from the downloaded
+    /// bytes. NAF (<c>naf_release.pth</c>, valeoai/NAF release <c>model</c>, 2664431 bytes, sha256 c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f)
+    /// is a GitHub release asset the catalog cannot fetch: place it in <c>3D/pixal3d</c>. Texture, multi-view and MoGe are not part of this entry.
+    /// Licences: Pixal3D code and weights MIT; DINOv3 under the DINOv3 License (Meta, custom, gated); BiRefNet-matting MIT; the NAF weights' licence is not stated.</summary>
+    private static CatalogEntry Pixal3D() => new CatalogEntry
+    {
+        Id = "pixal3d", Modality = Modality.Mesh, DisplayName = "Pixal3D (shape-only image to mesh; naf_release.pth placed by hand)",
+        Architecture = "TRELLIS.2 cascade with view-aligned projected DINOv3 features (NAF-upsampled), 1.3B projection-mode flows, shape VAE with dual-grid meshing",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "TencentARC/Pixal3D",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "pipeline.json", TargetSubdir = "3D/pixal3d", Role = "config",
+                Sha256 = "1647217de06e32477702d14895e826fea73497d94537b809a53637f13482a237" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "structure flow", Sha256 = "6d0147bb347eb61fa81c304cc68c7fd69d447e91870357a549b47e1d0fd77242" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_flow_img_dit_1_3B_64_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "structure flow config", Sha256 = "2b3ef4c63b72a3de8adf745bd9d9d36b7960bdd7ba3740a6fa4d18fea6c475dd" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 512", Sha256 = "63569838c1da93f010e2fa805b202ecf802cc758830230abac202a81b70e5b45" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 512 config", Sha256 = "2f7b736e8535aae96e7c41e8d123c24a14ee809fc25bea76eeac72643d21b997" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 1024", Sha256 = "3e6d1df0e62bc5bc863320d1d63d6b996235eef4abb8b851e878c88f316369f1" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json", TargetSubdir = "3D/pixal3d",
+                Role = "shape flow 1024 config", Sha256 = "f47fca56311959a643e8cfd2750229a2c53cbab0027406d8426cd564ce4fb5bc" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/ss_dec_conv3d_16l8_fp16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "structure decoder", Sha256 = "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a" },
+            new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors", TargetSubdir = "3D/pixal3d",
+                Role = "shape VAE decoder", Sha256 = "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581" },
             new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
                 Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
             new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",
@@ -2626,10 +2688,15 @@ public static class ModelCatalog
                 with { Assets = Hunyuan3DAssets("Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini", "hunyuan3d-mini",
                     "3cc66f3bea33e4062b7dbc875ffe1d70c4888914aec3e91b60f94e9bd01b522b",
                     "cabcba7f6115752c8fe5b370e12bf714936f70377a8a80f151872f76c2d64609") },
+            E("hunyuan3d-paint", d3, "Hunyuan3D-2 Paint (albedo texturing)", "SD 2.1 zero-SNR UNet + multiview and reference attention, back-projected", st, cli: true)
+                with { Assets = Hunyuan3DPaintAssets },
+            E("hunyuan3d-paint21", d3, "Hunyuan3D-2.1 Paint (PBR texturing)", "SD 2.1 zero-SNR UNet + material, DINO and rotary multiview attention, back-projected", st, cli: true)
+                with { Assets = Hunyuan3DPaint21Assets },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
+            Pixal3D(),
             HairDeck(),
 
             // Interactive / world models

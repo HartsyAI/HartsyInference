@@ -85,16 +85,57 @@ internal static class Ernie5SyntheticCheckpoint
         return "{" + string.Join(",\n", fields.Select(kv => $"\"{kv.Key}\": {kv.Value}")) + "}";
     }
 
-    /// <summary>Writes a complete checkpoint into <paramref name="directory"/> (created if absent) with weights from <paramref name="seed"/>.</summary>
-    internal static void Write(string directory, int seed = 7)
+    /// <summary>How the weights are stored: all F32; the ERNIE FP8 layout, where each linear is E4M3 with a <c>weight_scale_inv</c> grid; or the
+    /// same values as <see cref="Fp8Dequantized"/>, every linear decoded to F32, the reference an FP8 run is compared with.</summary>
+    internal enum Storage { F32, Fp8, Fp8Dequantized }
+
+    /// <summary>The 128x128 block-FP8 <c>quantization_config</c> of the real checkpoint.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> Fp8Overrides = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["quantization_config"] = "{\"quant_method\": \"fp8\", \"fmt\": \"e4m3\", \"weight_block_size\": [128, 128]}",
+    };
+
+    /// <summary>The FP8 block edge, as the real checkpoint stores it.</summary>
+    internal const int Fp8Block = 128;
+
+    /// <summary>The real checkpoint's dimensions: hidden 4096, 64 heads of 512 with the real MLA and indexer sizes, a 14336 dense FFN, 2048-wide
+    /// latent experts, 128-wide FP8 blocks and the real attention flags. Three layers (HCA, DSA, HCA) with one dense layer first, 8 routed
+    /// experts instead of 512 and a 4096-token vocabulary, so one forward fits on a local GPU. Every linear's shape follows from these, the
+    /// same as the real index.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> RealDimensionOverrides = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["hidden_size"] = "4096", ["num_hidden_layers"] = "3", ["num_nextn_predict_layers"] = "0",
+        ["num_attention_heads"] = "64", ["num_key_value_heads"] = "1", ["head_dim"] = "512",
+        ["qk_nope_head_dim"] = "448", ["qk_rope_head_dim"] = "64", ["v_head_dim"] = "512",
+        ["q_lora_rank"] = "1024", ["kv_lora_rank"] = "512", ["o_lora_rank"] = "1024", ["o_groups"] = "8",
+        ["hybrid_mla_num_attention_heads"] = "64", ["hybrid_mla_q_lora_rank"] = "1024", ["hybrid_mla_kv_lora_rank"] = "512",
+        ["hybrid_mla_qk_nope_head_dim"] = "192", ["hybrid_mla_qk_rope_head_dim"] = "64", ["hybrid_mla_v_head_dim"] = "256",
+        ["intermediate_size"] = "14336", ["moe_intermediate_size"] = "2048", ["moe_latent_size"] = "2048",
+        ["n_routed_experts"] = "8", ["n_shared_experts"] = "1", ["num_experts_per_tok"] = "2", ["first_k_dense_replace"] = "1",
+        ["compress_ratios"] = "[128, -2, 128]", ["hc_mult"] = "4", ["hc_sinkhorn_iters"] = "20",
+        ["index_n_heads"] = "64", ["index_head_dim"] = "128", ["index_topk"] = "64", ["sliding_window"] = "128",
+        ["max_position_embeddings"] = "4096", ["vocab_size"] = "4096", ["bos_token_id"] = "1", ["eos_token_id"] = "2",
+        ["use_gated_attn"] = "true", ["use_vha_attention"] = "true", ["moe_split_feature_routing"] = "true",
+        ["routed_scaling_factor"] = "3.0", ["routed_scaling_factor_learnable"] = "true", ["scoring_func"] = "\"sigmoid\"",
+        ["rope_theta"] = "8000000.0", ["compress_rope_theta"] = "160000.0",
+        ["activation_situ_beta"] = "4.0", ["activation_situ_linear_beta"] = "25.0",
+    };
+
+    /// <summary>Writes a complete checkpoint into <paramref name="directory"/> (created if absent) with weights from <paramref name="seed"/>.
+    /// <paramref name="configOverrides"/> replaces or adds config fields on top of the storage's own.</summary>
+    internal static void Write(string directory, int seed = 7, Storage storage = Storage.F32, IReadOnlyDictionary<string, string>? configOverrides = null)
     {
         Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson());
+        Dictionary<string, string> merged = new(StringComparer.Ordinal);
+        if (storage == Storage.Fp8) foreach (KeyValuePair<string, string> kv in Fp8Overrides) merged[kv.Key] = kv.Value;
+        if (configOverrides is not null) foreach (KeyValuePair<string, string> kv in configOverrides) merged[kv.Key] = kv.Value;
+        string configJson = ConfigJson(merged.Count == 0 ? null : merged);
+        File.WriteAllText(Path.Combine(directory, "config.json"), configJson);
         File.WriteAllText(Path.Combine(directory, "tokenizer.json"), TokenizerJson());
         File.WriteAllText(Path.Combine(directory, "tokenizer_config.json"), "{\"bos_token\": \"<s>\", \"eos_token\": \"</s>\"}");
         File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
-        Ernie5Config config = Ernie5Config.Parse(ConfigJson());
-        WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed);
+        Ernie5Config config = Ernie5Config.Parse(configJson);
+        WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed, storage);
     }
 
     /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials.</summary>
@@ -134,26 +175,53 @@ internal static class Ernie5SyntheticCheckpoint
         return map;
     }
 
-    private static void WriteSafetensors(string path, Ernie5Config config, int seed)
+    private sealed record Entry(string Name, string DType, int[] Shape, byte[] Data);
+
+    private static void WriteSafetensors(string path, Ernie5Config config, int seed, Storage storage)
     {
         Random rng = new(seed);
-        List<(string Name, int[] Shape, float[] Values)> tensors = [];
+        List<Entry> entries = [];
         foreach (string key in Ernie5WeightMap.ExpectedKeys(config).Concat(Ernie5WeightMap.ExpectedMtpKeys(config)))
         {
             int[] shape = ShapeOf(key, config);
             int count = shape.Aggregate(1, (a, n) => a * n);
-            tensors.Add((key, shape, ValuesOf(key, count, rng)));
+            if (storage != Storage.F32 && IsBf16Tensor(key))
+            {
+                // The real checkpoint stores these BF16, rounded to nearest even; the twin holds the same rounded values in F32.
+                float[] rounded = ValuesOf(key, count, rng).Select(RoundToBf16).ToArray();
+                entries.Add(storage == Storage.Fp8
+                    ? new Entry(key, "BF16", shape, Bf16Bytes(rounded))
+                    : new Entry(key, "F32", shape, FloatBytes(rounded)));
+                continue;
+            }
+            if (storage == Storage.F32 || !IsFp8Linear(key, shape))
+            {
+                entries.Add(new Entry(key, "F32", shape, FloatBytes(ValuesOf(key, count, rng))));
+                continue;
+            }
+            // Same draw order for both FP8 storages, so the dequantized twin holds exactly the values the FP8 file decodes to.
+            byte[] raw = Fp8BytesOf(count, rng);
+            float[] scale = ScaleValues(shape, rng);
+            if (storage == Storage.Fp8)
+            {
+                entries.Add(new Entry(key, "F8_E4M3", shape, raw));
+                entries.Add(new Entry(key + Ernie5WeightNames.ScaleSuffix, "F32", ScaleShape(shape), FloatBytes(scale)));
+            }
+            else
+            {
+                entries.Add(new Entry(key, "F32", shape, FloatBytes(DequantizedValues(raw, scale, shape))));
+            }
         }
-        tensors.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        entries.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
 
         StringBuilder header = new("{");
         long offset = 0;
-        for (int i = 0; i < tensors.Count; i++)
+        for (int i = 0; i < entries.Count; i++)
         {
-            (string name, int[] shape, float[] values) = tensors[i];
-            long bytes = (long)values.Length * sizeof(float);
+            Entry e = entries[i];
+            long bytes = e.Data.LongLength;
             if (i > 0) header.Append(',');
-            header.Append($"\"{name}\":{{\"dtype\":\"F32\",\"shape\":[{string.Join(",", shape)}],\"data_offsets\":[{offset},{offset + bytes}]}}");
+            header.Append($"\"{e.Name}\":{{\"dtype\":\"{e.DType}\",\"shape\":[{string.Join(",", e.Shape)}],\"data_offsets\":[{offset},{offset + bytes}]}}");
             offset += bytes;
         }
         header.Append('}');
@@ -165,8 +233,97 @@ internal static class Ernie5SyntheticCheckpoint
         using BinaryWriter writer = new(stream);
         writer.Write((long)headerBytes.Length);
         writer.Write(headerBytes);
-        foreach ((string _, int[] _, float[] values) in tensors)
-            foreach (float v in values) writer.Write(v);
+        foreach (Entry e in entries) writer.Write(e.Data);
+    }
+
+    private static byte[] FloatBytes(float[] values)
+    {
+        byte[] bytes = new byte[values.Length * sizeof(float)];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    // The tensors the real checkpoint stores BF16: the embedding and LM head, the routers, the compressor and the indexer projections.
+    private static bool IsBf16Tensor(string key) =>
+        // "block_sparse_moe.gate.weight" also matches the split-feature second router, gate.weight_1, which must stay BF16 too.
+        key == Ernie5WeightNames.Embedding || key == Ernie5WeightNames.LmHead || key.Contains("block_sparse_moe.gate.weight", StringComparison.Ordinal)
+        || key.Contains("compressor.linear_w", StringComparison.Ordinal) || key.Contains("indexer.wk.", StringComparison.Ordinal)
+        || key.Contains("indexer.weights_proj", StringComparison.Ordinal);
+
+    // Round to nearest, ties to even, keeping the top 16 bits: the BF16 value of a float.
+    private static float RoundToBf16(float v)
+    {
+        uint bits = BitConverter.SingleToUInt32Bits(v);
+        bits = (bits + 0x7FFFu + ((bits >> 16) & 1u)) & 0xFFFF0000u;
+        return BitConverter.UInt32BitsToSingle(bits);
+    }
+
+    private static byte[] Bf16Bytes(float[] values)
+    {
+        byte[] bytes = new byte[values.Length * 2];
+        for (int i = 0; i < values.Length; i++)
+        {
+            ushort top = (ushort)(BitConverter.SingleToUInt32Bits(values[i]) >> 16);
+            bytes[2 * i] = (byte)top;
+            bytes[2 * i + 1] = (byte)(top >> 8);
+        }
+        return bytes;
+    }
+
+    // The FP8 linears: the 2-D projections the real checkpoint stores as E4M3. The hyper-connection mappings and the other F32 tensors stay F32;
+    // the tensors listed in IsBf16Tensor (embedding, LM head, routers, compressor and indexer projections) are BF16 and are handled first.
+    private static bool IsFp8Linear(string key, int[] shape)
+    {
+        if (shape.Length != 2) return false;
+        if (!(key.EndsWith(".weight", StringComparison.Ordinal) || key.EndsWith("linear_o_group_proj", StringComparison.Ordinal))) return false;
+        return !(key.Contains("embed_tokens", StringComparison.Ordinal) || key.Contains("lm_head", StringComparison.Ordinal)
+            || key.Contains("gate.weight", StringComparison.Ordinal) || key.Contains("mapping_proj", StringComparison.Ordinal)
+            || key.Contains("compressor.linear_w", StringComparison.Ordinal) || key.Contains("indexer.wk.", StringComparison.Ordinal)
+            || key.Contains("weights_proj", StringComparison.Ordinal));
+    }
+
+    // Any byte is a finite E4M3 value except the two NaN codes, 0x7F and 0xFF, which map to their neighbours.
+    private static byte[] Fp8BytesOf(int count, Random rng)
+    {
+        byte[] bytes = new byte[count];
+        for (int i = 0; i < count; i++)
+        {
+            byte v = (byte)rng.Next(256);
+            if ((v & 0x7F) == 0x7F) v &= 0xFE;
+            bytes[i] = v;
+        }
+        return bytes;
+    }
+
+    private static int[] ScaleShape(int[] shape) => [(shape[0] + Fp8Block - 1) / Fp8Block, (shape[1] + Fp8Block - 1) / Fp8Block];
+
+    private static float[] ScaleValues(int[] shape, Random rng)
+    {
+        int[] grid = ScaleShape(shape);
+        float[] scale = new float[grid[0] * grid[1]];
+        for (int i = 0; i < scale.Length; i++) scale[i] = (float)(0.001 + rng.NextDouble() * 0.009);
+        return scale;
+    }
+
+    // Decodes the bytes with their block scales: W[r, c] = e4m3(raw[r, c]) * scale[r / 128, c / 128], the F32 weight the FP8 file stands for.
+    private static float[] DequantizedValues(byte[] raw, float[] scale, int[] shape)
+    {
+        int rows = shape[0], cols = shape[1], gridCols = ScaleShape(shape)[1];
+        float[] values = new float[rows * cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                values[r * cols + c] = E4m3ToFloat(raw[r * cols + c]) * scale[(r / Fp8Block) * gridCols + c / Fp8Block];
+        return values;
+    }
+
+    // IEEE-style E4M3: 1 sign, 4 exponent bits (bias 7), 3 mantissa bits; exponent 0 is subnormal.
+    private static float E4m3ToFloat(byte b)
+    {
+        int sign = b >> 7, exponent = (b >> 3) & 0xF, mantissa = b & 0x7;
+        float magnitude = exponent == 0
+            ? mantissa / 8f * MathF.Pow(2, -6)
+            : (1 + mantissa / 8f) * MathF.Pow(2, exponent - 7);
+        return sign == 1 ? -magnitude : magnitude;
     }
 
     private static float[] ValuesOf(string key, int count, Random rng)
@@ -204,10 +361,16 @@ internal static class Ernie5SyntheticCheckpoint
         string leaf = key[(key.IndexOf('.', "model.layers.".Length) + 1)..];
         if (leaf is Ernie5WeightNames.MtpEmbedNorm or Ernie5WeightNames.MtpHiddenNorm or Ernie5WeightNames.MtpFinalNorm) return [h];
         if (leaf is Ernie5WeightNames.MtpEmbedProj or Ernie5WeightNames.MtpHiddenProj) return [h, h];
+        // the attention output gate reads the q LoRA; its width is the grouped o-projection's (HCA) or the heads' value width (DSA)
+        if (c.UseGatedAttn && leaf == "self_attn." + Ernie5WeightNames.AttnGate)
+            return c.IsDsaLayer(layer) ? [c.MlaHeads * c.MlaVHeadDim, c.MlaQLoraRank] : [c.OGroups * c.OLoraRank, c.QLoraRank];
+        // the VHA post-mix matrices are [heads, 16], with the head count Ernie5Layer folds them with: MLA heads on DSA layers, attention heads on HCA
+        if (c.UseVhaAttention && Ernie5WeightNames.VhaLeaves.Any(v => leaf == "self_attn." + v))
+            return [c.IsDsaLayer(layer) ? c.MlaHeads : c.NumAttentionHeads, 16];
         if (leaf.StartsWith("self_attn.", StringComparison.Ordinal))
             return c.IsDsaLayer(layer) ? DsaShape(leaf, c) : HcaShape(leaf, c);
         if (leaf.StartsWith("mlp.", StringComparison.Ordinal) && layer < c.FirstKDenseReplace)
-            return leaf.StartsWith("mlp.down_proj", StringComparison.Ordinal) ? [h, Dense] : [Dense, h];
+            return leaf.StartsWith("mlp.down_proj", StringComparison.Ordinal) ? [h, c.IntermediateSize] : [c.IntermediateSize, h];
         return MoeShape(leaf, c);
     }
 
@@ -257,7 +420,8 @@ internal static class Ernie5SyntheticCheckpoint
     private static int[] MoeShape(string leaf, Ernie5Config c)
     {
         int shared = c.NSharedExperts * c.MoeIntermediateSize, latent = c.MoeLatentSize;
-        if (leaf == "block_sparse_moe.gate.weight") return [c.NRoutedExperts, c.HiddenSize];
+        if (leaf is "block_sparse_moe.gate.weight" or "block_sparse_moe.gate.weight_1") return [c.NRoutedExperts, c.HiddenSize];
+        if (leaf == "block_sparse_moe.gate.routed_scaling_factor_param") return [c.NRoutedExperts];
         if (leaf == "block_sparse_moe.e_score_correction_bias") return [c.NRoutedExperts];
         if (leaf == "block_sparse_moe.fc1_latent_proj.weight") return [latent, c.HiddenSize];
         if (leaf == "block_sparse_moe.latent_norm.weight") return [latent];
