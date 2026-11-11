@@ -68,6 +68,7 @@ Upstream's sparse path computes a population std and its dense path an unbiased 
 - Noise comes from the repository's `SeedGenerator`, not `torch.manual_seed`/`randn`; the same seed gives a different latent than Python.
 - Compute is F32 on CPU (and the CUDA backend); upstream runs the flows in BF16 and the VAE in FP16.
 - `m.fill_holes()` (CuMesh, in `decode_latent`) is not applied: the raw dual-grid mesh may have small holes.
+- The winding is unified by `FaceOrientation.Unify` (a breadth-first flip over shared edges, then each patch turned outward by its signed volume) where upstream calls CuMesh's `unify_face_orientations` in `to_glb`.
 - RMBG-2.0 is replaced by the BiRefNet-matting checkpoint the repository already supports, and only when the image has no alpha.
 - The direct `1024` pipeline type (64^3 structure grid) is not exposed.
 

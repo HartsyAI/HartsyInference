@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Models.TrellisV2;
 using HartsyInference.ThreeD.Pipelines.Requests;
 using HartsyInference.ThreeD.Pipelines.Stages;
@@ -17,8 +18,9 @@ namespace HartsyInference.ThreeD.Pipelines;
 /// <summary>
 /// TRELLIS.2 single-image to shape-only mesh (positions and computed normals, no texture). The stages follow upstream's shape path:
 /// foreground preprocessing, DINOv3 conditioning, the dense structure flow and decoder, the shape flow (once at 512, or the 512 to
-/// 1024 cascade), the shape VAE decode, and dual-grid meshing. Each stage sits behind its interface, so a test or another model can
-/// replace any of them. The output is in glTF's Y-up frame, rotated from TRELLIS.2's Z-up as upstream's GLB export does.
+/// 1024 cascade), the shape VAE decode, and dual-grid meshing with the triangle winding unified. Each stage sits behind its
+/// interface, so a test or another model can replace any of them. The output is in glTF's Y-up frame, rotated from TRELLIS.2's
+/// Z-up as upstream's GLB export does.
 /// </summary>
 public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
 {
@@ -237,6 +239,8 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
+            FaceOrientation.Unify(mesh);
+            MeshOps.ComputeVertexNormals(mesh);
             ToYUp(mesh);
             done++;
             Report();

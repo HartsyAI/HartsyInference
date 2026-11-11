@@ -14,7 +14,11 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 - **Added: config-driven TRELLIS.2 flow classes** (`Trellis2SparseStructureFlow`, `Trellis2SlatFlow`: shared adaLN with a per-block
   modulation, QK RMS norm, 3D RoPE), the guidance-interval FlowEuler sampler with CFG rescale, `pipeline.json` parsing, cascade
   token-cap logic, and `ShapeVaeDecoder.Upsample` (the decoder's first levels, returning coordinates). The existing full decode is unchanged.
-- Parity against the Python reference is not verified; the catalog entry is Structural and the status row is 🔧.
+- **Fixed: TRELLIS.2 meshes shaded with dark vertical streaks and speckle.** A dual-grid quad is wound the same way whichever side of the surface
+  is inside, so about half of a raw mesh's triangles faced inward and the vertex normals averaged across them were wrong. The pipeline now
+  unifies the winding (`FaceOrientation.Unify`, as upstream's `unify_face_orientations` does) before computing normals. CoLa3D shares the
+  dual-grid mesher and is unchanged.
+- Parity: the DINOv3 conditioning, the 512 shape flow forward and the guided sampler match the upstream Python on the CPU (correlation 0.99993 or better); the structure stage is not checked. The catalog entry is Structural and the status row is 🔧.
 
 ## alpha.416
 
