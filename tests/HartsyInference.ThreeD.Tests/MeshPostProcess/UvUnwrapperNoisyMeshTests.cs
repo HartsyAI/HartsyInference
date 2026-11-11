@@ -139,6 +139,43 @@ public sealed class UvUnwrapperNoisyMeshTests
         Assert.True(UvArea(result.Mesh, 1) > 1e-9);
     }
 
+    [Fact]
+    public void SmallSelfOverlappingComponent_NextToAVastOne_IsStillSplit()
+    {
+        // A helical ramp (about 0.03 per edge) next to one huge triangle (1000 across): tolerances taken from the whole mesh would call every
+        // ramp triangle a sliver and skip its overlap checks, so the ramp would grow into one self-overlapping chart.
+        const int segments = 96, turns = 2, across = 3;
+        List<float> verts = [];
+        for (int s = 0; s <= segments * turns; s++)
+        {
+            for (int w = 0; w <= across; w++)
+            {
+                double theta = 2 * Math.PI * s / segments, radius = 1.0 + 0.5 * w / across;
+                verts.AddRange([(float)(radius * Math.Cos(theta)), (float)(radius * Math.Sin(theta)), (float)(0.2 * theta)]);
+            }
+        }
+
+        List<int> idx = [];
+        for (int s = 0; s < segments * turns; s++)
+        {
+            for (int w = 0; w < across; w++)
+            {
+                int a = s * (across + 1) + w, b = (s + 1) * (across + 1) + w, c = b + 1, d = a + 1;
+                idx.AddRange([a, b, c, a, c, d]);
+            }
+        }
+
+        int far = verts.Count / 3;
+        verts.AddRange([5000, 5000, 0, 6000, 5000, 0, 5000, 6000, 0]);
+        idx.AddRange([far, far + 1, far + 2]);
+        Mesh mesh = new() { Vertices = [.. verts], Indices = [.. idx] };
+
+        UvUnwrapResult result = UvUnwrapper.Unwrap(mesh);
+
+        Assert.True(result.ChartCount > 2);
+        Assert.Equal(0, CountOverlappingPairs(result.Mesh));
+    }
+
     private static float GridStep(Mesh grid)
     {
         float minX = float.MaxValue, maxX = float.MinValue;

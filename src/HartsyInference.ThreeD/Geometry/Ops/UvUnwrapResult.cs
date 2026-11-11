@@ -28,7 +28,7 @@ public sealed class UvUnwrapResult
     /// <summary>Number of charts in the atlas.</summary>
     public int ChartCount { get; }
 
-    /// <summary>The gutter around each chart that the packer kept, in texels of the requested texture size; the requested padding unless the
-    /// charts did not fit, never below the requested minimum.</summary>
+    /// <summary>The gutter the packer kept around the larger charts, in texels of the requested texture size; the requested padding unless the
+    /// charts did not fit, never below the requested minimum. Charts under 8 texels across keep only the minimum.</summary>
     public double PaddingTexels { get; }
 }

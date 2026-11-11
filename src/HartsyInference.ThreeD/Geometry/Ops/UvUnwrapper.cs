@@ -37,7 +37,8 @@ public static class UvUnwrapper
         int faces = mesh.TriangleCount;
         double coneCos = Math.Cos(options.ConeHalfAngleDegrees * Math.PI / 180.0);
         double absorbCos = Math.Cos(options.AbsorbConeHalfAngleDegrees * Math.PI / 180.0);
-        UvChartGrower grower = new(mesh, data.Normal, data.Area, data.Neighbor, 2.0 * data.MeanEdgeLength);
+        double steepCos = Math.Cos(options.SteepAbsorbConeHalfAngleDegrees * Math.PI / 180.0);
+        UvChartGrower grower = new(mesh, data.Normal, data.Area, data.Neighbor);
 
         // Seeds largest face first, lowest index on ties, so the charts do not depend on the sort algorithm.
         int[] order = new int[faces];
@@ -63,6 +64,8 @@ public static class UvUnwrapper
                 if (chartOf[seed] >= 0)
                     continue;
                 int id = chartFaces.Count;
+                if ((id & 255) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
                 List<int> members = [seed];
                 chartOf[seed] = id;
                 double[] normal = grower.SeedNormal(seed, coneCos);
@@ -133,7 +136,7 @@ public static class UvUnwrapper
                 cancellationToken.ThrowIfCancellationRequested();
             List<int> members = chartFaces[c];
             members.Sort();
-            charts.Add(Project(mesh, data, members, chartNormal[c], localOf));
+            charts.Add(Project(mesh, data, members, chartNormal[c], steepCos, localOf));
         }
 
         return charts;
@@ -155,7 +158,7 @@ public static class UvUnwrapper
 
     // The chart on the plane of its area-weighted mean normal, which spreads the stretch evenly; when that projection folds or overlaps,
     // on the plane it was grown on, which is valid by construction.
-    private static UvChart Project(Mesh mesh, FaceData data, List<int> faces, double[] grownNormal, int[] localOf)
+    private static UvChart Project(Mesh mesh, FaceData data, List<int> faces, double[] grownNormal, double minCos, int[] localOf)
     {
         double ax = 0, ay = 0, az = 0;
         foreach (int f in faces)
@@ -168,9 +171,25 @@ public static class UvUnwrapper
         double len = Math.Sqrt(ax * ax + ay * ay + az * az);
         if (faces.Count > 1 && len > 1e-300)
         {
-            UvChart mean = ProjectOnto(mesh, data, faces, [ax / len, ay / len, az / len], localOf);
-            if (UvChartValidator.IsValid(mean, data.Area))
-                return mean;
+            double mx = ax / len, my = ay / len, mz = az / len;
+            // A face must keep at least the share of its area the steepest absorb round allows; past it the mean plane would squash a face a
+            // few degrees from edge-on to a line (few or no texels) where the grown plane gave it more.
+            bool keepsEveryFace = true;
+            foreach (int f in faces)
+            {
+                if (data.Area[f] > 0 && data.Normal[f * 3] * mx + data.Normal[f * 3 + 1] * my + data.Normal[f * 3 + 2] * mz < minCos)
+                {
+                    keepsEveryFace = false;
+                    break;
+                }
+            }
+
+            if (keepsEveryFace)
+            {
+                UvChart mean = ProjectOnto(mesh, data, faces, [mx, my, mz], localOf);
+                if (UvChartValidator.IsValid(mean, data.Area))
+                    return mean;
+            }
         }
 
         return ProjectOnto(mesh, data, faces, grownNormal, localOf);
@@ -263,7 +282,7 @@ public static class UvUnwrapper
         return new UvUnwrapResult(result, map, faceChart, charts.Count, paddingTexels);
     }
 
-    /// <summary>Per-face normals and areas plus edge adjacency, and the mean edge length.</summary>
+    /// <summary>Per-face normals and areas plus edge adjacency, and the adjacency.</summary>
     private sealed class FaceData
     {
         private readonly int[] _neighbor;
@@ -307,25 +326,10 @@ public static class UvUnwrapper
                 }
                 s = e;
             }
-
-            double edges = 0;
-            for (int f = 0; f < faces; f++)
-            {
-                for (int k = 0; k < 3; k++)
-                {
-                    int p = mesh.Indices[f * 3 + k] * 3, q = mesh.Indices[f * 3 + (k + 1) % 3] * 3;
-                    double dx = (double)mesh.Vertices[q] - mesh.Vertices[p], dy = (double)mesh.Vertices[q + 1] - mesh.Vertices[p + 1];
-                    double dz = (double)mesh.Vertices[q + 2] - mesh.Vertices[p + 2];
-                    edges += Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                }
-            }
-            MeanEdgeLength = edges / (3.0 * faces);
         }
 
         public int[] Neighbor => _neighbor;
 
-        /// <summary>Mean length of the triangle edges; the size the grower's hash cells are scaled to.</summary>
-        public double MeanEdgeLength { get; }
 
         public double[] Normal { get; }
 

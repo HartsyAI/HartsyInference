@@ -15,7 +15,7 @@ internal sealed class UvChartGrower
     private readonly double[] _normal;
     private readonly double[] _area;
     private readonly int[] _neighbor;
-    private readonly double _cell;
+    private double _cell;
     private readonly int[] _rejectedIn;
     private readonly int[] _seenIn;
     private readonly Dictionary<long, int> _head = [];
@@ -26,14 +26,12 @@ internal sealed class UvChartGrower
     private int _rejectToken, _seenToken;
     private double _tx, _ty, _tz, _bx, _by, _bz;
 
-    /// <param name="cell">Edge of the hash cells in projected units; about twice the mean edge length keeps a handful of triangles per cell.</param>
-    public UvChartGrower(Mesh mesh, double[] normal, double[] area, int[] neighbor, double cell)
+    public UvChartGrower(Mesh mesh, double[] normal, double[] area, int[] neighbor)
     {
         _mesh = mesh;
         _normal = normal;
         _area = area;
         _neighbor = neighbor;
-        _cell = Math.Max(cell, 1e-300);
         _rejectedIn = new int[mesh.TriangleCount];
         _seenIn = new int[mesh.TriangleCount];
     }
@@ -83,6 +81,9 @@ internal sealed class UvChartGrower
     {
         Basis(normal, out double[] t, out double[] b);
         _tx = t[0]; _ty = t[1]; _tz = t[2]; _bx = b[0]; _by = b[1]; _bz = b[2];
+        // The hash cell follows the chart's own scale (twice the longest edge of its first face), and the overlap tolerances follow the two
+        // triangles compared, so a small component sharing a mesh with a much larger one is judged at its own size.
+        _cell = Math.Max(2.0 * LongestEdge(faces[0]), 1e-300);
         _head.Clear();
         _next.Clear();
         _item.Clear();
@@ -128,6 +129,37 @@ internal sealed class UvChartGrower
         }
     }
 
+    private double LongestEdge(int f)
+    {
+        double longest = 0;
+        for (int k = 0; k < 3; k++)
+        {
+            int p = _mesh.Indices[f * 3 + k] * 3, q = _mesh.Indices[f * 3 + (k + 1) % 3] * 3;
+            double dx = (double)_mesh.Vertices[q] - _mesh.Vertices[p], dy = (double)_mesh.Vertices[q + 1] - _mesh.Vertices[p + 1];
+            double dz = (double)_mesh.Vertices[q + 2] - _mesh.Vertices[p + 2];
+            longest = Math.Max(longest, Math.Sqrt(dx * dx + dy * dy + dz * dz));
+        }
+
+        return longest;
+    }
+
+    private static double Extent(double[] t) =>
+        Math.Max(Math.Max(t[0], Math.Max(t[2], t[4])) - Math.Min(t[0], Math.Min(t[2], t[4])),
+            Math.Max(t[1], Math.Max(t[3], t[5])) - Math.Min(t[1], Math.Min(t[3], t[5])));
+
+    private static bool Sliver(double[] t, double extent) =>
+        0.5 * Math.Abs((t[2] - t[0]) * (t[5] - t[1]) - (t[4] - t[0]) * (t[3] - t[1])) <= 1e-14 * extent * extent;
+
+    // Whether triangle b overlaps a (extent extentA) in area; slivers occupy no area and touching within a tolerance of the smaller
+    // triangle's size is not overlap.
+    private static bool Hits(double[] a, double extentA, double[] b)
+    {
+        double extentB = Extent(b);
+        if (Sliver(b, extentB))
+            return false;
+        return UvChartValidator.TrianglesOverlap(a, b, 1e-7 * Math.Min(extentA, extentB));
+    }
+
     // Projected corners of face f: (u0, v0, u1, v1, u2, v2).
     private void Corners(int f, double[] uv)
     {
@@ -146,10 +178,9 @@ internal sealed class UvChartGrower
         Corners(g, a);
         double ax0 = Math.Min(a[0], Math.Min(a[2], a[4])), ax1 = Math.Max(a[0], Math.Max(a[2], a[4]));
         double ay0 = Math.Min(a[1], Math.Min(a[3], a[5])), ay1 = Math.Max(a[1], Math.Max(a[3], a[5]));
-        double sliver = 1e-14 * _cell * _cell;
-        if (0.5 * Math.Abs((a[2] - a[0]) * (a[5] - a[1]) - (a[4] - a[0]) * (a[3] - a[1])) <= sliver)
+        double extentA = Extent(a);
+        if (Sliver(a, extentA))
             return false;
-        double eps = 1e-7 * _cell;
         int token = ++_seenToken;
         foreach (int t in _big)
         {
@@ -159,7 +190,7 @@ internal sealed class UvChartGrower
 
         Range(ax0, ay0, ax1, ay1, out int cx0, out int cy0, out int cx1, out int cy1);
         if (cx1 - cx0 >= MaxCellSpan || cy1 - cy0 >= MaxCellSpan)
-            return ScanAll(g, eps);
+            return ScanAll(g, extentA);
         for (int cy = cy0; cy <= cy1; cy++)
         {
             for (int cx = cx0; cx <= cx1; cx++)
@@ -182,28 +213,25 @@ internal sealed class UvChartGrower
                 return false;
             _seenIn[t] = token;
             Corners(t, other);
-            if (0.5 * Math.Abs((other[2] - other[0]) * (other[5] - other[1]) - (other[4] - other[0]) * (other[3] - other[1])) <= sliver)
-                return false;
-            return UvChartValidator.TrianglesOverlap(a, other, eps);
+            return Hits(a, extentA, other);
         }
     }
 
     // A face wider than the grid is meant for: compare it with every triangle of the chart.
-    private bool ScanAll(int g, double eps)
+    private bool ScanAll(int g, double extentA)
     {
         double[] a = _corners, other = _otherCorners;
-        double sliver = 1e-14 * _cell * _cell;
+        int token = ++_seenToken;
         foreach (KeyValuePair<long, int> cell in _head)
         {
             for (int e = cell.Value; e >= 0; e = _next[e])
             {
                 int t = _item[e];
-                if (t == g)
+                if (t == g || _seenIn[t] == token)
                     continue;
+                _seenIn[t] = token;
                 Corners(t, other);
-                if (0.5 * Math.Abs((other[2] - other[0]) * (other[5] - other[1]) - (other[4] - other[0]) * (other[3] - other[1])) <= sliver)
-                    continue;
-                if (UvChartValidator.TrianglesOverlap(a, other, eps))
+                if (Hits(a, extentA, other))
                     return true;
             }
         }
@@ -213,7 +241,7 @@ internal sealed class UvChartGrower
             if (t == g)
                 continue;
             Corners(t, other);
-            if (UvChartValidator.TrianglesOverlap(a, other, eps))
+            if (Hits(a, extentA, other))
                 return true;
         }
 
@@ -247,9 +275,12 @@ internal sealed class UvChartGrower
 
     private void Range(double x0, double y0, double x1, double y1, out int cx0, out int cy0, out int cx1, out int cy1)
     {
-        cx0 = (int)Math.Floor(x0 / _cell); cx1 = (int)Math.Floor(x1 / _cell);
-        cy0 = (int)Math.Floor(y0 / _cell); cy1 = (int)Math.Floor(y1 / _cell);
+        cx0 = CellIndex(x0); cx1 = CellIndex(x1);
+        cy0 = CellIndex(y0); cy1 = CellIndex(y1);
     }
+
+    // Clamped so a mesh far from the origin relative to its edge length cannot overflow the cell index.
+    private int CellIndex(double v) => (int)Math.Clamp(Math.Floor(v / _cell), -1e9, 1e9);
 
     private static long Key(int cx, int cy) => ((long)cx << 32) ^ (uint)cy;
 }
