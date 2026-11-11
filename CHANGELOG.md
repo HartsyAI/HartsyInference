@@ -5,6 +5,15 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: Pixal3D structure stage building blocks (not yet a model id).** `Pixal3DView` and `Pixal3DProjection` reproduce
+  Pixal3D's camera (distance from the field of view) and view-aligned feature lookup: grid cells projected through the pinhole and read from
+  the DINOv3 patch map with a bilinear, border-clamped `grid_sample` (`GridSampler.GridSampleRowsBorder`). The coordinates and the sampler
+  match values produced by upstream's own `ProjGrid` and `sample_features` code (torch 2.6, fixture and dump script in `tests/`).
+  `Pixal3DConditionerStage` builds the (global tokens, per-cell features) pair from the shared DINOv3 conditioner and
+  `Pixal3DStructureStage` samples the projection-mode structure flow and decodes it with the TRELLIS.2 decoder, now shared through
+  `Trellis2StructureDecoder` (TRELLIS.2 behaviour unchanged). `Trellis2ImagePreprocessor.Prepare` gains a `cropScale` overload for
+  Pixal3D's 1.1 crop margin.
+
 - **Added: projection mode for the TRELLIS.2 flows (groundwork for Pixal3D, not yet runnable end to end).** `Trellis2FlowConfig` now
   reads `image_attn_mode` and `proj_in_channels` and accepts the `ElasticSLatFlowModel` sidecar name; a projection flow's blocks add a
   per-block `proj_linear` of per-token features to the cross-attention output and read the cross-attention tensors under

@@ -12,6 +12,9 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// </summary>
 public sealed class Pixal3DConditionerStage : IDisposable
 {
+    /// <summary>Pixels per DINOv3 patch edge.</summary>
+    private const int PatchSize = 16;
+
     private readonly Trellis2ImageConditioner _conditioner;
 
     /// <param name="conditioner">This stage owns it.</param>
@@ -25,10 +28,20 @@ public sealed class Pixal3DConditionerStage : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         using Tensor tokens = EncodeTokens(backend, image, imageSize);
-        int patches = imageSize / 16, patchCount = patches * patches;
+        return Split(tokens, imageSize, gridResolution, coords, view);
+    }
+
+    public void Dispose() => _conditioner.Dispose();
+
+    /// <summary>Splits DINOv3 <paramref name="tokens"/> <c>[1, globals + patches², C]</c> into the global tokens and the cell-aligned samples
+    /// of the <c>patches × patches</c> map; <paramref name="imageSize"/> is the encoded image's edge and fixes the patch count.</summary>
+    internal static Pixal3DCondition Split(
+        Tensor tokens, int imageSize, int gridResolution, ReadOnlySpan<int> coords, Pixal3DView view)
+    {
+        int patches = imageSize / PatchSize, patchCount = patches * patches;
+        if (tokens.Shape.Rank != 3 || tokens.Shape[0] != 1 || tokens.Shape[1] <= patchCount)
+            throw new ArgumentException($"{tokens.Shape} tokens leave no global tokens beside a {patches}x{patches} patch map.", nameof(tokens));
         int channels = (int)tokens.Shape[2], globalCount = (int)tokens.Shape[1] - patchCount;
-        if (globalCount <= 0)
-            throw new InvalidOperationException($"{tokens.Shape[1]} tokens leave no global tokens beside a {patches}x{patches} patch map.");
         ReadOnlySpan<float> values = tokens.AsReadOnlySpan<float>();
         float[] uv = coords.IsEmpty
             ? Pixal3DProjection.DenseCoordinates(gridResolution, view, imageSize)
@@ -38,8 +51,6 @@ public sealed class Pixal3DConditionerStage : IDisposable
         values[..(globalCount * channels)].CopyTo(global.AsSpan<float>());
         return new Pixal3DCondition(global, proj);
     }
-
-    public void Dispose() => _conditioner.Dispose();
 
     private Tensor EncodeTokens(IBackend backend, Trellis2PreparedImage image, int imageSize)
     {
