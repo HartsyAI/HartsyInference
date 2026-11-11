@@ -14,6 +14,21 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   Fisher-Yates point subset instead of numpy's stream, no decimation, retry with the next seed when a draw does not decode.
   `HartsyInference.ThreeD` now references `HartsyInference.LLM`. On the real checkpoint, an Xbot humanoid yields a 52-joint body with
   fingers and a horse a 32-joint quadruped (CUDA, RTX 3060, about 2 s per generation after load); no Python reference was run.
+- **Added: a model-independent mesh post-processing and PBR baking toolkit in `HartsyInference.ThreeD`.** `MeshDecimator`
+  (quadric edge collapse with the upstream 3x-then-target schedule), `MeshCleaner`, `TriangleBvh`, `UvUnwrapper` (chart
+  segmentation, planar projection, atlas packing), `Rasterizer`, `SparseAttributeVolume` with `SparseAttributeSampler`,
+  `TextureBaker`, `Inpainter` (Telea) and `PbrGlbWriter` (embedded PNG textures, glTF metallic-roughness packing, optional Z-up
+  to Y-up). `PbrMeshPostProcessor` chains them for a mesh plus a sparse attribute volume. Pure C#, no model dependency, and
+  `GlbWriter` and `HairCardGlbWriter` are unchanged. Differences from upstream `to_glb` are listed in
+  [MESH_POSTPROCESS.md](docs/Research/MESH_POSTPROCESS.md).
+
+## alpha.418
+
+- **Added: ERNIE-5.5-Flash-Base multi-token-prediction layer on the host reference.** With `Ernie5LoadOptions.Mtp`,
+  `Ernie5Model` loads layer 43 and drafts the token after next: `ForwardStream` returns the target's pre-head stream,
+  `MtpForward` runs the MTP layer on it (chained steps feed its output back), and `MtpHidden` plus `Logits` read the draft through
+  the shared LM head. Verified on a synthetic checkpoint only; the Text path does not draft yet. A checkpoint is no longer refused
+  for having MTP layers.
 
 ## alpha.417
 

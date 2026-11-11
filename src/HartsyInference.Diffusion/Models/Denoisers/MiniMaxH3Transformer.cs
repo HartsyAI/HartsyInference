@@ -70,7 +70,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             _weights[kv.Key] = kv.Value;
         }
         Require("video_patch_proj.weight");
-        Require("audio_patch_proj.weight");
+        if (_config.HasAudio)
+        {
+            Require("audio_patch_proj.weight");
+        }
         Require("final_layer.video_out.weight");
     }
 
@@ -93,6 +96,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// token-refiner blocks intentionally have no gate and remain on exact dense attention.</summary>
     internal void ValidateVideoSparseAttentionWeights()
     {
+        if (!_config.HasAudio)
+        {
+            throw new NotSupportedException("Video sparse attention is not supported on the MiniMax-H3-Image build.");
+        }
         if (_config.NumLayers != 50 || _config.HiddenSize != 5376 || _config.NumAttentionHeads != 56
             || _config.AttentionHeadDim != 128)
         {
@@ -245,8 +252,49 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         int[]? audioTimestepRows = null,
         IVideoSparseAttentionSession? sparseAttention = null)
     {
+        (Tensor video, Tensor? audio) = ForwardCore(backend, layout, videoRows, audioRows, textStates, cos, sin,
+            uniqueTimesteps, timestepRowOf, textTagRuns, pddHeads, controls, videoTimestepRows, audioTimestepRows,
+            sparseAttention);
+        return (video, audio ?? throw new InvalidOperationException("MiniMax-H3 video forward produced no audio head."));
+    }
+
+    /// <summary>One denoise evaluation for the image build: text, then the target image, through the token refiner,
+    /// all blocks and the video head. <paramref name="pddHeads"/> carries the step's resolved head weight and bias.
+    /// No audio rows or audio head exist, and Fun ControlNet and sparse attention are video-only.</summary>
+    internal Tensor ForwardImage(IBackend backend, MiniMaxH3PackedLayout layout, Tensor imageRows, Tensor textStates,
+        Tensor cos, Tensor sin, float[] uniqueTimesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
+        PddFusedHeads pddHeads, IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns = null,
+        int[]? videoTimestepRows = null)
+    {
+        ArgumentNullException.ThrowIfNull(pddHeads);
+        if (_config.HasAudio)
+        {
+            throw new NotSupportedException("ForwardImage is only for the MiniMax-H3-Image build without audio.");
+        }
+
+        (Tensor video, _) = ForwardCore(backend, layout, imageRows, null, textStates, cos, sin, uniqueTimesteps,
+            timestepRowOf, textTagRuns, pddHeads, controls: null, videoTimestepRows, audioTimestepRows: null,
+            sparseAttention: null);
+        return video;
+    }
+
+    private (Tensor Video, Tensor? Audio) ForwardCore(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
+        Tensor? audioRows, Tensor textStates, Tensor cos, Tensor sin, float[] uniqueTimesteps,
+        IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
+        IReadOnlyList<(int Start, int Stop, int Tag)>? textTagRuns,
+        PddFusedHeads? pddHeads,
+        IReadOnlyList<MiniMaxH3FunControlCondition>? controls,
+        int[]? videoTimestepRows,
+        int[]? audioTimestepRows,
+        IVideoSparseAttentionSession? sparseAttention)
+    {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(layout);
+        if (!_config.HasAudio && controls is { Count: > 0 })
+        {
+            throw new NotSupportedException("Fun ControlNet is not supported on the MiniMax-H3-Image build.");
+        }
+
         int seq = layout.SequenceLength;
         // Resolved once per forward, not per block: free VRAM only needs a cheap driver query (no stream sync, so
         // this cannot affect the GPU-resident-loop D2H-sync count), but re-querying inside the block loop would let
@@ -335,6 +383,10 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backendA);
         ArgumentNullException.ThrowIfNull(backendB);
+        if (!_config.HasAudio)
+        {
+            throw new NotSupportedException("Sharded forward is not yet supported on the MiniMax-H3-Image build.");
+        }
         ArgumentNullException.ThrowIfNull(layout);
         if (controls is { Count: > 0 })
         {
@@ -400,8 +452,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             Tensor hBack = CopyAcross(backendA, backendB, h);
             h.Dispose();
             h = hBack;
-            return FinalLayer(backendA, h, tEmb, layout, timestepRowOf, pddHeads,
+            (Tensor shardedVideo, Tensor? shardedAudio) = FinalLayer(backendA, h, tEmb, layout, timestepRowOf, pddHeads,
                 videoTimestepRows, audioTimestepRows);
+            return (shardedVideo, shardedAudio ?? throw new InvalidOperationException("MiniMax-H3 sharded forward produced no audio head."));
         }
         finally
         {
@@ -423,11 +476,21 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     /// rows through their patch projections, concatenated in segment order. The residual stream is shaped
     /// <c>[seq, 1, hidden]</c> so the adaLN ops see a broadcast group of one row and modulate per token.</summary>
     private Tensor EmbedSegments(IBackend backend, MiniMaxH3PackedLayout layout, Tensor videoRows,
-        Tensor audioRows, Tensor textStates)
+        Tensor? audioRows, Tensor textStates)
     {
         int hidden = _config.HiddenSize;
         Tensor videoEmbed = ProjectIntoStream(backend, videoRows, "video_patch_proj", hidden);
-        Tensor audioEmbed = ProjectIntoStream(backend, audioRows, "audio_patch_proj", hidden);
+        Tensor? audioEmbed = null;
+        if (_config.HasAudio)
+        {
+            audioEmbed = ProjectIntoStream(backend, audioRows ?? throw new ArgumentNullException(nameof(audioRows)),
+                "audio_patch_proj", hidden);
+        }
+        else if (audioRows is not null)
+        {
+            throw new ArgumentException("MiniMax-H3-Image takes no audio rows.", nameof(audioRows));
+        }
+
         Tensor textEmbed = RefineText(backend, textStates);
         List<Tensor> pieces = new List<Tensor>(layout.Segments.Count);
         try
@@ -435,11 +498,17 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
             int videoOffset = 0, audioOffset = 0, textOffset = 0;
             foreach (MiniMaxH3Segment seg in layout.Segments)
             {
+                bool audioKind = seg.Kind is MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.CondAudio
+                    or MiniMaxH3SegmentKind.RefAudio;
+                if (audioKind && audioEmbed is null && seg.Length > 0)
+                {
+                    throw new NotSupportedException($"{seg.Kind} segments need an audio stream this checkpoint does not have.");
+                }
+
                 (Tensor src, int off) = seg.Kind switch
                 {
                     MiniMaxH3SegmentKind.Text => (textEmbed, textOffset),
-                    MiniMaxH3SegmentKind.Audio or MiniMaxH3SegmentKind.CondAudio or MiniMaxH3SegmentKind.RefAudio
-                        => (audioEmbed, audioOffset),
+                    _ when audioKind => (audioEmbed ?? textEmbed, audioOffset),
                     _ => (videoEmbed, videoOffset),
                 };
                 if (seg.Length > 0)
@@ -464,7 +533,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         {
             foreach (Tensor t in pieces) t.Dispose();
             videoEmbed.Dispose();
-            audioEmbed.Dispose();
+            audioEmbed?.Dispose();
             textEmbed.Dispose();
         }
     }
@@ -1108,7 +1177,7 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return outT;
     }
 
-    private (Tensor Video, Tensor Audio) FinalLayer(IBackend backend, Tensor h, Tensor tEmb,
+    private (Tensor Video, Tensor? Audio) FinalLayer(IBackend backend, Tensor h, Tensor tEmb,
         MiniMaxH3PackedLayout layout, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> timestepRowOf,
         PddFusedHeads? pddHeads, int[]? videoTimestepRows, int[]? audioTimestepRows)
     {
@@ -1118,10 +1187,15 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         try
         {
             MiniMaxH3Segment videoSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Video);
-            MiniMaxH3Segment audioSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Audio);
             Tensor video = Head(backend, normed, mod[0], mod[1], videoSeg,
                 timestepRowOf[MiniMaxH3SegmentKind.Video], "final_layer.video_out",
                 pddHeads?.VideoWeight, pddHeads?.VideoBias, videoTimestepRows);
+            if (!_config.HasAudio)
+            {
+                return (video, null);
+            }
+
+            MiniMaxH3Segment audioSeg = layout.Segments.Last(s => s.Kind == MiniMaxH3SegmentKind.Audio);
             Tensor audio = Head(backend, normed, mod[0], mod[1], audioSeg,
                 timestepRowOf[MiniMaxH3SegmentKind.Audio], "final_layer.audio_out",
                 pddHeads?.AudioWeight, pddHeads?.AudioBias, audioTimestepRows);

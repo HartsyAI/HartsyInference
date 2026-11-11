@@ -135,6 +135,19 @@ public sealed class UniRigTokenizerTests
     public void Detokenize_RejectsMalformedSequences(int[] tokens) =>
         Assert.Throws<HartsyInferenceException>(() => UniRigTokenizer.Detokenize(tokens));
 
+    [Fact]
+    public void Build_ExtrudesABranchingRootStraightUpFromItsOwnHead()
+    {
+        float[] joints = [0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.5f, 0.6f, 0.3f, 0.1f];
+        float[] parentJoints = [0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.1f];
+        UniRigSkeleton skeleton = UniRigSkeletonBuilder.Build(joints, parentJoints, [], [null, null, null]);
+
+        // Mean child length 0.4, extrude scale 0.5: the tail sits 0.2 above the head, whatever the head's position.
+        Assert.Equal(0.2f, skeleton.Tails[0], 1e-5f);
+        Assert.Equal(0.3f, skeleton.Tails[1], 1e-5f);
+        Assert.Equal(0.3f, skeleton.Tails[2], 1e-5f);
+    }
+
     public static TheoryData<int[]> MalformedSequences() => new()
     {
         { [] },
