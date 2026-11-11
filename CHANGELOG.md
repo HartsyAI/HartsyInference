@@ -5,7 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
-- **Added: Hunyuan3D Paint source spike.** `docs/Research/HUNYUAN3D_PAINT_ARCHITECTURE.md` records the pinned Paint 2.0 and 2.1 sources, file hashes, the 2.5D UNet, the renderer and bake, the reuse map and the Tencent Hunyuan 3D 2.1 licence terms (territory excludes the EU, UK and South Korea, 1M MAU, no training other models).
+- **Added: Hunyuan3D Paint (validation-pending, nothing run on real weights).** `hartsy 3d <mesh.glb> --image <ref.png> -m hunyuan3d-paint` (2.0, albedo) and `-m hunyuan3d-paint21` (2.1, albedo + metallic-roughness) texture a mesh: orthographic normal and position maps, a six-view multiview diffusion over a Stable Diffusion 2.1 zero-SNR UNet with reference, multiview, material, DINO and 3D-rotary attention, then back-projection onto the UV atlas, inpainting and a PBR GLB. New in `HartsyInference.ThreeD`: the screen-space rasterizer and view selection (`Paint/`), the UNet, UniPC and Euler-ancestral samplers and pipeline (`Models/Hunyuan3D/Paint/`); the catalog gains `hunyuan3d-paint` and `hunyuan3d-paint21`. The 2.5D UNet is checked against the stock SD UNet and a host transcription of the upstream block on tiny weights. `docs/Research/HUNYUAN3D_PAINT_ARCHITECTURE.md` records the pinned Paint 2.0 and 2.1 sources, file hashes, the reuse map and the Tencent Hunyuan 3D 2.1 licence terms (territory excludes the EU, UK and South Korea, 1M MAU, no training other models).
 
 ## alpha.422
 

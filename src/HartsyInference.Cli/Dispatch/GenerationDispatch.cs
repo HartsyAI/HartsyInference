@@ -821,11 +821,15 @@ public static class GenerationDispatch
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId);
+        bool paint = MeshModelIds.PaintMesh.Contains(meshId);
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || paint;
+        string? imagePath = parameters.GetStringOrNull("image");
+        if (paint && imagePath is null)
+            throw new ArgumentException($"3D model '{meshId}' textures a mesh from a reference image; pass the image with --image.");
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = scene ? null : LoadMeshImage(prompt),
+            Image = paint ? LoadMeshImage(imagePath!) : scene ? null : LoadMeshImage(prompt),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),

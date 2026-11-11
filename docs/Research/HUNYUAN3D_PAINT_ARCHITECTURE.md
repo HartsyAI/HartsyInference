@@ -151,6 +151,15 @@ materials; the table keyed by sequence length selects the resolution, so the num
 | Canny edges, Navier-Stokes inpaint, vertex inpaint | Not in the repo; replaced by a depth-gradient edge test and the Telea `Inpainter`, a documented difference. |
 | xatlas, pymeshlab | Replaced by `UvUnwrapper`, `MeshDecimator`, as for TRELLIS.2. |
 
+## Implementation notes
+
+Code: `HartsyInference.ThreeD/Paint` (camera, frame, rasterizer, maps, selection, bake) and `Models/Hunyuan3D/Paint` (UNet, block, rotary tables, schedule, samplers, pipeline, loader); results and the list of differences are in the status doc.
+
+- **Layout.** The UNet carries one activation per material (`[views, channels, h, w]`) instead of upstream's stacked `(batch, material, view)` tensor, and the three guidance branches run as separate passes. Both are the same arithmetic: only reference attention couples materials, and attention is per item.
+- **Reference-attention values.** Upstream concatenates the per-material value projections and views the result as `(heads, materials * headDim)`; the loader selects those rows once so each material is an ordinary attention (tested against a transcription of the concatenation).
+- **Rotary multiview attention** reuses the engine's interleaved-pair `Rotary` op with duplicated-pair tables, one row per token and one table per sequence length.
+- **Why not the stock UNet.** `CrossAttentionBlock` hides the transformer layer; the new UNet composes the public ResNet and timestep blocks and passes the stock UNet's outputs on identical weights when the added projections are zero.
+
 ## Not yet checked
 
 The 2.1 `.bin` key layout (read the pickle after approval; expected `unet.*`, `unet_dual.*`, `attn1.processor.to_*_mr`, `attn_dino`,
