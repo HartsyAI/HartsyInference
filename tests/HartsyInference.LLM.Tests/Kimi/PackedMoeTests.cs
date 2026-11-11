@@ -40,7 +40,7 @@ public sealed class PackedMoeTests
         {
             Hidden = 16, Vocab = 20, Layers = 2, DenseLayers = 0, DenseIntermediate = 24, Heads = 2, KdaHeadDim = 8, KdaForgetRank = 4,
             FullAttentionLayers = new HashSet<int>(), QLoraRank = 8, KvLoraRank = 6, QkNopeDim = 4, QkRopeDim = 4, VDim = 4,
-            IndexHeads = 2, IndexHeadDim = 8, IndexTopK = 16, Experts = 4, ExpertsPerToken = 2, MoeIntermediate = 32,
+            IndexHeads = 2, IndexHeadDim = 8, IndexTopK = 16, Experts = 4, ExpertsPerToken = 2, MoeIntermediate = 64,
             SharedExperts = 1, LatentSize = 32, AttnResBlock = 2,
         };
         Random rng = new(21);

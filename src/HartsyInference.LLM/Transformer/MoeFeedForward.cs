@@ -197,9 +197,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             throw new NotSupportedException("Packed MXFP4 experts run on the resident path; detach the offload or the host expert runtime first.");
         for (int i = 0; i < e; i++)
         {
-            RequireMxfp4Projection(experts[i].Gate, _hidden, _moe.MoeIntermediateSize, $"expert {i} gate");
-            RequireMxfp4Projection(experts[i].Up, _hidden, _moe.MoeIntermediateSize, $"expert {i} up");
-            RequireMxfp4Projection(experts[i].Down, _moe.MoeIntermediateSize, _hidden, $"expert {i} down");
+            RequireMxfp4Projection(experts[i].Gate, _moe.MoeIntermediateSize, _hidden, $"expert {i} gate");
+            RequireMxfp4Projection(experts[i].Up, _moe.MoeIntermediateSize, _hidden, $"expert {i} up");
+            RequireMxfp4Projection(experts[i].Down, _hidden, _moe.MoeIntermediateSize, $"expert {i} down");
         }
         _packed = [.. experts];
         _gateW = [];
