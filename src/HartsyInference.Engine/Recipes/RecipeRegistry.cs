@@ -65,6 +65,7 @@ public static class RecipeRegistry
         new Image.HunyuanImageRecipe(),
         new Image.OmniGen2Recipe(),
         new Image.Krea2Recipe(),
+        new Image.Krea3Recipe(),
         new Image.MageFlowRecipe(),
         new Image.HiDreamRecipe(),
         new Image.Ideogram4Recipe(),
