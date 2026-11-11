@@ -29,6 +29,48 @@ public sealed unsafe class Hunyuan3DPlainBlockTests
             Assert.True(Math.Abs(expected[i] - actual[i]) < 1e-4f, $"element {i}: expected {expected[i]}, got {actual[i]}");
     }
 
+    [Fact]
+    public void Regroup_ReadsEachHeadsQkvAsConsecutiveGroupsOfTheFusedRow()
+    {
+        // Upstream: cat(q, k, v) along the channel axis, then view (heads, 3 * headDim). Head h's "q" is fused channels
+        // [h * 3d, h * 3d + d), its "k" the next d, its "v" the last d. Rows 0..W-1 are q, W..2W-1 k, 2W..3W-1 v.
+        const int cols = 3, headDim = Width / Heads;
+        float[][] source = [[.. Enumerable.Range(0, Width * cols).Select(i => 1f + i)], [.. Enumerable.Range(0, Width * cols).Select(i => 1000f + i)],
+                            [.. Enumerable.Range(0, Width * cols).Select(i => 2000f + i)]];
+        Tensor q = Make(source[0], Width, cols), k = Make(source[1], Width, cols), v = Make(source[2], Width, cols);
+        Hunyuan3DPlainBlock block = new(Width, Heads, skip: false, moe: false, Experts, TopK);
+
+        (Tensor rq, Tensor rk, Tensor? rv) = block.Regroup(q, k, v, 3);
+
+        Tensor[] regrouped = [rq, rk, rv!];
+        for (int part = 0; part < 3; part++)
+        {
+            for (int head = 0; head < Heads; head++)
+            {
+                for (int j = 0; j < headDim; j++)
+                {
+                    int fusedRow = head * 3 * headDim + part * headDim + j, sourceRow = fusedRow % Width;
+                    float[] from = source[fusedRow / Width];
+                    for (int c = 0; c < cols; c++)
+                        Assert.Equal(from[sourceRow * cols + c], ((float*)regrouped[part].DataPointer)[(head * headDim + j) * cols + c]);
+                }
+            }
+        }
+
+        // Cross-attention: cat(k, v) viewed (heads, 2 * headDim).
+        (Tensor ck, Tensor cv, _) = block.Regroup(q, k, null, 2);
+        for (int head = 0; head < Heads; head++)
+        {
+            for (int j = 0; j < headDim; j++)
+            {
+                int kRow = head * 2 * headDim + j;
+                Assert.Equal(source[kRow / Width][kRow % Width * cols], ((float*)ck.DataPointer)[(head * headDim + j) * cols]);
+                int vRow = head * 2 * headDim + headDim + j;
+                Assert.Equal(source[vRow / Width][vRow % Width * cols], ((float*)cv.DataPointer)[(head * headDim + j) * cols]);
+            }
+        }
+    }
+
     // shared(x) + sum over the two highest gate scores of score * expert(x), the scores being the plain softmax values.
     private static float[] Reference(Dictionary<string, Tensor> w, float[] x)
     {

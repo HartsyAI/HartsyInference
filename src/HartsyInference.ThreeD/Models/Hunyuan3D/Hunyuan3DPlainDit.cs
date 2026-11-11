@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
@@ -43,7 +44,11 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
         _finalNormW = F(w, $"{p}final_layer.norm_final.weight"); _finalNormB = F(w, $"{p}final_layer.norm_final.bias");
         _finalW = F(w, $"{p}final_layer.linear.weight"); _finalB = F(w, $"{p}final_layer.linear.bias");
         for (int i = 0; i < _blocks.Length; i++)
+        {
             _blocks[i].LoadWeights(w, $"{p}blocks.{i}", halfWeights);
+            if (_blocks[i].HiddenDim != _cfg.MlpDim)
+                throw new UnsupportedModelException($"Hunyuan3D-2.1 block {i} has MLP width {_blocks[i].HiddenDim}, but the config (hidden_size x mlp_ratio) says {_cfg.MlpDim}.");
+        }
     }
 
     /// <inheritdoc/>

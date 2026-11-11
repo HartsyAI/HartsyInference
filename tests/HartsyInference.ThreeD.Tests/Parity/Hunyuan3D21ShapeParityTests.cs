@@ -45,10 +45,10 @@ public sealed class Hunyuan3D21ShapeParityTests
         dit.BlockProbe = (layer, hidden) =>
         {
             if (fixture.Has($"block{layer}"))
-                Check($"block {layer} output", ToArray(hidden), fixture.Get($"block{layer}").ToFloat32(), minCorrelation: 0.9999, maxRelativeL2: 5e-2);
+                Check($"block {layer} output", ToArray(hidden), fixture.Get($"block{layer}").ToFloat32(), minCorrelation: 0.99999, maxRelativeL2: 1e-3);
         };
         // The embedding stage alone (timestep token + x_embedder, upstream's t_token and x_embedded) is cheap and localises an early divergence.
-        using (Tensor embedded = dit.Embed(backend, ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), sigmas[0]))
+        using (Tensor probeLatent = ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), embedded = dit.Embed(backend, probeLatent, sigmas[0]))
         {
             float[] all = ToArray(embedded);
             int width = config.Width;
@@ -57,8 +57,9 @@ public sealed class Hunyuan3D21ShapeParityTests
         }
 
         // One forward is enough: it checks the embedding and four block outputs, which is where the fused-QKV regrouping and the MoE show up.
-        Tensor velocity = dit.Forward(backend, ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), ToTensor(condValues, condArray.Shape), sigmas[0]);
-        Check($"image tokens, sigma {sigmas[0]:F2}", ToArray(velocity), fixture.Get("velocity_cond_0").ToFloat32(), minCorrelation: 0.9999, maxRelativeL2: 5e-2);
+        using Tensor noise = ToTensor(noiseArray.ToFloat32(), noiseArray.Shape), cond = ToTensor(condValues, condArray.Shape);
+        using Tensor velocity = dit.Forward(backend, noise, cond, sigmas[0]);
+        Check($"image tokens, sigma {sigmas[0]:F2}", ToArray(velocity), fixture.Get("velocity_cond_0").ToFloat32(), minCorrelation: 0.99999, maxRelativeL2: 1e-3);
     }
 
     [Fact]

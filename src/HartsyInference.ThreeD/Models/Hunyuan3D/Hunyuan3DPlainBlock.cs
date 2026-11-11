@@ -33,6 +33,9 @@ internal sealed unsafe class Hunyuan3DPlainBlock
 
     internal bool HasSkip => _skip;
 
+    /// <summary>Hidden width of the dense MLP (or of the shared expert in a MoE block), read from the loaded weights.</summary>
+    internal int HiddenDim => (int)_fc1W!.Shape[0];
+
     internal void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, bool halfWeights)
     {
         _halfWeights = halfWeights;
@@ -42,11 +45,15 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         // Upstream concatenates the projections and views the result as (heads, 3 * headDim), so a head's "q", "k" and "v" are three
         // consecutive channel groups of the fused row, not the head's own slices of q, k and v. The weights were trained that way; the
         // rows are regrouped once here so plain per-projection Linears reproduce it.
-        (_sqW, _skW, _svW) = Regroup(F(w, $"{p}.attn1.to_q.weight"), F(w, $"{p}.attn1.to_k.weight"), F(w, $"{p}.attn1.to_v.weight"), 3);
+        Tensor q = F(w, $"{p}.attn1.to_q.weight"), k = F(w, $"{p}.attn1.to_k.weight"), v = F(w, $"{p}.attn1.to_v.weight");
+        (_sqW, _skW, _svW) = Regroup(q, k, v, 3);
+        Release(q, w[$"{p}.attn1.to_q.weight"]); Release(k, w[$"{p}.attn1.to_k.weight"]); Release(v, w[$"{p}.attn1.to_v.weight"]);
         _sqNorm = F(w, $"{p}.attn1.q_norm.weight"); _skNorm = F(w, $"{p}.attn1.k_norm.weight");
         _soW = F(w, $"{p}.attn1.out_proj.weight"); _soB = F(w, $"{p}.attn1.out_proj.bias");
         _cqW = F(w, $"{p}.attn2.to_q.weight");
-        (_ckW, _cvW, _) = Regroup(F(w, $"{p}.attn2.to_k.weight"), F(w, $"{p}.attn2.to_v.weight"), null, 2);
+        Tensor ck = F(w, $"{p}.attn2.to_k.weight"), cv = F(w, $"{p}.attn2.to_v.weight");
+        (_ckW, _cvW, _) = Regroup(ck, cv, null, 2);
+        Release(ck, w[$"{p}.attn2.to_k.weight"]); Release(cv, w[$"{p}.attn2.to_v.weight"]);
         _cqNorm = F(w, $"{p}.attn2.q_norm.weight"); _ckNorm = F(w, $"{p}.attn2.k_norm.weight");
         _coW = F(w, $"{p}.attn2.out_proj.weight"); _coB = F(w, $"{p}.attn2.out_proj.bias");
         if (_skip)
@@ -256,7 +263,7 @@ internal sealed unsafe class Hunyuan3DPlainBlock
 
     /// <summary>Regroups the rows of <paramref name="parts"/> stacked as one fused projection so that head <c>h</c> reads channels
     /// <c>[h * parts * headDim, (h + 1) * parts * headDim)</c> of the fused row as its <paramref name="parts"/> consecutive groups.</summary>
-    private (Tensor First, Tensor Second, Tensor? Third) Regroup(Tensor a, Tensor b, Tensor? c, int parts)
+    internal (Tensor First, Tensor Second, Tensor? Third) Regroup(Tensor a, Tensor b, Tensor? c, int parts)
     {
         Tensor[] sources = c is null ? [a, b] : [a, b, c];
         int rows = (int)a.Shape[0], cols = (int)a.Shape[1];
@@ -278,6 +285,13 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         }
 
         return (outputs[0], outputs[1], parts > 2 ? outputs[2] : null);
+    }
+
+    // F32 casts made only to feed Regroup are freed at once instead of waiting for the finalizer (about 1.4 GB over 21 blocks on the CPU path).
+    private static void Release(Tensor made, Tensor original)
+    {
+        if (!ReferenceEquals(made, original))
+            made.Dispose();
     }
 
     // Matrices stay F16 when the backend multiplies F16 weights directly; vectors (biases, norms) are always F32.
