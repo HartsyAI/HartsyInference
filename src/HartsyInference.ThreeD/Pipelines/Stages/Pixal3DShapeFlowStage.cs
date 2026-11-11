@@ -10,6 +10,9 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// and the per-voxel projected features, which is then denormalized with the <c>pipeline.json</c> statistics (the same ones as TRELLIS.2). Each
 /// 1.3B flow is read from disk for the call and released afterwards, so only one is in memory at a time.
 /// </summary>
+/// <remarks>Before the flow loads, the live conditioning (<c>Global</c> and <c>Proj</c>, positive and negative) is offloaded to the host and
+/// <see cref="Trellis2DeviceMemory.ReleaseAll"/> sweeps the device, as the TRELLIS.2 texture flow does; cached weights of other models upload again on
+/// their next use.</remarks>
 public sealed class Pixal3DShapeFlowStage : IPixal3DShapeFlowStage
 {
     private readonly string _flow512Path, _flow1024Path;

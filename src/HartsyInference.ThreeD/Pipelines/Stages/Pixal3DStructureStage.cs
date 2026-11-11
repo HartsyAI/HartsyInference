@@ -11,6 +11,9 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// projected DINOv3 features, then <see cref="Trellis2StructureDecoder"/> (the same decoder checkpoint as TRELLIS.2) turns it into occupied
 /// voxels on the shape flow's grid. The 1.3B flow is read from disk for each request and released afterwards.
 /// </summary>
+/// <remarks>Before the flow loads, the live conditioning (<c>Global</c> and <c>Proj</c>, positive and negative) is offloaded to the host and
+/// <see cref="Trellis2DeviceMemory.ReleaseAll"/> sweeps the device, as the TRELLIS.2 texture flow does; cached weights of other models upload again on
+/// their next use.</remarks>
 public sealed class Pixal3DStructureStage : IPixal3DStructureStage, IDisposable
 {
     private readonly string _flowPath;
