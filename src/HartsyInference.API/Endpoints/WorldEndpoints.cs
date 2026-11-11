@@ -77,46 +77,54 @@ public static class WorldEndpoints
                 png = Convert.ToBase64String(PngEncoder.Encode(frame.Rgb, frame.Width, frame.Height)),
             }, jsonOptions);
 
-            if (session.DefersDeviceWork)
+            // Every frame is written and flushed before the next is pulled from the session, so a slow client holds the model back
+            // (a chunked session blocks when its consumer does) instead of frames piling up in memory.
+            async Task<bool> StreamFramesAsync()
             {
-                // Open reserved nothing for this session: this stream loads the model and runs it, so it takes a long-running slot
-                // like any other generation, and waits its turn (or gets a 429 when the queue is full).
-                await SseHelpers.RunAsync(ctx, queue, async (writer, _) =>
+                ctx.Response.Headers.ContentType = "text/event-stream";
+                try
                 {
-                    try
+                    await foreach (VideoFrame frame in session.StreamAsync(ct))
                     {
-                        await foreach (VideoFrame frame in session.StreamAsync(ct))
-                            writer.TryWrite(FrameEvent(frame));
+                        await ctx.Response.WriteAsync(FrameEvent(frame), ct);
+                        await ctx.Response.Body.FlushAsync(ct);
                     }
-                    catch (Exception ex) when (!ct.IsCancellationRequested)
-                    {
-                        Logs.Error($"[World] Session {id} failed while streaming: {ex}");
-                        throw;   // RunAsync sends it to the client as an error event
-                    }
-                }, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // The client disconnected: nothing to send, and the cancelled token must not be used to say so.
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error($"[World] Session {id} failed while streaming: {ex}");
+                    await ctx.Response.WriteAsync(SseHelpers.ErrorEvent(ex.Message, jsonOptions), CancellationToken.None);
+                    await ctx.Response.Body.FlushAsync(CancellationToken.None);
+                }
+                return true;
+            }
+
+            if (!session.DefersDeviceWork)
+            {
+                // An interactive session reserved its resources under the long-running gate when it opened, so streaming does not take
+                // a new slot (see this class's doc).
+                await StreamFramesAsync();
                 return;
             }
 
-            // An interactive session reserved its resources under the long-running gate when it opened, so streaming does not take
-            // a new slot (see this class's doc).
-            ctx.Response.Headers.ContentType = "text/event-stream";
+            // Open reserved nothing for this session: this stream loads the model and runs it, so it takes a long-running slot like any
+            // other generation. It waits its turn before the response starts, and a full queue is a 429.
             try
             {
-                await foreach (VideoFrame frame in session.StreamAsync(ct))
-                {
-                    await ctx.Response.WriteAsync(FrameEvent(frame), ct);
-                    await ctx.Response.Body.FlushAsync(ct);
-                }
+                await queue.EnqueueAsync(StreamFramesAsync, ct);
+            }
+            catch (QueueFullException ex)
+            {
+                ctx.Response.Headers["Retry-After"] = "1";
+                await HartsyInferenceServiceExtensions.WriteErrorAsync(ctx, StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error");
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                // The client disconnected: nothing to send, and the cancelled token must not be used to say so.
-            }
-            catch (Exception ex)
-            {
-                Logs.Error($"[World] Session {id} failed while streaming: {ex}");
-                await ctx.Response.WriteAsync(SseHelpers.ErrorEvent(ex.Message, jsonOptions), CancellationToken.None);
-                await ctx.Response.Body.FlushAsync(CancellationToken.None);
+                // The client left while waiting for a slot.
             }
         });
 
