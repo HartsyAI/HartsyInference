@@ -5,6 +5,14 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: `hartsy 3d -m pixal3d`, Pixal3D shape-only image to mesh (🔧, parity pending).** `Pixal3DImageTo3DPipeline` runs the cascade with the
+  projection-mode flows: DINOv3 tokens split into global tokens and a patch map sampled at each voxel's projected position (NAF-upsampled for the
+  shape flows), the structure flow and decoder, the 512 shape flow, the upsample, the rounding quantizer, the 1024 flow at 1024 or 1536, the shape VAE
+  and dual-grid meshing; `MeshService` routes the new `pixal3d` id, with a catalog entry for the `TencentARC/Pixal3D` files. `--grid` is the final
+  dual-grid resolution, 1024 (default) or 1536; `--fov <radians>` sets the camera (upstream estimates it with MoGe, which is not ported; its default
+  0.8576 rad is used otherwise). `naf_release.pth` must be placed in `3D/pixal3d` by hand (a GitHub release asset the catalog cannot fetch).
+  Not verified on real weights end to end; texture, multi-view and MoGe are not implemented.
+
 - **Added: Pixal3D structure stage building blocks (not yet a model id).** `Pixal3DView` and `Pixal3DProjection` reproduce
   Pixal3D's camera (distance from the field of view) and view-aligned feature lookup: grid cells projected through the pinhole and read from
   the DINOv3 patch map with a bilinear, border-clamped `grid_sample` (`GridSampler.GridSampleRowsBorder`). The coordinates and the sampler

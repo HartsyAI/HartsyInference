@@ -7,7 +7,7 @@ public static class MeshModelIds
     public static readonly IReadOnlyList<string> Hunyuan3D = ["hunyuan3d", "hunyuan3d-fast", "hunyuan3d-turbo", "hunyuan3d-mini"];
 
     /// <summary>Image-to-3D models: their request carries <see cref="Requests.MeshRequest.Image"/>.</summary>
-    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2"];
+    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", "pixal3d"];
 
     /// <summary>Scene-decomposition models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/>.</summary>
     public static readonly IReadOnlyList<string> SceneMesh = ["cola3d"];
