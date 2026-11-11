@@ -18,7 +18,8 @@ internal sealed unsafe class Hunyuan3DKvHost
 
     internal int Latents => _latents;
 
-    /// <summary>Per head, the <paramref name="topK"/> keys with the largest dot product with the mean of every <paramref name="stride"/>-th row of <paramref name="q"/> <c>[1,H,rows,D]</c>, and their values, as <c>[1,H,topK,D]</c> tensors the caller owns.</summary>
+    /// <summary>Per head, the <paramref name="topK"/> keys best matching the mean of every <paramref name="stride"/>-th row of <paramref name="q"/> <c>[1,H,rows,D]</c>.</summary>
+    /// <returns>The keys and their values as <c>[1,H,topK,D]</c> tensors the caller owns.</returns>
     /// <remarks>Mean-of-dot-products equals the dot product with the mean, which is why the mean is formed first.</remarks>
     internal (Tensor K, Tensor V) SelectTopK(Tensor q, int rows, int stride, int topK)
     {

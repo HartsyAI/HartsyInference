@@ -24,11 +24,13 @@ internal static class Hunyuan3DFlowSchedule
         return sigmas;
     }
 
-    /// <summary>Sigmas picked from the <paramref name="pcmTimesteps"/>-entry table of <c>ConsistencyFlowMatchEulerDiscreteScheduler</c> (index <c>floor(linspace(0, pcm, steps, endpoint=False))</c>), plus the trailing 1.0.</summary>
+    /// <summary>Sigmas picked from the <paramref name="pcmTimesteps"/>-entry table of the consistency scheduler, plus the trailing 1.0.</summary>
+    /// <remarks>Table index is <c>floor(linspace(0, pcm, steps, endpoint=False))</c>, as in <c>ConsistencyFlowMatchEulerDiscreteScheduler</c>.</remarks>
     internal static float[] ConsistencySigmas(int steps, int pcmTimesteps)
     {
         if (steps <= 0 || pcmTimesteps <= 0 || pcmTimesteps > TrainTimesteps)
-            throw new ArgumentOutOfRangeException(nameof(steps), steps, $"Steps {steps} and pcm_timesteps {pcmTimesteps} must be positive, pcm at most {TrainTimesteps}.");
+            throw new ArgumentOutOfRangeException(
+                nameof(steps), steps, $"Steps {steps} and pcm_timesteps {pcmTimesteps} must be positive, pcm at most {TrainTimesteps}.");
         int stepRatio = TrainTimesteps / pcmTimesteps;
         float[] sigmas = new float[steps + 1];
         for (int i = 0; i < steps; i++)

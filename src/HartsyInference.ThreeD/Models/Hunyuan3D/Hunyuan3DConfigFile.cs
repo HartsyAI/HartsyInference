@@ -54,7 +54,8 @@ public static class Hunyuan3DConfigFile
             DepthSingle = Int(values, ModelPrefix + "depth_single_blocks"),
             GuidanceEmbed = guidanceEmbed,
             Scheduler = scheduler,
-            PcmTimesteps = scheduler == Hunyuan3DScheduler.ConsistencyFlowMatchEuler ? Int(values, "scheduler.params.pcm_timesteps") : vae.PcmTimesteps,
+            PcmTimesteps = scheduler == Hunyuan3DScheduler.ConsistencyFlowMatchEuler
+                ? Int(values, "scheduler.params.pcm_timesteps") : vae.PcmTimesteps,
             ViewCount = views,
             NumInferenceSteps = scheduler == Hunyuan3DScheduler.ConsistencyFlowMatchEuler ? 5 : guidanceEmbed ? 10 : vae.NumInferenceSteps,
         };

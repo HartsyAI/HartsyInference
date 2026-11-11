@@ -11,7 +11,8 @@ internal static class Hunyuan3DFlashVdm
     private const float Unevaluated = -10000f;
     private const int CellsPerAxis = 6;
 
-    /// <summary>Decodes the occupancy of <paramref name="count"/> query points in one spatial group, selecting latents from every <paramref name="stride"/>-th query.</summary>
+    /// <summary>Decodes the occupancy of <paramref name="count"/> query points in one spatial group.</summary>
+    /// <remarks>Latents are selected from every <paramref name="stride"/>-th query of the group.</remarks>
     internal delegate void QueryGroup(ReadOnlySpan<float> coordinates, int count, int stride, Span<float> logits);
 
     /// <summary>The per-axis cell counts of each level, coarsest first, for <paramref name="octreeResolution"/>.</summary>
