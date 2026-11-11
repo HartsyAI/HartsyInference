@@ -14,23 +14,23 @@ namespace HartsyInference.ThreeD.Tests.Pixal3D;
 public sealed class Pixal3DRealWeightsTests
 {
     private const string RopePhases = "rope_phases";
+    private const string StructureFlow = "ss_flow_img_dit_1_3B_64_bf16";
+    private const string ShapeFlow512 = "slat_flow_img2shape_dit_1_3B_512_bf16";
+    private const string ShapeFlow1024 = "slat_flow_img2shape_dit_1_3B_1024_bf16";
 
     private readonly ITestOutputHelper _output;
 
     public Pixal3DRealWeightsTests(ITestOutputHelper output) => _output = output;
 
-    [Pixal3DRealWeightsFact]
+    [Pixal3DRealWeightsFact(
+        StructureFlow + ".safetensors", StructureFlow + ".json", ShapeFlow512 + ".safetensors", ShapeFlow512 + ".json",
+        ShapeFlow1024 + ".safetensors", ShapeFlow1024 + ".json")]
     public void FlowHeaders_MatchTheProjectionKeyMapExactly()
     {
         string folder = Pixal3DRealWeightsFactAttribute.FindFolder()!;
-        foreach (string name in new[]
-        {
-            "ss_flow_img_dit_1_3B_64_bf16", "slat_flow_img2shape_dit_1_3B_512_bf16", "slat_flow_img2shape_dit_1_3B_1024_bf16",
-        })
+        foreach (string name in new[] { StructureFlow, ShapeFlow512, ShapeFlow1024 })
         {
             string path = Path.Combine(folder, name + ".safetensors");
-            if (!File.Exists(path))
-                continue;
             Trellis2FlowConfig config = Trellis2FlowConfig.FromJson(File.ReadAllText(Path.ChangeExtension(path, ".json")));
             SafeTensorHeader header = SafeTensorHeaderReader.Read(path);
             IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs = Trellis2FlowKeyMap.Specs(config);
@@ -52,13 +52,11 @@ public sealed class Pixal3DRealWeightsTests
         }
     }
 
-    [Pixal3DRealWeightsFact]
+    [Pixal3DRealWeightsFact(StructureFlow + ".safetensors", StructureFlow + ".json")]
     public void StoredRopePhases_MatchTheRebuiltDenseRopeTable()
     {
         // The loader leaves the saved complex buffer unread because Trellis2RopeTable rebuilds it; this proves the two agree.
-        string path = Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, "ss_flow_img_dit_1_3B_64_bf16.safetensors");
-        if (!File.Exists(path))
-            return;
+        string path = Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, StructureFlow + ".safetensors");
         Trellis2FlowConfig config = Trellis2FlowConfig.FromJson(File.ReadAllText(Path.ChangeExtension(path, ".json")));
         SafeTensorDescriptor phases = SafeTensorHeaderReader.Read(path).Tensors[RopePhases];
         int tokens = config.DenseTokens, pairs = config.HeadDim / 2;
