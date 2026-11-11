@@ -229,6 +229,20 @@ public sealed class Pixal3DPipelineTests
     }
 
     [Fact]
+    public void Generate_ReleasesTheFineConditioningBeforeTheDecodeAndTheLatentAfterIt()
+    {
+        using Rig rig = new();
+
+        rig.Pipeline.Generate(Image(), new Pixal3DOptions { Seed = 1 });
+
+        // The decode is the step that needs the most memory: the per-voxel features of the fine stage must be gone by then.
+        Assert.NotEmpty(rig.FineConditioning);
+        Assert.True(rig.FineConditioningDisposedAtDecode);
+        Assert.NotNull(rig.FineLatent);
+        Trellis2TestData.AssertDisposed(rig.FineLatent);
+    }
+
+    [Fact]
     public void Generate_ThrowsWhenTheDecodedShapeHasNoSurface()
     {
         using Rig rig = new(emptyField: true);
@@ -281,6 +295,12 @@ public sealed class Pixal3DPipelineTests
         internal List<double> Scales { get; } = [];
 
         internal int[]? FineCoords { get; set; }
+
+        internal List<Tensor> FineConditioning { get; } = [];
+
+        internal Tensor? FineLatent { get; set; }
+
+        internal bool FineConditioningDisposedAtDecode { get; set; }
 
         public void Dispose()
         {
@@ -336,11 +356,17 @@ public sealed class Pixal3DPipelineTests
             rig.Tensors.Add(negCond.Global);
             rig.Tensors.Add(negCond.Proj);
             if (kind == Trellis2ShapeFlowKind.Res1024)
+            {
                 rig.FineCoords = coords;
+                rig.FineConditioning.AddRange([cond.Global, cond.Proj, negCond.Global, negCond.Proj]);
+            }
+
             for (int s = 1; s <= parameters.Steps; s++)
                 onStep?.Invoke(s);
             Tensor latent = new(new TensorShape(1, coords.Length / 4, 32), DType.F32);
             rig.Tensors.Add(latent);
+            if (kind == Trellis2ShapeFlowKind.Res1024)
+                rig.FineLatent = latent;
             return new SparseTensor(latent, coords, gridResolution);
         }
     }
@@ -354,11 +380,25 @@ public sealed class Pixal3DPipelineTests
         }
     }
 
+    private static bool Disposed(Tensor t)
+    {
+        try
+        {
+            _ = t.AsReadOnlySpan<float>().Length;
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            return true;
+        }
+    }
+
     private sealed class StubDecoder(Rig rig, bool emptyField) : ISparseShapeDecoder
     {
         public DualGridField Decode(IBackend backend, SparseTensor latent)
         {
             rig.Calls.Add("decode");
+            rig.FineConditioningDisposedAtDecode = rig.FineConditioning.All(t => Disposed(t));
             if (emptyField)
                 return new DualGridField(new DualGridVoxels([0, 0, 0], [0.5f, 0.5f, 0.5f], new bool[3]), [1f]);
             // Four voxels around one x-axis edge; the first flags it, so the mesher emits one quad (two triangles).

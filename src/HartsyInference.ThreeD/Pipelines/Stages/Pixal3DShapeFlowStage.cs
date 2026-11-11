@@ -1,7 +1,5 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Sparse;
-using HartsyInference.Core.Tensors;
-using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
 
@@ -44,35 +42,21 @@ public sealed class Pixal3DShapeFlowStage : IPixal3DShapeFlowStage
         ArgumentNullException.ThrowIfNull(coords);
         ArgumentNullException.ThrowIfNull(cond);
         ArgumentNullException.ThrowIfNull(negCond);
-        string path = kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path;
-        using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(path);
-        if (!weights.Config.HasProjection)
-            throw new InvalidOperationException($"'{path}' is not a projection flow; Pixal3D's shape flows have image_attn_mode \"proj\".");
-        using Trellis2SlatFlow flow = new(weights);
-        int n = coords.Length / 4;
-        using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, n, flow.Config.InChannels), seed);
-        Tensor latent;
-        backend.PreloadWeights(flow.EnumerateWeights());
-        try
-        {
-            latent = Trellis2FlowSampler.Sample(
-                backend,
-                noise,
-                parameters,
-                (x, tModel, conditional) =>
-                {
-                    Pixal3DCondition c = conditional ? cond : negCond;
-                    return flow.Forward(backend, x, coords, tModel, c.Global, c.Proj);
-                },
-                onStep);
-        }
-        finally
-        {
-            backend.Sync();
-            backend.FreeWeights(flow.EnumerateWeights());
-        }
-
-        Trellis2ShapeFlowStage.Denormalize(latent, _mean, _std);
-        return new SparseTensor(latent, coords, gridResolution);
+        return Trellis2ShapeFlowStage.SampleFlow(
+            backend,
+            kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path,
+            coords,
+            gridResolution,
+            seed,
+            parameters,
+            onStep,
+            _mean,
+            _std,
+            requireProjection: true,
+            (flow, x, tModel, conditional) =>
+            {
+                Pixal3DCondition c = conditional ? cond : negCond;
+                return flow.Forward(backend, x, coords, tModel, c.Global, c.Proj);
+            });
     }
 }

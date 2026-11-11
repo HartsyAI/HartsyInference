@@ -70,7 +70,7 @@ the `proj` image-attention mode, `flash_attn_4` and `sdpa` attention backends, a
 | `shape_dec_next_dc_f16c32_fp16.safetensors` | `Models/TRELLIS2-ShapeVAE/` | yes, sha256 `e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581` |
 | `ss_dec_conv3d_16l8_fp16.safetensors` | `Models/3D/trellis2/` | yes, sha256 `1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a` |
 | DINOv3 `model.safetensors` (camenduru mirror) | `Models/DINOv3/` | yes, sha256 `dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179` |
-| `pipeline.json` | `Models/3D/trellis2/pipeline.json` | no (name, rembg and `default_pipeline_type` differ), but the two samplers and both normalizations are equal |
+| `pipeline.json` | `Models/3D/trellis2/pipeline.json` | no (`rembg_model` and `default_pipeline_type` differ, 1536 against 1024), but the `name` is the same `Trellis2ImageTo3DPipeline` and the two samplers and both normalizations are equal, so `Trellis2PipelineConfig` parses it |
 
 ## Checkpoint layouts (safetensors headers)
 
@@ -235,5 +235,4 @@ sibling folders, matting through `Trellis2LazyMatter` / `Trellis2ModelFiles.Find
   the source, and nothing has been loaded through the engine yet.
 - NAF's weights licence (the repository is Apache-2.0; the release asset states none), the speed of NAF on a GPU backend (the attention is a host loop), and
   NATTEN's own border behaviour (see above).
-- Whether `Trellis2PipelineConfig.Load` accepts Pixal3D's `pipeline.json` as is (the fields it reads are equal to the local TRELLIS.2 file).
 - Any numerical agreement with the Python reference; no reference dumps exist.
