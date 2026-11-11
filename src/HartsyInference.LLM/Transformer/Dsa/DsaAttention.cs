@@ -46,7 +46,7 @@ public sealed class DsaAttention : IDisposable
         DsaIndexer.RequireShape(weights.QB, h * settings.QkHeadDim, settings.QLoraRank, "q_b_proj");
         DsaIndexer.RequireShape(weights.KvB, h * qkv, settings.KvLoraRank, "kv_b_proj");
         DsaIndexer.RequireShape(weights.WoB, settings.Dim, h * settings.VDim, "wo_b");
-        if (weights.OGate is { } gate) DsaIndexer.RequireShape(gate, h * settings.VDim, settings.QLoraRank, "o_gate");
+        if (weights.OGate is { } gate) DsaIndexer.RequireShape(gate, h * settings.VDim, settings.GateFromHidden ? settings.Dim : settings.QLoraRank, "o_gate");
         if (weights.QANorm.ElementCount != settings.QLoraRank || weights.KvANorm.ElementCount != settings.KvLoraRank)
             throw new ArgumentException("The latent norms must match QLoraRank and KvLoraRank.", nameof(weights));
         if (weights.Sink is { } sink && (sink.DType != DType.F32 || sink.ElementCount != h))
@@ -118,7 +118,12 @@ public sealed class DsaAttention : IDisposable
         float[] o = ExpandValues(latentOut, tokens, valueExpand);
 
         if (_w.OGate is { } gateWeight)
-            AttentionOutputGate.ApplySigmoid(o, HostOps.Project(_backend, qLatent, tokens, s.QLoraRank, gateWeight, h * s.VDim));
+        {
+            // ERNIE gates from the query latent; Kimi's g_proj gates from the hidden state (GateFromHidden).
+            float[] gateIn = s.GateFromHidden ? x.ToArray() : qLatent;
+            int gateCols = s.GateFromHidden ? s.Dim : s.QLoraRank;
+            AttentionOutputGate.ApplySigmoid(o, HostOps.Project(_backend, gateIn, tokens, gateCols, gateWeight, h * s.VDim));
+        }
         HostOps.Project(_backend, o, tokens, h * s.VDim, _w.WoB, s.Dim).CopyTo(y);
     }
 

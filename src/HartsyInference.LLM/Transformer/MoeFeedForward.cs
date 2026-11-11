@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.LLM.Transformer.Quant;
 using System.Buffers;
 using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
@@ -21,6 +23,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private Tensor _routerW = null!;                 // [E, hidden]
     private Tensor? _routerW2;                       // second router [E, hidden] of split-feature routing
     private Tensor[] _gateW = null!, _upW = null!, _downW = null!;   // per expert
+    private PackedMxfp4Expert[]? _packed;                            // MXFP4-packed routed experts (null when F32)
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
     private float[]? _correctionBias;                // e_score_correction_bias [E] (selection only)
     private Tensor? _correctionBiasT;                // the same bias as a tensor for the device router
@@ -67,6 +70,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <param name="layer">This block's layer index, the bank layer its experts are keyed by.</param>
     public void AttachOffload(MoeExpertOffload offload, int layer)
     {
+        if (_packed is not null) throw new NotSupportedException("Packed MXFP4 experts run resident; they cannot be offloaded.");
         ArgumentNullException.ThrowIfNull(offload);
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
         // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward.
@@ -105,6 +109,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         get => _useHostExpertRuntime;
         set
         {
+            if (value && _packed is not null) throw new NotSupportedException("The host expert runtime needs F32 experts; packed MXFP4 experts run resident.");
             if (value) _ = HostExpertProgram(_moe.Activation);
             _useHostExpertRuntime = value;
         }
@@ -142,15 +147,26 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _routedScale = _routedScaleT is null ? null : HostVector(_routedScaleT, _moe.NumExperts, "routed scale");
         LoadLatentAndExpertNorm(w, block);
         int e = _moe.NumExperts;
-        _gateW = new Tensor[e];
-        _upW = new Tensor[e];
-        _downW = new Tensor[e];
-        for (int i = 0; i < e; i++)
+        _packed = null;
+        if (w.ContainsKey($"{block}.experts.0.gate_proj.weight"))
         {
-            string ep = $"{block}.experts.{i}";
-            _gateW[i] = w[$"{ep}.gate_proj.weight"];
-            _upW[i] = w[$"{ep}.up_proj.weight"];
-            _downW[i] = w[$"{ep}.down_proj.weight"];
+            _gateW = new Tensor[e];
+            _upW = new Tensor[e];
+            _downW = new Tensor[e];
+            for (int i = 0; i < e; i++)
+            {
+                string ep = $"{block}.experts.{i}";
+                _gateW[i] = w[$"{ep}.gate_proj.weight"];
+                _upW[i] = w[$"{ep}.up_proj.weight"];
+                _downW[i] = w[$"{ep}.down_proj.weight"];
+            }
+        }
+        else
+        {
+            // Packed experts arrive through LoadPackedExperts; until then the layer has no F32 projections.
+            _gateW = [];
+            _upW = [];
+            _downW = [];
         }
         _shGateW = _shUpW = _shDownW = _shGateScoreW = null;
         if (_moe.SharedExpertIntermediateSize > 0)
@@ -167,6 +183,36 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 && (_shGateW.Shape[1] != _modelHidden || _shUpW.Shape[1] != _modelHidden || _shDownW.Shape[0] != _modelHidden))
                 throw new InvalidDataException($"{block}: the shared expert of a latent block must read and write the model width {_modelHidden}.");
         }
+    }
+
+    /// <summary>Installs MXFP4-packed routed experts after <see cref="LoadWeights"/>, one per expert in order. Packed experts run
+    /// through <see cref="PackedMxfp4Linear"/> on the resident path; the indexed, grouped, offload and host-runtime paths need F32
+    /// experts and refuse them.</summary>
+    public void LoadPackedExperts(IReadOnlyList<PackedMxfp4Expert> experts)
+    {
+        ArgumentNullException.ThrowIfNull(experts);
+        int e = _moe.NumExperts;
+        if (experts.Count != e) throw new InvalidDataException($"Expected {e} packed experts, got {experts.Count}.");
+        if (_offload is not null || _useHostExpertRuntime)
+            throw new NotSupportedException("Packed MXFP4 experts run on the resident path; detach the offload or the host expert runtime first.");
+        for (int i = 0; i < e; i++)
+        {
+            RequireMxfp4Projection(experts[i].Gate, _moe.MoeIntermediateSize, _hidden, $"expert {i} gate");
+            RequireMxfp4Projection(experts[i].Up, _moe.MoeIntermediateSize, _hidden, $"expert {i} up");
+            RequireMxfp4Projection(experts[i].Down, _hidden, _moe.MoeIntermediateSize, $"expert {i} down");
+        }
+        _packed = [.. experts];
+        _gateW = [];
+        _upW = [];
+        _downW = [];
+    }
+
+    private static void RequireMxfp4Projection(PackedMxfp4Projection p, int rows, int cols, string name)
+    {
+        if (p.Recipe.Encoding != QuantEncoding.Mxfp4E8M0)
+            throw new InvalidDataException($"{name} must be MXFP4, got {p.Recipe.Encoding}.");
+        if (p.Recipe.LogicalRows != rows || p.Recipe.LogicalCols != cols)
+            throw new InvalidDataException($"{name} must be {rows}x{cols}, got {p.Recipe.LogicalRows}x{p.Recipe.LogicalCols}.");
     }
 
     /// <summary>Refuses option combinations the host router cannot reproduce.</summary>
@@ -203,7 +249,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     {
         yield return _routerW;
         if (_routerW2 is not null) yield return _routerW2;
-        for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
+        if (_packed is null)
+        {
+            for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
+        }
+        else
+        {
+            foreach (PackedMxfp4Expert x in _packed) { yield return x.Gate.Packed; yield return x.Up.Packed; yield return x.Down.Packed; }
+        }
         if (_shGateW is not null) { yield return _shGateW; yield return _shUpW!; yield return _shDownW!; }
         if (_shGateScoreW is not null) yield return _shGateScoreW;
         if (_correctionBiasT is not null) yield return _correctionBiasT;
@@ -408,7 +461,36 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
     /// <summary>One routed expert over <paramref name="rows"/> gathered tokens, including the per-expert output norm when configured.</summary>
     private Tensor RoutedExpert(IBackend backend, Tensor x, int rows, int expert) =>
-        NormExpertRows(backend, SwiGlu(backend, x, rows, _gateW[expert], _upW[expert], _downW[expert], _moe.MoeIntermediateSize, _hidden));
+        NormExpertRows(backend, _packed is null
+            ? SwiGlu(backend, x, rows, _gateW[expert], _upW[expert], _downW[expert], _moe.MoeIntermediateSize, _hidden)
+            : PackedSwiGlu(backend, x, rows, _packed[expert]));
+
+    // A packed expert: gate and up through the packed linear, the activation as SwiGlu applies it, then the packed down projection.
+    private Tensor PackedSwiGlu(IBackend backend, Tensor x, int rows, PackedMxfp4Expert w)
+    {
+        int mi = _moe.MoeIntermediateSize;
+        Tensor gate = new(new TensorShape(1, rows, mi), DType.F32);
+        Tensor up = new(new TensorShape(1, rows, mi), DType.F32);
+        backend.Mxfp4LinearF32(gate, x, w.Gate.Packed, w.Gate.Recipe);
+        backend.Mxfp4LinearF32(up, x, w.Up.Packed, w.Up.Recipe);
+        Tensor act = GatedFfn.SwiGlu(backend, _moe.Activation, gate, up, _moe.SwigluLimit, _moe.SwigluAlpha,
+            _moe.ActivationSituBeta, _moe.ActivationSituLinearBeta);
+        Tensor output = new(new TensorShape(1, rows, _hidden), DType.F32);
+        try
+        {
+            backend.Mxfp4LinearF32(output, act, w.Down.Packed, w.Down.Recipe);
+        }
+        catch
+        {
+            output.Dispose();
+            throw;
+        }
+        finally
+        {
+            act.Dispose();
+        }
+        return output;
+    }
 
     /// <summary>Muse Spark's per-expert output norm: scales each routed row by <c>post_expert_norm</c>, then RMS-normalizes it. Consumes
     /// <paramref name="rows"/> and returns the normalized rows; returns <paramref name="rows"/> itself when the block has no such norm.</summary>
@@ -566,7 +648,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private bool DeviceRoutingEligible()
     {
         if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
-        if (UseHostExpertRuntime || _offload is not null) return false;
+        if (UseHostExpertRuntime || _offload is not null || _packed is not null) return false;
         _deviceShapeOk ??= DeviceRoutedShapeOk();
         return _deviceShapeOk.Value;
     }
