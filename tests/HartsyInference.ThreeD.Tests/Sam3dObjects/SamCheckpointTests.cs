@@ -61,6 +61,12 @@ public sealed class SamCheckpointTests
     }
 
     [Fact]
+    public void Select_AKeyThatCollidesAfterStrippingTheEnvelopeIsAnError()
+    {
+        Assert.Throws<InvalidOperationException>(() => SamCheckpointKeys.Select(["state_dict.x", "x"], SamCheckpointSection.Root));
+    }
+
+    [Fact]
     public void Load_ReadsASafetensorsConversionAndSelectsSections()
     {
         string path = Path.Combine(Path.GetTempPath(), $"sam3d-test-{Guid.NewGuid():N}.safetensors");

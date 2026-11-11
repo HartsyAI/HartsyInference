@@ -14,6 +14,9 @@ public sealed record SamFuserEmbedder(int EmbedDim, IReadOnlyList<(string Kwarg,
 /// (<c>w2(silu(w1 x) · w3 x)</c>, no biases) to the fused width, a learned row of <c>idx_emb</c> for the call's group is added, forced-drop
 /// groups are multiplied by 0, and all calls are concatenated on the token axis in embedder order. The embedders themselves (DINO,
 /// the point-patch embedder) run before this. Key names follow the module structure in the source and are unverified against a checkpoint.
+/// Positional groups are numbered in order of first appearance across the embedders' inputs and <c>idx_emb</c> has one row more than there are groups
+/// (<c>embedder_fuser.py</c>: <c>torch.empty(max_positional_embed_idx + 1, embed_dims)</c>, the index counted per new group); forced drops are by
+/// keyword and zero the tokens after the group embedding is added.
 /// </summary>
 public sealed class SamEmbedderFuser
 {
@@ -66,6 +69,15 @@ public sealed class SamEmbedderFuser
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(tokens);
+        if (forceDrop is not null)
+        {
+            foreach (string name in forceDrop)
+            {
+                if (!_embedders.Any(e => e.Inputs.Any(i => i.Kwarg == name)))
+                    throw new ArgumentException($"'{name}' is not a keyword of this fuser.", nameof(forceDrop));
+            }
+        }
+
         List<Tensor> parts = [];
         try
         {
@@ -106,6 +118,8 @@ public sealed class SamEmbedderFuser
         if (input.DType != DType.F32 || input.Shape.Rank != 2 || input.Shape[1] != embedder.EmbedDim)
             throw new ArgumentException($"Tokens for '{kwarg}' must be F32 [n, {embedder.EmbedDim}]; got {input.DType} {input.Shape}.");
         int n = (int)input.Shape[0];
+        if (drop)
+            return new Tensor(new TensorShape(n, FusedDim), DType.F32);
         string prefix = $"projection_nets.{index}.";
         using Tensor normed = new(input.Shape, DType.F32);
         backend.LayerNorm(normed, input, _weights[prefix + "0.weight"], _weights[prefix + "0.bias"], LayerNormEps);
@@ -125,7 +139,7 @@ public sealed class SamEmbedderFuser
             {
                 Span<float> target = data.Slice(r * FusedDim, FusedDim);
                 for (int c = 0; c < FusedDim; c++)
-                    target[c] = drop ? 0f : target[c] + row[c];
+                    target[c] += row[c];
             }
 
             return output;

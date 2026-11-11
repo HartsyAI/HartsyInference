@@ -33,7 +33,8 @@ public sealed class SamCheckpoint : IDisposable
         AnyFormatCheckpointLoader loader = new();
         try
         {
-            loader.Load(path);
+            // Flattened so keys stay fully qualified and SamCheckpointKeys decides, instead of the reader taking the first dict that holds tensors.
+            loader.Load(path, recursiveFlatten: true);
             return new SamCheckpoint(loader, loader.GetAllTensors());
         }
         catch

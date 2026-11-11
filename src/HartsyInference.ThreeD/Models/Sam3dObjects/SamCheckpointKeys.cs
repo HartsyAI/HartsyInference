@@ -30,7 +30,7 @@ public static class SamCheckpointKeys
         if (section == SamCheckpointSection.Root)
         {
             foreach ((string source, string name) in keys)
-                result[name] = source;
+                Add(result, name, source);
             return result;
         }
 
@@ -40,11 +40,17 @@ public static class SamCheckpointKeys
         foreach ((string source, string name) in keys)
         {
             if (name.StartsWith(prefix, StringComparison.Ordinal))
-                result[name[prefix.Length..]] = source;
+                Add(result, name[prefix.Length..], source);
             else if (!anyPrefixed && section == SamCheckpointSection.Generator)
-                result[name] = source;
+                Add(result, name, source);
         }
 
         return result;
+    }
+
+    private static void Add(Dictionary<string, string> result, string name, string source)
+    {
+        if (!result.TryAdd(name, source))
+            throw new InvalidOperationException($"'{source}' and '{result[name]}' name the same tensor '{name}'.");
     }
 }

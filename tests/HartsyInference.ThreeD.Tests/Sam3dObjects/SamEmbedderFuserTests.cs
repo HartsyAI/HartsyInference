@@ -76,9 +76,15 @@ public sealed class SamEmbedderFuserTests
         return result;
     }
 
-    private static void DisposeAll(Dictionary<string, Tensor> tensors)
+    private sealed class Owned(params Dictionary<string, Tensor>[] sets) : IDisposable
     {
-        foreach (Tensor t in tensors.Values) t.Dispose();
+        public void Dispose()
+        {
+            foreach (Dictionary<string, Tensor> set in sets)
+            {
+                foreach (Tensor t in set.Values) t.Dispose();
+            }
+        }
     }
 
     [Fact]
@@ -98,6 +104,7 @@ public sealed class SamEmbedderFuserTests
         {
             ["image"] = Filled(rng, 3, 4), ["rgb_image"] = Filled(rng, 2, 4), ["pointmap"] = Filled(rng, 2, 2),
         };
+        using Owned owned = new(w, tokens);
         using CpuBackend backend = new();
         SamEmbedderFuser fuser = new(Embedders, Fused, w);
 
@@ -118,8 +125,6 @@ public sealed class SamEmbedderFuserTests
             }
         }
 
-        DisposeAll(w);
-        DisposeAll(tokens);
     }
 
     [Fact]
@@ -131,6 +136,7 @@ public sealed class SamEmbedderFuserTests
         {
             ["image"] = Filled(rng, 1, 4), ["rgb_image"] = Filled(rng, 1, 4), ["pointmap"] = Filled(rng, 1, 2),
         };
+        using Owned owned = new(w, tokens);
         using CpuBackend backend = new();
         SamEmbedderFuser fuser = new(Embedders, Fused, w);
 
@@ -139,8 +145,6 @@ public sealed class SamEmbedderFuserTests
         ReadOnlySpan<float> got = fused.AsReadOnlySpan<float>();
         Assert.All(got.Slice(2 * Fused, Fused).ToArray(), v => Assert.Equal(0f, v));
         Assert.Contains(got.Slice(0, Fused).ToArray(), v => v != 0f);
-        DisposeAll(w);
-        DisposeAll(tokens);
     }
 
     [Fact]
@@ -148,15 +152,15 @@ public sealed class SamEmbedderFuserTests
     {
         Random rng = new(7);
         Dictionary<string, Tensor> w = Weights(rng);
+        Dictionary<string, Tensor> tokens = new() { ["image"] = Filled(rng, 1, 4), ["rgb_image"] = Filled(rng, 1, 5), ["pointmap"] = Filled(rng, 1, 2) };
+        using Owned owned = new(w, tokens);
         using CpuBackend backend = new();
         SamEmbedderFuser fuser = new(Embedders, Fused, w);
-        Dictionary<string, Tensor> tokens = new() { ["image"] = Filled(rng, 1, 4), ["rgb_image"] = Filled(rng, 1, 5), ["pointmap"] = Filled(rng, 1, 2) };
 
         Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, new Dictionary<string, Tensor> { ["image"] = tokens["image"] }));
         Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, tokens));
+        Assert.Throws<ArgumentException>(() => fuser.Fuse(backend, tokens, new HashSet<string> { "typo" }));
         w.Remove("idx_emb");
         Assert.Throws<InvalidOperationException>(() => new SamEmbedderFuser(Embedders, Fused, w));
-        DisposeAll(w);
-        DisposeAll(tokens);
     }
 }

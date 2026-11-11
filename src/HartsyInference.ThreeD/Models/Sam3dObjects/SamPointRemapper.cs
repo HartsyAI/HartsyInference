@@ -10,7 +10,8 @@ public enum SamPointRemapType
     ExpDisparity,
 }
 
-/// <summary>The remap of <c>point_remapper.py</c> on interleaved <c>x, y, z</c> points, in place, and its inverse.</summary>
+/// <summary>The remap of <c>point_remapper.py</c> on interleaved <c>x, y, z</c> points, in place, and its inverse. As upstream, <c>exp_disparity</c>
+/// gives infinity or NaN for <c>z &lt;= 0</c> and <c>exp</c> for <c>z &lt;= -1</c>; invalid points are expected to be zeroed before the remap.</summary>
 public static class SamPointRemapper
 {
     /// <summary>Parses the config name (<c>linear</c>, <c>sinh</c>, <c>exp</c>, <c>sinh_exp</c>, <c>exp_disparity</c>).</summary>
