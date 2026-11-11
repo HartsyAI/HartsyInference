@@ -118,6 +118,46 @@ public sealed class Trellis2TextureNetworkTests
     }
 
     [Fact]
+    public void GuidedDecoder_RejectsAGuideRecordedOverOtherVoxelsWithTheSameCounts()
+    {
+        ShapeVaeDecoderConfig predicting = ShapeVaeTestData.Decoder();
+        Dictionary<string, Tensor> shapeWeights = ShapeVaeTestData.RandomWeights(ShapeVaeKeyMap.Decoder(predicting), seed: 55);
+        Dictionary<string, Tensor> textureWeights = ShapeVaeTestData.RandomWeights(ShapeVaeKeyMap.Decoder(TextureConfig()), seed: 56);
+        (SparseTensor latent, Tensor feats) = Latent(57);
+        // The same voxels shifted by one along x: equal count at every level, different coordinates.
+        int[] shifted = (int[])latent.Coords.Clone();
+        for (int i = 1; i < shifted.Length; i += 4)
+            shifted[i] = (shifted[i] + 1) % LatentRes;
+        SparseTensor other = ShapeVaeTestData.Sparse(shifted, LatentRes, feats);
+        using CpuBackend backend = new();
+        using ShapeVaeDecoder shape = new(predicting, shapeWeights);
+        using ShapeVaeDecoder texture = new(TextureConfig(), textureWeights);
+        using ShapeVaeSubdivisions record = new();
+        shape.Decode(backend, latent, record).Feats.Dispose();
+
+        Assert.Throws<ArgumentException>(() => texture.DecodeGuided(backend, other, record));
+        texture.DecodeGuided(backend, latent, record).Feats.Dispose();
+        feats.Dispose();
+        Trellis2TestData.DisposeAll(shapeWeights.Values);
+        Trellis2TestData.DisposeAll(textureWeights.Values);
+    }
+
+    [Fact]
+    public void Decode_RefusesARecordThatAlreadyHoldsLevels()
+    {
+        Dictionary<string, Tensor> weights = ShapeVaeTestData.RandomWeights(ShapeVaeKeyMap.Decoder(ShapeVaeTestData.Decoder()), seed: 58);
+        (SparseTensor latent, Tensor feats) = Latent(59);
+        using CpuBackend backend = new();
+        using ShapeVaeDecoder shape = new(ShapeVaeTestData.Decoder(), weights);
+        using ShapeVaeSubdivisions record = new();
+        shape.Decode(backend, latent, record).Feats.Dispose();
+
+        Assert.Throws<ArgumentException>(() => shape.Decode(backend, latent, record));
+        feats.Dispose();
+        Trellis2TestData.DisposeAll(weights.Values);
+    }
+
+    [Fact]
     public void GuidedDecoder_NeedsEveryLevelOfTheGuide()
     {
         Dictionary<string, Tensor> weights = ShapeVaeTestData.RandomWeights(ShapeVaeKeyMap.Decoder(TextureConfig()), seed: 61);
@@ -168,9 +208,12 @@ public sealed class Trellis2TextureNetworkTests
     {
         ShapeVaeSubdivisions record = new();
         Tensor level = new(new TensorShape(8), DType.F32);
-        record.Add(level);
+        record.Add(level, [0, 1, 2, 3]);
 
         Assert.Same(level, record.Level(0));
+        Assert.True(record.Matches(0, [0, 1, 2, 3]));
+        Assert.False(record.Matches(0, [0, 1, 2, 4]));
+        Assert.False(record.Matches(1, [0, 1, 2, 3]));
         Assert.Throws<ArgumentOutOfRangeException>(() => record.Level(1));
         record.Dispose();
         Trellis2TestData.AssertDisposed(level);

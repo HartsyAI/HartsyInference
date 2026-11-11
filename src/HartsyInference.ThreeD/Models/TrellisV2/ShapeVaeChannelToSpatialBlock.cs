@@ -36,8 +36,10 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
     }
 
     /// <summary>Runs the block. A predicting block derives the child logits itself and hands them to <paramref name="record"/> when
-    /// given; a guided block needs <paramref name="guide"/>, the logits of the same voxels from a predicting decoder.</summary>
-    internal SparseTensor Forward(IBackend backend, SparseTensor x, Tensor? guide = null, ShapeVaeSubdivisions? record = null)
+    /// given; a guided block takes level <paramref name="level"/> of <paramref name="guides"/>, recorded by a predicting decoder over the
+    /// same voxels.</summary>
+    internal SparseTensor Forward(
+        IBackend backend, SparseTensor x, ShapeVaeSubdivisions? guides = null, int level = 0, ShapeVaeSubdivisions? record = null)
     {
         int n = x.Count, children = ShapeVaeConfigRules.ChildGroup;
 
@@ -49,21 +51,23 @@ internal sealed class ShapeVaeChannelToSpatialBlock : IDisposable
         }
         else
         {
-            if (guide is null)
-                throw new ArgumentException("A decoder without subdivision heads needs the guide logits of every upsample level.", nameof(guide));
-            if (guide.ElementCount != (long)n * children)
+            if (guides is null)
+                throw new ArgumentException("A decoder without subdivision heads needs the guide logits of every upsample level.", nameof(guides));
+            if (!guides.Matches(level, x.Coords))
+            {
                 throw new ArgumentException(
-                    $"Guide logits hold {guide.ElementCount} values; this level has {n} voxels and needs {(long)n * children}. "
-                    + "The guide must come from a decoder run over the same coordinates.",
-                    nameof(guide));
-            logits = guide;
+                    $"Guide level {level} was not recorded over this level's {n} voxels. The guide must come from a decoder run over the same coordinates.",
+                    nameof(guides));
+            }
+
+            logits = guides.Level(level);
         }
 
         SparseSpatialChannel.Plan plan = SparseSpatialChannel.PlanChannelToSpatial(x.Coords, x.Resolution, 2, logits);
         if (predicted)
         {
             if (record is not null)
-                record.Add(logits);
+                record.Add(logits, x.Coords);
             else
                 logits.Dispose();
         }

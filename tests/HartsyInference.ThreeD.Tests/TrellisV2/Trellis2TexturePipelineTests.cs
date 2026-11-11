@@ -84,6 +84,18 @@ public sealed class Trellis2TexturePipelineTests
     }
 
     [Fact]
+    public void GenerateTextured_Grid1536RunsTheCascadeAtTheFineResolution()
+    {
+        using Rig rig = new();
+
+        PbrPostProcessResult result = rig.Pipeline.GenerateTextured(Image(), Options(grid: 1536));
+
+        Assert.Contains("shape Res1024 grid=96 seed=102 steps=2", rig.Calls);
+        Assert.Contains("texture Res1024 voxels=2 seed=103 steps=2", rig.Calls);
+        Assert.NotNull(result.Mesh.Uvs);
+    }
+
+    [Fact]
     public void GenerateTextured_StepsOverrideTheTextureSamplerToo()
     {
         using Rig rig = new();
@@ -312,6 +324,16 @@ public sealed class Trellis2TexturePipelineTests
     }
 
     [Fact]
+    public void PipelineConfig_RejectsAFileWithOnlyOneOfTheTextureEntries()
+    {
+        string noSampler = Json(OneStats).Replace("\"tex_slat_sampler\"", "\"unused_sampler\"", StringComparison.Ordinal);
+        string noNorm = Json(OneStats).Replace("\"tex_slat_normalization\"", "\"unused_normalization\"", StringComparison.Ordinal);
+
+        Assert.Throws<ArgumentException>(() => Trellis2PipelineConfig.FromJson(noSampler));
+        Assert.Throws<ArgumentException>(() => Trellis2PipelineConfig.FromJson(noNorm));
+    }
+
+    [Fact]
     public void PipelineConfig_RejectsATextureNormalizationOfTheWrongWidthOrANonPositiveStd()
     {
         string wide = Json(OneStats[..^1] + ",1]");
@@ -398,8 +420,9 @@ public sealed class Trellis2TexturePipelineTests
                 decoder ?? new StubDecoder(this),
                 new DualGridMesherStage(),
                 [Owned],
-                textureFlow: textureFlow,
-                textureDecoder: textureDecoder);
+                Trellis2Cascade.DefaultMaxTokens,
+                textureFlow,
+                textureDecoder);
 
         public void Dispose()
         {
@@ -494,7 +517,7 @@ public sealed class Trellis2TexturePipelineTests
             rig.Calls.Add("decode+subs");
             Tensor level = new(new TensorShape(8), DType.F32);
             rig.Tensors.Add(level);
-            record.Add(level);
+            record.Add(level, [0, 0, 0, 0]);
             return Quad();
         }
     }

@@ -67,8 +67,11 @@ public sealed class Trellis2PipelineConfig
         (float[] mean, float[] std) = Normalization(norm, "shape_slat_normalization");
         Trellis2SamplerParams? texture = null;
         float[]? textureMean = null, textureStd = null;
-        if (args.TryGetProperty("tex_slat_sampler", out JsonElement textureNode)
-            && args.TryGetProperty("tex_slat_normalization", out JsonElement textureNorm))
+        bool hasSampler = args.TryGetProperty("tex_slat_sampler", out JsonElement textureNode);
+        bool hasNorm = args.TryGetProperty("tex_slat_normalization", out JsonElement textureNorm);
+        if (hasSampler != hasNorm)
+            throw new ArgumentException("pipeline.json needs both tex_slat_sampler and tex_slat_normalization for texture, or neither; it has one.");
+        if (hasSampler)
         {
             texture = Trellis2SamplerParams.FromNode(textureNode);
             (textureMean, textureStd) = Normalization(textureNorm, "tex_slat_normalization");

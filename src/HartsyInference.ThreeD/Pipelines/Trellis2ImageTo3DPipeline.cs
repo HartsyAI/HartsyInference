@@ -44,6 +44,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     /// <summary>Grid the structure stage pools to; every pipeline type starts the shape flow on it.</summary>
     public const int StructureGrid = 32;
 
+    /// <summary>Latent grid of the 1024 flows, twice <see cref="StructureGrid"/>.</summary>
+    public const int FineLatentGrid = StructureGrid * 2;
+
     /// <summary>Resolution of the 512 shape flow's output once upsampled: <c>StructureGrid · 16</c>.</summary>
     public const int CoarseShapeResolution = StructureGrid * Trellis2Cascade.LatentStride;
 
@@ -80,9 +83,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ISparseShapeDecoder decoder,
         IDualGridMesher mesher,
         IEnumerable<IDisposable> owned,
-        int maxTokens = Trellis2Cascade.DefaultMaxTokens,
-        ITrellis2TextureFlowStage? textureFlow = null,
-        ITrellis2TextureDecoderStage? textureDecoder = null) : base(backend)
+        int maxTokens,
+        ITrellis2TextureFlowStage? textureFlow,
+        ITrellis2TextureDecoderStage? textureDecoder) : base(backend)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(conditioner);
@@ -109,6 +112,23 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         _mesher = mesher;
         _maxTokens = maxTokens;
         _owned = [.. owned];
+    }
+
+    /// <summary>A shape-only pipeline; see the full constructor for the texture stages.</summary>
+    public Trellis2ImageTo3DPipeline(
+        IBackend backend,
+        Trellis2PipelineConfig config,
+        IForegroundMatter? matter,
+        ITrellis2Conditioner conditioner,
+        ITrellis2StructureStage structure,
+        ITrellis2ShapeFlowStage shape,
+        ISparseShapeUpsampler upsampler,
+        ISparseShapeDecoder decoder,
+        IDualGridMesher mesher,
+        IEnumerable<IDisposable> owned,
+        int maxTokens = Trellis2Cascade.DefaultMaxTokens)
+        : this(backend, config, matter, conditioner, structure, shape, upsampler, decoder, mesher, owned, maxTokens, null, null)
+    {
     }
 
     /// <summary>Loads the pipeline from a TRELLIS.2 folder (for example <c>Models/3D/trellis2</c>) or any file in it. The shape VAE decoder
@@ -139,7 +159,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             ITrellis2TextureDecoderStage? textureDecoder = null;
             if (files.HasTexture && config.HasTexture)
             {
-                CheckTextureFlowConfigs(files);
+                CheckTextureFlowConfigs(files, ReadConfig(files.StructureFlow).CondChannels);
                 textureFlow = new Trellis2TextureFlowStage(files.TextureFlow512, files.TextureFlow1024, config);
                 Trellis2TextureDecoderStage decoderStage = new(files.TextureDecoder!);
                 owned.Add(decoderStage);
@@ -157,8 +177,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 decoder,
                 new DualGridMesherStage(),
                 owned,
-                textureFlow: textureFlow,
-                textureDecoder: textureDecoder);
+                Trellis2Cascade.DefaultMaxTokens,
+                textureFlow,
+                textureDecoder);
         }
         catch
         {
@@ -398,8 +419,9 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         if (!_textureFlow.Supports(kind))
         {
             throw new HartsyInferenceException(
-                $"The {(kind == Trellis2ShapeFlowKind.Res512 ? "512 texture flow, which grid 512" : "1024 texture flow, which grids 1024 and 1536")} "
-                + "need, is not installed.");
+                kind == Trellis2ShapeFlowKind.Res512
+                    ? "Grid 512 needs the 512 texture flow, which is not installed."
+                    : "Grids 1024 and 1536 need the 1024 texture flow, which is not installed.");
         }
     }
 
@@ -460,16 +482,20 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     }
 
     // The texture flows take the shape latent as extra input channels and predict a 32-channel latent on the same grids.
-    private static void CheckTextureFlowConfigs(Trellis2ModelFiles files)
+    private static void CheckTextureFlowConfigs(Trellis2ModelFiles files, int condChannels)
     {
         int latent = Trellis2PipelineConfig.ShapeLatentChannels;
-        foreach ((string? path, int grid) in new[] { (files.TextureFlow512, StructureGrid), (files.TextureFlow1024, 64) })
+        foreach ((string? path, int grid) in new[] { (files.TextureFlow512, StructureGrid), (files.TextureFlow1024, FineLatentGrid) })
         {
             if (path is null)
                 continue;
             Trellis2FlowConfig config = ReadConfig(path);
-            if (config.Dense || config.OutChannels != latent || config.InChannels != 2 * latent)
-                throw new HartsyInferenceException($"'{path}' is not a texture flow ({2 * latent} in, {latent} out channels).");
+            if (config.Dense || config.OutChannels != latent || config.InChannels != 2 * latent || config.CondChannels != condChannels)
+            {
+                throw new HartsyInferenceException(
+                    $"'{path}' is not a texture flow ({2 * latent} in, {latent} out channels, {condChannels} conditioning channels).");
+            }
+
             if (config.Resolution != grid)
                 throw new HartsyInferenceException($"'{path}' is trained for a {config.Resolution} grid; expected {grid}.");
         }

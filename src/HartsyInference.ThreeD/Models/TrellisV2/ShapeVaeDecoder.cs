@@ -55,12 +55,20 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
     /// Decodes a latent <c>[N, latent]</c> on its coarse grid to the raw head <c>[1, M, OutputChannels]</c> on the grid
     /// <c>2^(levels-1)</c> times finer. Voxels are created where the subdivision head predicts a child.
     /// </summary>
-    /// <param name="record">Receives each level's child logits, for a guided decoder to follow (upstream <c>return_subs</c>).</param>
     /// <exception cref="InvalidOperationException">The decoder was built without subdivision heads.</exception>
-    public SparseTensor Decode(IBackend backend, SparseTensor latent, ShapeVaeSubdivisions? record = null)
+    public SparseTensor Decode(IBackend backend, SparseTensor latent) => Decode(backend, latent, null);
+
+    /// <summary>Decodes like <see cref="Decode(IBackend, SparseTensor)"/> and records each level's child logits for a guided decoder to
+    /// follow (upstream <c>return_subs</c>).</summary>
+    /// <param name="record">Receives the logits; it must be empty, so a record is never a mix of two decodes.</param>
+    /// <exception cref="InvalidOperationException">The decoder was built without subdivision heads.</exception>
+    /// <exception cref="ArgumentException"><paramref name="record"/> already holds levels.</exception>
+    public SparseTensor Decode(IBackend backend, SparseTensor latent, ShapeVaeSubdivisions? record)
     {
         if (!_predictsSubdivision)
             throw new InvalidOperationException("This decoder has no subdivision heads; use DecodeGuided with the subdivisions of a shape decode.");
+        if (record is { Count: > 0 })
+            throw new ArgumentException($"The record already holds {record.Count} levels; pass an empty one.", nameof(record));
         return DecodeCore(backend, latent, null, record);
     }
 
@@ -69,13 +77,13 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
     /// level's children from the guide instead of predicting them (upstream <c>guide_subs</c>).
     /// </summary>
     /// <exception cref="InvalidOperationException">The decoder predicts its own subdivisions.</exception>
-    /// <exception cref="ArgumentException">A level's guide does not match the voxels reaching it, or the guide has too few levels.</exception>
+    /// <exception cref="ArgumentException">The guide has another level count, or a level was recorded over other voxels than reach it.</exception>
     public SparseTensor DecodeGuided(IBackend backend, SparseTensor latent, ShapeVaeSubdivisions guides)
     {
         ArgumentNullException.ThrowIfNull(guides);
         if (_predictsSubdivision)
             throw new InvalidOperationException("This decoder predicts its own subdivisions; use Decode.");
-        if (guides.Count < _levels - 1)
+        if (guides.Count != _levels - 1)
             throw new ArgumentException($"The guide records {guides.Count} subdivision levels; this decoder upsamples {_levels - 1} times.", nameof(guides));
         return DecodeCore(backend, latent, guides, null);
     }
@@ -129,7 +137,7 @@ public sealed unsafe class ShapeVaeDecoder : IDisposable
             {
                 foreach (ShapeVaeConvNeXtBlock block in _blocks[i]) cur = ShapeVaeOps.Advance(cur, block.Forward(backend, cur));
                 if (i < _levels - 1)
-                    cur = ShapeVaeOps.Advance(cur, _ups[i]!.Forward(backend, cur, guides?.Level(i), record));
+                    cur = ShapeVaeOps.Advance(cur, _ups[i]!.Forward(backend, cur, guides, i, record));
             }
         }
         catch
