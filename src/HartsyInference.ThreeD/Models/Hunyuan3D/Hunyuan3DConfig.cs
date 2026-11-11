@@ -1,6 +1,6 @@
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
-/// <summary>Hunyuan3D-2 shape-generation configuration for the VecSet flow-match DiT plus ShapeVAE decoder; dims marked in <c>docs/Research/HUNYUAN3D_2_ARCHITECTURE.md</c> are <b>validation-gated</b>.</summary>
+/// <summary>Hunyuan3D-2 shape-generation configuration for the VecSet flow-match DiT plus ShapeVAE decoder; dims are read from the checkpoint's <c>config.yaml</c> (see <c>docs/Research/HUNYUAN3D_ARCHITECTURE.md</c>).</summary>
 public sealed record Hunyuan3DConfig
 {
     // --- VecSet latent / DiT ---
@@ -69,7 +69,7 @@ public sealed record Hunyuan3DConfig
     /// <summary>Half-extent of the cubic query box in object space (grid spans [-Bound, Bound]³).</summary>
     public float BoundingBox { get; init; } = 1.01f;
 
-    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model; <b>all dims are validation-gated</b> against the checkpoint's <c>config.json</c>.</summary>
+    /// <summary>Default config for the <c>tencent/Hunyuan3D-2</c> shape model; dims match the checkpoint's <c>config.yaml</c>.</summary>
     public static Hunyuan3DConfig Hunyuan3D2 => new()
     {
         LatentTokens = 3072, LatentChannels = 64, Width = 1024, DepthDouble = 16, DepthSingle = 32, NumHeads = 16,

@@ -20,15 +20,14 @@ Detail in the retired 3D build plan (git history).
 | Model | Notes |
 |---|---|
 | **HairDeck** (image → hair cards, per-card colours, spring chains; static or rigged glTF) | CUDA (RTX 3060) generations of demo `ex01` (seed 0), static and rigged, with unit parity of the spring simulation against the reference's Python. Only `ex01` has been run; `ex02`–`ex12` are not downloaded. VRM packaging is not implemented. ([details](#hairdeck)) |
-| **Hunyuan3D-2** | Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). ([details](#hunyuan3d-2)) |
+| **Hunyuan3D-2** | Image → mesh (`tencent/Hunyuan3D-2`). The melting-wax defect is root-caused and fixed; one image and 20 steps are checked, so it is not yet re-promoted. ([details](#hunyuan3d-2)) |
 | **CoLa3D decomposer (q20)** | Implemented; parity pending [#694](https://github.com/HartsyAI/HartsyInference/pull/694). Not verified against the Python reference. |
 
-Tests: `Hunyuan3DDinoParityTests`, `Hunyuan3DVaeParityTests` (both in
-`tests/HartsyInference.ThreeD.Tests/Parity/`). The DiT-parity and generation tests were removed in
-the 2026-08-06 suite cleanup; the generation test only asserted `TriangleCount > 100`, which the
-defective 760K-triangle mesh trivially passed, so it was never a correctness check. **The mesh-surface
-defect above is still open and still needs a dedicated bisect.** Detail in the retired 3D build plan
-(git history).
+Tests: `Hunyuan3DShapeParityTests` (in `tests/HartsyInference.ThreeD.Tests/Parity/`: DiT velocity at the schedule timestep
+and ShapeVAE occupancy against `tests/python-reference/hunyuan3d_reference/dump_shape_reference.py`), plus the
+`Hunyuan3DFlowScheduleTests` and `Hunyuan3DSurfaceTests` unit tests. The earlier DINO, VAE, DiT-parity and generation tests
+are gone (2026-08-06 suite cleanup); the generation test only asserted `TriangleCount > 100`, which the defective mesh
+passed. Detail in the retired 3D build plan (git history).
 
 | Model | Notes |
 |---|---|
@@ -52,7 +51,9 @@ Distilled from the retired PHASE_11_THREED / TRELLIS_BUILD_PLAN / THREED_GENPERF
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
 
 ### Correctness
-- [ ] Hunyuan3D-2 mesh "melting-wax" surface defect — bisect (ShapeVAE decode numerics / Fourier query encoding / missing floater post-process) before re-promoting to ✅.
+- [x] Hunyuan3D-2 mesh "melting-wax" surface defect: bisected and fixed (see [details](#hunyuan3d-2)).
+- [ ] Hunyuan3D-2 before ✅: compare the C# conditioner output with the reference on this input, run the default 50 steps at grid 256, add a second subject (a chair), and port the upstream image preprocessing (below).
+- [ ] Hunyuan3D-2 raw RGBA input: upstream recentres the foreground with a 15% border, composites it on **white** and resizes to 512 (`ImageProcessorV2`); the engine takes the RGB bytes as they are, so the caller must prepare that image. The "foreground-on-gray" hint in `MeshService` is the TripoSR contract and is wrong for Hunyuan3D.
 
 ### HairDeck
 - [ ] Run demo `ex02`–`ex12` (downloads need approval; ~5.9 MB total).
@@ -82,7 +83,24 @@ Real-weight image → mesh, verified on **both CPU F32 and the RTX 3060** vs the
 
 ### Hunyuan3D-2
 
-Real-weight image → mesh on GPU (`tencent/Hunyuan3D-2`). Rewritten from a wrong-architecture scaffold to the real **Flux-lineage MMDiT** (16 double + 32 single, QK-RMSNorm, no RoPE) + **DINOv2-giant** conditioner (SwiGLU) + **VecSet ShapeVAE** (`post_kl` → 16 self-attn resblocks → cross-attn `geo_decoder` w/ 51-dim Fourier queries). Every *component* is numerically verified in isolation vs hy3dgen: conditioner **corr 1.0**, DiT velocity **corr 0.99999738**, VAE occupancy **corr 0.99999518**. **However, the full pipeline's actual mesh output is defective** — re-verified 2026-07-21 by rendering the `hartsy 3d` CLI's GLB output from 4 angles and visually inspecting it (not just triangle count): the mesh is a recognizable chair silhouette (seat, backrest, four legs) but the surface is covered in "melting wax" drip artifacts, at both reduced (`--steps 20 --grid 128`) and full-default (`--steps 50 --grid 256`) settings — 380K vertices / 760K triangles vs. TripoSR's clean 42K/84K on the same input, consistent with spurious surface crossings from a noisy occupancy field. This was previously marked "✅ verified end-to-end" on the strength of `TriangleCount > 100` passing and a "coherent" claim below that was never re-checked against the actual rendered geometry — see `Hunyuan3DShapePipeline.cs`'s own doc comment, which already said "Numerics validation-pending — produces a real, watertight mesh structurally; per-checkpoint fidelity awaits the reference-diff pass." Root cause **not isolated** (candidates: ShapeVAE decode numerics, Fourier query-point encoding, or a missing floater/post-process step) — needs a dedicated bisect before re-promoting to ✅. Historical perf-pass data (kept for reference, not a correctness claim): gen-perf campaign Rounds 1–8 took 71.3 → 9.2 s (30 steps, grid 128) via a bit-exact fused `Concat` kernel, device DINOv2-giant LayerScale/SwiGLU, fused DiT adaLN + QKV-split-norm kernels, a device FourierEmbed for the VAE, cuDNN fused SDPA, DiT CUDA-graph, and F16 activations; the DiT + ShapeVAE blocks are GPU-resident. Three bugs previously fixed (see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)): timestep `max_period=time_factor=1000`; CUDA activation-cache reshape identity; async-race/perf (the GPU-residency rewrite) — none of these explain the current mesh-surface defect. **Caveat:** background removal is done in Python (shared C# foreground-tool TODO with TripoSR).
+Image → mesh on GPU (`tencent/Hunyuan3D-2`, weights revision `9cd649ba`, `hunyuan3d-dit-v2-0/model.fp16.safetensors`). The Flux-lineage MMDiT (16 double + 32 single blocks, QK-RMSNorm, no RoPE), the DINOv2-giant conditioner (SwiGLU) and the VecSet ShapeVAE (`post_kl`, 16 self-attention blocks, cross-attention `geo_decoder` with 51-dim Fourier queries) match upstream `hy3dgen`. Architecture, pins and licence terms: [HUNYUAN3D_ARCHITECTURE.md](../Research/HUNYUAN3D_ARCHITECTURE.md).
+
+**The melting-wax defect (2026-11-10).** Two pipeline-level bugs, neither visible in the per-component parity that had been recorded:
+
+1. **Timestep.** The sampler fed the DiT `sigma·1000` while `Hunyuan3DDit.Forward` takes `sigma` and applies `time_factor` (1000) itself, so the DiT saw a time 1000× too large and a different embedding at every step. Against the Python dump at the same latent and conditioning, the DiT velocity correlated **0.73** (step 10 of 20) and **0.53** (step 5) with the sampler's value, and **1.00000000** (relative L2 4.6e-5 and 1.3e-6) with the correct one. The schedule also started at sigma 0.001 where upstream starts at 0 (`np.linspace(0, 1, steps)`).
+2. **Winding.** The decoder's logits are positive inside, and `MarchingCubes` treats low values as inside, so every triangle faced inward (signed volume negative) and the lighting looked wrong.
+
+Ruled out against the reference: ShapeVAE decode (occupancy at 4000 grid points, corr 0.99999999, relative L2 7.2e-5), Fourier query encoding (include_pi is false in the config; layout matches), grid coordinates, iso level (0.0), CFG formula, unconditional tokens (zeros), and the VAE scale factor. Upstream applies no floater removal inside the pipeline (`FloaterRemover` and `FaceReducer` are separate post-processors).
+
+| Same image, seed 0, 20 steps, grid 128 | Triangles | Components | Watertight | Signed volume |
+|---|---|---|---|---|
+| Before (origin/main `da9751ca3`) | 227,816 | 101 | no (10 boundary edges) | −0.614 |
+| After (this change) | 77,328 | 1 | yes | +0.978 |
+| Python `hy3dgen`, fp32 CPU, other noise | 81,024 | 1 | yes | +0.980 |
+
+Rendered from four angles with the three.js viewer, the old mesh is a melted blob and the new one is the upstream demo mascot with a smooth body and a legible "HY3D" sign, matching the Python mesh. Input: `assets/demo.png` from the Hunyuan3D-2 repository, recentred and composited on white as upstream does, 512×512.
+
+**Still open before ✅.** One subject only. The C# conditioner output was not re-compared with the reference in this pass (it was corr 1.0 earlier). The default 50 steps at grid 256 was not re-run. The GPU runs had no cuDNN (the only copy on the machine is built for CUDA 12 and is rejected under the CUDA 13 driver), so they used the custom flash kernel. Raw RGBA preprocessing is not ported (see Remaining work). Vertex positions follow the physical grid; upstream divides by `res+1` instead of `res`, which shrinks its mesh by 0.4% at 256. Historical perf data (not a correctness claim): gen-perf Rounds 1–8 took 71.3 → 9.2 s (30 steps, grid 128) with fused kernels, cuDNN fused SDPA, DiT CUDA graph and F16 activations; the DiT and ShapeVAE blocks are GPU-resident. Earlier bugs: timestep `max_period=time_factor=1000`; CUDA activation-cache reshape identity; async-race/perf (see [PARITY_VERIFICATION.md §Bugs](PARITY_VERIFICATION.md)).
 
 ### HairDeck
 
