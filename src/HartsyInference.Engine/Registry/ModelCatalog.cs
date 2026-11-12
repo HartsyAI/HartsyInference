@@ -146,8 +146,7 @@ public static class ModelCatalog
             TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc" },
         new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
             Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
-        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", Role = "upscaler",
-            Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
+        // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
     ];
 
     /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>

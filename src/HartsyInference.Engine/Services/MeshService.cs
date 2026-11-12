@@ -342,7 +342,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Returns the cached Paint pipeline for <paramref name="spec"/>: the folder holding <c>unet/</c> and <c>vae/</c> (and, for 2.1, <c>dino/model.safetensors</c>
-    /// and <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
+    /// and, when <c>numerics.paintUpscaleViews</c> is on, <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
     private HunyuanPaintLoader GetOrLoadPaint(ModelSpec spec, string id)
     {
         if (spec.LocalPath is null)
@@ -360,8 +360,7 @@ public sealed class MeshService : IMeshService, IDisposable
             try
             {
                 string? dino = FindPaintDino(folder);
-                string upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
-                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, File.Exists(upscaler) ? upscaler : null);
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, PaintUpscaler(folder, EngineKnobs.PaintUpscaleViews.Value));
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -374,6 +373,14 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
+    /// <summary>The Real-ESRGAN checkpoint the Paint 2.1 views are upscaled with: only when the <c>numerics.paintUpscaleViews</c> knob is on and <c>RealESRGAN_x4plus.pth</c> is in
+    /// <paramref name="folder"/>; otherwise <c>null</c> and the views are baked as generated.</summary>
+    internal static string? PaintUpscaler(string folder, bool enabled)
+    {
+        string path = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+        return enabled && File.Exists(path) ? path : null;
+    }
+
     private static string? FindPaintDino(string folder)
     {
         string own = Path.Combine(folder, "dino", "model.safetensors");
