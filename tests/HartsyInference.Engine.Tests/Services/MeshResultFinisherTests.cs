@@ -110,6 +110,83 @@ public sealed class MeshResultFinisherTests
         Assert.NotNull(result.Info);
     }
 
+    /// <summary>The same-length text replacement in a GLB's JSON, so the container stays valid.</summary>
+    private static byte[] Corrupt(byte[] glb, string from, string to)
+    {
+        string text = Encoding.UTF8.GetString(glb);
+        int at = text.IndexOf(from, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"'{from}' not found");
+        byte[] result = [.. glb];
+        Encoding.UTF8.GetBytes(to).CopyTo(result, at);
+        return result;
+    }
+
+    [Fact]
+    public void AGlbWithAnOutOfRangeSceneStillReturnsTheGeneration()
+    {
+        byte[] glb = Corrupt(Raw(Sphere(6, 8)).Data, "\"scene\":0", "\"scene\":9");
+
+        MeshResult result = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest { Frame = MeshFrame.GltfYUpMetres, PreviewTriangles = 10 }, new MeshResult { Data = glb }, CancellationToken.None);
+
+        Assert.Same(glb, result.Data);
+        Assert.Equal(MeshFrame.Native, result.Frame);
+        Assert.Contains(result.Warnings, w => w.StartsWith("The frame was not normalised"));
+    }
+
+    [Fact]
+    public void AGlbWithAnOutOfRangeAccessorKeepsTheGenerationAndSaysWhatItCouldNotDo()
+    {
+        byte[] glb = Corrupt(Raw(Sphere(6, 8)).Data, "\"POSITION\":0", "\"POSITION\":9");
+
+        MeshResult result = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest { Frame = MeshFrame.GltfYUpMetres, PreviewTriangles = 10 }, new MeshResult { Data = glb }, CancellationToken.None);
+
+        Assert.Same(glb, result.Data);
+        Assert.NotNull(result.Info);
+        Assert.Null(result.Preview);
+        Assert.NotEmpty(result.Warnings);
+    }
+
+    [Fact]
+    public void BoundsAreNotReportedInTheFilesOwnSpaceOnceTheFrameMovedThem()
+    {
+        // Non-indexed primitive: the reader refuses it, so only the accessor bounds (pre-frame) exist.
+        Mesh mesh = Sphere(6, 8);
+        byte[] glb = Raw(mesh).Data;
+        string text = Encoding.UTF8.GetString(glb);
+        Assert.Contains("\"indices\":", text);
+        byte[] noIndices = Corrupt(glb, "\"indices\":", "\"indicex\":");
+
+        MeshResult native = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest(), new MeshResult { Data = noIndices }, CancellationToken.None);
+
+        Assert.True(native.Info!.BoundsMin is not null, string.Join(" | ", native.Warnings));
+        Assert.True(native.Info.VertexCount > 0);
+
+        MeshResult framed = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest { Frame = MeshFrame.GltfYUpMetres }, new MeshResult { Data = noIndices }, CancellationToken.None);
+
+        Assert.Equal(MeshFrame.GltfYUpMetres, framed.Frame);
+        Assert.Null(framed.Info!.BoundsMin);
+    }
+
+    [Fact]
+    public void ASplatPlyWhoseCoordinatesAreNotFirstOrNotFloatsIsReadFromItsHeader()
+    {
+        byte[] Ply(string properties, float[] body)
+        {
+            byte[] head = Encoding.ASCII.GetBytes("ply\nformat binary_little_endian 1.0\nelement vertex 1\n" + properties + "end_header\n");
+            byte[] bytes = new byte[head.Length + body.Length * 4];
+            head.CopyTo(bytes, 0);
+            Buffer.BlockCopy(body, 0, bytes, head.Length, body.Length * 4);
+            return bytes;
+        }
+
+        MeshInfo shifted = MeshResultFinisher.SplatInfo(Ply("property float opacity\nproperty float x\nproperty float y\nproperty float z\n", [0.5f, 1, 2, 3]));
+        MeshInfo mixed = MeshResultFinisher.SplatInfo(Ply("property uchar red\nproperty float x\nproperty float y\nproperty float z\n", [0, 1, 2, 3]));
+
+        Assert.Equal([1f, 2f, 3f], shifted.BoundsMin!);
+        Assert.Equal(1, mixed.SplatCount);
+        Assert.Null(mixed.BoundsMin);
+    }
+
     [Fact]
     public void ANegativePreviewBudgetIsRejectedBeforeAnythingLoads()
     {

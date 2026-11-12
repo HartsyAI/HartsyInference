@@ -9,4 +9,11 @@ namespace HartsyInference.ThreeD.Io;
 /// <param name="Min">The component-wise minimum of every POSITION accessor, or null when none declares one.</param>
 /// <param name="Max">The component-wise maximum of every POSITION accessor, or null when none declares one.</param>
 public sealed record GlbSummary(
-    int MeshCount, bool HasNormals, bool HasTexture, bool HasSkin, IReadOnlyList<string> AnimationNames, float[]? Min, float[]? Max);
+    int MeshCount, bool HasNormals, bool HasTexture, bool HasSkin, IReadOnlyList<string> AnimationNames, float[]? Min, float[]? Max)
+{
+    /// <summary>Vertices as the file stores them: the sum of its distinct POSITION accessors' counts.</summary>
+    public long VertexCount { get; init; }
+
+    /// <summary>Triangles of its triangle primitives, from the index or position accessor counts.</summary>
+    public long TriangleCount { get; init; }
+}

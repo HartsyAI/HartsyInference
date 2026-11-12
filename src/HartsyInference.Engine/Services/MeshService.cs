@@ -43,15 +43,12 @@ public sealed class MeshService : IMeshService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = IdOf(spec);
-        MeshResult raw = await GenerateRawAsync(spec, request, progress, cancel).ConfigureAwait(false);
+        MeshResult raw = await GenerateRawAsync(id, spec, request, progress, cancel).ConfigureAwait(false);
         return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, cancel), cancel).ConfigureAwait(false);
     }
 
-    private Task<MeshResult> GenerateRawAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        ArgumentNullException.ThrowIfNull(spec);
-        ArgumentNullException.ThrowIfNull(request);
-        string id = IdOf(spec);
         MeshRequestValidator.Validate(id, request, MatterAvailable());
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);

@@ -37,22 +37,42 @@ public static class GlbFrame
     /// <summary>Wraps the default scene's root nodes in a node carrying <paramref name="matrix"/> (row-vector convention).</summary>
     public static byte[] Wrap(byte[] glb, Matrix4x4 matrix)
     {
-        JsonObject root = JsonNode.Parse(GlbInspector.SplitJson(glb).Json)!.AsObject();
-        if (root["scenes"] is not JsonArray scenes || scenes.Count == 0 || root["nodes"] is not JsonArray nodes)
-            throw new HartsyInferenceException("The GLB has no scene to put in a frame.");
-        int sceneIndex = root["scene"]?.GetValue<int>() ?? 0;
-        JsonObject scene = scenes[sceneIndex]!.AsObject();
-        JsonArray children = scene["nodes"] is JsonArray existing ? (JsonArray)existing.DeepClone() : [];
-        JsonObject frame = new()
+        try
         {
-            ["name"] = NodeName,
-            ["matrix"] = new JsonArray(
-                matrix.M11, matrix.M12, matrix.M13, matrix.M14, matrix.M21, matrix.M22, matrix.M23, matrix.M24,
-                matrix.M31, matrix.M32, matrix.M33, matrix.M34, matrix.M41, matrix.M42, matrix.M43, matrix.M44),
-            ["children"] = children,
-        };
-        nodes.Add(frame);
-        scene["nodes"] = new JsonArray(nodes.Count - 1);
-        return GlbInspector.ReplaceJson(glb, System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
+            JsonObject root = JsonNode.Parse(GlbContainer.Split(glb).Json)!.AsObject();
+            if (root["scenes"] is not JsonArray scenes || scenes.Count == 0 || root["nodes"] is not JsonArray nodes)
+                throw new HartsyInferenceException("The GLB has no scene to put in a frame.");
+            RequireUntransformedMeshNodes(nodes);
+            JsonObject scene = scenes[root["scene"]?.GetValue<int>() ?? 0]!.AsObject();
+            JsonArray children = scene["nodes"] is JsonArray existing ? (JsonArray)existing.DeepClone() : [];
+            int frameIndex = nodes.Count;
+            nodes.Add(new JsonObject
+            {
+                ["name"] = NodeName,
+                ["matrix"] = new JsonArray(
+                    matrix.M11, matrix.M12, matrix.M13, matrix.M14, matrix.M21, matrix.M22, matrix.M23, matrix.M24,
+                    matrix.M31, matrix.M32, matrix.M33, matrix.M34, matrix.M41, matrix.M42, matrix.M43, matrix.M44),
+                ["children"] = children,
+            });
+            scene["nodes"] = new JsonArray(frameIndex);
+            return GlbContainer.ReplaceJson(glb, System.Text.Encoding.UTF8.GetBytes(root.ToJsonString()));
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or ArgumentOutOfRangeException or FormatException or InvalidCastException)
+        {
+            throw new HartsyInferenceException($"The GLB's scene could not be put in a frame: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>The frame is sized from the POSITION accessors' own bounds, which is right only while the nodes that carry meshes have no transform of their own (joints may).</summary>
+    private static void RequireUntransformedMeshNodes(JsonArray nodes)
+    {
+        foreach (JsonNode? node in nodes)
+        {
+            if (node is JsonObject { } obj && obj.ContainsKey("mesh")
+                && (obj.ContainsKey("matrix") || obj.ContainsKey("translation") || obj.ContainsKey("rotation") || obj.ContainsKey("scale")))
+            {
+                throw new HartsyInferenceException("A mesh node of the GLB carries its own transform, so its bounds are not known to the frame step.");
+            }
+        }
     }
 }

@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Text;
-using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
@@ -9,9 +9,12 @@ using HartsyInference.ThreeD.Io;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>What happens to a model's raw result before a host sees it: the frame, the measurements and the preview.</summary>
+/// <summary>What happens to a model's raw result before a host sees it: the frame, the measurements and the preview. A finished generation is never lost to these steps: each one that fails leaves the raw bytes, adds a warning and lets the rest run.</summary>
 internal static class MeshResultFinisher
 {
+    /// <summary>Above this many triangles the topology is not measured (the weld holds every vertex in a hash map); the counts and bounds still come from the GLB's accessors.</summary>
+    internal const long TopologyTriangleLimit = 4_000_000;
+
     /// <summary>Models whose export frame is turned half a turn about Y from glTF's: Pixal3D samples with the camera on +Z and exports a half turn, so its front faces -Z.</summary>
     private static readonly HashSet<string> HalfTurnedAboutY = new(StringComparer.OrdinalIgnoreCase) { MeshModelIds.Pixal3D };
 
@@ -26,27 +29,29 @@ internal static class MeshResultFinisher
         MeshFrame frame = MeshFrame.Native;
         if (request.Frame == MeshFrame.GltfYUpMetres)
         {
-            try
+            byte[]? framed = Step("The frame was not normalised", warnings, () => GlbFrame.Normalize(raw.Data, FrameRotation(id)));
+            if (framed is not null)
             {
-                data = GlbFrame.Normalize(data, FrameRotation(id));
+                data = framed;
                 frame = MeshFrame.GltfYUpMetres;
                 if (!HalfTurnedAboutY.Contains(id))
                     warnings.Add($"'{id}' was centred and scaled to one metre; its front direction is not verified, so it was not turned.");
             }
-            catch (HartsyInferenceException ex)
-            {
-                warnings.Add($"The frame was not normalised: {ex.Message}");
-            }
         }
         cancel.ThrowIfCancellationRequested();
 
-        MeshInfo info;
+        GlbSummary? summary = Step("The glb could not be inspected", warnings, () => GlbInspector.Read(data));
+        bool wantsPreview = request.PreviewTriangles > 0 && (summary is null || summary.TriangleCount > request.PreviewTriangles);
+        bool measure = summary is null || summary.TriangleCount <= TopologyTriangleLimit;
+        if (!measure)
+            warnings.Add($"The topology was not measured: the mesh has more than {TopologyTriangleLimit:N0} triangles.");
+        Mesh? mesh = measure || wantsPreview ? Step("The mesh could not be read, so its topology was not measured and no preview was made", warnings, () => GlbReader.Parse(data)) : null;
+        cancel.ThrowIfCancellationRequested();
+
+        MeshInfo info = BuildInfo(data, summary, mesh, measure, frame);
         byte[]? preview = null;
-        GlbSummary? summary = SummaryOf(data, warnings);
-        Mesh? mesh = ReadMesh(data, warnings);
-        info = BuildInfo(data, summary, mesh);
-        if (mesh is not null && request.PreviewTriangles > 0 && mesh.TriangleCount > request.PreviewTriangles)
-            preview = MakePreview(mesh, request.PreviewTriangles, cancel);
+        if (mesh is not null && wantsPreview && mesh.TriangleCount > request.PreviewTriangles)
+            preview = Step("The preview could not be made", warnings, () => MakePreview(mesh, request.PreviewTriangles, cancel));
         return raw with { Data = data, Frame = frame, Info = info, Preview = preview, Warnings = warnings };
     }
 
@@ -61,42 +66,37 @@ internal static class MeshResultFinisher
         return GlbWriter.Write(reduced);
     }
 
-    private static GlbSummary? SummaryOf(byte[] glb, List<string> warnings)
+    /// <summary>Runs one finishing step. This is the boundary where a failure must cost a warning and not the finished generation, so every failure but a cancellation is caught, logged and reported.</summary>
+    private static T? Step<T>(string what, List<string> warnings, Func<T> step) where T : class
     {
         try
         {
-            return GlbInspector.Read(glb);
+            return step();
         }
-        catch (Exception ex) when (ex is HartsyInferenceException or System.Text.Json.JsonException or InvalidOperationException or KeyNotFoundException)
+        catch (OperationCanceledException)
         {
-            warnings.Add($"The glb could not be inspected: {ex.Message}");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Mesh] {what}: {ex.Message}");
+            warnings.Add($"{what}: {ex.Message}");
             return null;
         }
     }
 
-    private static Mesh? ReadMesh(byte[] glb, List<string> warnings)
+    private static MeshInfo BuildInfo(byte[] glb, GlbSummary? summary, Mesh? mesh, bool measured, MeshFrame frame)
     {
-        try
-        {
-            return GlbReader.Parse(glb);
-        }
-        catch (HartsyInferenceException ex)
-        {
-            warnings.Add($"The topology was not measured and no preview was made: {ex.Message}");
-            return null;
-        }
-    }
-
-    private static MeshInfo BuildInfo(byte[] glb, GlbSummary? summary, Mesh? mesh)
-    {
-        MeshStats? stats = mesh is null ? null : MeshStatistics.Measure(mesh);
+        MeshStats? stats = mesh is null || !measured ? null : MeshStatistics.Measure(mesh);
+        // Accessor bounds are in the file's own space; the frame node moves them, so they are not the bounds of the framed result.
+        bool accessorBoundsValid = frame == MeshFrame.Native;
         return new MeshInfo
         {
             ByteSize = glb.LongLength,
-            TriangleCount = stats?.TriangleCount ?? 0,
-            VertexCount = stats?.VertexCount ?? 0,
-            BoundsMin = stats?.Min ?? summary?.Min,
-            BoundsMax = stats?.Max ?? summary?.Max,
+            TriangleCount = stats?.TriangleCount ?? mesh?.TriangleCount ?? summary?.TriangleCount ?? 0,
+            VertexCount = stats?.VertexCount ?? mesh?.VertexCount ?? summary?.VertexCount ?? 0,
+            BoundsMin = stats?.Min ?? (accessorBoundsValid ? summary?.Min : null),
+            BoundsMax = stats?.Max ?? (accessorBoundsValid ? summary?.Max : null),
             Components = stats?.Components,
             BoundaryEdges = stats?.BoundaryEdges,
             NonManifoldEdges = stats?.NonManifoldEdges,
@@ -108,25 +108,34 @@ internal static class MeshResultFinisher
         };
     }
 
-    /// <summary>The splat count and bounds of a Gaussian-splat PLY written by this engine (binary little endian, x y z first).</summary>
+    /// <summary>The splat count and bounds of a binary-little-endian Gaussian-splat PLY: the vertex count and the offsets of the x, y and z properties are read from the header; a header with a non-float property gives the count only.</summary>
     internal static MeshInfo SplatInfo(byte[] ply)
     {
         string marker = "end_header\n";
         int headerEnd = IndexOf(ply, Encoding.ASCII.GetBytes(marker));
         if (headerEnd < 0)
             return new MeshInfo { ByteSize = ply.LongLength };
-        string[] header = Encoding.ASCII.GetString(ply, 0, headerEnd).Split('\n');
-        int count = 0, floats = 0;
-        foreach (string line in header)
+        int count = 0, properties = 0;
+        int[] axis = [-1, -1, -1];
+        bool allFloats = true;
+        foreach (string line in Encoding.ASCII.GetString(ply, 0, headerEnd).Split('\n'))
         {
             string[] parts = line.Split(' ');
             if (parts is ["element", "vertex", _])
+            {
                 int.TryParse(parts[2], out count);
-            else if (parts is ["property", "float", _])
-                floats++;
+            }
+            else if (parts is ["property", _, _])
+            {
+                allFloats &= parts[1] == "float";
+                int slot = Array.IndexOf(new[] { "x", "y", "z" }, parts[2]);
+                if (slot >= 0)
+                    axis[slot] = properties;
+                properties++;
+            }
         }
         int body = headerEnd + marker.Length;
-        if (count == 0 || floats < 3 || ply.Length < body + (long)count * floats * 4)
+        if (count == 0 || !allFloats || axis.Any(i => i < 0) || ply.Length < body + (long)count * properties * 4)
             return new MeshInfo { ByteSize = ply.LongLength, SplatCount = count };
         float[] min = [float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity];
         float[] max = [float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity];
@@ -134,7 +143,7 @@ internal static class MeshResultFinisher
         {
             for (int c = 0; c < 3; c++)
             {
-                float value = BinaryPrimitives.ReadSingleLittleEndian(ply.AsSpan(body + (i * floats + c) * 4));
+                float value = BinaryPrimitives.ReadSingleLittleEndian(ply.AsSpan(body + (i * properties + axis[c]) * 4));
                 min[c] = Math.Min(min[c], value);
                 max[c] = Math.Max(max[c], value);
             }

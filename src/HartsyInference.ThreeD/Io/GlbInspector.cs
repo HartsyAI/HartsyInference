@@ -1,26 +1,36 @@
-using System.Buffers.Binary;
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
 
 namespace HartsyInference.ThreeD.Io;
 
-/// <summary>Reads the summary of a GLB from its JSON chunk, and splits and rejoins the chunks for the edits that change only the JSON.</summary>
+/// <summary>Reads the summary of a GLB from its JSON chunk, without touching the binary chunk.</summary>
 public static class GlbInspector
 {
-    private const uint Magic = 0x46546C67;
-    private const uint JsonChunk = 0x4E4F534A;
-
     /// <summary>The summary of <paramref name="glb"/>.</summary>
-    /// <exception cref="HartsyInferenceException">The bytes are not a glTF 2.0 GLB with a JSON chunk.</exception>
+    /// <exception cref="HartsyInferenceException">The bytes are not a glTF 2.0 GLB with a JSON chunk, or the JSON does not describe meshes the way glTF requires.</exception>
     public static GlbSummary Read(byte[] glb)
     {
-        using JsonDocument doc = JsonDocument.Parse(SplitJson(glb).Json);
-        JsonElement root = doc.RootElement;
+        byte[] json = GlbContainer.Split(glb).Json;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            return Summarize(doc.RootElement);
+        }
+        catch (Exception ex) when (ex is JsonException or IndexOutOfRangeException or FormatException or InvalidOperationException or ArgumentOutOfRangeException or KeyNotFoundException)
+        {
+            throw new HartsyInferenceException($"The GLB's JSON is malformed: {ex.Message}", ex);
+        }
+    }
+
+    private static GlbSummary Summarize(JsonElement root)
+    {
         int meshCount = root.TryGetProperty("meshes", out JsonElement meshes) ? meshes.GetArrayLength() : 0;
         bool normals = false;
         List<int> positionAccessors = [];
+        long triangles = 0;
         if (meshCount > 0)
         {
+            JsonElement accessorList = root.TryGetProperty("accessors", out JsonElement found) ? found : default;
             foreach (JsonElement mesh in meshes.EnumerateArray())
             {
                 if (!mesh.TryGetProperty("primitives", out JsonElement primitives))
@@ -30,18 +40,27 @@ public static class GlbInspector
                     if (!primitive.TryGetProperty("attributes", out JsonElement attributes))
                         continue;
                     normals |= attributes.TryGetProperty("NORMAL", out _);
-                    if (attributes.TryGetProperty("POSITION", out JsonElement position))
-                        positionAccessors.Add(position.GetInt32());
+                    if (!attributes.TryGetProperty("POSITION", out JsonElement position))
+                        continue;
+                    positionAccessors.Add(position.GetInt32());
+                    // Mode 4 (triangles) is the default; an indexed primitive has three indices per triangle, a non-indexed one three vertices.
+                    if (accessorList.ValueKind == JsonValueKind.Array && (!primitive.TryGetProperty("mode", out JsonElement mode) || mode.GetInt32() == 4))
+                    {
+                        int source = primitive.TryGetProperty("indices", out JsonElement indices) ? indices.GetInt32() : position.GetInt32();
+                        triangles += accessorList[source].GetProperty("count").GetInt64() / 3;
+                    }
                 }
             }
         }
 
         float[]? min = null, max = null;
+        long vertices = 0;
         if (root.TryGetProperty("accessors", out JsonElement accessors))
         {
             foreach (int index in positionAccessors.Distinct())
             {
                 JsonElement accessor = accessors[index];
+                vertices += accessor.GetProperty("count").GetInt64();
                 if (!accessor.TryGetProperty("min", out JsonElement lo) || !accessor.TryGetProperty("max", out JsonElement hi))
                     continue;
                 float[] low = [lo[0].GetSingle(), lo[1].GetSingle(), lo[2].GetSingle()];
@@ -63,35 +82,10 @@ public static class GlbInspector
         }
         return new GlbSummary(
             meshCount, normals, root.TryGetProperty("textures", out JsonElement textures) && textures.GetArrayLength() > 0,
-            root.TryGetProperty("skins", out JsonElement skins) && skins.GetArrayLength() > 0, animations, min, max);
-    }
-
-    /// <summary>The JSON chunk's bytes and the offset and length of that chunk's payload in <paramref name="glb"/>.</summary>
-    internal static (byte[] Json, int Offset, int Length) SplitJson(byte[] glb)
-    {
-        ArgumentNullException.ThrowIfNull(glb);
-        if (glb.Length < 20 || BinaryPrimitives.ReadUInt32LittleEndian(glb) != Magic)
-            throw new HartsyInferenceException("File is not a binary glTF (GLB) container.");
-        if (BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(4)) != 2)
-            throw new HartsyInferenceException("Only glTF 2.0 GLB containers are supported.");
-        int length = (int)BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(12));
-        if (BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(16)) != JsonChunk || 20 + length > glb.Length)
-            throw new HartsyInferenceException("GLB file has no leading JSON chunk.");
-        return (glb.AsSpan(20, length).ToArray(), 20, length);
-    }
-
-    /// <summary>Replaces the JSON chunk of <paramref name="glb"/> with <paramref name="json"/>, padded with spaces to four bytes, and fixes the container lengths.</summary>
-    internal static byte[] ReplaceJson(byte[] glb, byte[] json)
-    {
-        (_, int offset, int length) = SplitJson(glb);
-        int padded = (json.Length + 3) & ~3;
-        byte[] result = new byte[glb.Length - length + padded];
-        Buffer.BlockCopy(glb, 0, result, 0, 20);
-        Buffer.BlockCopy(json, 0, result, 20, json.Length);
-        Array.Fill(result, (byte)' ', 20 + json.Length, padded - json.Length);
-        Buffer.BlockCopy(glb, offset + length, result, 20 + padded, glb.Length - offset - length);
-        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(8), (uint)result.Length);
-        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(12), (uint)padded);
-        return result;
+            root.TryGetProperty("skins", out JsonElement skins) && skins.GetArrayLength() > 0, animations, min, max)
+        {
+            VertexCount = vertices,
+            TriangleCount = triangles,
+        };
     }
 }
