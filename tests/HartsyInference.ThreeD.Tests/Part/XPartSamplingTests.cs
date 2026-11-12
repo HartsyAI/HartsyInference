@@ -1,11 +1,10 @@
-using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 using HartsyInference.ThreeD.Tests.MeshPostProcess;
 
 namespace HartsyInference.ThreeD.Tests.Part;
 
-/// <summary>The geometry around the X-Part networks: normalisation, the faces and surface samples of a box, the part ids, the initial noise, and the half-precision DiT path.</summary>
+/// <summary>The geometry around the X-Part networks: normalisation, the faces and surface samples of a box, the part ids and the initial noise.</summary>
 public sealed class XPartSamplingTests
 {
     [Fact]
@@ -51,6 +50,15 @@ public sealed class XPartSamplingTests
 
         (float[] again, _) = XPartSampling.SurfaceSamples(sphere.Vertices, sub, 500, 7);
         Assert.Equal(points, again);
+    }
+
+    [Fact]
+    public void KeptParts_SkipsEmptyBoxesAndKeepsTheLargestInOrder()
+    {
+        Assert.Equal([0, 1, 3], XPartSampling.KeptParts([5, 2, 0, 9], 50));
+        Assert.Equal([0, 3], XPartSampling.KeptParts([5, 2, 0, 9], 2));
+        Assert.Equal([1, 2], XPartSampling.KeptParts([4, 7, 7, 1], 2)); // 7 and 7 beat 4; ties go to the lower index
+        Assert.Empty(XPartSampling.KeptParts([0, 0], 5));
     }
 
     [Fact]
