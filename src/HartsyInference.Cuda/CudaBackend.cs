@@ -6224,8 +6224,14 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Smallest score tile, in bytes, <see cref="TileRows"/> sizes for however little free memory is reported. <c>cuMemGetInfo</c> can
+    /// read far too low: on a Windows card a process past about 8 GiB of device allocations reports no free memory while gigabytes are free, and a
+    /// tile of one query row is one cuBLAS launch per head per row (about 800 thousand per call at 32 thousand tokens, minutes per layer).</summary>
+    internal const long MinTileScoreBytes = 128L << 20;
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
-    /// the weights), or the height <c>numerics.sdpaTile</c> forces, and never past the score elements the softmax addresses.</summary>
+    /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
+    /// score elements the softmax addresses.</summary>
     /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
     internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
     {
@@ -6234,7 +6240,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             throw new AttentionUnsupportedException(
                 $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
         long perRow = totalHeads * skv * sizeof(float);
-        long rows = (long)(freeBytes / 4) / Math.Max(1, perRow);
+        long budget = (long)Math.Max(freeBytes / 4, (ulong)MinTileScoreBytes);
+        long rows = budget / Math.Max(1, perRow);
         if (rows < 1) rows = 1;
         if (rows > sq) rows = sq;
         if (forced is int f && f > 0) rows = Math.Min(f, sq);
