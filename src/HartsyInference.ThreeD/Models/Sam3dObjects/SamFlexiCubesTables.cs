@@ -38,7 +38,7 @@ public sealed class SamFlexiCubesTables
         {
             if (check[c * 5] is not (0 or 1))
                 throw new ArgumentException($"The check flag of case {c} is {check[c * 5]}; it is 0 or 1.", nameof(check));
-            if (check[c * 5 + 4] < 0 || check[c * 5 + 4] >= Cases)
+            if (check[c * 5] == 1 && (check[c * 5 + 4] < 0 || check[c * 5 + 4] >= Cases))
                 throw new ArgumentException($"The replacement case of case {c} is {check[c * 5 + 4]}; it is 0 to {Cases - 1}.", nameof(check));
             for (int g = 0; g < numVd[c]; g++)
             {
