@@ -46,20 +46,20 @@ public static class Sam3dObjectsRequestMapper
     {
         ArgumentNullException.ThrowIfNull(request);
         string id = MeshModelIds.Sam3dObjects;
-        ImageData image = request.Image ?? throw new NotSupportedException($"3D model '{id}' lifts an object from an image; supply MeshRequest.Image with the object mask as its alpha plane.");
+        ImageData image = request.Image ?? throw new NotSupportedException($"3D model '{id}' lifts an object from an image; supply MeshRequest.Image with the object mask as its alpha plane.").ForField(nameof(MeshRequest.Image));
         if (image.Width <= 0 || image.Height <= 0 || image.Rgb.Length != (long)image.Width * image.Height * 3)
-            throw new NotSupportedException($"The image must hold {image.Width} x {image.Height} x 3 bytes of RGB.");
+            throw new NotSupportedException($"The image must hold {image.Width} x {image.Height} x 3 bytes of RGB.").ForField(nameof(MeshRequest.Image));
         if (!image.HasAlpha)
-            throw new NotSupportedException($"3D model '{id}' needs the mask of the object to lift: give an RGBA image whose alpha plane is the mask (the CLI takes --mask for a separate mask file).");
+            throw new NotSupportedException($"3D model '{id}' needs the mask of the object to lift: give an RGBA image whose alpha plane is the mask (the CLI takes --mask for a separate mask file).").ForField(nameof(MeshRequest.Image));
         if (!image.Alpha!.Any(a => a != 0))
-            throw new NotSupportedException($"The mask of the object is empty; '{id}' needs at least one non-zero alpha value.");
+            throw new NotSupportedException($"The mask of the object is empty; '{id}' needs at least one non-zero alpha value.").ForField(nameof(MeshRequest.Image));
         if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The {id} seed must be at most {int.MaxValue}.");
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The {id} seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
         if (request.Steps < 0)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The step count cannot be negative; 0 uses upstream's 25 for each flow.");
+            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The step count cannot be negative; 0 uses upstream's 25 for each flow.").ForField(nameof(MeshRequest.Steps));
         if (request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has a fixed 64-cube structure grid; GridResolution must be 0.");
+            throw new NotSupportedException($"3D model '{id}' has a fixed 64-cube structure grid; GridResolution must be 0.").ForField(nameof(MeshRequest.GridResolution));
         if (request.Texture || request.TextureSize != 0)
-            throw new NotSupportedException($"3D model '{id}' returns Gaussian splats and takes no texture options.");
+            throw new NotSupportedException($"3D model '{id}' returns Gaussian splats and takes no texture options.").ForField(request.Texture ? nameof(MeshRequest.Texture) : nameof(MeshRequest.TextureSize));
     }
 }

@@ -21,8 +21,8 @@ public sealed record MeshPlan
     /// <summary>The model's file inventory: what is present, what is missing, and what the engine cannot fetch.</summary>
     public required MeshAssetStatus Assets { get; init; }
 
-    /// <summary>Whether the request fits this engine's device; null when the model has no measured peak or the device does not report memory.</summary>
-    public MemoryFit? Memory { get; init; }
+    /// <summary>Whether the request fits this engine's device. The verdict is <see cref="MemoryFitVerdict.Unknown"/>, with the reason, when the model has no recorded peak or the device reports no memory.</summary>
+    public required MemoryFit Memory { get; init; }
 
     /// <summary>Whether preflight found no blocking issue.</summary>
     public bool IsValid => !Issues.Any(issue => issue.Severity == MeshPlanIssueSeverity.Error);

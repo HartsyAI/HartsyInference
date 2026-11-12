@@ -68,11 +68,12 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 LoadedMesh loaded = GetOrLoad(spec, id);
+                ImageData image = request.Image!;
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
-                    ImageRgb = request.Image!.Rgb,
-                    Width = request.Image!.Width,
-                    Height = request.Image!.Height,
+                    ImageRgb = image.Rgb,
+                    Width = image.Width,
+                    Height = image.Height,
                     GridResolution = request.GridResolution,
                     Steps = request.Steps,
                     Seed = request.Seed < 0 ? null : (int)request.Seed,
@@ -563,7 +564,7 @@ public sealed class MeshService : IMeshService, IDisposable
         (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D) && Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
 
     private static bool IsHairDeck(ModelSpec spec) =>
-        string.Equals(spec.Catalog?.Id, MeshModelIds.HairDeck, StringComparison.OrdinalIgnoreCase);
+        IdOf(spec) == MeshModelIds.HairDeck;
 
     /// <summary>One HairDeck request: the preprocessing of the image, then the image model; the GLB carries the chains when they were made.</summary>
     private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, CancellationToken cancel)

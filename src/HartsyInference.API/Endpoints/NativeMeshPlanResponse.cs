@@ -18,8 +18,8 @@ public sealed class NativeMeshPlanResponse
     /// <summary>The model's file inventory, with paths relative to the models root.</summary>
     public required MeshAssetStatus Assets { get; init; }
 
-    /// <summary>Whether the request fits the device; null when the model has no recorded peak.</summary>
-    public MemoryFit? Memory { get; init; }
+    /// <summary>Whether the request fits the device; <c>Unknown</c> with the reason when the model has no recorded peak.</summary>
+    public required MemoryFit Memory { get; init; }
 
     /// <summary>Whether preflight found no blocking issue.</summary>
     public required bool IsValid { get; init; }

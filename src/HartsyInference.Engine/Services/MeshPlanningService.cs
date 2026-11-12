@@ -76,7 +76,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
             Settings = Settings(request, descriptor),
             Issues = issues,
             Assets = assets,
-            Memory = memory.Estimate is null ? null : memory,
+            Memory = memory,
         });
     }
 
@@ -91,7 +91,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
             HartsyInferenceException => "mesh.request.rejected",
             _ => "mesh.request.invalid",
         };
-        string? field = descriptor.Fields.Keys.FirstOrDefault(name => error.Message.Contains(name, StringComparison.Ordinal));
+        string? field = MeshFieldTag.FieldOf(error)
+            ?? descriptor.Fields.Keys.OrderByDescending(name => name.Length).FirstOrDefault(name => error.Message.Contains(name, StringComparison.Ordinal));
         return new MeshPlanIssue { Code = code, Severity = MeshPlanIssueSeverity.Error, Message = error.Message, Field = field };
     }
 

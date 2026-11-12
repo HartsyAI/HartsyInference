@@ -15,7 +15,7 @@ public sealed record MeshFieldSpec
     /// <summary>The legal values when they are a closed set (grid resolutions); null otherwise.</summary>
     public IReadOnlyList<string>? Values { get; init; }
 
-    /// <summary>The smallest legal value when the field is a range.</summary>
+    /// <summary>The smallest legal value when the field is a range. A request that leaves the field at 0 (or unset) takes <see cref="Default"/> wherever the note says so; the range is for values the caller sets.</summary>
     public double? Min { get; init; }
 
     /// <summary>The largest legal value when the field is a range.</summary>
