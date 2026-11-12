@@ -236,6 +236,9 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public IMeshPreparationService MeshPreparation => _meshPreparation.Value;
 
+    /// <inheritdoc/>
+    public IMeshLifecycleService MeshLifecycle => _mesh.Value;
+
     internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
 
     /// <inheritdoc/>

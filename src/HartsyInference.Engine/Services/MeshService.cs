@@ -20,7 +20,7 @@ namespace HartsyInference.Engine.Services;
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
 /// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
-public sealed class MeshService : IMeshService, IDisposable
+public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposable
 {
     private static readonly string EngineVersion = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
@@ -50,8 +50,104 @@ public sealed class MeshService : IMeshService, IDisposable
         string id = IdOf(spec);
         MeshSettingsUsed settings = SettingsOf(id, request);
         MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? request with { Seed = seed } : request;
-        MeshResult raw = await GenerateRawAsync(id, spec, effective, progress, cancel).ConfigureAwait(false);
+        MeshResult raw = await WithOutOfVramRetry(() => GenerateRawAsync(id, spec, effective, progress, cancel), FreeAfterOutOfVram).ConfigureAwait(false);
         return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, settings, cancel), cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs <paramref name="run"/>; when it fails for lack of device memory, calls <paramref name="free"/> and runs it once more. The retry re-resolves its pipeline, which is why it can live here: the failed run's cached pipeline was freed, so nothing believes weights it no longer has are resident. A second failure, any other failure and a cancellation propagate.</summary>
+    internal static async Task<MeshResult> WithOutOfVramRetry(Func<Task<MeshResult>> run, Action free)
+    {
+        try
+        {
+            return await run().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (InferenceEngine.IsOutOfVram(ex))
+        {
+            Logs.Warning($"[Mesh] A generation ran out of VRAM; freeing the loaded 3D models and retrying once: {ex.Message}");
+            free();
+            return await run().ConfigureAwait(false);
+        }
+    }
+
+    private void FreeAfterOutOfVram()
+    {
+        Free();
+        try
+        {
+            _engine.Backend.FreeAllDeviceMemory();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logs.Error("[Mesh] The device sweep after an out-of-memory failure failed; the retry may fail too.", ex);
+        }
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<MeshLoadedModel> Loaded()
+    {
+        lock (_gate)
+        {
+            return [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
+        }
+    }
+
+    /// <inheritdoc/>
+    public int Free(string? name = null)
+    {
+        List<IDisposable> freed = [];
+        lock (_gate)
+        {
+            foreach ((string kind, string key, IDisposable item) in Resident().ToList())
+            {
+                if (name is not null && !string.Equals(NameOf(key), name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                RemoveResident(kind, key);
+                freed.Add(item);
+            }
+        }
+        // Disposing waits for a run in progress, so it happens outside the lock that every load takes.
+        foreach (IDisposable item in freed)
+            item.Dispose();
+        return freed.Count;
+    }
+
+    private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
+    {
+        foreach (KeyValuePair<string, LoadedMesh> e in _pipelines) yield return ("image", e.Key, e.Value.Pipeline);
+        foreach (KeyValuePair<string, CoLa3DPipeline> e in _scenePipelines) yield return ("scene", e.Key, e.Value);
+        foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return ("rig", e.Key, e.Value);
+        foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return ("paint", e.Key, e.Value);
+        foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return ("part", e.Key, e.Value);
+        foreach (KeyValuePair<string, HairDeckRuntime> e in _hairDecks) yield return ("hairdeck", e.Key, e.Value);
+        foreach (KeyValuePair<string, Trellis2Runtime> e in _trellis2) yield return ("trellis2", e.Key, e.Value);
+        foreach (KeyValuePair<string, Pixal3DRuntime> e in _pixal3d) yield return ("pixal3d", e.Key, e.Value);
+    }
+
+    private void RemoveResident(string kind, string key)
+    {
+        switch (kind)
+        {
+            case "image": _pipelines.Remove(key); break;
+            case "scene": _scenePipelines.Remove(key); break;
+            case "rig": _rigPipelines.Remove(key); break;
+            case "paint": _paintPipelines.Remove(key); break;
+            case "part": _partPipelines.Remove(key); break;
+            case "hairdeck": _hairDecks.Remove(key); break;
+            case "trellis2": _trellis2.Remove(key); break;
+            default: _pixal3d.Remove(key); break;
+        }
+    }
+
+    /// <summary>The key a pipeline is cached under as a name that holds no absolute path: relative to the models root when under it, else the last segment. A scene key carries its variant after a bar and keeps it.</summary>
+    private static string NameOf(string key)
+    {
+        string[] parts = key.Split('|');
+        string root = RepoPaths.ModelsRoot();
+        string path = parts[0];
+        string name = path.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetRelativePath(root, path).Replace('\\', '/')
+            : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return parts.Length > 1 ? name + "|" + parts[1] : name;
     }
 
     /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
