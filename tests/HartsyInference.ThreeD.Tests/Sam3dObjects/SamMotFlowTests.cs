@@ -661,10 +661,14 @@ public sealed class SamMotFlowTests
     {
         public List<string> Events { get; } = [];
 
+        public bool ThrowOnSync { get; set; }
+
         public Tensor? Watched { get; set; }
 
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
+            if (method?.Name == "Sync" && ThrowOnSync)
+                throw new InvalidOperationException("device error");
             if (method?.Name is "Sync" or "FreeWeights")
                 Events.Add($"{method.Name}:{(Watched is not null && IsDisposed(Watched) ? "disposed" : "alive")}");
             return method?.ReturnType.IsValueType == true && method.ReturnType != typeof(void) ? Activator.CreateInstance(method.ReturnType) : null;
@@ -733,6 +737,23 @@ public sealed class SamMotFlowTests
         });
 
         Assert.Equal(["Sync:alive", "FreeWeights:alive", "Sweep:alive"], recording.Events);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void ReleaseAfterFailure_WhenTheDrainThrowsStillDisposesAndReportsTheCleanupError()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        ((RecordingBackend)proxy).ThrowOnSync = true;
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        List<Tensor> owned = [converted];
+        List<string> reported = [];
+
+        SamFlowWeights.ReleaseAfterFailure(proxy, [converted], owned, () => reported.Add("swept"), error => reported.Add(error.Message));
+
+        // The drain failed, so the free and the sweep were skipped; the tensor is disposed and the error was handed over, not thrown.
+        Assert.Equal(["device error"], reported);
         Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
         Assert.Empty(owned);
     }
