@@ -22,6 +22,26 @@ public static class ModelCatalog
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
 
+    /// <summary>One transformer shard of an Iris-Z build (<paramref name="size"/> is <c>small</c> or <c>big</c>), kept in the
+    /// release's own folder layout so the index beside it resolves the set.</summary>
+    private static ModelAsset IrisZShard(string size, int index, int count, string sha256) => new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = $"Iris-Z-{size}/transformer-{index:D5}-of-{count:D5}.safetensors",
+        TargetSubdir = $"Stable-Diffusion/IrisZ/Iris-Z-{size}",
+        Role = "transformer",
+        Sha256 = sha256,
+    };
+
+    /// <summary>The shard index of an Iris-Z build.</summary>
+    private static ModelAsset IrisZIndex(string size) => new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = $"Iris-Z-{size}/transformer.safetensors.index.json",
+        TargetSubdir = $"Stable-Diffusion/IrisZ/Iris-Z-{size}",
+        Role = "config",
+    };
+
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
@@ -1081,6 +1101,54 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/Flux2", Role = "transformer",
                         Sha256 = "ec3d4e733a771f61c052fb4856c48b336c55eaf2c65487c2a1faeb9bbda7a343" },
                     SideModels.Qwen3_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Iris-Z-small (speridlabs/iris-z): FLUX.2 Klein base 9B fine-tuned to generate images and depth, served by
+                // Flux2Recipe's iris-z-small variant. Licence: FLUX non-commercial. Built and unit-tested; no real-weight run yet.
+                Id = "iris-z-small", Modality = img, DisplayName = "Iris-Z-small", Architecture = "FLUX.2 DiT with a depth grid, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    IrisZShard("small", 1, 4, "4b1fec0714cad8e0a76b2512b91fd21b7937879f80be11dc518817a8dfcbae2b"),
+                    IrisZShard("small", 2, 4, "b402401fcf7dbe5e26d55d7a52abf72291636ed0be6b0f61fb95c0c085ffd2b1"),
+                    IrisZShard("small", 3, 4, "148f4d1d65765f02ad0e2f4a1157ed3c749d798d5c789d10272c69fb2d55a7a1"),
+                    IrisZShard("small", 4, 4, "5b93e5f0069dff96a5ffa23cdee666ad220fa8ef06d22142aaa54e5bfae51064"),
+                    IrisZIndex("small"),
+                    SideModels.IrisZSmallEmptyPrompt,
+                    SideModels.Qwen3_8B_Fp4Mixed,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Iris-Z-big (speridlabs/iris-z): FLUX.2 Dev without its guidance embedding, fine-tuned the same way; 64 GB of
+                // BF16 shards. Licence: FLUX non-commercial. Built only: nothing here has run it, and it has no quantized build.
+                Id = "iris-z-big", Modality = img, DisplayName = "Iris-Z-big", Architecture = "FLUX.2 DiT with a depth grid, flow-matching",
+                Status = st,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    IrisZShard("big", 1, 14, "0aa1e4829170757e562e90c24e9459fce4b64660cf9851187e4fb0b4304dd5bc"),
+                    IrisZShard("big", 2, 14, "20cd14a01c2bb3fa4767d8a98896d9cc3c2d796d3038e9f3ff826ad656a50272"),
+                    IrisZShard("big", 3, 14, "a5dcdaa9cee58c9f3cd770a59f8aa03dd001898f26fd86257be00031bd5e6c6b"),
+                    IrisZShard("big", 4, 14, "cb1a366403f756835f361e4d48010917152e14aea9c437b356c7849dedac7def"),
+                    IrisZShard("big", 5, 14, "4dc2e4393cf2c565786d8ba3ad6074e0857fe860b7a72e1eab0514f358cb021e"),
+                    IrisZShard("big", 6, 14, "a23bed96506b68314983ad42fd53310748b95569a163c7fb98f71b1d32725c3f"),
+                    IrisZShard("big", 7, 14, "62b0257177a62706879ce03c5d659f069b874543c5488eddc37465914af4d85b"),
+                    IrisZShard("big", 8, 14, "b22e7bb0c024e128db863573f367284d493aaadb0b20ae1a21cc08a608f9c5da"),
+                    IrisZShard("big", 9, 14, "1ab1e350bc51356bce7ce1a6971d07f927a84e6ae8053ba963f4770477f88dd5"),
+                    IrisZShard("big", 10, 14, "41173d42e6bdc6c41bc28354cdf774b3d12ae6296d52a7f4e6c993317a97f720"),
+                    IrisZShard("big", 11, 14, "e93a598dd6c0351cf7a9153530f610ea780ace4a012a00f77b32a715580c2d7e"),
+                    IrisZShard("big", 12, 14, "c3a1d10ec62125bbbedc34b96775334a60c4836191ec235a668247e7097bca51"),
+                    IrisZShard("big", 13, 14, "ed89962d45d5f67c93948e024694acc8711b6c5ca95955b5f5f0f6f4c7249ff0"),
+                    IrisZShard("big", 14, 14, "1bab9a78674130c8e7b07f478a1d8adf42f7f0add5dbd92d917de09d27691077"),
+                    IrisZIndex("big"),
+                    SideModels.IrisZBigEmptyPrompt,
+                    SideModels.MistralSmallFlux2,
                     SideModels.Flux2Vae,
                 },
             },

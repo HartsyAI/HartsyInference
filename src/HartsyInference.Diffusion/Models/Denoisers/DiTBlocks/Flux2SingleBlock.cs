@@ -107,8 +107,12 @@ public sealed unsafe class Flux2SingleBlock
     }
 
     /// <summary>Forward pass on the concatenated <c>[txt, img]</c> sequence. <paramref name="mod"/> has 3 elements <c>(shift, scale, gate)</c>, shape <c>[B, hidden]</c>, shared across all single blocks (computed once at the top level).</summary>
-    public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope, Tensor? attnBias = null)
+    /// <param name="segments">Per-token-segment modulation replacing <paramref name="mod"/>; needs an F32 stream.</param>
+    public Tensor Forward(IBackend backend, Tensor hidden, Tensor[] mod, FluxRope rope, Tensor? attnBias = null,
+        SegmentModulation? segments = null)
     {
+        if (segments is not null && hidden.DType != DType.F32)
+            throw new ArgumentException($"Segment modulation needs an F32 stream, got {hidden.DType}.", nameof(hidden));
         int batch = (int)hidden.Shape[0];
         int seqLen = (int)hidden.Shape[1];
 
@@ -119,7 +123,9 @@ public sealed unsafe class Flux2SingleBlock
         TensorShape headsShape = new TensorShape(batch, seqLen, _numHeads, _headDim);
 
         // ── 1. LayerNorm (no affine) + modulate x*(1+scale)+shift ──
-        Tensor modulated = DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hiddenShape, _layerNormEps);
+        Tensor modulated = segments is null
+            ? DiTUtils.NormModulate(backend, hidden, mod[0], mod[1], hiddenShape, _layerNormEps)
+            : segments.NormAffine(backend, hidden, _layerNormEps);
 
         // ── 2. Q/K/V projections ([B, S, H, D]) + gate/up MLP projections (same modulated input) ──
         Tensor q = new Tensor(headsShape, act);
@@ -161,8 +167,16 @@ public sealed unsafe class Flux2SingleBlock
         concat.Dispose();
 
         // ── 11. Gated residual ──
-        Tensor result = new Tensor(hiddenShape, act);
-        backend.GatedResidualLastDim(result, hidden, proj, mod[2]);
+        Tensor result;
+        if (segments is null)
+        {
+            result = new Tensor(hiddenShape, act);
+            backend.GatedResidualLastDim(result, hidden, proj, mod[2]);
+        }
+        else
+        {
+            result = segments.GatedResidual(backend, hidden, proj);
+        }
         proj.Dispose();
         return result;
     }

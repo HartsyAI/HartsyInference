@@ -400,6 +400,28 @@ public static class SideModels
         Sha256 = "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
     };
 
+    /// <summary>Iris-Z-small's empty-prompt conditioning (speridlabs/iris-z, FLUX non-commercial licence): the Qwen3-8B
+    /// features of an empty prompt, BF16 <c>[1, 512, 12288]</c>. It sits beside the transformer shards.</summary>
+    public static readonly ModelAsset IrisZSmallEmptyPrompt = new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = "Iris-Z-small/empty_prompt.safetensors",
+        TargetSubdir = "Stable-Diffusion/IrisZ/Iris-Z-small",
+        Role = "conditioning",
+        Sha256 = "3e39a39a9444db5b63b376470deeff230f4428945f2cc510a4ef83534ca11925"
+    };
+
+    /// <summary>Iris-Z-big's empty-prompt conditioning (speridlabs/iris-z, FLUX non-commercial licence): the
+    /// Mistral-Small-3 features of an empty prompt, BF16 <c>[1, 512, 15360]</c>. It sits beside the transformer shards.</summary>
+    public static readonly ModelAsset IrisZBigEmptyPrompt = new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = "Iris-Z-big/empty_prompt.safetensors",
+        TargetSubdir = "Stable-Diffusion/IrisZ/Iris-Z-big",
+        Role = "conditioning",
+        Sha256 = "90513ddf7f69e551200f80f7a369ffacf8fde283ca295fd1fd5bb68169e1fb24"
+    };
+
     /// <summary>FLUX.2 VAE with the small decoder (96-192-384-384) that OpenMOSS ships for MOSS-Image: its decoder tensors
     /// are byte-identical to the MOSS-Image folder's <c>vae/</c>. Path and hash match Comfy-Org's <c>MOSS-Image</c> repack.</summary>
     public static readonly ModelAsset Flux2VaeSmall = new ModelAsset
