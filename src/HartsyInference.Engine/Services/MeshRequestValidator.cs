@@ -31,7 +31,7 @@ internal static class MeshRequestValidator
         }
         if (MeshModelIds.PaintMesh.Contains(id))
         {
-            ValidatePaint(id, request);
+            ValidatePaint(id, request, matterAvailable);
             return;
         }
         if (MeshModelIds.PartMesh.Contains(id))
@@ -53,6 +53,7 @@ internal static class MeshRequestValidator
             return;
         }
         HairDeckRequestMapper.RejectForOtherModels(request, id);
+        RequireMatteForAuto(id, request, matterAvailable);
         if (id == MeshModelIds.Trellis2)
         {
             Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
@@ -100,6 +101,16 @@ internal static class MeshRequestValidator
             : message.StartsWith("Seed", StringComparison.Ordinal) ? nameof(MeshRequest.Seed)
             : message.StartsWith("TextureSize", StringComparison.Ordinal) ? nameof(MeshRequest.TextureSize)
             : null;
+    }
+
+    private static void RequireMatteForAuto(string id, MeshRequest request, bool matterAvailable)
+    {
+        if (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id) && request.Image is { } image && !MeshPreparationService.HasUsableAlpha(image) && !matterAvailable)
+        {
+            throw new NotSupportedException(
+                $"Preprocess Auto needs the foreground cut out for {id}: send an image with alpha, or install the BiRefNet matting checkpoint (Vision/BiRefNet-matting/model.safetensors).")
+                .ForField(nameof(MeshRequest.Preprocess));
+        }
     }
 
     private static Trellis2InputImage ToInput(ImageData source) =>
@@ -151,7 +162,7 @@ internal static class MeshRequestValidator
         }
     }
 
-    private static void ValidatePaint(string id, MeshRequest request)
+    private static void ValidatePaint(string id, MeshRequest request, bool matterAvailable)
     {
         HairDeckRequestMapper.RejectForOtherModels(request, id);
         if (request.SceneMesh is null || request.Image is null)
@@ -164,6 +175,7 @@ internal static class MeshRequestValidator
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
         if (request.Seed > int.MaxValue)
             throw SeedTooLarge(request, "The Paint seed");
+        RequireMatteForAuto(id, request, matterAvailable);
         if (request.Steps < 0 || request.GridResolution < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.")

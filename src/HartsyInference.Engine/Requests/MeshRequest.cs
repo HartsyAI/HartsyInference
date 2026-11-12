@@ -50,6 +50,9 @@ public sealed record MeshRequest
     /// <summary>TRELLIS.2 with <see cref="Texture"/>: baked texture edge in texels, 16 to 8192; 0 uses 2048. Other models reject a value.</summary>
     public int TextureSize { get; init; }
 
+    /// <summary>Input image preparation: <see cref="MeshPreprocess.None"/> (default) uses the image as given, <see cref="MeshPreprocess.Auto"/> mattes and frames it for the model. Models that prepare their own input ignore it.</summary>
+    public MeshPreprocess Preprocess { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 
