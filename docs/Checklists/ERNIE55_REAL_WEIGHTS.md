@@ -41,6 +41,9 @@ Expected: `Real_IndexMapsEveryKey` passes, and `Real_PrefillAndDecode_ProduceFin
 prints load, prefill and decode times. Two forwards read about 270 GiB each from the volume, so budget on the order of tens of minutes
 of I/O on a network volume (an estimate, not a measurement).
 
+For a rented pod (volume size, the pinned download, the GPU and PTX checks, and the PR record), follow
+[ERNIE55_POD_RUNBOOK.md](ERNIE55_POD_RUNBOOK.md); `scripts/ernie55_pod_run.sh` runs its steps in order.
+
 ## Open before a paid run
 
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) and the decision to download about 288 GB to a volume.

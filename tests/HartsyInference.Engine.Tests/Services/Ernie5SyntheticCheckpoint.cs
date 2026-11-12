@@ -122,8 +122,11 @@ internal static class Ernie5SyntheticCheckpoint
     };
 
     /// <summary>Writes a complete checkpoint into <paramref name="directory"/> (created if absent) with weights from <paramref name="seed"/>.
-    /// <paramref name="configOverrides"/> replaces or adds config fields on top of the storage's own.</summary>
-    internal static void Write(string directory, int seed = 7, Storage storage = Storage.F32, IReadOnlyDictionary<string, string>? configOverrides = null)
+    /// <paramref name="configOverrides"/> replaces or adds config fields on top of the storage's own. With <paramref name="shards"/> above one
+    /// the weights go into <c>model-NNNNN-of-NNNNN.safetensors</c> shards with a <c>model.safetensors.index.json</c>, the layout the real
+    /// checkpoint ships and the real-weight harness reads.</summary>
+    internal static void Write(string directory, int seed = 7, Storage storage = Storage.F32, IReadOnlyDictionary<string, string>? configOverrides = null,
+        int shards = 1)
     {
         Directory.CreateDirectory(directory);
         Dictionary<string, string> merged = new(StringComparer.Ordinal);
@@ -135,7 +138,7 @@ internal static class Ernie5SyntheticCheckpoint
         File.WriteAllText(Path.Combine(directory, "tokenizer_config.json"), "{\"bos_token\": \"<s>\", \"eos_token\": \"</s>\"}");
         File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
         Ernie5Config config = Ernie5Config.Parse(configJson);
-        WriteSafetensors(Path.Combine(directory, "model.safetensors"), config, seed, storage);
+        WriteWeights(directory, config, seed, storage, shards);
     }
 
     /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials.</summary>
@@ -177,7 +180,37 @@ internal static class Ernie5SyntheticCheckpoint
 
     private sealed record Entry(string Name, string DType, int[] Shape, byte[] Data);
 
-    private static void WriteSafetensors(string path, Ernie5Config config, int seed, Storage storage)
+    private static void WriteWeights(string directory, Ernie5Config config, int seed, Storage storage, int shards)
+    {
+        if (shards < 1) throw new ArgumentOutOfRangeException(nameof(shards), shards, "A checkpoint has at least one shard.");
+        List<Entry> entries = WeightEntries(config, seed, storage);
+        if (shards == 1)
+        {
+            WriteSafetensorsFile(Path.Combine(directory, "model.safetensors"), entries);
+            return;
+        }
+        if (shards > entries.Count) throw new ArgumentOutOfRangeException(nameof(shards), shards, "More shards than tensors.");
+
+        Dictionary<string, string> weightMap = new(StringComparer.Ordinal);
+        long totalSize = 0;
+        for (int s = 0; s < shards; s++)
+        {
+            // Contiguous, sorted slices: every shard holds at least one tensor.
+            int from = (int)((long)s * entries.Count / shards), to = (int)((long)(s + 1) * entries.Count / shards);
+            string file = $"model-{s + 1:D5}-of-{shards:D5}.safetensors";
+            List<Entry> part = entries.GetRange(from, to - from);
+            WriteSafetensorsFile(Path.Combine(directory, file), part);
+            foreach (Entry e in part)
+            {
+                weightMap[e.Name] = file;
+                totalSize += e.Data.LongLength;
+            }
+        }
+        string index = System.Text.Json.JsonSerializer.Serialize(new { metadata = new { total_size = totalSize }, weight_map = weightMap });
+        File.WriteAllText(Path.Combine(directory, "model.safetensors.index.json"), index);
+    }
+
+    private static List<Entry> WeightEntries(Ernie5Config config, int seed, Storage storage)
     {
         Random rng = new(seed);
         List<Entry> entries = [];
@@ -213,7 +246,11 @@ internal static class Ernie5SyntheticCheckpoint
             }
         }
         entries.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        return entries;
+    }
 
+    private static void WriteSafetensorsFile(string path, List<Entry> entries)
+    {
         StringBuilder header = new("{");
         long offset = 0;
         for (int i = 0; i < entries.Count; i++)
