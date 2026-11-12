@@ -88,7 +88,7 @@ public sealed class MeshService : IMeshService, IDisposable
 
         if (IsHairDeck(spec))
         {
-            return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
+            return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, progress, cancel), Format = "glb" }, cancel);
         }
         if (id == MeshModelIds.Trellis2)
             return GenerateTrellis2Async(spec, request, progress, cancel);
@@ -117,7 +117,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 ThreeDResult result = loaded.Generate(job, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 });
                 if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
@@ -148,7 +148,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 CoLa3DResult result = pipeline.Generate(scene, request.GridResolution, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, prompt);
                 if (result.Objects.Count == 0)
                     throw new InvalidOperationException("The scene decomposed into no object geometry (try a finer grid).");
@@ -171,7 +171,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 UniRigResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
                 return new MeshResult { Data = result.Glb, Format = "glb" };
             },
@@ -221,7 +221,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 P3SamResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, onProgress: p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel: cancel);
                 MeshPart[] parts = [.. result.PartIds.Select((partId, i) => new MeshPart(partId, result.Boxes[i], result.FaceCounts[i]))];
                 return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
@@ -299,7 +299,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
                 return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb" };
             },
@@ -427,7 +427,7 @@ public sealed class MeshService : IMeshService, IDisposable
                     Action<GenerationProgress> report = p =>
                     {
                         cancel.ThrowIfCancellationRequested();
-                        progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                        progress?.Report(MeshProgress.Map(MeshModelIds.Trellis2, options.Texture, options.Grid, p));
                     };
                     if (options.Texture)
                     {
@@ -464,7 +464,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 void Report(GenerationProgress p)
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Map(MeshModelIds.Pixal3D, options.Texture, options.Grid, p));
                 }
 
                 return RunGated(
@@ -510,7 +510,7 @@ public sealed class MeshService : IMeshService, IDisposable
                         (stage, step) =>
                         {
                             cancel.ThrowIfCancellationRequested();
-                            progress?.Report(new StepPreview { Step = stage == "structure" ? step : job.StructureSteps + step, TotalSteps = total });
+                            progress?.Report(MeshProgress.Plain(stage == "structure" ? step : job.StructureSteps + step, total, stage == "structure" ? "Structure flow" : "SLAT flow", step, stage == "structure" ? job.StructureSteps : job.SlatSteps, stage == "structure" ? 1 : 2, 2));
                         });
                     if (result.Splats is not { Count: > 0 } splats)
                         throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
@@ -605,7 +605,7 @@ public sealed class MeshService : IMeshService, IDisposable
         IdOf(spec) == MeshModelIds.HairDeck;
 
     /// <summary>One HairDeck request: the preprocessing of the image, then the image model; the GLB carries the chains when they were made.</summary>
-    private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, CancellationToken cancel)
+    private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         HairDeckOptions options = HairDeckRequestMapper.ToOptions(request);
         HairDeckRuntime runtime = GetOrLoadHairDeck(spec);
@@ -618,7 +618,7 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 throw new ModelUnloadedException("The HairDeck model was unloaded while this request was queued; retry the request.");
             }
-            return RunHairDeck(runtime, options, request, cancel);
+            return RunHairDeck(runtime, options, request, progress, cancel);
         }
         finally
         {
@@ -626,12 +626,16 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
-    private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, CancellationToken cancel)
+    private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         HairDeckSourceImage source = HairDeckSourceImage.Create(request.Image!.Rgb, request.Image.Alpha, request.Image.Width, request.Image.Height);
         // A request cancelled while it queued for the gate must not start SAM 3 and BiRefNet.
         cancel.ThrowIfCancellationRequested();
-        HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
+        int chainSteps = options.Chains ? HairDeckCore.ChainSteps : 0;
+        int total = 2 + options.Steps + chainSteps;
+        int stages = options.Chains ? 4 : 3;
+        HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source, cancel, name =>
+            progress?.Report(MeshProgress.Plain(name == HairDeckPreprocessor.SegmentStage ? 0 : 1, total, name, 0, 1, name == HairDeckPreprocessor.SegmentStage ? 1 : 2, stages)));
         foreach (string note in prep.Notes)
         {
             // input_alpha only records that the input's alpha was applied as a mask; it does not degrade the result.
@@ -646,7 +650,9 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         cancel.ThrowIfCancellationRequested();
-        HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel);
+        HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel, (stage, done, count) =>
+            progress?.Report(MeshProgress.Plain(
+                2 + (stage == HairDeckCore.CardStage ? 0 : options.Steps) + done, total, stage, done, count, stage == HairDeckCore.CardStage ? 3 : 4, stages)));
         if (!result.HasCards)
         {
             throw new InvalidOperationException("No hair cards were generated for this image. Try another seed or another image.");

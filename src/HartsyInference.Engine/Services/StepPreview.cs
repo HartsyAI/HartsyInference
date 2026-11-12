@@ -23,4 +23,16 @@ public readonly record struct StepPreview
 
     /// <summary>Preview height in pixels.</summary>
     public int PreviewHeight { get; init; }
+
+    /// <summary>The stage of a multi-stage generation (a 3D model's structure flow, shape flow, decode, bake) this tick belongs to; null when the model does not name its stages. <see cref="Step"/> and <see cref="TotalSteps"/> keep their meaning.</summary>
+    public string? Stage { get; init; }
+
+    /// <summary>The 1-based position of <see cref="Stage"/> among the stages of this generation; 0 when unknown.</summary>
+    public int StageIndex { get; init; }
+
+    /// <summary>How many stages this generation has; 0 when unknown.</summary>
+    public int StageCount { get; init; }
+
+    /// <summary>Overall progress in <c>[0, 1]</c> that does not move backwards between stages, weighted by how long each stage usually takes; null when the model does not report it (use <see cref="Step"/> over <see cref="TotalSteps"/>).</summary>
+    public float? OverallFraction { get; init; }
 }

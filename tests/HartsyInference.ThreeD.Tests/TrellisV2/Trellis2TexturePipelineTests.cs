@@ -167,6 +167,10 @@ public sealed class Trellis2TexturePipelineTests
         // 512 type: 1 + 3 + 2 + 1 (shape decode) + 2 (texture steps) + 1 (texture decode) + 1 (bake) = 11.
         Assert.Equal(Enumerable.Range(1, 11), reports.Select(p => p.Step));
         Assert.All(reports, p => Assert.Equal(11, p.TotalSteps));
+        Assert.Equal(
+            [MeshStageNames.ImageConditioning, MeshStageNames.StructureFlow, MeshStageNames.ShapeFlow512, MeshStageNames.ShapeDecode,
+                MeshStageNames.TextureFlow, MeshStageNames.TextureDecode, MeshStageNames.TextureBake],
+            reports.Select(p => p.Stage!).Distinct());
     }
 
     [Theory]

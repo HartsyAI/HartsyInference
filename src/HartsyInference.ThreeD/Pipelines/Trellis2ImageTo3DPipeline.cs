@@ -279,7 +279,21 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             + (textured ? textureParams!.Steps + 2 : 1);
         int done = 0;
         long started = MonotonicClock.NowNs();
-        void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6));
+        string? stage = null;
+        int stageStep = 0, stageSteps = 0;
+        void Begin(string name, int steps)
+        {
+            stage = name;
+            stageStep = 0;
+            stageSteps = steps;
+        }
+
+        void Report()
+        {
+            stageStep++;
+            onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6) { Stage = stage, StageStep = stageStep, StageSteps = stageSteps });
+        }
+
         void Tick(int step)
         {
             done++;
@@ -292,18 +306,22 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ShapeVaeSubdivisions? guides = textured ? new ShapeVaeSubdivisions() : null;
         try
         {
+            Begin(MeshStageNames.ImageConditioning, 1);
             cond = _conditioner.Encode(Backend, prepared, CoarseConditioning);
             negCond = Zeros(cond.Shape);
             done++;
             Report();
 
+            Begin(MeshStageNames.StructureFlow, structureParams.Steps);
             int[] voxels = _structure.Sample(Backend, cond, negCond, seed, structureParams, StructureGrid, Tick);
+            Begin(MeshStageNames.ShapeFlow512, shapeParams.Steps);
             coarse = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res512, voxels, StructureGrid, cond, negCond, unchecked(seed + 1), shapeParams, Tick);
 
             SparseTensor latent;
             int resolution;
             if (cascade)
             {
+                Begin(MeshStageNames.Upsample, 1);
                 int[] upsampled = _upsampler.Upsample(Backend, coarse, UpsampleLevels);
                 coarse.Feats.Dispose();
                 coarse = null;
@@ -313,6 +331,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                     upsampled, CoarseShapeResolution, (int)type, _maxTokens);
                 fineCond = _conditioner.Encode(Backend, prepared, FineConditioning);
                 fineNeg = Zeros(fineCond.Shape);
+                Begin(MeshStageNames.ShapeFlow1024, shapeParams.Steps);
                 fine = _shape.Sample(
                     Backend, Trellis2ShapeFlowKind.Res1024, fineCoords, fineResolution / Trellis2Cascade.LatentStride,
                     fineCond, fineNeg, unchecked(seed + 2), shapeParams, Tick);
@@ -325,11 +344,13 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 resolution = (int)type;
             }
 
+            Begin(MeshStageNames.ShapeDecode, 1);
             DualGridField field = guides is null
                 ? _decoder.Decode(Backend, latent)
                 : ((ISparseShapeSubdivisionDecoder)_decoder).Decode(Backend, latent, guides);
             done++;
             Report();
+            Begin(MeshStageNames.MeshExtraction, 1);
             SceneGrid grid = new() { Resolution = resolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / resolution };
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
@@ -349,11 +370,14 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             // The texture flow stage sweeps the device before it starts; the guides the texture decoder reads later must survive that.
             for (int level = 0; level < guides!.Count; level++)
                 Backend.OffloadActivation(guides.Level(level));
+            Begin(MeshStageNames.TextureFlow, textureParams!.Steps);
             textureLatent = _textureFlow!.Sample(
                 Backend, textureKind, latent, texCond, texNeg, unchecked(seed + 3), textureParams!, Tick);
+            Begin(MeshStageNames.TextureDecode, 1);
             textureVoxels = _textureDecoder!.Decode(Backend, textureLatent, guides!);
             done++;
             Report();
+            Begin(MeshStageNames.TextureBake, 1);
             SparseAttributeVolume volume = BuildVolume(textureVoxels, resolution);
             PbrPostProcessOptions post = new()
             {

@@ -90,10 +90,11 @@ public sealed class HairDeckModel : IDisposable
         }
     }
 
+    /// <param name="progress">Called with the stage name, the steps done and the steps of the stage after each sampler step.</param>
     /// <summary>Generates one hairstyle for <paramref name="input"/>: the DINOv3 tokens of the crop, then the image model, the
     /// colour model when <see cref="HairDeckOptions.Colors"/> is set and the chain model when <see cref="HairDeckOptions.Chains"/> is set.</summary>
     /// <exception cref="InvalidOperationException">A requested component is not loaded; no partial result is returned.</exception>
-    public HairDeckResult Generate(HairDeckInput input, HairDeckOptions options, CancellationToken cancel = default)
+    public HairDeckResult Generate(HairDeckInput input, HairDeckOptions options, CancellationToken cancel = default, Action<string, int, int>? progress = null)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(input);
@@ -109,7 +110,7 @@ public sealed class HairDeckModel : IDisposable
         using Tensor? colorImage = options.Colors ? ColorImage(input.Rgb448) : null;
         using Tensor? colorMatte = options.Colors ? ColorMatte(input.Matte448) : null;
         return _core.Generate(_backend, dino, colorImage, colorMatte, (int)options.Seed,
-            options.Steps, (float)options.Cfg, options.Chains, cancel: cancel);
+            options.Steps, (float)options.Cfg, options.Chains, cancel: cancel, progress: progress);
     }
 
     /// <summary>DINOv3 tokens <c>[789, 1024]</c> of the crop. The reference feeds uint8 and the encoder applies the ImageNet
