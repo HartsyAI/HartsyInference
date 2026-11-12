@@ -90,6 +90,32 @@ public sealed class MeshResultFinisherTests
     }
 
     [Fact]
+    public void ThePlyCommentIsReplacedNotRepeatedAndCanBeReadBack()
+    {
+        byte[] head = Encoding.ASCII.GetBytes("ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n");
+        byte[] source = [.. head, .. new byte[12]];
+
+        byte[] once = MeshMetadata.SetPly(source, new System.Text.Json.Nodes.JsonObject { ["a"] = 1 });
+        byte[] twice = MeshMetadata.SetPly(once, new System.Text.Json.Nodes.JsonObject { ["b"] = 2 });
+
+        Assert.Equal(1, Encoding.UTF8.GetString(twice).Split('\n').Count(l => l.StartsWith(MeshMetadata.PlyPrefix)));
+        Assert.Equal(2, (int?)MeshMetadata.ReadPly(twice)!["b"]);
+        Assert.Null(MeshMetadata.ReadPly(source));
+        Assert.Equal(1, MeshResultFinisher.SplatInfo(twice).SplatCount);
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MeshMetadata.SetPly([1, 2, 3], new System.Text.Json.Nodes.JsonObject()));
+    }
+
+    [Fact]
+    public void AFormatThatIsNeitherGlbNorPlyIsReturnedUntouchedWithItsSettings()
+    {
+        MeshResult result = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest(), new MeshResult { Data = [1, 2, 3], Format = "obj" }, S, CancellationToken.None);
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, result.Data);
+        Assert.Empty(result.Warnings);
+        Assert.Same(S, result.Settings);
+    }
+
+    [Fact]
     public void MetadataKeepsTheExtrasAFileAlreadyHas()
     {
         byte[] glb = GlbWriter.Write(Sphere(4, 4));
@@ -133,7 +159,7 @@ public sealed class MeshResultFinisherTests
     }
 
     [Fact]
-    public void ASplatPlyReportsItsCountAndBoundsAndIsNotChanged()
+    public void ASplatPlyReportsItsCountAndBoundsAndOnlyGainsTheSettingsComment()
     {
         StringBuilder header = new();
         header.Append("ply\nformat binary_little_endian 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nproperty float opacity\nend_header\n");

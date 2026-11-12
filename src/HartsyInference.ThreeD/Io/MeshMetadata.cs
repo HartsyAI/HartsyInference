@@ -34,32 +34,52 @@ public static class MeshMetadata
         return root["asset"]?["extras"]?[Key] as JsonObject;
     }
 
-    /// <summary>Returns <paramref name="ply"/> with <paramref name="description"/> as one comment line after the <c>format</c> line of its header.</summary>
+    /// <summary>Returns <paramref name="ply"/> with <paramref name="description"/> as the one <see cref="PlyPrefix"/> comment line of its header, after the <c>format</c> line; a line an earlier call wrote is replaced.</summary>
     /// <exception cref="HartsyInferenceException">The bytes have no PLY header.</exception>
     public static byte[] SetPly(byte[] ply, JsonObject description)
     {
         ArgumentNullException.ThrowIfNull(description);
-        string marker = "\nformat ";
-        int format = IndexOf(ply, Encoding.ASCII.GetBytes(marker));
+        (int start, int end) = HeaderBounds(ply);
+        List<string> lines = [.. Encoding.UTF8.GetString(ply, start, end - start).Split('\n')];
+        lines.RemoveAll(line => line.StartsWith(PlyPrefix, StringComparison.Ordinal));
+        int format = lines.FindIndex(line => line.StartsWith("format ", StringComparison.Ordinal));
         if (format < 0)
-            throw new HartsyInferenceException("The bytes have no PLY header.");
-        int lineEnd = Array.IndexOf(ply, (byte)'\n', format + 1);
-        byte[] line = Encoding.UTF8.GetBytes(PlyPrefix + description.ToJsonString().Replace('\n', ' ') + "\n");
-        byte[] result = new byte[ply.Length + line.Length];
-        Buffer.BlockCopy(ply, 0, result, 0, lineEnd + 1);
-        Buffer.BlockCopy(line, 0, result, lineEnd + 1, line.Length);
-        Buffer.BlockCopy(ply, lineEnd + 1, result, lineEnd + 1 + line.Length, ply.Length - lineEnd - 1);
+            throw new HartsyInferenceException("The PLY header has no format line.");
+        lines.Insert(format + 1, PlyPrefix + description.ToJsonString().Replace('\n', ' '));
+        byte[] header = Encoding.UTF8.GetBytes(string.Join('\n', lines));
+        byte[] result = new byte[header.Length + ply.Length - end];
+        Buffer.BlockCopy(header, 0, result, 0, header.Length);
+        Buffer.BlockCopy(ply, end, result, header.Length, ply.Length - end);
         return result;
     }
 
-    private static int IndexOf(byte[] data, byte[] pattern)
+    /// <summary>The description stored by <see cref="SetPly"/>, or null when the header has none.</summary>
+    public static JsonObject? ReadPly(byte[] ply)
     {
-        int limit = Math.Min(data.Length, 1 << 16) - pattern.Length;
+        (int start, int end) = HeaderBounds(ply);
+        foreach (string line in Encoding.UTF8.GetString(ply, start, end - start).Split('\n'))
+        {
+            if (line.StartsWith(PlyPrefix, StringComparison.Ordinal))
+                return JsonNode.Parse(line[PlyPrefix.Length..]) as JsonObject;
+        }
+        return null;
+    }
+
+    /// <summary>The header's text span: from the first byte to just before the newline that ends the <c>end_header</c> line, so a join of its lines needs one newline to close it.</summary>
+    private static (int Start, int End) HeaderBounds(byte[] ply)
+    {
+        byte[] marker = Encoding.ASCII.GetBytes("end_header");
+        int limit = Math.Min(ply.Length, 1 << 16) - marker.Length;
         for (int i = 0; i <= limit; i++)
         {
-            if (data.AsSpan(i, pattern.Length).SequenceEqual(pattern))
-                return i;
+            if (data(ply, i, marker))
+            {
+                int end = i + marker.Length;
+                return end < ply.Length && ply[end] == (byte)'\n' ? (0, end) : throw new HartsyInferenceException("The PLY header has no newline after end_header.");
+            }
         }
-        return -1;
+        throw new HartsyInferenceException("The bytes have no PLY header.");
+
+        static bool data(byte[] bytes, int at, byte[] pattern) => bytes.AsSpan(at, pattern.Length).SequenceEqual(pattern);
     }
 }

@@ -24,7 +24,9 @@ internal static class MeshResultFinisher
     public static MeshResult Finish(string id, MeshRequest request, MeshResult raw, MeshSettingsUsed settings, CancellationToken cancel)
     {
         List<string> warnings = [.. raw.Warnings];
-        if (raw.Format != "glb")
+        if (raw.Format is not ("glb" or "ply"))
+            return raw with { Settings = settings };
+        if (raw.Format == "ply")
         {
             byte[] ply = Step("The settings were not embedded", warnings, () => MeshMetadata.SetPly(raw.Data, Describe(settings, MeshFrame.Native))) ?? raw.Data;
             return raw with { Data = ply, Info = SplatInfo(ply), Settings = settings, Warnings = warnings };
