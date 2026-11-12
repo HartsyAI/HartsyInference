@@ -198,8 +198,10 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         if (globalSelf)
         {
             using Tensor pooledIn = n1.Reshape(pooled);
-            Tensor pooledOut = Attention(backend, pooledIn, pooledIn, rows, rows, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!);
-            a1 = pooledOut.Reshape(flat); // a view: it keeps pooledOut alive, so there is no extra copy
+            using Tensor pooledOut = Attention(backend, pooledIn, pooledIn, rows, rows, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!);
+            using Tensor pooledView = pooledOut.Reshape(flat);
+            a1 = new(flat, DType.F32);
+            backend.CopyInto(a1, pooledView); // a view does not own its parent, so the parent is disposed here and the result is a copy
         }
         else
         {
