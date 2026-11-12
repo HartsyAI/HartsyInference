@@ -56,7 +56,7 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
         for (int i = 0; i < unit.Length; i++)
             unit[i] = (float)points[i];
         watch.Restart();
-        P3SamHeads.Prepared prepared = heads.Prepare(backend, feature, unit, count);
+        using P3SamHeads.Prepared prepared = heads.Prepare(backend, feature, unit, count);
         output.WriteLine($"head setup: {watch.Elapsed.TotalSeconds:F1} s");
         watch.Restart();
         P3SamHeads.Result result = heads.Segment(backend, prepared, unit.AsSpan(0, 3));
@@ -136,7 +136,7 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
 
         // The heads take the features of the fixture, not the C# ones, so the two halves are checked on their own.
         using P3SamHeads heads = new(state);
-        P3SamHeads.Prepared prepared = heads.Prepare(backend, ToArray(fixture["features"]), pointsFloat, count);
+        using P3SamHeads.Prepared prepared = heads.Prepare(backend, ToArray(fixture["features"]), pointsFloat, count);
         for (int k = 0; k < 2; k++)
         {
             float[] prompt = ToArray(fixture[$"prompt_{k}"]);

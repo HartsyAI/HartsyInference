@@ -99,7 +99,8 @@ public sealed class P3SamHeadsTests
         using CpuBackend backend = new();
         using P3SamHeads heads = new(w);
 
-        P3SamHeads.Result result = heads.Segment(backend, heads.Prepare(backend, features, points, Points), prompt);
+        using P3SamHeads.Prepared prepared = heads.Prepare(backend, features, points, Points);
+        P3SamHeads.Result result = heads.Segment(backend, prepared, prompt);
 
         // Upstream: feats_seg = [feature, point, prompt]; stage 1 -> 3 logits; stage 2 over [feats_seg, logits] with the global max.
         double[][] seg = new double[Points][];

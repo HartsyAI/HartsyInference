@@ -56,7 +56,7 @@ public sealed class P3SamAutoMask(IBackend backend, P3SamFeatures features, P3Sa
 
         float[] unitFloat = [.. unit.Select(v => (float)v)];
         int[] prompts = SurfaceSampler.FarthestPointIndices(unitFloat, options.PromptCount);
-        P3SamHeads.Prepared prepared = heads.Prepare(backend, feature, unitFloat, options.PointCount);
+        using P3SamHeads.Prepared prepared = heads.Prepare(backend, feature, unitFloat, options.PointCount);
         Stage("prompts and head setup");
 
         bool[][] masks = new bool[prompts.Length][];
