@@ -17,7 +17,7 @@ public sealed class MeshAssetService : IMeshAssetService
         [MeshModelIds.Pixal3D] =
         [
             ("NAF upsampler (manual)", "3D/pixal3d/naf_release.pth",
-                "Download the 'model' asset of the valeoai/NAF GitHub release (naf_release.pth, 2,664,431 bytes) and place it in the model folder (3D/pixal3d)."),
+                "Download the 'model' asset of the valeoai/NAF GitHub release (naf_release.pth, 2,664,431 bytes) and place it beside the model's other files: in 3D/pixal3d for the catalog install, or in the folder you pass as the model path."),
         ],
     };
 
