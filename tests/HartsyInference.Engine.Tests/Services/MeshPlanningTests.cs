@@ -190,7 +190,7 @@ public sealed class MeshPlanningTests
     [Fact]
     public void TheModelsThatWrapALargeSeedSayTheyDo()
     {
-        foreach (string id in new[] { "triposr", "hunyuan3d", "trellis", "unirig" })
+        foreach (string id in new[] { "hunyuan3d", "trellis", "unirig" })
         {
             MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
             Assert.Null(seed.Max);
@@ -218,6 +218,34 @@ public sealed class MeshPlanningTests
         MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { TextureSize = 512 });
 
         Assert.Equal(field, Assert.Single(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Theory]
+    [InlineData("trellis2", nameof(MeshRequest.GridResolution))]
+    [InlineData("pixal3d", nameof(MeshRequest.GridResolution))]
+    public async Task PlanNamesTheGridFieldOfAPipelineError(string id, string field)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { GridResolution = 768 });
+
+        Assert.Equal(field, Assert.Single(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Fact]
+    public async Task PlanNamesTheFieldsOfOtherPipelineErrors()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan fov = await engine.MeshPlanning.PlanAsync(Spec("pixal3d"), Valid("pixal3d") with { FieldOfViewRadians = 2.0 });
+        MeshPlan steps = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Steps = 500 });
+        MeshPlan rigged = await engine.MeshPlanning.PlanAsync(Spec("hairdeck"), Valid("hairdeck") with { Rigged = true, Chains = false });
+        MeshPlan seed = await engine.MeshPlanning.PlanAsync(Spec("hairdeck"), Valid("hairdeck") with { Seed = (long)int.MaxValue + 1 });
+
+        Assert.Equal(nameof(MeshRequest.FieldOfViewRadians), fov.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Steps), steps.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Rigged), rigged.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Seed), seed.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
     }
 
     [Fact]
@@ -258,7 +286,9 @@ public sealed class MeshPlanningTests
     {
         MeshRequest request = Valid("trellis2") with { Image = Image() with { Alpha = null } };
 
-        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MeshRequestValidator.Validate("trellis2", request, matterAvailable: false));
+        HartsyInference.Core.Exceptions.HartsyInferenceException error =
+            Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => MeshRequestValidator.Validate("trellis2", request, matterAvailable: false));
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
         MeshRequestValidator.Validate("trellis2", request, matterAvailable: true);
     }
 
