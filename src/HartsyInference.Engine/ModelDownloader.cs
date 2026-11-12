@@ -55,6 +55,15 @@ public static class ModelDownloader
     public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry) =>
         entry.Assets.Where(a => !File.Exists(TargetPath(a))).ToList();
 
+    /// <summary>
+    /// The subset of <paramref name="entry"/>'s assets present neither at their catalog path nor, when <paramref name="checkpointFolder"/> is an existing folder, in that folder under
+    /// the asset's file name: a folder named with <c>--model-path</c> that already holds the model's files is the install, wherever the catalog would have put it.
+    /// </summary>
+    public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry, string? checkpointFolder) =>
+        entry.Assets
+            .Where(a => !File.Exists(TargetPath(a)) && !(checkpointFolder is not null && Directory.Exists(checkpointFolder) && File.Exists(Path.Combine(checkpointFolder, a.FileName))))
+            .ToList();
+
     /// <summary>The local path of the model's primary file (its transformer/checkpoint), or null when the entry has no
     /// assets. Used as the resolved <c>LocalPath</c> once the set is present.</summary>
     public static string? PrimaryLocalPath(CatalogEntry entry) =>
