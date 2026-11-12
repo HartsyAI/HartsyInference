@@ -196,6 +196,11 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
         return dot > 7 && int.TryParse(key.AsSpan(7, dot - 7), out block);
     }
 
+    /// <summary>The stacked video output head as stored: <c>[heads * rows, hidden]</c> weight and <c>[heads * rows]</c>
+    /// bias. Combine it per step with <see cref="StackedOutputHeadWeights"/> before passing it to <see cref="ForwardImage"/>.</summary>
+    public (Tensor Weight, Tensor Bias) StackedVideoHead() =>
+        (Require("final_layer.video_out.weight"), Require("final_layer.video_out.bias"));
+
     /// <summary>The checkpoint's own rotary base frequencies; synthesising these would shift every position.</summary>
     public float[] RopeInvFreq()
     {

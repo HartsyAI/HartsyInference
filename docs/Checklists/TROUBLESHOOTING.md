@@ -423,6 +423,32 @@ no bug, any more than one bad seed was proof there was one.
 
 ## GPU residency / throughput (CUDA)
 
+- **A flow or DiT that takes 5 s runs 6 to 35 times slower, or never finishes a step, with no error and the GPU at 99% (Windows).** Not an
+  attention route, a pool-accounting or an OOM-retry problem (`CudaMemory.OomRetries` stays 0). Measured on an RTX 3060 12 GB (driver 610.88,
+  Windows 11 build 26200): one process that allocates in 64 MB steps sees `cuMemGetInfo` free fall linearly (3,141 MB free at 8,064 MB allocated)
+  and then, between 8,064 and 8,192 MB, drop to 0 while 4 GB is still physically free. The DXGI video-memory budget of the process
+  (`IDXGIAdapter3::QueryVideoMemoryInfo`) collapses from 11,347 MB to about 5,430 MB, and allocations go on succeeding (12.9 GB "used" on a 12 GB
+  card), out of system memory. Whatever sits past about 8 GiB is paged, so a forward that needs it crawls; the collapse shows a moment after the
+  allocation that causes it. A clean 1.3B TRELLIS.2 flow peaks at 8.2 GB and takes 5.5 s; with the previous stage's pool, cached weights and the
+  F32-widened flow (4.9 GB) the process crossed it: 650 to 775 s per fine shape step, 360 to 460 s per texture step. A per-block `Sync`, a trimmed pool
+  or a device sweep between stages (`Trellis2DeviceMemory`) only worked by keeping the peak under the limit. Confirm it: `cuMemGetInfo` free reading 0
+  while the card is not full, or DXGI `CurrentUsage` above `Budget`; the log now says so once (`[Cuda] The device reports no free memory after a
+  large allocation, which succeeded ...`). What the backend does about it (Windows only; `vram.overcommitReliefMb = 0` turns all of it off): (1) an explicit
+  `PreloadWeights` stops when the device reports under 64 MB free, releases the last weights it uploaded from the host (never an activation promoted
+  in place, whose device buffer may be the only copy) until `vram.overcommitReliefMb` (3072) is given back and free memory returns, and leaves the
+  rest on the host, where they upload per op; `vram.preloadHeadroomMb` (2048) also keeps a preload from taking the last of the free memory, and a
+  warning counts the weights it left on the host; (2) the first time a device reports itself full, the used-memory level it was at becomes that
+  device's limit, which auto-promotion, cached weight casts and later preloads stay under (forgotten again if real use passes it with gigabytes free);
+  (3) a large allocation that finds the device full trims the allocator pool (reserved-but-free memory, never a live buffer; at most once a second,
+  and not while a step-graph capture is open, since the trim synchronizes the stream).
+  Real generation, TRELLIS.2 `--grid 1024 --texture` with the stage sweeps removed, 3 steps per stage, bust, seed 1, 15-minute budget: before, the
+  first fine shape step ran 720 s and 628 s (two runs, neither finished); after, 64 s, then 17.9 s, 17.8 s, 16.2 s per step, 13.5 s per texture step,
+  and 16 of 17 progress steps in 277 s. With the sweeps in place (the shipped configuration) the output is byte-identical (vertex and index
+  SHA-256) and the time unchanged, and no warning fires. Guard: `PreloadUnderPressureGpuTests` (benchmark lane; 11.2 GB of weights asked for on a 12 GB
+  card: 0 MB free after the preload before the fix, 6,149 MB after, and a 12288x12288 matmul in 0.5 s). Not solved: a process whose working set simply
+  needs more than about 8 GiB at once, which streams or pages whatever it does; keep stage peaks under it. Preloads by group
+  (`PreloadWeightGroups`, the MoE LLMs) do not check the device and are not covered by the preload give-back.
+
 - **A model is GPU-resident only if EVERY hot-path op is a backend op.** One `.DataPointer`/`AsSpan` read
   on a GPU tensor fires `cuStreamSynchronize`+D2H copy (lazy-sync). Ideogram 4's CPU "glue" (modulation
   split, gating, QK-norm, RoPE, slice/reshape, CFG/Euler) caused ~370 syncs/forward → 57 min/gen. Fix: a
