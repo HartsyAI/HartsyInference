@@ -29,5 +29,7 @@ x, as the C# engine does, so the axis convention is not independently checked.
    `python -I run_stage_parity.py <TRELLIS.2 clone> <models/3D/trellis2> <shape decoder path without extension> <capture dir>` and
    `python -I run_forward_parity.py <same four arguments> [--flow-only] [--bf16]`.
 
+The capture reads each stage's tensors back to the host to write them, which offloads the device copies of the conditioning and the shape latent the next stage still uses, so a stage time can include one re-upload (milliseconds at 2,634 tokens). `run_stage_parity.py` takes the grid resolution from `mesh.tns`; for the 1024 and 1536 cascades check it against the decoder's grid before trusting the comparison.
+
 Needs `torch`, `numpy`, `safetensors`. The shape and texture decodes of a 700k-voxel field take about 1 to 2 minutes each on 8 threads.
 Results and the numbers measured on 2026-11-12 are in `docs/Checklists/MODEL_STATUS_3D.md` (TRELLIS.2, stage parity).
