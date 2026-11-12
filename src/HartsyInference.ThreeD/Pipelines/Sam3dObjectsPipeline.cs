@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -142,7 +143,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             log($"structure condition {cond.Shape}");
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
-            SamMotFlow flow = new(SamMotFlowConfig.Released, flowWeights);
+            List<Tensor> narrowed = [];
+            Dictionary<string, Tensor> narrowedWeights = SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed);
+            SamMotFlow flow = new(SamMotFlowConfig.Released, narrowedWeights);
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = [];
             try
@@ -163,6 +166,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             }
 
             Backend.FreeWeights(flowWeights.Values);
+            Backend.FreeWeights(narrowed);
+            foreach (Tensor tensor in narrowed)
+                tensor.Dispose();
             Sweep([.. latents.Values]);
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
@@ -261,8 +267,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             log($"SLAT condition {cond.Shape}");
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
+            List<Tensor> narrowed = [];
             SlatFlowModel flow = new();
-            flow.LoadWeights(flowWeights);
+            flow.LoadWeights(SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed));
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = new()
             {
@@ -289,6 +296,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             }
 
             Backend.FreeWeights(flow.EnumerateWeights());
+            foreach (Tensor tensor in narrowed)
+                tensor.Dispose();
             latent = sampled["slat"];
             Sweep(latent);
             log($"SLAT flow sampled ({steps} steps)");
@@ -324,6 +333,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     /// past about 8 GiB of device memory runs 10 to 100 times slower, and the structure stage's pool alone is 7 GB: the first full run took 28 s for the first ten SLAT steps and 350 s for
     /// the other fifteen once the pool and the SLAT activations together passed it. The same sweep the TRELLIS.2 stages use.
     /// </summary>
+    /// <summary>What the flows' transformer-block linear weights are held as: F16 when <c>numerics.flowF16Weights</c> is set (half the memory, a 16-bit GEMM with F32 accumulation), otherwise the checkpoint's F32.</summary>
+    private static DType FlowLinearDType => EngineKnobs.FlowF16Weights.Value ? DType.F16 : DType.F32;
+
     private void Sweep(params Tensor[] live) => Trellis2DeviceMemory.ReleaseBetweenStages(Backend, live);
 
     private Tensor BuildCondition(SamStage stage, Dictionary<string, Tensor> embedder, SamConditionInputs inputs)

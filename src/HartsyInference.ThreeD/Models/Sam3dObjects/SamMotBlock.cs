@@ -35,7 +35,7 @@ internal sealed class SamMotBlock
         _streams = config.StreamNames;
         int c = config.ModelChannels, heads = config.Heads, headDim = config.HeadDim, hidden = config.MlpHidden, cond = config.CondChannels;
         _attention = new AttentionLayer(new AttentionLayerConfig { Heads = heads, KvHeads = heads, HeadDim = headDim, ComputeDType = DType.F32, AllowF16 = false });
-        _modulationWeight = SamWeights.Require(weights, prefix + "adaLN_modulation.1.weight", 6 * c, c);
+        _modulationWeight = SamWeights.RequireLinear(weights, prefix + "adaLN_modulation.1.weight", 6 * c, c);
         _modulationBias = SamWeights.Require(weights, prefix + "adaLN_modulation.1.bias", 6 * c);
         _onesHeadDim = new Tensor(new TensorShape(headDim), DType.F32);
         _onesHeadDim.AsSpan<float>().Fill(1f);
@@ -45,21 +45,21 @@ internal sealed class SamMotBlock
             _weights[s] = new StreamWeights(
                 Norm2Weight: SamWeights.Require(weights, $"{prefix}norm2.{s}.weight", c),
                 Norm2Bias: SamWeights.Require(weights, $"{prefix}norm2.{s}.bias", c),
-                QkvWeight: SamWeights.Require(weights, $"{self}to_qkv.{s}.weight", 3 * c, c),
+                QkvWeight: SamWeights.RequireLinear(weights, $"{self}to_qkv.{s}.weight", 3 * c, c),
                 QkvBias: SamWeights.Require(weights, $"{self}to_qkv.{s}.bias", 3 * c),
                 QGamma: SamWeights.Require(weights, $"{self}q_rms_norm.{s}.gamma", heads, headDim).Reshape(new TensorShape(c)),
                 KGamma: SamWeights.Require(weights, $"{self}k_rms_norm.{s}.gamma", heads, headDim).Reshape(new TensorShape(c)),
-                OutWeight: SamWeights.Require(weights, $"{self}to_out.{s}.weight", c, c),
+                OutWeight: SamWeights.RequireLinear(weights, $"{self}to_out.{s}.weight", c, c),
                 OutBias: SamWeights.Require(weights, $"{self}to_out.{s}.bias", c),
-                CrossQWeight: SamWeights.Require(weights, cross + "to_q.weight", c, c),
+                CrossQWeight: SamWeights.RequireLinear(weights, cross + "to_q.weight", c, c),
                 CrossQBias: SamWeights.Require(weights, cross + "to_q.bias", c),
-                CrossKvWeight: SamWeights.Require(weights, cross + "to_kv.weight", 2 * c, cond),
+                CrossKvWeight: SamWeights.RequireLinear(weights, cross + "to_kv.weight", 2 * c, cond),
                 CrossKvBias: SamWeights.Require(weights, cross + "to_kv.bias", 2 * c),
-                CrossOutWeight: SamWeights.Require(weights, cross + "to_out.weight", c, c),
+                CrossOutWeight: SamWeights.RequireLinear(weights, cross + "to_out.weight", c, c),
                 CrossOutBias: SamWeights.Require(weights, cross + "to_out.bias", c),
-                Mlp0Weight: SamWeights.Require(weights, mlp + "0.weight", hidden, c),
+                Mlp0Weight: SamWeights.RequireLinear(weights, mlp + "0.weight", hidden, c),
                 Mlp0Bias: SamWeights.Require(weights, mlp + "0.bias", hidden),
-                Mlp2Weight: SamWeights.Require(weights, mlp + "2.weight", c, hidden),
+                Mlp2Weight: SamWeights.RequireLinear(weights, mlp + "2.weight", c, hidden),
                 Mlp2Bias: SamWeights.Require(weights, mlp + "2.bias", c));
         }
     }
