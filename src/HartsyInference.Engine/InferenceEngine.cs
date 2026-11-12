@@ -132,7 +132,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
-        _meshPlanning = new Lazy<MeshPlanningService>(() => new MeshPlanningService(_memoryEstimation.Value));
+        _meshPlanning = new Lazy<MeshPlanningService>(() => new MeshPlanningService(_memoryEstimation.Value, MeshAssets));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
         _decisions = new Lazy<DecisionService>(() => new DecisionService(this));
@@ -227,6 +227,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IMeshPlanningService MeshPlanning => _meshPlanning.Value;
+
+    /// <inheritdoc/>
+    public IMeshAssetService MeshAssets { get; } = new MeshAssetService();
 
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
