@@ -4,6 +4,13 @@ namespace HartsyInference.Core.Configuration;
 /// <remarks>Generated from the pre-migration call sites; defaults and grammars are those the code already had.</remarks>
 public static partial class EngineKnobs
 {
+    /// <summary>Holds the TRELLIS.2 and Pixal3D flows' transformer linear weights (the 1.3 B parameters) as F16 instead of F32: half the device memory and a
+    /// faster forward; the GEMM runs in F16 with F32 accumulation. Measured against the F32 weights on the 1024 shape flow: relative L2 1.4e-4 with F32
+    /// activations (CPU) and 2.6e-4 on the GPU, which also casts the activations to F16.</summary>
+    public static readonly Knob<bool> FlowF16Weights =
+        Bool("numerics.flowF16Weights", false, KnobScope.Runtime, KnobDomain.Numerics,
+            "Holds the TRELLIS.2 and Pixal3D flows' transformer linear weights as F16 instead of F32: half the memory, a faster forward, relative L2 about 2.6e-4 against F32 weights.");
+
     /// <summary>Routes audio conv1d through cuDNN (1D-as-2D, TF32) instead of the direct kernel; 0 disables.</summary>
     public static readonly Knob<bool> AudioConvCudnn =
         Bool("numerics.audioConvCudnn", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes audio conv1d through cuDNN (1D-as-2D, TF32) instead of the direct kernel; 0 disables.");
