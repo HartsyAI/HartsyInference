@@ -122,7 +122,27 @@ public static class MeshEndpoints
             }
         });
 
-        app.MapPost("/v1/native/mesh/plan",async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        app.MapPost("/v1/native/mesh/thumbnail", async Task<IResult> (NativeMeshThumbnailRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.Data) || string.IsNullOrWhiteSpace(req.Format))
+                    throw new ArgumentException("Send Data (base64) and Format.");
+                byte[] data = MeshBase64.Decode(req.Data);
+                MeshThumbnail thumbnail = await Task.Run(() => engine.MeshThumbnails.Render(data, req.Format, req.Options), ct);
+                return Results.Ok(new { Png = System.Convert.ToBase64String(thumbnail.Png), thumbnail.Width, thumbnail.Height, thumbnail.Kind, thumbnail.Notes });
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
         {
             try
             {
