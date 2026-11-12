@@ -14,6 +14,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
+- **Added: Kimi K3.1 MoonViT-V2 vision encoder and patch merger (CPU, synthetic checkpoints; not wired into the engine route).** `MoonViTEncoder` implements `IVlmImageEncoder` and loads `vision_tower.*` and `mm_projector.*` from the checkpoint index.
+
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)
   matches the CPU on CUDA and Vulkan. The real index maps every key, and the multimax matches the reference. `Ernie5RealCheckpointTests` runs
