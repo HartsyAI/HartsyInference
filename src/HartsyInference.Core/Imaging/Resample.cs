@@ -19,33 +19,7 @@ public static class Resample
         Span<float> dst, int dstW, int dstH, float a, bool antialias)
     {
         ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels: 1);
-        (int[] xStart, int[] xCount, float[] xWeights, int xTaps) = BuildWeights(srcW, dstW, a, antialias);
-        (int[] yStart, int[] yCount, float[] yWeights, int yTaps) = BuildWeights(srcH, dstH, a, antialias);
-
-        float[] tmp = new float[(long)srcH * dstW];
-        for (int y = 0; y < srcH; y++)
-        {
-            ReadOnlySpan<float> row = src.Slice(y * srcW, srcW);
-            for (int x = 0; x < dstW; x++)
-            {
-                float acc = 0f;
-                int lo = xStart[x];
-                for (int t = 0; t < xCount[x]; t++)
-                    acc += xWeights[x * xTaps + t] * row[lo + t];
-                tmp[(long)y * dstW + x] = acc;
-            }
-        }
-        for (int y = 0; y < dstH; y++)
-        {
-            int lo = yStart[y];
-            for (int x = 0; x < dstW; x++)
-            {
-                float acc = 0f;
-                for (int t = 0; t < yCount[y]; t++)
-                    acc += yWeights[y * yTaps + t] * tmp[(long)(lo + t) * dstW + x];
-                dst[y * dstW + x] = acc;
-            }
-        }
+        SeparablePlane(src, srcW, srcH, dst, dstW, dstH, BuildWeights(srcW, dstW, a, antialias), BuildWeights(srcH, dstH, a, antialias));
     }
 
     /// <summary>Resizes interleaved (HWC) 8-bit pixels into interleaved F32 (still 0–255 scale; the caller
@@ -90,6 +64,46 @@ public static class Resample
                 float top = hx * src[r0 + x0[x]] + lx * src[r0 + x1[x]];
                 float bottom = hx * src[r1 + x0[x]] + lx * src[r1 + x1[x]];
                 dst[y * dstW + x] = hy * top + ly * bottom;
+            }
+        }
+    }
+
+    /// <summary>Bilinear resize of one row-major F32 plane with the triangle filter widened by the downscale factor
+    /// (<c>F.interpolate(mode="bilinear", antialias=True)</c>); enlarging is plain half-pixel bilinear.</summary>
+    public static void BilinearPlaneAntialias(ReadOnlySpan<float> src, int srcW, int srcH, Span<float> dst, int dstW, int dstH)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels: 1);
+        SeparablePlane(src, srcW, srcH, dst, dstW, dstH,
+            BuildWeights(srcW, dstW, 1.0, TriangleKernel, antialias: true), BuildWeights(srcH, dstH, 1.0, TriangleKernel, antialias: true));
+    }
+
+    /// <summary>The two separable passes (horizontal, then vertical) of a single-channel F32 plane over precomputed filter taps.</summary>
+    private static void SeparablePlane(ReadOnlySpan<float> src, int srcW, int srcH, Span<float> dst, int dstW, int dstH,
+        (int[] Starts, int[] Counts, float[] Weights, int Taps) horizontal, (int[] Starts, int[] Counts, float[] Weights, int Taps) vertical)
+    {
+        float[] tmp = new float[(long)srcH * dstW];
+        for (int y = 0; y < srcH; y++)
+        {
+            ReadOnlySpan<float> row = src.Slice(y * srcW, srcW);
+            for (int x = 0; x < dstW; x++)
+            {
+                float acc = 0f;
+                int lo = horizontal.Starts[x];
+                for (int t = 0; t < horizontal.Counts[x]; t++)
+                    acc += horizontal.Weights[x * horizontal.Taps + t] * row[lo + t];
+                tmp[(long)y * dstW + x] = acc;
+            }
+        }
+
+        for (int y = 0; y < dstH; y++)
+        {
+            int lo = vertical.Starts[y];
+            for (int x = 0; x < dstW; x++)
+            {
+                float acc = 0f;
+                for (int t = 0; t < vertical.Counts[y]; t++)
+                    acc += vertical.Weights[y * vertical.Taps + t] * tmp[(long)(lo + t) * dstW + x];
+                dst[y * dstW + x] = acc;
             }
         }
     }
