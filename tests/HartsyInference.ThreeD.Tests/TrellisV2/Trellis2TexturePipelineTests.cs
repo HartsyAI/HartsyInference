@@ -113,7 +113,8 @@ public sealed class Trellis2TexturePipelineTests
         Mesh mesh = rig.Pipeline.Generate(Image(), Options());
 
         Assert.Equal(["cond@512", "structure@32 steps=3 seed=100", "shape Res512 grid=32 seed=101 steps=2", "decode"], rig.Calls);
-        Assert.Equal(2, mesh.TriangleCount);
+        // The stub mesher's quad is one open loop under the hole limit: the cleanup caps it with a fan of four triangles.
+        Assert.Equal(6, mesh.TriangleCount);
     }
 
     [Fact]

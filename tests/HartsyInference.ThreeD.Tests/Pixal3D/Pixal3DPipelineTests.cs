@@ -59,6 +59,18 @@ public sealed class Pixal3DPipelineTests
                 "decode",
             ],
             rig.Calls);
+        // The stub mesher's quad is one open loop under the hole limit: the cleanup caps it with a fan of four triangles.
+        Assert.Equal(6, mesh.TriangleCount);
+        Assert.NotNull(mesh.Normals);
+    }
+
+    [Fact]
+    public void Generate_CleanMeshOffKeepsTheDecodedFacesAsTheyCame()
+    {
+        using Rig rig = new();
+
+        Mesh mesh = rig.Pipeline.Generate(Image(), new Pixal3DOptions { Seed = 100, CleanMesh = false });
+
         Assert.Equal(2, mesh.TriangleCount);
         Assert.NotNull(mesh.Normals);
     }
