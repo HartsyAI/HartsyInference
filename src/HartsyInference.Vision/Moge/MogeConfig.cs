@@ -24,6 +24,13 @@ public enum MogeRemap
 /// </summary>
 public sealed record MogeConfig
 {
+    /// <summary>The released <c>moge_vitl</c> (<c>Ruicheng/moge-vitl</c>) as its <c>moge_vitl_config.json</c> states it, for a checkpoint that comes without the file.</summary>
+    public static MogeConfig Released { get; } = new()
+    {
+        IntermediateLayers = 4, DimUpsample = [256, 128, 64], ResBlockHiddenMultiplier = 2, NumResBlocks = 2, Remap = MogeRemap.Exp,
+        NumTokensRange = (250000 / (14 * 14), 500000 / (14 * 14)),
+    };
+
     /// <summary>The backbone's last blocks that feed the head (<c>intermediate_layers</c>).</summary>
     public int IntermediateLayers { get; init; } = 4;
 

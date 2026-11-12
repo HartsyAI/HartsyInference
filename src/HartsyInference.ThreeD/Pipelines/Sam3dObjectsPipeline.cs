@@ -7,6 +7,7 @@ using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
 using HartsyInference.ThreeD.Models.Trellis;
 using HartsyInference.ThreeD.Pipelines.Stages;
+using HartsyInference.Vision.Moge;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -39,6 +40,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     public static bool HasWeights(string modelDirectory) =>
         Directory.Exists(modelDirectory) && new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs" }.All(stem => Find(modelDirectory, stem) is not null);
 
+    /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c>; its config JSON is optional).</summary>
+    public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, "moge_vitl.safetensors"));
+
     /// <summary>Generates the splats and the pose of one object.</summary>
     /// <param name="log">Receives one line per stage with the elapsed time since the call started.</param>
     /// <param name="onStep">Called after each sampler step with the stage name (<c>structure</c> or <c>slat</c>) and the step count so far.</param>
@@ -53,7 +57,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         Stopwatch clock = Stopwatch.StartNew();
         void Log(string message) => log?.Invoke($"[{clock.Elapsed.TotalSeconds,7:F1}s] {message}");
 
-        SamPrepared prepared = Preprocess(request);
+        (float[] rgb, float[] mask) = Planar(request);
+        SamPointmapInput pointmap = request.Pointmap ?? EstimatePointmap(rgb, request, Log);
+        SamPrepared prepared = SamPreprocessor.Prepare(rgb, mask, pointmap, request.Height, request.Width);
         Log("preprocessed");
 
         (int[] coords, SamPose pose) = StructureStage(request, prepared, seed, Log, onStep);
@@ -65,7 +71,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         return new Sam3dObjectsResult { Splats = cloud, Pose = pose, Voxels = voxels, Seed = seed };
     }
 
-    private static SamPrepared Preprocess(Sam3dObjectsRequest request)
+    /// <summary>The planar float image (0 to 1) and the mask (0 or 1) of the request.</summary>
+    private static (float[] Rgb, float[] Mask) Planar(Sam3dObjectsRequest request)
     {
         int pixels = request.Width * request.Height;
         float[] rgb = new float[3 * pixels];
@@ -77,7 +84,35 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             mask[i] = request.Mask[i] / 255f;
         }
 
-        return SamPreprocessor.Prepare(rgb, mask, request.Pointmap, request.Height, request.Width);
+        return (rgb, mask);
+    }
+
+    /// <summary>
+    /// MoGe on the whole image (<c>depth_model(image)</c> with <c>force_projection=False</c>), then the camera rotation to the PyTorch3D convention, <c>diag(-1, -1, 1)</c>: x and y flip
+    /// sign (infinite stays infinite). The MoGe weights are released again before the structure stage loads.
+    /// </summary>
+    private SamPointmapInput EstimatePointmap(float[] rgb, Sam3dObjectsRequest request, Action<string> log)
+    {
+        string checkpointPath = Find(_modelDirectory, "moge_vitl")
+            ?? throw new FileNotFoundException($"The request has no pointmap and '{_modelDirectory}' holds no 'moge_vitl.safetensors' to estimate one with.");
+        string configPath = Path.Combine(_modelDirectory, "moge_vitl_config.json");
+        MogeConfig config = File.Exists(configPath) ? MogeConfig.FromJson(File.ReadAllText(configPath)) : MogeConfig.Released;
+        MogeResult result;
+        using (SamCheckpoint checkpoint = SamCheckpoint.Load(checkpointPath))
+        {
+            MogeModel model = new(config, checkpoint.Tensors);
+            Backend.PreloadWeights(checkpoint.Tensors.Values);
+            result = model.Infer(Backend, rgb, request.Height, request.Width, request.MogeResolutionLevel);
+            Backend.FreeWeights(checkpoint.Tensors.Values);
+        }
+
+        Sweep();
+        int plane = request.Height * request.Width;
+        float[] points = result.Points;
+        for (int i = 0; i < 2 * plane; i++)
+            points[i] = -points[i];
+        log($"MoGe pointmap (focal {result.Focal:F3}, shift {result.Shift:F3}, {result.Mask.Count(valid => valid)} of {plane} points valid)");
+        return new SamPointmapInput(points, request.Height, request.Width);
     }
 
     /// <summary>Structure condition, flow, occupancy decode, prune, downsample and the pose.</summary>
