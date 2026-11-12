@@ -64,6 +64,27 @@ public sealed class MeshPlanRouteTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AssetsOfAModelWithoutCatalogFilesCarryATypedBlocker()
+    {
+        using JsonDocument status = JsonDocument.Parse(await _http.GetStringAsync("/v1/native/mesh/assets/triposr"));
+
+        Assert.Equal("NoCatalogEntry", status.RootElement.GetProperty("modelBlocker").GetProperty("kind").GetString());
+        Assert.False(status.RootElement.GetProperty("complete").GetBoolean());
+        Assert.Equal(HttpStatusCode.NotFound, (await _http.GetAsync("/v1/native/mesh/assets/hunyuan3d-mv")).StatusCode);
+    }
+
+    [Fact]
+    public async Task PrefetchOfAModelWithoutCatalogFilesAnswersUnsupportedWithTheBlocker()
+    {
+        HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/mesh/prefetch", new { model = "triposr" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using JsonDocument result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(result.RootElement.GetProperty("supported").GetBoolean());
+        Assert.Equal("NoCatalogEntry", result.RootElement.GetProperty("blockers")[0].GetProperty("kind").GetString());
+    }
+
+    [Fact]
     public async Task PlanOfAnUnsupportedFieldIs422WithTheIssue()
     {
         string folder = Path.GetTempPath();

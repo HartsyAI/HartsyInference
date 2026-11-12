@@ -63,7 +63,9 @@ code.
 | Member | Use |
 |---|---|
 | `DescribeAll()` / `Describe(id)` (`GET /v1/native/mesh/describe[/{id}]`) | Per 3D model: input and output kinds, how it treats each tunable `MeshRequest` field (access, default, legal values or range, unit), licence and gated repositories, cost. A host builds its form from this. |
-| `PlanAsync(spec, request)` | The validation generation runs, the settings with their provenance, ignored-field warnings, catalog files not at their catalog path, and whether the recorded peak fits the card; nothing loads. A plan with an error issue answers `422` over HTTP. |
+| `PlanAsync(spec, request)` | The validation generation runs, the settings with their provenance, ignored-field warnings, the file inventory and a warning per absent file, and whether the recorded peak fits the card (verdict `Unknown` with the reason when none was recorded); nothing loads. A plan with an error issue answers `422` over HTTP. |
+| `MeshAssets.GetStatus(spec)` (`GET /v1/native/mesh/assets/{id}`) | Each file a 3D model needs with its role, catalog-relative path, whether it is required, present (found where the loader looks, legacy folders and SAM 3D's `.ckpt` included) and its size, and a typed blocker for what the engine cannot fetch: `Gated` (needs `HF_TOKEN`), `ManualPlacement` (Pixal3D's `naf_release.pth`), `NoCatalogEntry` (TripoSR, TRELLIS, CoLa3D and UniRig have no catalog files). |
+| `ModelPrefetch.PrefetchAsync(spec)` for a mesh spec (`POST /v1/native/mesh/prefetch`) | Fetches the absent, fetchable catalog files with progress, the primary file last; the files it cannot fetch come back in `ModelPrefetchResult.Blockers` instead of an exception. |
 | `IMemoryEstimationService` for a mesh spec | The recorded whole-card peak of the default request as a one-stage estimate; a model with no recorded peak throws `NotSupportedException` from `EstimateAsync` and answers `Unknown` from `AssessAsync`. |
 
 ## Realtime audio primitives (`HartsyInference.Core.Runtime`)
