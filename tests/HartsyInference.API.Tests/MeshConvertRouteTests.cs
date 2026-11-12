@@ -57,6 +57,28 @@ public sealed class MeshConvertRouteTests : IAsyncLifetime
         Assert.Equal(1, body.RootElement.GetProperty("triangles").GetInt32());
         Assert.False(body.RootElement.GetProperty("staticOnly").GetBoolean());
         Assert.NotEqual(JsonValueKind.Null, body.RootElement.GetProperty("archive").ValueKind);
+        Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("files")[0].GetProperty("data").ValueKind);
+    }
+
+    [Fact]
+    public async Task WithoutAnArchiveEachFileCarriesItsBytes()
+    {
+        HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/mesh/convert", new { data = Glb(), format = "glb", target = "stl" });
+
+        using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.NotEqual(JsonValueKind.Null, body.RootElement.GetProperty("files")[0].GetProperty("data").ValueKind);
+        Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("archive").ValueKind);
+    }
+
+    [Fact]
+    public async Task AModelFileLargerThanKestrelsDefaultBodyLimitIsReadAndRefusedAsAFileNotAs413()
+    {
+        // 24 MiB of bytes is 32 MiB of base64, over the 30 MB default; the route's own limit lets it through to the reader, which refuses the bytes.
+        string data = Convert.ToBase64String(new byte[24 * 1024 * 1024]);
+
+        HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/mesh/convert", new { data, format = "glb", target = "obj" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Theory]

@@ -19,7 +19,8 @@ public sealed class ObjExporter : IMeshExporter
         List<string> notes = MeshExporters.CommonNotes(document, carriesMotion: false);
         List<MeshExportFile> files = [];
         Dictionary<MeshImage, string> imageNames = new(ReferenceEqualityComparer.Instance);
-        string mtl = WriteMtl(document, stem, files, imageNames, notes);
+        string[] names = MaterialNames(document);
+        string mtl = WriteMtl(document, stem, names, files, imageNames, notes);
         if (document.Primitives.Any(p => p.Geometry.VertexColors is not null))
             notes.Add("Vertex colours were dropped; OBJ has no standard place for them.");
 
@@ -34,7 +35,7 @@ public sealed class ObjExporter : IMeshExporter
             bool uvs = g.Uvs is not null, normals = g.Normals is not null;
             obj.Append("g part_").Append(group++).Append('\n');
             if ((uint)primitive.Material < (uint)document.Materials.Count)
-                obj.Append("usemtl ").Append(MaterialName(document, primitive.Material)).Append('\n');
+                obj.Append("usemtl ").Append(names[primitive.Material]).Append('\n');
             for (int i = 0; i < g.Vertices.Length; i += 3)
                 obj.Append("v ").Append(F(g.Vertices[i])).Append(' ').Append(F(g.Vertices[i + 1])).Append(' ').Append(F(g.Vertices[i + 2])).Append('\n');
             if (uvs)
@@ -72,13 +73,13 @@ public sealed class ObjExporter : IMeshExporter
                 normalBase += g.VertexCount;
         }
 
-        files.Insert(0, new MeshExportFile(stem + ".obj", "text/plain", Encoding.UTF8.GetBytes(obj.ToString())));
+        files.Insert(0, new MeshExportFile(stem + ".obj", "model/obj", Encoding.UTF8.GetBytes(obj.ToString())));
         if (document.Materials.Count > 0)
             files.Insert(1, new MeshExportFile(stem + ".mtl", "text/plain", Encoding.UTF8.GetBytes(mtl)));
         return new MeshExport(files, notes);
     }
 
-    private static string WriteMtl(MeshDocument document, string stem, List<MeshExportFile> files, Dictionary<MeshImage, string> imageNames, List<string> notes)
+    private static string WriteMtl(MeshDocument document, string stem, string[] names, List<MeshExportFile> files, Dictionary<MeshImage, string> imageNames, List<string> notes)
     {
         StringBuilder mtl = new();
         mtl.Append("# HartsyInference\n");
@@ -87,7 +88,7 @@ public sealed class ObjExporter : IMeshExporter
         {
             MeshMaterial material = document.Materials[m];
             float[] c = material.BaseColorFactor;
-            mtl.Append("newmtl ").Append(MaterialName(document, m)).Append('\n');
+            mtl.Append("newmtl ").Append(names[m]).Append('\n');
             mtl.Append("Kd ").Append(F(c[0])).Append(' ').Append(F(c[1])).Append(' ').Append(F(c[2])).Append('\n');
             mtl.Append("d ").Append(F(material.AlphaMode == MeshAlphaMode.Opaque ? 1f : c[3])).Append('\n');
             mtl.Append("Pm ").Append(F(material.Metallic)).Append('\n');
@@ -96,7 +97,9 @@ public sealed class ObjExporter : IMeshExporter
             if (e.Any(v => v > 0))
                 mtl.Append("Ke ").Append(F(e[0])).Append(' ').Append(F(e[1])).Append(' ').Append(F(e[2])).Append('\n');
             Slot(mtl, "map_Kd", material.BaseColor, $"{stem}_{m}_basecolor", files, imageNames);
+            // The PBR MTL extension names a normal map `norm`; most importers (Blender among them) only read `map_Bump`, so both are written.
             Slot(mtl, "norm", material.Normal, $"{stem}_{m}_normal", files, imageNames);
+            Slot(mtl, "map_Bump", material.Normal, $"{stem}_{m}_normal", files, imageNames);
             Slot(mtl, "map_Ke", material.Emissive, $"{stem}_{m}_emissive", files, imageNames);
             droppedMetalRough |= material.MetallicRoughness is not null || material.Occlusion is not null;
             mtl.Append('\n');
@@ -119,7 +122,20 @@ public sealed class ObjExporter : IMeshExporter
         mtl.Append(keyword).Append(' ').Append(file).Append('\n');
     }
 
-    private static string MaterialName(MeshDocument document, int index) => $"material_{index}";
+    /// <summary>The material names an MTL file uses: the document's own, made safe for a one-word MTL entry and made unique, or <c>material_i</c> when a material has none.</summary>
+    private static string[] MaterialNames(MeshDocument document)
+    {
+        string[] names = new string[document.Materials.Count];
+        HashSet<string> used = [];
+        for (int i = 0; i < names.Length; i++)
+        {
+            string clean = new([.. document.Materials[i].Name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '_')]);
+            string name = clean.Length == 0 ? $"material_{i}" : clean;
+            names[i] = used.Add(name) ? name : $"{name}_{i}";
+            used.Add(names[i]);
+        }
+        return names;
+    }
 
     private static string F(float value) => value.ToString("R", CultureInfo.InvariantCulture);
 }

@@ -108,6 +108,68 @@ public sealed class MeshExportTests
         Assert.Equal([0, 1, 2], GlbReader.Parse(glb).Indices);
     }
 
+    // A file shaped like a painted result with broken extras: a NaN normal, a texture that names an image that is not there, and a material with a bad factor.
+    private static byte[] BrokenExtrasGlb()
+    {
+        const string json = """
+            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+             "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"material":0}]}],
+             "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0}}},{"emissiveFactor":[1,2]}],
+             "textures":[{"source":9}],"samplers":[{"magFilter":9729}],"extensionsUsed":["KHR_materials_sheen","KHR_texture_transform"],
+             "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}],
+             "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":36}],"buffers":[{"byteLength":72}]}
+            """;
+        byte[] bin = new byte[72];
+        BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(12), 1f);
+        BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(28), 1f);
+        BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(36), float.NaN);
+        return GlbContainer.Assemble(Encoding.UTF8.GetBytes(json), bin);
+    }
+
+    [Fact]
+    public void ParseStaysGeometryOnlyAndAcceptsAFileWhoseExtrasAreBroken()
+    {
+        byte[] glb = BrokenExtrasGlb();
+
+        Mesh mesh = GlbReader.Parse(glb);
+
+        Assert.Equal(3, mesh.VertexCount);
+        Assert.Null(mesh.Normals);
+        Assert.Null(mesh.Uvs);
+    }
+
+    [Fact]
+    public void ParseDocumentDropsWhatItCannotReadWithANoteInsteadOfFailingTheFile()
+    {
+        MeshDocument document = GlbReader.ParseDocument(BrokenExtrasGlb());
+
+        Assert.Equal(1, document.TriangleCount);
+        Assert.Null(document.Primitives[0].Geometry.Normals);
+        Assert.Equal(2, document.Materials.Count);
+        Assert.Contains(document.Notes, n => n.StartsWith("Normals (NORMAL) could not be read"));
+        Assert.Contains(document.Notes, n => n.StartsWith("Material 0: the baseColorTexture could not be read"));
+        Assert.Contains(document.Notes, n => n.StartsWith("Material 1 could not be read and was replaced"));
+        Assert.Contains(document.Notes, n => n.StartsWith("Texture samplers"));
+        Assert.Contains(document.Notes, n => n.Contains("KHR_materials_sheen, KHR_texture_transform"));
+    }
+
+    [Fact]
+    public void AnEmptyPrimitiveIsLeftOutSoTheFileWrittenBackIsValid()
+    {
+        const string json = """
+            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+             "meshes":[{"primitives":[{"attributes":{"POSITION":1}},{"attributes":{"POSITION":0}}]}],
+             "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"componentType":5126,"count":0,"type":"VEC3","bufferView":0}],
+             "bufferViews":[{"buffer":0,"byteLength":36}],"buffers":[{"byteLength":36}]}
+            """;
+        byte[] glb = GlbContainer.Assemble(Encoding.UTF8.GetBytes(json), new byte[36]);
+
+        MeshDocument document = GlbReader.ParseDocument(glb);
+
+        Assert.Single(document.Primitives);
+        Assert.NotEmpty(MeshDocumentGlbWriter.Write(document));
+    }
+
     [Fact]
     public void AnAnimatedSkinnedFileIsReadAsItsRestPoseAndSaysWhatWasLeftOut()
     {
@@ -195,6 +257,38 @@ public sealed class MeshExportTests
         NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshExporters.Get("fbx"));
 
         Assert.Contains("obj, ply, stl, glb", error.Message);
+    }
+
+    [Fact]
+    public void AnObjKeepsNormalsOnlyWhenEveryCornerHasOneAndIgnoresInlineComments()
+    {
+        MeshDocument partial = ObjDocumentReader.Parse("v 0 0 0 # first\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2 3 # a face\n");
+        MeshDocument full = ObjDocumentReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2//1 3//1\n");
+
+        Assert.Null(partial.Primitives.Single().Geometry.Normals);
+        Assert.Contains(partial.Notes, n => n.Contains("normals were dropped"));
+        Assert.Equal(1, partial.TriangleCount);
+        Assert.NotNull(full.Primitives.Single().Geometry.Normals);
+    }
+
+    [Fact]
+    public void ObjExportKeepsMaterialNamesUniqueAndWritesBothNormalMapKeywords()
+    {
+        MeshDocument source = Sample();
+        MeshDocument renamed = new()
+        {
+            Primitives = source.Primitives,
+            Materials = [source.Materials[0] with { Name = "Skin & Bone" }, source.Materials[1] with { Name = "Skin & Bone" }],
+        };
+
+        MeshExport export = new ObjExporter().Export(renamed, "m");
+
+        string mtl = Encoding.UTF8.GetString(export.Files[1].Data);
+        Assert.Contains("newmtl Skin___Bone\n", mtl);
+        Assert.Contains("newmtl Skin___Bone_1\n", mtl);
+        Assert.Contains("norm m_0_normal.png", mtl);
+        Assert.Contains("map_Bump m_0_normal.png", mtl);
+        Assert.Equal("model/obj", export.Files[0].ContentType);
     }
 
     [Fact]

@@ -16,10 +16,24 @@ public static partial class GlbReader
             return materials;
         Dictionary<int, MeshImage?> images = [];
         bool notedUvSet = false;
+        int materialIndex = 0;
         foreach (JsonElement material in list.EnumerateArray())
         {
             JsonElement pbr = TryMember(material, "pbrMetallicRoughness", out JsonElement found) ? found : default;
             MeshImage? Slot(JsonElement owner, string name)
+            {
+                try
+                {
+                    return ReadSlot(owner, name);
+                }
+                catch (HartsyInferenceException ex)
+                {
+                    notes.Add($"Material {materialIndex}: the {name} could not be read and was left out: {ex.Message}");
+                    return null;
+                }
+            }
+
+            MeshImage? ReadSlot(JsonElement owner, string name)
             {
                 if (!TryMember(owner, name, out JsonElement info))
                     return null;
@@ -46,24 +60,34 @@ public static partial class GlbReader
                 return loaded;
             }
 
-            float[] baseColor = FloatsMember(pbr, "baseColorFactor", 4) ?? [1f, 1f, 1f, 1f];
-            string alphaMode = TryMember(material, "alphaMode", out JsonElement mode) && mode.ValueKind == JsonValueKind.String ? mode.GetString()! : "OPAQUE";
-            materials.Add(new MeshMaterial
+            try
             {
-                Name = TryMember(material, "name", out JsonElement name) && name.ValueKind == JsonValueKind.String ? name.GetString()! : "",
-                BaseColorFactor = baseColor,
-                BaseColor = Slot(pbr, "baseColorTexture"),
-                Metallic = FloatMember(pbr, "metallicFactor", 1f),
-                Roughness = FloatMember(pbr, "roughnessFactor", 1f),
-                MetallicRoughness = Slot(pbr, "metallicRoughnessTexture"),
-                Normal = Slot(material, "normalTexture"),
-                Occlusion = Slot(material, "occlusionTexture"),
-                EmissiveFactor = FloatsMember(material, "emissiveFactor", 3) ?? [0f, 0f, 0f],
-                Emissive = Slot(material, "emissiveTexture"),
-                AlphaMode = alphaMode switch { "MASK" => MeshAlphaMode.Mask, "BLEND" => MeshAlphaMode.Blend, _ => MeshAlphaMode.Opaque },
-                AlphaCutoff = FloatMember(material, "alphaCutoff", 0.5f),
-                DoubleSided = TryMember(material, "doubleSided", out JsonElement sided) && sided.ValueKind == JsonValueKind.True,
-            });
+                float[] baseColor = FloatsMember(pbr, "baseColorFactor", 4) ?? [1f, 1f, 1f, 1f];
+                string alphaMode = TryMember(material, "alphaMode", out JsonElement mode) && mode.ValueKind == JsonValueKind.String ? mode.GetString()! : "OPAQUE";
+                materials.Add(new MeshMaterial
+                {
+                    Name = TryMember(material, "name", out JsonElement name) && name.ValueKind == JsonValueKind.String ? name.GetString()! : "",
+                    BaseColorFactor = baseColor,
+                    BaseColor = Slot(pbr, "baseColorTexture"),
+                    Metallic = FloatMember(pbr, "metallicFactor", 1f),
+                    Roughness = FloatMember(pbr, "roughnessFactor", 1f),
+                    MetallicRoughness = Slot(pbr, "metallicRoughnessTexture"),
+                    Normal = Slot(material, "normalTexture"),
+                    Occlusion = Slot(material, "occlusionTexture"),
+                    EmissiveFactor = FloatsMember(material, "emissiveFactor", 3) ?? [0f, 0f, 0f],
+                    Emissive = Slot(material, "emissiveTexture"),
+                    AlphaMode = alphaMode switch { "MASK" => MeshAlphaMode.Mask, "BLEND" => MeshAlphaMode.Blend, _ => MeshAlphaMode.Opaque },
+                    AlphaCutoff = FloatMember(material, "alphaCutoff", 0.5f),
+                    DoubleSided = TryMember(material, "doubleSided", out JsonElement sided) && sided.ValueKind == JsonValueKind.True,
+                });
+            }
+            catch (HartsyInferenceException ex)
+            {
+                // The slot keeps its index, so primitives still point at the right material; it falls back to the default.
+                notes.Add($"Material {materialIndex} could not be read and was replaced by the default material: {ex.Message}");
+                materials.Add(new MeshMaterial());
+            }
+            materialIndex++;
         }
         return materials;
     }

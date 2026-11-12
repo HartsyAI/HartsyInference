@@ -16,11 +16,13 @@ public static class ObjDocumentReader
         List<float> outPositions = [], outUvs = [], outNormals = [];
         List<int> indices = [];
         Dictionary<(int, int, int), int> unique = [];
-        bool anyUv = false, anyNormal = false, materials = false;
-        foreach (string raw in text.Split('\n'))
+        bool anyUv = false, anyNormal = false, missingNormal = false, materials = false;
+        foreach (string line in text.Split('\n'))
         {
-            string[] tokens = raw.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (tokens.Length == 0 || tokens[0][0] == '#')
+            // A '#' starts a comment anywhere on a line.
+            int hash = line.IndexOf('#');
+            string[] tokens = (hash >= 0 ? line[..hash] : line).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length == 0)
                 continue;
             switch (tokens[0])
             {
@@ -47,12 +49,15 @@ public static class ObjDocumentReader
         List<string> notes = [];
         if (materials)
             notes.Add("The OBJ names materials, which are not read (the MTL file is not part of the input).");
+        // A normal that is not a unit vector is invalid glTF, so normals are kept only when every corner has one.
+        if (anyNormal && missingNormal)
+            notes.Add("Some faces have no normals, so the normals were dropped.");
         Mesh mesh = new()
         {
             Vertices = [.. outPositions],
             Indices = [.. indices],
             Uvs = anyUv ? [.. outUvs] : null,
-            Normals = anyNormal ? [.. outNormals] : null,
+            Normals = anyNormal && !missingNormal ? [.. outNormals] : null,
         };
         return new MeshDocument { Primitives = [new MeshPrimitive { Geometry = mesh }], Notes = notes };
 
@@ -98,6 +103,7 @@ public static class ObjDocumentReader
             }
             else
             {
+                missingNormal = true;
                 outNormals.AddRange([0f, 0f, 0f]);
             }
             return index;

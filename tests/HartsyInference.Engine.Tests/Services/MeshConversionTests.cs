@@ -60,13 +60,16 @@ public sealed class MeshConversionTests
     }
 
     [Fact]
-    public void ASplatPlyIsRefusedWithTheReason()
+    public void ASplatPlyAndAMeshPlyAreRefusedWithTheirOwnReason()
     {
         using InferenceEngine engine = new("cpu");
+        byte[] splat = System.Text.Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float f_dc_0\nproperty float opacity\nend_header\n0 0 0\n");
+        byte[] meshPly = PlyWriter.WriteMeshBinary(new Mesh { Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0], Indices = [0, 1, 2] });
 
-        NotSupportedException error = Assert.Throws<NotSupportedException>(() => engine.MeshConversion.Convert([1, 2, 3], "ply", "glb"));
-
-        Assert.Contains("Gaussian-splat", error.Message);
+        Assert.Contains("Gaussian-splat", Assert.Throws<NotSupportedException>(() => engine.MeshConversion.Convert(splat, "ply", "glb")).Message);
+        string mesh = Assert.Throws<NotSupportedException>(() => engine.MeshConversion.Convert(meshPly, "PLY", "glb")).Message;
+        Assert.Contains("mesh PLY is not read", mesh);
+        Assert.DoesNotContain("splat", mesh);
     }
 
     [Fact]

@@ -14,6 +14,14 @@ internal sealed class MeshConversionService : IMeshConversionService
     /// <inheritdoc/>
     public IReadOnlyList<string> Targets { get; } = [.. MeshExporters.All.Select(e => e.Id)];
 
+    /// <summary>Whether the PLY header (the first 64 KiB) lists the properties only a Gaussian-splat file has.</summary>
+    private static bool IsSplatHeader(byte[] ply)
+    {
+        string header = System.Text.Encoding.ASCII.GetString(ply, 0, Math.Min(ply.Length, 1 << 16));
+        int end = header.IndexOf("end_header", StringComparison.Ordinal);
+        return (end < 0 ? header : header[..end]).Contains("f_dc_0", StringComparison.Ordinal);
+    }
+
     /// <inheritdoc/>
     public MeshConversion Convert(byte[] data, string source, string target, string? name = null)
     {
@@ -22,7 +30,11 @@ internal sealed class MeshConversionService : IMeshConversionService
         ArgumentException.ThrowIfNullOrWhiteSpace(target);
         IMeshExporter exporter = MeshExporters.Get(target);
         if (string.Equals(source, "ply", StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException("A PLY file is not read: the engine's PLY output is a Gaussian-splat cloud, which holds splats rather than a mesh. Convert a mesh from glb or obj.");
+        {
+            throw new NotSupportedException(IsSplatHeader(data)
+                ? "A Gaussian-splat PLY holds splats, not a mesh, so it cannot be converted to a mesh format."
+                : "A mesh PLY is not read as a source yet; send the model as glb or obj.");
+        }
         MeshDocument document = MeshDocumentReader.Read(data, source);
         MeshExport export = exporter.Export(document, name ?? "model");
         return new MeshConversion

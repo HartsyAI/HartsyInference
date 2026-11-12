@@ -23,10 +23,12 @@ public static partial class GlbReader
     private const int UnsignedIntType = 5125;
 
     /// <summary>Parses a GLB container and concatenates the positions and indices of every triangle primitive its scene places.</summary>
-    public static Mesh Parse(byte[] glb) => ParseDocument(glb).MergeGeometry();
+    public static Mesh Parse(byte[] glb) => Read(glb, geometryOnly: true).MergeGeometry();
 
-    /// <summary>Parses a GLB container into its triangle primitives with their attributes and materials.</summary>
-    public static MeshDocument ParseDocument(byte[] glb)
+    /// <summary>Parses a GLB container into its triangle primitives with their attributes and materials. Unlike <see cref="Parse"/> it also reads normals, UVs, vertex colours, materials and embedded images; an attribute, texture or material it cannot read is dropped with a note rather than failing the file, because the geometry is what the file is for.</summary>
+    public static MeshDocument ParseDocument(byte[] glb) => Read(glb, geometryOnly: false);
+
+    private static MeshDocument Read(byte[] glb, bool geometryOnly)
     {
         ArgumentNullException.ThrowIfNull(glb);
         (byte[] json, byte[] bin) = SplitChunks(glb);
@@ -36,18 +38,22 @@ public static partial class GlbReader
             throw new HartsyInferenceException("GLB file has no meshes.");
 
         List<string> notes = [];
-        Collector collector = new(root, bin, meshes, notes);
+        Collector collector = new(root, bin, meshes, notes, geometryOnly);
         collector.PlaceScene();
         if (collector.Primitives.Count == 0)
             throw new HartsyInferenceException("GLB file has no triangle primitives.");
+        if (geometryOnly)
+            return new MeshDocument { Primitives = collector.Primitives };
         if (collector.SkippedPrimitives > 0)
             notes.Add($"{collector.SkippedPrimitives} primitive(s) in strip, fan, line or point mode were skipped; only triangle lists are read.");
         if (collector.HasMorphTargets)
             notes.Add("Morph targets were dropped.");
+        List<MeshMaterial> materials = ReadMaterials(root, bin, notes);
+        NoteUncarriedMaterialFeatures(root, notes);
         return new MeshDocument
         {
             Primitives = collector.Primitives,
-            Materials = ReadMaterials(root, bin, notes),
+            Materials = materials,
             Animations = AnimationNames(root),
             HasSkin = TryArray(root, "skins", out JsonElement skins) && skins.GetArrayLength() > 0,
             Notes = notes,
@@ -55,6 +61,20 @@ public static partial class GlbReader
                 ? extras.GetRawText()
                 : null,
         };
+    }
+
+    /// <summary>Notes the material features a document has no field for: texture samplers and material or texture extensions.</summary>
+    private static void NoteUncarriedMaterialFeatures(JsonElement root, List<string> notes)
+    {
+        if (TryArray(root, "textures", out JsonElement textures) && textures.GetArrayLength() > 0 && TryArray(root, "samplers", out JsonElement samplers) && samplers.GetArrayLength() > 0)
+            notes.Add("Texture samplers (wrap and filter modes) are not carried; textures repeat and filter linearly.");
+        if (TryArray(root, "extensionsUsed", out JsonElement used))
+        {
+            string[] dropped = [.. used.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!)
+                .Where(name => name.StartsWith("KHR_materials_", StringComparison.Ordinal) || name == "KHR_texture_transform")];
+            if (dropped.Length > 0)
+                notes.Add($"Material extensions are not carried: {string.Join(", ", dropped)}.");
+        }
     }
 
     private static List<string> AnimationNames(JsonElement root)
@@ -90,9 +110,27 @@ public static partial class GlbReader
     }
 
     /// <summary>Walks the scene graph and appends each placed primitive to the output buffers.</summary>
-    private sealed class Collector(JsonElement root, byte[] bin, JsonElement meshes, List<string> notes)
+    private sealed class Collector(JsonElement root, byte[] bin, JsonElement meshes, List<string> notes, bool geometryOnly)
     {
         private bool _notedUvSet, _notedColour;
+
+        /// <summary>Reads an optional attribute; a failure drops that attribute with one note instead of failing the file.</summary>
+        private float[]? Optional(string what, Func<float[]?> read)
+        {
+            if (geometryOnly)
+                return null;
+            try
+            {
+                return read();
+            }
+            catch (HartsyInferenceException ex)
+            {
+                string note = $"{what} could not be read and was dropped: {ex.Message}";
+                if (!notes.Contains(note))
+                    notes.Add(note);
+                return null;
+            }
+        }
 
         public List<MeshPrimitive> Primitives { get; } = [];
 
@@ -187,6 +225,9 @@ public static partial class GlbReader
                     : Enumerable.Range(0, vertexCount).ToArray();
                 if (indices.Length % 3 != 0)
                     throw new HartsyInferenceException("GLB triangle index count is not a multiple of three.");
+                // An empty primitive carries nothing and would make an invalid file when written back.
+                if (vertexCount == 0 || indices.Length == 0)
+                    continue;
 
                 // A mirroring transform turns each triangle inside out; swapping two corners restores its facing.
                 if (mirrored)
@@ -194,7 +235,7 @@ public static partial class GlbReader
                     for (int i = 0; i < indices.Length; i += 3)
                         (indices[i + 1], indices[i + 2]) = (indices[i + 2], indices[i + 1]);
                 }
-                if (TryArray(primitive, "targets", out JsonElement targets) && targets.GetArrayLength() > 0)
+                if (!geometryOnly && TryArray(primitive, "targets", out JsonElement targets) && targets.GetArrayLength() > 0)
                     HasMorphTargets = true;
                 Primitives.Add(new MeshPrimitive
                 {
@@ -202,9 +243,9 @@ public static partial class GlbReader
                     {
                         Vertices = positions,
                         Indices = indices,
-                        Normals = ReadNormals(attributes, vertexCount, world),
-                        Uvs = ReadUvs(attributes, vertexCount),
-                        VertexColors = ReadColours(attributes, vertexCount),
+                        Normals = Optional("Normals (NORMAL)", () => ReadNormals(attributes, vertexCount, world)),
+                        Uvs = Optional("UV coordinates (TEXCOORD_0)", () => ReadUvs(attributes, vertexCount)),
+                        VertexColors = Optional("Vertex colours (COLOR_0)", () => ReadColours(attributes, vertexCount)),
                     },
                     Material = IntMember(primitive, "material", -1),
                 });

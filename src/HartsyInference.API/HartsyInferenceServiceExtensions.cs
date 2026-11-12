@@ -209,13 +209,18 @@ public static class HartsyInferenceServiceExtensions
         // would refuse with a bare 413.
         app.Use(async (ctx, next) =>
         {
-            if (ctx.Request.Path.StartsWithSegments("/v1/native/video") || ctx.Request.Path.StartsWithSegments("/v1/chat/completions"))
+            // The mesh file routes take a base64 model file, which a textured result can make tens of MB.
+            long? cap = ctx.Request.Path.StartsWithSegments("/v1/native/video") || ctx.Request.Path.StartsWithSegments("/v1/chat/completions")
+                ? options.MaxVideoRequestBodyBytes
+                : ctx.Request.Path.StartsWithSegments("/v1/native/mesh/convert") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/thumbnail")
+                    ? options.MaxMeshFileRequestBodyBytes
+                    : null;
+            if (cap is long maxBytes)
             {
-                if (ctx.Request.ContentLength is long contentLength
-                    && contentLength > options.MaxVideoRequestBodyBytes)
+                if (ctx.Request.ContentLength is long contentLength && contentLength > maxBytes)
                 {
                     await WriteErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge,
-                        $"Request body exceeds the configured {options.MaxVideoRequestBodyBytes}-byte limit.",
+                        $"Request body exceeds the configured {maxBytes}-byte limit.",
                         "invalid_request_error");
                     return;
                 }
@@ -223,7 +228,7 @@ public static class HartsyInferenceServiceExtensions
                     ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
                 if (limit is not null && !limit.IsReadOnly)
                 {
-                    limit.MaxRequestBodySize = options.MaxVideoRequestBodyBytes;
+                    limit.MaxRequestBodySize = maxBytes;
                 }
             }
             await next();

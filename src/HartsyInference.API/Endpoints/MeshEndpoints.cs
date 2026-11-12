@@ -103,7 +103,8 @@ public static class MeshEndpoints
                 return Results.Ok(new
                 {
                     result.Target,
-                    Files = result.Files.Select(f => new { f.Name, f.ContentType, Data = System.Convert.ToBase64String(f.Data) }),
+                    // With an archive the files travel inside it once; their names and types are still listed.
+                    Files = result.Files.Select(f => new { f.Name, f.ContentType, Data = req.Archive ? null : System.Convert.ToBase64String(f.Data) }),
                     result.Notes,
                     result.Vertices,
                     result.Triangles,
@@ -122,7 +123,7 @@ public static class MeshEndpoints
             }
         });
 
-        app.MapPost("/v1/native/mesh/plan",async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
         {
             try
             {
