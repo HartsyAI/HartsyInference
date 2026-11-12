@@ -96,14 +96,9 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             try
             {
                 (Tensor stackedWeight, Tensor stackedBias) = _transformer.StackedVideoHead();
-                for (int step = 0; step < RequiredSteps; step++)
-                {
-                    cancel.ThrowIfCancellationRequested();
-                    x = DenoiseStep(x, layout, encoded, cos, sin, stackedWeight, stackedBias, sigmas[step],
-                        sigmas[step + 1]);
-                    // TODO(gpu): step progress and live previews through RecipeProgressAdapter and
-                    // LatentArchitecture.MiniMaxH3 are not wired yet.
-                }
+                x = RunSteps(x, sigmas, (current, sigma, sigmaNext) => DenoiseStep(current, layout, encoded, cos, sin,
+                    stackedWeight, stackedBias, sigma, sigmaNext), progress, cancel);
+                // TODO(gpu): live latent previews (LatentArchitecture.MiniMaxH3) are not wired yet; progress ticks are.
             }
             finally
             {
@@ -125,6 +120,12 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     /// refused upstream by the engine; these are the settings that reach the pipeline.</summary>
     internal static void RefuseUnsupported(ImageRequest request, ImageEffectiveSettings settings)
     {
+        if (request.Batch != 1)
+        {
+            throw new NotSupportedException(
+                $"MiniMax-H3-Image generates one image per request; got batch {request.Batch}. Send one request per image.");
+        }
+
         if (settings.Steps != RequiredSteps)
         {
             throw new NotSupportedException(
@@ -167,6 +168,21 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         // TODO(gpu): the encoder's preload and release calls are not wired here; the video pipeline frees the encoder
         // weights after encoding, which matters once the image path shares a device with the DiT.
         return _encoder.Encode(_textBackend, PresentPrompt(_tokenizer, prompt), null);
+    }
+
+    /// <summary>Runs the sampler's steps over <paramref name="sigmas"/>: one denoise call per adjacent sigma pair, in order.
+    /// Cancellation is checked before each step, and each finished step reports one progress tick.</summary>
+    internal static Tensor RunSteps(Tensor x, double[] sigmas, Func<Tensor, double, double, Tensor> denoise,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        int steps = sigmas.Length - 1;
+        for (int step = 0; step < steps; step++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            x = denoise(x, sigmas[step], sigmas[step + 1]);
+            progress?.Report(new StepPreview { Step = step + 1, TotalSteps = steps });
+        }
+        return x;
     }
 
     /// <summary>One sampler step: resolve the step's stacked head, run the image forward, and take the Euler step.</summary>

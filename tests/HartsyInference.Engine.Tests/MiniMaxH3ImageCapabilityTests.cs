@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Services;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
@@ -132,6 +133,77 @@ public sealed class MiniMaxH3ImageCapabilityTests
             Assert.Throws<NotSupportedException>(() =>
                 MiniMaxH3ImageRecipePipeline.RefuseUnsupported(request, Settings(2048, 2048, 6, 1f)));
         }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void BatchOtherThanOneIsRefusedBecauseEachImageIsOneRequest(int batch)
+    {
+        ImageRequest request = Request() with { Batch = batch };
+
+        Assert.Throws<NotSupportedException>(() =>
+            MiniMaxH3ImageRecipePipeline.RefuseUnsupported(request, Settings(2048, 2048, 6, 1f)));
+    }
+
+    [Fact]
+    public void StepRunnerCallsTheDenoiserOncePerSigmaPairInOrder()
+    {
+        double[] sigmas = [1.0, 0.75, 0.5, 0.0];
+        List<(double Sigma, double SigmaNext)> calls = [];
+        using Tensor start = new(new TensorShape(4), DType.F32);
+
+        MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) => { calls.Add((s, sn)); return x; },
+            progress: null, CancellationToken.None);
+
+        Assert.Equal([(1.0, 0.75), (0.75, 0.5), (0.5, 0.0)], calls);
+    }
+
+    [Fact]
+    public void StepRunnerReportsOneProgressTickPerFinishedStep()
+    {
+        double[] sigmas = [1.0, 0.75, 0.5, 0.0];
+        CollectingProgress progress = new();
+        using Tensor start = new(new TensorShape(4), DType.F32);
+
+        MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) => x, progress, CancellationToken.None);
+
+        Assert.Equal(3, progress.Ticks.Count);
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(i + 1, progress.Ticks[i].Step);
+            Assert.Equal(3, progress.Ticks[i].TotalSteps);
+        }
+    }
+
+    [Fact]
+    public void StepRunnerStopsBeforeTheNextStepWhenCancelled()
+    {
+        double[] sigmas = [1.0, 0.75, 0.5, 0.25, 0.0];
+        using CancellationTokenSource cancel = new();
+        int calls = 0;
+        using Tensor start = new(new TensorShape(4), DType.F32);
+
+        Assert.Throws<OperationCanceledException>(() =>
+            MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) =>
+            {
+                calls++;
+                if (calls == 2)
+                {
+                    cancel.Cancel();
+                }
+                return x;
+            }, progress: null, cancel.Token));
+
+        Assert.Equal(2, calls);
+    }
+
+    private sealed class CollectingProgress : IProgress<StepPreview>
+    {
+        public List<StepPreview> Ticks { get; } = [];
+
+        public void Report(StepPreview value) => Ticks.Add(value);
     }
 
     [Fact]
