@@ -38,7 +38,16 @@ public sealed class MeshService : IMeshService, IDisposable
     internal MeshService(InferenceEngine engine) => _engine = engine;
 
     /// <inheritdoc/>
-    public Task<MeshResult> GenerateAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
+    public async Task<MeshResult> GenerateAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(spec);
+        ArgumentNullException.ThrowIfNull(request);
+        string id = IdOf(spec);
+        MeshResult raw = await GenerateRawAsync(spec, request, progress, cancel).ConfigureAwait(false);
+        return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, cancel), cancel).ConfigureAwait(false);
+    }
+
+    private Task<MeshResult> GenerateRawAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
