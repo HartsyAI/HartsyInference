@@ -166,10 +166,11 @@ public sealed class MiniMaxH3ImageCapabilityTests
     {
         double[] sigmas = [1.0, 0.75, 0.5, 0.0];
         List<(double Sigma, double SigmaNext)> calls = [];
-        using Tensor start = new(new TensorShape(4), DType.F32);
+        Tensor start = new(new TensorShape(4), DType.F32);
 
-        MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) => { calls.Add((s, sn)); return x; },
+        MiniMaxH3ImageRecipePipeline.RunSteps(ref start, sigmas, (x, s, sn) => { calls.Add((s, sn)); return x; },
             progress: null, CancellationToken.None);
+        start.Dispose();
 
         Assert.Equal([(1.0, 0.75), (0.75, 0.5), (0.5, 0.0)], calls);
     }
@@ -179,9 +180,10 @@ public sealed class MiniMaxH3ImageCapabilityTests
     {
         double[] sigmas = [1.0, 0.75, 0.5, 0.0];
         CollectingProgress progress = new();
-        using Tensor start = new(new TensorShape(4), DType.F32);
+        Tensor start = new(new TensorShape(4), DType.F32);
 
-        MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) => x, progress, CancellationToken.None);
+        MiniMaxH3ImageRecipePipeline.RunSteps(ref start, sigmas, (x, s, sn) => x, progress, CancellationToken.None);
+        start.Dispose();
 
         Assert.Equal(3, progress.Ticks.Count);
         for (int i = 0; i < 3; i++)
@@ -197,10 +199,10 @@ public sealed class MiniMaxH3ImageCapabilityTests
         double[] sigmas = [1.0, 0.75, 0.5, 0.25, 0.0];
         using CancellationTokenSource cancel = new();
         int calls = 0;
-        using Tensor start = new(new TensorShape(4), DType.F32);
+        Tensor current = new(new TensorShape(4), DType.F32);
 
         Assert.Throws<OperationCanceledException>(() =>
-            MiniMaxH3ImageRecipePipeline.RunSteps(start, sigmas, (x, s, sn) =>
+            MiniMaxH3ImageRecipePipeline.RunSteps(ref current, sigmas, (x, s, sn) =>
             {
                 calls++;
                 if (calls == 2)
@@ -211,6 +213,36 @@ public sealed class MiniMaxH3ImageCapabilityTests
             }, progress: null, cancel.Token));
 
         Assert.Equal(2, calls);
+        current.Dispose();
+    }
+
+    [Fact]
+    public void StepRunnerKeepsTheLiveLatentWhenCancelledAfterAStepThatReplacedIt()
+    {
+        // Each step consumes its input and returns a new latent, as DenoiseStep does. After the cancel, the caller's variable
+        // must be the newest latent, so disposing it is the only release. Before the ref version it pointed at the consumed one.
+        double[] sigmas = [1.0, 0.75, 0.5, 0.25, 0.0];
+        using CancellationTokenSource cancel = new();
+        Tensor current = new(new TensorShape(4), DType.F32);
+        Tensor? lastReturned = null;
+        int calls = 0;
+
+        Assert.Throws<OperationCanceledException>(() =>
+            MiniMaxH3ImageRecipePipeline.RunSteps(ref current, sigmas, (x, s, sn) =>
+            {
+                calls++;
+                x.Dispose();
+                Tensor next = new(new TensorShape(4), DType.F32);
+                lastReturned = next;
+                if (calls == 1)
+                {
+                    cancel.Cancel();
+                }
+                return next;
+            }, progress: null, cancel.Token));
+
+        Assert.Same(lastReturned, current);
+        current.Dispose();
     }
 
     private sealed class CollectingProgress : IProgress<StepPreview>

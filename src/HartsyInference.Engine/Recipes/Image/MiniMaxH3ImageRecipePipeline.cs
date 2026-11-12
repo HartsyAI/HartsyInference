@@ -95,7 +95,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             try
             {
                 (Tensor stackedWeight, Tensor stackedBias) = StackedHead();
-                x = RunSteps(x, sigmas, (current, sigma, sigmaNext) => DenoiseStep(current, layout, encoded, cos, sin,
+                // x is passed by ref so this frame always holds the live latent, even if a later step is cancelled.
+                RunSteps(ref x, sigmas, (current, sigma, sigmaNext) => DenoiseStep(current, layout, encoded, cos, sin,
                     stackedWeight, stackedBias, sigma, sigmaNext), progress, cancel);
                 // TODO(gpu): live latent previews (LatentArchitecture.MiniMaxH3) are not wired yet; progress ticks are.
             }
@@ -181,7 +182,10 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
     /// <summary>Runs the sampler's steps over <paramref name="sigmas"/>: one denoise call per adjacent sigma pair, in order.
     /// Cancellation is checked before each step, and each finished step reports one progress tick.</summary>
-    internal static Tensor RunSteps(Tensor x, double[] sigmas, Func<Tensor, double, double, Tensor> denoise,
+    /// <remarks>The latent is passed by reference and replaced after every step, so the caller always holds the live tensor.
+    /// Each denoise call takes ownership of its input and returns the next latent; if a later step is cancelled, the caller
+    /// disposes the latent it holds, which is the one the last completed step returned.</remarks>
+    internal static void RunSteps(ref Tensor x, double[] sigmas, Func<Tensor, double, double, Tensor> denoise,
         IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         int steps = sigmas.Length - 1;
@@ -191,7 +195,6 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             x = denoise(x, sigmas[step], sigmas[step + 1]);
             progress?.Report(new StepPreview { Step = step + 1, TotalSteps = steps });
         }
-        return x;
     }
 
     /// <summary>One sampler step: resolve the step's stacked head, run the image forward, and take the Euler step.</summary>
