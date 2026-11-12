@@ -106,10 +106,11 @@ public static class MeshCleaner
     /// consistently wound, largest pair stays joined; the other faces are cut off along it, which gives them copies of its two vertices. Corners
     /// of one vertex stay one vertex while a chain of joined edges links their faces. Joins made for the next edge of a chain can link the
     /// faces of an edge whose own pair was cut off again at both ends; such an edge is then joined nowhere (its kept pair included) and the
-    /// grouping is redone. Removing joins can only split groups further, so one redo is enough: the second pass finds nothing new. An edge that
-    /// was already cut and whose faces other chains group back together at both of its ends would still keep them; none of the tests produces
-    /// one (all 19,683 chain patterns, 3,000 random junction meshes). Positions and faces are unchanged, so nothing is removed from the surface;
-    /// <see cref="RemoveNonManifoldFaces"/> is the variant that drops faces.</summary>
+    /// grouping is redone. Removing joins can only split groups further, so one redo is enough: the second pass finds nothing new. No edge keeps
+    /// more than two faces afterwards: a corner has two edges at its vertex and each gives it at most one join, so the corners of a vertex
+    /// group into paths and cycles; the faces of a cut edge are path ends, at most two per group. That assumes no face repeats a vertex
+    /// (<see cref="RemoveDegenerateFaces"/> runs first in <see cref="Clean"/>). Positions and faces are unchanged, so nothing is removed from the
+    /// surface; <see cref="RemoveNonManifoldFaces"/> is the variant that drops faces.</summary>
     public static Mesh RepairNonManifoldEdges(Mesh mesh)
     {
         Validate(mesh);

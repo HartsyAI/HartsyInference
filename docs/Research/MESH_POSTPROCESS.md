@@ -74,9 +74,10 @@ Measured on the TRELLIS.2 512 bust (seed 1), raw mesher output of 736,637 vertic
 - Our cleaner made it worse: `RepairNonManifoldEdges` dropped faces, which cut cracks along the non-manifold chains (a 12,789-edge loop of
   perimeter 25.8 on the bust, visible as dark lines across the jacket). Upstream's `repair_non_manifold_edges` splits vertices instead. It does now, and
   checks its own result: when the pairs kept at neighbouring edges of a chain join all the faces of one edge back together at both ends, that edge is
-  cut as well (its kept pair included, which can leave a one-edge slit where keeping a pair was possible) and the grouping redone, once: no edge keeps
-  more than two faces in any test (all 19,683 chain patterns, 3,000 random junction meshes), though a cut edge whose faces other chains group back
-  together at both ends would keep them.
+  cut as well (its kept pair included, which can leave a one-edge slit where keeping a pair was possible) and the grouping redone, once, and no edge keeps
+  more than two faces afterwards: a corner has two edges at its vertex and each gives it at most one join, so the corners of a vertex group into
+  paths and cycles, and the faces of a cut edge are path ends, at most two per group (it assumes no degenerate faces, which `Clean` removes first;
+  tested on all 19,683 chain patterns and 3,000 random junction meshes).
   The pair kept at an edge is the consistently wound one, then the larger by area (the area term used to be lost to a `1e30` bonus added to it).
 - Fins cut off by the repair are vertex-disconnected from the surface, so `RemoveSmallComponents` drops the small ones, as upstream's order does
   (repair, small components, fill holes). Hole filling skips a lone triangle (its cap would be the same face reversed); a larger cut-off fin whose
