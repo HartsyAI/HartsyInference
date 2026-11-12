@@ -15,8 +15,14 @@ public sealed unsafe class SlatGaussianDecoder
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _inW = w["input_layer.weight"]; _inB = F(w, "input_layer.bias");   // GEMM weight native F16 (F32-accum GEMM); see SsFlowBlock
+        LoadTrunkWeights(w);
         _outW = w["out_layer.weight"]; _outB = F(w, "out_layer.bias");
+    }
+
+    /// <summary>Loads the input layer and the 12 transformer blocks only (the trunk a decoder with another head shares, such as SAM 3D's mesh decoder).</summary>
+    public void LoadTrunkWeights(IReadOnlyDictionary<string, Tensor> w)
+    {
+        _inW = w["input_layer.weight"]; _inB = F(w, "input_layer.bias");   // GEMM weight native F16 (F32-accum GEMM); see SsFlowBlock
         for (int i = 0; i < 12; i++) _blocks[i] = GsBlock.Load(w, $"blocks.{i}");
     }
 
@@ -30,10 +36,20 @@ public sealed unsafe class SlatGaussianDecoder
     public SparseTensor Forward(IBackend backend, SparseTensor x)
     {
         int n = x.Count;
+        SparseTensor h = Trunk(backend, x);
+        Tensor normed = new(new TensorShape(1, n, Width), DType.F32); backend.LayerNormNoAffine(normed, SparseOps.As3D(h.Feats), 1e-5f);
+        Tensor outFeats = SlatLinear(backend, normed, _outW!, _outB!, n); normed.Dispose();
+        return h.Replace(outFeats);
+    }
+
+    /// <summary>The input layer, the absolute position embedding and the 12 swin blocks (upstream's <c>SparseTransformerBase.forward</c>): per-voxel features <c>[1, N, 768]</c>.</summary>
+    public SparseTensor Trunk(IBackend backend, SparseTensor x)
+    {
+        int n = x.Count;
         Tensor h0 = SlatLinear(backend, x.Feats, _inW!, _inB!, n);
         SparseTensor h = x.Replace(h0);
         Tensor ape = SlatFlowModel.AbsolutePositionEmbed(x.Coords, n, Width);
-        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, ape); ape.Dispose();
+        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, ape); ape.Dispose(); h0.Dispose();
         h = h.Replace(hAdd);
 
         // Two block-diagonal window masks (shift 0 and window/2), reused across alternating blocks.
@@ -45,15 +61,14 @@ public sealed unsafe class SlatGaussianDecoder
         for (int i = 0; i < 12; i++)
         {
             Tensor nf = _blocks[i].Forward(backend, cur, (i % 2 == 0) ? mask0 : mask4, n);
+            // The first block's input is hAdd, which h still references: free it here, once the first block has consumed it.
             if (!ReferenceEquals(cur, h.Feats)) cur.Dispose();
+            else hAdd.Dispose();
             cur = nf;
         }
         h = h.Replace(cur);
         mask0.Dispose(); mask4.Dispose();
-
-        Tensor normed = new(new TensorShape(1, n, Width), DType.F32); backend.LayerNormNoAffine(normed, SparseOps.As3D(h.Feats), 1e-5f);
-        Tensor outFeats = SlatLinear(backend, normed, _outW!, _outB!, n); normed.Dispose();
-        return h.Replace(outFeats);
+        return h;
     }
 
     /// <summary>Block-diagonal attention mask <c>[1,1,N,N]</c>: 0 where two voxels share the same <c>((coord+shift)/window)</c> cube, −1e30 otherwise.</summary>
