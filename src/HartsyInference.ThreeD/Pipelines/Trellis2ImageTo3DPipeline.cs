@@ -306,22 +306,22 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
         ShapeVaeSubdivisions? guides = textured ? new ShapeVaeSubdivisions() : null;
         try
         {
-            Begin("Image conditioning", 1);
+            Begin(MeshStageNames.ImageConditioning, 1);
             cond = _conditioner.Encode(Backend, prepared, CoarseConditioning);
             negCond = Zeros(cond.Shape);
             done++;
             Report();
 
-            Begin("Structure flow", structureParams.Steps);
+            Begin(MeshStageNames.StructureFlow, structureParams.Steps);
             int[] voxels = _structure.Sample(Backend, cond, negCond, seed, structureParams, StructureGrid, Tick);
-            Begin("Shape flow 512", shapeParams.Steps);
+            Begin(MeshStageNames.ShapeFlow512, shapeParams.Steps);
             coarse = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res512, voxels, StructureGrid, cond, negCond, unchecked(seed + 1), shapeParams, Tick);
 
             SparseTensor latent;
             int resolution;
             if (cascade)
             {
-                Begin("Upsample", 1);
+                Begin(MeshStageNames.Upsample, 1);
                 int[] upsampled = _upsampler.Upsample(Backend, coarse, UpsampleLevels);
                 coarse.Feats.Dispose();
                 coarse = null;
@@ -331,7 +331,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                     upsampled, CoarseShapeResolution, (int)type, _maxTokens);
                 fineCond = _conditioner.Encode(Backend, prepared, FineConditioning);
                 fineNeg = Zeros(fineCond.Shape);
-                Begin("Shape flow 1024", shapeParams.Steps);
+                Begin(MeshStageNames.ShapeFlow1024, shapeParams.Steps);
                 fine = _shape.Sample(
                     Backend, Trellis2ShapeFlowKind.Res1024, fineCoords, fineResolution / Trellis2Cascade.LatentStride,
                     fineCond, fineNeg, unchecked(seed + 2), shapeParams, Tick);
@@ -344,13 +344,13 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 resolution = (int)type;
             }
 
-            Begin("Shape decode", 1);
+            Begin(MeshStageNames.ShapeDecode, 1);
             DualGridField field = guides is null
                 ? _decoder.Decode(Backend, latent)
                 : ((ISparseShapeSubdivisionDecoder)_decoder).Decode(Backend, latent, guides);
             done++;
             Report();
-            Begin("Mesh extraction", 1);
+            Begin(MeshStageNames.MeshExtraction, 1);
             SceneGrid grid = new() { Resolution = resolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / resolution };
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
@@ -370,14 +370,14 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             // The texture flow stage sweeps the device before it starts; the guides the texture decoder reads later must survive that.
             for (int level = 0; level < guides!.Count; level++)
                 Backend.OffloadActivation(guides.Level(level));
-            Begin("Texture flow", textureParams!.Steps);
+            Begin(MeshStageNames.TextureFlow, textureParams!.Steps);
             textureLatent = _textureFlow!.Sample(
                 Backend, textureKind, latent, texCond, texNeg, unchecked(seed + 3), textureParams!, Tick);
-            Begin("Texture decode", 1);
+            Begin(MeshStageNames.TextureDecode, 1);
             textureVoxels = _textureDecoder!.Decode(Backend, textureLatent, guides!);
             done++;
             Report();
-            Begin("Texture bake", 1);
+            Begin(MeshStageNames.TextureBake, 1);
             SparseAttributeVolume volume = BuildVolume(textureVoxels, resolution);
             PbrPostProcessOptions post = new()
             {
