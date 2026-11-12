@@ -47,6 +47,8 @@ public sealed class SamMeshCornerGrid
         if (cubes.Length % 3 != 0 || channels <= 0)
             throw new ArgumentException("Cube coordinates are triples and the channel count is positive.");
         int m = cubes.Length / 3;
+        if (cubes.Any(c => c < 0 || c > MaxCoordinate))
+            throw new ArgumentException($"Cube coordinates are 0 to {MaxCoordinate}.", nameof(cubes));
         if (values.Length != (long)m * 8 * channels)
             throw new ArgumentException($"{m} cubes of 8 corners with {channels} channels hold {(long)m * 8 * channels} values; got {values.Length}.", nameof(values));
 
@@ -91,10 +93,13 @@ public sealed class SamMeshCornerGrid
         return new SamMeshCornerGrid(points, corners, sums, channels);
     }
 
-    // 21 bits per axis: a corner of a 256 grid is at most 256, with room to spare.
-    private static long Pack(int x, int y, int z) => ((long)x << 42) | ((long)y << 21) | (uint)z;
+    /// <summary>The largest cube coordinate: a corner packs into 21 bits per axis.</summary>
+    public const int MaxCoordinate = (1 << 21) - 2;
 
-    private static void Unpack(long key, out int x, out int y, out int z)
+    // 21 bits per axis: a corner of a 256 grid is at most 256, with room to spare.
+    internal static long Pack(int x, int y, int z) => ((long)x << 42) | ((long)y << 21) | (uint)z;
+
+    internal static void Unpack(long key, out int x, out int y, out int z)
     {
         x = (int)(key >> 42);
         y = (int)((key >> 21) & 0x1FFFFF);

@@ -45,6 +45,8 @@ public static class SamSparseFeatures2Mesh
         float[] cornerValues = new float[(long)m * 8 * 10];
         for (int i = 0; i < m; i++)
         {
+            if (coords[i * 4] != 0)
+                throw new ArgumentException($"Voxel {i} is in batch {coords[i * 4]}; the extraction takes one mesh at a time (batch 0).", nameof(coords));
             cubes[i * 3] = coords[i * 4 + 1];
             cubes[i * 3 + 1] = coords[i * 4 + 2];
             cubes[i * 3 + 2] = coords[i * 4 + 3];
@@ -71,7 +73,7 @@ public static class SamSparseFeatures2Mesh
         List<float[]> position = new(grid.PointCount), colour = new(grid.PointCount);
         for (int p = 0; p < grid.PointCount; p++)
         {
-            long key = Pack(grid.Points[p * 3], grid.Points[p * 3 + 1], grid.Points[p * 3 + 2]);
+            long key = SamMeshCornerGrid.Pack(grid.Points[p * 3], grid.Points[p * 3 + 1], grid.Points[p * 3 + 2]);
             vertexOf[key] = p;
             keys.Add(key);
             float[] a = grid.Attributes[(p * 10)..(p * 10 + 10)];
@@ -82,7 +84,7 @@ public static class SamSparseFeatures2Mesh
 
         int Vertex(int x, int y, int z)
         {
-            long key = Pack(x, y, z);
+            long key = SamMeshCornerGrid.Pack(x, y, z);
             if (vertexOf.TryGetValue(key, out int existing))
                 return existing;
             int index = keys.Count;
@@ -104,13 +106,13 @@ public static class SamSparseFeatures2Mesh
             {
                 int cx = grid.Points[p * 3] - SamMeshCornerGrid.CornerOffsets[j][0], cy = grid.Points[p * 3 + 1] - SamMeshCornerGrid.CornerOffsets[j][1], cz = grid.Points[p * 3 + 2] - SamMeshCornerGrid.CornerOffsets[j][2];
                 if (cx >= 0 && cx < resolution && cy >= 0 && cy < resolution && cz >= 0 && cz < resolution)
-                    candidates.Add(Pack(cx, cy, cz));
+                    candidates.Add(SamMeshCornerGrid.Pack(cx, cy, cz));
             }
         }
 
         Dictionary<long, int> voxelOf = new(m);
         for (int i = 0; i < m; i++)
-            voxelOf[Pack(cubes[i * 3], cubes[i * 3 + 1], cubes[i * 3 + 2])] = i;
+            voxelOf[SamMeshCornerGrid.Pack(cubes[i * 3], cubes[i * 3 + 1], cubes[i * 3 + 2])] = i;
 
         long[] cubeKeys = [.. candidates.Order()];
         int n = cubeKeys.Length;
@@ -119,7 +121,7 @@ public static class SamSparseFeatures2Mesh
         bool[] surface = new bool[n];
         for (int c = 0; c < n; c++)
         {
-            Unpack(cubeKeys[c], out int cx, out int cy, out int cz);
+            SamMeshCornerGrid.Unpack(cubeKeys[c], out int cx, out int cy, out int cz);
             int caseId = 0, inside = 0;
             for (int j = 0; j < 8; j++)
             {
@@ -141,11 +143,11 @@ public static class SamSparseFeatures2Mesh
             return new SamMeshResult([], [], []);
 
         ResolveAmbiguousCases(cubeKeys, surfaceCubes, cubeCase, tables, resolution);
-        return Triangulate(cubeKeys, corner, surfaceCubes, cubeCase, voxelOf, features, keys, sdf, position, colour, tables);
+        return Triangulate(cubeKeys, corner, surfaceCubes, cubeCase, voxelOf, features, keys, vertexOf, sdf, position, colour, tables);
     }
 
     // The cases whose check flag is set are resolved against the cube they point at, as upstream's _get_case_id does, from the cases as they were before any was replaced.
-    private static void ResolveAmbiguousCases(long[] cubeKeys, int[] surfaceCubes, int[] cubeCase, SamFlexiCubesTables tables, int resolution)
+    internal static void ResolveAmbiguousCases(long[] cubeKeys, int[] surfaceCubes, int[] cubeCase, SamFlexiCubesTables tables, int resolution)
     {
         Dictionary<long, int> flagged = [];
         foreach (int c in surfaceCubes)
@@ -160,11 +162,11 @@ public static class SamSparseFeatures2Mesh
             int config = cubeCase[c];
             if (tables.Check[config * 5] != 1)
                 continue;
-            Unpack(cubeKeys[c], out int cx, out int cy, out int cz);
+            SamMeshCornerGrid.Unpack(cubeKeys[c], out int cx, out int cy, out int cz);
             int nx = cx + tables.Check[config * 5 + 1], ny = cy + tables.Check[config * 5 + 2], nz = cz + tables.Check[config * 5 + 3];
             if (nx < 0 || nx >= resolution || ny < 0 || ny >= resolution || nz < 0 || nz >= resolution)
                 continue;
-            if (flagged.ContainsKey(Pack(nx, ny, nz)))
+            if (flagged.ContainsKey(SamMeshCornerGrid.Pack(nx, ny, nz)))
                 replacements.Add((c, tables.Check[config * 5 + 4]));
         }
 
@@ -174,7 +176,7 @@ public static class SamSparseFeatures2Mesh
 
     private static SamMeshResult Triangulate(
         long[] cubeKeys, int[] corner, int[] surfaceCubes, int[] cubeCase, Dictionary<long, int> voxelOf, float[] features,
-        List<long> keys, List<float> sdf, List<float[]> position, List<float[]> colour, SamFlexiCubesTables tables)
+        List<long> keys, Dictionary<long, int> indexOfKey, List<float> sdf, List<float[]> position, List<float[]> colour, SamFlexiCubesTables tables)
     {
         int s = surfaceCubes.Length;
 
@@ -193,9 +195,6 @@ public static class SamSparseFeatures2Mesh
         int[] counts = new int[distinct.Length];
         foreach ((long, long) pair in all)
             counts[distinctId[pair]]++;
-        Dictionary<long, int> indexOfKey = new(keys.Count);
-        for (int v = 0; v < keys.Count; v++)
-            indexOfKey[keys[v]] = v;
         int[] surfaceEdgeOf = new int[distinct.Length];
         List<int> surfaceEdgeA = [], surfaceEdgeB = [];
         for (int d = 0; d < distinct.Length; d++)
@@ -217,8 +216,8 @@ public static class SamSparseFeatures2Mesh
         float[] beta = new float[s * 12], alpha = new float[s * 8], gamma = new float[s];
         for (int i = 0; i < s; i++)
         {
-            Unpack(cubeKeys[surfaceCubes[i]], out int cx, out int cy, out int cz);
-            long weights = voxelOf.TryGetValue(Pack(cx, cy, cz), out int voxel) ? (long)voxel * SlatMeshDecoder.OutChannels + 32 : -1;
+            SamMeshCornerGrid.Unpack(cubeKeys[surfaceCubes[i]], out int cx, out int cy, out int cz);
+            long weights = voxelOf.TryGetValue(SamMeshCornerGrid.Pack(cx, cy, cz), out int voxel) ? (long)voxel * SlatMeshDecoder.OutChannels + 32 : -1;
             for (int e = 0; e < 12; e++)
                 beta[i * 12 + e] = (float)(Math.Tanh(weights < 0 ? 0 : features[weights + e]) * 0.99 + 1);
             for (int j = 0; j < 8; j++)
@@ -288,7 +287,8 @@ public static class SamSparseFeatures2Mesh
             }
         }
 
-        (int Edge, int Vertex)[] ordered = [.. incidences.Select((x, index) => (x, index)).OrderBy(p => p.x.Edge).ThenBy(p => p.index).Select(p => p.x)];
+        // OrderBy is stable: incidences of one edge stay in cube order.
+        (int Edge, int Vertex)[] ordered = [.. incidences.OrderBy(x => x.Edge)];
         List<int[]> flipped = [], unflipped = [];
         for (int q = 0; q + 3 < ordered.Length; q += 4)
         {
@@ -330,13 +330,4 @@ public static class SamSparseFeatures2Mesh
     }
 
     private static float Sigmoid(float v) => (float)(1.0 / (1.0 + Math.Exp(-v)));
-
-    private static long Pack(int x, int y, int z) => ((long)x << 42) | ((long)y << 21) | (uint)z;
-
-    private static void Unpack(long key, out int x, out int y, out int z)
-    {
-        x = (int)(key >> 42);
-        y = (int)((key >> 21) & 0x1FFFFF);
-        z = (int)(key & 0x1FFFFF);
-    }
 }

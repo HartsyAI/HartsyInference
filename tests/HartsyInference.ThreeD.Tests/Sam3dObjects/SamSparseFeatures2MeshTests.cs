@@ -47,7 +47,8 @@ public sealed class SamSparseFeatures2MeshTests
                 }
 
                 Assert.True(slot <= 7);
-                groups++;
+                if (slot > 0)
+                    groups++;
             }
 
             numVd[c] = groups;
@@ -172,5 +173,84 @@ public sealed class SamSparseFeatures2MeshTests
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(new int[10], 4, new int[256], new int[1280]));
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(new int[256 * 4 * 7], 4, new int[255], new int[1280]));
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(new int[256 * 4 * 7], 4, Enumerable.Repeat(5, 256).ToArray(), new int[1280]));
+    }
+
+    [Fact]
+    public void Tables_RejectValuesOutOfRange()
+    {
+        int[] Valid() => [.. ComponentTables().Dmc];
+        int[] numVd = [.. ComponentTables().NumVd];
+        int[] check = new int[1280];
+        int[] bad = Valid();
+        bad[2] = 12;
+        Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(bad, 4, numVd, check));
+        int[] flag = new int[1280];
+        flag[5 * 3] = 2;
+        Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, flag));
+        int[] replacement = new int[1280];
+        replacement[7 * 5 + 4] = 256;
+        Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, replacement));
+        // A case that emits a vertex but lists no edge for it.
+        int[] empty = Valid();
+        Array.Fill(empty, -1, 1 * 4 * 7, 7);
+        Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(empty, 4, numVd, check));
+    }
+
+    [Fact]
+    public void ResolveAmbiguousCases_SwapsCasesAgainstTheCasesAsTheyWereAndLeavesLoneOrOutOfRangeOnesAlone()
+    {
+        // Case 1 is flagged, looks at the cube at +x and becomes case 10; case 2 is flagged, looks at -x and becomes case 20.
+        int[] check = new int[1280];
+        check[1 * 5] = 1;
+        check[1 * 5 + 1] = 1;
+        check[1 * 5 + 4] = 10;
+        check[2 * 5] = 1;
+        check[2 * 5 + 1] = -1;
+        check[2 * 5 + 4] = 20;
+        SamFlexiCubesTables tables = new(new int[256 * 4 * 7], 4, new int[256], check);
+        // A (2,2,2) case 1 and B (3,2,2) case 2 look at each other; C (5,5,5) case 1 looks at (6,5,5), which is not a cube here; D (0,0,0) case 2 looks at x = -1, outside the grid.
+        long[] keys = [SamMeshCornerGrid.Pack(2, 2, 2), SamMeshCornerGrid.Pack(3, 2, 2), SamMeshCornerGrid.Pack(5, 5, 5), SamMeshCornerGrid.Pack(0, 0, 0)];
+        int[] cases = [1, 2, 1, 2];
+
+        SamSparseFeatures2Mesh.ResolveAmbiguousCases(keys, [0, 1, 2, 3], cases, tables, 16);
+
+        // Both of the pair are replaced (B is checked against A as A was, not as A became); the others are not.
+        Assert.Equal([10, 20, 1, 2], cases);
+    }
+
+    [Fact]
+    public void Extract_InterpolatesTheColoursAlongTheEdgesItCrosses()
+    {
+        const int res = 8;
+        (int[] coords, float[] features) = SphereFeatures(res, 0.3);
+        for (int i = 0; i < coords.Length / 4; i++)
+        {
+            // Colour channel 0 of every corner grows with x, so the sigmoid colour of a vertex grows with its x.
+            for (int j = 0; j < 8; j++)
+                features[i * 101 + 53 + j * 6] = 4f * ((coords[i * 4 + 1] + SamMeshCornerGrid.CornerOffsets[j][0]) / (float)res - 0.5f) * 2f;
+        }
+
+        SamMeshResult mesh = SamSparseFeatures2Mesh.Extract(coords, features, ComponentTables(), res);
+
+        for (int v = 0; v < mesh.VertexCount; v++)
+        {
+            double expectedLogit = 4.0 * (mesh.Vertices[v * 3] + 0.5 - 0.5) * 2.0;
+            double colour = mesh.Colors[v * 6];
+            // The mix is of sigmoids of corner values, so it lies between the sigmoids at the voxel's x extremes and grows with x.
+            Assert.InRange(colour, 0.0, 1.0);
+            Assert.True(Math.Abs(colour - 1.0 / (1.0 + Math.Exp(-expectedLogit))) < 0.2, $"vertex {v}: colour {colour}");
+            Assert.Equal(0.5f, mesh.Colors[v * 6 + 1], 4);
+        }
+
+        Assert.True(Enumerable.Range(0, mesh.VertexCount).Select(v => mesh.Colors[v * 6]).Distinct().Count() > 10);
+    }
+
+    [Fact]
+    public void Extract_RejectsAVoxelOfAnotherBatchAndTheLatticeRejectsNegativeCoordinates()
+    {
+        float[] outside = new float[101];
+        Array.Fill(outside, 1f, 0, 8);
+        Assert.Throws<ArgumentException>(() => SamSparseFeatures2Mesh.Extract([1, 3, 3, 3], outside, ComponentTables(), 16));
+        Assert.Throws<ArgumentException>(() => SamMeshCornerGrid.Build([0, -1, 0], new float[8], 1));
     }
 }

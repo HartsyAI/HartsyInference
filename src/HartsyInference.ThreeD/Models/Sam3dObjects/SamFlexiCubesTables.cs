@@ -32,6 +32,24 @@ public sealed class SamFlexiCubesTables
             throw new ArgumentException($"The check table holds {Cases} x 5 entries; got {check.Length}.", nameof(check));
         if (numVd.Any(n => n < 0 || n > maxVertices))
             throw new ArgumentException($"A case emits more than {maxVertices} dual vertices.", nameof(numVd));
+        if (dmc.Any(e => e < -1 || e > 11))
+            throw new ArgumentException("A dual-vertex edge index is outside -1 (padding) to 11.", nameof(dmc));
+        for (int c = 0; c < Cases; c++)
+        {
+            if (check[c * 5] is not (0 or 1))
+                throw new ArgumentException($"The check flag of case {c} is {check[c * 5]}; it is 0 or 1.", nameof(check));
+            if (check[c * 5 + 4] < 0 || check[c * 5 + 4] >= Cases)
+                throw new ArgumentException($"The replacement case of case {c} is {check[c * 5 + 4]}; it is 0 to {Cases - 1}.", nameof(check));
+            for (int g = 0; g < numVd[c]; g++)
+            {
+                bool any = false;
+                for (int t = 0; t < EdgesPerVertex; t++)
+                    any |= dmc[(c * maxVertices + g) * EdgesPerVertex + t] >= 0;
+                if (!any)
+                    throw new ArgumentException($"Case {c} emits dual vertex {g} but lists no edge for it.", nameof(dmc));
+            }
+        }
+
         Dmc = dmc;
         MaxVertices = maxVertices;
         NumVd = numVd;
