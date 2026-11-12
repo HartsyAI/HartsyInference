@@ -175,7 +175,7 @@ internal static class MeshModelProfiles
     }
 
     private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
-        ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (GLB with vertex colours) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
+        ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
         : Rejected(nameof(MeshRequest.Mesh));
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)

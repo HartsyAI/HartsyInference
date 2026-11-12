@@ -792,7 +792,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     if (result.Mesh is { FaceCount: > 0 } meshResult)
                     {
                         Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, mesh {meshResult.VertexCount} vertices and {meshResult.FaceCount} triangles from {result.Voxels} voxels");
-                        return new MeshResult { Data = GlbWriter.Write(Sam3dObjectsMesh.ToMesh(meshResult), vertexColors: true), Format = "glb" };
+                        return new MeshResult { Data = GlbWriter.Write(Sam3dObjectsMesh.ToMesh(meshResult)), Format = "glb" };
                     }
 
                     if (request.Mesh)

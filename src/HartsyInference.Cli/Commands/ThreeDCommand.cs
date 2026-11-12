@@ -55,7 +55,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>SAM 3D Objects: return a triangle mesh (GLB) instead of Gaussian splats (PLY).</summary>
         [CommandOption("--mesh")]
-        [Description("sam3d-objects: return a triangle mesh (GLB with vertex colours) instead of Gaussian splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")]
+        [Description("sam3d-objects: return a triangle mesh (geometry-only GLB) instead of Gaussian splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")]
         public bool Mesh { get; init; }
 
         /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 and Pixal3D).</summary>
