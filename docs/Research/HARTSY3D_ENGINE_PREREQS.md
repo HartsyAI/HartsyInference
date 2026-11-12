@@ -17,7 +17,7 @@ host types never enter the engine.
 | `IModelPrefetchService` | Handles `Transcribe`, `Speech` and `Music` only; `Modality.Mesh` returns `Unsupported`. The catalog downloader (`ModelDownloader`, `ModelAsset`) already knows every mesh asset's repo, path, folder and sha256. |
 | Recipe describe routes | `POST /v1/native/recipes/describe` takes `image` or `video` only. `ParameterProvenance`, `ResolvedParameter`, `RecipeIdentity` and `VideoPlanIssue` are public and reusable. |
 | Request mappers as one source of truth | They are not: `Trellis2RequestMapper`, `Pixal3DRequestMapper`, `HairDeckRequestMapper`, `Sam3dObjectsRequestMapper` hold the rejection rules and defaults, but `MeshService` re-checks per branch (`GeneratePaintAsync`, `GeneratePartAsync`, `GenerateRiggedAsync`, `GenerateSceneAsync` each carry their own `NotSupportedException` lines), and the ranges (grid values, texture size 16 to 8192, field of view) live in the pipelines' `ValidateRequest`. |
-| Seeds | `request.Seed < 0 ? null : (int)request.Seed` is unchecked in the generic branch (TripoSR, Hunyuan3D, TRELLIS): 2^32 + 5 runs as 5. TRELLIS.2, Pixal3D, SAM 3D, P3-SAM and Paint throw `ArgumentOutOfRangeException` above `int.MaxValue`. HairDeck takes the full `long` (its `HairDeckOptions.Seed` is `long`). The resolved seed of a negative request is not returned anywhere (HairDeck draws it inside the mapper). |
+| Seeds | `request.Seed < 0 ? null : (int)request.Seed` is unchecked in the generic branch (TripoSR, Hunyuan3D, TRELLIS) and in `GenerateRiggedAsync` (UniRig): 2^32 + 5 runs as 5, and 2^31 to 2^32 - 1 wrap to a negative `int`. TRELLIS.2, Pixal3D, SAM 3D, P3-SAM and Paint throw `ArgumentOutOfRangeException` above `int.MaxValue`. HairDeck takes the full `long` (its `HairDeckOptions.Seed` is `long`). The resolved seed of a negative request is not returned anywhere (HairDeck draws it inside the mapper). |
 | Progress | `StepPreview { Step, TotalSteps, Preview* }`, one counter per stage. Pixal3D and TRELLIS.2 report `GenerationProgress` per stage and the service forwards it as is, so the number resets between stages. HairDeck reports none; the preprocessing (SAM 3, BiRefNet, DINOv3) never reads the token (`HairDeckRuntime.Preprocessor.Process(source)` takes none). |
 | Cancellation and OOM | `MeshService` does not run under `InferenceEngine.GenerateWithVramCleanup`; only `ImagesService` and the refiner do. A TRELLIS.2 or Pixal3D out-of-memory failure therefore leaves its half-loaded stage weights resident. `FreeMemory()` disposes the whole `MeshService`; there is no listing and no per-model free. |
 | Models added since the handoff | Catalog ids `hunyuan3d-paint` (2.0 albedo) and `hunyuan3d-paint21` (2.1 PBR) texture a mesh; `hunyuan3d-part` (P3-SAM) segments a mesh into parts and fills `MeshResult.Parts`; `sam3d-objects` lifts an object from an image plus mask (alpha plane) to a splat PLY; `pixal3d` has `Texture` and F16 flow weights through `numerics.flowF16Weights`; `unirig` rigs. Hunyuan3D-2.1 shape and X-Part have no catalog id and no engine wiring (X-Part's ShapeVAE encoder, conditioner and DiT are ported; sampler, pipeline and wiring are not). `hunyuan3d-mv` is catalogued but has no mesh path. |
@@ -25,7 +25,8 @@ host types never enter the engine.
 Frames today (read from code comments and the status doc, not measured on real output): TRELLIS.2 shape-only is rotated to Y-up in the
 pipeline and the textured GLB converts Z-up to Y-up in `ToGlb`; Pixal3D exports in its sampling frame turned a half turn about Y;
 Hunyuan3D and TripoSR emit the grid of their decoders, not metres; UniRig works in a normalised box of about [-1, 1]; SAM 3D splats stay
-in the object frame. No model records its frame or its unit.
+in the object frame; CoLa3D (`GenerateSceneAsync`) returns its objects in the scene mesh's frame; P3-SAM and Paint take a mesh in and keep the
+frame it was given. No model records its frame or its unit.
 
 ## Proposed contract (additive only)
 
@@ -111,13 +112,13 @@ resolved seed, the effective `MeshRequest` fields as `ResolvedParameter`s, engin
 `hartsyinference` object) through a new optional `extras` argument on `GlbWriter` and `PbrGlbWriter` (existing overloads stay); PLY
 gets `comment` lines. Seeds: one shared `MeshSeed.Resolve(long)` returns the 32-bit seed for every model and throws
 `ArgumentOutOfRangeException` above `int.MaxValue`, replacing the unchecked cast. That tightens validation for a caller passing a
-seed above `int.MaxValue` to TripoSR, Hunyuan3D or TRELLIS (today it wraps silently), so it is listed below. HairDeck keeps its
+seed above `int.MaxValue` to TripoSR, Hunyuan3D, TRELLIS or UniRig (today it wraps silently, and 2^31 to 2^32 - 1 become negative seeds whose meaning depends on the sampler), so it is listed below. HairDeck keeps its
 `long` range and says so in its profile.
 
 ### 6. Progress and cancellation
 
 `StepPreview` gains `init` properties `Stage` (`string?`), `StageIndex`, `StageCount` and `OverallFraction` (`float?`, 0 to 1); `Step`
-and `TotalSteps` keep their meaning (the current stage's counter). `StepPreviewPayload` adds the same fields as optional JSON. Each
+and `TotalSteps` keep their meaning (the current stage's counter). `StepPreview` is a `readonly record struct`, so the added fields are additive and cost each progress callback a slightly larger copy, which is negligible. `StepPreviewPayload` adds the same fields as optional JSON. Each
 multi-stage pipeline declares its stages with relative weights (a measured share where one exists, equal otherwise) in its profile,
 and a small `MeshProgress` adapter maps a pipeline's `GenerationProgress` to the stage, so the fraction never moves backwards. HairDeck
 reports its stages (matte, image sampler, colour, chains) and `/stream` forwards them. Cancellation: the HairDeck preprocessor and the
@@ -139,10 +140,10 @@ cached one believes its weights are resident), and the same cleanup around every
    and TRELLIS for callers that already prepared the image).
 2. `Frame` default `Native` (additive, proposed) or the normalised frame (every current GLB consumer sees a rotated or rescaled model).
 3. `PreviewTriangles` default 0 (proposed) or 200,000.
-4. The seed range check on the generic branch: a seed above `int.MaxValue` now throws instead of wrapping.
+4. The seed range check on the generic branch and UniRig: a seed above `int.MaxValue` now throws instead of wrapping.
 5. A mesh-specific issue type (`MeshPlanIssue`) instead of reusing `VideoPlanIssue`, whose name says video.
 
-Items 1, 2, 3 and 5 are not breaking in the form proposed. Item 4 is a validation tightening on a path that was already silently wrong.
+Items 1, 2 and 3 are not breaking in the form proposed. Item 4 is a validation tightening on paths that were already silently wrong. Item 5 is a naming decision that changes no behaviour.
 
 ## Order of the PRs
 
