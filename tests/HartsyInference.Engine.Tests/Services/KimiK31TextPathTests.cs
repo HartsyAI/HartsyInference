@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Sampling;
@@ -144,6 +145,71 @@ public sealed class KimiK31TextPathTests : IDisposable
 
         HartsyInferenceException refused = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
         Assert.Contains("tiktoken.model", refused.Message);
+    }
+
+    [Fact]
+    public void A_tiktoken_only_checkpoint_loads_on_the_builtin_kimi_template()
+    {
+        string dir = WriteTiktokenCheckpoint("tiktoken-route", withJinja: false);
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend);
+
+        KimiK31TextModel text = Assert.IsType<KimiK31TextModel>(model);
+        Assert.IsType<KimiK31ChatTemplate>(text.Template);
+        Assert.Equal(TiktokenBos, text.Tokenizer.BosId);
+        Assert.Equal(TiktokenEos, text.Tokenizer.EosId);
+    }
+
+    [Fact]
+    public void A_tiktoken_checkpoint_with_a_chat_template_file_uses_that_template()
+    {
+        string dir = WriteTiktokenCheckpoint("tiktoken-jinja", withJinja: true);
+
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend);
+
+        Assert.IsType<JinjaChatTemplate>(Assert.IsType<KimiK31TextModel>(model).Template);
+    }
+
+    [Fact]
+    public void A_tiktoken_checkpoint_without_its_tiktoken_file_is_refused_by_name()
+    {
+        string dir = WriteCheckpoint("no-tiktoken");
+        File.Delete(Path.Combine(dir, "tokenizer.json"));
+        File.Delete(Path.Combine(dir, "chat_template.jinja"));
+
+        HartsyInferenceException refused = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(Probe(dir)));
+        Assert.Contains("tiktoken.model", refused.Message);
+    }
+
+    // Named specials sit right above a 256-byte rank file plus three merges, so the config's bos and eos ids are rewritten to match.
+    private const int TiktokenBos = 259, TiktokenEos = 260;
+
+    private string WriteTiktokenCheckpoint(string name, bool withJinja)
+    {
+        string dir = WriteCheckpoint(name);
+        File.Delete(Path.Combine(dir, "tokenizer.json"));
+        if (!withJinja)
+            File.Delete(Path.Combine(dir, "chat_template.jinja"));
+
+        List<string> lines = [];
+        for (int b = 0; b < 256; b++)
+            lines.Add($"{Convert.ToBase64String([(byte)b])} {b}");
+        lines.Add($"{Convert.ToBase64String("he"u8)} 256");
+        lines.Add($"{Convert.ToBase64String("ll"u8)} 257");
+        lines.Add($"{Convert.ToBase64String("hell"u8)} 258");
+        File.WriteAllLines(Path.Combine(dir, "tiktoken.model"), lines);
+        File.WriteAllText(Path.Combine(dir, "tokenizer_config.json"),
+            "{\"added_tokens_decoder\": {\"259\": {\"content\": \"[BOS]\", \"special\": true}, \"260\": {\"content\": \"<|end_of_msg|>\", \"special\": true}}}");
+
+        string configPath = Path.Combine(dir, "config.json");
+        string config = File.ReadAllText(configPath);
+        string rewritten = config.Replace(
+            $"\"bos_token_id\": {KimiSyntheticCheckpoint.BosId}, \"eos_token_id\": {KimiSyntheticCheckpoint.EosId}",
+            $"\"bos_token_id\": {TiktokenBos}, \"eos_token_id\": {TiktokenEos}", StringComparison.Ordinal);
+        Assert.NotEqual(config, rewritten);
+        File.WriteAllText(configPath, rewritten);
+        return dir;
     }
 
     private IHostReferenceTextModel Load(IBackend backend, string name) =>

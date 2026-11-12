@@ -111,22 +111,23 @@ internal static class HfTextDirectoryLoader
             if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
                 throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the {info.ModelType} Text path needs.");
         }
-        if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
+        // A Kimi K3.1 directory may carry tiktoken.model instead; RequireKimiK31Runnable has already checked for one of the two.
+        if (!IsKimiK31(info) && !File.Exists(Path.Combine(info.Root, "tokenizer.json")))
             throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the Text path needs to build its prompt.");
     }
 
-    /// <summary>Refuses a Kimi K3.1 directory the Text path cannot read before any weight is opened: the Moonshot repo ships tiktoken.model, not tokenizer.json.</summary>
-    /// <exception cref="HartsyInferenceException">The shard index, tokenizer.json or chat_template.jinja is missing.</exception>
+    /// <summary>Refuses a Kimi K3.1 directory the Text path cannot read before any weight is opened. The tokenizer is tokenizer.json or, when that is absent,
+    /// tiktoken.model; the template is chat_template.jinja or, on a tiktoken.model checkpoint, the built-in XTML template.</summary>
+    /// <exception cref="HartsyInferenceException">The shard index is missing, the directory has neither tokenizer file, or it has tokenizer.json without a chat template.</exception>
     private static void RequireKimiK31Runnable(HfCheckpointInfo info)
     {
         if (info.IndexPath is null)
             throw new HartsyInferenceException($"'{info.Root}' has no model.safetensors.index.json, which the Kimi K3.1 Text path needs to find its shards.");
-        if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
-        {
-            throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json. The Kimi K3.1 Text path reads tokenizer.json; "
-                + "the Moonshot checkpoint ships tiktoken.model and tokenization_kimi.py instead, which are not loaded.");
-        }
-        if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+        bool hasTokenizerJson = File.Exists(Path.Combine(info.Root, "tokenizer.json"));
+        bool hasTiktoken = File.Exists(Path.Combine(info.Root, KimiK31Tokenizer.TiktokenFile));
+        if (!hasTokenizerJson && !hasTiktoken)
+            throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json or tiktoken.model, which the Kimi K3.1 Text path needs to build its prompt.");
+        if (hasTokenizerJson && !File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
             throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Kimi K3.1 Text path needs.");
     }
 }
