@@ -167,3 +167,30 @@ The 2.1 `.bin` key layout (read the pickle after approval; expected `unet.*`, `u
 tensors, `unet.conv_in.weight` `[320, 12, 3, 3]`, `unet_dual.conv_in.weight` `[320, 4, 3, 3]`, `unet.class_embedding.weight` `[49, 1280]`,
 `unet.learned_text_clip_{gen,ref}` `[1, 77, 1024]`, attention keys under `transformer_blocks.N.{transformer.attn1,transformer.attn2,transformer.ff,
 transformer.norm1..3,attn_multiview,attn_refview}`, all F16. The attention inner dimensions are heads x 64 (`attention_head_dim` `[5, 10, 20, 20]` is a head count).
+
+## Full Paint 2.1 run and the input mesh (2026-11-12)
+
+One process on the RTX 3060 (12 GB), bust photo 512 px, 512 px views, 15 UniPC steps, 2048 texture, DINOv2-giant, F32 activations (`HunyuanPaintOptions` defaults otherwise), per-stage log of the scratch runner (not committed):
+
+| Stage | Clean 40k mesh, no upscaler | Same, with the Real-ESRGAN upscaler |
+|---|---|---|
+| load | 9.6 s | 8.7 s |
+| uv unwrap, frame and 6 views, geometry maps | 1.9 s | 1.9 s |
+| VAE encode, reference stream | 4.4 s | 4.5 s |
+| 15 denoise steps | about 80 s (5.3 s each, first 8.5 s) | about 80 s |
+| VAE decode | 5.3 s | 5.3 s |
+| **bake** | **15.3 s** | **247.4 s** |
+| total | 116 s | 349 s |
+| peak VRAM (device, baseline 1.3 GB) | 9.99 GB | 10.10 GB |
+
+The upscaler (12 views through Real-ESRGAN x4) costs 232 s while the process is past the roughly 8 GiB the driver gives a 12 GB card on Windows (the CUDA backend warns about it), and the renders show no visible gain from it; the projection itself takes about 1 s and the inpaint 4 to 5 s per material. Looks, judged by eye from renders of the baked GLB and of the generated views (`paint21-results` in the session notes): the six generated views are coherent (front, sides, back, top, bottom, stone colour of the photo, hair and jacket detail), with a grey-blue stipple at the moustache in the side views; the baked bust is recognisable from four sides with a few coloured specks along chart seams. This is a first full run, not a parity result: nothing in it is compared with the Python reference.
+
+**The input mesh decides the bake.** The same 40k-face bust gave very different atlases depending on its connectivity:
+
+| Input | Vertices | Charts | Atlas texels filled | Atlas reached by the 6 views |
+|---|---|---|---|---|
+| decimated OBJ with split seam vertices and about 25k open boundary edges | 70,748 (33,660 welded) | 16,252 | 12 % | 29 % |
+| TRELLIS.2 bust (1 M faces) welded, cleaned and decimated with `MeshDecimator.DecimateStaged` to 40k | 24,013 | 4,910 | 22 % | 78 % |
+
+The unwrapper grows charts across shared vertices only, so split vertices turn into one-face charts, an atlas that is mostly padding, and a bake that is mostly inpainting (star-shaped fills, coloured specks). The pipeline therefore merges vertices by position (`HunyuanPaintPipeline.WeldForUnwrap`: weld, degenerate and duplicate faces only, no hole filling or reorientation) before it unwraps a mesh that has no UVs. It does not decimate: upstream's texture pipeline expects a mesh of about 40,000 faces, so a caller with a dense mesh (a 1 M-face TRELLIS.2 output) decimates first (`MeshDecimator.DecimateStaged(mesh, 40000)`), which also keeps the unwrap and the bake short. `HunyuanPaintWeldTests` pin the weld and the chart and fill bounds on a synthetic soup.
+
