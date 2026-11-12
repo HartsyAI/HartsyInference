@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Paint;
+using HartsyInference.ThreeD.Pipelines.Stages;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 
@@ -25,6 +26,9 @@ public sealed class HunyuanPaintPipeline
 
     /// <summary>Receives one line per stage with its wall time (view selection, geometry maps, VAE encode, reference stream, each step, VAE decode, bake).</summary>
     public Action<string>? StageLog { get; set; }
+
+    /// <summary>A diagnostic hook: receives the generated views (material-major square RGB bytes, <c>materials * views</c> of them, at the view resolution) before the bake.</summary>
+    public Action<byte[][], int>? GeneratedViewsLog { get; set; }
 
     private readonly Stopwatch _stage = new();
 
@@ -176,6 +180,9 @@ public sealed class HunyuanPaintPipeline
             dino = _conditioner?.Tokens(_backend, reference, size, size);
             zeroDino = dino is null ? null : new Tensor(dino.Shape, DType.F32);
             rotation = _config.UsePoseRope ? BuildRotation(positionMaps, n, size, latent) : null;
+            // The reference stream, the VAE encoder and DINO are done: sweep their cached weights and activations so the sampling UNet does not start on a
+            // saturated card (which runs several times slower without failing). What later steps still read is offloaded to the host first.
+            DeviceSweep(write.Embeds.Values.Append(dino).Append(zeroDino).Where(t => t is not null).Select(t => t!));
             int[] classes = _config.CameraClasses > 0 ? [.. views.Select(v => CameraClass(v.Elevation, v.Azimuth))] : [];
             // 2.1 guides u + g s (r - u) + g s (f - r); with one s per view the reference-only prediction r cancels, so only (u, f) are run.
             (float Scale, bool Dino)[] branches = _config.UsePoseRope ? [(0f, false), (1f, true)] : [(0f, false), (1f, false)];
@@ -232,6 +239,7 @@ public sealed class HunyuanPaintPipeline
                 progress?.Invoke(new GenerationProgress(step + 1, steps, (DateTime.UtcNow - started).TotalMilliseconds));
             }
 
+            DeviceSweep([]); // the UNets are done: free their cached weights before the VAE decodes
             byte[][] generated = new byte[materials * n][];
             for (int m = 0; m < materials; m++)
             {
@@ -242,6 +250,7 @@ public sealed class HunyuanPaintPipeline
                     generated[m * n + v] = images[v];
             }
             Stage("vae decode");
+            GeneratedViewsLog?.Invoke(generated, size);
             return generated;
         }
         finally
@@ -304,6 +313,12 @@ public sealed class HunyuanPaintPipeline
                 result[i] = branch[0][i] + s * (branch[1][i] - branch[0][i]);
         }
         return result;
+    }
+
+    private void DeviceSweep(IEnumerable<Tensor> live)
+    {
+        Trellis2DeviceMemory.ReleaseAll(_backend, [.. live]);
+        Stage("device sweep");
     }
 
     // Texels more than GutterReach (a fixed texel count, measured as a square: up to about 1.4 times that on the diagonals) from any texel the mesh covers
