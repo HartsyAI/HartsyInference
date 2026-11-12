@@ -5,6 +5,35 @@ Concise status for 3D-generation (image → mesh) models. Open work is in the
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Parity evidence lives in
 [PARITY_VERIFICATION.md](PARITY_VERIFICATION.md). Legend: [MODEL_STATUS.md](MODEL_STATUS.md).
 
+## Ship gate and tiers
+
+A 3D model is announced as supported only when it passes the gate. The tiers below are a judgement on 2026-11-12;
+move a model by recording the evidence in its row, not by editing this table alone.
+
+**Gate** (all must hold):
+
+1. **End to end on the target card.** A real-weight CLI run on the 12 GB RTX 3060 with absolute per-stage time and peak VRAM recorded.
+2. **Parity.** Stage-level agreement with the upstream Python reference (max difference and correlation), or the unchecked stages named. No parity claim beyond what was measured.
+3. **Output quality.** A rendered look, plus structural checks that fit the output (manifold or watertight where expected, UV coverage, PBR channels).
+4. **Download path.** Every file is fetched by the catalog with a pinned sha256, or the engine returns a typed manual-placement blocker with instructions. Pickles are repacked or read only through the safe loader.
+5. **Request contract.** A `MeshModelProfile` and validator entry, preflight and asset status, and the shared seed range.
+6. **Licence.** Terms and restrictions recorded and surfaced (Tencent regional exclusions, the SAM License, RMBG's non-commercial licence).
+7. **Docs.** A status row and a research doc with an honest not-verified list.
+
+**Tiers.** *Preview*: runs end to end and meets the gate except for stated gaps in parity or speed. *Experimental*: runs end to end
+but fails the gate in quality, parity or contract. *Not usable*: no end-to-end run.
+
+| Tier | Models | Gaps before the next tier |
+|---|---|---|
+| **Preview candidates** | TRELLIS.2 (shape + texture), Pixal3D (shape + texture), Hunyuan3D-2 and its variants (Fast, Turbo, FlashVDM, mini, 2mv) | **TRELLIS.2:** meshes are not watertight (non-manifold edges are repaired, boundary edges remain); no whole-pipeline Python comparison; 1024 takes about 9.4 minutes on the 3060. **Pixal3D:** `naf_release.pth` is placed by hand; 1536 takes 25.6 minutes and F32 vs F16 there is unmeasured; the decoders, upsample and bake cannot be compared here (flex_gemm and spconv are CUDA-only); not watertight. **Hunyuan3D-2 and variants:** one subject and one seed per build; default step counts not run; 2mv unreachable from the CLI; the 2.1 shape model has no catalog id (pickle). |
+| **Experimental** | Hunyuan3D Paint 2.0 and 2.1, P3-SAM, X-Part, UniRig, SAM 3D Objects, HairDeck, CoLa3D | **Paint:** bake and sampler end to end not compared with Python; the 2.1 UNet differs by 7.8e-4 relative RMS on CUDA (F16). **P3-SAM, X-Part:** checked stage by stage on CPU, no full Python comparison; X-Part decode is slow (about 47 s per part dense). **UniRig:** no Python parity. **SAM 3D:** a splat run takes 321 to 423 s in F16; the blue-tinted mouth region is unexplained; the mesh output is new and unreviewed against upstream end to end. |
+| **Not usable** | Hunyuan3D Omni (only the control encoder is ported), TRELLIS v1 mesh and radiance-field decoders | **Omni:** the DiT port and a run. **TRELLIS v1:** the decoders are not ported. |
+
+Cross-cutting items that gate every tier: the engine P0 features (preflight, asset status, input preparation, viewer-ready output,
+progress and cancellation) have synthetic tests only, with no real-GPU checks yet; the pickle-to-safetensors repack and hosting
+for the models that ship pickles has not started; and the version bump with one changelog line per model happens once, in the
+last PR of the series.
+
 ## Verified end-to-end (✅)
 
 | Model | Notes |
