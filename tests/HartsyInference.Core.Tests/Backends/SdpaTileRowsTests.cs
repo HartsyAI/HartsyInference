@@ -29,7 +29,8 @@ public sealed class SdpaTileRowsTests
     {
         long rows = CudaBackend.TileRows(freeBytes, Heads, Tokens, Tokens, forced: null);
 
-        Assert.True(rows * PerRowBytes >= CudaBackend.MinTileScoreBytes - PerRowBytes);
+        // Every reading under 512 MB free puts a quarter of it under the floor, so the tile is exactly the floor's.
+        Assert.Equal(CudaBackend.MinTileScoreBytes / PerRowBytes, rows);
     }
 
     [Fact]

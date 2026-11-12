@@ -6259,7 +6259,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             (nuint freeBytes, _) = _context.GetMemoryInfo();
             long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value);
 
-            scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+            // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
+            // so the floor never turns a slow call into a failed one.
+            while (true)
+            {
+                try
+                {
+                    scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+                    break;
+                }
+                catch (OutOfVramException) when (Br > 1)
+                {
+                    Br = Math.Max(1, Br / 2);
+                }
+            }
             if (pBias != 0)
             {
                 pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));
