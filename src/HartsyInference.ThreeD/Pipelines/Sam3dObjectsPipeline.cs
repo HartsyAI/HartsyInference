@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
 using HartsyInference.ThreeD.Models.Trellis;
+using HartsyInference.ThreeD.Pipelines.Stages;
 
 namespace HartsyInference.ThreeD.Pipelines;
 
@@ -89,6 +90,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Dictionary<string, Tensor> embedder = checkpoint.Section(SamCheckpointSection.ConditionEmbedder);
             using Tensor cond = BuildCondition(SamStage.Structure, embedder, prepared.Structure);
             Backend.FreeWeights(embedder.Values);
+            Sweep(cond);
             log($"structure condition {cond.Shape}");
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
@@ -113,12 +115,14 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             }
 
             Backend.FreeWeights(flowWeights.Values);
+            Sweep([.. latents.Values]);
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
 
         try
         {
             using Tensor occupancy = DecodeOccupancy(latents["shape"]);
+            Sweep(occupancy);
             log($"occupancy decoded {occupancy.Shape}");
             int[] triples = ActiveTriples(occupancy);
             int original = triples.Length / 3;
@@ -205,6 +209,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Dictionary<string, Tensor> embedder = checkpoint.Section(SamCheckpointSection.ConditionEmbedder);
             using Tensor cond = BuildCondition(SamStage.Slat, embedder, prepared.Slat);
             Backend.FreeWeights(embedder.Values);
+            Sweep(cond);
             log($"SLAT condition {cond.Shape}");
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
@@ -237,6 +242,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
 
             Backend.FreeWeights(flow.EnumerateWeights());
             latent = sampled["slat"];
+            Sweep(latent);
             log($"SLAT flow sampled ({steps} steps)");
         }
 
@@ -264,6 +270,13 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             latent.Dispose();
         }
     }
+
+    /// <summary>
+    /// Returns the device memory the stage before left reserved (cached activations, attention plans, pool reservations) after offloading what a later stage still reads. On Windows a process
+    /// past about 8 GiB of device memory runs 10 to 100 times slower, and the structure stage's pool alone is 7 GB: the first full run took 28 s for the first ten SLAT steps and 350 s for
+    /// the other fifteen once the pool and the SLAT activations together passed it. The same sweep the TRELLIS.2 stages use.
+    /// </summary>
+    private void Sweep(params Tensor[] live) => Trellis2DeviceMemory.ReleaseBetweenStages(Backend, live);
 
     private Tensor BuildCondition(SamStage stage, Dictionary<string, Tensor> embedder, SamConditionInputs inputs)
     {
