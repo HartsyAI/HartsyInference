@@ -48,6 +48,8 @@ public static partial class GlbReader
             notes.Add($"{collector.SkippedPrimitives} primitive(s) in strip, fan, line or point mode were skipped; only triangle lists are read.");
         if (collector.HasMorphTargets)
             notes.Add("Morph targets were dropped.");
+        if (collector.RepairedNormals > 0)
+            notes.Add($"{collector.RepairedNormals} zero-length normal(s) were replaced by unit ones (the source wrote them for vertices no triangle uses, or for degenerate faces).");
         List<MeshMaterial> materials = ReadMaterials(root, bin, notes);
         NoteUncarriedMaterialFeatures(root, notes);
         return new MeshDocument
@@ -137,6 +139,45 @@ public static partial class GlbReader
         public int SkippedPrimitives { get; private set; }
 
         public bool HasMorphTargets { get; private set; }
+
+        /// <summary>Zero-length normals replaced so far.</summary>
+        public int RepairedNormals { get; private set; }
+
+        /// <summary>Gives every zero-length normal a unit one: the area-weighted normal of the faces that use the vertex, or +Y for a vertex no face uses (which is never drawn). Returns how many were replaced.</summary>
+        private static int RepairZeroNormals(float[] positions, int[] indices, float[] normals)
+        {
+            bool[] zero = new bool[normals.Length / 3];
+            int count = 0;
+            for (int i = 0; i < zero.Length; i++)
+            {
+                zero[i] = normals[i * 3] == 0 && normals[i * 3 + 1] == 0 && normals[i * 3 + 2] == 0;
+                count += zero[i] ? 1 : 0;
+            }
+            if (count == 0)
+                return 0;
+            Vector3[] sum = new Vector3[zero.Length];
+            for (int t = 0; t < indices.Length; t += 3)
+            {
+                int a = indices[t], b = indices[t + 1], c = indices[t + 2];
+                if (!zero[a] && !zero[b] && !zero[c])
+                    continue;
+                Vector3 pa = new(positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]);
+                Vector3 face = Vector3.Cross(new Vector3(positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]) - pa, new Vector3(positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]) - pa);
+                sum[a] += face;
+                sum[b] += face;
+                sum[c] += face;
+            }
+            for (int i = 0; i < zero.Length; i++)
+            {
+                if (!zero[i])
+                    continue;
+                Vector3 n = sum[i].LengthSquared() > 0 ? Vector3.Normalize(sum[i]) : Vector3.UnitY;
+                normals[i * 3] = n.X;
+                normals[i * 3 + 1] = n.Y;
+                normals[i * 3 + 2] = n.Z;
+            }
+            return count;
+        }
 
         /// <summary>Places every mesh the scene reaches. A file with no node list places each mesh at the origin.</summary>
         public void PlaceScene()
@@ -237,13 +278,16 @@ public static partial class GlbReader
                 }
                 if (!geometryOnly && TryArray(primitive, "targets", out JsonElement targets) && targets.GetArrayLength() > 0)
                     HasMorphTargets = true;
+                float[]? normals = Optional("Normals (NORMAL)", () => ReadNormals(attributes, vertexCount, world));
+                if (normals is not null)
+                    RepairedNormals += RepairZeroNormals(positions, indices, normals);
                 Primitives.Add(new MeshPrimitive
                 {
                     Geometry = new Mesh
                     {
                         Vertices = positions,
                         Indices = indices,
-                        Normals = Optional("Normals (NORMAL)", () => ReadNormals(attributes, vertexCount, world)),
+                        Normals = normals,
                         Uvs = Optional("UV coordinates (TEXCOORD_0)", () => ReadUvs(attributes, vertexCount)),
                         VertexColors = Optional("Vertex colours (COLOR_0)", () => ReadColours(attributes, vertexCount)),
                     },
@@ -286,10 +330,8 @@ public static partial class GlbReader
             for (int i = 0; i < vertexCount; i++)
             {
                 Vector3 n = Vector3.TransformNormal(new Vector3(values[i * 3], values[i * 3 + 1], values[i * 3 + 2]), normalMatrix);
-                // A zero-length normal is invalid glTF and cannot be shaded, so the attribute is dropped with a note rather than written back.
-                if (!(n.LengthSquared() > 0))
-                    throw new HartsyInferenceException("a normal has zero length");
-                n = Vector3.Normalize(n);
+                // A zero-length normal (the engine's own textured outputs write one for every vertex no triangle uses) stays zero here and is repaired once the indices are known.
+                n = n.LengthSquared() > 0 ? Vector3.Normalize(n) : Vector3.Zero;
                 values[i * 3] = n.X;
                 values[i * 3 + 1] = n.Y;
                 values[i * 3 + 2] = n.Z;
