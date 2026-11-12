@@ -1,7 +1,7 @@
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
 /// <summary>
-/// Topology repair for indexed triangle meshes: vertex welding, degenerate and duplicate face removal, non-manifold edge thinning,
+/// Topology repair for indexed triangle meshes: vertex welding, degenerate and duplicate face removal, non-manifold edge splitting,
 /// small-component removal, hole filling and orientation unification. Every step returns a new geometry-only mesh (positions and
 /// indices; normals, UVs and colors are dropped) with unreferenced vertices removed and the surviving order preserved.
 /// </summary>
@@ -101,8 +101,134 @@ public static class MeshCleaner
         return Rebuild(mesh, keep);
     }
 
-    /// <summary>For every edge shared by more than two faces keeps the pair that is consistently wound and largest, and drops the rest.</summary>
+    /// <summary>Makes every edge belong to at most two faces by splitting vertices, keeping every face: upstream's <c>repair_non_manifold_edges</c>
+    /// ("repair non-manifold edges by splitting vertices", duplicates with the same coordinates). For an edge shared by more than two faces the
+    /// consistently wound, largest pair stays joined; the other faces are cut off along it, which gives them copies of its two vertices. Corners
+    /// of one vertex stay one vertex while a chain of joined edges links their faces. Joins made for the next edge of a chain can link the
+    /// faces of an edge whose own pair was cut off again at both ends; such an edge is then joined nowhere (its kept pair included) and the
+    /// grouping is redone. Removing joins can only split groups further, so one redo is enough: the second pass finds nothing new. No edge keeps
+    /// more than two faces afterwards: a corner has two edges at its vertex and each gives it at most one join, so the corners of a vertex
+    /// group into paths and cycles; the faces of a cut edge are path ends, at most two per group. That assumes no face repeats a vertex
+    /// (<see cref="RemoveDegenerateFaces"/> runs first in <see cref="Clean"/>). Positions and faces are unchanged, so nothing is removed from the
+    /// surface; <see cref="RemoveNonManifoldFaces"/> is the variant that drops faces.</summary>
     public static Mesh RepairNonManifoldEdges(Mesh mesh)
+    {
+        Validate(mesh);
+        int faces = mesh.TriangleCount;
+        int vertexCount = mesh.VertexCount;
+        EdgeTable table = EdgeTable.Build(mesh.Indices, vertexCount);
+
+        // The edges with more than two faces, their runs in the table, and the pair of half-edges each keeps joined.
+        List<(int Start, int End)> overfull = [];
+        List<(int First, int Second)> kept = [];
+        List<int> run = [];
+        for (int s = 0; s < table.Count;)
+        {
+            int e = table.RunEnd(s);
+            if (e - s > 2)
+            {
+                run.Clear();
+                for (int k = s; k < e; k++) run.Add(table.HalfEdges[k]);
+                (int bestI, int bestJ) = BestPair(mesh, table, run);
+                overfull.Add((s, e));
+                kept.Add((run[bestI], run[bestJ]));
+            }
+            s = e;
+        }
+        if (overfull.Count == 0) return Compact(mesh.Vertices, mesh.Indices);
+
+        bool[] cut = new bool[overfull.Count];
+        int[] parent = new int[faces * 3];
+        while (true)
+        {
+            for (int i = 0; i < parent.Length; i++) parent[i] = i;
+            for (int s = 0; s < table.Count;)
+            {
+                int e = table.RunEnd(s);
+                if (e - s == 2) JoinAcross(table, parent, table.HalfEdges[s], table.HalfEdges[s + 1]);
+                s = e;
+            }
+            for (int k = 0; k < overfull.Count; k++)
+                if (!cut[k]) JoinAcross(table, parent, kept[k].First, kept[k].Second);
+
+            (int[] indices, List<int> sources) = SplitCornerGroups(mesh.Indices, parent, vertexCount);
+            bool changed = false;
+            Dictionary<long, int> shared = [];
+            for (int k = 0; k < overfull.Count; k++)
+            {
+                if (cut[k]) continue;
+                shared.Clear();
+                for (int h = overfull[k].Start; h < overfull[k].End; h++)
+                {
+                    int slot = table.HalfEdges[h];
+                    long key = EdgeTable.Key(indices[slot], indices[NextCorner(slot)], vertexCount + sources.Count);
+                    int count = shared.GetValueOrDefault(key) + 1;
+                    shared[key] = count;
+                    if (count > 2) cut[k] = true;
+                }
+                changed |= cut[k];
+            }
+            if (changed) continue;
+
+            float[] vertices = new float[(vertexCount + sources.Count) * 3];
+            Array.Copy(mesh.Vertices, vertices, mesh.Vertices.Length);
+            for (int i = 0; i < sources.Count; i++)
+                Array.Copy(mesh.Vertices, sources[i] * 3, vertices, (vertexCount + i) * 3, 3);
+            return Compact(vertices, indices);
+        }
+    }
+
+    // A corner group is one vertex: the group met first keeps the original index, every other group gets a copy (sources[i] is the original
+    // vertex of copy vertexCount + i).
+    private static (int[] Indices, List<int> Sources) SplitCornerGroups(int[] original, int[] parent, int vertexCount)
+    {
+        int[] firstRoot = new int[vertexCount];
+        Array.Fill(firstRoot, -1);
+        Dictionary<int, int> copyOf = [];
+        List<int> sources = [];
+        int[] indices = new int[original.Length];
+        for (int c = 0; c < indices.Length; c++)
+        {
+            int v = original[c];
+            int root = Find(parent, c);
+            if (firstRoot[v] < 0) firstRoot[v] = root;
+            if (firstRoot[v] == root)
+            {
+                indices[c] = v;
+                continue;
+            }
+            if (!copyOf.TryGetValue(root, out int id))
+            {
+                id = vertexCount + sources.Count;
+                copyOf[root] = id;
+                sources.Add(v);
+            }
+            indices[c] = id;
+        }
+        return (indices, sources);
+    }
+
+    // Joins the corners of two faces across their shared edge: slot h is the corner at the edge's first vertex, the next corner the second.
+    private static void JoinAcross(EdgeTable table, int[] parent, int h1, int h2)
+    {
+        int n1 = NextCorner(h1), n2 = NextCorner(h2);
+        if (table.From(h1) == table.From(h2))
+        {
+            Union(parent, h1, h2);
+            Union(parent, n1, n2);
+        }
+        else
+        {
+            Union(parent, h1, n2);
+            Union(parent, n1, h2);
+        }
+    }
+
+    private static int NextCorner(int slot) => slot / 3 * 3 + (slot % 3 + 1) % 3;
+
+    /// <summary>For every edge shared by more than two faces keeps the pair that is consistently wound and largest, and drops the rest
+    /// (a crack opens along the edge; <see cref="RepairNonManifoldEdges"/> splits vertices instead).</summary>
+    public static Mesh RemoveNonManifoldFaces(Mesh mesh)
     {
         Validate(mesh);
         int faces = mesh.TriangleCount;
@@ -190,6 +316,7 @@ public static class MeshCleaner
         List<int> idx = [.. mesh.Indices];
         bool[] used = new bool[boundary.Count];
         List<int> loop = [];
+        HashSet<(int, int, int)>? faceSet = null;
         for (int start = 0; start < boundary.Count; start++)
         {
             if (used[start]) continue;
@@ -212,6 +339,9 @@ public static class MeshCleaner
                 cur = following;
             }
             if (!closed || loop.Count < 3 || LoopPerimeter(mesh.Vertices, loop) > maxPerimeter)
+                continue;
+            // A lone triangle (a fin split off by the non-manifold repair) is a three-edge loop whose cap would be the same face reversed.
+            if (loop.Count == 3 && (faceSet ??= FaceSet(mesh.Indices)).Contains(SortedTriple(loop[0], loop[1], loop[2])))
                 continue;
             AddFill(verts, idx, loop);
         }
@@ -307,21 +437,36 @@ public static class MeshCleaner
         return Compact(mesh.Vertices, indices);
     }
 
+    // The two half-edges of a run to keep joined: a consistently wound pair first, then the largest faces.
+    private static (int I, int J) BestPair(Mesh mesh, EdgeTable table, List<int> run)
+    {
+        int bestI = 0, bestJ = 1;
+        bool bestConsistent = false;
+        double bestArea = double.NegativeInfinity;
+        for (int i = 0; i < run.Count; i++)
+        {
+            for (int j = i + 1; j < run.Count; j++)
+            {
+                // Compared in this order: a bonus added to the area (the earlier 1e30) swallows the area in double precision.
+                bool consistent = table.From(run[i]) != table.From(run[j]);
+                double area = FaceAreaOf(mesh, run[i] / 3) + FaceAreaOf(mesh, run[j] / 3);
+                if (consistent != bestConsistent ? consistent : area > bestArea)
+                {
+                    bestConsistent = consistent;
+                    bestArea = area;
+                    bestI = i;
+                    bestJ = j;
+                }
+            }
+        }
+        return (bestI, bestJ);
+    }
+
     private static void ThinRun(Mesh mesh, EdgeTable table, List<int> run, bool[] keep)
     {
         while (run.Count > 2)
         {
-            int bestI = 0, bestJ = 1;
-            double bestScore = double.NegativeInfinity;
-            for (int i = 0; i < run.Count; i++)
-            {
-                for (int j = i + 1; j < run.Count; j++)
-                {
-                    bool consistent = table.From(run[i]) != table.From(run[j]);
-                    double score = FaceAreaOf(mesh, run[i] / 3) + FaceAreaOf(mesh, run[j] / 3) + (consistent ? 1e30 : 0.0);
-                    if (score > bestScore) { bestScore = score; bestI = i; bestJ = j; }
-                }
-            }
+            (int bestI, int bestJ) = BestPair(mesh, table, run);
             for (int k = run.Count - 1; k >= 0; k--)
             {
                 if (k == bestI || k == bestJ) continue;
@@ -331,6 +476,20 @@ public static class MeshCleaner
                 if (k < bestJ) bestJ--;
             }
         }
+    }
+
+    private static (int, int, int) SortedTriple(int a, int b, int c)
+    {
+        int lo = Math.Min(a, Math.Min(b, c)), hi = Math.Max(a, Math.Max(b, c));
+        return (lo, a + b + c - lo - hi, hi);
+    }
+
+    private static HashSet<(int, int, int)> FaceSet(int[] indices)
+    {
+        HashSet<(int, int, int)> set = new(indices.Length / 3);
+        for (int f = 0; f < indices.Length / 3; f++)
+            set.Add(SortedTriple(indices[f * 3], indices[f * 3 + 1], indices[f * 3 + 2]));
+        return set;
     }
 
     private static void AddFill(List<float> verts, List<int> idx, List<int> loop)
