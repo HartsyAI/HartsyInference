@@ -36,8 +36,8 @@ public sealed class XPartDit : IDisposable
     /// <summary>Called with the layer index and the hidden state <c>[K, N + 1, W]</c> after each block (a parity probe); the tensor is the block's output and must not be disposed.</summary>
     public Action<int, Tensor>? BlockProbe { get; set; }
 
-    /// <summary>Loads the <c>model.safetensors</c> tensors (<paramref name="prefix"/> <c>""</c>). BF16 and F16 widen to F32; the caller keeps ownership of <paramref name="weights"/>.</summary>
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
+    /// <summary>Loads the <c>model.safetensors</c> tensors (<paramref name="prefix"/> <c>""</c>). BF16 and F16 widen to F32; with <paramref name="halfWeights"/> the block matrices stay half precision (BF16 is converted to F16) for a backend that multiplies F16 weights, which halves the DiT's memory (6.6 GB instead of 13 GB). The caller keeps ownership of <paramref name="weights"/>.</summary>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "", bool halfWeights = false)
     {
         if (_loaded)
             throw new InvalidOperationException("The weights are already loaded; create a new DiT for another set.");
@@ -45,7 +45,7 @@ public sealed class XPartDit : IDisposable
         string p = prefix.Length == 0 ? string.Empty : prefix + ".";
         for (int i = 0; i < _blocks.Length; i++)
         {
-            _blocks[i].LoadWeights(weights, $"{p}blocks.{i}", halfWeights: false);
+            _blocks[i].LoadWeights(weights, $"{p}blocks.{i}", halfWeights);
             if (!_blocks[i].HasSecondCross)
                 throw new InvalidDataException($"X-Part block {i} has no attn2_2 second cross-attention.");
         }
