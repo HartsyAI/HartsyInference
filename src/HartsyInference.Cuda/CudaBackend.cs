@@ -6233,8 +6233,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// (0: it has not had to), how many calls have fitted at that size since, and how many must fit before the size is probed upward again.</summary>
     internal readonly record struct TileCap(long Bytes, int Streak, int ProbeAfter)
     {
-        /// <summary>No cap; the first probe waits for <see cref="FirstProbeAfter"/> calls.</summary>
-        internal static TileCap None => new(0, 0, FirstProbeAfter);
+        /// <summary>No cap and no history (a wait of 0); the first halving sets the wait to <see cref="FirstProbeAfter"/> calls.</summary>
+        internal static TileCap None => new(0, 0, 0);
     }
 
     private const int FirstProbeAfter = 2, MaxProbeAfter = 1024;
@@ -6245,18 +6245,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// that was a failed probe upward: the wait before the next one doubles). A call whose tile reached the cap and fitted counts toward the next
     /// probe; after <see cref="TileCap.ProbeAfter"/> of them the cap doubles, and a cap that reaches <see cref="MinTileScoreBytes"/> is dropped, so a
     /// transient failure costs a few calls, the Windows reading that stays near zero cannot hold the tile small for good, and a card that really
-    /// is full pays a recovery only every doubling number of calls. A call that did not reach the cap (a short query, a smaller shape) learns
-    /// nothing, and a forced tile height says nothing about what the card has free.</summary>
+    /// is full pays a recovery only every doubling number of calls. Dropping the cap is itself a probe (of the floor): it keeps the wait, and a
+    /// halving right after it doubles that wait, so a card where only part of the floor fits is not probed every third call. A call that did not
+    /// reach the cap (a short query, a smaller shape) learns nothing, and a forced tile height says nothing about what the card has free.</summary>
     internal static TileCap NextTileCap(TileCap cap, bool halved, long usedBytes, long perRowBytes, bool forced)
     {
         if (forced) return cap;
         if (halved)
-            return new TileCap(usedBytes, 0, cap.Bytes > 0 ? Math.Min(cap.ProbeAfter * 2, MaxProbeAfter) : FirstProbeAfter);
+            return new TileCap(usedBytes, 0, cap.ProbeAfter > 0 ? Math.Min(cap.ProbeAfter * 2, MaxProbeAfter) : FirstProbeAfter);
         if (cap.Bytes <= 0 || usedBytes + perRowBytes <= cap.Bytes) return cap;
         int streak = cap.Streak + 1;
         if (streak < cap.ProbeAfter) return cap with { Streak = streak };
         long raised = cap.Bytes * 2;
-        return raised >= MinTileScoreBytes ? TileCap.None : new TileCap(raised, 0, cap.ProbeAfter);
+        return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
     }
 
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and

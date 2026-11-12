@@ -102,7 +102,26 @@ public sealed class SdpaTileRowsTests
         Assert.Equal(
             [8 * Mb, 16 * Mb, 16 * Mb, 32 * Mb, 32 * Mb, 64 * Mb, 64 * Mb, 0],
             history.Select(c => c.Bytes));
-        Assert.Equal(CudaBackend.TileCap.None, history[^1]);
+        Assert.Equal(new CudaBackend.TileCap(0, 0, 2), history[^1]);   // dropped, and the wait is kept
+    }
+
+    [Fact]
+    public void AFailedProbeOfTheFloorDoublesTheWaitInsteadOfStartingOver()
+    {
+        // A card where 64 MB fits and 128 MB does not: the cap grows from 64 MB to the floor and is dropped, the floor fails and halves back to 64 MB.
+        CudaBackend.TileCap cap = new(64 * Mb, 0, 2);
+        cap = Fit(Fit(cap));
+        Assert.Equal(new CudaBackend.TileCap(0, 0, 2), cap);
+
+        cap = CudaBackend.NextTileCap(cap, halved: true, usedBytes: 64 * Mb, 1 * Mb, forced: false);
+        Assert.Equal(new CudaBackend.TileCap(64 * Mb, 0, 4), cap);
+
+        // The next round waits four fits, and its failure doubles the wait again.
+        for (int i = 0; i < 4; i++)
+            cap = Fit(cap);
+        Assert.Equal(new CudaBackend.TileCap(0, 0, 4), cap);
+        cap = CudaBackend.NextTileCap(cap, halved: true, usedBytes: 64 * Mb, 1 * Mb, forced: false);
+        Assert.Equal(new CudaBackend.TileCap(64 * Mb, 0, 8), cap);
     }
 
     [Fact]
