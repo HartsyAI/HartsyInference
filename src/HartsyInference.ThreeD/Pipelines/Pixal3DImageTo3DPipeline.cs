@@ -276,13 +276,23 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             + (textured ? 1 + textureParams!.Steps + 2 : 1);
         int done = 0;
         long started = MonotonicClock.NowNs();
-        void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6));
+        string? stage = null;
+        int stageStep = 0, stageSteps = 0;
+        void Begin(string name, int steps)
+        {
+            stage = name;
+            stageStep = 0;
+            stageSteps = steps;
+        }
+
+        void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6) { Stage = stage, StageStep = stageStep, StageSteps = stageSteps });
 
         // Every stage and every sampler step passes here, so the token is observed throughout and not only at the bake.
         void Stage()
         {
             cancellationToken.ThrowIfCancellationRequested();
             done++;
+            stageStep++;
             Report();
         }
 
@@ -295,31 +305,39 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         ShapeVaeSubdivisions? guides = textured ? new ShapeVaeSubdivisions() : null;
         try
         {
+            Begin("Structure conditioning", 1);
             cond = _conditioner.Encode(Backend, prepared, new Pixal3DConditionSpec(StructureImage, StructureConditioningGrid, null, 0), view);
             negCond = cond.ZerosLike();
             Stage();
+            Begin("Structure flow", structureParams.Steps);
             int[] voxels = _structure.Sample(Backend, cond, negCond, seed, structureParams, StructureGrid, Tick);
             DisposeConditioning(ref cond, ref negCond);
 
+            Begin("Coarse conditioning", 1);
             cond = _conditioner.Encode(Backend, prepared, new Pixal3DConditionSpec(CoarseImage, StructureGrid, voxels, NafSize), view);
             negCond = cond.ZerosLike();
             Stage();
+            Begin("Coarse shape flow", shapeParams.Steps);
             coarse = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res512, voxels, StructureGrid, cond, negCond, unchecked(seed + 1), shapeParams, Tick);
             DisposeConditioning(ref cond, ref negCond);
 
+            Begin("Upsample", 1);
             int[] upsampled = _upsampler.Upsample(Backend, coarse, UpsampleLevels);
             coarse.Feats.Dispose();
             coarse = null;
             Stage();
+            Begin("Fine conditioning", 1);
             (int[] fineCoords, int fineResolution) = Trellis2Cascade.FitTokenCap(
                 upsampled, Trellis2ImageTo3DPipeline.CoarseShapeResolution, target, _maxTokens, Trellis2CascadeQuantizer.RoundToCorners);
             int fineGrid = fineResolution / Trellis2Cascade.LatentStride;
             cond = _conditioner.Encode(Backend, prepared, new Pixal3DConditionSpec(FineImage, fineGrid, fineCoords, NafSize), view);
             negCond = cond.ZerosLike();
             Stage();
+            Begin("Fine shape flow", shapeParams.Steps);
             fine = _shape.Sample(Backend, Trellis2ShapeFlowKind.Res1024, fineCoords, fineGrid, cond, negCond, unchecked(seed + 2), shapeParams, Tick);
             DisposeConditioning(ref cond, ref negCond);
 
+            Begin("Shape decode", 1);
             DualGridField field = guides is null
                 ? _decoder.Decode(Backend, fine)
                 : ((ISparseShapeSubdivisionDecoder)_decoder).Decode(Backend, fine, guides);
@@ -330,6 +348,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             }
 
             Stage();
+            Begin("Mesh extraction", 1);
             SceneGrid grid = new() { Resolution = fineResolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / fineResolution };
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
@@ -345,15 +364,19 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             // The texture flow sweeps the device before it starts; the guides the texture decoder reads later must survive that.
             for (int level = 0; level < guides!.Count; level++)
                 Backend.OffloadActivation(guides.Level(level));
+            Begin("Texture conditioning", 1);
             cond = _conditioner.Encode(Backend, prepared, new Pixal3DConditionSpec(TextureImage, fineGrid, fineCoords, TextureNafSize), view);
             negCond = cond.ZerosLike();
             Stage();
+            Begin("Texture flow", textureParams!.Steps);
             textureLatent = _textureFlow!.Sample(Backend, fine!, cond, negCond, unchecked(seed + 3), textureParams!, Tick);
             DisposeConditioning(ref cond, ref negCond);
             fine!.Feats.Dispose();
             fine = null;
+            Begin("Texture decode", 1);
             textureVoxels = _textureDecoder!.Decode(Backend, textureLatent, guides);
             Stage();
+            Begin("Texture bake", 1);
             SparseAttributeVolume volume = Trellis2ImageTo3DPipeline.BuildVolume(textureVoxels, fineResolution);
             PbrPostProcessOptions post = new()
             {

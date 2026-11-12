@@ -218,6 +218,23 @@ public sealed class Pixal3DPipelineTests
         Assert.Equal(Enumerable.Range(1, 13), reports.Select(p => p.Step));
     }
 
+    [Fact]
+    public void Generate_NamesEachStageAndCountsItsStepsInOrder()
+    {
+        using Rig rig = new();
+        List<GenerationProgress> reports = [];
+
+        rig.Pipeline.Generate(Image(), new Pixal3DOptions { Seed = 1 }, reports.Add);
+
+        string[] stages = [.. reports.Select(p => p.Stage!).Distinct()];
+        Assert.Equal(
+            ["Structure conditioning", "Structure flow", "Coarse conditioning", "Coarse shape flow", "Upsample", "Fine conditioning", "Fine shape flow", "Shape decode", "Mesh extraction"],
+            stages);
+        Assert.All(reports.Where(p => p.Stage == "Structure flow"), p => Assert.Equal(3, p.StageSteps));
+        Assert.Equal([1, 2, 3], reports.Where(p => p.Stage == "Structure flow").Select(p => p.StageStep));
+        Assert.Equal([1], reports.Where(p => p.Stage == "Shape decode").Select(p => p.StageStep));
+    }
+
     // A cancel raised from the progress callback at any step must stop the run and release every tensor a stage handed out.
     [Theory]
     [InlineData(1)]

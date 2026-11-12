@@ -11,6 +11,15 @@ public readonly record struct GenerationProgress(int Step, int TotalSteps, doubl
     /// <summary>Pipeline-computed overall progress in <c>[0, 1]</c> across all phases (text encoding + denoise + VAE decode), including phase weights; <c>-1.0</c> means "not provided, fall back to step count".</summary>
     public double OverallPercent { get; init; } = -1.0;
 
+    /// <summary>The name of the stage of a multi-stage pipeline (the 3D shape pipelines) the report belongs to; null when the pipeline does not name its stages.</summary>
+    public string? Stage { get; init; } = null;
+
+    /// <summary>Steps of <see cref="Stage"/> done, when the pipeline reports them.</summary>
+    public int StageStep { get; init; } = 0;
+
+    /// <summary>Steps <see cref="Stage"/> takes; 0 when unknown.</summary>
+    public int StageSteps { get; init; } = 0;
+
     /// <summary>True when this report is a mid-step heartbeat rather than an end-of-step completion.</summary>
     public bool IsHeartbeat { get; init; } = false;
 

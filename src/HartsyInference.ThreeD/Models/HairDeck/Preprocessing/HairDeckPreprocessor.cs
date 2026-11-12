@@ -19,6 +19,12 @@ public sealed class HairDeckPreprocessor
     /// <summary>Side of the square input of the matting model.</summary>
     public const int MatteInputSize = 768;
 
+    /// <summary>The stage name reported while SAM 3 segments the image.</summary>
+    public const string SegmentStage = "SAM 3 segmentation";
+
+    /// <summary>The stage name reported while BiRefNet mattes the image.</summary>
+    public const string MatteStage = "BiRefNet matting";
+
     private const float ScoreFloor = 0.2f;
     private const float UncertainAgreement = 0.8f;
     private const int Resolution = HairDeckInput.Resolution;
@@ -37,11 +43,21 @@ public sealed class HairDeckPreprocessor
 
     /// <summary>Preprocesses one character image.</summary>
     /// <exception cref="HairDeckInputException">Neither hair nor face was found, so no head crop can be made.</exception>
-    public HairDeckPreprocessResult Process(HairDeckSourceImage source)
+    /// <param name="cancel">Checked between the stages (loading, SAM 3, BiRefNet): a model run in progress finishes first.</param>
+    /// <param name="onStage">Called with the name of each stage as it starts.</param>
+    public HairDeckPreprocessResult Process(HairDeckSourceImage source, CancellationToken cancel = default, Action<string>? onStage = null)
     {
         ArgumentNullException.ThrowIfNull(source);
+        cancel.ThrowIfCancellationRequested();
         HairDeckLoadedImage image = HairDeckImageRules.Load(source);
-        return FromModels(image, Segment(image), MatteOf(image));
+        cancel.ThrowIfCancellationRequested();
+        onStage?.Invoke(SegmentStage);
+        IReadOnlyList<TextGroundedLogitResult> segments = Segment(image);
+        cancel.ThrowIfCancellationRequested();
+        onStage?.Invoke(MatteStage);
+        float[] matte = MatteOf(image);
+        cancel.ThrowIfCancellationRequested();
+        return FromModels(image, segments, matte);
     }
 
     /// <summary>The SAM 3 queries of the preset prompts above the working floor, for the loaded image.</summary>
