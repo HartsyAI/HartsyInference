@@ -333,6 +333,36 @@ public static class ModelCatalog
         },
     };
 
+    /// <summary>SAM 3D Objects (facebookresearch/sam-3d-objects), image plus object mask to Gaussian splats with a pose: a mixture-of-transformers structure flow conditioned on two DINOv2 towers and a
+    /// pointmap, a sparse SLAT flow, and the Gaussian decoder, with MoGe estimating the pointmap. Meta's checkpoints are gated and pickled; this entry names the ungated third-party safetensors conversion
+    /// <c>apozz/sam-3d-objects-safetensors</c> (revision cbb995af47eae6c30d2f2a087f5195be2365a2e2; an asset carries no revision field, so a changed file fails
+    /// the hash check). The four generator and decoder files are byte-identical to Meta's <c>.ckpt</c> contents (see docs/Research/SAM3D_OBJECTS_ARCHITECTURE.md). The safetensors hashes are the repository's LFS oids,
+    /// the small files' were computed from the downloaded bytes. The SAM License binds on use and on redistribution, a repack included, so its text is fetched beside the weights; it has no non-commercial clause but
+    /// ends use for trade-controlled parties and for military, nuclear, espionage and weapons end uses (read the licence, not this comment). The mesh decoder (<c>slat_decoder_mesh</c>) is not part of this entry: it is not ported.</summary>
+    private static CatalogEntry Sam3dObjects() => new CatalogEntry
+    {
+        Id = "sam3d-objects", Modality = Modality.Mesh, DisplayName = "SAM 3D Objects (image + mask to Gaussian splats; SAM License)",
+        Architecture = "MoT shortcut-flow structure generator (DINOv2-L x2 + pointmap), TRELLIS sparse SLAT flow, Gaussian decoder, MoGe pointmap",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "apozz/sam-3d-objects-safetensors",
+        Assets = new ModelAsset[]
+        {
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "ss_generator.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "structure generator (with both DINOv2 towers)",
+                Sha256 = "9f0fd0a7e288eadf7e51b6ead30f70aea0cd2ac4fe4160ee1deb412916bcfa0d" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "ss_decoder.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "structure decoder",
+                Sha256 = "f192156b047dc467f82f8efa851157c32ad9d7a008f01bc92c846f5ef0a4293f" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_generator.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "SLAT generator",
+                Sha256 = "ee0c1601f3259f61cb22030bad839a3fe30a95b5f78bc9451babdbd8836fd06d" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_decoder_gs.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "Gaussian decoder",
+                Sha256 = "48a3dc3271f56efe9c8b1e601d0350d9ab7914fec0e635048682aa8f7c9e86be" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "MoGe pointmap model",
+                Sha256 = "dbdf89d1f7651b9213a507923b4f100fed87489bb7425fda7f7d430bcb31d8a9" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl_config.json", TargetSubdir = "3D/sam3d-objects", Role = "MoGe config",
+                Sha256 = "2cbf99f5e52882af6963f6c99064f9504d5ed923af73ed2ff7f9bf8675d85201" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "SAM3D_LICENSE", TargetSubdir = "3D/sam3d-objects", Role = "licence (SAM License, binds on use)",
+                Sha256 = "b3a5a0e2d973ab80e6610ccf1cffc40756050d0ace3cd4fec879b3ec290b2e9b" },
+        },
+    };
+
     private static List<CatalogEntry> Build()
     {
         const Modality img = Modality.Image;
@@ -2766,6 +2796,7 @@ public static class ModelCatalog
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
             Trellis2(),
             Pixal3D(),
+            Sam3dObjects(),
             HairDeck(),
 
             // Interactive / world models
