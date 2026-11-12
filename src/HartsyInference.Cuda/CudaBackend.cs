@@ -6224,17 +6224,57 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Smallest score tile, in bytes, <see cref="TileRows"/> sizes for however little free memory is reported. <c>cuMemGetInfo</c> can
+    /// read far too low: on a Windows card a process past about 8 GiB of device allocations reports no free memory while gigabytes are free, and a
+    /// tile of one query row is one cuBLAS launch per head per row (about 800 thousand per call at 32 thousand tokens, minutes per layer).</summary>
+    internal const long MinTileScoreBytes = 128L << 20;
+
+    /// <summary>What the tiled attention loop remembers of its allocation failures: the tile size in bytes the allocation last had to shrink to
+    /// (0: it has not had to), how many calls have fitted at that size since, and how many must fit before the size is probed upward again.</summary>
+    internal readonly record struct TileCap(long Bytes, int Streak, int ProbeAfter)
+    {
+        /// <summary>No cap and no history (a wait of 0); the first halving sets the wait to <see cref="FirstProbeAfter"/> calls.</summary>
+        internal static TileCap None => new(0, 0, 0);
+    }
+
+    private const int FirstProbeAfter = 2, MaxProbeAfter = 1024;
+    private TileCap _sdpaTileCap = TileCap.None;
+    private readonly object _sdpaTileCapGate = new();
+
+    /// <summary>The remembered tile cap after a call. A call that had to halve its tile records the size that fit (and, when a cap already stood,
+    /// that was a failed probe upward: the wait before the next one doubles). A call whose tile reached the cap and fitted counts toward the next
+    /// probe; after <see cref="TileCap.ProbeAfter"/> of them the cap doubles, and a cap that reaches <see cref="MinTileScoreBytes"/> is dropped, so a
+    /// transient failure costs a few calls, the Windows reading that stays near zero cannot hold the tile small for good, and a card that really
+    /// is full pays a recovery only every doubling number of calls. Dropping the cap is itself a probe (of the floor): it keeps the wait, and a
+    /// halving right after it doubles that wait, so a card where only part of the floor fits is not probed every third call. A call that did not
+    /// reach the cap (a short query, a smaller shape) learns nothing, and a forced tile height says nothing about what the card has free.</summary>
+    internal static TileCap NextTileCap(TileCap cap, bool halved, long usedBytes, long perRowBytes, bool forced)
+    {
+        if (forced) return cap;
+        if (halved)
+            return new TileCap(usedBytes, 0, cap.ProbeAfter > 0 ? Math.Min(cap.ProbeAfter * 2, MaxProbeAfter) : FirstProbeAfter);
+        if (cap.Bytes <= 0 || usedBytes + perRowBytes <= cap.Bytes) return cap;
+        int streak = cap.Streak + 1;
+        if (streak < cap.ProbeAfter) return cap with { Streak = streak };
+        long raised = cap.Bytes * 2;
+        return raised >= MinTileScoreBytes ? new TileCap(0, 0, cap.ProbeAfter) : new TileCap(raised, 0, cap.ProbeAfter);
+    }
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
-    /// the weights), or the height <c>numerics.sdpaTile</c> forces, and never past the score elements the softmax addresses.</summary>
+    /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
+    /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
+    /// it limits the tile like the free-memory reading does, so a card that really is full pays its allocation failures once and not on every call.</summary>
     /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
-    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
+    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced, long capBytes = 0)
     {
         long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
         if (cap < 1)
             throw new AttentionUnsupportedException(
                 $"One query row of {totalHeads} heads over {skv} keys is past the 2^32 ({MaterializedMaxScores}) score elements a tile addresses.");
         long perRow = totalHeads * skv * sizeof(float);
-        long rows = (long)(freeBytes / 4) / Math.Max(1, perRow);
+        long budget = (long)Math.Max(freeBytes / 4, (ulong)MinTileScoreBytes);
+        long rows = budget / Math.Max(1, perRow);
+        if (capBytes > 0) rows = Math.Min(rows, capBytes / Math.Max(1, perRow));
         if (rows < 1) rows = 1;
         if (rows > sq) rows = sq;
         if (forced is int f && f > 0) rows = Math.Min(f, sq);
@@ -6250,9 +6290,33 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         try
         {
             (nuint freeBytes, _) = _context.GetMemoryInfo();
-            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value);
+            long perRow = totalHeads * skv * sizeof(float);
+            TileCap remembered;
+            lock (_sdpaTileCapGate)
+                remembered = _sdpaTileCap;
+            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, remembered.Bytes);
 
-            scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+            // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
+            // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
+            // allocator recovery) are not paid on every call. The memory grows back, with backoff (see NextTileCap): a transient failure must not
+            // pin the tile small for the backend's lifetime, and a card that really is full must not be probed every other call.
+            bool halved = false;
+            while (true)
+            {
+                try
+                {
+                    scoresBuf = CudaMemory.Allocate((nuint)(perRow * Br));
+                    break;
+                }
+                catch (OutOfVramException) when (Br > 1)
+                {
+                    Br = Math.Max(1, Br / 2);
+                    halved = true;
+                }
+            }
+
+            lock (_sdpaTileCapGate)
+                _sdpaTileCap = NextTileCap(_sdpaTileCap, halved, perRow * Br, perRow, EngineKnobs.SdpaTile.Value is > 0);
             if (pBias != 0)
             {
                 pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));
