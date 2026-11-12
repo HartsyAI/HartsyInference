@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Kimi;
@@ -10,18 +11,23 @@ namespace HartsyInference.LLM.Kimi;
 /// <summary>Everything the Text path needs to run a Kimi K3.1 directory: the generation model, the tokenizer from the checkpoint's
 /// <c>tokenizer.json</c> or, when that is absent, its <c>tiktoken.model</c>, and the chat template from its <c>chat_template.jinja</c> or, when that
 /// is absent on a <c>tiktoken.model</c> checkpoint, the built-in XTML template (<see cref="KimiK31ChatTemplate"/>).</summary>
-/// <remarks>Text only: the vision tower is not loaded, and image input is refused by the engine. Owns the generation model, which owns the checkpoint.</remarks>
+/// <remarks>Takes images through <see cref="Vision"/> when the checkpoint's vision tower loads; otherwise image input is refused by name. Owns the
+/// generation model, which owns the checkpoint, and the vision input.</remarks>
 public sealed class KimiK31TextModel : IHostReferenceTextModel
 {
-    private KimiK31TextModel(KimiK31GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template)
+    private KimiK31TextModel(KimiK31GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, KimiVisionInput vision)
     {
         Generation = generation;
         Tokenizer = tokenizer;
         Template = template;
+        Vision = vision;
     }
 
     /// <summary>The engine-facing model.</summary>
     public KimiK31GenerationModel Generation { get; }
+
+    /// <summary>The checkpoint's image inputs: the vision encoder, or the reason images are refused.</summary>
+    public KimiVisionInput Vision { get; }
 
     /// <inheritdoc />
     public ILlmTokenizer Tokenizer { get; }
@@ -73,6 +79,7 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
         }
 
         KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, backend, maxSequenceTokens);
+        KimiVisionInput? vision = null;
         try
         {
             // a mismatch would make the model read the wrong embeddings, so refuse rather than guess
@@ -80,10 +87,13 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
                 throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
             if (configEos is { } eos && tokenizer.EosId != eos)
                 throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
-            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, backend, maxSequenceTokens), tokenizer, template);
+            // A missing vision tower leaves the text path working; KimiVisionInput records why images are refused.
+            vision = KimiVisionInput.Load(directory, tokenizer, checkpoint.Config.Hidden, template is KimiK31ChatTemplate);
+            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, backend, maxSequenceTokens), tokenizer, template, vision);
         }
         catch
         {
+            vision?.Dispose();
             checkpoint.Dispose();
             throw;
         }
@@ -117,5 +127,9 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     }
 
     /// <inheritdoc />
-    public void Dispose() => Generation.Dispose();
+    public void Dispose()
+    {
+        Vision.Dispose();
+        Generation.Dispose();
+    }
 }

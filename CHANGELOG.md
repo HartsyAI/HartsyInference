@@ -14,10 +14,11 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
-- **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text only (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
+- **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is
-  absent. Image input and multi-GPU placement are refused by name. The MoonViT vision tower and the tensor- and expert-parallel decoder are tested on
-  CPU only and are not routed yet. The `kimi-k3.1-pro` catalog row is Structural and not CLI-drivable.
+  absent. Images on the last user turn go through the MoonViT-V2 tower and are spliced at the checkpoint's media placeholder; a checkpoint whose tower
+  or placeholder id does not load, video, and multi-GPU placement are refused by name. Image input is CPU-tested on synthetic checkpoints only. The
+  tensor- and expert-parallel decoder is tested on CPU only and is not routed yet. The `kimi-k3.1-pro` catalog row is Structural and not CLI-drivable.
 
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)

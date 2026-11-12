@@ -31,6 +31,15 @@ public sealed class KimiK31GenerationModel : IGenerationModel
 
     private KimiK31Config Config => _checkpoint.Config;
 
+    /// <summary>The decoder, for the image route's embedding splice.</summary>
+    internal KimiK31Model Decoder => Model;
+
+    /// <summary>The config the decoder was built from.</summary>
+    internal KimiK31Config DecoderConfig => Config;
+
+    /// <summary>The longest sequence the decoder was loaded for.</summary>
+    internal int MaxSequenceTokens => _maxTokens;
+
     /// <inheritdoc />
     public GenerationModelInfo Info { get; }
 

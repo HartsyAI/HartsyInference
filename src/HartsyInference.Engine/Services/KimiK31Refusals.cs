@@ -3,16 +3,16 @@ using HartsyInference.LLM.Kimi;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>The requests the Kimi K3.1 Text route refuses by name: image input, because the route loads no vision tower, and multi-GPU
+/// <summary>The requests the Kimi K3.1 Text route refuses by name: image input the checkpoint's vision tower cannot take, and multi-GPU
 /// placement, because the route does not build the sharded decoder (verified on CPU virtual ranks only).</summary>
 internal static class KimiK31Refusals
 {
-    /// <summary>Refuses an image on a Kimi K3.1 slot. The checkpoint's vision tower is not loaded, so an image would be dropped silently otherwise.</summary>
-    /// <exception cref="NotSupportedException">The slot holds a Kimi K3.1 model and the request carries an image.</exception>
+    /// <summary>Refuses an image on a Kimi K3.1 slot whose checkpoint did not load a vision tower, so the image would be dropped silently otherwise.</summary>
+    /// <exception cref="NotSupportedException">The slot holds a Kimi K3.1 model that refuses images, and the request carries one.</exception>
     internal static void RefuseImage(IHostReferenceTextModel? model, bool hasImage)
     {
-        if (hasImage && model is KimiK31TextModel)
-            throw new NotSupportedException("Kimi K3.1 image input is not supported: the Text path loads the text decoder only and runs no vision tower (vision_tower.*).");
+        if (hasImage && model is KimiK31TextModel kimi && !kimi.Vision.Accepts)
+            throw new NotSupportedException($"Kimi K3.1 image input is not supported: {kimi.Vision.Refusal}.");
     }
 
     /// <summary>Refuses any Kimi K3.1 request that spreads the model over more than one device, rather than loading it on one.</summary>

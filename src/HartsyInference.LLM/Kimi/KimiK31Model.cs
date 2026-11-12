@@ -259,13 +259,44 @@ public sealed class KimiK31Model : IDisposable
     /// <summary>Runs one token through the decoder, advancing <paramref name="state"/>, and returns its logits <c>[Vocab]</c>.</summary>
     public float[] ForwardToken(int token, KimiK31State state) => ProjectHidden(ForwardTokenHidden(token, state));
 
+    /// <summary>Runs one embedding row <c>[Hidden]</c> through the decoder, advancing <paramref name="state"/>, and returns its logits <c>[Vocab]</c>.
+    /// Image rows spliced into a prompt take this path; token rows reach it through <see cref="ForwardToken"/>.</summary>
+    public float[] ForwardEmbedding(ReadOnlySpan<float> embedding, KimiK31State state) => ProjectHidden(ForwardEmbeddingHidden(embedding, state));
+
+    /// <summary>Runs one embedding row <c>[Hidden]</c> through the decoder, advancing <paramref name="state"/>, and returns its final normed hidden row <c>[Hidden]</c>.</summary>
+    public float[] ForwardEmbeddingHidden(ReadOnlySpan<float> embedding, KimiK31State state)
+    {
+        CheckState(state);
+        if (embedding.Length != _config.Hidden) throw new ArgumentException($"Expected {_config.Hidden} embedding values.", nameof(embedding));
+        return RunRow(embedding.ToArray(), state);
+    }
+
+    /// <summary>Writes the token embedding rows <c>[ids.Length, Hidden]</c> of <paramref name="ids"/> into <paramref name="dst"/>, the host rows a
+    /// prompt splice starts from.</summary>
+    public void EmbedTokens(ReadOnlySpan<int> ids, Span<float> dst)
+    {
+        int d = _config.Hidden;
+        if (dst.Length != ids.Length * d) throw new ArgumentException($"dst must hold {ids.Length} rows of {d} values.", nameof(dst));
+        for (int i = 0; i < ids.Length; i++) Embedding(ids[i]).CopyTo(dst.Slice(i * d, d));
+    }
+
     /// <summary>Runs one token through the decoder, advancing <paramref name="state"/>, and returns its final normed hidden row <c>[Hidden]</c>.</summary>
     public float[] ForwardTokenHidden(int token, KimiK31State state)
+    {
+        CheckState(state);
+        return RunRow(Embedding(token), state);
+    }
+
+    private void CheckState(KimiK31State state)
     {
         ArgumentNullException.ThrowIfNull(state);
         if (state.Position >= state.Capacity) throw new InvalidOperationException("The sequence state is full.");
         if (state.Ranks != _ranks) throw new ArgumentException($"The state is split over {state.Ranks} ranks; this decoder runs on {_ranks}.", nameof(state));
-        float[] x = Embedding(token);
+    }
+
+    // One row through every layer, from its embedding x. Token and embedding rows share it, so they cannot drift apart.
+    private float[] RunRow(float[] x, KimiK31State state)
+    {
         // The depth-residual stack is per token: each token's block summaries start from its own embedding. Only the KDA and
         // MLA caches carry across calls.
         state.Blocks.Clear();

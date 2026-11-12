@@ -20,6 +20,7 @@ using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Multimodal;
@@ -523,6 +524,7 @@ public sealed partial class TextService : ITextService, IDisposable
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
+                    : image is not null && slot.HostReference is KimiK31TextModel kimi ? RunKimiVision(kimi, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
