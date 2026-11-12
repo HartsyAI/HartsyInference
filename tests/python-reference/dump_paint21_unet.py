@@ -183,7 +183,8 @@ def main():
         missing, unexpected = wrapped.load_state_dict(state, strict=False)
         print(f"loaded UNet in {time.time() - t0:.1f} s: {len(state)} tensors, missing {len(missing)}, unexpected {len(unexpected)}")
         if missing or unexpected:
-            print("missing", missing[:5], "unexpected", unexpected[:5])
+            # A partly loaded upstream model would produce a quietly wrong oracle.
+            raise SystemExit(f"UNet weights do not match: missing {missing[:5]}, unexpected {unexpected[:5]}")
         wrapped.eval()
 
         sample = torch.randn(1, materials, n, 4, h, h)
@@ -228,7 +229,10 @@ def main():
     vae_state = {k: v.float() for k, v in read_state_dict(os.path.join(args.folder, "vae", "diffusion_pytorch_model.bin")).items()}
     # The pickle uses the pre-0.14 diffusers names for the mid-block attention.
     vae_state = {modern_vae_name(k): v for k, v in vae_state.items()}
-    print("vae load", vae.load_state_dict(vae_state, strict=False))
+    vae_missing, vae_unexpected = vae.load_state_dict(vae_state, strict=False)
+    if vae_missing or vae_unexpected:
+        raise SystemExit(f"VAE weights do not match: missing {vae_missing[:5]}, unexpected {vae_unexpected[:5]}")
+    print("vae load: all keys matched")
     vae.eval()
     vae_latent = torch.randn(2, 4, h, h)
     start = time.time()

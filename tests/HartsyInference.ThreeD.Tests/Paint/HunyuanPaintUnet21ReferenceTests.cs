@@ -74,14 +74,18 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
             t.Dispose();
         output.WriteLine($"reference stream forward: {watch.Elapsed.TotalSeconds:F1} s, {write.Embeds.Count} feature blocks");
         watch.Restart();
-        int compared = 0;
+        int compared = 0, fixtureBlocks = fixture.Keys.Count(k => k.StartsWith("ref.", StringComparison.Ordinal));
         foreach ((string name, Tensor features) in write.Embeds)
-            if (fixture.TryGetValue($"ref.{name}", out Tensor? expected))
-            {
-                if (compared++ < 4 || name.StartsWith("up_3_2", StringComparison.Ordinal) || name.StartsWith("mid", StringComparison.Ordinal))
-                    Report($"ref features {name}", ToArray(features), ToArray(expected));
-            }
-        output.WriteLine($"reference blocks compared: {compared} of {write.Embeds.Count}; fixture has {fixture.Keys.Count(k => k.StartsWith("ref.", StringComparison.Ordinal))}");
+        {
+            Assert.True(fixture.TryGetValue($"ref.{name}", out Tensor? expected), $"the fixture has no reference features for block {name}");
+            float[] actualFeatures = ToArray(features), expectedFeatures = ToArray(expected!);
+            if (compared++ < 4 || name.StartsWith("up_3_2", StringComparison.Ordinal) || name.StartsWith("mid", StringComparison.Ordinal))
+                Report($"ref features {name}", actualFeatures, expectedFeatures);
+            else
+                Assert.True(Compare(actualFeatures, expectedFeatures) is { RelRms: < 5e-3, Correlation: > 0.9999 }, $"reference features of block {name} are outside the tolerance");
+        }
+        output.WriteLine($"reference blocks compared: {compared} of {write.Embeds.Count}; fixture has {fixtureBlocks}");
+        Assert.Equal(fixtureBlocks, compared);
 
         // DINO projection.
         Tensor dinoCopy = new(dino.Shape, DType.F32);
@@ -93,7 +97,8 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         Report("dino projection", ToArray(projected), ToArray(fixture["dino_proj"]));
         using Tensor zeroDino = conditioner.UnconditionalTokens(backend);
 
-        // Rotation tables from the position maps (CHW float in [0, 1], quantised to bytes).
+        // Rotation tables from the position maps (CHW float in [0, 1]). The fixture generator already rounds them to k / 255, so Math.Round(v * 255) below
+        // recovers the exact bytes; change the generator and this round trip changes with it.
         byte[][] mapBytes = new byte[views][];
         float* mp = (float*)maps.DataPointer;
         for (int v = 0; v < views; v++)

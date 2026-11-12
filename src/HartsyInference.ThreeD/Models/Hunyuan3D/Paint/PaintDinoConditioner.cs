@@ -46,10 +46,12 @@ public sealed class PaintDinoConditioner : IPaintConditioner
     }
 
     /// <inheritdoc/>
-    public Tensor UnconditionalTokens(IBackend backend) => Project(backend, new Tensor(new TensorShape(1, UnconditionalHiddenTokens, 1536), DType.F32));
-
-    // 1 class token + (224 / 14)^2 patches.
-    private const int UnconditionalHiddenTokens = 257;
+    public Tensor UnconditionalTokens(IBackend backend)
+    {
+        // The hidden states DINO would produce for a 224 px crop: a class token, any register tokens and one token per patch, 1536 wide (the projection's input).
+        int tokens = 1 + _dino.Preset.NumRegisterTokens + (Crop / _dino.Preset.PatchSize) * (Crop / _dino.Preset.PatchSize);
+        return Project(backend, new Tensor(new TensorShape(1, tokens, (int)_projW.Shape[1]), DType.F32));
+    }
 
     /// <summary>The projection alone: the last hidden state <c>[1, tokens, 1536]</c> (consumed) to <c>[1, 4 * tokens, dim]</c>.</summary>
     internal Tensor Project(IBackend backend, Tensor hidden)
