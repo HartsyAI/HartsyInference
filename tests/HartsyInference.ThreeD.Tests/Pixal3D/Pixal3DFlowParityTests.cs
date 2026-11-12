@@ -25,7 +25,7 @@ public sealed class Pixal3DFlowParityTests
 
     private static string? Dumps => Environment.GetEnvironmentVariable("PIXAL3D_FLOW_DUMPS");
 
-    [Pixal3DFlowParityFact("out_ss", StructureFlow + ".safetensors", StructureFlow + ".json")]
+    [Pixal3DFlowParityFact("out_ss", "x.bin", StructureFlow + ".safetensors", StructureFlow + ".json")]
     public void StructureFlow_MatchesUpstreamTorchOnTheCpu()
     {
         string dir = Path.Combine(Dumps!, "out_ss");
@@ -39,7 +39,7 @@ public sealed class Pixal3DFlowParityTests
         AssertClose(y.AsReadOnlySpan<float>(), Floats(dir, "out"), "structure flow");
     }
 
-    [Pixal3DFlowParityFact("out_slat", ShapeFlow1024 + ".safetensors", ShapeFlow1024 + ".json")]
+    [Pixal3DFlowParityFact("out_slat", "coords.bin", ShapeFlow1024 + ".safetensors", ShapeFlow1024 + ".json")]
     public void ShapeFlow1024_MatchesUpstreamTorchOnTheCpu()
     {
         (string dir, int[] coords) = Open("out_slat");
@@ -54,7 +54,7 @@ public sealed class Pixal3DFlowParityTests
         AssertClose(y.AsReadOnlySpan<float>(), Floats(dir, "shape_out"), "1024 shape flow");
     }
 
-    [Pixal3DFlowParityFact("out_slat", TextureFlow1024 + ".safetensors", TextureFlow1024 + ".json")]
+    [Pixal3DFlowParityFact("out_slat", "coords.bin", TextureFlow1024 + ".safetensors", TextureFlow1024 + ".json")]
     public void TextureFlow1024_MatchesUpstreamTorchOnTheCpu()
     {
         (string dir, int[] coords) = Open("out_slat");

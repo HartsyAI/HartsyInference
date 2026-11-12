@@ -60,6 +60,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
     private readonly IDualGridMesher _mesher;
     private readonly IPixal3DTextureFlowStage? _textureFlow;
     private readonly ITrellis2TextureDecoderStage? _textureDecoder;
+    private readonly string? _textureUnavailable;
     private readonly int _maxTokens;
     private readonly List<IDisposable> _owned;
 
@@ -68,6 +69,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
     /// <param name="owned">Disposables released with the pipeline: the stages that hold weights, and the matter if it should go too.</param>
     /// <param name="textureFlow">The texture sampler stage; null leaves the pipeline shape-only. Needs <paramref name="textureDecoder"/>.</param>
     /// <param name="textureDecoder">The texture decoder stage; the shape <paramref name="decoder"/> must then be an <see cref="ISparseShapeSubdivisionDecoder"/>.</param>
+    /// <param name="textureUnavailable">Why a pipeline without texture stages has none (a missing file, a config that does not fit), named in the error of
+    /// <see cref="GenerateTextured"/>; ignored when the texture stages are given.</param>
     public Pixal3DImageTo3DPipeline(
         IBackend backend,
         Trellis2PipelineConfig config,
@@ -81,7 +84,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         IEnumerable<IDisposable> owned,
         int maxTokens = Trellis2Cascade.DefaultMaxTokens,
         IPixal3DTextureFlowStage? textureFlow = null,
-        ITrellis2TextureDecoderStage? textureDecoder = null) : base(backend)
+        ITrellis2TextureDecoderStage? textureDecoder = null,
+        string? textureUnavailable = null) : base(backend)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(conditioner);
@@ -98,6 +102,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             throw new ArgumentException("The texture decoder follows the shape decoder's subdivisions; the shape decoder must record them.", nameof(decoder));
         _textureFlow = textureFlow;
         _textureDecoder = textureDecoder;
+        _textureUnavailable = textureFlow is null ? textureUnavailable : null;
         _config = config;
         _matter = matter;
         _conditioner = conditioner;
@@ -135,13 +140,24 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             owned.Add(decoder);
             IPixal3DTextureFlowStage? textureFlow = null;
             ITrellis2TextureDecoderStage? textureDecoder = null;
-            if (files.HasTexture && config.HasTexture)
+            string? textureUnavailable = TextureUnavailable(files, config);
+            if (textureUnavailable is null)
             {
-                CheckTextureFlowConfig(files.TextureFlow!, ReadConfig(files.StructureFlow).CondChannels);
-                textureFlow = new Pixal3DTextureFlowStage(files.TextureFlow!, config);
-                Trellis2TextureDecoderStage decoderStage = new(files.TextureDecoder!);
-                owned.Add(decoderStage);
-                textureDecoder = decoderStage;
+                // An install that is incomplete or does not fit leaves the texture path off with its reason; shape-only requests still load.
+                try
+                {
+                    CheckTextureFlowConfig(files.TextureFlow!, ReadConfig(files.StructureFlow).CondChannels);
+                    textureFlow = new Pixal3DTextureFlowStage(files.TextureFlow!, config);
+                    Trellis2TextureDecoderStage decoderStage = new(files.TextureDecoder!);
+                    owned.Add(decoderStage);
+                    textureDecoder = decoderStage;
+                }
+                catch (Exception error) when (error is HartsyInferenceException or FileNotFoundException)
+                {
+                    textureFlow = null;
+                    textureDecoder = null;
+                    textureUnavailable = error.Message;
+                }
             }
 
             return new Pixal3DImageTo3DPipeline(
@@ -157,7 +173,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
                 owned,
                 Trellis2Cascade.DefaultMaxTokens,
                 textureFlow,
-                textureDecoder);
+                textureDecoder,
+                textureUnavailable);
         }
         catch
         {
@@ -232,7 +249,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
     /// <summary>
     /// Generates a textured PBR model for one image: the shape path, then the texture flow over the fine shape latent's voxels, the texture decoder
     /// guided by the shape decode's subdivisions, and <see cref="PbrMeshPostProcessor"/> (clean, decimate, unwrap, bake, inpaint). The result is in
-    /// the export frame (see <see cref="ToExportFrame"/>); <see cref="ToGlb"/> writes it.
+    /// the export frame (see <see cref="ToExportFrame"/>); <see cref="ToGlb"/> writes it. The token is observed between stages and sampler steps (a
+    /// stage in progress finishes first) and by the bake.
     /// </summary>
     /// <exception cref="HartsyInferenceException">The texture checkpoints are not installed, or the sampled shape holds no geometry.</exception>
     public PbrPostProcessResult GenerateTextured(
@@ -258,8 +276,10 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         if (textured && _textureFlow is null)
         {
             throw new HartsyInferenceException(
-                "Texture needs the Pixal3D texture flow (slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors), the texture decoder "
-                + "(tex_dec_next_dc_f16c32_fp16.safetensors) and a pipeline.json with the texture entries; one or more are not installed.");
+                "Texture is not available: " + (_textureUnavailable ?? "this pipeline was built without texture stages")
+                + ". It needs the Pixal3D texture flow (slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors and its .json), the texture decoder "
+                + "(tex_dec_next_dc_f16c32_fp16.safetensors) and a pipeline.json with the texture entries. A model that is already loaded keeps this "
+                + "answer: unload it after installing them.");
         }
 
         int target = ResolveGrid(options.Grid);
@@ -441,6 +461,19 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             throw new HartsyInferenceException($"'{files.ShapeFlow512}' is trained for a {coarse.Resolution} grid; expected {StructureGrid}.");
         if (fine.Resolution != FineTrainingGrid)
             throw new HartsyInferenceException($"'{files.ShapeFlow1024}' is trained for a {fine.Resolution} grid; expected {FineTrainingGrid}.");
+    }
+
+    // Names what keeps the texture path off, or null when the files and pipeline.json allow it.
+    private static string? TextureUnavailable(Pixal3DModelFiles files, Trellis2PipelineConfig config)
+    {
+        List<string> missing = [];
+        if (files.TextureFlow is null)
+            missing.Add(Trellis2ModelFiles.TextureFlow1024File + " is not installed");
+        if (files.TextureDecoder is null)
+            missing.Add(Trellis2ModelFiles.TextureDecoderFile + " is not installed");
+        if (!config.HasTexture)
+            missing.Add("pipeline.json has no tex_slat_sampler and tex_slat_normalization");
+        return missing.Count == 0 ? null : string.Join("; ", missing);
     }
 
     // The texture flow concatenates the 32-channel shape latent to the 32-channel sample and reads the fine grid's projected features.

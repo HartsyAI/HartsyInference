@@ -107,6 +107,33 @@ public sealed class Pixal3DTexturePipelineTests
         Assert.Empty(rig.Calls);
     }
 
+    [Fact]
+    public void GenerateTextured_NamesWhyTheTexturePathIsOffWhenThePipelineWasLoadedWithoutIt()
+    {
+        using Rig rig = new();
+        using Pixal3DImageTo3DPipeline pipeline = new(
+            rig.Backend,
+            Config,
+            null,
+            new StubConditioner(rig),
+            new StubStructure(rig),
+            new StubShape(rig),
+            new StubUpsampler(rig),
+            new StubDecoder(rig),
+            new DualGridMesherStage(),
+            [],
+            Trellis2Cascade.DefaultMaxTokens,
+            null,
+            null,
+            "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json not found");
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => pipeline.GenerateTextured(Image(), Options()));
+
+        Assert.Contains("1024_bf16.json not found", error.Message, StringComparison.Ordinal);
+        Assert.Contains("unload", error.Message, StringComparison.Ordinal);
+        Assert.Empty(rig.Calls);
+    }
+
     [Theory]
     [InlineData(-1)]
     [InlineData(15)]
