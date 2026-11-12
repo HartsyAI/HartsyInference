@@ -6,6 +6,7 @@ using HartsyInference.Cuda;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Tests.Services;
@@ -49,8 +50,35 @@ public sealed class MiniMaxH3ImageGpuTests
             using Tensor pixels = decoder.Decode(cuda, latent);
 
             Assert.Equal(expected.Length, pixels.ElementCount);
-            double relative = RelativeL2(pixels.AsSpan<float>().ToArray(), expected);
-            Assert.True(relative < VaeRelativeL2Floor, $"VAE decode relative L2 vs ComfyUI was {relative:E3}");
+            // The decoder emits [-1, 1]; ComfyUI emits [0, 1] (its de-normalised, clamped pixels). Compare in the engine's
+            // convention, then check the bytes the engine would write against ComfyUI's uint8 (truncated 255 * x).
+            float[] actual = pixels.AsSpan<float>().ToArray();
+            float[] expectedSigned = expected.Select(v => 2f * v - 1f).ToArray();
+            double relative = RelativeL2(actual, expectedSigned);
+            Assert.True(relative < VaeRelativeL2Floor, Diagnose("VAE decode", actual, expectedSigned, relative));
+
+            byte[] ours = ImagePostProcessor.TensorToRgbBytes(pixels.Reshape(new TensorShape(1, 3, 128, 128)));
+            // ComfyUI decodes in fp16 and we decode in f32, so the bytes may differ by up to two levels at a boundary. The
+            // mean difference is the stronger check.
+            int worst = 0;
+            long total = 0;
+            for (int y = 0; y < 128; y++)
+            {
+                for (int x = 0; x < 128; x++)
+                {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        float reference = Math.Clamp(expected[c * 128 * 128 + y * 128 + x], 0f, 1f);
+                        int comfy = (int)Math.Floor(255f * reference);
+                        int difference = Math.Abs(ours[(y * 128 + x) * 3 + c] - comfy);
+                        worst = Math.Max(worst, difference);
+                        total += difference;
+                    }
+                }
+            }
+            double meanDifference = total / (128.0 * 128.0 * 3.0);
+            Assert.True(worst <= 2 && meanDifference < 0.5,
+                $"byte difference from ComfyUI's uint8 image: worst {worst}, mean {meanDifference:F3}");
         }
         finally
         {
@@ -66,8 +94,7 @@ public sealed class MiniMaxH3ImageGpuTests
     {
         string refDir = ReferenceDir();
         JsonElement manifest = ReadManifest(refDir);
-        int[] expectedIds = JsonSerializer.Deserialize<int[]>(
-            File.ReadAllText(Path.Combine(refDir, "text_ids.json"))) ?? throw new InvalidDataException("text_ids.json");
+        int[] expectedIds = ReadTextIds(refDir);
         float[] expectedHidden = ReadFloats(Path.Combine(refDir, "text_hidden_f32.bin"));
         int tokens = expectedIds.Length;
 
@@ -114,8 +141,8 @@ public sealed class MiniMaxH3ImageGpuTests
     {
         string refDir = ReferenceDir();
         JsonElement manifest = ReadManifest(refDir);
-        double[] sigmas = manifest.GetProperty("sigmas").EnumerateArray().Select(e => e.GetDouble()).ToArray();
-        int[] expectedIds = JsonSerializer.Deserialize<int[]>(File.ReadAllText(Path.Combine(refDir, "text_ids.json")))!;
+        double[] sigmas = manifest.GetProperty("sigmas_7_float64").EnumerateArray().Select(e => e.GetDouble()).ToArray();
+        int[] expectedIds = ReadTextIds(refDir);
         int tokens = expectedIds.Length;
         float[] hidden = ReadFloats(Path.Combine(refDir, "text_hidden_f32.bin"));
         float[] xValues = ReadFloats(Path.Combine(refDir, $"step{step}_x_f32.bin"));
@@ -196,6 +223,13 @@ public sealed class MiniMaxH3ImageGpuTests
         Environment.GetEnvironmentVariable(ModelsDirVariable)
         ?? throw new InvalidOperationException($"{ModelsDirVariable} is not set.");
 
+    /// <summary>The prompt's token ids as ComfyUI's node presented them: the first (only) entry of <c>node_ids</c>.</summary>
+    private static int[] ReadTextIds(string refDir)
+    {
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(refDir, "text_ids.json")));
+        return document.RootElement.GetProperty("node_ids")[0].EnumerateArray().Select(e => e.GetInt32()).ToArray();
+    }
+
     private static JsonElement ReadManifest(string refDir)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(refDir, "manifest.json")));
@@ -217,6 +251,33 @@ public sealed class MiniMaxH3ImageGpuTests
             throw new InvalidDataException($"Expected {destination.Length} values, found {source.Length}.");
         }
         source.AsSpan().CopyTo(destination);
+    }
+
+    /// <summary>A failure message that says whether the gap is a convention (an affine map fits) or a structural error.</summary>
+    private static string Diagnose(string what, float[] actual, float[] expected, double relative)
+    {
+        double sa = 0, se = 0, saa = 0, sae = 0, n = expected.Length;
+        double minA = double.MaxValue, maxA = double.MinValue, minE = double.MaxValue, maxE = double.MinValue;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double a = actual[i], e = expected[i];
+            sa += a; se += e; saa += a * a; sae += a * e;
+            minA = Math.Min(minA, a); maxA = Math.Max(maxA, a);
+            minE = Math.Min(minE, e); maxE = Math.Max(maxE, e);
+        }
+        double denominator = n * saa - sa * sa;
+        double scale = denominator == 0 ? 0 : (n * sae - sa * se) / denominator;
+        double offset = (se - scale * sa) / n;
+        double fitted = 0, norm = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double d = scale * actual[i] + offset - expected[i];
+            fitted += d * d;
+            norm += (double)expected[i] * expected[i];
+        }
+        return $"{what} relative L2 vs ComfyUI was {relative:E3}. Ours range [{minA:F4}, {maxA:F4}], ComfyUI range "
+            + $"[{minE:F4}, {maxE:F4}]. Best affine fit ours->ComfyUI: scale {scale:F5}, offset {offset:F5}, residual "
+            + $"relative L2 {Math.Sqrt(fitted) / Math.Max(1e-30, Math.Sqrt(norm)):E3}.";
     }
 
     private static double RelativeL2(float[] actual, float[] expected)
