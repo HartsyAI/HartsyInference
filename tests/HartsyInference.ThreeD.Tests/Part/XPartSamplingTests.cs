@@ -53,6 +53,15 @@ public sealed class XPartSamplingTests
     }
 
     [Fact]
+    public void KeptParts_SkipsEmptyBoxesAndKeepsTheLargestInOrder()
+    {
+        Assert.Equal([0, 1, 3], XPartSampling.KeptParts([5, 2, 0, 9], 50));
+        Assert.Equal([0, 3], XPartSampling.KeptParts([5, 2, 0, 9], 2));
+        Assert.Equal([1, 2], XPartSampling.KeptParts([4, 7, 7, 1], 2)); // 7 and 7 beat 4; ties go to the lower index
+        Assert.Empty(XPartSampling.KeptParts([0, 0], 5));
+    }
+
+    [Fact]
     public void PartIds_AreAFixedSelectionOfDistinctIds()
     {
         int[] ids = XPartSampling.PartIds(12, 50, 3);

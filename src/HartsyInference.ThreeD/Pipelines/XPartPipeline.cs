@@ -50,7 +50,10 @@ public sealed record XPartOptions
 /// <c>conditioner/conditioner.safetensors</c>, <c>model/model.safetensors</c> and <c>shapevae/shapevae.safetensors</c> of <c>tencent/Hunyuan3D-Part</c>.</remarks>
 public sealed class XPartPipeline
 {
-    private const int LatentTokens = 1024, LatentChannels = 64, MaxParts = 50;
+    private const int LatentTokens = 1024, LatentChannels = 64;
+
+    // The part embeddings of the DiT: the most parts the release can generate at once.
+    private static readonly int MaxParts = new XPartDitConfig().ValidParts;
     private const float VaeScaleFactor = 1.0039506158752403f;
 
     private readonly IBackend _backend;
@@ -81,7 +84,7 @@ public sealed class XPartPipeline
         if (options.Steps < 1 || options.GridResolution < 8 || options.PointCount < 1 || options.QueryCount < 1 || options.QueryCount > options.PointCount || !(options.BoxExtent > 0))
             throw new ArgumentOutOfRangeException(nameof(options), "Steps, grid, point counts and the box extent must be positive and the queries must not exceed the points.");
         Stopwatch clock = Stopwatch.StartNew();
-        // P3-SAM and the sampling are one step, the conditioner one, each flow step one and each decoded part one: the total is complete once the parts are known.
+        // P3-SAM with the sampling is one step, the conditioner one, each flow step one and each decoded part one; the first report waits until the parts are known, so every report carries the final total.
         int total = options.Steps + 3, done = 0;
         void Advance() => onProgress?.Invoke(new GenerationProgress(Math.Min(++done, total), total, clock.Elapsed.TotalMilliseconds));
 
@@ -90,14 +93,13 @@ public sealed class XPartPipeline
 
         // 1. The part boxes.
         float[][] boxes = PredictBoxes(normalized, options, cancel);
-        Advance();
         cancel.ThrowIfCancellationRequested();
 
         // 2. Surface samples: the object, and the faces in each box.
         (float[] objectPoints, float[] objectFeatures) = XPartSampling.SurfaceSamples(normalized.Vertices, normalized.Indices, options.PointCount, options.Seed);
         // The release has 50 part embeddings: with more parts the 50 whose boxes hold the most faces are kept, in P3-SAM's order.
         int[][] boxFaces = [.. boxes.Select(b => XPartSampling.FacesInBox(normalized.Vertices, normalized.Indices, b))];
-        HashSet<int> keep = [.. Enumerable.Range(0, boxes.Length).Where(k => boxFaces[k].Length > 0).OrderByDescending(k => boxFaces[k].Length).ThenBy(k => k).Take(MaxParts)];
+        HashSet<int> keep = [.. XPartSampling.KeptParts([.. boxFaces.Select(f => f.Length)], MaxParts)];
         List<XPartPartSample> samples = [];
         List<float[]> keptBoxes = [];
         for (int k = 0; k < boxes.Length; k++)
@@ -116,6 +118,7 @@ public sealed class XPartPipeline
         int[] objectQueries = SurfaceSampler.FarthestPointIndices(objectPoints, options.QueryCount, (options.Seed % objectCount + objectCount) % objectCount);
         int parts = samples.Count;
         total += parts - 1; // one step per decoded part
+        Advance();
         int[] ids = XPartSampling.PartIds(parts, MaxParts, options.Seed);
 
         // 3. The conditioning tokens.

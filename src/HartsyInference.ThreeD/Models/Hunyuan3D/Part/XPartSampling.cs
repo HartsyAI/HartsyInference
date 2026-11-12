@@ -96,6 +96,11 @@ internal static class XPartSampling
         return (xyz, features);
     }
 
+    /// <summary>The parts to generate when P3-SAM finds more than the release has embeddings for: the indices of the boxes with at least one face, at most <paramref name="max"/> of them, the ones
+    /// holding the most faces (ties by index), returned in ascending order.</summary>
+    public static int[] KeptParts(int[] faceCounts, int max) =>
+        [.. Enumerable.Range(0, faceCounts.Length).Where(k => faceCounts[k] > 0).OrderByDescending(k => faceCounts[k]).ThenBy(k => k).Take(max).Order()];
+
     /// <summary>The first <paramref name="count"/> entries of a seeded permutation of <c>0 .. validParts - 1</c> (upstream: <c>torch.randperm(valid_num)[:num_parts]</c>), the ids of the parts' learned embeddings.</summary>
     public static int[] PartIds(int count, int validParts, int seed)
     {
