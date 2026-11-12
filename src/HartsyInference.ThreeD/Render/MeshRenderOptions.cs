@@ -6,6 +6,9 @@ public sealed record MeshRenderOptions
     /// <summary>The largest edge a render may have.</summary>
     public const int MaxSize = 2048;
 
+    /// <summary>The most samples a render may hold (4096 x 4096), which bounds its memory at about 117 MB.</summary>
+    public const long MaxSampleCount = 4096L * 4096;
+
     /// <summary>Picture width in pixels, 16 to <see cref="MaxSize"/>.</summary>
     public int Width { get; init; } = 256;
 
@@ -43,6 +46,8 @@ public sealed record MeshRenderOptions
             throw new ArgumentOutOfRangeException(nameof(Height), Height, $"Height must be between 16 and {MaxSize}.");
         if (Samples is < 1 or > 4)
             throw new ArgumentOutOfRangeException(nameof(Samples), Samples, "Samples must be between 1 and 4.");
+        if ((long)Width * Height * Samples * Samples > MaxSampleCount)
+            throw new ArgumentOutOfRangeException(nameof(Samples), Samples, $"Width x Height x Samples squared must be at most {MaxSampleCount} (a 2048 x 2048 picture takes 2 samples per axis at most 4096 x 4096 in all).");
         if (!(FovDegrees is >= 10f and <= 90f))
             throw new ArgumentOutOfRangeException(nameof(FovDegrees), FovDegrees, "FovDegrees must be between 10 and 90.");
         if (!(Viewpoint.ElevationDegrees is >= -90f and <= 90f) || !float.IsFinite(Viewpoint.AzimuthDegrees))

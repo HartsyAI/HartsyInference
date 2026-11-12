@@ -12,8 +12,9 @@ public interface IMeshThumbnailService
     /// <param name="data">The file bytes.</param>
     /// <param name="format">The file's format, one of <see cref="Formats"/>.</param>
     /// <param name="request">Size, view and background; null takes the defaults.</param>
+    /// <param name="cancel">Observed while the picture is drawn, so a long render of a large model stops when the caller goes away.</param>
     /// <exception cref="NotSupportedException">The format is not supported.</exception>
     /// <exception cref="ArgumentException">An option is out of range or names an unknown view.</exception>
     /// <exception cref="Core.Exceptions.HartsyInferenceException">The file is malformed or has nothing to draw.</exception>
-    MeshThumbnail Render(byte[] data, string format, MeshThumbnailRequest? request = null);
+    MeshThumbnail Render(byte[] data, string format, MeshThumbnailRequest? request = null, CancellationToken cancel = default);
 }

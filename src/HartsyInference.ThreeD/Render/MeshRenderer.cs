@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.Numerics;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.ThreeD.Document;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.Vision.Codec;
@@ -11,7 +13,7 @@ public static class MeshRenderer
     /// <summary>Draws <paramref name="document"/>.</summary>
     /// <returns>The picture (RGBA, or RGB with a background) and notes about what was not drawn as the file describes it.</returns>
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
-    public static MeshRender Render(MeshDocument document, MeshRenderOptions options)
+    public static MeshRender Render(MeshDocument document, MeshRenderOptions options, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(options);
@@ -19,22 +21,26 @@ public static class MeshRenderer
         List<string> notes = [];
 
         Vector3 min = new(float.PositiveInfinity), max = new(float.NegativeInfinity);
-        List<Prepared> prepared = [];
+        List<(MeshPrimitive Primitive, Prepared Geometry)> prepared = [];
         foreach (MeshPrimitive primitive in document.Primitives)
         {
+            if (primitive.Geometry.VertexCount == 0)
+                continue;
             Prepared p = Prepare(primitive.Geometry, options.Up);
-            prepared.Add(p);
+            prepared.Add((primitive, p));
             min = Vector3.Min(min, p.Min);
             max = Vector3.Max(max, p.Max);
         }
+        if (prepared.Count == 0)
+            throw new HartsyInferenceException("The model has no geometry to draw.");
 
         SampleBuffer buffer = new(options);
         OrbitCamera camera = new(min, max, options, buffer.Width, buffer.Height);
         Dictionary<MeshImage, Texture?> textures = new(ReferenceEqualityComparer.Instance);
-        bool jpegSkipped = false;
-        for (int i = 0; i < document.Primitives.Count; i++)
+        bool jpegSkipped = false, undecodable = false;
+        foreach ((MeshPrimitive primitive, Prepared geometry) in prepared)
         {
-            MeshPrimitive primitive = document.Primitives[i];
+            cancel.ThrowIfCancellationRequested();
             MeshMaterial? material = (uint)primitive.Material < (uint)document.Materials.Count ? document.Materials[primitive.Material] : null;
             Texture? texture = null;
             if (options.Textured && material?.BaseColor is { } image && primitive.Geometry.Uvs is not null)
@@ -44,12 +50,18 @@ public static class MeshRenderer
                     texture = image.MimeType == "image/png" ? Texture.TryDecode(image.Data) : null;
                     textures[image] = texture;
                 }
-                jpegSkipped |= texture is null;
+                if (texture is null)
+                {
+                    jpegSkipped |= image.MimeType != "image/png";
+                    undecodable |= image.MimeType == "image/png";
+                }
             }
-            Draw(prepared[i], material, texture, camera, buffer);
+            Draw(geometry, material, texture, camera, buffer, cancel);
         }
         if (jpegSkipped)
-            notes.Add("A base-colour texture is not a PNG the renderer can decode (JPEG is not decoded), so that material is drawn with its colour only.");
+            notes.Add("A base-colour texture is a JPEG, which the renderer does not decode, so that material is drawn with its colour only.");
+        if (undecodable)
+            notes.Add($"A base-colour PNG texture could not be decoded (it is corrupt or larger than {Texture.MaxPixels} pixels), so that material is drawn with its colour only.");
         return new MeshRender(buffer.Resolve(options), notes);
     }
 
@@ -82,8 +94,10 @@ public static class MeshRenderer
         return new Prepared(mesh, positions, normals, colours, min, max);
     }
 
-    private static void Draw(Prepared p, MeshMaterial? material, Texture? texture, OrbitCamera camera, SampleBuffer buffer)
+    private static void Draw(Prepared p, MeshMaterial? material, Texture? texture, OrbitCamera camera, SampleBuffer buffer, CancellationToken cancel)
     {
+        // Colour space: texels are sRGB and the factors and vertex colours are converted to the same display space before they are
+        // multiplied, so all three terms are in one space; change them together or not at all.
         float[] f = material?.BaseColorFactor ?? [1f, 1f, 1f, 1f];
         Vector3 factor = new(ToDisplay(f[0]), ToDisplay(f[1]), ToDisplay(f[2]));
         float alphaFactor = f[3];
@@ -98,6 +112,8 @@ public static class MeshRenderer
 
         for (int t = 0; t < indices.Length; t += 3)
         {
+            if ((t / 3 & 0x1FFF) == 0)
+                cancel.ThrowIfCancellationRequested();
             int a = indices[t], b = indices[t + 1], c = indices[t + 2];
             (float x0, float y0, float w0) = screen[a];
             (float x1, float y1, float w1) = screen[b];
@@ -201,8 +217,14 @@ public static class MeshRenderer
             _height = png.Height;
         }
 
+        /// <summary>The most pixels a texture may have (8192 x 8192); the decoder is not run on a larger one.</summary>
+        public const long MaxPixels = 8192L * 8192;
+
         public static Texture? TryDecode(byte[] data)
         {
+            // The PNG header names the size before any of the image is inflated: width and height are the first IHDR fields.
+            if (data.Length < 24 || (long)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(16)) * BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(20)) > MaxPixels)
+                return null;
             try
             {
                 return new Texture(PngDecoder.DecodeWithAlpha(data));
@@ -216,7 +238,8 @@ public static class MeshRenderer
         public (Vector3 Colour, float Alpha) Sample(float u, float v)
         {
             float fu = u - MathF.Floor(u), fv = v - MathF.Floor(v);
-            int x = Math.Min((int)(fu * _width), _width - 1), y = Math.Min((int)(fv * _height), _height - 1);
+            // Clamped so a NaN coordinate from a future reader cannot index outside the image.
+            int x = Math.Clamp((int)(fu * _width), 0, _width - 1), y = Math.Clamp((int)(fv * _height), 0, _height - 1);
             int i = y * _width + x;
             return (new Vector3(_rgb[i * 3], _rgb[i * 3 + 1], _rgb[i * 3 + 2]) / 255f, _alpha is null ? 1f : _alpha[i] / 255f);
         }

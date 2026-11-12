@@ -14,7 +14,7 @@ internal sealed class MeshThumbnailService : IMeshThumbnailService
     public IReadOnlyList<string> Formats { get; } = [.. MeshDocumentReader.Formats, "ply"];
 
     /// <inheritdoc/>
-    public MeshThumbnail Render(byte[] data, string format, MeshThumbnailRequest? request = null)
+    public MeshThumbnail Render(byte[] data, string format, MeshThumbnailRequest? request = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentException.ThrowIfNullOrWhiteSpace(format);
@@ -30,13 +30,13 @@ internal sealed class MeshThumbnailService : IMeshThumbnailService
             PointPlyReader.Result points = PointPlyReader.Read(data);
             if (points.Dropped > 0)
                 notes.Add($"{points.Dropped} splat(s) fainter than 5 % opacity were left out.");
-            render = PointCloudRenderer.Render(points.Cloud, options);
+            render = PointCloudRenderer.Render(points.Cloud, options, cancel);
             kind = "points";
         }
         else
         {
             MeshDocument document = MeshDocumentReader.Read(data, format);
-            render = MeshRenderer.Render(document, options);
+            render = MeshRenderer.Render(document, options, cancel);
             notes.AddRange(render.Notes);
             kind = "mesh";
         }

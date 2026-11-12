@@ -115,20 +115,28 @@ public static class PngDecoder
 
         // Strip zlib 2-byte header (CMF + FLG).
         ReadOnlySpan<byte> deflated = compressed.AsSpan(2);
+        // Output stride = 1 (filter byte) + bytes per scanline.
+        int channelsIn = colorType == 2 ? 3 : 4;
+        int bytesPerPixel = channelsIn; // 8-bit per channel.
+        long expectedBytes = (1L + (long)width * bytesPerPixel) * height;
+        if (expectedBytes > int.MaxValue || (long)width * height * 3 > int.MaxValue)
+            throw new InvalidDataException($"PNG dimensions {width} x {height} are too large to decode.");
+        int scanlineBytes = width * bytesPerPixel;
+        int expected = (int)expectedBytes;
+
+        // Inflate at most one byte past what the header promises, so a stream that expands far beyond its dimensions (a deflate bomb)
+        // is refused without being held in memory.
         byte[] decompressed;
         using (MemoryStream ms = new(deflated.ToArray()))
         using (DeflateStream df = new(ms, CompressionMode.Decompress))
         using (MemoryStream output = new())
         {
-            df.CopyTo(output);
+            byte[] block = new byte[81920];
+            int read;
+            while (output.Length <= expected && (read = df.Read(block, 0, (int)Math.Min(block.Length, expected + 1L - output.Length))) > 0)
+                output.Write(block, 0, read);
             decompressed = output.ToArray();
         }
-
-        // Output stride = 1 (filter byte) + bytes per scanline.
-        int channelsIn = colorType == 2 ? 3 : 4;
-        int bytesPerPixel = channelsIn; // 8-bit per channel.
-        int scanlineBytes = width * bytesPerPixel;
-        int expected = (1 + scanlineBytes) * height;
         if (decompressed.Length != expected)
             throw new InvalidDataException($"PNG decompressed data is {decompressed.Length} bytes; expected {expected}.");
 

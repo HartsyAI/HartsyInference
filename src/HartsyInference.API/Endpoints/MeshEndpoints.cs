@@ -130,7 +130,7 @@ public static class MeshEndpoints
                 if (string.IsNullOrWhiteSpace(req.Data) || string.IsNullOrWhiteSpace(req.Format))
                     throw new ArgumentException("Send Data (base64) and Format.");
                 byte[] data = MeshBase64.Decode(req.Data);
-                MeshThumbnail thumbnail = await Task.Run(() => engine.MeshThumbnails.Render(data, req.Format, req.Options), ct);
+                MeshThumbnail thumbnail = await Task.Run(() => engine.MeshThumbnails.Render(data, req.Format, req.Options, ct), ct);
                 return Results.Ok(new { Png = System.Convert.ToBase64String(thumbnail.Png), thumbnail.Width, thumbnail.Height, thumbnail.Kind, thumbnail.Notes });
             }
             catch (NotSupportedException ex)

@@ -36,6 +36,9 @@ public static class PointPlyReader
             }
             else if (parts is ["element", _, _])
             {
+                // The body is read from the end of the header, so the vertex element has to be the first one.
+                if (!vertexSeen && parts[1] != "vertex")
+                    throw new HartsyInferenceException($"The PLY element '{parts[1]}' comes before the vertex element; only files whose first element is vertex are read.");
                 inVertex = parts[1] == "vertex" && !vertexSeen;
                 if (inVertex)
                 {
@@ -55,13 +58,22 @@ public static class PointPlyReader
         int x = properties.FindIndex(p => p.Name == "x"), y = properties.FindIndex(p => p.Name == "y"), z = properties.FindIndex(p => p.Name == "z");
         if (x < 0 || y < 0 || z < 0 || count == 0)
             throw new HartsyInferenceException("The PLY file has no vertices with x, y and z properties.");
+        // Every vertex takes at least one byte (a binary one) or one line, so a count beyond the file's length is a lie, and nothing is sized from it.
+        if (count > ply.Length)
+            throw new HartsyInferenceException($"The PLY header declares {count} vertices but the file holds only {ply.Length} bytes.");
 
         int[] rgb = [.. new[] { "red", "green", "blue" }.Select(n => properties.FindIndex(p => p.Name == n))];
         int[] dc = [.. new[] { "f_dc_0", "f_dc_1", "f_dc_2" }.Select(n => properties.FindIndex(p => p.Name == n))];
         int opacity = properties.FindIndex(p => p.Name == "opacity");
         bool splat = dc.All(i => i >= 0);
         bool coloured = splat || rgb.All(i => i >= 0);
-        bool byteColours = !splat && coloured && properties[rgb[0]].Type is "uchar" or "uint8" or "char" or "int8";
+        // Integer colours are scaled to [0, 1] by their type's range; float ones are taken as they are.
+        double colourScale = splat || !coloured ? 1.0 : properties[rgb[0]].Type switch
+        {
+            "uchar" or "uint8" or "char" or "int8" => 255.0,
+            "ushort" or "uint16" or "short" or "int16" => 65535.0,
+            _ => 1.0,
+        };
 
         // Only the properties that are drawn are kept: a splat has dozens per point and there can be millions of points.
         List<int> wanted = [x, y, z];
@@ -74,8 +86,9 @@ public static class PointPlyReader
         double[] values = format == "ascii" ? ReadAscii(ply, bodyStart, count, properties.Count, wanted) : ReadBinary(ply, bodyStart, count, properties, wanted);
         int columns = wanted.Count;
 
-        List<float> positions = [], colours = [];
-        int dropped = 0;
+        float[] positions = new float[count * 3];
+        float[]? colours = coloured ? new float[count * 3] : null;
+        int kept = 0, dropped = 0;
         for (int i = 0; i < count; i++)
         {
             int row = i * columns;
@@ -84,20 +97,24 @@ public static class PointPlyReader
                 dropped++;
                 continue;
             }
-            positions.Add((float)values[row]);
-            positions.Add((float)values[row + 1]);
-            positions.Add((float)values[row + 2]);
-            if (!coloured)
-                continue;
             for (int c = 0; c < 3; c++)
+                positions[kept * 3 + c] = (float)values[row + c];
+            if (colours is not null)
             {
-                double v = values[row + 3 + c];
-                colours.Add((float)Math.Clamp(splat ? 0.5 + ShC0 * v : byteColours ? v / 255.0 : v, 0.0, 1.0));
+                for (int c = 0; c < 3; c++)
+                {
+                    double v = values[row + 3 + c];
+                    colours[kept * 3 + c] = (float)Math.Clamp(splat ? 0.5 + ShC0 * v : v / colourScale, 0.0, 1.0);
+                }
             }
+            kept++;
         }
-        if (positions.Count == 0)
+        if (kept == 0)
             throw new HartsyInferenceException("Every splat in the file is fainter than 5 % opacity; there is nothing to draw.");
-        return new Result(new PointCloud { Positions = [.. positions], Colors = coloured ? [.. colours] : null }, splat, dropped);
+        Array.Resize(ref positions, kept * 3);
+        if (colours is not null)
+            Array.Resize(ref colours, kept * 3);
+        return new Result(new PointCloud { Positions = positions, Colors = colours }, splat, dropped);
     }
 
     /// <summary>The <paramref name="wanted"/> properties of every vertex, row by row.</summary>
@@ -115,7 +132,13 @@ public static class PointPlyReader
         {
             long row = start + i * stride;
             for (int w = 0; w < wanted.Count; w++)
-                values[(long)i * wanted.Count + w] = Decode(properties[wanted[w]].Type, ply.AsSpan((int)(row + offsets[wanted[w]])));
+            {
+                double value = Decode(properties[wanted[w]].Type, ply.AsSpan((int)(row + offsets[wanted[w]])));
+                // A NaN or infinite coordinate would make the bounds, and so the camera, meaningless; the ASCII path refuses them too.
+                if (!double.IsFinite(value))
+                    throw new HartsyInferenceException($"PLY vertex {i + 1} holds a value ({properties[wanted[w]].Name}) that is not a finite number.");
+                values[(long)i * wanted.Count + w] = value;
+            }
         }
         return values;
     }

@@ -9,7 +9,7 @@ public static class PointCloudRenderer
     /// <summary>Draws <paramref name="cloud"/>.</summary>
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
     /// <exception cref="ArgumentException">The cloud has no points.</exception>
-    public static MeshRender Render(PointCloud cloud, MeshRenderOptions options)
+    public static MeshRender Render(PointCloud cloud, MeshRenderOptions options, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(cloud);
         ArgumentNullException.ThrowIfNull(options);
@@ -31,6 +31,8 @@ public static class PointCloudRenderer
         int reach = (int)MathF.Ceiling(radius);
         for (int i = 0; i < points.Length; i++)
         {
+            if ((i & 0xFFFF) == 0)
+                cancel.ThrowIfCancellationRequested();
             (float x, float y, float w) = camera.Project(points[i]);
             if (w <= 0)
                 continue;
