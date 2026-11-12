@@ -1,6 +1,6 @@
 # Hunyuan3D-Omni: source spike
 
-Source read, nothing run, nothing implemented. Pins: `Tencent-Hunyuan/Hunyuan3D-Omni` `4d47c0cc2bd0c4281963a7314ab330a5af36bfa8` (code, 2025-10-17), weights `tencent/Hunyuan3D-Omni` `70e803bfb4e127d534049d8ab8c8cb511780d485` (not gated). Read 2026-11-11. The configs under `model/`, `cond_encoder/`, `vae/`, `scheduler/` and the root `config.json` were read as text (a few hundred bytes each); no weight file was opened.
+Source read, nothing run, nothing implemented. Pins: `Tencent-Hunyuan/Hunyuan3D-Omni` `4d47c0cc2bd0c4281963a7314ab330a5af36bfa8` (code, 2025-10-17), weights `tencent/Hunyuan3D-Omni` `70e803bfb4e127d534049d8ab8c8cb511780d485` (not gated). Read 2026-11-11. The configs under `model/`, `cond_encoder/`, `vae/`, `scheduler/` and the root `config.json` were read as text (a few hundred bytes each); no weight file was opened on that day; the weights were downloaded and read on 2026-11-12, see "Weights downloaded and compared" below, which supersedes the statements here that they were unread.
 
 ## What it is
 
@@ -15,7 +15,7 @@ Tencent Hunyuan 3D Omni Community License Agreement (release 2025-09-26, root `L
 | Part | Config | Expected match in this repository (inferred from the configs, not checked) |
 |---|---|---|
 | DiT | `HunYuanDiTPlain`: input 4096 x 64, width 2048, depth 21, 16 heads, `context_dim` 1024, `text_len` 1370, RMS q/k norm, no biases, no position embedding, MoE in 6 layers (8 experts, top 2) | The Hunyuan3D-2.1 shape DiT, which `Models/Hunyuan3D` already runs (`HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md`); the weights are fine-tuned |
-| Shape VAE | `ShapeVAE`: 4096 latents, `embed_dim` 64, width 1024, 8 encoder and 16 decoder layers, `scale_factor` 1.0079887561230991, `point_feats` 3, `sharpedge_label` | The 2.1 VAE family (`Hunyuan3DShapeVae`); whether the Omni VAE equals the 2.1 one is unknown |
+| Shape VAE | `ShapeVAE`: 4096 latents, `embed_dim` 64, width 1024, 8 encoder and 16 decoder layers, `scale_factor` 1.0079887561230991, `point_feats` 3, `sharpedge_label` | The 2.1 VAE family (`Hunyuan3DShapeVae`); it does not equal the 2.1 one: same keys, different values (see the 2026-11-12 section) |
 | Image encoder | `facebook/dinov2-large`, 518 px, CLS token kept (1 + 37 x 37 = 1370 tokens), frozen | `Dinov2Preset.Large`; the 2.1 shape checkpoints carry it under `conditioner.main_image_encoder.model.` |
 | Sampler | flow matching, velocity prediction, Euler, 50 steps, logit-normal training, `shift_scale` 0.125; guidance 7.5 | The Hunyuan3D flow sampler |
 | Surface | marching cubes, octree resolution 384, `box_v` 1.01, optional FlashVDM | Hunyuan3D extraction (MC and FlashVDM exist) |
@@ -45,7 +45,7 @@ All of it is small. `cond_encoder/pytorch_model.bin` is 464,828 bytes.
 | `cond_encoder/pytorch_model.bin` | 464,828 | `f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432` |
 | the `config.json` files, `image_processor/config.json` | 78 to 1,217 B | not LFS |
 
-All three weight files are pickles (read only through the safe pickle subset, never executed). By size the DiT is F32: 12.2 GB over about 3.05 B parameters equals the 2.1 DiT without its conditioner or VAE (the 2.1 shape file is 7.37 GB in F16 with DINO and VAE inside), and the VAE (1.3 GB, about 330 M parameters) likewise; dtypes unread. The `_ema` file is the same size; the upstream `--use_ema` flag selects it. The DiT needs 6.1 GB in F16, so a 12 GB card is plausible and tight, as for 2.1.
+All three weight files are pickles (read only through the safe pickle subset, never executed). By size the DiT is F32: 12.2 GB over about 3.05 B parameters equals the 2.1 DiT without its conditioner or VAE (the 2.1 shape file is 7.37 GB in F16 with DINO and VAE inside), and the VAE (1.3 GB, about 330 M parameters) likewise; dtypes F32 (read 2026-11-12). The `_ema` file is the same size; the upstream `--use_ema` flag selects it. The DiT needs 6.1 GB in F16, so a 12 GB card is plausible and tight, as for 2.1.
 
 ## Reuse map
 
@@ -60,12 +60,12 @@ All three weight files are pickles (read only through the safe pickle subset, ne
 ## Plan and what is needed
 
 1. Port `OmniEncoder` and the four control preprocessors (CPU-testable against the demo `data.json` inputs without any weights), add the control signal and the longer context to the Hunyuan3D shape pipeline, with a synthetic smoke test (tiny random weights).
-2. Real-weight run: `cond_encoder/pytorch_model.bin` (465 KB) and `vae/pytorch_model.bin` (1.3 GB) first (the VAE may equal the 2.1 one, which is already on disk: compare before downloading), then `model/pytorch_model.bin` (12.2 GB, the non-EMA file first). That is a download of about 13.5 GB for the full set and needs an explicit yes; nothing is downloaded.
+2. Real-weight run: `cond_encoder/pytorch_model.bin` (465 KB) and `vae/pytorch_model.bin` (1.3 GB) first (the VAE does not equal the 2.1 one, compared after the download), then `model/pytorch_model.bin` (12.2 GB, the non-EMA file first). That download (13.5 GB, without the EMA file) was approved and done on 2026-11-12.
 3. The 12.2 GB file is read through the safe pickle parser and held as F16 (6.1 GB): the F32 widen path used for Paint would need 12 GB on the host and is not an option, so the loader has to narrow per tensor.
 
 ## Not checked
 
-No weight was opened, no code was run, the dtypes and key names are unread, the Omni VAE is not compared with the 2.1 VAE, the Fourier embedder is not compared with the ShapeVae one, the pipeline's unread parts (`prepare_image`, the guidance schedule `prev_guidance_scale`, the post-processors `FloaterRemover` and `DegenerateFaceRemover`) are not read in full.
+No Omni code was run (the pickles were read only as names and shapes, and the VAE values compared, with a Python unpickler restricted to tensors; nothing from the pickles was executed), the Fourier embedder is not compared with the ShapeVae one, the pipeline's unread parts (`prepare_image`, the guidance schedule `prev_guidance_scale`, the post-processors `FloaterRemover` and `DegenerateFaceRemover`) are not read in full.
 
 ## Weights downloaded and compared (2026-11-12)
 
@@ -73,9 +73,9 @@ User-approved download of `tencent/Hunyuan3D-Omni` @ `70e803bfb4e127d534049d8ab8
 
 | File | Tensors | Finding |
 |---|---|---|
-| `model/pytorch_model.bin` | 752, all F32 | The key set and every shape equal the `model.*` group of the 2.1 shape file (`hunyuan3d-21/dit/model.fp16.safetensors`, also 752): the Omni DiT is the 2.1 DiT architecture unchanged, so `Hunyuan3DPlainDit` loads it as it is; the values were not compared |
-| `vae/pytorch_model.bin` | 410, all F32, keys prefixed `sal.` | The same 410 keys and shapes as the 2.1 VAE (`vae.*` in the 2.1 shape file) apart from the prefix, but the values differ: none of the 410 tensors equals the 2.1 one after rounding to F16 (largest absolute difference 0.50). Omni needs its own VAE weights, loaded with prefix `sal` by the existing `Hunyuan3DShapeVae`; the 2.1 VAE cannot stand in |
-| `cond_encoder/pytorch_model.bin` | 6, all F32 | `cond_signal_embedding.weight` [4, 8], `cond_signal_linear.weight` [1024, 8] and `.bias`, `linear.0` and `linear.1` weight [1024, 102] and bias: the point-cloud, voxel, bounding-box and skeleton control signals share one small encoder |
+| `model/pytorch_model.bin` | 752, all F32 | The keys are bare (no `model.` prefix, so `Hunyuan3DPlainDit.LoadWeights` takes prefix `""`); the key set and every shape equal the `model.*` group of the 2.1 shape file (`hunyuan3d-21/dit/model.fp16.safetensors`, also 752): the Omni DiT is the 2.1 DiT architecture unchanged, so `Hunyuan3DPlainDit` loads it as it is; the values were not compared |
+| `vae/pytorch_model.bin` | 410, all F32, keys prefixed `sal.` | The same 410 keys and shapes as the 2.1 VAE (`vae.*` in the 2.1 shape file) apart from the prefix, but the values differ: none of the 410 tensors equals the 2.1 one after rounding to F16 (largest absolute difference 0.50, in `geo_decoder.cross_attn_decoder.mlp.c_proj.weight`, 21 % relative to that tensor; the median tensor differs by 9 %, so the whole VAE was retrained, which `scale_factor` 1.0079887561230991 here against 1.0039506 for 2.1 agrees with: the Omni path takes the scale from its own config). Omni needs its own VAE weights, loaded with prefix `sal` by the existing `Hunyuan3DShapeVae`, which reads only the decoder side (the 8 encoder layers in the file go unused unless a later control path encodes point clouds); the 2.1 VAE cannot stand in |
+| `cond_encoder/pytorch_model.bin` | 6, all F32 | `cond_signal_embedding.weight` [4, 8], `cond_signal_linear.weight` [1024, 8] and `.bias` [1024], `linear.0.weight` [1024, 102] and `.bias` [1024], and `linear.1.weight` [1024] (the RMSNorm, no bias; the `Sequential(Linear(102, 1024), RMSNorm(1024), GELU)` above): the point-cloud, voxel, bounding-box and skeleton control signals share one small encoder |
 
-So the engine work for Omni is the control encoder with its four preprocessors, the longer context (DINO tokens, control tokens, 10 signal tokens), reading the 12.2 GB F32 pickle per tensor straight into F16 (the host would otherwise hold 12 GB), and the pipeline wiring; no DiT or VAE code changes. Nothing was run; no tensor values were compared except the VAE.
+So the engine work for Omni is the control encoder with its four preprocessors, the longer context (DINO tokens, control tokens, 10 signal tokens), reading the 12.2 GB F32 pickle per tensor straight into F16 (the host would otherwise hold 12 GB), and the pipeline wiring; no DiT or VAE architecture changes are expected, but two things from earlier in this document are still open: the cross-attention and KV paths of the DiT must take the variable context length (1370 DINO tokens + control tokens + 10 signal tokens) and not a constant fixed once from the config, and whether the unconditional DINO replacement is zeros (the CFG question above). No Omni model code was run; the only tensor values compared are the VAE ones.
 
