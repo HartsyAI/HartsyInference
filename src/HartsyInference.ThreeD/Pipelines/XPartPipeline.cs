@@ -50,7 +50,7 @@ public sealed record XPartOptions
 /// <c>conditioner/conditioner.safetensors</c>, <c>model/model.safetensors</c> and <c>shapevae/shapevae.safetensors</c> of <c>tencent/Hunyuan3D-Part</c>.</remarks>
 public sealed class XPartPipeline
 {
-    private const int LatentTokens = 1024, LatentChannels = 64;
+    private const int LatentTokens = 1024, LatentChannels = 64, MaxParts = 50;
     private const float VaeScaleFactor = 1.0039506158752403f;
 
     private readonly IBackend _backend;
@@ -78,10 +78,11 @@ public sealed class XPartPipeline
     {
         options ??= new XPartOptions();
         P3SamPipeline.ValidateMesh(mesh);
-        if (options.Steps < 1 || options.GridResolution < 8 || options.PointCount < 1 || options.QueryCount < 1 || options.QueryCount > options.PointCount)
-            throw new ArgumentOutOfRangeException(nameof(options), "Steps, grid, point and query counts must be positive and the queries must not exceed the points.");
+        if (options.Steps < 1 || options.GridResolution < 8 || options.PointCount < 1 || options.QueryCount < 1 || options.QueryCount > options.PointCount || !(options.BoxExtent > 0))
+            throw new ArgumentOutOfRangeException(nameof(options), "Steps, grid, point counts and the box extent must be positive and the queries must not exceed the points.");
         Stopwatch clock = Stopwatch.StartNew();
-        int total = options.Steps + 4, done = 0;
+        // P3-SAM and the sampling are one step, the conditioner one, each flow step one and each decoded part one: the total is complete once the parts are known.
+        int total = options.Steps + 3, done = 0;
         void Advance() => onProgress?.Invoke(new GenerationProgress(Math.Min(++done, total), total, clock.Elapsed.TotalMilliseconds));
 
         (float[] vertices, double[] center, double scale) = XPartSampling.Normalize(mesh.Vertices);
@@ -94,23 +95,28 @@ public sealed class XPartPipeline
 
         // 2. Surface samples: the object, and the faces in each box.
         (float[] objectPoints, float[] objectFeatures) = XPartSampling.SurfaceSamples(normalized.Vertices, normalized.Indices, options.PointCount, options.Seed);
+        // The release has 50 part embeddings: with more parts the 50 whose boxes hold the most faces are kept, in P3-SAM's order.
+        int[][] boxFaces = [.. boxes.Select(b => XPartSampling.FacesInBox(normalized.Vertices, normalized.Indices, b))];
+        HashSet<int> keep = [.. Enumerable.Range(0, boxes.Length).Where(k => boxFaces[k].Length > 0).OrderByDescending(k => boxFaces[k].Length).ThenBy(k => k).Take(MaxParts)];
         List<XPartPartSample> samples = [];
         List<float[]> keptBoxes = [];
         for (int k = 0; k < boxes.Length; k++)
         {
-            int[] faces = XPartSampling.FacesInBox(normalized.Vertices, normalized.Indices, boxes[k]);
-            if (faces.Length == 0)
+            if (!keep.Contains(k))
                 continue;
-            (float[] points, float[] features) = XPartSampling.SurfaceSamples(normalized.Vertices, XPartSampling.SubIndices(normalized.Indices, faces), options.PointCount, options.Seed + 1 + k);
-            samples.Add(new XPartPartSample(points, features, SurfaceSampler.FarthestPointIndices(points, options.QueryCount, (options.Seed + k) % (points.Length / 3))));
+            (float[] points, float[] features) = XPartSampling.SurfaceSamples(normalized.Vertices, XPartSampling.SubIndices(normalized.Indices, boxFaces[k]), options.PointCount, options.Seed + 1 + k);
+            int count = points.Length / 3, start = ((options.Seed + k) % count + count) % count;
+            samples.Add(new XPartPartSample(points, features, SurfaceSampler.FarthestPointIndices(points, options.QueryCount, start)));
             keptBoxes.Add(boxes[k]);
         }
 
         if (samples.Count == 0)
             throw new HartsyInferenceException("P3-SAM found no part with faces in its box.");
-        int[] objectQueries = SurfaceSampler.FarthestPointIndices(objectPoints, options.QueryCount, options.Seed % (objectPoints.Length / 3));
+        int objectCount = objectPoints.Length / 3;
+        int[] objectQueries = SurfaceSampler.FarthestPointIndices(objectPoints, options.QueryCount, (options.Seed % objectCount + objectCount) % objectCount);
         int parts = samples.Count;
-        int[] ids = XPartSampling.PartIds(parts, 50, options.Seed);
+        total += parts - 1; // one step per decoded part
+        int[] ids = XPartSampling.PartIds(parts, MaxParts, options.Seed);
 
         // 3. The conditioning tokens.
         Tensor objectContext, partContext;
@@ -165,6 +171,7 @@ public sealed class XPartPipeline
                 ScalarField3D field = vae.Decode(_backend, scaled, options.GridResolution, options.BoxExtent);
                 Mesh part = Hunyuan3DSurface.Extract(field, options.Level);
                 result[k] = new Mesh { Vertices = XPartSampling.Denormalize(part.Vertices, center, scale), Indices = part.Indices };
+                Advance();
             }
         }
         finally
@@ -172,7 +179,6 @@ public sealed class XPartPipeline
             latents.Dispose();
         }
 
-        Advance();
         float[][] outBoxes = [.. keptBoxes.Select(b => Denormalize(b, center, scale))];
         return new XPartResult(result, outBoxes, Combine(result, outBoxes));
     }
@@ -204,36 +210,52 @@ public sealed class XPartPipeline
     // The flow-matching Euler loop over all parts at once: sample += (sigma_next - sigma) * velocity, from sigma 0 (noise) to 1.
     private Tensor Denoise(int parts, int[] ids, Tensor objectContext, Tensor partContext, XPartOptions options, Action advance, CancellationToken cancel)
     {
-        Tensor latents = new(new TensorShape(parts, LatentTokens, LatentChannels), DType.F32);
-        XPartSampling.Gaussian(latents.ElementCount, options.Seed).CopyTo(latents.AsSpan<float>());
         float[] sigmas = Hunyuan3DFlowSchedule.Sigmas(options.Steps);
         using SafeTensorsLoader loader = new();
         loader.Load(Path.Combine(_folder, "model", "model.safetensors"));
         using XPartDit dit = new();
-        dit.LoadWeights(loader.GetAllTensors(), halfWeights: true);
+        // BF16 matrices become F16 on a device backend (6.6 GB instead of 13 GB), as for the 2.1 shape DiT; the CPU keeps F32.
+        dit.LoadWeights(loader.GetAllTensors(), halfWeights: _backend.Device != DeviceKind.Cpu);
+        Tensor? latents = null;
         try
         {
+            latents = new Tensor(new TensorShape(parts, LatentTokens, LatentChannels), DType.F32);
+            XPartSampling.Gaussian(latents.ElementCount, options.Seed).CopyTo(latents.AsSpan<float>());
             for (int step = 0; step < options.Steps; step++)
             {
                 cancel.ThrowIfCancellationRequested();
                 float dt = sigmas[step + 1] - sigmas[step];
-                using Tensor velocity = dit.Forward(_backend, latents, Hunyuan3DFlowSchedule.DitTimestep(sigmas[step]), objectContext, partContext, ids);
-                using Tensor delta = new(latents.Shape, DType.F32);
-                _backend.Scale(delta, velocity, dt);
-                Tensor next = new(latents.Shape, DType.F32);
-                _backend.Add(next, latents, delta);
-                latents.Dispose();
-                latents = next;
+                // The schedule ends 1, 1: the last step has no width, so the forward that would be scaled by zero is skipped.
+                if (dt != 0)
+                {
+                    using Tensor velocity = dit.Forward(_backend, latents, Hunyuan3DFlowSchedule.DitTimestep(sigmas[step]), objectContext, partContext, ids);
+                    using Tensor delta = new(latents.Shape, DType.F32);
+                    _backend.Scale(delta, velocity, dt);
+                    Tensor next = new(latents.Shape, DType.F32);
+                    try
+                    {
+                        _backend.Add(next, latents, delta);
+                    }
+                    catch
+                    {
+                        next.Dispose();
+                        throw;
+                    }
+
+                    latents.Dispose();
+                    latents = next;
+                }
+
                 advance();
             }
+
+            return latents;
         }
         catch
         {
-            latents.Dispose();
+            latents?.Dispose();
             throw;
         }
-
-        return latents;
     }
 
     // The release's ShapeVAE: 16 decoder blocks of width 1024 and 16 heads, 8 Fourier frequencies, scale factor 1.0039506.
@@ -255,7 +277,7 @@ public sealed class XPartPipeline
     }
 
     // One mesh of all the parts with a label per face for the GLB writer.
-    private static byte[] Combine(Mesh[] parts, float[][] boxes)
+    internal static byte[] Combine(Mesh[] parts, float[][] boxes)
     {
         List<float> vertices = [];
         List<int> indices = [], faceIds = [];

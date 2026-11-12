@@ -1,11 +1,10 @@
-using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 using HartsyInference.ThreeD.Tests.MeshPostProcess;
 
 namespace HartsyInference.ThreeD.Tests.Part;
 
-/// <summary>The geometry around the X-Part networks: normalisation, the faces and surface samples of a box, the part ids, the initial noise, and the half-precision DiT path.</summary>
+/// <summary>The geometry around the X-Part networks: normalisation, the faces and surface samples of a box, the part ids and the initial noise.</summary>
 public sealed class XPartSamplingTests
 {
     [Fact]
