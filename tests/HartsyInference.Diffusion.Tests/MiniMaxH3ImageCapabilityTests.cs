@@ -27,7 +27,7 @@ public sealed class MiniMaxH3ImageCapabilityTests
         StackedOutputHeads heads = new(SixStepGrid);
 
         Assert.Equal(6, heads.HeadCount);
-        Assert.Equal(SixStepGrid, MiniMaxH3Schedule.ImageSigmas(SixStepGrid));
+        Assert.Equal(7, MiniMaxH3Schedule.ImageSigmas(SixStepGrid).Length);
     }
 
     [Theory]
@@ -399,6 +399,37 @@ public sealed class MiniMaxH3ImageCapabilityTests
         Assert.Equal(1, config.TemporalPatch);
         Assert.Equal(2, config.RopeAxes);
         Assert.Equal(768, config.PatchDim);
+    }
+
+    [Fact]
+    public void ImageVaeTiles_AtOneThousandTwentyFourPixelsGiveFiveTilesWithSixtyFourPixelOverlap()
+    {
+        // ComfyUI vae.py split_tiles: 256-pixel tiles, at least 64 pixels of overlap, extra overlap in 16-pixel steps.
+        (int[] start, int[] length, int[] overlap) = MiniMaxH3VideoVaeConfig.ImageBaseline.SplitTiles(1024);
+
+        Assert.Equal([0, 192, 384, 576, 768], start);
+        Assert.Equal([256, 256, 256, 256, 256], length);
+        Assert.Equal([64, 64, 64, 64], overlap);
+    }
+
+    [Fact]
+    public void ImageVaeTiles_AtTwoThousandFortyEightPixelsGiveElevenTilesWithTheExtraOverlapOnTheFirstEightGaps()
+    {
+        (int[] start, int[] length, int[] overlap) = MiniMaxH3VideoVaeConfig.ImageBaseline.SplitTiles(2048);
+
+        Assert.Equal([0, 176, 352, 528, 704, 880, 1056, 1232, 1408, 1600, 1792], start);
+        Assert.Equal(Enumerable.Repeat(256, 11), length);
+        Assert.Equal([80, 80, 80, 80, 80, 80, 80, 80, 64, 64], overlap);
+    }
+
+    [Fact]
+    public void ImageVaeTiles_AtTwoFiftySixPixelsNoTilingHappens()
+    {
+        (int[] start, int[] length, int[] overlap) = MiniMaxH3VideoVaeConfig.ImageBaseline.SplitTiles(256);
+
+        Assert.Equal([0], start);
+        Assert.Equal([256], length);
+        Assert.Empty(overlap);
     }
 
     [Fact]

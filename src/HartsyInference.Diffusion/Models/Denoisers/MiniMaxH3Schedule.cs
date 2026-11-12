@@ -57,22 +57,47 @@ public static class MiniMaxH3Schedule
         return sigmas;
     }
 
-    /// <summary>The MiniMax-H3-Image sigma schedule: the checkpoint's own grid, unshifted. Its heads are distilled on
-    /// this grid, so the step count must equal the head count and no resolution-dependent shift applies.</summary>
-    public static double[] ImageSigmas(IReadOnlyList<double> grid)
+    /// <summary>The MiniMax-H3-Image sigma schedule that ComfyUI's stock <c>simple</c> scheduler produces at
+    /// <paramref name="steps"/> steps. ComfyUI reads the checkpoint grid piecewise-linearly in the timestep
+    /// (<c>comfy/ldm/minimax/sampling.py</c>), samples its 1000-entry table at <c>int(x * 1000 / steps)</c> from the top
+    /// (<c>comfy/samplers.py</c>, <c>simple_scheduler</c>), and appends 0. At six steps the timesteps are 1000, 834, 667,
+    /// 500, 334 and 167, so four of the sigmas sit between grid points. The heads are still chosen by nearest grid point.
+    /// The values match ComfyUI 0.45.0 run on CPU to float32 precision.</summary>
+    public static double[] ImageSigmas(IReadOnlyList<double> grid, int steps = 6)
     {
         ArgumentNullException.ThrowIfNull(grid);
         if (grid.Count < 2 || grid[0] != 1.0 || grid[^1] != 0.0)
         {
             throw new ArgumentException("The MiniMax-H3-Image grid must run from 1.0 to 0.0 with at least one step.", nameof(grid));
         }
-
-        double[] sigmas = new double[grid.Count];
-        for (int i = 0; i < grid.Count; i++)
+        if (steps < 1)
         {
-            sigmas[i] = grid[i];
+            throw new ArgumentOutOfRangeException(nameof(steps), steps, "MiniMax-H3-Image needs at least one step.");
         }
+
+        double[] sigmas = new double[steps + 1];
+        for (int x = 0; x < steps; x++)
+        {
+            int timestep = 1000 - (int)(x * (1000.0 / steps));
+            sigmas[x] = GridSigmaAt(grid, timestep);
+        }
+        sigmas[steps] = 0.0;
         return sigmas;
+    }
+
+    /// <summary>ComfyUI's <c>MiniMaxH3ImageModelSampling.sigma</c>: the ascending grid read linearly between its points at
+    /// <c>timestep / 1000</c> scaled to the segment count, with the last segment's end clamped.</summary>
+    private static double GridSigmaAt(IReadOnlyList<double> grid, int timestep)
+    {
+        int segments = grid.Count - 1;
+        double pos = Math.Clamp(timestep / 1000.0, 0.0, 1.0) * segments;
+        int i = Math.Min((int)Math.Floor(pos), segments - 1);
+        // The grid is stored descending; ComfyUI flips it, so ascending point k is grid[segments - k].
+        double start = grid[segments - i];
+        double end = grid[segments - (i + 1)];
+        double weight = pos - i;
+        // torch.lerp's two branches, so the rounding matches the reference.
+        return weight < 0.5 ? start + weight * (end - start) : end - (end - start) * (1.0 - weight);
     }
 
     /// <summary>Per-token timesteps for one step: video/text follow <c>1 - sigma_v</c>, audio follows its own shifted

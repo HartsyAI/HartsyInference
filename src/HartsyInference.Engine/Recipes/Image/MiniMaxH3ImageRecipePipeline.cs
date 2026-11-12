@@ -142,25 +142,39 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             throw new NotSupportedException("MiniMax-H3-Image does not take a negative prompt.");
         }
 
-        if (SamplingParamResolver.ResolveSchedulerName(request) is not null)
+        // The image build's solver is euler over the simple schedule, so that pair (or no selection) is exact. Any other
+        // sampler or sigma schedule would silently run a different solver, so it is refused by name.
+        string? selection = SamplingParamResolver.ResolveSchedulerName(request);
+        if (selection is not null && !IsSolverOwnSelection(selection))
         {
             throw new NotSupportedException(
-                "MiniMax-H3-Image picks its own sigma schedule; sampler and scheduler selection is not supported.");
+                $"MiniMax-H3-Image runs euler over the simple sigma schedule; sampler '{request.Sampler}' and "
+                + $"schedule '{request.Scheduler}' are not supported.");
         }
     }
+
+    /// <summary>True for the selections the image build's own solver already is: euler, or euler over the simple schedule.</summary>
+    internal static bool IsSolverOwnSelection(string selection) =>
+        selection.Trim().ToLowerInvariant() is "euler" or "euler_simple";
+
+    /// <summary>The prompt's token presentation for the image build. Plain text in, the way ComfyUI's image node presents
+    /// it: the Qwen byte-level BPE of the string as written, with no template and no special tokens.</summary>
+    internal static MiniMaxH3TextEncoding.Encoded PresentPrompt(Qwen2Tokenizer tokenizer, string prompt) =>
+        MiniMaxH3TextEncoding.Build(tokenizer, prompt, conditions: null, weightedPrompt: false);
 
     private MiniMaxH3TextEncoder.Result EncodePrompt(string prompt)
     {
         // TODO(gpu): the encoder's preload and release calls are not wired here; the video pipeline frees the encoder
         // weights after encoding, which matters once the image path shares a device with the DiT.
-        return _encoder.Encode(_textBackend, _tokenizer, prompt, null, null);
+        return _encoder.Encode(_textBackend, PresentPrompt(_tokenizer, prompt), null);
     }
 
     /// <summary>One sampler step: resolve the step's stacked head, run the image forward, and take the Euler step.</summary>
     private Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
         Tensor cos, Tensor sin, Tensor stackedWeight, Tensor stackedBias, double sigma, double sigmaNext)
     {
-        float tVideo = (float)(1.0 - sigma);
+        // ComfyUI hands the DiT float32(sigma * 1000) and runs on t = 1 - that / 1000, so the same rounding is mirrored.
+        float tVideo = (float)(1.0 - (double)(float)(sigma * 1000.0) / 1000.0);
         (float[] timesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
             MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, 0f, MiniMaxH3Schedule.VisualCondTimestep,
                 MiniMaxH3Schedule.AudioCondTimestep);

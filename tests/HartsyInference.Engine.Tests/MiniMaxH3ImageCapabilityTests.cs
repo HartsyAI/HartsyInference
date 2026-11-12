@@ -109,6 +109,31 @@ public sealed class MiniMaxH3ImageCapabilityTests
             MiniMaxH3ImageRecipePipeline.RefuseUnsupported(request, Settings(1024, 1024, 6, 1f)));
     }
 
+    [Theory]
+    [InlineData(null, null, true)]
+    [InlineData("euler", null, true)]
+    [InlineData(null, "simple", true)]
+    [InlineData("euler", "simple", true)]
+    [InlineData("euler", "normal", true)]
+    [InlineData("dpmpp_2m", null, false)]
+    [InlineData(null, "karras", false)]
+    [InlineData("euler", "karras", false)]
+    public void SamplerAndScheduleAcceptTheSolversOwnEulerOverSimpleAndRefuseTheRest(string? sampler, string? schedule, bool accepted)
+    {
+        // The template runs euler over the simple schedule. Swarm-style defaults send the same pair, so those must pass.
+        ImageRequest request = Request() with { Sampler = sampler, Scheduler = schedule };
+
+        if (accepted)
+        {
+            MiniMaxH3ImageRecipePipeline.RefuseUnsupported(request, Settings(2048, 2048, 6, 1f));
+        }
+        else
+        {
+            Assert.Throws<NotSupportedException>(() =>
+                MiniMaxH3ImageRecipePipeline.RefuseUnsupported(request, Settings(2048, 2048, 6, 1f)));
+        }
+    }
+
     [Fact]
     public void SixStepsAtGuidanceOneWithNoNegativeAndNoSchedulerIsAccepted()
     {
@@ -136,6 +161,19 @@ public sealed class MiniMaxH3ImageCapabilityTests
 
         Assert.Throws<OperationCanceledException>(() =>
             pipeline.Generate(Request(), Settings(1024, 1024, 6, 1f), null, new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public void PromptWeightSyntaxIsTokenizedAsWrittenLikeComfyUi()
+    {
+        // ComfyUI's image node tokenizes with disable_weights, so "(fox:1.5)" reaches the BPE as literal text and no
+        // per-token weights are produced.
+        Qwen2Tokenizer tokenizer = new();
+
+        MiniMaxH3TextEncoding.Encoded presented = MiniMaxH3ImageRecipePipeline.PresentPrompt(tokenizer, "a (fox:1.5)");
+
+        Assert.Equal(tokenizer.EncodeRawByteLevel("a (fox:1.5)").ToArray(), presented.TokenIds);
+        Assert.Null(presented.PromptWeights);
     }
 
     [Fact]
