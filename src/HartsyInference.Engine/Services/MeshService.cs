@@ -220,6 +220,7 @@ public sealed class MeshService : IMeshService, IDisposable
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
                 }, cancel);
+                // The id is the part's position in the output (X-Part regenerates the parts, so P3-SAM's labels do not apply to them).
                 MeshPart[] parts = [.. result.Parts.Select((part, i) => new MeshPart(i, result.Boxes[i], part.TriangleCount))];
                 return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
             },
@@ -267,8 +268,10 @@ public sealed class MeshService : IMeshService, IDisposable
                 return Path.GetFullPath(candidate);
             }
         }
-        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
-        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(folder, XPartPipeline.Files[0]));
+        // Name what is missing from the candidate that holds the most of the files (the path may point at a file or a subfolder of the install).
+        string best = new[] { folder, parent }.Where(c => c is not null).Select(c => c!).MaxBy(c => XPartPipeline.Files.Count(file => File.Exists(Path.Combine(c, file))))!;
+        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(best, file))));
+        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(best, XPartPipeline.Files[0]));
     }
 
     /// <summary>Returns the cached P3-SAM pipeline for <paramref name="spec"/>: <c>p3sam.safetensors</c>, given directly or found in the folder it was given as.</summary>
@@ -905,7 +908,7 @@ public sealed class MeshService : IMeshService, IDisposable
             rigPipelines = _rigPipelines.Values.ToList();
             paintPipelines = _paintPipelines.Values.ToList();
             partPipelines = _partPipelines.Values.ToList();
-            _xpartPipelines.Clear();
+            _xpartPipelines.Clear(); // XPartPipeline holds no resources: each run loads and releases its checkpoints
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
             pixal3dRuntimes = _pixal3d.Values.ToList();

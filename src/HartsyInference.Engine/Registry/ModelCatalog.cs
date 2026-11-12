@@ -141,13 +141,14 @@ public static class ModelCatalog
     /// F32 Sonata). Same Tencent 3D-Part Community License.</summary>
     private static ModelAsset[] Hunyuan3DXPartAssets =>
     [
-        .. Hunyuan3DPartAssets,
+        // The part DiT is the one transformer, so it is the entry's primary asset; the P3-SAM copy (same path and hash as hunyuan3d-part's) takes another role.
+        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "model/model.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "model/model.safetensors",
+            Role = "transformer", Sha256 = "4ca47998e1357432302d7de0ec85f7e4076b8e64037935f033b881e2fd9973e0" },
+        .. Hunyuan3DPartAssets.Select(a => a with { Role = "segmenter" }),
         new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "conditioner/conditioner.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "conditioner/conditioner.safetensors",
             Role = "conditioner", Sha256 = "730518ae5f2b6af51db12137ed0dc0ac791ee04d927cf8e4f2043db9c8218251" },
         new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "shapevae/shapevae.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "shapevae/shapevae.safetensors",
             Role = "vae", Sha256 = "3d46179a603c529c42ce8c1eac6d56667700b1f16626e4bc5bc319c99a4f3b88" },
-        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "model/model.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "model/model.safetensors",
-            Role = "transformer", Sha256 = "4ca47998e1357432302d7de0ec85f7e4076b8e64037935f033b881e2fd9973e0" },
     ];
 
     /// <summary>Hunyuan3D Paint 2.1 (<c>tencent/Hunyuan3D-2.1</c> at <c>0b946776</c>): the PBR UNet and VAE (pickles, read by the safe parser only), DINOv2-giant and Real-ESRGAN x4plus.</summary>

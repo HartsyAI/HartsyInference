@@ -170,8 +170,8 @@ internal static class MeshRequestValidator
             throw SeedTooLarge(request, "The X-Part seed");
         if (request.Steps is < 0 or > 1000)
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
-        if (request.GridResolution != 0 && request.GridResolution is < 32 or > 1024)
-            throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The X-Part grid must be between 32 and 1024 (0 takes the default of 256).").ForField(nameof(MeshRequest.GridResolution));
+        if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The X-Part grid must be between 32 and 512 (0 takes the default of 256; upstream's is 512).").ForField(nameof(MeshRequest.GridResolution));
     }
 
     private static void ValidatePaint(string id, MeshRequest request)

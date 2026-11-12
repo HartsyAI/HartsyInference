@@ -98,7 +98,7 @@ internal static class MeshModelProfiles
                 note: "Segments a mesh into parts; the labels and boxes come back in MeshResult.Parts."),
             Profile("hunyuan3d-xpart", MeshInputKind.SceneMesh, MeshOutputKinds.PartMesh,
                 [Steps("50", 0, 1000, "Euler steps of the part flow; 0 takes 50."),
-                    Grid("256", null, 32, 1024, "Marching-cubes grid per axis of each part; 0 takes 256 (upstream extracts on an octree at 512)."),
+                    Grid("256", null, 32, 512, "Marching-cubes grid per axis of each part, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 256, upstream extracts on an octree at 512."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
                     Used(nameof(MeshRequest.Seed), "42", 0, int.MaxValue, null, "Fixes the surface samples, the part ids and the noise; a negative value takes 42."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence

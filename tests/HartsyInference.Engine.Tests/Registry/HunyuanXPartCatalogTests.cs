@@ -22,6 +22,15 @@ public sealed class HunyuanXPartCatalogTests
     }
 
     [Fact]
+    public void XPart_PrimaryAssetIsTheDiTSoAnInstalledPartModelDoesNotHideItsDownload()
+    {
+        CatalogEntry entry = ModelCatalog.Find("hunyuan3d-xpart")!;
+
+        Assert.Equal("model/model.safetensors", ModelDownloader.PrimaryAsset(entry)!.FileName);
+        Assert.Single(entry.Assets, a => a.Role == "transformer");
+    }
+
+    [Fact]
     public void XPart_IsWiredToTheMeshServiceAsAMeshOnlyModel()
     {
         Assert.Equal(["hunyuan3d-xpart"], MeshModelIds.XPartMesh);

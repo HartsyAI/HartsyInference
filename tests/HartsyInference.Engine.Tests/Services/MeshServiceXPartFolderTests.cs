@@ -30,6 +30,19 @@ public sealed class MeshServiceXPartFolderTests : IDisposable
     }
 
     [Fact]
+    public void XPartFolder_GivenAFileOfAnIncompleteInstall_NamesOnlyWhatIsMissingThere()
+    {
+        Touch("p3sam/p3sam.safetensors");
+        Touch("conditioner/conditioner.safetensors");
+
+        FileNotFoundException error = Assert.Throws<FileNotFoundException>(() => MeshService.XPartFolder(Path.Combine(_root, "p3sam", "p3sam.safetensors")));
+        Assert.Contains("model/model.safetensors", error.Message);
+        Assert.Contains("shapevae/shapevae.safetensors", error.Message);
+        Assert.DoesNotContain("p3sam/p3sam.safetensors", error.Message);
+        Assert.DoesNotContain("conditioner/conditioner.safetensors", error.Message);
+    }
+
+    [Fact]
     public void XPartFolder_NamesTheMissingCheckpoints()
     {
         Touch("p3sam/p3sam.safetensors");
