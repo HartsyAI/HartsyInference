@@ -1,5 +1,7 @@
-using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Models.Hunyuan3D;
@@ -9,7 +11,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.ThreeD.Tests.Paint;
 
-/// <summary>Integration lane: the Paint 2.1 UNet against upstream's own modules on the CPU. The fixture comes from
+/// <summary>Integration lane: the Paint 2.1 UNet against upstream's own modules (on the CPU unless <c>HARTSY_PAINT21_BACKEND</c> says otherwise). The fixture comes from
 /// <c>tests/python-reference/dump_paint21_unet.py</c> (inputs, the features the reference stream writes, the DINO projection, the UNet output for the full
 /// and the unconditional branch, and a VAE decode). Set <c>HARTSY_PAINT21_UNET</c> (the pickle), <c>HARTSY_PAINT21_REF</c> (the fixture) and, for the VAE test,
 /// <c>HARTSY_PAINT21_VAE</c>. Each stage logs the maximum absolute difference, the relative RMS error and the correlation.</summary>
@@ -32,6 +34,50 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         return (max, Math.Sqrt(diff2 / Math.Max(ref2, 1e-30)), cov / Math.Sqrt(Math.Max(va * vb, 1e-30)));
     }
 
+    private static string? BackendName => Environment.GetEnvironmentVariable("HARTSY_PAINT21_BACKEND") is { Length: > 0 } name ? name : null;
+
+    private static bool OnGpu => BackendName is { } name && !string.Equals(name, "cpu", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Points the knob file at <c>HARTSY_PAINT21_SETTINGS</c> (numerics knobs such as <c>numerics.noTf32</c> and <c>numerics.sdpaNoTf32</c>) and reloads it, because
+    /// the file loads once on the first knob read; disposing restores the previous path and reloads, so later tests in the process see their own settings. Without the
+    /// variable it does nothing.</summary>
+    private sealed class KnobScope : IDisposable
+    {
+        private readonly string? _previous = KnobFile.ExplicitPath;
+        private readonly bool _active = Environment.GetEnvironmentVariable("HARTSY_PAINT21_SETTINGS") is { Length: > 0 };
+
+        public KnobScope()
+        {
+            if (!_active)
+                return;
+            KnobFile.ExplicitPath = Environment.GetEnvironmentVariable("HARTSY_PAINT21_SETTINGS");
+            KnobFile.Reload();
+        }
+
+        public void Dispose()
+        {
+            if (!_active)
+                return;
+            KnobFile.ExplicitPath = _previous;
+            KnobFile.Reload();
+        }
+    }
+
+    /// <summary>The backend of the lane: the CPU, or the one named by <c>HARTSY_PAINT21_BACKEND</c> (<c>cuda</c>, <c>vulkan</c>); <c>HARTSY_PAINT21_HP=1</c> turns on
+    /// full-precision GEMMs. Create it inside a <see cref="KnobScope"/>, which the knobs are read through.</summary>
+    private static IBackend Backend()
+    {
+        IBackend backend = BackendFactory.Create(BackendName ?? "cpu");
+        if (Environment.GetEnvironmentVariable("HARTSY_PAINT21_HP") == "1")
+            backend.HighPrecisionGemm = true;
+        return backend;
+    }
+
+    // GPU stages that miss the loose bound; checked once at the end so that one bad stage does not hide the numbers of the later ones.
+    private readonly List<string> _gpuFailures = [];
+
+    private void AssertGpuBound() => Assert.True(_gpuFailures.Count == 0, "GPU stages outside the loose bound (relRMS 1e-2, correlation 0.999): " + string.Join("; ", _gpuFailures));
+
     private static unsafe float[] ToArray(Tensor t)
     {
         float[] values = new float[t.ElementCount];
@@ -43,11 +89,15 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
     {
         (double max, double rel, double corr) = Compare(actual, expected);
         output.WriteLine($"{stage,-34} n={expected.Length,9}  max|diff|={max:E3}  relRMS={rel:E3}  corr={corr:F6}  refMax={expected.Max(Math.Abs):F3}");
-        Assert.True(rel < 5e-3 && corr > 0.9999, $"{stage}: relRMS {rel:E3}, correlation {corr:F6} are outside the tolerance (5e-3, 0.9999)");
+        // A GPU run measures (TF32 is looser than the CPU tolerance) and is checked against a loose bound at the end.
+        if (!OnGpu)
+            Assert.True(rel < 5e-3 && corr > 0.9999, $"{stage}: relRMS {rel:E3}, correlation {corr:F6} are outside the tolerance (5e-3, 0.9999)");
+        else if (rel >= 1e-2 || corr <= 0.999)
+            _gpuFailures.Add($"{stage} relRMS {rel:E3} corr {corr:F6}");
     }
 
     [RealWeightsFact("HARTSY_PAINT21_UNET", "HARTSY_PAINT21_REF")]
-    public unsafe void Unet_MatchesUpstreamOnTheCpu()
+    public unsafe void Unet_MatchesUpstream()
     {
         using SafeTensorsLoader fixtureLoader = new();
         fixtureLoader.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_REF")!);
@@ -63,7 +113,8 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         using HunyuanPaintUnet unet = new(config, generating: true), reference = new(config, generating: false);
         unet.LoadWeights(weights, "unet");
         reference.LoadWeights(weights, "unet_dual");
-        using CpuBackend backend = new();
+        using KnobScope knobs = new();
+        using IBackend backend = Backend();
         System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
 
         // Reference stream at timestep 0.
@@ -74,6 +125,7 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
             t.Dispose();
         output.WriteLine($"reference stream forward: {watch.Elapsed.TotalSeconds:F1} s, {write.Embeds.Count} feature blocks");
         watch.Restart();
+        double worstFeatureRel = 0;
         int compared = 0, fixtureBlocks = fixture.Keys.Count(k => k.StartsWith("ref.", StringComparison.Ordinal));
         foreach ((string name, Tensor features) in write.Embeds)
         {
@@ -82,9 +134,16 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
             if (compared++ < 4 || name.StartsWith("up_3_2", StringComparison.Ordinal) || name.StartsWith("mid", StringComparison.Ordinal))
                 Report($"ref features {name}", actualFeatures, expectedFeatures);
             else
-                Assert.True(Compare(actualFeatures, expectedFeatures) is { RelRms: < 5e-3, Correlation: > 0.9999 }, $"reference features of block {name} are outside the tolerance");
+            {
+                (_, double rel, double corr) = Compare(actualFeatures, expectedFeatures);
+                worstFeatureRel = Math.Max(worstFeatureRel, rel);
+                if (!OnGpu)
+                    Assert.True(rel < 5e-3 && corr > 0.9999, $"reference features of block {name} are outside the tolerance");
+                else if (rel >= 1e-2 || corr <= 0.999)
+                    _gpuFailures.Add($"ref features {name} relRMS {rel:E3} corr {corr:F6}");
+            }
         }
-        output.WriteLine($"reference blocks compared: {compared} of {write.Embeds.Count}; fixture has {fixtureBlocks}");
+        output.WriteLine($"reference blocks compared: {compared} of {write.Embeds.Count}; fixture has {fixtureBlocks}; worst relRMS of the unlogged blocks {worstFeatureRel:E3}");
         Assert.Equal(fixtureBlocks, compared);
 
         // DINO projection.
@@ -150,6 +209,7 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
             cos.Dispose();
             sin.Dispose();
         }
+        AssertGpuBound();
     }
 
     /// <summary>The rotary voxel indices and the VAE decode against upstream. Set <c>HARTSY_PAINT21_AUX</c> (a fixture from <c>dump_paint21_unet.py --aux-only</c>)
@@ -192,7 +252,8 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         using HunyuanPaintF32Weights weights = new(HunyuanPaintLoader.ModernizeVaeKeys(pickle.GetAllTensors()));
         HartsyInference.Diffusion.Models.Vae.VaeDecoder decoder = new(HartsyInference.Diffusion.Models.Vae.VaeConfig.Sd15);
         decoder.LoadWeights(weights);
-        using CpuBackend backend = new();
+        using KnobScope knobs = new();
+        using IBackend backend = Backend();
         Tensor source = fixture["vae_latent"];
         using Tensor latents = new(source.Shape, DType.F32);
         new ReadOnlySpan<float>((float*)source.DataPointer, (int)source.ElementCount).CopyTo(new Span<float>((float*)latents.DataPointer, (int)source.ElementCount));
@@ -200,5 +261,6 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         using Tensor decoded = decoder.Decode(backend, latents);
         output.WriteLine($"vae decode: {watch.Elapsed.TotalSeconds:F1} s");
         Report("vae decode (latent / 0.18215)", ToArray(decoded), ToArray(fixture["vae_decoded"]));
+        AssertGpuBound();
     }
 }
