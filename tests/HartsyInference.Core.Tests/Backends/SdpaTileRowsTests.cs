@@ -67,29 +67,56 @@ public sealed class SdpaTileRowsTests
         Assert.Equal(1, CudaBackend.TileRows(0, Heads, Tokens, Tokens, forced: null, capBytes: 1));
     }
 
-    [Fact]
-    public void TheRememberedCapIsSetByAHalvingAndGrowsBackUntilItIsDropped()
-    {
-        long mb = 1L << 20;
+    private const long Mb = 1L << 20;
 
-        // A halving records the size that fit.
-        Assert.Equal(16 * mb, CudaBackend.NextTileCap(0, halved: true, usedBytes: 16 * mb, forced: false));
-        Assert.Equal(4 * mb, CudaBackend.NextTileCap(16 * mb, halved: true, usedBytes: 4 * mb, forced: false));
-        // Each call that fits at the cap doubles it, and a cap that reaches the floor is dropped.
-        long cap = 8 * mb;
-        List<long> caps = [];
-        for (int call = 0; call < 6 && cap > 0; call++)
+    private static CudaBackend.TileCap Fit(CudaBackend.TileCap cap, long perRow = 1 * Mb) => CudaBackend.NextTileCap(cap, halved: false, usedBytes: cap.Bytes, perRow, forced: false);
+
+    [Fact]
+    public void AHalvingRecordsTheSizeThatFitAndAFailedProbeDoublesTheWaitBeforeTheNext()
+    {
+        CudaBackend.TileCap first = CudaBackend.NextTileCap(CudaBackend.TileCap.None, halved: true, usedBytes: 16 * Mb, 1 * Mb, forced: false);
+        Assert.Equal(new CudaBackend.TileCap(16 * Mb, 0, 2), first);
+
+        // Two calls fit at the cap, the third probes 32 MB, fails and halves back: the next wait is 4.
+        CudaBackend.TileCap cap = Fit(Fit(first));
+        Assert.Equal(new CudaBackend.TileCap(32 * Mb, 0, 2), cap);
+        CudaBackend.TileCap failedProbe = CudaBackend.NextTileCap(cap, halved: true, usedBytes: 16 * Mb, 1 * Mb, forced: false);
+        Assert.Equal(new CudaBackend.TileCap(16 * Mb, 0, 4), failedProbe);
+        // The wait is bounded.
+        CudaBackend.TileCap capped = new(16 * Mb, 0, 1024);
+        Assert.Equal(1024, CudaBackend.NextTileCap(capped, halved: true, usedBytes: 8 * Mb, 1 * Mb, forced: false).ProbeAfter);
+    }
+
+    [Fact]
+    public void TheCapGrowsBackAfterARunOfFitsAndIsDroppedAtTheFloor()
+    {
+        CudaBackend.TileCap cap = new(8 * Mb, 0, 2);
+        List<CudaBackend.TileCap> history = [];
+        while (cap.Bytes > 0)
         {
-            cap = CudaBackend.NextTileCap(cap, halved: false, usedBytes: cap, forced: false);
-            caps.Add(cap);
+            cap = Fit(cap);
+            history.Add(cap);
         }
 
-        Assert.Equal([16 * mb, 32 * mb, 64 * mb, 0], caps);
-        // No cap stays no cap; a forced height changes nothing either way.
-        Assert.Equal(0, CudaBackend.NextTileCap(0, halved: false, usedBytes: 100 * mb, forced: false));
-        Assert.Equal(8 * mb, CudaBackend.NextTileCap(8 * mb, halved: true, usedBytes: 1 * mb, forced: true));
-        Assert.Equal(8 * mb, CudaBackend.NextTileCap(8 * mb, halved: false, usedBytes: 8 * mb, forced: true));
-        Assert.Equal(0, CudaBackend.NextTileCap(0, halved: true, usedBytes: 1 * mb, forced: true));
+        // 8 MB: one fit counts, the second doubles; then 16, 32 and 64 MB each after two fits; 128 MB is the floor and drops the cap.
+        Assert.Equal(
+            [8 * Mb, 16 * Mb, 16 * Mb, 32 * Mb, 32 * Mb, 64 * Mb, 64 * Mb, 0],
+            history.Select(c => c.Bytes));
+        Assert.Equal(CudaBackend.TileCap.None, history[^1]);
+    }
+
+    [Fact]
+    public void ACallThatDidNotReachTheCapOrWasForcedLearnsNothing()
+    {
+        CudaBackend.TileCap cap = new(64 * Mb, 1, 2);
+
+        // The tile used stopped short of the cap (a short query): not a fit at the cap.
+        Assert.Equal(cap, CudaBackend.NextTileCap(cap, halved: false, usedBytes: 10 * Mb, perRowBytes: 1 * Mb, forced: false));
+        // A forced height neither records nor grows nor halves.
+        Assert.Equal(cap, CudaBackend.NextTileCap(cap, halved: true, usedBytes: 1 * Mb, 1 * Mb, forced: true));
+        Assert.Equal(cap, CudaBackend.NextTileCap(cap, halved: false, usedBytes: 64 * Mb, 1 * Mb, forced: true));
+        // No cap stays no cap.
+        Assert.Equal(CudaBackend.TileCap.None, CudaBackend.NextTileCap(CudaBackend.TileCap.None, halved: false, usedBytes: 100 * Mb, 1 * Mb, forced: false));
     }
 
     [Fact]
