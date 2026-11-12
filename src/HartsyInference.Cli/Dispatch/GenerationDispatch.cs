@@ -816,13 +816,16 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
+    private static string DescribePart(MeshPart part) =>
+        $"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]";
+
     /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d, a mesh to rig for unirig.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         bool paint = MeshModelIds.PaintMesh.Contains(meshId);
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || paint;
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || paint;
         string? imagePath = parameters.GetStringOrNull("image");
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
@@ -861,10 +864,19 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Mesh,
             FileBytes = result.Data,
             Extension = result.Format,
-            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)" + (result.Parts is { } found ? $", {found.Count} parts" : string.Empty),
             SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
+        if (result.Parts is { } parts)
+        {
+            artifact.Meta["parts"] = string.Join("; ", parts.Select(DescribePart));
+            if (!quiet)
+            {
+                foreach (MeshPart part in parts)
+                    Console.WriteLine(DescribePart(part));
+            }
+        }
         return artifact;
     }
 
