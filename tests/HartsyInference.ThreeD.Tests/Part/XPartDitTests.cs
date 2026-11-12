@@ -12,7 +12,7 @@ namespace HartsyInference.ThreeD.Tests.Part;
 /// upstream's own modules on the CPU. Set <c>HARTSY_XPART_DIT_REF</c> and <c>HARTSY_XPART_DIT_SUBSET</c> (the two files written by <c>tests/python-reference/dump_xpart_dit.py</c>).</summary>
 public sealed class XPartDitTests(ITestOutputHelper output)
 {
-    private static readonly XPartDitConfig Tiny = new(Width: 32, Depth: 3, Heads: 2, LatentChannels: 4, MoeBlocks: 1, Experts: 2, TopK: 1, ValidParts: 5);
+    private static readonly XPartDitConfig Tiny = new(Width: 32, Depth: 3, Heads: 2, LatentChannels: 4, MoeBlocks: 1, Experts: 2, TopK: 1, ValidParts: 5, ContextWidth: 8);
 
     private static Dictionary<string, Tensor> RandomWeights(XPartDitConfig c, int seed)
     {
@@ -105,6 +105,9 @@ public sealed class XPartDitTests(ITestOutputHelper output)
         Assert.NotEqual(a.AsSpan<float>().ToArray(), swapped.AsSpan<float>().ToArray());
 
         Assert.Throws<ArgumentException>(() => dit.Forward(backend, latents, 0.3f, obj, part, [0, 1]));
+        using Tensor wide = Random3(3, 5, 16, 9);
+        Assert.Throws<ArgumentException>(() => dit.Forward(backend, latents, 0.3f, wide, part, [0, 1, 2]));
+        Assert.Throws<InvalidOperationException>(() => dit.LoadWeights(weights));
         Assert.Throws<ArgumentOutOfRangeException>(() => dit.Forward(backend, latents, 0.3f, obj, part, [0, 1, 5]));
         foreach (Tensor t in weights.Values)
             t.Dispose();

@@ -5,7 +5,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 
 /// <summary>Shape of the X-Part DiT (<c>PartFormerDITPlain</c>, <c>infer.yaml</c>): 21 blocks of width 2048 and 16 heads over 1024 latent tokens of 64 channels per part, a mixture of
 /// experts (8 experts, top 2) in the last 6 blocks, U-skips after the middle, a learned embedding per part id (50 ids).</summary>
-public sealed record XPartDitConfig(int Width = 2048, int Depth = 21, int Heads = 16, int LatentChannels = 64, int MoeBlocks = 6, int Experts = 8, int TopK = 2, int ValidParts = 50);
+public sealed record XPartDitConfig(int Width = 2048, int Depth = 21, int Heads = 16, int LatentChannels = 64, int MoeBlocks = 6, int Experts = 8, int TopK = 2, int ValidParts = 50, int ContextWidth = 1024);
 
 /// <summary>The X-Part DiT: all parts of one object are denoised together as a batch of <c>K</c> latent sets. Each block runs self-attention over its own part (even layers) or over the
 /// tokens of every part at once (odd layers, upstream's <c>LocalGlobalProcessor(use_global=True)</c>), then cross-attends to the object tokens and to the part-in-box tokens, which
@@ -19,7 +19,7 @@ public sealed class XPartDit : IDisposable
     private readonly List<Tensor> _owned = [];
     private readonly HashSet<Tensor> _callerOwned = new(ReferenceEqualityComparer.Instance);
     private Tensor _xW = null!, _xB = null!, _t1W = null!, _t1B = null!, _t2W = null!, _t2B = null!, _finalNormW = null!, _finalNormB = null!, _finalW = null!, _finalB = null!, _partEmbed = null!;
-    private bool _disposed;
+    private bool _disposed, _loaded;
 
     /// <summary>Creates a DiT with no weights; call <see cref="LoadWeights"/>.</summary>
     public XPartDit(XPartDitConfig? config = null)
@@ -39,6 +39,8 @@ public sealed class XPartDit : IDisposable
     /// <summary>Loads the <c>model.safetensors</c> tensors (<paramref name="prefix"/> <c>""</c>). BF16 and F16 widen to F32; the caller keeps ownership of <paramref name="weights"/>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
     {
+        if (_loaded)
+            throw new InvalidOperationException("The weights are already loaded; create a new DiT for another set.");
         LoadEdgeWeights(weights, prefix);
         string p = prefix.Length == 0 ? string.Empty : prefix + ".";
         for (int i = 0; i < _blocks.Length; i++)
@@ -47,6 +49,8 @@ public sealed class XPartDit : IDisposable
             if (!_blocks[i].HasSecondCross)
                 throw new InvalidDataException($"X-Part block {i} has no attn2_2 second cross-attention.");
         }
+
+        _loaded = true;
     }
 
     // The embedding, the time embedder, the part embedding and the final layer: everything outside the blocks.
@@ -67,16 +71,19 @@ public sealed class XPartDit : IDisposable
 
     /// <summary>One velocity prediction. <paramref name="latents"/> is <c>[K, N, 64]</c>, <paramref name="sigma"/> the flow time (<c>t / 1000</c>), <paramref name="objectContext"/> and
     /// <paramref name="partContext"/> are <c>[K, Nc, 1024]</c> (the object tokens, repeated per part, and each part's in-box tokens), <paramref name="partIds"/> one id below 50 per part.
-    /// Returns <c>[K, N, 64]</c>; the caller disposes it. Nothing passed in is consumed.</summary>
+    /// Returns <c>[K, N, 64]</c>; the caller disposes it. Nothing passed in is consumed. Run classifier-free guidance as two forwards (the default release has none): the global
+    /// self-attention pools the whole leading dimension, so a batch of conditional and unconditional parts would mix.</summary>
     public Tensor Forward(IBackend backend, Tensor latents, float sigma, Tensor objectContext, Tensor partContext, ReadOnlySpan<int> partIds)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(backend);
-        if (_xW is null)
+        if (!_loaded)
             throw new InvalidOperationException("Call LoadWeights first.");
-        int k = (int)latents.Shape[0], c = _config.LatentChannels;
-        if (latents.Shape.Rank != 3 || latents.Shape[2] != c || partIds.Length != k || objectContext.Shape[0] != k || partContext.Shape[0] != k)
-            throw new ArgumentException($"Latents {latents.Shape}, contexts {objectContext.Shape} and {partContext.Shape} and {partIds.Length} part ids do not describe one set of parts.");
+        if (latents.Shape.Rank != 3 || latents.Shape[2] != _config.LatentChannels || objectContext.Shape.Rank != 3 || partContext.Shape.Rank != 3)
+            throw new ArgumentException($"Latents must be [K, N, {_config.LatentChannels}] and the contexts [K, Nc, {_config.ContextWidth}]; got {latents.Shape}, {objectContext.Shape} and {partContext.Shape}.");
+        int k = (int)latents.Shape[0];
+        if (partIds.Length != k || objectContext.Shape[0] != k || partContext.Shape[0] != k || objectContext.Shape[2] != _config.ContextWidth || partContext.Shape[2] != _config.ContextWidth)
+            throw new ArgumentException($"Latents {latents.Shape}, contexts {objectContext.Shape} and {partContext.Shape} (width {_config.ContextWidth}) and {partIds.Length} part ids do not describe one set of {k} parts.");
         foreach (int id in partIds)
         {
             if ((uint)id >= (uint)_config.ValidParts)
@@ -86,26 +93,34 @@ public sealed class XPartDit : IDisposable
         Tensor x = Embed(backend, latents, sigma, partIds);
         Stack<Tensor> skips = new();
         int half = _config.Depth / 2;
-        for (int layer = 0; layer < _blocks.Length; layer++)
+        try
         {
-            Tensor? skip = layer > half ? skips.Pop() : null;
-            bool global = (layer + 1) % 2 == 0;
-            Tensor next = _blocks[layer].ForwardParts(backend, x, objectContext, partContext, skip, global);
-            skip?.Dispose();
-            if (layer < half)
+            for (int layer = 0; layer < _blocks.Length; layer++)
             {
-                Tensor copy = new(next.Shape, DType.F32);
-                backend.CopyInto(copy, next);
-                skips.Push(copy);
+                Tensor? skip = layer > half ? skips.Pop() : null;
+                bool global = (layer + 1) % 2 == 0;
+                Tensor next = _blocks[layer].ForwardParts(backend, x, objectContext, partContext, skip, global);
+                skip?.Dispose();
+                if (layer < half)
+                {
+                    Tensor copy = new(next.Shape, DType.F32);
+                    backend.CopyInto(copy, next);
+                    skips.Push(copy);
+                }
+
+                x = next;
+                BlockProbe?.Invoke(layer, x);
             }
 
-            x = next;
-            BlockProbe?.Invoke(layer, x);
+            Tensor velocity = Project(backend, x);
+            x.Dispose();
+            return velocity;
         }
-
-        Tensor velocity = Project(backend, x);
-        x.Dispose();
-        return velocity;
+        finally
+        {
+            while (skips.Count > 0)
+                skips.Pop().Dispose();
+        }
     }
 
     /// <summary>The final layer: LayerNorm, the time token dropped, then the linear to the latent channels. <paramref name="x"/> is <c>[K, N + 1, W]</c>; returns <c>[K, N, 64]</c>.</summary>
@@ -114,46 +129,55 @@ public sealed class XPartDit : IDisposable
         int k = (int)x.Shape[0], n = (int)x.Shape[1] - 1, w = _config.Width;
         using Tensor normed = new(x.Shape, DType.F32);
         backend.LayerNorm(normed, x, _finalNormW, _finalNormB, 1e-6f);
-        using Tensor body = new(new TensorShape(k, n, w), DType.F32);
+        // Every row but each part's time token.
+        int[] rows = new int[k * n];
         for (int part = 0; part < k; part++)
-            normed.AsSpan<float>().Slice((part * (n + 1) + 1) * w, n * w).CopyTo(body.AsSpan<float>().Slice(part * n * w, n * w));
+        {
+            for (int i = 0; i < n; i++)
+                rows[part * n + i] = part * (n + 1) + 1 + i;
+        }
+
+        using Tensor pooled = normed.Reshape(new TensorShape(1, k * (n + 1), w));
+        using Tensor body = new(new TensorShape(1, k * n, w), DType.F32);
+        backend.GatherRows(body, pooled, rows);
+        using Tensor projected = new(new TensorShape(1, k * n, _config.LatentChannels), DType.F32);
+        backend.Linear(projected, body, _finalW, _finalB);
         Tensor velocity = new(new TensorShape(k, n, _config.LatentChannels), DType.F32);
-        backend.Linear(velocity, body, _finalW, _finalB);
+        backend.CopyInto(velocity, projected.Reshape(velocity.Shape));
         return velocity;
     }
 
-    /// <summary>The input of the first block: the time token followed by <c>x_embedder(latent) + part_embed[id]</c>, <c>[K, N + 1, W]</c>.</summary>
+    /// <summary>The input of the first block: the time token followed by <c>x_embedder(latent) + part_embed[id]</c>, <c>[K, N + 1, W]</c>, built from backend ops only.</summary>
     internal Tensor Embed(IBackend backend, Tensor latents, float sigma, ReadOnlySpan<int> partIds)
     {
         int k = (int)latents.Shape[0], n = (int)latents.Shape[1], w = _config.Width;
         using Tensor sin = new(new TensorShape(1, w), DType.F32);
-        TimestepEmbedding(sin.AsSpan<float>(), sigma, w);
+        Hunyuan3DPlainDit.TimestepEmbedding(sin, sigma, w);
         using Tensor t1 = new(new TensorShape(1, 4 * w), DType.F32);
         backend.Linear(t1, sin, _t1W, _t1B);
         using Tensor t1a = new(t1.Shape, DType.F32);
         backend.GeluErf(t1a, t1);
         using Tensor token = new(new TensorShape(1, 1, w), DType.F32);
         backend.Linear(token, t1a, _t2W, _t2B);
+        // The time token once per part.
+        using Tensor tokenRows = new(new TensorShape(1, k, w), DType.F32);
+        backend.GatherRows(tokenRows, token, new int[k]);
+        using Tensor timeTokens = tokenRows.Reshape(new TensorShape(k, 1, w));
 
         using Tensor embedded = new(new TensorShape(k, n, w), DType.F32);
         backend.Linear(embedded, latents, _xW, _xB);
-        Tensor x = new(new TensorShape(k, n + 1, w), DType.F32);
-        Span<float> target = x.AsSpan<float>();
-        ReadOnlySpan<float> body = embedded.AsSpan<float>(), time = token.AsSpan<float>(), parts = _partEmbed.AsSpan<float>();
+        // part_embed[id] for every latent row of its part.
+        int[] rowIds = new int[k * n];
         for (int part = 0; part < k; part++)
-        {
-            Span<float> rows = target.Slice(part * (n + 1) * w, (n + 1) * w);
-            time.CopyTo(rows[..w]);
-            ReadOnlySpan<float> embed = parts.Slice(partIds[part] * w, w), source = body.Slice(part * n * w, n * w);
-            for (int row = 0; row < n; row++)
-            {
-                Span<float> dst = rows.Slice((row + 1) * w, w);
-                ReadOnlySpan<float> src = source.Slice(row * w, w);
-                for (int i = 0; i < w; i++)
-                    dst[i] = src[i] + embed[i];
-            }
-        }
-
+            Array.Fill(rowIds, partIds[part], part * n, n);
+        using Tensor partTable = _partEmbed.Reshape(new TensorShape(1, _config.ValidParts, w));
+        using Tensor partRows = new(new TensorShape(1, k * n, w), DType.F32);
+        backend.GatherRows(partRows, partTable, rowIds);
+        using Tensor partRowsShaped = partRows.Reshape(embedded.Shape);
+        using Tensor body = new(embedded.Shape, DType.F32);
+        backend.Add(body, embedded, partRowsShaped);
+        Tensor x = new(new TensorShape(k, n + 1, w), DType.F32);
+        backend.Concat(x, [timeTokens, body], 1);
         return x;
     }
 
@@ -172,19 +196,6 @@ public sealed class XPartDit : IDisposable
                 if (!_callerOwned.Contains(t))
                     t.Dispose();
             }
-        }
-    }
-
-    // Timesteps(width): frequencies exp(-ln(10000) i / half), sines then cosines, scale 1.
-    private static void TimestepEmbedding(Span<float> output, float timestep, int width)
-    {
-        int half = width / 2;
-        float logMax = MathF.Log(10000f);
-        for (int i = 0; i < half; i++)
-        {
-            float angle = timestep * MathF.Exp(-logMax * i / half);
-            output[i] = MathF.Sin(angle);
-            output[half + i] = MathF.Cos(angle);
         }
     }
 

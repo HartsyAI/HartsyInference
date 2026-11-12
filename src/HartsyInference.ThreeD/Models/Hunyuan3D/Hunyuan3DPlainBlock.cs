@@ -5,7 +5,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.ThreeD.Models.Hunyuan3D;
 
 /// <summary>One <c>HunYuanDiTBlock</c> of Hunyuan3D-2.1: optional U-skip, self-attention, cross-attention to the image tokens, then a dense MLP or a mixture of experts.</summary>
-/// <remarks>Batch 1 only; classifier-free guidance runs as two forwards. Activations are F32.</remarks>
+/// <remarks>Batch 1 only for <see cref="Forward"/> (classifier-free guidance runs as two forwards); <see cref="ForwardParts"/> takes K parts as a batch. Activations are F32.</remarks>
 internal sealed unsafe class Hunyuan3DPlainBlock
 {
     private const float Eps = 1e-6f;
@@ -170,7 +170,7 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         return x3;
     }
 
-    /// <summary>X-Part's block over <paramref name="parts"/> parts held as <paramref name="x"/> <c>[K, S, W]</c> (consumed): optional U-skip, self-attention that is local to each part or,
+    /// <summary>X-Part's block over K parts held as <paramref name="x"/> <c>[K, S, W]</c> (consumed): optional U-skip, self-attention that is local to each part or,
     /// with <paramref name="globalSelf"/>, one attention over the <c>K * S</c> tokens of all parts, both cross-attentions (each from the same hidden state, their outputs summed with it),
     /// then the dense MLP or mixture of experts. The contexts are <c>[K, Sc, 1024]</c>. The skip value (not consumed) has the shape of <paramref name="x"/>.</summary>
     internal Tensor ForwardParts(IBackend backend, Tensor x, Tensor context, Tensor context2, Tensor? skipValue, bool globalSelf)
@@ -198,9 +198,8 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         if (globalSelf)
         {
             using Tensor pooledIn = n1.Reshape(pooled);
-            using Tensor pooledOut = Attention(backend, pooledIn, pooledIn, rows, rows, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!);
-            a1 = new(flat, DType.F32);
-            backend.CopyInto(a1, pooledOut.Reshape(flat));
+            Tensor pooledOut = Attention(backend, pooledIn, pooledIn, rows, rows, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!);
+            a1 = pooledOut.Reshape(flat); // a view: it keeps pooledOut alive, so there is no extra copy
         }
         else
         {
