@@ -90,7 +90,8 @@ public sealed class ObjExporter : IMeshExporter
             float[] c = material.BaseColorFactor;
             mtl.Append("newmtl ").Append(names[m]).Append('\n');
             mtl.Append("Kd ").Append(F(c[0])).Append(' ').Append(F(c[1])).Append(' ').Append(F(c[2])).Append('\n');
-            mtl.Append("d ").Append(F(material.AlphaMode == MeshAlphaMode.Opaque ? 1f : c[3])).Append('\n');
+            // Only a blended material is see-through; a masked one is cut out by its alpha, which `d` cannot say.
+            mtl.Append("d ").Append(F(material.AlphaMode == MeshAlphaMode.Blend ? c[3] : 1f)).Append('\n');
             mtl.Append("Pm ").Append(F(material.Metallic)).Append('\n');
             mtl.Append("Pr ").Append(F(material.Roughness)).Append('\n');
             float[] e = material.EmissiveFactor;
@@ -131,8 +132,10 @@ public sealed class ObjExporter : IMeshExporter
         {
             string clean = new([.. document.Materials[i].Name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '_')]);
             string name = clean.Length == 0 ? $"material_{i}" : clean;
-            names[i] = used.Add(name) ? name : $"{name}_{i}";
-            used.Add(names[i]);
+            string candidate = name;
+            for (int suffix = i; !used.Add(candidate); suffix++)
+                candidate = $"{name}_{suffix}";
+            names[i] = candidate;
         }
         return names;
     }
