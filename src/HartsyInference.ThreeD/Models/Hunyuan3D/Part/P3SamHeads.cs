@@ -13,27 +13,27 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 public sealed class P3SamHeads
 {
     private const int PointWidth = 3, PromptWidth = 3, Masks = 3;
-    private readonly Mlp _seg1, _seg2, _seg3, _g, _s21, _s22, _s23, _iou, _iouOut;
+    private readonly P3SamMlp _seg1, _seg2, _seg3, _g, _s21, _s22, _s23, _iou, _iouOut;
     private readonly int _featureDim, _hidden1, _hidden2;
 
     /// <summary>Reads the heads from <paramref name="weights"/> (keys such as <c>seg_mlp_1.0.weight</c>, the names in <c>p3sam.safetensors</c>).</summary>
     public P3SamHeads(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        _seg1 = new Mlp(weights, "seg_mlp_1");
-        _seg2 = new Mlp(weights, "seg_mlp_2");
-        _seg3 = new Mlp(weights, "seg_mlp_3");
-        _g = new Mlp(weights, "seg_s2_mlp_g");
-        _s21 = new Mlp(weights, "seg_s2_mlp_1");
-        _s22 = new Mlp(weights, "seg_s2_mlp_2");
-        _s23 = new Mlp(weights, "seg_s2_mlp_3");
-        _iou = new Mlp(weights, "iou_mlp");
-        _iouOut = new Mlp(weights, "iou_mlp_out");
+        _seg1 = new P3SamMlp(weights, "seg_mlp_1");
+        _seg2 = new P3SamMlp(weights, "seg_mlp_2");
+        _seg3 = new P3SamMlp(weights, "seg_mlp_3");
+        _g = new P3SamMlp(weights, "seg_s2_mlp_g");
+        _s21 = new P3SamMlp(weights, "seg_s2_mlp_1");
+        _s22 = new P3SamMlp(weights, "seg_s2_mlp_2");
+        _s23 = new P3SamMlp(weights, "seg_s2_mlp_3");
+        _iou = new P3SamMlp(weights, "iou_mlp");
+        _iouOut = new P3SamMlp(weights, "iou_mlp_out");
         _featureDim = _seg1.In - PointWidth - PromptWidth;
         _hidden1 = _seg1.Hidden;
         _hidden2 = _g.Out;
         Expect(_g.In == _featureDim + PointWidth + PromptWidth + Masks, "seg_s2_mlp_g input");
-        foreach (Mlp s2 in new[] { _s21, _s22, _s23 })
+        foreach (P3SamMlp s2 in new[] { _s21, _s22, _s23 })
             Expect(s2.In == _hidden2 + _featureDim + PointWidth + PromptWidth + Masks && s2.Out == 1, "seg_s2_mlp input");
         Expect(_iou.In == _hidden2 + _featureDim + PointWidth + PromptWidth + Masks && _iouOut.Out == Masks, "iou head input");
     }
@@ -91,7 +91,7 @@ public sealed class P3SamHeads
 
         float[] stage2 = new float[n * Masks];
         float[][] s2Prompt = [PromptTerm(_s21, globalVector, prompt), PromptTerm(_s22, globalVector, prompt), PromptTerm(_s23, globalVector, prompt)];
-        Mlp[] s2 = [_s21, _s22, _s23];
+        P3SamMlp[] s2 = [_s21, _s22, _s23];
         float[][] s2Base = [p.S21, p.S22, p.S23];
         for (int h = 0; h < Masks; h++)
         {
@@ -119,14 +119,14 @@ public sealed class P3SamHeads
 
     // The first linear layer restricted to the prompt-independent input columns: W[:, featureStart .. featureStart + featureDim) applied to the features,
     // the three point columns that follow applied to the points, plus the bias. Returns [count, hidden].
-    private static float[] FirstLayer(IBackend backend, Mlp mlp, float[] features, float[] points, int count, int featureStart, int featureDim)
+    private static float[] FirstLayer(IBackend backend, P3SamMlp mlp, float[] features, float[] points, int count, int featureStart, int featureDim)
     {
         int hidden = mlp.Hidden;
         float[] w = mlp.W0;
         float[] featureWeights = new float[hidden * featureDim];
         for (int r = 0; r < hidden; r++)
             Array.Copy(w, (long)r * mlp.In + featureStart, featureWeights, (long)r * featureDim, featureDim);
-        float[] result = Matmul(backend, features, count, featureDim, featureWeights, hidden, null);
+        float[] result = P3SamMlp.Matmul(backend, features, count, featureDim, featureWeights, hidden, null);
         int pointStart = featureStart + featureDim;
         for (int i = 0; i < count; i++)
             for (int r = 0; r < hidden; r++)
@@ -141,7 +141,7 @@ public sealed class P3SamHeads
     }
 
     // The prompt columns of the first layer applied to the prompt, [hidden]; `promptStart` is the column of the first prompt value.
-    private static float[] Prompt(Mlp mlp, int promptStart, ReadOnlySpan<float> prompt)
+    private static float[] Prompt(P3SamMlp mlp, int promptStart, ReadOnlySpan<float> prompt)
     {
         float[] term = new float[mlp.Hidden];
         for (int r = 0; r < mlp.Hidden; r++)
@@ -151,7 +151,7 @@ public sealed class P3SamHeads
     }
 
     // Stage-2 and IoU first layers: the global vector sits in columns [0, hidden2), so its term is added together with the prompt term.
-    private float[] PromptTerm(Mlp mlp, float[] globalVector, ReadOnlySpan<float> prompt)
+    private float[] PromptTerm(P3SamMlp mlp, float[] globalVector, ReadOnlySpan<float> prompt)
     {
         float[] term = Prompt(mlp, _hidden2 + _featureDim + PointWidth, prompt);
         for (int r = 0; r < mlp.Hidden; r++)
@@ -161,7 +161,7 @@ public sealed class P3SamHeads
     }
 
     // base[i] + promptTerm + W0[:, logitStart ..] . logits[i]  (activation not yet applied).
-    private static float[] AddTerms(float[] baseTerms, int n, int hidden, float[] promptTerm, float[] logits, Mlp mlp, int logitStart)
+    private static float[] AddTerms(float[] baseTerms, int n, int hidden, float[] promptTerm, float[] logits, P3SamMlp mlp, int logitStart)
     {
         float[] result = new float[(long)n * hidden];
         for (int i = 0; i < n; i++)
@@ -177,16 +177,16 @@ public sealed class P3SamHeads
     }
 
     // Layers 2 and 3 (the last without its activation) of a head whose first layer output is `firstLayer` before the GELU.
-    private static float[] Tail(IBackend backend, Mlp mlp, float[] firstLayer, int n, bool activateLast)
+    private static float[] Tail(IBackend backend, P3SamMlp mlp, float[] firstLayer, int n, bool activateLast)
     {
-        float[] h = Gelu(backend, firstLayer);
-        h = Matmul(backend, h, n, mlp.Hidden, mlp.W1, mlp.Hidden, mlp.B1);
-        h = Gelu(backend, h);
-        float[] output = Matmul(backend, h, n, mlp.Hidden, mlp.W2, mlp.Out, mlp.B2);
-        return activateLast ? Gelu(backend, output) : output;
+        float[] h = P3SamMlp.Gelu(backend, firstLayer);
+        h = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.W1, mlp.Hidden, mlp.B1);
+        h = P3SamMlp.Gelu(backend, h);
+        float[] output = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.W2, mlp.Out, mlp.B2);
+        return activateLast ? P3SamMlp.Gelu(backend, output) : output;
     }
 
-    private static void Head(IBackend backend, Mlp mlp, float[] baseTerms, int n, float[] promptTerm, float[] destination, int column)
+    private static void Head(IBackend backend, P3SamMlp mlp, float[] baseTerms, int n, float[] promptTerm, float[] destination, int column)
     {
         float[] first = new float[baseTerms.Length];
         for (int i = 0; i < n; i++)
@@ -195,7 +195,7 @@ public sealed class P3SamHeads
         Logits(backend, mlp, first, n, destination, column);
     }
 
-    private static void Logits(IBackend backend, Mlp mlp, float[] first, int n, float[] destination, int column)
+    private static void Logits(IBackend backend, P3SamMlp mlp, float[] first, int n, float[] destination, int column)
     {
         float[] logits = Tail(backend, mlp, first, n, activateLast: false);
         for (int i = 0; i < n; i++)
@@ -212,101 +212,11 @@ public sealed class P3SamHeads
         return max;
     }
 
-    // nn.GELU (exact, erf based) through the backend's own kernel.
-    private static float[] Gelu(IBackend backend, float[] x)
-    {
-        using Tensor input = new(new TensorShape(x.Length), DType.F32);
-        using Tensor output = new(new TensorShape(x.Length), DType.F32);
-        Copy(x, input);
-        backend.GeluErf(output, input);
-        float[] y = new float[x.Length];
-        Read(output, y);
-        return y;
-    }
-
     private static float Sigmoid(float x) => (float)(1.0 / (1.0 + Math.Exp(-x)));
-
-    private static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, float[] weight, int outDim, float[]? bias)
-    {
-        using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
-        using Tensor w = new(new TensorShape(outDim, inDim), DType.F32);
-        using Tensor y = new(new TensorShape(rows, outDim), DType.F32);
-        Tensor? b = bias is null ? null : new Tensor(new TensorShape(outDim), DType.F32);
-        try
-        {
-            Copy(input, x);
-            Copy(weight, w);
-            if (b is not null)
-                Copy(bias!, b);
-            backend.Linear(y, x, w, b);
-            float[] result = new float[(long)rows * outDim];
-            Read(y, result);
-            return result;
-        }
-        finally
-        {
-            b?.Dispose();
-        }
-    }
-
-    private static unsafe void Copy(float[] source, Tensor destination) =>
-        new ReadOnlySpan<float>(source).CopyTo(new Span<float>((float*)destination.DataPointer, source.Length));
-
-    private static unsafe void Read(Tensor source, float[] destination) =>
-        new ReadOnlySpan<float>((float*)source.DataPointer, destination.Length).CopyTo(destination);
 
     private static void Expect(bool condition, string what)
     {
         if (!condition)
             throw new HartsyInferenceException($"P3-SAM head shapes do not fit together: {what}.");
-    }
-
-    private sealed class Mlp
-    {
-        public readonly float[] W0, B0, W1, B1, W2, B2;
-        public readonly int In, Hidden, Out;
-
-        public Mlp(IReadOnlyDictionary<string, Tensor> weights, string prefix)
-        {
-            Tensor w0 = Get(weights, prefix, 0, "weight"), w1 = Get(weights, prefix, 2, "weight"), w2 = Get(weights, prefix, 4, "weight");
-            Hidden = (int)w0.Shape[0];
-            In = (int)w0.Shape[1];
-            Out = (int)w2.Shape[0];
-            if (w1.Shape[0] != Hidden || w1.Shape[1] != Hidden || w2.Shape[1] != Hidden)
-                throw new HartsyInferenceException($"P3-SAM MLP '{prefix}' has inconsistent layer shapes.");
-            W0 = ToArray(w0);
-            B0 = ToArray(Get(weights, prefix, 0, "bias"));
-            W1 = ToArray(w1);
-            B1 = ToArray(Get(weights, prefix, 2, "bias"));
-            W2 = ToArray(w2);
-            B2 = ToArray(Get(weights, prefix, 4, "bias"));
-        }
-
-        // One row through the whole MLP (GELU between layers), for the small output heads.
-        public float[] ForwardRow(IBackend backend, float[] row)
-        {
-            float[] h = Matmul(backend, row, 1, In, W0, Hidden, B0);
-            h = Gelu(backend, h);
-            h = Matmul(backend, h, 1, Hidden, W1, Hidden, B1);
-            h = Gelu(backend, h);
-            return Matmul(backend, h, 1, Hidden, W2, Out, B2);
-        }
-
-        private static Tensor Get(IReadOnlyDictionary<string, Tensor> weights, string prefix, int layer, string kind)
-        {
-            string key = $"{prefix}.{layer}.{kind}";
-            if (!weights.TryGetValue(key, out Tensor? tensor))
-                throw new HartsyInferenceException($"P3-SAM weight '{key}' is missing.");
-            if (tensor.DType != DType.F32)
-                throw new HartsyInferenceException($"P3-SAM weight '{key}' must be F32, got {tensor.DType.Name}.");
-            return tensor;
-        }
-
-        private static unsafe float[] ToArray(Tensor t)
-        {
-            float[] values = new float[t.ElementCount];
-            new ReadOnlySpan<float>((float*)t.DataPointer, values.Length).CopyTo(values);
-            return values;
-        }
     }
 }

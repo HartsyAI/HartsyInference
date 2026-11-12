@@ -124,6 +124,30 @@ public sealed class UtoniaEncoder : IDisposable
         }
     }
 
+    /// <summary>Runs the encoder stages on a prebuilt input point (features, coordinates and grid coordinates supplied by the caller, as Sonata's data transform
+    /// produces them) and returns every stage's point, finest first. Each level after the first carries <see cref="UtoniaPoint.PoolingInverse"/>, the row of
+    /// each finer point in it. The caller disposes the levels; <paramref name="raw"/> is consumed.</summary>
+    public IReadOnlyList<UtoniaPoint> ForwardLevels(UtoniaPoint raw)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(raw);
+        List<UtoniaPoint> levels = new();
+        try
+        {
+            EncodeStages(raw, levels);
+            return levels;
+        }
+        catch
+        {
+            foreach (UtoniaPoint level in levels)
+            {
+                level.Dispose();
+            }
+
+            throw;
+        }
+    }
+
     /// <summary>Runs the model as built: the encoder alone when encoder-only, otherwise the full encoder-decoder back to the input grid.</summary>
     public UtoniaFeatures Forward(ReadOnlySpan<int> coords, int batchSize, float[]? colors = null, float[]? normals = null)
     {
