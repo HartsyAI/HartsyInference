@@ -55,7 +55,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         List<MeshPlanIssue> issues = [];
         try
         {
-            MeshRequestValidator.Validate(id, request, MeshService.MatterAvailable(id));
+            MeshRequestValidator.Validate(id, request, MeshService.MatterAvailable());
         }
         catch (Exception ex) when (ex is NotSupportedException or ArgumentException or HartsyInferenceException)
         {

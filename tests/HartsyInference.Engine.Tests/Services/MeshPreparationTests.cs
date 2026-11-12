@@ -62,7 +62,56 @@ public sealed class MeshPreparationTests
     }
 
     [Fact]
-    public void AnImageWithAlphaIsNotMattedAgain()
+    public void AnRgbaImageWhoseAlphaIsEntirelyOpaqueIsMatted()
+    {
+        BlockMatter matter = new();
+        ImageData opaque = Plain() with { Alpha = Enumerable.Repeat((byte)255, 64).ToArray() };
+
+        PreparedMeshImage result = Run("hunyuan3d", opaque, matter);
+
+        Assert.Equal(1, matter.Calls);
+        Assert.True(result.Matted);
+        Assert.False(MeshPreparationService.HasUsableAlpha(opaque));
+    }
+
+    [Fact]
+    public void AnAlphaPlaneWithATransparentBorderIsUsedAsIs()
+    {
+        BlockMatter matter = new();
+
+        PreparedMeshImage result = Run("hunyuan3d", WithAlpha(), matter);
+
+        Assert.Equal(0, matter.Calls);
+        Assert.False(result.Matted);
+        Assert.True(MeshPreparationService.HasUsableAlpha(WithAlpha()));
+    }
+
+    [Fact]
+    public void AnEmptyAlphaPlaneIsAnEmptyCutoutNotAMissingOne()
+    {
+        BlockMatter matter = new();
+        ImageData empty = Plain() with { Alpha = new byte[64] };
+
+        Assert.True(MeshPreparationService.HasUsableAlpha(empty));
+        Assert.Throws<ArgumentException>(() => Run("hunyuan3d", empty, matter));
+        Assert.Equal(0, matter.Calls);
+    }
+
+    [Fact]
+    public void AnImageWithoutAnyAlphaPlaneHasNoUsableAlpha()
+        => Assert.False(MeshPreparationService.HasUsableAlpha(Plain()));
+
+    [Fact]
+    public void AutoNeedsTheMatteForAnOpaqueRgbaImageToo()
+    {
+        MeshRequest request = new() { Image = Plain() with { Alpha = Enumerable.Repeat((byte)255, 64).ToArray() }, Preprocess = MeshPreprocess.Auto };
+
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("triposr", request, matterAvailable: false));
+        MeshRequestValidator.Validate("triposr", request, matterAvailable: true);
+    }
+
+    [Fact]
+    public void AnImageWithAnAlphaPlaneIsNotMattedAgain()
     {
         BlockMatter matter = new();
 

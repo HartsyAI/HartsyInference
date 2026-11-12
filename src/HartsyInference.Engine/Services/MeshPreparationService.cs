@@ -45,7 +45,7 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
         List<string> notes = [];
         ImageData source = image;
         bool matted = false;
-        if (!image.HasAlpha)
+        if (!HasUsableAlpha(image))
         {
             if (!matter.IsAvailable)
             {
@@ -86,21 +86,37 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
     internal static bool UsesPreparation(string id) =>
         id == "triposr" || id == "trellis" || MeshModelIds.Hunyuan3D.Contains(id) || MeshModelIds.PaintMesh.Contains(id);
 
-    private Trellis2LazyMatter Matter()
-    {
-        lock (_gate)
-        {
-            return _matter ??= new Trellis2LazyMatter(RepoPaths.ModelsRoot());
-        }
-    }
+    /// <summary>Whether the image carries a cutout to use: an alpha plane with some transparency. An RGBA image whose alpha is entirely opaque (every ordinary RGBA export of a photo) has no foreground to find, as in upstream TRELLIS, so it is matted.</summary>
+    internal static bool HasUsableAlpha(ImageData image) => image.HasAlpha && image.Alpha!.Any(a => a != 255);
 
-    /// <summary>Releases the matting model.</summary>
+    private IForegroundMatter Matter() => new SerializedMatter(this);
+
+    /// <summary>Releases the matting model, waiting for a matte in progress.</summary>
     public void Dispose()
     {
         lock (_gate)
         {
             _matter?.Dispose();
             _matter = null;
+        }
+    }
+
+    /// <summary>The service's one matting model behind the service's lock: it loads once, runs one image at a time, and cannot be released under a run.</summary>
+    private sealed class SerializedMatter(MeshPreparationService owner) : IForegroundMatter
+    {
+        public bool IsAvailable
+        {
+            get
+            {
+                lock (owner._gate)
+                    return (owner._matter ??= new Trellis2LazyMatter(RepoPaths.ModelsRoot())).IsAvailable;
+            }
+        }
+
+        public float[] Alpha(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height)
+        {
+            lock (owner._gate)
+                return (owner._matter ??= new Trellis2LazyMatter(RepoPaths.ModelsRoot())).Alpha(backend, rgb, width, height);
         }
     }
 }

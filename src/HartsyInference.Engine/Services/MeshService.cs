@@ -52,7 +52,7 @@ public sealed class MeshService : IMeshService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = IdOf(spec);
-        MeshRequestValidator.Validate(id, request, MatterAvailable(id));
+        MeshRequestValidator.Validate(id, request, MatterAvailable());
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
@@ -76,10 +76,11 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                LoadedMesh loaded = GetOrLoad(spec, id);
+                // Matting first, so the matting model and the shape model are not on the device together.
                 ImageData image = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
+                LoadedMesh loaded = GetOrLoad(spec, id);
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
                     ImageRgb = image.Rgb,
@@ -573,7 +574,7 @@ public sealed class MeshService : IMeshService, IDisposable
     internal static string IdOf(ModelSpec spec) => (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
 
     /// <summary>Whether the BiRefNet matting checkpoint that mattes images without alpha is installed right now.</summary>
-    internal static bool MatterAvailable(string id) =>
+    internal static bool MatterAvailable() =>
         Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
 
     private static bool IsHairDeck(ModelSpec spec) =>
