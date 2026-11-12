@@ -6,7 +6,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.ThreeD.Tests.Paint;
 
 /// <summary>Integration lane: the Paint schedule, both samplers and the 2.1 guidance against diffusers itself (<c>UniPCMultistepScheduler</c>,
-/// <c>EulerAncestralDiscreteScheduler</c>, <c>DDIMScheduler</c>) and upstream's guidance code. The fixture comes from <c>tests/python-reference/dump_paint_sampler.py</c>;
+/// <c>EulerAncestralDiscreteScheduler</c>) and upstream's guidance code. The fixture comes from <c>tests/python-reference/dump_paint_sampler.py</c>;
 /// set <c>HARTSY_PAINT_SAMPLER_REF</c> to it. The fixture needs no model weights. A fixed synthetic model drives both sides, so this compares the scheduler arithmetic.</summary>
 [Trait("Category", "Integration")]
 public sealed class HunyuanPaintSamplerReferenceTests(ITestOutputHelper output)
@@ -71,14 +71,18 @@ public sealed class HunyuanPaintSamplerReferenceTests(ITestOutputHelper output)
 
         foreach (int steps in new[] { 15, 30 })
         {
-            float[] timesteps = Read(fixture, $"unipc.{steps}.timesteps"), sigmas = Read(fixture, $"unipc.{steps}.sigmas");
-            Assert.Equal(timesteps.Select(t => (int)t), HunyuanPaintSchedule.TrailingTimesteps(steps));
-            double[] mine = schedule.SigmasAt(HunyuanPaintSchedule.TrailingTimesteps(steps), 0.0);
-            double worst = 0;
-            for (int i = 0; i < mine.Length; i++)
-                worst = Math.Max(worst, Math.Abs(mine[i] - sigmas[i]) / Math.Max(sigmas[i], 1.0));
-            output.WriteLine($"{steps} steps: timesteps equal, sigmas worst relative difference {worst:E3}");
-            Assert.True(worst < 1e-5, $"{steps}-step sigmas differ by {worst:E3}");
+            foreach (string kind in new[] { "unipc", "euler" })
+            {
+                float[] timesteps = Read(fixture, $"{kind}.{steps}.timesteps"), sigmas = Read(fixture, $"{kind}.{steps}.sigmas");
+                Assert.Equal(timesteps.Select(t => (int)t), HunyuanPaintSchedule.TrailingTimesteps(steps));
+                double[] mine = schedule.SigmasAt(HunyuanPaintSchedule.TrailingTimesteps(steps), 0.0);
+                Assert.Equal(sigmas.Length, mine.Length);
+                double worst = 0;
+                for (int i = 0; i < mine.Length; i++)
+                    worst = Math.Max(worst, Math.Abs(mine[i] - sigmas[i]) / Math.Max(sigmas[i], 1.0));
+                output.WriteLine($"{kind} {steps} steps: timesteps equal, sigmas worst relative difference {worst:E3}");
+                Assert.True(worst < 1e-5, $"{kind} {steps}-step sigmas differ by {worst:E3}");
+            }
         }
     }
 
@@ -143,6 +147,7 @@ public sealed class HunyuanPaintSamplerReferenceTests(ITestOutputHelper output)
         const int materials = 2, views = 8, latent = 8;
         int per = views * latent * latent * 4;
         float[] scales = azimuths.Select(a => HunyuanPaintPipeline.ViewScale(a)).ToArray();
+        // The oracle's scales repeat per material, so the first `views` entries are all there is to check.
         for (int v = 0; v < views; v++)
             Assert.Equal(expectedScales[v], scales[v], 6);
 
