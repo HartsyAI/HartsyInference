@@ -1,6 +1,6 @@
 # Hunyuan3D Part (P3-SAM and X-Part): source spike
 
-Source read, nothing run, nothing implemented. Pins: `Tencent-Hunyuan/Hunyuan3D-Part` `e96be065375438962375b55326416291342958a7` (code, 2025-12-05), weights `tencent/Hunyuan3D-Part` `677174466c53571e8bacd5050dff5948734a1a4d` (not gated). Date of reading: 2026-11-11.
+Status line of the first spike (2026-11-11: source read, nothing run); later sections record the P3-SAM port running on the real weights and the X-Part weights and port plan. Pins: `Tencent-Hunyuan/Hunyuan3D-Part` `e96be065375438962375b55326416291342958a7` (code, 2025-12-05), weights `tencent/Hunyuan3D-Part` `677174466c53571e8bacd5050dff5948734a1a4d` (not gated). Date of reading: 2026-11-11.
 
 ## Licence
 
@@ -28,7 +28,7 @@ mesh -> P3-SAM (point-prompted 3D segmentation, 400 FPS prompts, NMS, face label
 - Weights: `model/model.safetensors` 6,630,571,584 B (the DiT; BF16, see the 2026-11-12 section below), `shapevae/shapevae.safetensors` 655,539,474 B, `conditioner/conditioner.safetensors` 1,755,920,004 B, `p3sam/p3sam.safetensors` above; configs `model/config.json`, `shapevae/config.json`, `conditioner/config.json`, `scheduler/config.json`. The release is "a light version of X-Part" (README); the full model is only on Hunyuan3D-Studio. Recommended inputs: scanned or AI-generated meshes.
 - DiT (`PartFormerDITPlain`): width 2048, depth 21, 16 heads, RMS q/k norm, no biases, learned part embedding (`valid_num` 50), two cross-attentions (object tokens and part-in-bbox tokens, both 1024-wide), MoE in 6 layers (8 experts, top-2), 1024 latent tokens of 64 channels. This is the same family as the Hunyuan3D-2.1 shape DiT, which this repository already runs (MoE routing included). Structure checked in `partformer_dit.py` and `moe_layers.py`: the MoE block has a shared expert (as in 2.1); U-skips (`skip_linear` over a concatenation, then a norm) on layers 11 to 20 (`layer > depth // 2`); the time embedding is prepended as one token (`torch.cat([c, x])`). Not yet compared: the head-split order inside `Hunyuan3DPlainBlock.Regroup` (the q/k/v are separate tensors as in 2.1, so only the head layout is open). A parity trap: with `use_part_embed` the forward adds `part_embed[torch.randperm(valid_num)[:num_parts]]` (random part ids at inference), so a reference run needs the permutation pinned.
 - Scheduler: `FlowMatchEulerDiscreteScheduler`, 1000 training steps, flow matching with an Euler integrator (the repository already has the Hunyuan3D flow sampler).
-- Shape VAE (`VolumeDecoderShapeVAE`): 1024 latents x 64, width 1024, 8 encoder and 16 decoder layers, 8 Fourier frequencies, `qk_norm`, 81,920 surface points, scale factor 1.0039506. Hunyuan3D shape VAE family, with a different latent count; the conditioner uses two copies (4096 latents for the object, bbox-local for the part).
+- Shape VAE (`VolumeDecoderShapeVAE`): 1024 latents x 64, width 1024, 8 encoder and 16 decoder layers, 8 Fourier frequencies, `qk_norm`, 81,920 surface points, scale factor 1.0039506. Hunyuan3D shape VAE family, with a different latent count; the conditioner uses two copies (4096 latents each (the object, and the part in its box)).
 - Conditioner: ShapeVAE object and local encoders plus a Sonata feature extractor (`use_seg_feat`), the P3-SAM output giving the part boxes.
 
 ## Reuse map
