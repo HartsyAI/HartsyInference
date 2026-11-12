@@ -31,7 +31,7 @@ All of it is small. `cond_encoder/pytorch_model.bin` is 464,828 bytes.
   - bbox: the three extents (length, height, width, each 0 to 1) are repeated to 6 values, one token;
   - voxel: the input points are quantised to a 16 x 16 x 16 grid, the unique voxel centres in [-1, 1] are repeated to 6 values, one token per occupied voxel;
   - point: the points repeated to 6 values, one token per point.
-- Classifier-free guidance: the unconditional branch replaces only the DINO tokens (`unconditional_embedding`) and keeps the control and signal tokens, so the conditional and unconditional batches differ in the image part only. Whether that replacement is `zeros_like` (as the 2.1 doc records for 2.1) has not been read (`DinoImageEncoder.unconditional_embedding`, line 212); until it is, reusing the 2.1 CFG path is unconfirmed.
+- Classifier-free guidance: the unconditional branch replaces only the DINO tokens (`unconditional_embedding`) and keeps the control and signal tokens, so the conditional and unconditional batches differ in the image part only. The replacement is zeros: `DinoImageEncoder.unconditional_embedding` returns `torch.zeros(batch, patch_nums, hidden_size)` with `patch_nums` 37 x 37 + 1 = 1370 and `hidden_size` 1024 (read 2026-11-12), so the 2.1 zero-conditioning CFG path applies with the control and signal tokens appended to both branches.
 - `sampled_point` (pose bone starts, bbox corners, voxel centres, points) is returned for visualisation; the denoiser does not read it.
 - Training-only paths (`drop_point`, `random_noise`, `noise_ratio`) are off at inference (`disable_drop = True`).
 
