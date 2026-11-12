@@ -36,10 +36,12 @@ public sealed class MeshServiceXPartFolderTests : IDisposable
         Touch("conditioner/conditioner.safetensors");
 
         FileNotFoundException error = Assert.Throws<FileNotFoundException>(() => MeshService.XPartFolder(Path.Combine(_root, "p3sam", "p3sam.safetensors")));
-        Assert.Contains("model/model.safetensors", error.Message);
-        Assert.Contains("shapevae/shapevae.safetensors", error.Message);
-        Assert.DoesNotContain("p3sam/p3sam.safetensors", error.Message);
-        Assert.DoesNotContain("conditioner/conditioner.safetensors", error.Message);
+        // The message starts with the path that was given (which names the P3-SAM file itself); the list of what is missing follows it.
+        string missing = error.Message[(error.Message.IndexOf("missing X-Part checkpoints:", StringComparison.Ordinal))..];
+        Assert.Contains("model/model.safetensors", missing);
+        Assert.Contains("shapevae/shapevae.safetensors", missing);
+        Assert.DoesNotContain("p3sam/p3sam.safetensors", missing);
+        Assert.DoesNotContain("conditioner/conditioner.safetensors", missing);
     }
 
     [Fact]
