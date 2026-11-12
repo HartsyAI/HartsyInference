@@ -19,7 +19,7 @@ public sealed class P3SamHeadsTests
         return t;
     }
 
-    private static Dictionary<string, Tensor> Weights(int seed)
+    internal static Dictionary<string, Tensor> Weights(int seed, int featureDim = D)
     {
         Random rng = new(seed);
         Dictionary<string, Tensor> w = [];
@@ -32,12 +32,12 @@ public sealed class P3SamHeadsTests
 
         for (int i = 1; i <= 3; i++)
         {
-            Mlp($"seg_mlp_{i}", D + 6, H1, 1);
-            Mlp($"seg_s2_mlp_{i}", H2 + D + 9, H2, 1);
+            Mlp($"seg_mlp_{i}", featureDim + 6, H1, 1);
+            Mlp($"seg_s2_mlp_{i}", H2 + featureDim + 9, H2, 1);
         }
 
-        Mlp("seg_s2_mlp_g", D + 9, H2, H2);
-        Mlp("iou_mlp", H2 + D + 9, H2, H2);
+        Mlp("seg_s2_mlp_g", featureDim + 9, H2, H2);
+        Mlp("iou_mlp", H2 + featureDim + 9, H2, H2);
         Mlp("iou_mlp_out", H2, H2, 3);
         return w;
     }

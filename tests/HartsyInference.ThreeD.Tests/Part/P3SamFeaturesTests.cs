@@ -41,7 +41,7 @@ public sealed class P3SamFeaturesTests
             Assert.Equal(row, result.Inverse[result.Selected[row]]);
     }
 
-    private static Dictionary<string, Tensor> TinyState(UtoniaConfig config, int gathered)
+    internal static Dictionary<string, Tensor> TinyState(UtoniaConfig config, int gathered)
     {
         Dictionary<string, Tensor> byName = UtoniaTestData.RandomTensors(config, 5);
         Dictionary<string, Tensor> state = [];
@@ -60,7 +60,7 @@ public sealed class P3SamFeaturesTests
         return state;
     }
 
-    private static UtoniaConfig TinyNoRope() =>
+    internal static UtoniaConfig TinyNoRope() =>
         UtoniaTestData.TinyConfig() with { UseRope = false, EncChannels = [8, 16, 24], EncNumHeads = [2, 4, 6], LayerScaleInit = null };
 
     [Fact]
