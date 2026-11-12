@@ -209,7 +209,10 @@ public sealed class KimiK31Model : IDisposable
     };
 
     /// <summary>Runs one token through the decoder, advancing <paramref name="state"/>, and returns its logits <c>[Vocab]</c>.</summary>
-    public float[] ForwardToken(int token, KimiK31State state)
+    public float[] ForwardToken(int token, KimiK31State state) => ProjectHidden(ForwardTokenHidden(token, state));
+
+    /// <summary>Runs one token through the decoder, advancing <paramref name="state"/>, and returns its final normed hidden row <c>[Hidden]</c>.</summary>
+    public float[] ForwardTokenHidden(int token, KimiK31State state)
     {
         ArgumentNullException.ThrowIfNull(state);
         if (state.Position >= state.Capacity) throw new InvalidOperationException("The sequence state is full.");
@@ -241,7 +244,15 @@ public sealed class KimiK31Model : IDisposable
         float[] head = Mix(state, _weights.OutputResQuery, _weights.OutputResNorm);
         float[] final = Normalize(head, _weights.FinalNorm);
         state.Position++;
-        return Logits(final);
+        return final;
+    }
+
+    /// <summary>Projects a final hidden row <c>[Hidden]</c> through the LM head to logits <c>[Vocab]</c>.</summary>
+    public float[] ProjectHidden(float[] hidden)
+    {
+        ArgumentNullException.ThrowIfNull(hidden);
+        if (hidden.Length != _config.Hidden) throw new ArgumentException($"Expected {_config.Hidden} hidden values.", nameof(hidden));
+        return Logits(hidden);
     }
 
     /// <summary>Runs <paramref name="tokens"/> through the decoder in order and returns the last token's logits.</summary>
