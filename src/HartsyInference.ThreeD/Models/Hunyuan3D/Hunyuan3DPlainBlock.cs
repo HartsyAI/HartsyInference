@@ -386,6 +386,14 @@ internal sealed unsafe class Hunyuan3DPlainBlock
     }
 
     // Matrices stay F16 when the backend multiplies F16 weights directly; vectors (biases, norms) are always F32.
-    private Tensor F(IReadOnlyDictionary<string, Tensor> w, string key) =>
-        _halfWeights && w[key].DType == DType.F16 && w[key].Shape.Rank == 2 ? w[key] : Hunyuan3DShapeVae.F32(w[key]);
+    private Tensor F(IReadOnlyDictionary<string, Tensor> w, string key)
+    {
+        Tensor t = w[key];
+        if (_halfWeights && t.Shape.Rank == 2 && t.DType == DType.F16)
+            return t;
+        // X-Part's matrices are BF16; a backend that multiplies F16 weights takes them as F16 (the weights are far inside the F16 range).
+        if (_halfWeights && t.Shape.Rank == 2 && t.DType == DType.BF16)
+            return t.CastTo(DType.F16);
+        return Hunyuan3DShapeVae.F32(t);
+    }
 }

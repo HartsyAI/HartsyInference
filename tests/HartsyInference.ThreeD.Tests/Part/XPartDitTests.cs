@@ -114,6 +114,32 @@ public sealed class XPartDitTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void HalfWeights_KeepTheBf16MatricesAsF16AndAgreeWithTheF32Path()
+    {
+        using CpuBackend backend = new();
+        // BF16 checkpoint: every matrix rounded to BF16 (vectors stay as they are, the released file has BF16 vectors too, which widen exactly).
+        Dictionary<string, Tensor> bf16 = RandomWeights(Tiny, 4).ToDictionary(p => p.Key, p => p.Value.Shape.Rank == 2 ? p.Value.CastTo(DType.BF16) : p.Value);
+        using XPartDit full = new(Tiny), half = new(Tiny);
+        full.LoadWeights(bf16);
+        half.LoadWeights(bf16, halfWeights: true);
+        using Tensor latents = Random3(2, 6, 4, 2), obj = Random3(2, 5, 8, 3), part = Random3(2, 7, 8, 4);
+
+        using Tensor a = full.Forward(backend, latents, 0.3f, obj, part, [1, 2]);
+        using Tensor b = half.Forward(backend, latents, 0.3f, obj, part, [1, 2]);
+
+        double diff = 0, reference = 0;
+        for (int i = 0; i < a.ElementCount; i++)
+        {
+            diff += Math.Pow(a.AsSpan<float>()[i] - b.AsSpan<float>()[i], 2);
+            reference += Math.Pow(a.AsSpan<float>()[i], 2);
+        }
+
+        Assert.True(Math.Sqrt(diff / reference) < 1e-3, $"relRMS {Math.Sqrt(diff / reference):E2}");
+        foreach (Tensor t in bf16.Values)
+            t.Dispose();
+    }
+
+    [Fact]
     public void LoadWeights_RejectsAMissingSecondCrossAttentionAndAWrongShape()
     {
         Dictionary<string, Tensor> weights = RandomWeights(Tiny, 1);
