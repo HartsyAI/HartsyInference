@@ -212,7 +212,7 @@ public static class HartsyInferenceServiceExtensions
             // The mesh file routes take a base64 model file, which a textured result can make tens of MB.
             long? cap = ctx.Request.Path.StartsWithSegments("/v1/native/video") || ctx.Request.Path.StartsWithSegments("/v1/chat/completions")
                 ? options.MaxVideoRequestBodyBytes
-                : ctx.Request.Path.StartsWithSegments("/v1/native/mesh/convert") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/thumbnail")
+                : ctx.Request.Path.StartsWithSegments("/v1/native/mesh/convert") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/thumbnail") || ctx.Request.Path.StartsWithSegments("/v1/native/mesh/operate")
                     ? options.MaxMeshFileRequestBodyBytes
                     : null;
             if (cap is long maxBytes)

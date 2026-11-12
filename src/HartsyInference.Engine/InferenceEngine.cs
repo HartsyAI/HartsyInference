@@ -240,6 +240,9 @@ public sealed class InferenceEngine : IInferenceEngine
     public IMeshConversionService MeshConversion { get; } = new MeshConversionService();
 
     /// <inheritdoc/>
+    public IMeshOperationService MeshOperations { get; } = new MeshOperationService();
+
+    /// <inheritdoc/>
     public IMeshThumbnailService MeshThumbnails { get; } = new MeshThumbnailService();
 
     /// <inheritdoc/>
