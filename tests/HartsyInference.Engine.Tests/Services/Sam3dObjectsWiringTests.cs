@@ -116,6 +116,31 @@ public sealed class Sam3dObjectsWiringTests
     }
 
     [Fact]
+    public async Task GenerateAsync_StillRunsAfterTheServiceWasDisposedToFreeMemory()
+    {
+        string folder = Directory.CreateTempSubdirectory("sam3d-wiring").FullName;
+        try
+        {
+            using InferenceEngine engine = new InferenceEngine("cpu");
+            ModelSpec spec = ModelResolver.Resolve("sam3d-objects", folder, Modality.Mesh);
+            // Empty checkpoint files get a request past the file checks and through the queue, where it fails reading them, not for being unloaded.
+            foreach (string name in new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs", "moge_vitl" })
+                File.WriteAllBytes(Path.Combine(folder, name + ".safetensors"), []);
+            // The engine disposes the service to free memory and keeps the instance: later requests must not be rejected as unloaded.
+            ((IDisposable)engine.Mesh).Dispose();
+
+            Exception error = await Record.ExceptionAsync(() => engine.Mesh.GenerateAsync(spec, new MeshRequest { Image = Image() }));
+
+            Assert.NotNull(error);
+            Assert.IsNotType<ModelUnloadedException>(error);
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GenerateAsync_NamesTheMissingCheckpointsOfAnIncompleteFolder()
     {
         string folder = Directory.CreateTempSubdirectory("sam3d-wiring").FullName;

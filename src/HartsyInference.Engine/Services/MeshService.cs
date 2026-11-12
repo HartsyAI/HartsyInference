@@ -34,7 +34,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
     private readonly SemaphoreSlim _sam3dGate = new(1, 1);
-    private volatile bool _disposed;
+    private int _disposals;
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal MeshService(InferenceEngine engine) => _engine = engine;
@@ -423,6 +423,8 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new FileNotFoundException($"'{directory}' lacks moge_vitl.safetensors, which estimates the scene's pointmap.");
         Sam3dObjectsRequest job = Sam3dObjectsRequestMapper.ToRequest(request);
         int total = job.StructureSteps + job.SlatSteps;
+        // The service outlives Dispose (the engine calls it to free memory and on a backend switch and keeps the instance), so a request is rejected only when a disposal happened after it was queued.
+        int disposalsWhenQueued = Volatile.Read(ref _disposals);
 
         return Task.Run(
             async () =>
@@ -431,7 +433,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 try
                 {
                     cancel.ThrowIfCancellationRequested();
-                    if (_disposed)
+                    if (Volatile.Read(ref _disposals) != disposalsWhenQueued)
                         throw new ModelUnloadedException("The service was disposed while this SAM 3D request was queued; retry the request.");
                     using Sam3dObjectsPipeline pipeline = new(_engine.Backend, directory);
                     Sam3dObjectsResult result = pipeline.Generate(
@@ -765,8 +767,9 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
-        // A SAM 3D run builds its pipeline on the engine's backend: wait for the one in progress, and a request queued behind it finds the flag set.
-        _disposed = true;
+        // A SAM 3D run builds its pipeline on the engine's backend: count the disposal (a request queued before it is then rejected, one queued after it runs) and wait for the run in
+        // progress, which can take minutes, as a HairDeck disposal does.
+        Interlocked.Increment(ref _disposals);
         _sam3dGate.Wait();
         _sam3dGate.Release();
 
