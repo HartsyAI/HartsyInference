@@ -31,8 +31,8 @@ internal static class GlbContainer
         return glb;
     }
 
-    /// <summary>The chunks of a GLB: the JSON chunk's payload and where it sits, and the binary chunk's payload (empty when there is none).</summary>
-    public readonly record struct Chunks(byte[] Json, int JsonOffset, int JsonLength, byte[] Bin);
+    /// <summary>The chunks of a GLB: the JSON chunk's payload and where it sits, and where the binary chunk's payload sits (length 0 when there is none); the binary payload is not copied.</summary>
+    public readonly record struct Chunks(byte[] Json, int JsonOffset, int JsonLength, int BinOffset, int BinLength);
 
     /// <summary>Splits a GLB 2.0 container into its JSON and binary chunks.</summary>
     /// <exception cref="HartsyInference.Core.Exceptions.HartsyInferenceException">Not a GLB 2.0, a chunk runs past the end, or there is no JSON chunk.</exception>
@@ -44,7 +44,8 @@ internal static class GlbContainer
         if (BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(4)) != 2)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException("Only glTF 2.0 GLB containers are supported.");
 
-        byte[]? json = null, bin = null;
+        byte[]? json = null;
+        int binOffset = 0, binLength = 0;
         int jsonOffset = 0, jsonLength = 0;
         long offset = 12;
         while (offset + 8 <= glb.Length)
@@ -54,7 +55,7 @@ internal static class GlbContainer
             long start = offset + 8;
             if (start + length > glb.Length)
                 throw new HartsyInference.Core.Exceptions.HartsyInferenceException("GLB chunk runs past the end of the file.");
-            byte[] chunk = glb.AsSpan((int)start, (int)length).ToArray();
+            byte[]? chunk = type == JsonChunk ? glb.AsSpan((int)start, (int)length).ToArray() : null;
             if (type == JsonChunk)
             {
                 json = chunk;
@@ -63,14 +64,15 @@ internal static class GlbContainer
             }
             else if (type == BinChunk)
             {
-                bin = chunk;
+                binOffset = (int)start;
+                binLength = (int)length;
             }
             offset = start + length;
         }
 
         return json is null
             ? throw new HartsyInference.Core.Exceptions.HartsyInferenceException("GLB file has no JSON chunk.")
-            : new Chunks(json, jsonOffset, jsonLength, bin ?? []);
+            : new Chunks(json, jsonOffset, jsonLength, binOffset, binLength);
     }
 
     /// <summary>Replaces the JSON chunk of <paramref name="glb"/> with <paramref name="json"/>, padded with spaces to four bytes, and fixes the chunk and container lengths.</summary>
