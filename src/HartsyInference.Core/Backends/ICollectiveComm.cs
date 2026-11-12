@@ -16,4 +16,9 @@ public interface ICollectiveComm : IDisposable
 
     /// <summary>Each rank's <paramref name="sendBuffers"/>[i] (N elements) is concatenated rank-major into every <paramref name="recvBuffers"/>[i] (N·<see cref="RankCount"/> elements): rank j's block lands at element offset j·N on every rank.</summary>
     void AllGather(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers);
+
+    /// <summary>Variable-size all-to-all: rank i's <paramref name="sendBuffers"/>[i] holds, for each destination j in order,
+    /// <c>elementCounts[i, j]</c> elements, and rank j's <paramref name="recvBuffers"/>[j] receives, for each source i in order,
+    /// <c>elementCounts[i, j]</c> elements. Buffers may hold more than their exchange uses; <see cref="AllToAllLayout"/> states the rules.</summary>
+    void AllToAll(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] elementCounts);
 }

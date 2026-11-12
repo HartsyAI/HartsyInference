@@ -100,10 +100,10 @@ public sealed class KimiK31WeightLoader
             Host(src, p + "k_conv1d.weight", key, 1L, k),
             Host(src, p + "v_conv1d.weight", key, 1L, k));
 
-        // A_log holds one value per head-channel, shared by every head; the fold takes one per key channel.
-        float[] aLogHead = Host(src, p + "A_log", c.KdaHeadDim);
+        // A_log holds one value per head; every key channel of a head takes that head's value.
+        float[] aLogHead = HostLeading(src, p + "A_log", c.Heads);
         float[] aLog = new float[key];
-        for (int ch = 0; ch < key; ch++) aLog[ch] = aLogHead[ch % c.KdaHeadDim];
+        for (int ch = 0; ch < key; ch++) aLog[ch] = aLogHead[ch / c.KdaHeadDim];
         (float[] up, float[] bias) = KdaLayer.FoldForgetGate(
             Host(src, p + "f_b_proj.weight", key, rank), aLog, Host(src, p + "dt_bias", key), key, rank);
 
@@ -231,6 +231,24 @@ public sealed class KimiK31WeightLoader
             for (int d = 0; d < dims.Length; d++)
                 if (f.Shape[d] != dims[d]) throw Mismatch(name, f.Shape, dims);
             return f.AsReadOnlySpan<float>().ToArray();
+        }
+        finally
+        {
+            if (!ReferenceEquals(f, t)) f.Dispose();
+            t.Dispose();
+        }
+    }
+
+    // The first n values of a vector. A published vector may carry trailing padding past its heads; only the leading n are read.
+    private static float[] HostLeading(IKimiK31WeightSource src, string name, int n)
+    {
+        Tensor t = src.Read(name);
+        Tensor f = t.DType == DType.F32 ? t : ProjectionOps.EnsureF32(t);
+        try
+        {
+            if (f.Shape.Rank != 1 || f.Shape[0] < n)
+                throw new InvalidDataException($"Tensor '{name}' must be a vector of at least {n} values, got {f.Shape}.");
+            return f.AsReadOnlySpan<float>().Slice(0, n).ToArray();
         }
         finally
         {
