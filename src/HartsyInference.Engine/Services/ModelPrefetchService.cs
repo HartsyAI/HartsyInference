@@ -105,11 +105,11 @@ public sealed class ModelPrefetchService : IModelPrefetchService
                     await fetch(asset, cancel).ConfigureAwait(false);
                     fetched++;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested)
                 {
                     throw;
                 }
-                catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidOperationException)
+                catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidOperationException or OperationCanceledException)
                 {
                     Logs.Warning($"[Mesh][Prefetch] '{asset.RepoPath}' of '{status.ModelId}' was not fetched: {ex.Message}");
                     blockers.Add(FetchFailure(asset, ex));
@@ -131,9 +131,19 @@ public sealed class ModelPrefetchService : IModelPrefetchService
     {
         bool refused = error.Message.Contains("HTTP 401", StringComparison.Ordinal) || error.Message.Contains("HTTP 403", StringComparison.Ordinal)
             || error is HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden };
-        return refused
-            ? new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.Gated, MeshAssetService.GatedInstructions(asset.Repo))
-            : new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Repo}/{asset.RepoPath} could not be fetched: {error.Message} Check the connection and try again.");
+        if (refused)
+        {
+            return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.Gated, MeshAssetService.GatedInstructions(asset.Repo));
+        }
+        // A fixed sentence per kind of failure: the exception text can hold a server's error page or a local path, and is in the log.
+        string reason = error switch
+        {
+            InvalidOperationException => "the download did not match its pinned hash",
+            IOException => "the file could not be written to disk",
+            OperationCanceledException => "the server did not answer in time",
+            _ => "the server could not be reached or refused the request",
+        };
+        return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Repo}/{asset.RepoPath} was not fetched: {reason}. Check the connection and the disk, then fetch again.");
     }
 
     private static async Task<ModelPrefetchResult> PrefetchTtsAsync(AudioModelSelector selector,

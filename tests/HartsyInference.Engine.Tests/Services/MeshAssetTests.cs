@@ -197,15 +197,19 @@ public sealed class MeshAssetTests : IDisposable
     [Theory]
     [InlineData(typeof(HttpRequestException))]
     [InlineData(typeof(IOException))]
+    [InlineData(typeof(TaskCanceledException))]
+    [InlineData(typeof(InvalidOperationException))]
     public async Task ANetworkFailureBecomesAFetchFailedBlockerNotAnException(Type failure)
     {
         ModelSpec spec = PixalMissingEncoderAndPrimary(_root);
 
         ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(spec, null,
-            (_, _) => throw (Exception)Activator.CreateInstance(failure, "connection reset")!, CancellationToken.None);
+            (_, _) => throw (Exception)Activator.CreateInstance(failure, @"C:secretpath <html>Body: error page</html>")!, CancellationToken.None);
 
         Assert.Equal(2, result.Blockers.Count);
         Assert.All(result.Blockers, b => Assert.Equal(MeshAssetBlockerKind.FetchFailed, b.Kind));
+        Assert.All(result.Blockers, b => Assert.DoesNotContain("secret", b.Message));
+        Assert.All(result.Blockers, b => Assert.DoesNotContain("html", b.Message));
         Assert.Null(result.PrimaryPath);
     }
 
@@ -214,8 +218,10 @@ public sealed class MeshAssetTests : IDisposable
     {
         ModelSpec spec = PixalMissingEncoderAndPrimary(_root);
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            ModelPrefetchService.PrefetchMeshAsync(spec, null, (_, _) => throw new OperationCanceledException(), CancellationToken.None));
+        using CancellationTokenSource cancel = new();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ModelPrefetchService.PrefetchMeshAsync(spec, null, (_, _) => { cancel.Cancel(); throw new OperationCanceledException(cancel.Token); }, cancel.Token));
     }
 
     [Fact]
