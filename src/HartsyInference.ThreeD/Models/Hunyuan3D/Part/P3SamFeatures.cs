@@ -43,7 +43,27 @@ public sealed class P3SamFeatures : IDisposable
     /// channels, and the per-point result.</summary>
     internal sealed record Detail(P3SamGridSample.Result Grid, float[][] Stages, int[][] StageGrids, float[] Gathered, float[] Features);
 
+    /// <summary>Whether the encoder's GEMMs run in full F32 on a GPU backend (<see cref="IBackend.HighPrecisionGemm"/>, scoped to <see cref="Extract"/>). On by
+    /// default: with TF32 the CUDA features differ from upstream by relRMS 2e-2 (7e-5 with this on and <c>numerics.sdpaNoTf32</c> set), at the same speed. The
+    /// attention half is a construction-time knob (<c>numerics.sdpaNoTf32</c>, or the <c>reference</c> profile), which this class cannot change.</summary>
+    public bool ExactGemm { get; set; } = true;
+
     internal Detail ExtractDetailed(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random = null, bool keepStages = true)
+    {
+        bool previous = _backend.HighPrecisionGemm;
+        if (ExactGemm)
+            _backend.HighPrecisionGemm = true;
+        try
+        {
+            return ExtractCore(points, normals, count, pick, random, keepStages);
+        }
+        finally
+        {
+            _backend.HighPrecisionGemm = previous;
+        }
+    }
+
+    private Detail ExtractCore(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random, bool keepStages)
     {
         if (normals.Length != count * 3)
             throw new ArgumentException("Normals must be [count, 3].", nameof(normals));
