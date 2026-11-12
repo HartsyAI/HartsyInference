@@ -822,7 +822,7 @@ public static class GenerationDispatch
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         bool paint = MeshModelIds.PaintMesh.Contains(meshId);
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || paint;
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || paint;
         string? imagePath = parameters.GetStringOrNull("image");
         if (paint && imagePath is null)
             throw new ArgumentException($"3D model '{meshId}' textures a mesh from a reference image; pass the image with --image.");
@@ -860,10 +860,20 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Mesh,
             FileBytes = result.Data,
             Extension = result.Format,
-            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)" + (result.Parts is { } found ? $", {found.Count} parts" : string.Empty),
             SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
+        if (result.Parts is { } parts)
+        {
+            artifact.Meta["parts"] = string.Join("; ", parts.Select(p =>
+                $"part {p.Id}: {p.FaceCount} faces, box [{string.Join(", ", p.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]"));
+            if (!quiet)
+            {
+                foreach (MeshPart part in parts)
+                    Console.WriteLine($"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]");
+            }
+        }
         return artifact;
     }
 

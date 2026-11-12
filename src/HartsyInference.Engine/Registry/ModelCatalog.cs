@@ -109,6 +109,14 @@ public static class ModelCatalog
             TargetName = "vae/diffusion_pytorch_model.safetensors", Role = "vae", Sha256 = "abcec86e499e1ce9f05d1630725d386dc533b61fe0947ab034f07f89042e7a61" },
     ];
 
+    /// <summary>Hunyuan3D-Part P3-SAM (<c>tencent/Hunyuan3D-Part</c> at <c>67717446</c>): the one safetensors file with the Sonata encoder and the mask and IoU heads.
+    /// The Tencent 3D-Part Community License applies (it excludes the EU, UK and South Korea); the file's Sonata weights come from Pointcept, whose own terms were not verified.</summary>
+    private static ModelAsset[] Hunyuan3DPartAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "p3sam/p3sam.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "p3sam/p3sam.safetensors",
+            Role = "transformer", Sha256 = "eb76550cfbe06f154c6e9b17167ccfc28222bb4a216ec7b12ac2bf7d762de38c" },
+    ];
+
     /// <summary>Hunyuan3D Paint 2.1 (<c>tencent/Hunyuan3D-2.1</c> at <c>0b946776</c>): the PBR UNet and VAE (pickles, read by the safe parser only), DINOv2-giant and Real-ESRGAN x4plus.</summary>
     private static ModelAsset[] Hunyuan3DPaint21Assets =>
     [
@@ -2761,6 +2769,8 @@ public static class ModelCatalog
                 with { Assets = Hunyuan3DPaintAssets },
             E("hunyuan3d-paint21", d3, "Hunyuan3D-2.1 Paint (PBR texturing)", "SD 2.1 zero-SNR UNet + material, DINO and rotary multiview attention, back-projected", st, cli: true)
                 with { Assets = Hunyuan3DPaint21Assets },
+            E("hunyuan3d-part", d3, "Hunyuan3D-Part P3-SAM (part segmentation)", "Sonata (PTv3) encoder + prompt-conditioned mask and IoU heads, auto-mask labelling", st, cli: true)
+                with { Assets = Hunyuan3DPartAssets },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),
