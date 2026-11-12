@@ -86,9 +86,9 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             int textLen = (int)encoded.HiddenStates.Shape[0];
             MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, 1, latentH, latentW, 0);
 
-            // TODO(gpu): ComfyUI draws noise with its own generator. Matching the seed bit-for-bit is not required; the
-            // parity test feeds saved noise instead.
-            noise = SeedGenerator.CreateNoise(new TensorShape(new long[] { 1, _config.LatentsDim, 1, latentH, latentW }), seed);
+            // The same seed gives the same noise as ComfyUI's torch.randn (see TorchCompatibleNoise), so a request is comparable
+            // with the reference image, not just with itself.
+            noise = TorchCompatibleNoise.Randn(new TensorShape([1L, _config.LatentsDim, 1L, latentH, latentW]), seed);
             x = MiniMaxH3Latents.PackVideo(noise, _config);
 
             (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(),

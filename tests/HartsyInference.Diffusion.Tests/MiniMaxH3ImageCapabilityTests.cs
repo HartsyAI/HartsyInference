@@ -3,6 +3,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
+using HartsyInference.Diffusion.Utilities;
 using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
 
@@ -168,6 +169,31 @@ public sealed class MiniMaxH3ImageCapabilityTests
                 }
             }
         }
+    }
+
+    // ---- Seeded noise --------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void SeededNoise_MatchesTorchRandnForTheSameSeed()
+    {
+        // torch 2.14.1 on CPU: torch.manual_seed(1); torch.randn(1, 24, 1, 5, 7). The count is not a multiple of 16, so the
+        // reference's recomputed final block is covered too. The values are one float32 per line in the fixture.
+        string[] lines = File.ReadAllLines(Path.Combine(AppContext.BaseDirectory, "Fixtures", "MiniMaxH3",
+            "torch_randn_seed1_24x5x7.txt"));
+        float[] expected = lines.Where(l => !l.StartsWith('#')).Select(float.Parse).ToArray();
+
+        using Tensor noise = TorchCompatibleNoise.Randn(new TensorShape([1L, 24L, 1L, 5L, 7L]), seed: 1);
+        float[] actual = noise.AsSpan<float>().ToArray();
+
+        Assert.Equal(840, expected.Length);
+        Assert.Equal(expected.Length, actual.Length);
+        float worst = 0f;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            worst = Math.Max(worst, Math.Abs(expected[i] - actual[i]));
+        }
+        // Float32 rounding of the transcendental steps: torch's AVX2 path can differ from libm in the last bit.
+        Assert.True(worst < 1e-5f, $"largest difference from torch.randn was {worst}");
     }
 
     // ---- Packed layout and rotary positions ---------------------------------------------------------------------
