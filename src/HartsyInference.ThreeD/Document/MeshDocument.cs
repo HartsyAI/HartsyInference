@@ -49,9 +49,12 @@ public sealed class MeshDocument
         {
             Mesh g = primitive.Geometry;
             g.Vertices.CopyTo(positions, vo * 3);
-            g.Normals?.CopyTo(n!, vo * 3);
-            g.Uvs?.CopyTo(t!, vo * 2);
-            g.VertexColors?.CopyTo(c!, vo * 3);
+            if (n is not null)
+                g.Normals!.CopyTo(n, vo * 3);
+            if (t is not null)
+                g.Uvs!.CopyTo(t, vo * 2);
+            if (c is not null)
+                g.VertexColors!.CopyTo(c, vo * 3);
             foreach (int i in g.Indices)
                 indices[io++] = i + vo;
             vo += g.VertexCount;
