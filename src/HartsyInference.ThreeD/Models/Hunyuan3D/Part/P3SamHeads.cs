@@ -66,7 +66,8 @@ public sealed class P3SamHeads : IDisposable
     public int FeatureDim => _featureDim;
 
     /// <summary>The prompt-independent first-layer terms of every head for one mesh, with the work buffers a prompt needs, as backend tensors. Dispose it
-    /// when the mesh is done.</summary>
+    /// when the mesh is done. At 100,000 points it holds about 2.3 GB on the device (8 first-layer terms and 3 work buffers of <c>[points, 512]</c> in F32).
+    /// The work buffers are shared, so one instance serves one <see cref="Segment"/> call at a time.</summary>
     public sealed class Prepared : IDisposable
     {
         internal Tensor Seg1 = null!, Seg2 = null!, Seg3 = null!, G = null!, S21 = null!, S22 = null!, S23 = null!, Iou = null!;
@@ -220,8 +221,16 @@ public sealed class P3SamHeads : IDisposable
         Tensor weight = P3SamMlp.Own(slice, mlp.Hidden, width);
         temporaries.Add(weight);
         Tensor result = new(new TensorShape(count, mlp.Hidden), DType.F32);
-        backend.Linear(result, columns, weight, mlp.TB0);
-        return result;
+        try
+        {
+            backend.Linear(result, columns, weight, mlp.TB0);
+            return result;
+        }
+        catch
+        {
+            result.Dispose();
+            throw;
+        }
     }
 
     // The columns [start, start + 3) of the first layer of `mlp` as a [hidden, 3] weight, which multiplies the stage logits.
@@ -244,6 +253,8 @@ public sealed class P3SamHeads : IDisposable
     }
 
     // first = base + term (in buffer 0), then GELU, the second layer, GELU and the last layer; returns the output buffer [n, Out].
+    // Buffer roles: 0 and 1 ping-pong through the layers, 2 holds the prompt/logit term, 3 is the output. The output is shared by every head, so the caller
+    // reads it (logit column or max-pool) before the next head runs.
     private static Tensor Tail(IBackend backend, Prepared p, P3SamMlp mlp, Tensor baseTerms, Tensor term)
     {
         Tensor a = p.Buffer(0, mlp.Hidden), b = p.Buffer(1, mlp.Hidden), output = p.Buffer(3, mlp.Out);

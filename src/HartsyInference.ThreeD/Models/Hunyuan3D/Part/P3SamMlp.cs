@@ -97,30 +97,6 @@ internal sealed class P3SamMlp : IDisposable
         return y;
     }
 
-    internal static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, float[] weight, int outDim, float[]? bias)
-    {
-        using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
-        using Tensor w = new(new TensorShape(outDim, inDim), DType.F32);
-        using Tensor y = new(new TensorShape(rows, outDim), DType.F32);
-        Tensor? b = bias is null ? null : new Tensor(new TensorShape(outDim), DType.F32);
-        try
-        {
-            Copy(input, x);
-            Copy(weight, w);
-            if (b is not null)
-                Copy(bias!, b);
-            backend.Linear(y, x, w, b);
-            float[] result = new float[(long)rows * outDim];
-            Read(y, result);
-            return result;
-        }
-        finally
-        {
-            b?.Dispose();
-        }
-    }
-
-    // The same product with weights that already are tensors.
     internal static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, Tensor weight, int outDim, Tensor? bias)
     {
         using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
