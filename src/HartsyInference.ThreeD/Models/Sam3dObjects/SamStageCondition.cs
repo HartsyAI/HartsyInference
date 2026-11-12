@@ -129,7 +129,7 @@ public sealed class SamStageCondition : IDisposable
     {
         if (forceDrop is not null && forceDrop.Contains(keyword))
             return new Tensor(new TensorShape(_patch.Windows, _patch.EmbedDim), DType.F32);
-        SamPointmapInput input = pointmap ?? throw new ArgumentException($"The structure stage needs the pointmap for '{keyword}' unless it is dropped.", nameof(pointmap));
+        SamPointmapInput input = pointmap ?? throw new ArgumentException($"The structure stage needs the pointmap for '{keyword}' unless it is dropped.", "inputs");
         return _pointmap!.Embed(backend, input.Planar, input.Height, input.Width);
     }
 
