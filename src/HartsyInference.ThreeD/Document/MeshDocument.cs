@@ -20,6 +20,9 @@ public sealed class MeshDocument
     /// <summary>What the reader could not carry into this document, in words a host can show (skipped primitive modes, external images, other UV sets).</summary>
     public IReadOnlyList<string> Notes { get; init; } = [];
 
+    /// <summary>The source's <c>asset.extras</c> object as JSON text (the engine's settings block lives there), carried through so a conversion or an operation keeps it; null when the source had none.</summary>
+    public string? AssetExtrasJson { get; init; }
+
     /// <summary>Vertices over all primitives.</summary>
     public long VertexCount => Primitives.Sum(p => (long)p.Geometry.VertexCount);
 

@@ -51,6 +51,9 @@ public static partial class GlbReader
             Animations = AnimationNames(root),
             HasSkin = TryArray(root, "skins", out JsonElement skins) && skins.GetArrayLength() > 0,
             Notes = notes,
+            AssetExtrasJson = TryMember(root, "asset", out JsonElement asset) && TryMember(asset, "extras", out JsonElement extras) && extras.ValueKind == JsonValueKind.Object
+                ? extras.GetRawText()
+                : null,
         };
     }
 

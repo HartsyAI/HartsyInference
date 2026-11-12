@@ -89,7 +89,40 @@ public static class MeshEndpoints
             }
         });
 
-        app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        app.MapGet("/v1/native/mesh/formats", IResult (IInferenceEngine engine) =>
+            Results.Ok(new { Sources = engine.MeshConversion.Sources, Targets = engine.MeshConversion.Targets }));
+
+        app.MapPost("/v1/native/mesh/convert", async Task<IResult> (NativeMeshConvertRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.Data) || string.IsNullOrWhiteSpace(req.Format) || string.IsNullOrWhiteSpace(req.Target))
+                    throw new ArgumentException("Send Data (base64), Format and Target.");
+                byte[] data = MeshBase64.Decode(req.Data);
+                MeshConversion result = await Task.Run(() => engine.MeshConversion.Convert(data, req.Format, req.Target, req.Name), ct);
+                return Results.Ok(new
+                {
+                    result.Target,
+                    Files = result.Files.Select(f => new { f.Name, f.ContentType, Data = System.Convert.ToBase64String(f.Data) }),
+                    result.Notes,
+                    result.Vertices,
+                    result.Triangles,
+                    result.StaticOnly,
+                    Archive = req.Archive ? System.Convert.ToBase64String(result.Archive()) : null,
+                });
+            }
+            catch (NotSupportedException ex)
+            {
+                // A format the converter does not read or write is the caller's request, not a missing server feature.
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/plan",async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
         {
             try
             {

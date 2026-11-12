@@ -82,6 +82,10 @@ public interface IInferenceEngine : IDisposable
     IMeshPreparationService MeshPreparation =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh image preparation.");
 
+    /// <summary>Converting a 3D model file (glb, obj) to another format (glb, obj with its MTL and images, ply, stl), whichever model made it.</summary>
+    IMeshConversionService MeshConversion =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh conversion.");
+
     /// <summary>3D preflight: what each 3D model accepts, and whether one request would run, without loading weights.</summary>
     IMeshPlanningService MeshPlanning =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh planning.");
