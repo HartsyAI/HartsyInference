@@ -118,8 +118,8 @@ internal static class MeshResultFinisher
             ByteSize = glb.LongLength,
             TriangleCount = stats?.TriangleCount ?? mesh?.TriangleCount ?? summary?.TriangleCount ?? 0,
             VertexCount = stats?.VertexCount ?? mesh?.VertexCount ?? summary?.VertexCount ?? 0,
-            BoundsMin = stats?.Min ?? (accessorBoundsValid ? summary?.Min : null),
-            BoundsMax = stats?.Max ?? (accessorBoundsValid ? summary?.Max : null),
+            BoundsMin = stats?.Min ?? BoundsOf(mesh, min: true) ?? (accessorBoundsValid ? summary?.Min : null),
+            BoundsMax = stats?.Max ?? BoundsOf(mesh, min: false) ?? (accessorBoundsValid ? summary?.Max : null),
             Components = stats?.Components,
             BoundaryEdges = stats?.BoundaryEdges,
             NonManifoldEdges = stats?.NonManifoldEdges,
@@ -129,6 +129,20 @@ internal static class MeshResultFinisher
             HasSkin = summary?.HasSkin ?? false,
             AnimationNames = summary?.AnimationNames ?? [],
         };
+    }
+
+    /// <summary>The smallest or largest <c>[x, y, z]</c> of a mesh that was read (in the framed space, since the reader applies the nodes), or null when there is none.</summary>
+    private static float[]? BoundsOf(Mesh? mesh, bool min)
+    {
+        if (mesh is null || mesh.VertexCount == 0)
+            return null;
+        float[] bounds = [mesh.Vertices[0], mesh.Vertices[1], mesh.Vertices[2]];
+        for (int i = 3; i < mesh.Vertices.Length; i += 3)
+        {
+            for (int c = 0; c < 3; c++)
+                bounds[c] = min ? Math.Min(bounds[c], mesh.Vertices[i + c]) : Math.Max(bounds[c], mesh.Vertices[i + c]);
+        }
+        return bounds;
     }
 
     /// <summary>The splat count and bounds of a binary-little-endian Gaussian-splat PLY: the vertex count and the offsets of the x, y and z properties are read from the header; a header with a non-float property gives the count only.</summary>
@@ -141,14 +155,24 @@ internal static class MeshResultFinisher
         int count = 0, properties = 0;
         int[] axis = [-1, -1, -1];
         bool allFloats = true;
+        bool littleEndian = false, inVertex = false, vertexFirst = true, otherElementSeen = false;
         foreach (string line in Encoding.ASCII.GetString(ply, 0, headerEnd).Split('\n'))
         {
-            string[] parts = line.Split(' ');
-            if (parts is ["element", "vertex", _])
+            string[] parts = line.Trim().Split(' ');
+            if (parts is ["format", _, _])
             {
-                int.TryParse(parts[2], out count);
+                littleEndian = parts[1] == "binary_little_endian";
             }
-            else if (parts is ["property", _, _])
+            else if (parts is ["element", _, _])
+            {
+                inVertex = parts[1] == "vertex";
+                if (inVertex)
+                    int.TryParse(parts[2], out count);
+                else
+                    otherElementSeen = true;
+                vertexFirst &= !(inVertex && otherElementSeen);
+            }
+            else if (inVertex && parts is ["property", _, _])
             {
                 allFloats &= parts[1] == "float";
                 int slot = Array.IndexOf(new[] { "x", "y", "z" }, parts[2]);
@@ -157,6 +181,8 @@ internal static class MeshResultFinisher
                 properties++;
             }
         }
+        if (!littleEndian || !vertexFirst)
+            return new MeshInfo { ByteSize = ply.LongLength, SplatCount = littleEndian ? count : 0 };
         int body = headerEnd + marker.Length;
         if (count == 0 || !allFloats || axis.Any(i => i < 0) || ply.Length < body + (long)count * properties * 4)
             return new MeshInfo { ByteSize = ply.LongLength, SplatCount = count };

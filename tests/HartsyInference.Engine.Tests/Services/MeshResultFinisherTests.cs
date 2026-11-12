@@ -238,6 +238,20 @@ public sealed class MeshResultFinisherTests
     }
 
     [Fact]
+    public void APlyThatIsAsciiOrDeclaresItsVertexElementAfterAnotherGivesTheCountAtMost()
+    {
+        byte[] Ply(string format, string elements) =>
+            Encoding.ASCII.GetBytes("ply\nformat " + format + " 1.0\n" + elements + "end_header\n").Concat(new byte[64]).ToArray();
+
+        MeshInfo ascii = MeshResultFinisher.SplatInfo(Ply("ascii", "element vertex 1\nproperty float x\nproperty float y\nproperty float z\n"));
+        MeshInfo faceFirst = MeshResultFinisher.SplatInfo(Ply("binary_little_endian", "element face 1\nproperty float a\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\n"));
+
+        Assert.Null(ascii.BoundsMin);
+        Assert.Equal(0, ascii.SplatCount);
+        Assert.Null(faceFirst.BoundsMin);
+    }
+
+    [Fact]
     public void ANegativePreviewBudgetIsRejectedBeforeAnythingLoads()
     {
         MeshRequest request = new() { Image = new ImageData { Rgb = new byte[12], Width = 2, Height = 2 }, PreviewTriangles = -1 };
