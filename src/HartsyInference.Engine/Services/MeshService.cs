@@ -326,7 +326,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
-    private static string? FindPaintDino(string folder)
+    internal static string? FindPaintDino(string folder)
     {
         string own = Path.Combine(folder, "dino", "model.safetensors");
         if (File.Exists(own))

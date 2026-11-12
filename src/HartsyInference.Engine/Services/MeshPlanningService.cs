@@ -11,8 +11,13 @@ namespace HartsyInference.Engine.Services;
 public sealed class MeshPlanningService : IMeshPlanningService
 {
     private readonly MemoryEstimationService _memory;
+    private readonly IMeshAssetService _assets;
 
-    internal MeshPlanningService(MemoryEstimationService memory) => _memory = memory;
+    internal MeshPlanningService(MemoryEstimationService memory, IMeshAssetService assets)
+    {
+        _memory = memory;
+        _assets = assets;
+    }
 
     /// <inheritdoc/>
     public IReadOnlyList<MeshModelDescriptor> DescribeAll() => [.. MeshModelIds.Described.Select(Describe)];
@@ -57,7 +62,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
             issues.Add(Rejection(ex, descriptor));
         }
         AddIgnoredFieldWarnings(request, descriptor, issues);
-        IReadOnlyList<MeshMissingArtifact> missing = MissingArtifacts(spec, issues);
+        MeshAssetStatus assets = _assets.GetStatus(spec);
+        AddAssetIssues(spec, assets, issues);
         MemoryFit memory = _memory.AssessMesh(id, request, request.Vram);
         if (memory.Verdict == MemoryFitVerdict.Infeasible)
         {
@@ -69,7 +75,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
             Descriptor = descriptor,
             Settings = Settings(request, descriptor),
             Issues = issues,
-            MissingArtifacts = missing,
+            Assets = assets,
             Memory = memory.Estimate is null ? null : memory,
         });
     }
@@ -103,8 +109,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
         }
     }
 
-    /// <summary>The catalog files not at their catalog path. The loader may find a file elsewhere (a legacy folder), so these are warnings; a model with no checkpoint at all cannot run.</summary>
-    private static IReadOnlyList<MeshMissingArtifact> MissingArtifacts(ModelSpec spec, List<MeshPlanIssue> issues)
+    /// <summary>One warning per absent file (the loader may find a model path the catalog does not know, so an absent file does not block), with what to do when the engine cannot fetch it; an error when no checkpoint resolved at all.</summary>
+    private static void AddAssetIssues(ModelSpec spec, MeshAssetStatus status, List<MeshPlanIssue> issues)
     {
         if (spec.LocalPath is null)
         {
@@ -115,24 +121,15 @@ public sealed class MeshPlanningService : IMeshPlanningService
                 Message = $"No checkpoint was found for '{spec.Requested}'; fetch its catalog files or supply the model path.",
             });
         }
-        if (spec.Catalog is null)
+        foreach (MeshAssetInfo asset in status.Missing)
         {
-            return [];
-        }
-        List<MeshMissingArtifact> missing = [];
-        foreach (ModelAsset asset in ModelDownloader.MissingAssets(spec.Catalog, spec.LocalPath))
-        {
-            bool required = !asset.Role.Contains("optional", StringComparison.OrdinalIgnoreCase);
-            string relative = Path.Combine(asset.TargetSubdir, asset.FileName).Replace('\\', '/');
-            missing.Add(new MeshMissingArtifact(asset.Role, relative, required));
             issues.Add(new MeshPlanIssue
             {
-                Code = "mesh.artifact.missing",
+                Code = asset.Blocker is null ? "mesh.artifact.missing" : "mesh.artifact.blocked",
                 Severity = MeshPlanIssueSeverity.Warning,
-                Message = $"{asset.Role} ({relative}) is not at its catalog path.",
+                Message = asset.Instructions ?? $"{asset.Role} ({asset.RelativePath}) is not installed; fetch the model's files.",
             });
         }
-        return missing;
     }
 
     private static bool IsSet(MeshRequest request, string name) => name switch

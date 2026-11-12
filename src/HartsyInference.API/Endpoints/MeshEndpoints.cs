@@ -27,6 +27,34 @@ public static class MeshEndpoints
             }
         });
 
+        app.MapGet("/v1/native/mesh/assets/{id}", IResult (string id, IInferenceEngine engine) =>
+        {
+            try
+            {
+                return Results.Json(engine.MeshAssets.GetStatus(ModelResolver.Resolve(id, null, Modality.Mesh)));
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/prefetch", async Task<IResult> (
+            NativeMeshPrefetchRequest req, IInferenceEngine engine,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
+                ModelPrefetchResult result = await queue.EnqueueAsync(() => engine.ModelPrefetch.PrefetchAsync(spec, null, ct), ct);
+                return Results.Ok(new { result.Supported, result.Message, result.Blockers, Installed = engine.MeshAssets.GetStatus(spec).Complete });
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
         app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
         {
             try

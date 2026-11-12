@@ -2,6 +2,9 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.HuggingFace;
+using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Registry;
 
 namespace HartsyInference.Engine.Services;
 
@@ -23,6 +26,10 @@ public sealed class ModelPrefetchService : IModelPrefetchService
         CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(spec);
+        if (spec.Modality == Modality.Mesh)
+        {
+            return await PrefetchMeshAsync(spec, progress, cancel).ConfigureAwait(false);
+        }
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         try
         {
@@ -43,6 +50,57 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             Logs.Error($"[Audio][Prefetch] '{selector.Id}:{selector.Variant}' failed: {ex.Message}", ex);
             throw;
         }
+    }
+
+    /// <summary>Fetches the catalog files of a 3D model that are absent and fetchable, the primary file last; the files it cannot fetch come back as typed blockers, never as an exception.</summary>
+    private static async Task<ModelPrefetchResult> PrefetchMeshAsync(ModelSpec spec, IProgress<AudioFetchProgress>? progress, CancellationToken cancel)
+    {
+        MeshAssetService assets = new();
+        MeshAssetStatus status = assets.GetStatus(spec);
+        if (status.ModelBlocker is MeshAssetBlocker whole)
+        {
+            return new ModelPrefetchResult(false, $"'{status.ModelId}' cannot be pre-downloaded: {whole.Message}", []) { Blockers = [whole] };
+        }
+        CatalogEntry entry = spec.Catalog ?? ModelCatalog.Find(status.ModelId)!;
+        ModelAsset? primary = ModelDownloader.PrimaryAsset(entry);
+        List<MeshAssetBlocker> blockers = [];
+        List<ModelAsset> toFetch = [];
+        for (int i = 0; i < status.Assets.Count; i++)
+        {
+            MeshAssetInfo info = status.Assets[i];
+            if (info.Present)
+            {
+                continue;
+            }
+            if (info.Blocker is MeshAssetBlockerKind kind)
+            {
+                blockers.Add(new MeshAssetBlocker(info.Role, kind, info.Instructions ?? string.Empty));
+            }
+            else if (i < entry.Assets.Count)
+            {
+                toFetch.Add(entry.Assets[i]);
+            }
+        }
+        toFetch = [.. toFetch.Where(asset => asset != primary), .. toFetch.Where(asset => asset == primary)];
+        if (toFetch.Count > 0)
+        {
+            Logs.Info($"[Mesh][Prefetch] Fetching {toFetch.Count} file(s) for '{status.ModelId}'.");
+            using HuggingFaceClient client = new();
+            for (int i = 0; i < toFetch.Count; i++)
+            {
+                progress?.Report(new AudioFetchProgress(toFetch[i].FileName, i, toFetch.Count));
+                await ModelDownloader.EnsureAsync(client, toFetch[i], allowDownload: true, onProgress: null, cancel).ConfigureAwait(false);
+            }
+            progress?.Report(new AudioFetchProgress(toFetch[^1].FileName, toFetch.Count, toFetch.Count));
+        }
+        string message = blockers.Count == 0
+            ? $"Fetched {toFetch.Count} file(s) for '{status.ModelId}'."
+            : $"Fetched {toFetch.Count} file(s) for '{status.ModelId}'; {blockers.Count} file(s) need your action: {string.Join("; ", blockers.Select(b => b.Role))}.";
+        string? primaryPath = primary is not null && ModelDownloader.TargetPath(primary) is string path && File.Exists(path) ? path : null;
+        return new ModelPrefetchResult(true, message, [.. entry.Assets.Select(ModelDownloader.TargetPath).Where(File.Exists)], primaryPath)
+        {
+            Blockers = blockers,
+        };
     }
 
     private static async Task<ModelPrefetchResult> PrefetchTtsAsync(AudioModelSelector selector,

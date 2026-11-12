@@ -15,8 +15,8 @@ public sealed class NativeMeshPlanResponse
     /// <summary>Blocking errors and non-blocking warnings.</summary>
     public required IReadOnlyList<MeshPlanIssue> Issues { get; init; }
 
-    /// <summary>Catalog files not at their catalog path, relative to the models root.</summary>
-    public required IReadOnlyList<MeshMissingArtifact> MissingArtifacts { get; init; }
+    /// <summary>The model's file inventory, with paths relative to the models root.</summary>
+    public required MeshAssetStatus Assets { get; init; }
 
     /// <summary>Whether the request fits the device; null when the model has no recorded peak.</summary>
     public MemoryFit? Memory { get; init; }
@@ -33,7 +33,7 @@ public sealed class NativeMeshPlanResponse
             Model = plan.Descriptor,
             Settings = plan.Settings,
             Issues = plan.Issues,
-            MissingArtifacts = plan.MissingArtifacts,
+            Assets = plan.Assets,
             Memory = plan.Memory,
             IsValid = plan.IsValid,
         };
