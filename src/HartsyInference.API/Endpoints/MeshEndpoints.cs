@@ -4,6 +4,7 @@ using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ThreeD.Operations;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -12,6 +13,9 @@ public static class MeshEndpoints
 {
     /// <summary>The thumbnail renders that may run at once.</summary>
     private static readonly SemaphoreSlim ThumbnailGate = new(2);
+
+    /// <summary>The model edits that may run at once.</summary>
+    private static readonly SemaphoreSlim OperateGate = new(2);
 
     /// <summary>Maps <c>/v1/native/mesh</c> and its SSE step-preview variant.</summary>
     public static void MapMeshEndpoints(this WebApplication app)
@@ -118,6 +122,52 @@ public static class MeshEndpoints
             catch (NotSupportedException ex)
             {
                 // A format the converter does not read or write is the caller's request, not a missing server feature.
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapGet("/v1/native/mesh/operations", IResult (IInferenceEngine engine) =>
+            Results.Ok(engine.MeshOperations.Operations.Select(o => new { o.Id, o.Description, o.Parameters })));
+
+        app.MapPost("/v1/native/mesh/operate", async Task<IResult> (NativeMeshOperateRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.Data) || string.IsNullOrWhiteSpace(req.Format) || req.Operations is null || req.Operations.Count == 0)
+                    throw new ArgumentException("Send Data (base64), Format and at least one entry in Operations.");
+                if (req.Operations.Any(o => string.IsNullOrWhiteSpace(o.Operation)))
+                    throw new ArgumentException("Every entry of Operations needs an Operation id.");
+                byte[] data = MeshBase64.Decode(req.Data);
+                List<MeshOperationStep> steps = [.. req.Operations.Select(o => new MeshOperationStep(o.Operation!, o.Parameters))];
+                // Editing a large model is CPU and memory heavy and runs next to model work, so only a couple run at once; the rest wait here and give up if their caller does.
+                await OperateGate.WaitAsync(ct);
+                MeshOperationResult result;
+                try
+                {
+                    result = await Task.Run(() => engine.MeshOperations.Apply(data, req.Format, steps, req.Target ?? "glb", req.Name, ct), ct);
+                }
+                finally
+                {
+                    OperateGate.Release();
+                }
+                return Results.Ok(new
+                {
+                    result.Output.Target,
+                    Files = result.Output.Files.Select(f => new { f.Name, f.ContentType, Data = req.Archive ? null : System.Convert.ToBase64String(f.Data) }),
+                    result.Output.Notes,
+                    result.Output.Vertices,
+                    result.Output.Triangles,
+                    result.Output.StaticOnly,
+                    Archive = req.Archive ? System.Convert.ToBase64String(result.Output.Archive()) : null,
+                    result.Steps,
+                });
+            }
+            catch (NotSupportedException ex)
+            {
                 return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
             }
             catch (Exception ex)

@@ -52,7 +52,8 @@ public sealed class SmoothOperation : IMeshOperation
                 int a = welded.Indices[t + k], b = welded.Indices[t + (k + 1) % 3];
                 if (a == b)
                     continue;
-                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                // lo * n + hi, not a packed pair: a long hashes as the xor of its halves, so packed pairs collide by the thousand on a real mesh.
+                long key = a < b ? (long)a * n + b : (long)b * n + a;
                 edges[key] = edges.GetValueOrDefault(key) + 1;
             }
         }
@@ -60,7 +61,7 @@ public sealed class SmoothOperation : IMeshOperation
         bool[] fixedVertex = new bool[n];
         foreach ((long key, int uses) in edges)
         {
-            int a = (int)(key >> 32), b = (int)(key & 0xFFFFFFFF);
+            int a = (int)(key / n), b = (int)(key % n);
             degree[a]++;
             degree[b]++;
             // An edge used by one triangle lies on an open boundary.
@@ -77,7 +78,7 @@ public sealed class SmoothOperation : IMeshOperation
         int[] fill = new int[n];
         foreach (long key in edges.Keys)
         {
-            int a = (int)(key >> 32), b = (int)(key & 0xFFFFFFFF);
+            int a = (int)(key / n), b = (int)(key % n);
             neighbours[start[a] + fill[a]++] = b;
             neighbours[start[b] + fill[b]++] = a;
         }
