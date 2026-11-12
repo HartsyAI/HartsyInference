@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Vision.Dinov2;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 
@@ -25,23 +26,35 @@ public sealed class SamStageCondition : IDisposable
     private readonly SamDinoEmbedder _image;
     private readonly SamDinoEmbedder _mask;
     private readonly SamPointPatchEmbed? _pointmap;
+    private readonly SamPointPatchConfig _patch;
+    private readonly int _dinoWidth;
     private readonly SamEmbedderFuser _fuser;
 
     /// <param name="stage">The generator this condition feeds.</param>
     /// <param name="section">The condition embedder's tensors by name inside it: <c>module_list.{0,1}.backbone.*</c>, <c>module_list.2.*</c> (structure only), <c>idx_emb</c>, <c>projection_nets.*</c>.</param>
     public SamStageCondition(SamStage stage, IReadOnlyDictionary<string, Tensor> section)
+        : this(stage, section, Dinov2Preset.LargeReg, SamPointPatchConfig.Released)
+    {
+    }
+
+    /// <summary>The same condition at other sizes, for tests on a tiny network; the released one is <see cref="Dinov2Preset.LargeReg"/> with <see cref="SamPointPatchConfig.Released"/>.</summary>
+    internal SamStageCondition(SamStage stage, IReadOnlyDictionary<string, Tensor> section, Dinov2Preset dino, SamPointPatchConfig patch)
     {
         ArgumentNullException.ThrowIfNull(section);
+        ArgumentNullException.ThrowIfNull(dino);
+        ArgumentNullException.ThrowIfNull(patch);
         _stage = stage;
+        _patch = patch;
+        _dinoWidth = dino.HiddenSize;
         SamDinoEmbedder? image = null, mask = null;
         try
         {
-            image = new SamDinoEmbedder(section, "module_list.0.backbone.");
-            mask = new SamDinoEmbedder(section, "module_list.1.backbone.");
+            image = new SamDinoEmbedder(dino, section, "module_list.0.backbone.");
+            mask = new SamDinoEmbedder(dino, section, "module_list.1.backbone.");
             List<SamFuserEmbedder> embedders =
             [
-                new SamFuserEmbedder(SamDinoEmbedder.Width, [("image", "cropped"), ("rgb_image", "full")]),
-                new SamFuserEmbedder(SamDinoEmbedder.Width, [("mask", "cropped"), ("rgb_image_mask", "full")]),
+                new SamFuserEmbedder(_dinoWidth, [("image", "cropped"), ("rgb_image", "full")]),
+                new SamFuserEmbedder(_dinoWidth, [("mask", "cropped"), ("rgb_image_mask", "full")]),
             ];
             if (stage == SamStage.Structure)
             {
@@ -53,11 +66,11 @@ public sealed class SamStageCondition : IDisposable
                         pointmap[entry.Key[prefix.Length..]] = entry.Value;
                 }
 
-                _pointmap = new SamPointPatchEmbed(SamPointPatchConfig.Released, pointmap);
-                embedders.Add(new SamFuserEmbedder(SamPointPatchConfig.Released.EmbedDim, [("pointmap", "cropped"), ("rgb_pointmap", "full")]));
+                _pointmap = new SamPointPatchEmbed(patch, pointmap);
+                embedders.Add(new SamFuserEmbedder(patch.EmbedDim, [("pointmap", "cropped"), ("rgb_pointmap", "full")]));
             }
 
-            _fuser = new SamEmbedderFuser(embedders, SamDinoEmbedder.Width, section);
+            _fuser = new SamEmbedderFuser(embedders, _dinoWidth, section);
             _image = image;
             _mask = mask;
         }
@@ -77,25 +90,24 @@ public sealed class SamStageCondition : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(inputs);
         Dictionary<string, Tensor> tokens = new(StringComparer.Ordinal);
+        List<Tensor> owners = [];
         try
         {
             if (_stage == SamStage.Structure)
             {
-                SamPointmapInput cropped = inputs.CroppedPointmap ?? throw new ArgumentException("The structure stage needs the cropped pointmap.", nameof(inputs));
-                SamPointmapInput full = inputs.FullPointmap ?? throw new ArgumentException("The structure stage needs the full pointmap.", nameof(inputs));
-                tokens["image"] = Rows(_image.StructureTokens(backend, inputs.CroppedImage));
-                tokens["rgb_image"] = Rows(_image.StructureTokens(backend, inputs.FullImage));
-                tokens["mask"] = Rows(_mask.StructureTokensOfMask(backend, inputs.CroppedMask));
-                tokens["rgb_image_mask"] = Rows(_mask.StructureTokensOfMask(backend, inputs.FullMask));
-                tokens["pointmap"] = _pointmap!.Embed(backend, cropped.Planar, cropped.Height, cropped.Width);
-                tokens["rgb_pointmap"] = _pointmap.Embed(backend, full.Planar, full.Height, full.Width);
+                tokens["image"] = Rows(owners, _image.StructureTokens(backend, inputs.CroppedImage));
+                tokens["rgb_image"] = Rows(owners, _image.StructureTokens(backend, inputs.FullImage));
+                tokens["mask"] = Rows(owners, _mask.StructureTokensOfMask(backend, inputs.CroppedMask));
+                tokens["rgb_image_mask"] = Rows(owners, _mask.StructureTokensOfMask(backend, inputs.FullMask));
+                tokens["pointmap"] = PointmapTokens(backend, "pointmap", inputs.CroppedPointmap, forceDrop);
+                tokens["rgb_pointmap"] = PointmapTokens(backend, "rgb_pointmap", inputs.FullPointmap, forceDrop);
             }
             else
             {
-                tokens["image"] = Rows(_image.SlatTokens(backend, inputs.CroppedImage));
-                tokens["rgb_image"] = Rows(_image.SlatTokens(backend, inputs.FullImage));
-                tokens["mask"] = Rows(_mask.SlatTokensOfMask(backend, inputs.CroppedMask));
-                tokens["rgb_image_mask"] = Rows(_mask.SlatTokensOfMask(backend, inputs.FullMask));
+                tokens["image"] = Rows(owners, _image.SlatTokens(backend, inputs.CroppedImage));
+                tokens["rgb_image"] = Rows(owners, _image.SlatTokens(backend, inputs.FullImage));
+                tokens["mask"] = Rows(owners, _mask.SlatTokensOfMask(backend, inputs.CroppedMask));
+                tokens["rgb_image_mask"] = Rows(owners, _mask.SlatTokensOfMask(backend, inputs.FullMask));
             }
 
             using Tensor fused = _fuser.Fuse(backend, tokens, forceDrop);
@@ -107,16 +119,25 @@ public sealed class SamStageCondition : IDisposable
         {
             foreach (Tensor token in tokens.Values)
                 token.Dispose();
+            foreach (Tensor owner in owners)
+                owner.Dispose();
         }
     }
 
-    /// <summary>A <c>[1, n, d]</c> tensor as an independent <c>[n, d]</c> one (the fuser takes rows); the input is disposed.</summary>
-    private static Tensor Rows(Tensor batched)
+    /// <summary>The point-patch tokens of one pointmap; a force-dropped keyword gets zeros without the pointmap being read (the fuser zeroes them after projecting anyway), so object-only runs need no pointmap.</summary>
+    private Tensor PointmapTokens(IBackend backend, string keyword, SamPointmapInput? pointmap, IReadOnlySet<string>? forceDrop)
     {
-        Tensor rows = new(new TensorShape(batched.Shape[1], batched.Shape[2]), DType.F32);
-        batched.AsReadOnlySpan<float>().CopyTo(rows.AsSpan<float>());
-        batched.Dispose();
-        return rows;
+        if (forceDrop is not null && forceDrop.Contains(keyword))
+            return new Tensor(new TensorShape(_patch.Windows, _patch.EmbedDim), DType.F32);
+        SamPointmapInput input = pointmap ?? throw new ArgumentException($"The structure stage needs the pointmap for '{keyword}' unless it is dropped.", nameof(pointmap));
+        return _pointmap!.Embed(backend, input.Planar, input.Height, input.Width);
+    }
+
+    /// <summary>A <c>[1, n, d]</c> tensor as a <c>[n, d]</c> view (the fuser takes rows); the input is added to <paramref name="owners"/>, which the caller disposes after the views.</summary>
+    private static Tensor Rows(List<Tensor> owners, Tensor batched)
+    {
+        owners.Add(batched);
+        return batched.Reshape(new TensorShape(batched.Shape[1], batched.Shape[2]));
     }
 
     public void Dispose()

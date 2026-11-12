@@ -7,7 +7,7 @@ namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 /// <summary>
 /// The DINOv2-L/14 with registers that both SAM 3D condition embedders wrap (upstream <c>Dino</c>, <c>embedder/dino.py</c>, <c>dinov2_vitl14_reg</c>, input 518,
 /// ImageNet normalisation). Weights come with <c>torch.hub</c> names (<c>patch_embed.proj</c>, <c>blocks.i.attn.qkv</c>, <c>ls1.gamma</c>, <c>norm</c>); they are
-/// re-keyed to the names <see cref="Dinov2VisionEncoder"/> reads, with the fused QKV split into three copies this object owns. Two outputs:
+/// re-keyed to the names <see cref="Dinov2VisionEncoder"/> reads (<see cref="Dinov2HubKeys"/>, the fused QKV split into zero-copy views). Two outputs:
 /// <see cref="StructureTokens"/> (<c>forward_features</c>: final norm, class token then patch tokens, the four register tokens dropped, <c>[1, 1370, 1024]</c>) feeds the
 /// structure stage's fuser, and <see cref="SlatTokens"/> (<c>prenorm_features</c>: the block output before the final norm, registers kept, then a non-affine LayerNorm,
 /// <c>[1, 1374, 1024]</c>) feeds the SLAT flow. The mask tower is the same network with the mask repeated over three channels (<c>Dino</c> is called on the mask).
@@ -26,7 +26,7 @@ public sealed class SamDinoEmbedder : IDisposable
 
     private readonly Dinov2Preset _preset;
     private readonly Dinov2VisionEncoder _encoder;
-    private readonly List<Tensor> _owned = [];
+    private bool _disposed;
 
     /// <param name="weights">The DINO tensors by hub name under <paramref name="prefix"/>, F32; they stay owned by the caller and must outlive this object.</param>
     /// <param name="prefix">Everything before <c>patch_embed.proj.weight</c> and the other keys, such as <c>condition_embedder.module_list.0.backbone.</c>.</param>
@@ -44,72 +44,14 @@ public sealed class SamDinoEmbedder : IDisposable
         ArgumentNullException.ThrowIfNull(prefix);
         _preset = preset;
         _encoder = new Dinov2VisionEncoder(preset);
-        try
-        {
-            _encoder.LoadWeights(ToEncoderNames(weights, prefix));
-        }
-        catch
-        {
-            Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>The encoder's weights under its own names: renamed ones are the caller's tensors, the split query, key and value projections are owned copies.</summary>
-    private Dictionary<string, Tensor> ToEncoderNames(IReadOnlyDictionary<string, Tensor> weights, string prefix)
-    {
-        int d = _preset.HiddenSize, layers = _preset.NumLayers, patch = _preset.PatchSize, registers = _preset.NumRegisterTokens;
-        Dictionary<string, Tensor> result = new(StringComparer.Ordinal)
-        {
-            ["embeddings.patch_embeddings.projection.weight"] = SamWeights.Require(weights, prefix + "patch_embed.proj.weight", d, 3, patch, patch),
-            ["embeddings.patch_embeddings.projection.bias"] = SamWeights.Require(weights, prefix + "patch_embed.proj.bias", d),
-            ["embeddings.cls_token"] = SamWeights.Require(weights, prefix + "cls_token", 1, 1, d),
-            ["embeddings.position_embeddings"] = SamWeights.Require(weights, prefix + "pos_embed", 1, 1 + _preset.NumPatches, d),
-            ["embeddings.register_tokens"] = SamWeights.Require(weights, prefix + "register_tokens", 1, registers, d),
-            ["layernorm.weight"] = SamWeights.Require(weights, prefix + "norm.weight", d),
-            ["layernorm.bias"] = SamWeights.Require(weights, prefix + "norm.bias", d),
-        };
-        for (int i = 0; i < layers; i++)
-        {
-            string hub = $"{prefix}blocks.{i}.", hf = $"encoder.layer.{i}.";
-            result[hf + "norm1.weight"] = SamWeights.Require(weights, hub + "norm1.weight", d);
-            result[hf + "norm1.bias"] = SamWeights.Require(weights, hub + "norm1.bias", d);
-            result[hf + "norm2.weight"] = SamWeights.Require(weights, hub + "norm2.weight", d);
-            result[hf + "norm2.bias"] = SamWeights.Require(weights, hub + "norm2.bias", d);
-            result[hf + "attention.output.dense.weight"] = SamWeights.Require(weights, hub + "attn.proj.weight", d, d);
-            result[hf + "attention.output.dense.bias"] = SamWeights.Require(weights, hub + "attn.proj.bias", d);
-            result[hf + "layer_scale1.lambda1"] = SamWeights.Require(weights, hub + "ls1.gamma", d);
-            result[hf + "layer_scale2.lambda1"] = SamWeights.Require(weights, hub + "ls2.gamma", d);
-            result[hf + "mlp.fc1.weight"] = SamWeights.Require(weights, hub + "mlp.fc1.weight", _preset.IntermediateSize, d);
-            result[hf + "mlp.fc1.bias"] = SamWeights.Require(weights, hub + "mlp.fc1.bias", _preset.IntermediateSize);
-            result[hf + "mlp.fc2.weight"] = SamWeights.Require(weights, hub + "mlp.fc2.weight", d, _preset.IntermediateSize);
-            result[hf + "mlp.fc2.bias"] = SamWeights.Require(weights, hub + "mlp.fc2.bias", d);
-            Tensor qkvWeight = SamWeights.Require(weights, hub + "attn.qkv.weight", 3 * d, d);
-            Tensor qkvBias = SamWeights.Require(weights, hub + "attn.qkv.bias", 3 * d);
-            string[] names = ["query", "key", "value"];
-            for (int part = 0; part < 3; part++)
-            {
-                result[$"{hf}attention.attention.{names[part]}.weight"] = Own(qkvWeight, part * d * d, d, d);
-                result[$"{hf}attention.attention.{names[part]}.bias"] = Own(qkvBias, part * d, d);
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>An owned copy of <paramref name="count"/> values of <paramref name="source"/> from <paramref name="start"/>, shaped <paramref name="shape"/>.</summary>
-    private Tensor Own(Tensor source, int start, params long[] shape)
-    {
-        Tensor copy = new(new TensorShape(shape), DType.F32);
-        _owned.Add(copy);
-        source.AsReadOnlySpan<float>().Slice(start, (int)copy.Shape.ElementCount).CopyTo(copy.AsSpan<float>());
-        return copy;
+        _encoder.LoadWeights(Dinov2HubKeys.Remap(weights, prefix, preset, requireF32: true));
     }
 
     /// <summary>The structure-stage tokens of an RGB image: planar F32 <c>[3, 518, 518]</c> in 0 to 1. Returns F32 <c>[1, 1370, 1024]</c>, owned by the caller.</summary>
     public Tensor StructureTokens(IBackend backend, ReadOnlySpan<float> rgb)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using Tensor pixels = Normalize(rgb, 3);
         using Tensor all = _encoder.Encode(backend, pixels);
         return DropRegisters(backend, all);
@@ -119,6 +61,7 @@ public sealed class SamDinoEmbedder : IDisposable
     public Tensor StructureTokensOfMask(IBackend backend, ReadOnlySpan<float> mask)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using Tensor pixels = Normalize(mask, 1);
         using Tensor all = _encoder.Encode(backend, pixels);
         return DropRegisters(backend, all);
@@ -128,6 +71,7 @@ public sealed class SamDinoEmbedder : IDisposable
     public Tensor SlatTokens(IBackend backend, ReadOnlySpan<float> rgb)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using Tensor pixels = Normalize(rgb, 3);
         return PrenormTokens(backend, pixels);
     }
@@ -136,6 +80,7 @@ public sealed class SamDinoEmbedder : IDisposable
     public Tensor SlatTokensOfMask(IBackend backend, ReadOnlySpan<float> mask)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         using Tensor pixels = Normalize(mask, 1);
         return PrenormTokens(backend, pixels);
     }
@@ -176,10 +121,6 @@ public sealed class SamDinoEmbedder : IDisposable
         return result;
     }
 
-    public void Dispose()
-    {
-        foreach (Tensor tensor in _owned)
-            tensor.Dispose();
-        _owned.Clear();
-    }
+    /// <summary>Marks the embedder unusable; the weights stay the caller's.</summary>
+    public void Dispose() => _disposed = true;
 }
