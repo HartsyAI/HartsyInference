@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.TrellisV2;
 
-/// <summary>Validates a checkpoint against a config's tensor specs and resolves each tensor to F32.</summary>
+/// <summary>Validates a checkpoint against a config's tensor specs and resolves each tensor to F32 (or, for the tensors a caller selects, to a narrower type).</summary>
 internal static class ShapeVaeWeights
 {
     /// <summary>Returns the spec'd tensors keyed by checkpoint key. Allocating casts go to <paramref name="owned"/>; F32 is borrowed.</summary>
@@ -12,7 +12,9 @@ internal static class ShapeVaeWeights
         IReadOnlyList<ShapeVaeKeyMap.TensorSpec> specs,
         IReadOnlyDictionary<string, Tensor> weights,
         List<Tensor> owned,
-        string owner = "Shape VAE")
+        string owner = "Shape VAE",
+        DType? narrowDType = null,
+        Func<string, Tensor, bool>? narrow = null)
     {
         ArgumentNullException.ThrowIfNull(weights);
         Dictionary<string, Tensor> resolved = new(specs.Count);
@@ -23,7 +25,10 @@ internal static class ShapeVaeWeights
             if (!HasShape(t, spec.Shape))
                 throw new HartsyInferenceException(
                     $"{owner} tensor '{spec.CheckpointKey}' is {ShapeText(t.Shape)}, expected {ShapeText(spec.Shape)}.");
-            Tensor f = TensorCasts.EnsureF32(t);
+            // The tensors a caller opts into narrowing go straight to the narrow type: from BF16 or F32 in one pass, never through an F32 copy.
+            Tensor f = narrow is not null && narrowDType is { } target && target != DType.F32 && narrow(spec.CheckpointKey, t)
+                ? (t.DType == target ? t : t.CastTo(target))
+                : TensorCasts.EnsureF32(t);
             if (!ReferenceEquals(f, t)) owned.Add(f);
             resolved[spec.CheckpointKey] = f;
         }

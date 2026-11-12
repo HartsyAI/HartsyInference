@@ -59,7 +59,8 @@ public static class ModelAcquisition
         bool isFolderFamily = spec.Modality == Modality.Music && AudioWeightsCatalog.IsFolderCheckpoint(cat.Id);
 
         // A checkpoint named with --model-path already is the transformer, so the catalog's copy is not fetched.
-        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat)
+        // For a model that loads from a folder, a --model-path folder holding the other files is not asked about them either.
+        IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat, spec.LocalPath)
             .Where(a => spec.LocalPath is null || a.Role != "transformer")
             .ToList();
         if (missing.Count == 0)
@@ -70,6 +71,8 @@ public static class ModelAcquisition
 
         AnsiConsole.MarkupLine($"[{CliTheme.Accent}]{Markup.Escape(cat.DisplayName)}[/] [#9aa4af]needs {missing.Count} file(s) not on disk:[/]");
         ListMissingAssets(missing, showTargetDir: true);
+        if (cat.LoadsFromFolder && spec.LocalPath is not null && Directory.Exists(spec.LocalPath))
+            AnsiConsole.MarkupLine("[yellow]The --model-path folder lacks these files; they download to the folder above, which is not the one this run reads. Drop --model-path or copy them there.[/]");
 
         if (!InteractivePrompt.Confirm("Download these now?", defaultYes: false))
             return spec;

@@ -85,3 +85,19 @@ Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, 
 - Parity of the Sonata features on CUDA (6000-point fixture): defaults (TF32 GEMMs, TF32 attention) relRMS 3.6e-2; `ForceF32Gemm` on the encoder weights 2.1e-2; `HighPrecisionGemm` 2.1e-2; `numerics.sdpaNoTf32` alone 2.9e-2; `HighPrecisionGemm` (or `numerics.noTf32`) together with `numerics.sdpaNoTf32` **7.1e-5**, correlation 1.000000, 1.83 s in every setting (at 100k points 3.45 s with the TF32 defaults, 3.54 s exact). The `reference` knob profile gives the same 7.1e-5. `P3SamFeatures.ExactGemm` (default on) scopes `HighPrecisionGemm` around the encoder; the attention half is a construction-time knob (`numerics.sdpaNoTf32` in the settings file, or `--profile reference`).
 - Heads on CUDA (F32 GEMMs through `ForceF32Gemm`): masks max diff 2.4e-6, IoU 3.3e-7.
 - Full size, 100k points and 400 prompts, procedural robot of 8 convex parts (33k faces): surface points 0.03 s, features 3.5 s, prompts and setup 0.22 s, masks 43 s (0.108 s per prompt), labels 0.33 s, 48 s in all; peak VRAM 4.3 GB (3.1 GB above the 1.1 GB baseline). All 8 parts were recovered, each 99 to 100 % pure. The mesh is synthetic; a real-world mesh and a Python comparison of the auto-mask geometry are still open.
+
+## Engine and CLI (2026-11-12)
+
+`P3SamPipeline` (`ThreeD/Pipelines`) loads `p3sam.safetensors` and runs `P3SamAutoMask` on the mesh after the upstream cleanup (`MeshCleaner`: weld, degenerate and duplicate faces, unreferenced vertices), so the result's faces refer to the cleaned mesh. `PartGlbWriter` writes one node, mesh and flat-coloured material per part (`part_{id}`, golden-angle hues), faces with no part in a grey `unassigned` node; each node's `extras` hold `partId`, `faceCount` and `aabb`. `MeshService` takes id `hunyuan3d-part` (`MeshModelIds.PartMesh`): `MeshRequest.SceneMesh` in, `Seed` fixes the surface sampling, no image, steps or grid; the catalog entry downloads the one 451 MB file into `3D/hunyuan3d-part/p3sam/` (sha256 pinned). `hartsy 3d part.glb -m hunyuan3d-part` writes the GLB and prints `part N: faces, box`. Point and prompt counts are upstream's (100,000 and 400). For parity-grade features use `--profile reference` (or `numerics.sdpaNoTf32`), see the GPU section.
+
+## Real meshes through the CLI (2026-11-12)
+
+`hartsy 3d <mesh.glb> -m hunyuan3d-part -b cuda --profile reference` on two TRELLIS.2 512-grid textured GLBs, RTX 3060 (the default 100,000 points and 400 prompts). Wall time is the whole process, including loading the 450 MB checkpoint and the 44 to 49 MB GLB; peak VRAM is the `nvidia-smi` maximum, 1.16 GB being in use before the run.
+
+| Mesh | Faces after cleaning | Wall | Peak VRAM | Parts |
+|---|---|---|---|---|
+| mug (`mug_512_textured.glb`) | 1,000,578 | 69 s | 4.70 GB | 2: body 874,980 faces, handle 125,598 |
+| bust (`bust_512_textured.glb`) | 1,001,131 | 53 s | 4.67 GB | 3: jacket and base 633,074, head and hair 347,788, moustache 20,269 |
+
+The CLI progress lines (13 steps) showed 5.0 to 7.0 s for the second step, 0.2 s for the third, 5.3 to 6.5 s for each block of 50 prompts and 2.1 s for the last step; the per-stage log of the pipeline was not captured in this run. Looks: the mug's handle is one part with a sliver of the body next to its upper joint; the bust splits at the neck and the moustache is a separate part, the base stays with the jacket. These are judged by eye from a flat-colour render (`p3sam_mug512_parts.png`, `p3sam_bust512_parts.png` in the shared notes); there is no ground truth and no Python run of the auto-mask geometry on these meshes yet.
+

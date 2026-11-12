@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.424
+
+- **Added: Vulkan support for grouped and depthwise `ConvTranspose1d`, so Kokoro and StyleTTS 2 run on Vulkan.**
+
 ## alpha.423
 
 - **Added: Kimi K3.1 decoder on CUDA and Vulkan, synthetic checkpoints only (real weights not run).** `KimiK31Model` runs KDA and NoPE

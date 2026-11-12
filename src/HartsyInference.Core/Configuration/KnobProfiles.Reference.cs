@@ -45,6 +45,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.FlashSplitForce, false)
         // Keeps attention on the monolithic single-accumulator reduction; the split merge is only claimed exact, never bit-identical.
         .With(EngineKnobs.FlashSplitOff, true)
+        // Narrows the TRELLIS.2 / Pixal3D flows' linear weights to F16 (relative L2 about 2.6e-4 against F32 weights); F32 is the reference arm.
+        .With(EngineKnobs.FlowF16Weights, false)
         // Enables an FP8 GEMM with F16 accumulate, narrowing both the operands and the accumulator.
         .With(EngineKnobs.Fp8F16, false)
         // Enables the FP8 GEMM path; operands are still quantized to e4m3 even though the accumulator stays F32.

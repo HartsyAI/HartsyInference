@@ -50,6 +50,18 @@ public sealed class Trellis2PipelineTests
                 "cond@1024", "shape Res1024 grid=64 seed=102 steps=2", "decode",
             ],
             rig.Calls);
+        // The stub mesher's quad is one open loop under the hole limit: the cleanup caps it with a fan of four triangles.
+        Assert.Equal(6, mesh.TriangleCount);
+        Assert.NotNull(mesh.Normals);
+    }
+
+    [Fact]
+    public void Generate_CleanMeshOffKeepsTheDecodedFacesAsTheyCame()
+    {
+        using Rig rig = new();
+
+        Mesh mesh = rig.Pipeline.Generate(Image(), new Trellis2Options { Seed = 100, CleanMesh = false });
+
         Assert.Equal(2, mesh.TriangleCount);
         Assert.NotNull(mesh.Normals);
     }
