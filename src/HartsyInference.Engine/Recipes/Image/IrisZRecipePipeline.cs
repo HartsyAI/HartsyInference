@@ -133,16 +133,8 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         {
             logDepth = _pipeline.ImageToDepth(image, steps, IrisZPipeline.DepthAverageLast, seeds, bridge);
         }
-        // Back at the photo's own size: depth bilinear, the sky mask nearest, as the reference resizes them.
-        bool[] sky = ResizeNearest(IrisZDepth.SkyMask(logDepth, _skyCeiling), width, height, photo.Width, photo.Height);
-        float[] depth = IrisZDepth.ResizeBilinear(logDepth, width, height, photo.Width, photo.Height);
-        if (_skyCeiling < 1f)
-        {
-            // The plane is the only thing returned, so it must name the same sky as the rendering: bilinear blending
-            // would otherwise leave a halo of near-sky values along every sky edge.
-            float belowSky = MathF.BitDecrement(IrisZDepth.SkyValue);
-            for (int i = 0; i < depth.Length; i++) depth[i] = sky[i] ? 1f : MathF.Min(depth[i], belowSky);
-        }
+        // Back at the photo's own size. The plane is the only depth returned, so it names the same sky as the rendering.
+        (float[] depth, bool[] sky) = IrisZDepth.ResizeLogDepth(logDepth, width, height, photo.Width, photo.Height, _skyCeiling);
         string format = (RequestExtras.String(request.Extra, RequestExtras.IrisZDepthFormat) ?? "colours").Trim().ToLowerInvariant();
         byte[] rgb = format switch
         {
@@ -243,20 +235,6 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         for (int i = 0; i < gray.Length; i++)
             gray[i] = ((rgb[i * 3] * 19595 + rgb[i * 3 + 1] * 38470 + rgb[i * 3 + 2] * 7471 + 0x8000) >> 16) / 255f;
         return gray;
-    }
-
-    private static bool[] ResizeNearest(bool[] mask, int width, int height, int newWidth, int newHeight)
-    {
-        if (newWidth == width && newHeight == height)
-            return mask;
-        bool[] resized = new bool[newWidth * newHeight];
-        for (int y = 0; y < newHeight; y++)
-        {
-            int sourceY = Math.Min((int)((y + 0.5) * height / newHeight), height - 1);
-            for (int x = 0; x < newWidth; x++)
-                resized[y * newWidth + x] = mask[sourceY * width + Math.Min((int)((x + 0.5) * width / newWidth), width - 1)];
-        }
-        return resized;
     }
 
     /// <inheritdoc/>

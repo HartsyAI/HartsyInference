@@ -495,7 +495,9 @@ public sealed unsafe class Flux2Transformer : IDisposable
             && wPacked == _gridWidth && gridTimes.SequenceEqual(_gridTimes);
         if (!sameKey)
         {
-            ReleaseGridLayouts();
+            // Every grid layout shares one rope signature, so the tables are disowned before anything is rebuilt: a
+            // failure below must not leave the new key paired with the old layout's tables.
+            _ropeSig = long.MinValue;
             int gridCount = gridTimes.Length;
             Span<int> lengths = stackalloc int[gridCount + 1];
             Span<int> groups = stackalloc int[gridCount + 1];
@@ -506,8 +508,21 @@ public sealed unsafe class Flux2Transformer : IDisposable
                 lengths[g + 1] = hPacked * wPacked;
                 groups[g + 1] = g + 1;
             }
-            _gridImageLayout = new TokenSegmentLayout(lengths[1..], groups[..gridCount]);
-            _gridJointLayout = new TokenSegmentLayout(lengths, groups);
+            TokenSegmentLayout imageLayout = new TokenSegmentLayout(lengths[1..], groups[..gridCount]);
+            TokenSegmentLayout jointLayout;
+            try
+            {
+                jointLayout = new TokenSegmentLayout(lengths, groups);
+            }
+            catch
+            {
+                imageLayout.Dispose();
+                throw;
+            }
+            // Both layouts exist: they and the key change together.
+            ReleaseGridLayouts();
+            _gridImageLayout = imageLayout;
+            _gridJointLayout = jointLayout;
             _gridTextLength = txtSeqLen;
             _gridHeight = hPacked;
             _gridWidth = wPacked;
@@ -516,6 +531,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
         // A single-image forward in between leaves its own signature, which also means the tables are no longer these.
         if (sameKey && _ropeSig == GridRopeSignature)
             return;
+        // Disowned while the tables are rewritten, so a Precompute that throws part-way is redone on the next call.
+        _ropeSig = long.MinValue;
         using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
         _rope.Precompute(posIds);
         _ropeSig = GridRopeSignature;

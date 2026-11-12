@@ -241,6 +241,33 @@ public static class IrisZDepth
         return ChooseResolution(sourceWidth, sourceHeight, targetSide);
     }
 
+    /// <summary>Resizes a log depth plane with its sky: depth bilinear, the sky mask nearest (as the reference resizes
+    /// them). With a sky ceiling below 1 the returned plane names exactly the returned mask: sky pixels are +1 and every
+    /// other pixel stays below <see cref="SkyValue"/>, so the blend along a sky edge cannot read as more sky.</summary>
+    public static (float[] LogDepth, bool[] Sky) ResizeLogDepth(ReadOnlySpan<float> logDepth, int width, int height, int newWidth,
+        int newHeight, float skyCeiling)
+    {
+        bool[] sourceSky = SkyMask(logDepth, skyCeiling);
+        bool[] sky = sourceSky;
+        if (newWidth != width || newHeight != height)
+        {
+            sky = new bool[newWidth * newHeight];
+            for (int y = 0; y < newHeight; y++)
+            {
+                int sourceY = Math.Min((int)((y + 0.5) * height / newHeight), height - 1);
+                for (int x = 0; x < newWidth; x++)
+                    sky[y * newWidth + x] = sourceSky[sourceY * width + Math.Min((int)((x + 0.5) * width / newWidth), width - 1)];
+            }
+        }
+        float[] resized = ResizeBilinear(logDepth, width, height, newWidth, newHeight);
+        if (skyCeiling < 1f)
+        {
+            float belowSky = MathF.BitDecrement(SkyValue);
+            for (int i = 0; i < resized.Length; i++) resized[i] = sky[i] ? 1f : MathF.Min(resized[i], belowSky);
+        }
+        return (resized, sky);
+    }
+
     /// <summary>Bilinear resize of a row-major plane, sampling at pixel centres.</summary>
     public static float[] ResizeBilinear(ReadOnlySpan<float> plane, int width, int height, int newWidth, int newHeight)
     {

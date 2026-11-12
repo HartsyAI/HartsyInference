@@ -110,6 +110,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         IDisposable? checkpoint = null;
         // Handed to the recipe pipeline on success; released here when construction fails part-way.
         MergedLoraStack? loraStack = null;
+        Flux2Transformer? transformer = null;
         LlamaStyleEncoder? encoder = null;
         Qwen3Tokenizer? qwenTokenizer = null;
         ErnieTokenizer? mistralTokenizer = null;
@@ -150,9 +151,13 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // The release's empty-prompt tensor loads first: it can need a download, and nothing heavier exists yet to strand.
             Tensor? irisEmptyPrompt = Flux2Variants.IsIrisZ(variant) ? LoadIrisZEmptyPrompt(context, variant, loaders) : null;
 
-            Flux2Transformer transformer = new Flux2Transformer(config);
-            // The transformer owns its fixed step-graph buffers and modality rows; the pipeline releases it with the loaders.
-            loaders.Add(transformer);
+            transformer = new Flux2Transformer(config);
+            if (irisEmptyPrompt is not null)
+            {
+                // An Iris-Z transformer owns its modality rows and segment layouts; the pipeline releases it with the
+                // loaders. The plain FLUX.2 pipelines keep theirs alive as before: its fixed buffers back a captured step graph.
+                loaders.Add(transformer);
+            }
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
             loraStack = RecipeLoraMerge.Apply(
@@ -223,7 +228,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         {
             Logs.Error("[Flux2Recipe] Construction failed.", ex);
             // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
-            new CompositeDisposable([qwenTokenizer, mistralTokenizer, encoder, .. loaders, checkpoint, loraStack]).Dispose();
+            new CompositeDisposable([qwenTokenizer, mistralTokenizer, encoder, transformer, .. loaders, checkpoint, loraStack]).Dispose();
             throw;
         }
     }

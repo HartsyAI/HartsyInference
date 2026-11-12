@@ -162,6 +162,35 @@ public sealed class IrisZDepthTests
         Assert.Equal(2.5f, half[1], 5);
     }
 
+    [Fact]
+    public void ResizingKeepsThePlaneAndTheSkyMaskInAgreement()
+    {
+        // One row: real depth on the left, sky on the right. Enlarging blends the edge toward +1.
+        float[] plane = [0.2f, 0.9999995f, 1f, 1f];
+
+        (float[] resized, bool[] sky) = IrisZDepth.ResizeLogDepth(plane, 4, 1, 16, 1, skyCeiling: 0.95f);
+
+        Assert.Contains(true, sky);
+        Assert.Contains(false, sky);
+        for (int i = 0; i < resized.Length; i++)
+        {
+            Assert.Equal(sky[i], resized[i] == 1f);
+            Assert.True(sky[i] || resized[i] < IrisZDepth.SkyValue, $"pixel {i} is {resized[i]} but not sky");
+        }
+        Assert.Equal(sky, IrisZDepth.SkyMask(resized, 0.95f));
+    }
+
+    [Fact]
+    public void ResizingWithoutASkyClassIsPlainBilinear()
+    {
+        float[] plane = [0.2f, 1f];
+
+        (float[] resized, bool[] sky) = IrisZDepth.ResizeLogDepth(plane, 2, 1, 4, 1, skyCeiling: 1f);
+
+        Assert.DoesNotContain(true, sky);
+        Assert.Equal(IrisZDepth.ResizeBilinear(plane, 2, 1, 4, 1), resized);
+    }
+
     [Theory]
     // mu = a2·seq + b2 above 4300 tokens.
     [InlineData(4301, 50, 0.00016927 * 4301 + 0.45666666)]
