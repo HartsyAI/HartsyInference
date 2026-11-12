@@ -10,7 +10,8 @@ internal static class Sam3dObjectsMesh
     /// The extraction's output frame turned to glTF's (y up, front toward +z): <c>(x, y, z)</c> becomes <c>(x, z, -y)</c>, a proper rotation, so the winding is kept. This is not the splats' turn,
     /// <c>(x, -z, y)</c>: the first attempt used that and the real bust came out upside down; the turn here was found by rendering that bust, which stands upright and faces the camera. The vertex colour
     /// is the sigmoid RGB (the first three of the six colour channels; the last three are a normal map and are not read). It is carried on the mesh but the service does not write it: on the real bust
-    /// it is noisy purple and green, not the stone's grey (upstream bakes the texture from renders of the splats instead).
+    /// it came out noisy purple and green, not the stone's grey. Upstream's <c>to_glb</c> reads the same first three channels as vertex colours (<c>use_vertex_color</c>), but its default
+    /// path bakes a texture from renders of the splats; neither was compared with this port.
     /// </summary>
     public static Mesh ToMesh(SamMeshResult result)
     {
