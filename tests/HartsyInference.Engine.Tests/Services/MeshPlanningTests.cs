@@ -62,6 +62,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Rigged) => request with { Rigged = true },
         nameof(MeshRequest.Texture) => request with { Texture = true },
         nameof(MeshRequest.TextureSize) => request with { TextureSize = 512 },
+        nameof(MeshRequest.Mesh) => request with { Mesh = true },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
@@ -364,7 +365,7 @@ public sealed class MeshPlanningTests
         Assert.Contains("facebook/sam3", hairdeck.Licence.GatedRepos);
         Assert.Contains("facebook/dinov3-vitl16-pretrain-lvd1689m", hairdeck.Licence.GatedRepos);
         Assert.Empty(engine.MeshPlanning.Describe("hunyuan3d").Licence.GatedRepos);
-        Assert.Equal(MeshOutputKinds.Splats, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
+        Assert.Equal(MeshOutputKinds.Splats | MeshOutputKinds.Mesh, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
         Assert.Equal(MeshInputKind.ImageWithMask, engine.MeshPlanning.Describe("sam3d-objects").Input);
         Assert.Throws<NotSupportedException>(() => engine.MeshPlanning.Describe("hunyuan3d-mv"));
     }
@@ -425,6 +426,32 @@ public sealed class MeshPlanningTests
         MeshRequest request = Valid("trellis2") with { FieldOfViewRadians = 0.5 };
 
         await Assert.ThrowsAsync<NotSupportedException>(() => engine.Mesh.GenerateAsync(Spec("trellis2"), request));
+    }
+
+    [Fact]
+    public async Task ASam3dMeshRequestIsPlannedAsMeshTrueFromTheUserAndKeepsPreviewAndFrameUsed()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("sam3d-objects") with { Mesh = true };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), request);
+        MeshPlan splats = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), Valid("sam3d-objects"));
+
+        Assert.Equal(new ResolvedParameter("true", ParameterSource.UserOverride), plan.Settings[nameof(MeshRequest.Mesh)]);
+        Assert.Equal(new ResolvedParameter("false", ParameterSource.RecipeDefault), splats.Settings[nameof(MeshRequest.Mesh)]);
+        // The finisher decimates a preview and applies the frame to every glb, so a model that can return a mesh describes both as used.
+        Assert.All([nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame)], name => Assert.Equal(MeshFieldAccess.Used, Profile("sam3d-objects").Fields.Single(f => f.Name == name).Access));
+        Assert.Equal(MeshFieldAccess.Ignored, Profile("trellis").Fields.Single(f => f.Name == nameof(MeshRequest.Frame)).Access);
+    }
+
+    [Fact]
+    public void ASam3dMeshRunHasAMeasuredPeakAndASplatRunHasNone()
+    {
+        MemoryEstimate? mesh = MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest { Mesh = true });
+
+        Assert.NotNull(mesh);
+        Assert.Equal(MemoryEstimateAccuracy.Measured, mesh.Accuracy);
+        Assert.Null(MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest()));
     }
 
     [Fact]

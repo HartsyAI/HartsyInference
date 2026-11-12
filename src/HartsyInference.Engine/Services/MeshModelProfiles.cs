@@ -51,7 +51,7 @@ internal static class MeshModelProfiles
                 new MeshCost { PeakVramGiB = 9.3, TypicalSeconds = 386, Basis = "RTX 3060, 1024 cascade, shape-only, 12 steps per flow, one image (a bust); 1536 peaks at 11.6." },
                 peak: request => request.GridResolution == 1536 ? 11.6 : 9.3,
                 note: "naf_release.pth must be placed in the model folder by hand; needs the foreground cut out like TRELLIS.2."),
-            Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats,
+            Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats | MeshOutputKinds.Mesh,
                 [Steps("25", 0, null, "Steps of the structure flow and of the SLAT flow."), Rejected(nameof(MeshRequest.GridResolution)),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
@@ -59,7 +59,8 @@ internal static class MeshModelProfiles
                     Summary = "SAM License (binds on use and redistribution)",
                     Restrictions = ["Use ends for trade-controlled parties and for military, nuclear, espionage and weapons end uses; read the licence text fetched beside the weights"],
                 },
-                new MeshCost { TypicalSeconds = 450, Basis = "RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated." },
+                new MeshCost { TypicalSeconds = 450, Basis = "Splats: RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated. Mesh: RTX 3060, F16 flow weights (numerics.flowF16Weights), one bust, 340 s and an 11.8 GiB peak of the 12 GiB card (F32 flows are not recorded for the mesh path)." },
+                peak: request => request.Mesh ? 11.8 : null,
                 note: "The image's alpha plane is the mask of the object to lift."),
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
@@ -148,7 +149,7 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
         Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, MeshField(id), PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
 
     private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
     {
@@ -173,6 +174,10 @@ internal static class MeshModelProfiles
             },
         ];
     }
+
+    private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
+        ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
+        : Rejected(nameof(MeshRequest.Mesh));
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()
@@ -216,7 +221,7 @@ internal static class MeshModelProfiles
     private static string DefaultOf(string name) => name switch
     {
         nameof(MeshRequest.Samples) => "1",
-        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) => "false",
+        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) => "false",
         nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) => "unset",
         _ => "0",
     };

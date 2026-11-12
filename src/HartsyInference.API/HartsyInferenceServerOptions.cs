@@ -33,7 +33,7 @@ public sealed class HartsyInferenceServerOptions
     /// <summary>Maximum native-video JSON body size; defaults to 256 MiB to accommodate base64 guide/control clips.</summary>
     public long MaxVideoRequestBodyBytes { get; set; } = 256L * 1024 * 1024;
 
-    /// <summary>Maximum JSON body size of the mesh file routes (<c>/v1/native/mesh/convert</c>, <c>/thumbnail</c>), which carry a base64 model file; defaults to 256 MiB because a textured result is tens of MB.</summary>
+    /// <summary>Maximum JSON body size of the mesh file routes (<c>/v1/native/mesh/convert</c>, <c>/thumbnail</c>, <c>/operate</c>), which carry a base64 model file; defaults to 256 MiB because a textured result is tens of MB.</summary>
     public long MaxMeshFileRequestBodyBytes { get; set; } = 256L * 1024 * 1024;
 
     /// <summary>How long an interactive world session may sit with no action/stream activity before the server evicts it and releases its backend resources.</summary>
