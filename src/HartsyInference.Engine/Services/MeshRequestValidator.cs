@@ -44,6 +44,11 @@ internal static class MeshRequestValidator
             RequireMeshOnly(id, request, "segments a triangle mesh into parts");
             return;
         }
+        if (MeshModelIds.XPartMesh.Contains(id))
+        {
+            ValidateXPart(id, request);
+            return;
+        }
         if (id != MeshModelIds.HairDeck && !MeshModelIds.ImageToMesh.Contains(id))
             throw new NotSupportedException($"3D model '{id}' has no wired pipeline; supported: {string.Join(", ", MeshModelIds.Described)}.");
         if (request.ScenePrompt is not null)
@@ -160,6 +165,24 @@ internal static class MeshRequestValidator
             throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.")
                 .ForField(request.Steps != 0 ? nameof(MeshRequest.Steps) : nameof(MeshRequest.GridResolution));
         }
+    }
+
+    /// <summary>X-Part takes a mesh like P3-SAM does, and its Steps (the flow steps, 0 takes 50) and GridResolution (the marching-cubes grid of each part, 0 takes 256) are real settings.</summary>
+    private static void ValidateXPart(string id, MeshRequest request)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.SceneMesh is null)
+            throw new NotSupportedException($"3D model '{id}' generates the parts of a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.").ForField(nameof(MeshRequest.SceneMesh));
+        if (request.Image is not null)
+            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.").ForField(nameof(MeshRequest.Image));
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
+        if (request.Seed > int.MaxValue)
+            throw SeedTooLarge(request, "The X-Part seed");
+        if (request.Steps is < 0 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
+        if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The X-Part grid must be between 32 and 512 (0 takes the default of 256; upstream's is 512).").ForField(nameof(MeshRequest.GridResolution));
     }
 
     private static void ValidatePaint(string id, MeshRequest request, bool matterAvailable)

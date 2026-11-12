@@ -833,7 +833,7 @@ public static class GenerationDispatch
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         bool paint = MeshModelIds.PaintMesh.Contains(meshId);
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || paint;
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || MeshModelIds.XPartMesh.Contains(meshId) || paint;
         string? imagePath = parameters.GetStringOrNull("image");
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
