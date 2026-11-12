@@ -51,7 +51,7 @@ internal static class MeshModelProfiles
                 new MeshCost { PeakVramGiB = 9.3, TypicalSeconds = 386, Basis = "RTX 3060, 1024 cascade, shape-only, 12 steps per flow, one image (a bust); 1536 peaks at 11.6." },
                 peak: request => request.GridResolution == 1536 ? 11.6 : 9.3,
                 note: "naf_release.pth must be placed in the model folder by hand; needs the foreground cut out like TRELLIS.2."),
-            Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats,
+            Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats | MeshOutputKinds.Mesh,
                 [Steps("25", 0, null, "Steps of the structure flow and of the SLAT flow."), Rejected(nameof(MeshRequest.GridResolution)),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
@@ -148,16 +148,16 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
         Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, MeshField(id), PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
 
     private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
     {
-        if (outputs == MeshOutputKinds.Splats)
+        if (outputs.HasFlag(MeshOutputKinds.Splats))
         {
             return
             [
-                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate."),
-                Ignored(nameof(MeshRequest.Frame), "A splat result is returned in the object's own frame."),
+                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate, and a SAM 3D mesh is returned undecimated."),
+                Ignored(nameof(MeshRequest.Frame), "A splat or SAM 3D mesh result is returned in the object's own frame."),
             ];
         }
         return
@@ -173,6 +173,10 @@ internal static class MeshModelProfiles
             },
         ];
     }
+
+    private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
+        ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (GLB with vertex colours) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
+        : Rejected(nameof(MeshRequest.Mesh));
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()
@@ -216,7 +220,7 @@ internal static class MeshModelProfiles
     private static string DefaultOf(string name) => name switch
     {
         nameof(MeshRequest.Samples) => "1",
-        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) => "false",
+        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) => "false",
         nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) => "unset",
         _ => "0",
     };

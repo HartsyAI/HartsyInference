@@ -3,6 +3,8 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Models.Sam3dObjects;
 using HartsyInference.ThreeD.Pipelines;
 
 namespace HartsyInference.Engine.Tests.Services;
@@ -34,9 +36,9 @@ public sealed class Sam3dObjectsWiringTests
         Assert.Contains("slat_generator.safetensors", files);
         Assert.Contains("slat_decoder_gs.safetensors", files);
         Assert.Contains("moge_vitl.safetensors", files);
-        // The SAM License binds on use and on redistribution: it is fetched beside the weights. The unported mesh decoder is not part of the entry.
+        // The SAM License binds on use and on redistribution: it is fetched beside the weights. The mesh decoder is part of the entry, for the mesh output.
         Assert.Contains("SAM3D_LICENSE", files);
-        Assert.DoesNotContain(files, f => f.Contains("mesh", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("slat_decoder_mesh.safetensors", files);
     }
 
     [Fact]
@@ -158,5 +160,29 @@ public sealed class Sam3dObjectsWiringTests
         {
             Directory.Delete(folder, recursive: true);
         }
+    }
+
+    [Fact]
+    public void MeshOption_IsPassedToThePipelineAndRejectedForOtherModels()
+    {
+        MeshRequest request = new() { Image = Image(), Mesh = true };
+
+        Assert.True(Sam3dObjectsRequestMapper.ToRequest(request).Mesh);
+        Assert.False(Sam3dObjectsRequestMapper.ToRequest(request with { Mesh = false }).Mesh);
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("triposr", new MeshRequest { Image = Image(), Mesh = true }, matterAvailable: false));
+        Assert.Equal(nameof(MeshRequest.Mesh), MeshFieldTag.FieldOf(error));
+    }
+
+    [Fact]
+    public void ToMesh_TurnsTheDecoderFrameLikeTheSplatsAndTakesTheFirstThreeColourChannels()
+    {
+        SamMeshResult result = new([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f], [0, 1, 2], [0.1f, 0.2f, 0.3f, 0.9f, 0.9f, 0.9f, 0.4f, 0.5f, 0.6f, 0.9f, 0.9f, 0.9f, 0.7f, 0.8f, 0.9f, 0.9f, 0.9f, 0.9f]);
+
+        Mesh mesh = Sam3dObjectsMesh.ToMesh(result);
+
+        // (x, y, z) becomes (x, -z, y), as the splats are written; the winding is kept.
+        Assert.Equal([1f, -3f, 2f, 4f, -6f, 5f, 7f, -9f, 8f], mesh.Vertices);
+        Assert.Equal([0, 1, 2], mesh.Indices);
+        Assert.Equal([0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f], mesh.VertexColors!);
     }
 }

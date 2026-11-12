@@ -21,7 +21,7 @@ public static class Sam3dObjectsRequestMapper
         int steps = request.Steps == 0 ? DefaultSteps : request.Steps;
         return new Sam3dObjectsRequest(
             image.Rgb, image.Alpha!, image.Width, image.Height, Pointmap: null,
-            Seed: request.Seed < 0 ? null : (int)request.Seed, StructureSteps: steps, SlatSteps: steps);
+            Seed: request.Seed < 0 ? null : (int)request.Seed, StructureSteps: steps, SlatSteps: steps, Mesh: request.Mesh);
     }
 
     /// <summary>

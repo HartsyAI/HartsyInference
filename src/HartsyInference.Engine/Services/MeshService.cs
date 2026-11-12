@@ -768,6 +768,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             throw new FileNotFoundException($"'{directory}' lacks SAM 3D checkpoints: ss_generator, ss_decoder, slat_generator and slat_decoder_gs (.safetensors or .ckpt) must all be there.");
         if (!Sam3dObjectsPipeline.HasMoge(directory))
             throw new FileNotFoundException($"'{directory}' lacks moge_vitl.safetensors, which estimates the scene's pointmap.");
+        if (request.Mesh && !Sam3dObjectsPipeline.HasMeshDecoder(directory))
+            throw new FileNotFoundException($"'{directory}' lacks slat_decoder_mesh.safetensors, which the mesh output needs.");
         Sam3dObjectsRequest job = Sam3dObjectsRequestMapper.ToRequest(request);
         int total = job.StructureSteps + job.SlatSteps;
         // The service outlives Dispose (the engine calls it to free memory and on a backend switch and keeps the instance), so a request is rejected only when a disposal happened after it was queued.
@@ -791,6 +793,14 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                             cancel.ThrowIfCancellationRequested();
                             progress?.Report(MeshProgress.Plain(stage == "structure" ? step : job.StructureSteps + step, total, stage == "structure" ? "Structure flow" : "SLAT flow", step, stage == "structure" ? job.StructureSteps : job.SlatSteps, stage == "structure" ? 1 : 2, 2));
                         });
+                    if (result.Mesh is { FaceCount: > 0 } meshResult)
+                    {
+                        Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, mesh {meshResult.VertexCount} vertices and {meshResult.FaceCount} triangles from {result.Voxels} voxels");
+                        return new MeshResult { Data = GlbWriter.Write(Sam3dObjectsMesh.ToMesh(meshResult)), Format = "glb" };
+                    }
+
+                    if (request.Mesh)
+                        throw new InvalidOperationException("SAM 3D's mesh decoder found no surface for this mask (try splats, or a larger or cleaner mask).");
                     if (result.Splats is not { Count: > 0 } splats)
                         throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
                     Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, {splats.Count} splats from {result.Voxels} voxels");

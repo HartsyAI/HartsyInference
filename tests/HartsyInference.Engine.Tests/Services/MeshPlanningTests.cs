@@ -62,6 +62,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Rigged) => request with { Rigged = true },
         nameof(MeshRequest.Texture) => request with { Texture = true },
         nameof(MeshRequest.TextureSize) => request with { TextureSize = 512 },
+        nameof(MeshRequest.Mesh) => request with { Mesh = true },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
@@ -323,7 +324,7 @@ public sealed class MeshPlanningTests
         Assert.Contains("facebook/sam3", hairdeck.Licence.GatedRepos);
         Assert.Contains("facebook/dinov3-vitl16-pretrain-lvd1689m", hairdeck.Licence.GatedRepos);
         Assert.Empty(engine.MeshPlanning.Describe("hunyuan3d").Licence.GatedRepos);
-        Assert.Equal(MeshOutputKinds.Splats, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
+        Assert.Equal(MeshOutputKinds.Splats | MeshOutputKinds.Mesh, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
         Assert.Equal(MeshInputKind.ImageWithMask, engine.MeshPlanning.Describe("sam3d-objects").Input);
         Assert.Throws<NotSupportedException>(() => engine.MeshPlanning.Describe("hunyuan3d-mv"));
     }

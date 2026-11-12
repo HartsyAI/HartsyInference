@@ -395,6 +395,8 @@ public static class ModelCatalog
                 Sha256 = "ee0c1601f3259f61cb22030bad839a3fe30a95b5f78bc9451babdbd8836fd06d" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_decoder_gs.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "Gaussian decoder",
                 Sha256 = "48a3dc3271f56efe9c8b1e601d0350d9ab7914fec0e635048682aa8f7c9e86be" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_decoder_mesh.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "mesh decoder (the mesh output)",
+                Sha256 = "51f27a1c7a7892eff9576cf73bb888a255d4a184a76a9bfd9675f0d9ba464f5a" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "MoGe pointmap model",
                 Sha256 = "dbdf89d1f7651b9213a507923b4f100fed87489bb7425fda7f7d430bcb31d8a9" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl_config.json", TargetSubdir = "3D/sam3d-objects", Role = "MoGe config",

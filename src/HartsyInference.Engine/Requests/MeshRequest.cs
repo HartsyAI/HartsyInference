@@ -50,6 +50,9 @@ public sealed record MeshRequest
     /// <summary>TRELLIS.2 with <see cref="Texture"/>: baked texture edge in texels, 16 to 8192; 0 uses 2048. Other models reject a value.</summary>
     public int TextureSize { get; init; }
 
+    /// <summary>SAM 3D Objects: return a triangle mesh (a GLB with vertex colours, from the mesh decoder and FlexiCubes at the 256 grid) instead of Gaussian splats (a PLY). It needs <c>slat_decoder_mesh.safetensors</c> beside the other checkpoints. Other models reject it.</summary>
+    public bool Mesh { get; init; }
+
     /// <summary>Input image preparation: <see cref="MeshPreprocess.None"/> (default) uses the image as given, <see cref="MeshPreprocess.Auto"/> mattes and frames it for the model. Models that prepare their own input ignore it.</summary>
     public MeshPreprocess Preprocess { get; init; }
 
