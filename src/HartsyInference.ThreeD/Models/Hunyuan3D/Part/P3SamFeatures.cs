@@ -36,7 +36,14 @@ public sealed class P3SamFeatures : IDisposable
 
     /// <summary>Returns <c>[count, FeatureDim]</c> features for <paramref name="points"/> (<c>[count, 3]</c>, already normalised to the unit cube) and their
     /// face <paramref name="normals"/> (<c>[count, 3]</c>).</summary>
-    public float[] Extract(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random = null)
+    public float[] Extract(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random = null) =>
+        ExtractDetailed(points, normals, count, pick, random).Features;
+
+    /// <summary>Every intermediate of <see cref="Extract"/>: the voxel selection, each stage's features after its blocks (finest voxels first), the gathered
+    /// channels, and the per-point result.</summary>
+    internal sealed record Detail(P3SamGridSample.Result Grid, float[][] Stages, int[][] StageGrids, float[] Gathered, float[] Features);
+
+    internal Detail ExtractDetailed(double[] points, float[] normals, int count, P3SamVoxelPick pick, Random? random = null)
     {
         if (normals.Length != count * 3)
             throw new ArgumentException("Normals must be [count, 3].", nameof(normals));
@@ -64,19 +71,28 @@ public sealed class P3SamFeatures : IDisposable
         IReadOnlyList<UtoniaPoint> levels = _sonata.ForwardLevels(raw);
         try
         {
+            float[][] stages = [.. levels.Select(ToArray)];
+            int[][] stageGrids = [.. levels.Select(l => l.GridCoord)];
             float[] gathered = Gather(levels, rows);
             float[] voxelFeatures = _mlp.Forward(_backend, gathered, rows);
             int dim = _mlp.Out;
             float[] result = new float[(long)count * dim];
             for (int i = 0; i < count; i++)
                 Array.Copy(voxelFeatures, (long)grid.Inverse[i] * dim, result, (long)i * dim, dim);
-            return result;
+            return new Detail(grid, stages, stageGrids, gathered, result);
         }
         finally
         {
             foreach (UtoniaPoint level in levels)
                 level.Dispose();
         }
+    }
+
+    private static unsafe float[] ToArray(UtoniaPoint level)
+    {
+        float[] values = new float[level.Feat.ElementCount];
+        new ReadOnlySpan<float>((float*)level.Feat.DataPointer, values.Length).CopyTo(values);
+        return values;
     }
 
     /// <summary>Sonata's unpooling by concatenation in <c>get_feat</c>: each finest voxel's row is followed through the pooling maps and every stage's feature
