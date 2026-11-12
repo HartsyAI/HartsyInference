@@ -134,6 +134,35 @@ public sealed class MeshCleanerTests
     }
 
     [Fact]
+    public void RepairNonManifoldEdges_LeavesNoEdgeWithMoreThanTwoFaces_OnRandomJunctions()
+    {
+        // Random triangles over a few vertices cross each other along many shared edges, branching junctions included.
+        for (int seed = 0; seed < 3000; seed++)
+        {
+            Random random = new(seed);
+            int vertexCount = 6 + random.Next(8);
+            float[] vertices = new float[vertexCount * 3];
+            for (int i = 0; i < vertices.Length; i++) vertices[i] = (float)random.NextDouble();
+            HashSet<(int, int, int)> seen = [];
+            List<int> indices = [];
+            int target = 10 + random.Next(40);
+            for (int attempt = 0; attempt < target * 4 && indices.Count < target * 3; attempt++)
+            {
+                int a = random.Next(vertexCount), b = random.Next(vertexCount), c = random.Next(vertexCount);
+                int lo = Math.Min(a, Math.Min(b, c)), hi = Math.Max(a, Math.Max(b, c));
+                if (a == b || b == c || a == c || !seen.Add((lo, a + b + c - lo - hi, hi))) continue;
+                indices.AddRange([a, b, c]);
+            }
+            Mesh soup = new() { Vertices = vertices, Indices = [.. indices] };
+
+            Mesh repaired = MeshCleaner.RepairNonManifoldEdges(soup);
+
+            Assert.True(SyntheticMeshes.Topology(repaired).NonManifold == 0, $"seed {seed}: {SyntheticMeshes.Topology(repaired).NonManifold} edges keep more than two faces");
+            Assert.Equal(soup.TriangleCount, repaired.TriangleCount);
+        }
+    }
+
+    [Fact]
     public void RepairNonManifoldEdges_ReturnsACompactedCopy()
     {
         Mesh sphere = SyntheticMeshes.Icosphere(1);
