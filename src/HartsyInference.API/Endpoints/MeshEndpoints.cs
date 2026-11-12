@@ -144,6 +144,7 @@ public static class MeshEndpoints
         result.Info,
         result.Frame,
         result.Warnings,
+        result.Settings,
         savedPath,
     };
 }

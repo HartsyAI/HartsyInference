@@ -97,7 +97,7 @@ public sealed class MeshOutputTests
         Assert.Equal(-0.5f, read.Vertices[3], 4);
         Assert.Equal(0.5f, read.Vertices[0], 4);
         Assert.Equal(1f, read.Vertices.Where((_, i) => i % 3 == 0).Max() - read.Vertices.Where((_, i) => i % 3 == 0).Min(), 4);
-        Assert.Equal(glb.Length, GlbInspector.ReplaceJson(glb, GlbInspector.SplitJson(glb).Json).Length);
+        Assert.Equal(glb.Length, GlbContainer.ReplaceJson(glb, GlbContainer.Split(glb).Json).Length);
         GlbSummary summary = GlbInspector.Read(framed);
         Assert.Equal(1, summary.MeshCount);
     }

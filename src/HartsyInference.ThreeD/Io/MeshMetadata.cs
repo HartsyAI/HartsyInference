@@ -18,19 +18,19 @@ public static class MeshMetadata
     public static byte[] SetGlb(byte[] glb, JsonObject description)
     {
         ArgumentNullException.ThrowIfNull(description);
-        JsonObject root = JsonNode.Parse(GlbInspector.SplitJson(glb).Json)!.AsObject();
+        JsonObject root = JsonNode.Parse(GlbContainer.Split(glb).Json)!.AsObject();
         JsonObject asset = root["asset"] as JsonObject ?? new JsonObject { ["version"] = "2.0" };
         JsonObject extras = asset["extras"] as JsonObject ?? new JsonObject();
         extras[Key] = description.DeepClone();
         asset["extras"] = extras;
         root["asset"] = asset;
-        return GlbInspector.ReplaceJson(glb, Encoding.UTF8.GetBytes(root.ToJsonString()));
+        return GlbContainer.ReplaceJson(glb, Encoding.UTF8.GetBytes(root.ToJsonString()));
     }
 
     /// <summary>The description stored by <see cref="SetGlb"/>, or null when the file has none.</summary>
     public static JsonObject? ReadGlb(byte[] glb)
     {
-        JsonObject root = JsonNode.Parse(GlbInspector.SplitJson(glb).Json)!.AsObject();
+        JsonObject root = JsonNode.Parse(GlbContainer.Split(glb).Json)!.AsObject();
         return root["asset"]?["extras"]?[Key] as JsonObject;
     }
 

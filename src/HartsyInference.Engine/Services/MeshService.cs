@@ -46,12 +46,12 @@ public sealed class MeshService : IMeshService, IDisposable
         string id = IdOf(spec);
         MeshSettingsUsed settings = SettingsOf(id, request);
         MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? request with { Seed = seed } : request;
-        MeshResult raw = await GenerateRawAsync(spec, effective, progress, cancel).ConfigureAwait(false);
+        MeshResult raw = await GenerateRawAsync(id, spec, effective, progress, cancel).ConfigureAwait(false);
         return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, settings, cancel), cancel).ConfigureAwait(false);
     }
 
     /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
-    private static MeshSettingsUsed SettingsOf(string id, MeshRequest request)
+    internal static MeshSettingsUsed SettingsOf(string id, MeshRequest request)
     {
         string version = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
             .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
@@ -73,11 +73,8 @@ public sealed class MeshService : IMeshService, IDisposable
     private static bool WrapsLargeSeeds(string id) =>
         MeshModelProfiles.Find(id)!.Fields.Single(f => f.Name == nameof(MeshRequest.Seed)) is { Access: MeshFieldAccess.Used, Max: null };
 
-    private Task<MeshResult> GenerateRawAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        ArgumentNullException.ThrowIfNull(spec);
-        ArgumentNullException.ThrowIfNull(request);
-        string id = IdOf(spec);
         MeshRequestValidator.Validate(id, request, MatterAvailable());
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
@@ -102,7 +99,7 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                // Matting first, so the matting model and the shape model are not on the device together.
+                // Matting first, so on a cold start the matting forward pass does not overlap the shape model's first load; the matting weights stay resident afterwards.
                 ImageData image = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
