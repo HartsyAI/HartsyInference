@@ -18,7 +18,9 @@ internal static class MeshRequestValidator
         ArgumentNullException.ThrowIfNull(request);
         if (request.PreviewTriangles < 0)
             throw new ArgumentOutOfRangeException(nameof(request), request.PreviewTriangles, "PreviewTriangles must not be negative; 0 returns no preview.").ForField(nameof(MeshRequest.PreviewTriangles));
-        MeshSeed.Require(request);
+        // An id the engine does not know fails as an unknown model below, not as a range error.
+        if (MeshModelProfiles.Find(id) is not null)
+            MeshSeed.Require(request);
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);

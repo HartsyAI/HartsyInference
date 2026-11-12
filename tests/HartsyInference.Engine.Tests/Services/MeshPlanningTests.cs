@@ -191,7 +191,7 @@ public sealed class MeshPlanningTests
 
     [Theory]
     [MemberData(nameof(Ids))]
-    public void TheProfileStatesTheSeedRangeTheValidatorEnforces(string id)
+    public void EveryProfileStatesTheSeedMaximum(string id)
     {
         MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
 
@@ -211,6 +211,23 @@ public sealed class MeshPlanningTests
         MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { Seed = (1L << 32) + 5 });
 
         Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Seed));
+    }
+
+    [Fact]
+    public void AnUnknownModelFailsAsUnknownBeforeItsSeedIsRangeChecked()
+    {
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("no-such-model", Valid("hunyuan3d") with { Seed = 1L << 32 }, matterAvailable: false));
+    }
+
+    [Fact]
+    public async Task AnIgnoredSeedOutOfRangeIsOneErrorNotAnErrorAndAnIgnoredWarning()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Seed = 1L << 32 });
+
+        Assert.Single(plan.Issues, i => i.Field == nameof(MeshRequest.Seed));
+        Assert.Equal(MeshPlanIssueSeverity.Error, plan.Issues.Single(i => i.Field == nameof(MeshRequest.Seed)).Severity);
     }
 
     [Fact]

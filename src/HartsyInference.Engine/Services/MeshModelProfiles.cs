@@ -182,7 +182,7 @@ internal static class MeshModelProfiles
         Used(nameof(MeshRequest.Seed), "random", 0, MeshSeed.Max, null, note ?? "A negative value draws a random seed.");
 
     private static MeshFieldSpec IgnoredSeed(string why) =>
-        new() { Name = nameof(MeshRequest.Seed), Access = MeshFieldAccess.Ignored, Max = MeshSeed.Max, Note = why + " A seed above " + MeshSeed.Max + " is still rejected, like for every model." };
+        new() { Name = nameof(MeshRequest.Seed), Access = MeshFieldAccess.Ignored, Max = MeshSeed.Max, Note = $"{why} A seed above {MeshSeed.Max} is still rejected, like for every model." };
 
     private static MeshFieldSpec Used(string name, string? defaultValue, double? min, double? max, string? unit, string note) =>
         new()
