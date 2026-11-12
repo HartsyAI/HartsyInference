@@ -90,7 +90,8 @@ public sealed class Pixal3DTexturePipelineTests
 
         Mesh mesh = rig.Pipeline.Generate(Image(), Options());
 
-        Assert.Equal(2, mesh.TriangleCount);
+        // The stub mesher's quad is one open loop under the hole limit: the cleanup caps it with a fan of four triangles.
+        Assert.Equal(6, mesh.TriangleCount);
         Assert.Contains("decode", rig.Calls);
         Assert.DoesNotContain(rig.Calls, c => c.StartsWith("texture", StringComparison.Ordinal));
         Assert.DoesNotContain("decode+subs", rig.Calls);
