@@ -17,8 +17,10 @@ internal static class HairDeckRequestMapper
     public static HairDeckOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The HairDeck seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
         long seed = request.Seed < 0 ? Random.Shared.NextInt64(0, int.MaxValue) : request.Seed;
-        return new HairDeckOptions
+        HairDeckOptions options = new()
         {
             Seed = seed,
             Steps = request.Steps > 0 ? request.Steps : DefaultSteps,
@@ -27,7 +29,16 @@ internal static class HairDeckRequestMapper
             Colors = request.Colors ?? true,
             Chains = request.Chains ?? true,
             Rigged = request.Rigged,
-        }.Validate();
+        };
+        try
+        {
+            return options.Validate();
+        }
+        catch (NotSupportedException error)
+        {
+            error.ForField(options.Samples != 1 ? nameof(MeshRequest.Samples) : nameof(MeshRequest.Rigged));
+            throw;
+        }
     }
 
     /// <summary>Fails when a HairDeck-only option is set for another model, so the request is never silently changed.</summary>

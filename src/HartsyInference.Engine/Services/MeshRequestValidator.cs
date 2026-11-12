@@ -57,18 +57,47 @@ internal static class MeshRequestValidator
         {
             Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
             RequireTextureForSize(request, "TRELLIS.2");
-            Trellis2ImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable);
+            TagPipelineErrors(() => Trellis2ImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable));
         }
         else if (id == MeshModelIds.Pixal3D)
         {
             Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
             RequireTextureForSize(request, "Pixal3D");
-            Pixal3DImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable);
+            TagPipelineErrors(() => Pixal3DImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable));
         }
         else if (id == MeshModelIds.Sam3dObjects)
         {
             Sam3dObjectsRequestMapper.Validate(request);
         }
+    }
+
+    /// <summary>Runs a pipeline's own request check and tags its exception with the request field it is about, which its messages name in the pipeline's words (<c>grid</c>, <c>FovRadians</c>).</summary>
+    private static void TagPipelineErrors(Action check)
+    {
+        try
+        {
+            check();
+        }
+        catch (Exception error) when (error is ArgumentException or HartsyInference.Core.Exceptions.HartsyInferenceException)
+        {
+            if (PipelineField(error) is string field)
+                error.ForField(field);
+            throw;
+        }
+    }
+
+    private static string? PipelineField(Exception error)
+    {
+        if (error is not ArgumentException argument)
+            return nameof(MeshRequest.Image);
+        string message = argument.Message;
+        return argument.ParamName == "image" ? nameof(MeshRequest.Image)
+            : argument.InnerException is ArgumentOutOfRangeException { ParamName: "FovRadians" } ? nameof(MeshRequest.FieldOfViewRadians)
+            : message.Contains(" grid ", StringComparison.OrdinalIgnoreCase) ? nameof(MeshRequest.GridResolution)
+            : message.StartsWith("Steps", StringComparison.Ordinal) ? nameof(MeshRequest.Steps)
+            : message.StartsWith("Seed", StringComparison.Ordinal) ? nameof(MeshRequest.Seed)
+            : message.StartsWith("TextureSize", StringComparison.Ordinal) ? nameof(MeshRequest.TextureSize)
+            : null;
     }
 
     private static Trellis2InputImage ToInput(ImageData source) =>

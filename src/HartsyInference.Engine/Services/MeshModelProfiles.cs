@@ -64,7 +64,7 @@ internal static class MeshModelProfiles
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    new MeshFieldSpec { Name = nameof(MeshRequest.Seed), Access = MeshFieldAccess.Used, Default = "random", Min = 0, Max = long.MaxValue, Note = "A negative value draws a random seed; HairDeck takes the full 64 bits." },
+                    Seed(),
                     new MeshFieldSpec { Name = nameof(MeshRequest.Samples), Access = MeshFieldAccess.Used, Default = "1", Values = ["1"], Note = "Only one sample per request." },
                     Used(nameof(MeshRequest.Colors), "true", null, null, null, "Colour the cards with the colour model."),
                     Used(nameof(MeshRequest.Chains), "true", null, null, null, "Also generate the spring-bone chains."),
