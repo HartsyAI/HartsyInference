@@ -17,6 +17,9 @@ public sealed class SamDinoEmbedder : IDisposable
     /// <summary>Side of the square input (<c>input_size</c>); inputs must already have this size, as the upstream preprocessor resizes first.</summary>
     public const int InputSize = 518;
 
+    /// <summary>Token width of the released tower (the fuser's DINO <c>embed_dim</c>).</summary>
+    public const int Width = 1024;
+
     private const float NormEps = 1e-5f;
     private static readonly float[] Mean = [0.485f, 0.456f, 0.406f];
     private static readonly float[] Std = [0.229f, 0.224f, 0.225f];
