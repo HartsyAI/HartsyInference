@@ -64,9 +64,10 @@ public sealed class KimiK31ModelTests
         return model.Forward(tokens, state);
     }
 
-    internal static KimiK31Weights RandomWeights(Random rng)
+    internal static KimiK31Weights RandomWeights(Random rng) => RandomWeights(rng, Config);
+
+    internal static KimiK31Weights RandomWeights(Random rng, KimiK31Config c)
     {
-        KimiK31Config c = Config;
         int keyDim = c.Heads * c.KdaHeadDim;
         List<KimiK31LayerWeights> layers = new();
         for (int i = 0; i < c.Layers; i++)

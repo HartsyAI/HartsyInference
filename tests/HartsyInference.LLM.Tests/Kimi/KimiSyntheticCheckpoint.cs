@@ -89,7 +89,7 @@ internal static class KimiSyntheticCheckpoint
             {
                 foreach (string proj in new[] { "q_proj", "k_proj", "v_proj" }) t.Add((a + proj + ".weight", [keyDim, Hidden]));
                 foreach (string conv in new[] { "q_conv1d", "k_conv1d", "v_conv1d" }) t.Add((a + conv + ".weight", [keyDim, 1, ConvKernel]));
-                t.Add((a + "A_log", [KdaHeadDim]));
+                t.Add((a + "A_log", [Heads]));
                 t.Add((a + "dt_bias", [keyDim]));
                 t.Add((a + "f_a_proj.weight", [KdaForgetRank, Hidden]));
                 t.Add((a + "f_b_proj.weight", [keyDim, KdaForgetRank]));

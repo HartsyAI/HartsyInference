@@ -19,6 +19,9 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   Structural and not CLI-drivable. The Moonshot repo ships no `tokenizer.json`, so the real checkpoint is refused until one is supplied.
   (Integration: consolidated entry, see final commit.)
 
+- **Added: tensor- and expert-parallel sharding for the Kimi K3.1 decoder (CPU, virtual ranks; NCCL path not run).** Attention heads, the
+  dense and shared FFN, the vocabulary and the routed experts split across ranks, with an all-to-all in `ICollectiveComm`. A rank count
+  that does not divide the decoder's dimensions is refused by name.
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)
   matches the CPU on CUDA and Vulkan. The real index maps every key, and the multimax matches the reference. `Ernie5RealCheckpointTests` runs
