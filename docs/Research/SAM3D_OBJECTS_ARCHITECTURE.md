@@ -356,7 +356,7 @@ the files go through the existing safe `PytorchPickleLoader` (a pickle machine t
 
 ## Checkpoints read (2026-11-11, from the sha256-verified ungated mirror)
 
-Read through `SamCheckpoint` (the safe-subset pickle reader; nothing from the files is executed). The four `.ckpt` files below match the sizes and hashes in the table above; `slat_decoder_mesh.ckpt` was not fetched.
+Read through `SamCheckpoint` (the safe-subset pickle reader; nothing from the files is executed). The four `.ckpt` files below match the sizes and hashes in the table above; `slat_decoder_mesh.ckpt` was not fetched (its safetensors conversion was, see below).
 
 | File | Tensors | dtype | Key layout |
 |---|---|---|---|
@@ -372,7 +372,25 @@ Confirmed against the files:
 - The SLAT flow keys (`input_layer`, `input_blocks.i`, `blocks.i`, `out_blocks.i`, `out_layer`, `t_embedder`; spconv convolutions `[out, 3, 3, 3, in]`; no `d_embedder`, no position-embedder weights) load into the existing `Trellis/SlatFlowModel`; `Trellis/SparseStructureDecoder` and `Trellis/SlatGaussianDecoder` load `ss_decoder.ckpt` and `slat_decoder_gs.ckpt` without a key map. This shows the keys are present; it does not show the outputs agree.
 - A conversion to safetensors should keep or drop the envelope and prefixes (`SamCheckpointKeys` accepts both); the generators are F32 and the decoders mixed, so only the decoders need widening before an F32-only module reads them.
 
-Still unverified: every number (no reference dumps exist), the mesh decoder file, the MoGe checkpoint, and behaviour with the pointmap group dropped.
+Still unverified: every number (no reference dumps exist), the MoGe checkpoint's use, and behaviour with the pointmap group dropped.
+
+### The safetensors set (`apozz/sam-3d-objects-safetensors`, revision `cbb995af`, fetched 2026-11-11)
+
+Ungated third-party conversion, placed in `Models/3D/sam3d/` with `SAM3D_LICENSE` beside it (the SAM License binds on use and on redistribution, including through this mirror). Every file's size and sha256 was checked against the Hugging Face tree listing.
+
+| File | Bytes | sha256 | Tensors, dtypes |
+|---|---|---|---|
+| `ss_generator.safetensors` | 6,689,521,984 | `9f0fd0a7e288eadf7e51b6ead30f70aea0cd2ac4fe4160ee1deb412916bcfa0d` | 1741, F32 |
+| `slat_generator.safetensors` | 4,906,129,160 | `ee0c1601f3259f61cb22030bad839a3fe30a95b5f78bc9451babdbd8836fd06d` | 1225, F32 |
+| `ss_decoder.safetensors` | 147,591,972 | `f192156b047dc467f82f8efa851157c32ad9d7a008f01bc92c846f5ef0a4293f` | 74, 38 F32 + 36 F16 |
+| `slat_decoder_gs.safetensors` | 171,450,952 | `48a3dc3271f56efe9c8b1e601d0350d9ab7914fec0e635048682aa8f7c9e86be` | 101, 5 F32 + 96 F16 |
+| `slat_decoder_mesh.safetensors` | 363,718,540 | `51f27a1c7a7892eff9576cf73bb888a255d4a184a76a9bfd9675f0d9ba464f5a` | 120, F32 |
+| `dinov2_vitl14_reg.safetensors` | 1,217,523,408 | `30e20dce587ad621a8dfc20e4ed66198d2998974928d44f06a6baf7732503dcc` | 344, F32 |
+| `moge_vitl.safetensors` | 1,256,740,032 | `dbdf89d1f7651b9213a507923b4f100fed87489bb7425fda7f7d430bcb31d8a9` | 421, F32 |
+
+Compared against Meta's `.ckpt` files (the four above that exist locally, loaded through `SamCheckpoint`, nothing executed): every tensor of `ss_generator`, `slat_generator`, `ss_decoder` and `slat_decoder_gs` is present with the same shape and dtype and **byte-identical contents** (3141 tensors). The generators drop the Lightning envelope (`state_dict._base_models.`), the decoders keep their unprefixed names. `dinov2_vitl14_reg.safetensors` is byte-identical to **both** DINO towers bundled in `ss_generator.ckpt` (`condition_embedder.module_list.{0,1}.backbone.`, 344 tensors each), so the two towers hold the same weights. This shows the conversion is lossless for those files; it says nothing about whether the C# forward matches upstream.
+
+Not compared with a Meta file: `slat_decoder_mesh.safetensors` (the `.ckpt` was not fetched; header names match the `blocks.i.attn`, `blocks.i.mlp`, `input_layer`, `out_layer` and `upsample.i` layout of the YAML's 12 swin blocks at width 768) and `moge_vitl.safetensors` (backbone plus a multi-scale head, with `image_mean` and `image_std`; its licence is not recorded yet).
 
 ## Open items
 
