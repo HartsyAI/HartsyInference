@@ -65,6 +65,9 @@ public sealed class HunyuanPaintPipeline
         _stage.Restart();
         if (mesh.Uvs is null)
         {
+            // Charts grow across shared vertices only: a mesh whose vertices are split along every face (a triangle soup, or a decimated mesh with duplicated seam vertices)
+            // unwraps into thousands of one-face charts, an atlas that is mostly padding and a bake that is mostly inpainting. Merge them first.
+            mesh = WeldForUnwrap(mesh);
             mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
             Stage("uv unwrap");
         }
@@ -83,6 +86,21 @@ public sealed class HunyuanPaintPipeline
         Stage("bake");
         return baked;
     }
+
+    /// <summary>Merges vertices at the same position (exact match) and drops degenerate and duplicate faces and unreferenced vertices, and does nothing else to the surface (no hole filling,
+    /// no component removal, no reorientation), so that the unwrapper sees the mesh's real connectivity. Like every <c>MeshCleaner</c> result it holds positions and indices only: supplied
+    /// normals and vertex colours are dropped (the bake replaces the colours, the renderer uses face normals). An edge shared by three or more faces stays; the unwrapper treats it as a boundary.</summary>
+    internal static Mesh WeldForUnwrap(Mesh mesh) => MeshCleaner.Clean(mesh, new MeshCleanOptions
+    {
+        WeldVertices = true,
+        RemoveDegenerateFaces = true,
+        RemoveDuplicateFaces = true,
+        RepairNonManifoldEdges = false,
+        SmallComponentAreaRatio = 0,
+        HoleFillMaxPerimeter = 0,
+        UnifyOrientation = false,
+        OrientOutward = false,
+    });
 
     /// <summary>Encodes and decodes one image with the pipeline's VAE (a diagnostic for checking the VAE weights and timing): resizes to <paramref name="size"/>
     /// square, reports the latent statistics through <see cref="StageLog"/> and returns the decoded RGB bytes.</summary>
