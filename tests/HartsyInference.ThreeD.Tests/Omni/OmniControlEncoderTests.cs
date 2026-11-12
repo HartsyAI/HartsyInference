@@ -101,10 +101,22 @@ public sealed class OmniControlEncoderTests(ITestOutputHelper output)
     {
         using CpuBackend backend = new();
         Dictionary<string, Tensor> weights = RandomWeights(2);
-        weights.Remove("cond_signal_linear.bias");
-        Assert.Throws<KeyNotFoundException>(() => new OmniControlEncoder(backend, weights));
-        weights["cond_signal_linear.bias"] = new Tensor(new TensorShape(512), DType.F32);
-        Assert.Throws<InvalidDataException>(() => new OmniControlEncoder(backend, weights));
+        Tensor bias = weights["cond_signal_linear.bias"];
+        Tensor wrong = new(new TensorShape(512), DType.F32);
+        try
+        {
+            weights.Remove("cond_signal_linear.bias");
+            Assert.Throws<KeyNotFoundException>(() => new OmniControlEncoder(backend, weights));
+            weights["cond_signal_linear.bias"] = wrong;
+            Assert.Throws<InvalidDataException>(() => new OmniControlEncoder(backend, weights));
+        }
+        finally
+        {
+            bias.Dispose();
+            wrong.Dispose();
+            foreach (Tensor t in weights.Values)
+                t.Dispose();
+        }
     }
 
     private static unsafe float[] Values(Tensor t)
