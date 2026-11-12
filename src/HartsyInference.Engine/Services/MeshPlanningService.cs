@@ -23,7 +23,10 @@ public sealed class MeshPlanningService : IMeshPlanningService
     public IReadOnlyList<MeshModelDescriptor> DescribeAll() => [.. MeshModelIds.Described.Select(Describe)];
 
     /// <inheritdoc/>
-    public MeshModelDescriptor Describe(string modelId)
+    public MeshModelDescriptor Describe(string modelId) => DescriptorOf(modelId);
+
+    /// <summary>The descriptor of <paramref name="modelId"/>; the service holds no state, so a generation reads it too.</summary>
+    internal static MeshModelDescriptor DescriptorOf(string modelId)
     {
         ArgumentNullException.ThrowIfNull(modelId);
         string id = modelId.ToLowerInvariant();
@@ -154,7 +157,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
     };
 
     /// <summary>What will run for each tunable field, and whether the caller or the model chose it.</summary>
-    private static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor)
+    internal static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor)
     {
         Dictionary<string, ResolvedParameter> settings = new(StringComparer.Ordinal);
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))

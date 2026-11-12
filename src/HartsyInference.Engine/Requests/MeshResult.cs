@@ -23,6 +23,9 @@ public sealed record MeshResult
 
     /// <summary>Things a host should tell its user: a frame that could not be fully normalised, topology that could not be measured.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>The settings the result was made with, including the resolved seed; also embedded in the file (glb <c>asset.extras.hartsyinference</c>, ply comment header).</summary>
+    public MeshSettingsUsed? Settings { get; init; }
 }
 
 /// <summary>One part found by a segmentation model.</summary>
