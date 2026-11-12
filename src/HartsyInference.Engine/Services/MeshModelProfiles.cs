@@ -25,7 +25,7 @@ internal static class MeshModelProfiles
         [
             Profile("triposr", MeshInputKind.Image, MeshOutputKinds.Mesh,
                 [Ignored(nameof(MeshRequest.Steps), "TripoSR is one feed-forward pass."), Grid(null, null, 1, null, "Marching-cubes samples per axis; memory grows with its cube."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Ignored(nameof(MeshRequest.Seed), "There is no sampler to seed."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), IgnoredSeed("There is no sampler to seed."),
                     .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "MIT (stabilityai/TripoSR)" },
                 new MeshCost { Basis = "Verified on CPU and an RTX 3060; no time or memory figure is recorded." },
@@ -33,7 +33,7 @@ internal static class MeshModelProfiles
             .. HunyuanShapeProfiles(),
             Profile("trellis", MeshInputKind.Image, MeshOutputKinds.Splats,
                 [Steps("25", 1, null, "Sampler steps of both flows."), Ignored(nameof(MeshRequest.GridResolution), "The output is a splat cloud."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "MIT (TRELLIS-image-large)" },
                 new MeshCost { Basis = "No time or memory figure is recorded." },
                 note: "Returns Gaussian splats (ply), not a mesh."),
@@ -75,19 +75,19 @@ internal static class MeshModelProfiles
                 note: "Mattes the image with SAM 3 and BiRefNet before sampling."),
             Profile("cola3d", MeshInputKind.SceneMesh, MeshOutputKinds.Mesh,
                 [Ignored(nameof(MeshRequest.Steps), "The decomposer is one forward pass."), Grid("256", null, 16, 1024, "Dual-grid voxels per axis, a multiple of 16; a point prompt defaults to 1024."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Ignored(nameof(MeshRequest.Seed), "The decomposer is deterministic."), .. NoHairDeck(), .. NoTexture()],
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), IgnoredSeed("The decomposer is deterministic."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "Not recorded in the engine's documents" },
                 new MeshCost { Basis = "No time or memory figure is recorded." },
                 note: "Takes a scene mesh and, optionally, a mask or point prompt in ScenePrompt."),
             Profile("unirig", MeshInputKind.SceneMesh, MeshOutputKinds.RiggedMesh,
                 [Rejected(nameof(MeshRequest.Steps)), Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
+                    Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "MIT (code and weights); training data CC-BY-4.0" },
                 new MeshCost { Basis = "CPU F32 skinning of one mesh took 400 s; no GPU figure is recorded." },
                 note: "Skeleton and skin weights for a triangle mesh; the result is a rigged glb."),
             Profile("hunyuan3d-part", MeshInputKind.SceneMesh, MeshOutputKinds.PartMesh,
                 [Rejected(nameof(MeshRequest.Steps)), Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "Seeds the surface sampling."), .. NoHairDeck(), .. NoTexture()],
+                    Seed("Seeds the surface sampling."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
                 {
                     Summary = "Tencent Hunyuan 3D-Part Community License; the Sonata weights' own terms are unverified",
@@ -100,7 +100,7 @@ internal static class MeshModelProfiles
                 [Steps("50", 0, 1000, "Euler steps of the part flow; 0 takes 50."),
                     Grid("256", null, 32, 512, "Marching-cubes grid per axis of each part, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 256, upstream extracts on an octree at 512."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    Used(nameof(MeshRequest.Seed), "42", 0, int.MaxValue, null, "Fixes the surface samples, the part ids and the noise; a negative value takes 42."), .. NoHairDeck(), .. NoTexture()],
+                    Used(nameof(MeshRequest.Seed), "42", 0, MeshSeed.Max, null, "Fixes the surface samples, the part ids and the noise; a negative value takes 42."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
                 {
                     Summary = "Tencent Hunyuan 3D-Part Community License; the Sonata weights' own terms are unverified",
@@ -125,7 +125,7 @@ internal static class MeshModelProfiles
             yield return Profile(id, MeshInputKind.Image, MeshOutputKinds.Mesh,
                 [Steps(null, 1, null, "Sampler steps; the build's own default (50 standard, 10 Fast, 5 Turbo) when unset."),
                     Grid(null, null, 1, null, "Marching-cubes samples per axis; the checkpoint's default when unset."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
                 new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
                 note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.");
@@ -136,7 +136,7 @@ internal static class MeshModelProfiles
         Profile(id, MeshInputKind.SceneMeshAndImage, MeshOutputKinds.TexturedMesh,
             [Steps(null, 0, null, "Sampler steps; 0 takes the checkpoint's default."),
                 Used(nameof(MeshRequest.GridResolution), "2048", 0, null, "texels", "The baked texture's edge, not a grid; 0 takes 2048."),
-                Rejected(nameof(MeshRequest.FieldOfViewRadians)), Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "Seeds the multiview noise."),
+                Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed("Seeds the multiview noise."),
                 .. NoHairDeck(), .. NoTexture()],
             new MeshLicence
             {
@@ -191,11 +191,11 @@ internal static class MeshModelProfiles
     private static MeshFieldSpec Grid(string? defaultValue, IReadOnlyList<string>? values, double? min, double? max, string note) =>
         new() { Name = nameof(MeshRequest.GridResolution), Access = MeshFieldAccess.Used, Default = defaultValue, Values = values, Min = min, Max = max, Note = note };
 
-    private static MeshFieldSpec WrappingSeed() =>
-        Used(nameof(MeshRequest.Seed), "random", 0, null, null, "A negative value draws a random seed. Only the low 32 bits are used: a larger value wraps instead of failing.");
+    private static MeshFieldSpec Seed(string? note = null) =>
+        Used(nameof(MeshRequest.Seed), "random", 0, MeshSeed.Max, null, note ?? "A negative value draws a random seed.");
 
-    private static MeshFieldSpec Seed() =>
-        Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "A negative value draws a random seed.");
+    private static MeshFieldSpec IgnoredSeed(string why) =>
+        new() { Name = nameof(MeshRequest.Seed), Access = MeshFieldAccess.Ignored, Max = MeshSeed.Max, Note = $"{why} A seed above {MeshSeed.Max} is still rejected, like for every model." };
 
     private static MeshFieldSpec Used(string name, string? defaultValue, double? min, double? max, string? unit, string note) =>
         new()

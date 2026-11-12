@@ -21,7 +21,7 @@ public static class Sam3dObjectsRequestMapper
         int steps = request.Steps == 0 ? DefaultSteps : request.Steps;
         return new Sam3dObjectsRequest(
             image.Rgb, image.Alpha!, image.Width, image.Height, Pointmap: null,
-            Seed: request.Seed < 0 ? null : (int)request.Seed, StructureSteps: steps, SlatSteps: steps);
+            Seed: MeshSeed.ForSampler(request.Seed), StructureSteps: steps, SlatSteps: steps);
     }
 
     /// <summary>
@@ -53,8 +53,7 @@ public static class Sam3dObjectsRequestMapper
             throw new NotSupportedException($"3D model '{id}' needs the mask of the object to lift: give an RGBA image whose alpha plane is the mask (the CLI takes --mask for a separate mask file).").ForField(nameof(MeshRequest.Image));
         if (!image.Alpha!.Any(a => a != 0))
             throw new NotSupportedException($"The mask of the object is empty; '{id}' needs at least one non-zero alpha value.").ForField(nameof(MeshRequest.Image));
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The {id} seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
+        MeshSeed.Require(request);
         if (request.Steps < 0)
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The step count cannot be negative; 0 uses upstream's 25 for each flow.").ForField(nameof(MeshRequest.Steps));
         if (request.GridResolution != 0)

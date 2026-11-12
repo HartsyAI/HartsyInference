@@ -101,7 +101,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
 
     private static void AddIgnoredFieldWarnings(MeshRequest request, MeshModelDescriptor descriptor, List<MeshPlanIssue> issues)
     {
-        foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Ignored && IsSet(request, f.Name)))
+        // A field that already has an error is not also reported as ignored: the error says what is wrong with it.
+        foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Ignored && IsSet(request, f.Name) && !issues.Any(i => i.Field == f.Name && i.Severity == MeshPlanIssueSeverity.Error)))
         {
             issues.Add(new MeshPlanIssue
             {

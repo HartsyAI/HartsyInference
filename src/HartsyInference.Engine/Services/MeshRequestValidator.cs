@@ -18,6 +18,9 @@ internal static class MeshRequestValidator
         ArgumentNullException.ThrowIfNull(request);
         if (request.PreviewTriangles < 0)
             throw new ArgumentOutOfRangeException(nameof(request), request.PreviewTriangles, "PreviewTriangles must not be negative; 0 returns no preview.").ForField(nameof(MeshRequest.PreviewTriangles));
+        // An id the engine does not know fails as an unknown model below, not as a range error.
+        if (MeshModelProfiles.Find(id) is not null)
+            MeshSeed.Require(request);
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);
@@ -39,8 +42,6 @@ internal static class MeshRequestValidator
         if (MeshModelIds.PartMesh.Contains(id))
         {
             RequireMeshOnly(id, request, "segments a triangle mesh into parts");
-            if (request.Seed > int.MaxValue)
-                throw SeedTooLarge(request, "The P3-SAM seed");
             return;
         }
         if (MeshModelIds.XPartMesh.Contains(id))
@@ -123,9 +124,6 @@ internal static class MeshRequestValidator
     private static Trellis2InputImage ToInput(ImageData source) =>
         new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
 
-    private static ArgumentOutOfRangeException SeedTooLarge(MeshRequest request, string what) =>
-        new ArgumentOutOfRangeException(nameof(request), request.Seed, $"{what} must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
-
     private static void RequireTextureForSize(MeshRequest request, string model)
     {
         if (!request.Texture && request.TextureSize != 0)
@@ -179,8 +177,6 @@ internal static class MeshRequestValidator
             throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.").ForField(nameof(MeshRequest.Image));
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
-        if (request.Seed > int.MaxValue)
-            throw SeedTooLarge(request, "The X-Part seed");
         if (request.Steps is < 0 or > 1000)
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
         if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
@@ -198,8 +194,6 @@ internal static class MeshRequestValidator
         }
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
-        if (request.Seed > int.MaxValue)
-            throw SeedTooLarge(request, "The Paint seed");
         RequireMatteForAuto(id, request, matterAvailable);
         if (request.Steps < 0 || request.GridResolution < 0)
         {
