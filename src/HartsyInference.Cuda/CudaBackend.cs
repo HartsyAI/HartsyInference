@@ -2615,7 +2615,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                     // OOMed Qwen3-4B. 4 GB caches the hottest few GB of casts and never starves transients.
                     long headroom = weight.DType.IsQuantized ? Math.Max(4L << 30, totalBytes / 3)
                         : Math.Max(2L << 30, totalBytes / 8);
-                    if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
+                    if ((freeBytes > 0 && freeBytes - (long)castBytes < headroom) || !GpuTransferHelper.UnderOvercommitLimit((long)castBytes))
                     {
                         System.Threading.Interlocked.Increment(ref _castTransientGated);
                         weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
@@ -8794,14 +8794,46 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// exits, starving every other consumer of the card (including separate processes).</remarks>
     protected override void PreloadExpandedWeights(IEnumerable<Tensor> weights) => PreloadWithRollback(uploaded =>
     {
+        (long skippedBefore, long skippedBytesBefore) = GpuTransferHelper.PreloadSkipped();
+        // The weights that went up from the host, the only ones a full device may take back: an activation promoted in place has no host copy.
+        List<Tensor> fromHostWeights = [];
         foreach (Tensor weight in weights)
         {
             // Only weights this call actually uploaded are rollback candidates — one already resident from
             // an earlier phase (or from vram.keepModels) is not ours to free. PreloadWeight reports this
             // itself so ownership is decided by the same lookup that does the registration.
-            if (GpuTransferHelper.PreloadWeight(weight))
+            if (GpuTransferHelper.PreloadWeight(weight, out bool fromHost))
             {
                 uploaded.Add(weight);
+                if (fromHost)
+                {
+                    fromHostWeights.Add(weight);
+                }
+            }
+
+            // The device can report itself full a moment after the allocation that caused it (a skipped weight is checked too). The rest of the
+            // set then streams per op, and part of what went resident is given back.
+            if (fromHostWeights.Count > 0 && GpuTransferHelper.DeviceReportsFull())
+            {
+                GpuTransferHelper.ReleaseForOvercommit(fromHostWeights, uploaded);
+                break;
+            }
+        }
+
+        (long skipped, long skippedBytes) = GpuTransferHelper.PreloadSkipped();
+        if (skipped > skippedBefore)
+        {
+            // The same weights are skipped again on every later preload (once per generation for a block-streamed model): say it once.
+            string message = $"[Cuda] Left {skipped - skippedBefore} weight(s), {(skippedBytes - skippedBytesBefore) >> 20} MB, on the host "
+                + "(they upload per op): making them resident would have left the device under vram.preloadHeadroomMb free. "
+                + "Lower vram.preloadHeadroomMb, or set vram.overcommitReliefMb to 0, to preload everything.";
+            if (System.Threading.Interlocked.Exchange(ref _preloadSkipWarned, 1) == 0)
+            {
+                HartsyInference.Core.Logging.Logs.Warning(message);
+            }
+            else
+            {
+                HartsyInference.Core.Logging.Logs.Debug(message);
             }
         }
     });
@@ -8817,6 +8849,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             uploaded.AddRange(GpuTransferHelper.PreloadWeightGroup(group));
         }
     });
+
+    private static int _preloadSkipWarned;
 
     /// <summary>Runs a preload pass; if it throws, frees every weight it reported as uploaded, then rethrows.</summary>
     private static void PreloadWithRollback(Action<List<Tensor>> pass)

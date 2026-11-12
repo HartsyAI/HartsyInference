@@ -34,6 +34,10 @@ internal static class UvChartValidator
         return !HasOverlap(uv, tri, solid, minX, minY, maxX, maxY, eps);
     }
 
+    /// <summary>Whether two triangles, given as <c>(u0, v0, u1, v1, u2, v2)</c>, overlap in area; triangles that only touch within
+    /// <paramref name="eps"/> do not.</summary>
+    internal static bool TrianglesOverlap(ReadOnlySpan<double> a, ReadOnlySpan<double> b, double eps) => !Separated(a, b, eps) && !Separated(b, a, eps);
+
     private static bool HasOverlap(double[] uv, int[] tri, List<int> solid, double minX, double minY, double maxX, double maxY, double eps)
     {
         int m = solid.Count;

@@ -70,4 +70,17 @@ public sealed class HunyuanPaintRopeTests
             }
         Assert.Throws<ArgumentException>(() => HunyuanPaintRope.Tables([1, 2, 3], 12));
     }
+
+    [Fact]
+    public void VoxelIndices_PoolInHalfPrecisionAsUpstreamDoes()
+    {
+        // One view, 8 x 8 pixels, every channel 234: the mean is 234 / 255 = 0.9176; scaled by 127 in F32 it rounds to 117, but upstream rounds the
+        // value, the sum, the mean and the product to F16 first and lands on 116 (checked against torch in tests/python-reference/dump_paint21_unet.py).
+        byte[] positions = new byte[8 * 8 * 3];
+        Array.Fill(positions, (byte)234);
+
+        int[] indices = HunyuanPaintRope.VoxelIndices(positions, 1, 8, 1, 128);
+
+        Assert.Equal([116, 116, 116], indices);
+    }
 }

@@ -55,23 +55,65 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
         string path = (kind == Trellis2ShapeFlowKind.Res512 ? _flow512Path : _flow1024Path)
             ?? throw new HartsyInferenceException(
                 $"The {(kind == Trellis2ShapeFlowKind.Res512 ? "512" : "1024")} texture flow checkpoint is not installed.");
-        int n = shape.Count;
-        if (shape.Feats.Shape.ElementCount != (long)n * _shapeMean.Length)
-            throw new ArgumentException($"The shape latent must hold {_shapeMean.Length} channels per voxel; got {shape.Feats.Shape}.", nameof(shape));
+        return SampleFlow(
+            backend,
+            path,
+            shape,
+            seed,
+            parameters,
+            onStep,
+            _shapeMean,
+            _shapeStd,
+            _textureMean,
+            _textureStd,
+            requireProjection: false,
+            [cond, negCond],
+            (flow, x, shapeNormalized, tModel, conditional) => flow.Forward(backend, x, shapeNormalized, shape.Coords, tModel, conditional ? cond : negCond));
+    }
 
-        Trellis2DeviceMemory.ReleaseAll(backend, cond, negCond, shape.Feats);
+    /// <summary>The sequence both TRELLIS.2 and Pixal3D texture stages run: sweep the device (keeping <paramref name="live"/> and the shape latent),
+    /// load the flow, sample over the voxels of <paramref name="shape"/> with the normalized shape latent concatenated at every step, release the
+    /// flow, denormalize. <paramref name="requireProjection"/> says which kind of flow the stage expects, so a checkpoint of the other model fails
+    /// before any step runs.</summary>
+    internal static SparseTensor SampleFlow(
+        IBackend backend,
+        string path,
+        SparseTensor shape,
+        int seed,
+        Trellis2SamplerParams parameters,
+        Action<int>? onStep,
+        ReadOnlySpan<float> shapeMean,
+        ReadOnlySpan<float> shapeStd,
+        ReadOnlySpan<float> textureMean,
+        ReadOnlySpan<float> textureStd,
+        bool requireProjection,
+        Tensor[] live,
+        Func<Trellis2TextureFlow, Tensor, Tensor, float, bool, Tensor> forward)
+    {
+        int n = shape.Count;
+        if (shape.Feats.Shape.ElementCount != (long)n * shapeMean.Length)
+            throw new ArgumentException($"The shape latent must hold {shapeMean.Length} channels per voxel; got {shape.Feats.Shape}.", nameof(shape));
+
+        Trellis2DeviceMemory.ReleaseAll(backend, [.. live, shape.Feats]);
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(path);
+        if (weights.Config.HasProjection != requireProjection)
+        {
+            throw new HartsyInferenceException(
+                $"'{path}' {(weights.Config.HasProjection ? "is" : "is not")} a projection flow; this stage needs a "
+                + $"{(requireProjection ? "Pixal3D projection" : "TRELLIS.2 plain")} texture flow.");
+        }
+
         using Trellis2TextureFlow flow = new(weights);
-        if (flow.ConcatChannels != _shapeMean.Length || flow.LatentChannels != _textureMean.Length)
+        if (flow.ConcatChannels != shapeMean.Length || flow.LatentChannels != textureMean.Length)
         {
             throw new HartsyInferenceException(
                 $"'{path}' takes {flow.ConcatChannels} shape and {flow.LatentChannels} texture channels; expected "
-                + $"{_shapeMean.Length} and {_textureMean.Length}.");
+                + $"{shapeMean.Length} and {textureMean.Length}.");
         }
 
-        using Tensor shapeNormalized = new(new TensorShape(1, n, _shapeMean.Length), DType.F32);
+        using Tensor shapeNormalized = new(new TensorShape(1, n, shapeMean.Length), DType.F32);
         shape.Feats.AsReadOnlySpan<float>().CopyTo(shapeNormalized.AsSpan<float>());
-        Trellis2LatentNormalization.Normalize(shapeNormalized, _shapeMean, _shapeStd);
+        Trellis2LatentNormalization.Normalize(shapeNormalized, shapeMean, shapeStd);
 
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, n, flow.LatentChannels), seed);
         Tensor latent;
@@ -82,7 +124,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
                 backend,
                 noise,
                 parameters,
-                (x, tModel, conditional) => flow.Forward(backend, x, shapeNormalized, shape.Coords, tModel, conditional ? cond : negCond),
+                (x, tModel, conditional) => forward(flow, x, shapeNormalized, tModel, conditional),
                 onStep);
         }
         finally
@@ -91,7 +133,7 @@ public sealed class Trellis2TextureFlowStage : ITrellis2TextureFlowStage
             backend.FreeWeights(flow.EnumerateWeights());
         }
 
-        Trellis2LatentNormalization.Denormalize(latent, _textureMean, _textureStd);
+        Trellis2LatentNormalization.Denormalize(latent, textureMean, textureStd);
         return new SparseTensor(latent, shape.Coords, shape.Resolution);
     }
 }

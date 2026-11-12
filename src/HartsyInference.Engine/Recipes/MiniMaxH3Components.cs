@@ -50,7 +50,7 @@ internal static class MiniMaxH3Components
             }
         }
         Logs.Info($"[MiniMaxH3Recipe] Promoted {promoted} norm/rope tensors to F32.");
-        config = MiniMaxH3Config.Detect(promotedWeights);
+        config = MiniMaxH3Config.Detect(promotedWeights, source.Header.Metadata);
         Logs.Info($"[MiniMaxH3Recipe] DiT: {converted.Transformer.Count} tensors, {config.NumLayers} blocks, "
             + $"hidden {config.HiddenSize}, curves={config.UseAdalnCurves}.");
         // BF16 residual stream matches the reference body dtype; CPU has F32-only kernels.

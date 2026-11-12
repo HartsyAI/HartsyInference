@@ -127,4 +127,27 @@ public sealed class HunyuanPaintRealWeightsTests(ITestOutputHelper output)
             max = Math.Max(max, Math.Abs(a[i] - b[i]));
         return max;
     }
+
+    /// <summary>Integration lane: the released Paint 2.1 pickle (<c>unet/diffusion_pytorch_model.bin</c> of <c>tencent/Hunyuan3D-2.1</c>) read through the safe
+    /// pickle subset, against the UNet's key map and shapes. Set <c>HARTSY_PAINT21_UNET</c>.</summary>
+    [RealWeightsFact("HARTSY_PAINT21_UNET")]
+    public void Paint21Unet_PickleLoadsEveryTensorIntoBothStreamsWithoutAMissingKey()
+    {
+        using HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader loader = new();
+        loader.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_UNET")!);
+        Dictionary<string, Tensor> weights = loader.GetAllTensors();
+        output.WriteLine($"{weights.Count} tensors, skipped {loader.SkippedTensorCount}");
+        output.WriteLine(string.Join(", ", weights.Keys.Select(k => k.Split('.')[0]).Distinct()));
+
+        HunyuanPaintConfig config = HunyuanPaintLoader.Detect(weights);
+        using HunyuanPaintUnet unet = new(config, generating: true), reference = new(config, generating: false);
+        unet.LoadWeights(weights, "unet");
+        reference.LoadWeights(weights, "unet_dual");
+        HunyuanPaintPromptTokens tokens = HunyuanPaintPromptTokens.FromWeights(weights, config, "unet");
+
+        Assert.True(config.UseDino && config.UsePoseRope);
+        Assert.Equal(["albedo", "mr"], config.Materials);
+        Assert.Equal(2, tokens.PerMaterial.Length);
+        Assert.True(weights.ContainsKey("unet.image_proj_model_dino.proj.weight"));
+    }
 }

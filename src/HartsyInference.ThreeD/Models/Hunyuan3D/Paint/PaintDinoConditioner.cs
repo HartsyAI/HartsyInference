@@ -41,7 +41,21 @@ public sealed class PaintDinoConditioner : IPaintConditioner
                     p[(c * Crop + y) * Crop + x] = (resized[((y + offset) * ShortestEdge + x + offset) * 3 + c] / 255f - Mean[c]) / Std[c];
         Tensor[] last = _dino.EncodeIntermediates(backend, pixels, [_dino.Preset.NumLayers - 1]);
         pixels.Dispose();
-        Tensor hidden = last[0];
+        Tensor result = Project(backend, last[0]);
+        return result;
+    }
+
+    /// <inheritdoc/>
+    public Tensor UnconditionalTokens(IBackend backend)
+    {
+        // The hidden states DINO would produce for a 224 px crop: a class token, any register tokens and one token per patch, 1536 wide (the projection's input).
+        int tokens = 1 + _dino.Preset.NumRegisterTokens + (Crop / _dino.Preset.PatchSize) * (Crop / _dino.Preset.PatchSize);
+        return Project(backend, new Tensor(new TensorShape(1, tokens, (int)_projW.Shape[1]), DType.F32));
+    }
+
+    /// <summary>The projection alone: the last hidden state <c>[1, tokens, 1536]</c> (consumed) to <c>[1, 4 * tokens, dim]</c>.</summary>
+    internal Tensor Project(IBackend backend, Tensor hidden)
+    {
         int tokens = (int)hidden.Shape[1];
 
         Tensor projected = new(new TensorShape(1, tokens, ExtraTokens * _outputDim), DType.F32);

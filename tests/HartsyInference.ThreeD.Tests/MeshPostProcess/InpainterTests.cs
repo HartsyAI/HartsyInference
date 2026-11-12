@@ -116,4 +116,25 @@ public sealed class InpainterTests
         Assert.Throws<ArgumentException>(() => Inpainter.Inpaint(new float[4], 2, 2, 1, new bool[3], 1));
         Assert.Throws<ArgumentOutOfRangeException>(() => Inpainter.Inpaint(new float[4], 2, 2, 1, new bool[4], 0));
     }
+
+    [Fact]
+    public void ClampToUnit_HoldsFilledValuesInRangeWhereTheGradientTermRunsAway()
+    {
+        // A steep ramp that ends at 1 against a wide unknown band: extrapolating its gradient overshoots without the clamp.
+        const int Wide = 64;
+        float[] image = new float[Wide * Wide];
+        bool[] known = new bool[Wide * Wide];
+        for (int y = 0; y < Wide; y++)
+            for (int x = 0; x < Wide; x++)
+            {
+                image[y * Wide + x] = Math.Min(1f, x / 8f);
+                known[y * Wide + x] = x < 9;
+            }
+
+        float[] free = Inpainter.Inpaint(image, Wide, Wide, 1, known, 3);
+        float[] clamped = Inpainter.Inpaint(image, Wide, Wide, 1, known, 3, clampToUnit: true);
+
+        Assert.Contains(free, v => v is > 1.001f or < -0.001f);
+        Assert.All(clamped, v => Assert.InRange(v, 0f, 1f));
+    }
 }

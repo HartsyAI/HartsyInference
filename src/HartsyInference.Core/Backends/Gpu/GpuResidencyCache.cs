@@ -730,11 +730,16 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <summary>Uploads one weight and keeps it resident. Already-resident weights cost nothing.</summary>
-    public void PreloadWeight(Tensor weight)
+    public void PreloadWeight(Tensor weight) => PreloadWeightFromHost(weight);
+
+    /// <summary><see cref="PreloadWeight"/>, reporting whether it allocated a device buffer and filled it from the host. False for a weight that was
+    /// already resident, one left on the host for want of room, and an activation promoted in place: the device buffer of that last one may be the
+    /// only valid copy of its contents, so a caller that gives weights back must not free it.</summary>
+    public bool PreloadWeightFromHost(Tensor weight)
     {
         try
         {
-            PreloadWeightCore(weight);
+            return PreloadWeightCore(weight);
         }
         catch (InvalidOperationException ex) when (IsCorruption(ex))
         {
@@ -742,11 +747,11 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
     }
 
-    private void PreloadWeightCore(Tensor weight)
+    private bool PreloadWeightCore(Tensor weight)
     {
         if (Weights.ContainsKey(weight))
         {
-            return;
+            return false;
         }
         // An activation that is about to become a weight keeps its buffer: the bytes are already there, and the
         // binding it holds would otherwise free the buffer the weight cache is now pointing at.
@@ -755,15 +760,36 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             weight.ClearGpuBinding(BindingKey);
             Weights[weight] = promoted.Buffer;
             CachedBuffers.Add(promoted.Buffer);
-            return;
+            return false;
         }
         MakeCurrent();
         long bytes = ByteSize(weight);
+        if (!HasRoomForPreload(bytes))
+        {
+            // Not an error: the weight stays on the host and uploads per op, like a weight nobody preloaded.
+            Interlocked.Increment(ref _preloadSkippedWeights);
+            Interlocked.Add(ref _preloadSkippedBytes, bytes);
+            return false;
+        }
         TBuffer buffer = AllocateWeight(bytes);
         Upload(buffer, weight, bytes);
         Weights[weight] = buffer;
         CachedBuffers.Add(buffer);
+        return true;
     }
+
+    private long _preloadSkippedWeights, _preloadSkippedBytes;
+
+    /// <summary>Weights an explicit preload left on the host because making them resident would have taken the free memory below its headroom.</summary>
+    public long PreloadSkippedWeights => Interlocked.Read(ref _preloadSkippedWeights);
+
+    /// <summary>Bytes of those weights.</summary>
+    public long PreloadSkippedBytes => Interlocked.Read(ref _preloadSkippedBytes);
+
+    /// <summary>Whether an explicit preload may make a weight of <paramref name="bytes"/> resident. A backend that can tell how much device memory
+    /// is free keeps headroom for the activations and pool growth of the forward that follows: a card filled with weights does not fail with an
+    /// out-of-memory error but stalls (a 1.3B flow that takes 5 s did not finish in 200 s). The default preloads everything.</summary>
+    protected virtual bool HasRoomForPreload(long bytes) => true;
 
     /// <inheritdoc/>
     public virtual void PreloadWeights(IEnumerable<Tensor> weights)
