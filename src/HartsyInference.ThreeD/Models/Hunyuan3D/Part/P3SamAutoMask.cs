@@ -71,6 +71,8 @@ public sealed class P3SamAutoMask(IBackend backend, P3SamFeatures features, P3Sa
                     best = m;
             masks[k] = [.. r.Masks[best].Select(p => p > 0.5f)];
             iou[k] = r.Iou[best];
+            if ((k + 1) % 50 == 0)
+                StageLog?.Invoke($"  prompt {k + 1}/{prompts.Length}: {clock.Elapsed.TotalSeconds:F2} s into the mask stage");
         }
 
         Stage($"masks for {prompts.Length} prompts");
