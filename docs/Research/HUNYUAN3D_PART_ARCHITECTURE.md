@@ -101,3 +101,26 @@ Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, 
 
 The CLI progress lines (13 steps) showed 5.0 to 7.0 s for the second step, 0.2 s for the third, 5.3 to 6.5 s for each block of 50 prompts and 2.1 s for the last step; the per-stage log of the pipeline was not captured in this run. Looks: the mug's handle is one part with a sliver of the body next to its upper joint; the bust splits at the neck and the moustache is a separate part, the base stays with the jacket. These are judged by eye from a flat-colour render (`p3sam_mug512_parts.png`, `p3sam_bust512_parts.png` in the shared notes); there is no ground truth and no Python run of the auto-mask geometry on these meshes yet.
 
+## X-Part weights and key layout (2026-11-12)
+
+Downloaded (user-approved, `tencent/Hunyuan3D-Part` @ `677174466c`, `.part` then rename, size and sha256 checked against the HF tree API) into `Models/3D/hunyuan3d-part/`: `model/model.safetensors` 6,630,571,584 B (sha256 `4ca47998e135...`), `shapevae/shapevae.safetensors` 655,539,474 B (`3d46179a603c...`), `conditioner/conditioner.safetensors` 1,755,920,004 B (`730518ae5f2b...`), and the four small configs (`model`, `shapevae`, `conditioner`, `scheduler`). Headers read only.
+
+| File | Tensors, dtype | Layout |
+|---|---|---|
+| `model/model.safetensors` (DiT) | 942, all BF16 | `x_embedder` 64 to 2048; `t_embedder.mlp.0/2` (2048 to 8192 to 2048); `part_embed` [50, 2048]; 21 `blocks.N` with `attn1` (self, fused-free `to_q/to_k/to_v`, `q_norm`/`k_norm` [128]), `attn2` and `attn2_2` (the two cross-attentions, `to_k/to_v` 1024 to 2048, each with its own `norm2`/`norm2_2` and out_proj bias), `norm1`, `norm3`; a dense `mlp.fc1/fc2` (8192) in 15 blocks and `moe` (`gate` [8, 2048], 8 `experts.N.net.0.proj`/`net.2`, `shared_experts`) in 6; `skip_linear` [2048, 4096] and `skip_norm` in 10 blocks (11 to 20); `final_layer.norm_final` and `.linear` 2048 to 64 |
+| `shapevae/shapevae.safetensors` | 410, all BF16 | `encoder.input_proj` [1024, 55] (3 x (2 x 8 + 1) Fourier + 4 point features), `encoder.cross_attn`, `encoder.self_attn.resblocks.0..7`, `geo_decoder` (`cross_attn_decoder`, `query_proj`, `ln_post`, `output_proj`), the Hunyuan3D 2.x ShapeVAE key family |
+| `conditioner/conditioner.safetensors` | 1,283: 824 BF16, 459 F32 | `geo_encoder.local_encoder.*` (410, a second ShapeVAE encoder for the part in its box, 4096 latents) and `geo_out_proj` (to 1024); `obj_encoder.*` (encoder 142, transformer 240, geo_decoder 24, `pre_kl`/`post_kl`; the object ShapeVAE, 4096 latents) and `obj_out_proj`; `seg_feat_encoder.sonata.*` (453 F32, the Sonata backbone with stem 9 to 48, stages 48/96/..., cpe 3x3x3 convs) and `seg_feat_encoder.mlp.0/2/4` (1232 to 512 to 512 to 512, F32) |
+
+What differs from the 2.1 DiT the engine already runs (`Hunyuan3DPlainDit`, `Hunyuan3DPlainBlock`): a second cross-attention with its own norm per block, the learned part embedding (random part ids at inference upstream, see the parity trap above), the bounding-box token allocation (`allocate_tokens`), and BF16 weights (the 2.1 file is F16; BF16 widens exactly to F32). The conditioner holds F32 Sonata weights beside BF16 VAE weights.
+
+Run shape upstream (`partformer_pipeline.py`): the mesh is normalised to a 0.8 box, P3-SAM's auto-mask boxes give K parts, 81,920 surface points of the object and of each part inside its box feed the two conditioners, the DiT denoises K latents of 1024 x 64 as a batch (one latent set per part, guidance -1 meaning off) over 50 flow-matching Euler steps (`sigmas = linspace(0, 1, 50)`), each part latent is decoded and extracted at octree resolution 512, and the parts are mapped back to the input frame.
+
+### Port plan (one PR each, CPU oracle first)
+
+1. ShapeVAE encoder (`input_proj`, cross-attention, 8 self-attention blocks, KL head) from the X-Part file; compare against `partgen/models/autoencoders`.
+2. `PartFormerDITPlain`: the second cross-attention, part embedding, token allocation; oracle on random inputs with the part ids pinned (upstream draws them with `torch.randperm`).
+3. Conditioner: object and local encoders, Sonata features (`sonata_extractor.py`, reusing the P3-SAM Sonata with its RoPE off), the 1232 to 512 MLP.
+4. Flow sampler and the pipeline: boxes from the P3-SAM auto-mask (check `bbox_estimator/auto_mask_api.py` against `P3SamAutoMask`), the in-box surface sampling, decoding and marching cubes per part, CLI id.
+
+Not done: no tensor value was read; the BF16 and F32 mix is from the headers only.
+
