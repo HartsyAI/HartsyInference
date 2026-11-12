@@ -86,6 +86,7 @@ internal static class MeshRequestValidator
         }
     }
 
+    /// <summary>The Steps, Seed and TextureSize branches read the pipelines' own message text (they share ParamName "options"); rewording those messages needs this list updated.</summary>
     private static string? PipelineField(Exception error)
     {
         if (error is not ArgumentException argument)
@@ -93,7 +94,8 @@ internal static class MeshRequestValidator
         string message = argument.Message;
         return argument.ParamName == "image" ? nameof(MeshRequest.Image)
             : argument.InnerException is ArgumentOutOfRangeException { ParamName: "FovRadians" } ? nameof(MeshRequest.FieldOfViewRadians)
-            : message.Contains(" grid ", StringComparison.OrdinalIgnoreCase) ? nameof(MeshRequest.GridResolution)
+            : argument.ParamName == "grid" ? nameof(MeshRequest.GridResolution)
+            : message.StartsWith("Image", StringComparison.Ordinal) || message.StartsWith("RGB", StringComparison.Ordinal) || message.StartsWith("Alpha", StringComparison.Ordinal) ? nameof(MeshRequest.Image)
             : message.StartsWith("Steps", StringComparison.Ordinal) ? nameof(MeshRequest.Steps)
             : message.StartsWith("Seed", StringComparison.Ordinal) ? nameof(MeshRequest.Seed)
             : message.StartsWith("TextureSize", StringComparison.Ordinal) ? nameof(MeshRequest.TextureSize)
