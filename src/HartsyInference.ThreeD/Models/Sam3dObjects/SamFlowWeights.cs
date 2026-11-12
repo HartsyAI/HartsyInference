@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
@@ -38,5 +39,22 @@ public static class SamFlowWeights
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Ends a flow's use of its weights: drains the backend, frees its device copies of <paramref name="resident"/>, then disposes the converted tensors in <paramref name="owned"/>. The order is the
+    /// contract: a converted tensor's host memory must outlive every transfer and kernel the backend still has queued against it, and disposing it first freed memory the backend was still using (an
+    /// access violation in the next stage on one seed in two).
+    /// </summary>
+    public static void Release(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(resident);
+        ArgumentNullException.ThrowIfNull(owned);
+        backend.Sync();
+        backend.FreeWeights(resident);
+        foreach (Tensor tensor in owned)
+            tensor.Dispose();
+        owned.Clear();
     }
 }

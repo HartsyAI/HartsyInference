@@ -1,3 +1,5 @@
+using System.Reflection;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
@@ -651,5 +653,50 @@ public sealed class SamMotFlowTests
         double relative = Math.Sqrt(difference / magnitude);
         Assert.True(relative > 0, "F16 weights must change the result at least a little; identical output means the narrowing did nothing.");
         Assert.True(relative < 5e-3, $"relative L2 {relative}");
+    }
+
+    /// <summary>An <see cref="IBackend"/> that records <c>Sync</c> and <c>FreeWeights</c> and, at each, whether a watched tensor is still alive; every other call does nothing.</summary>
+    public class RecordingBackend : DispatchProxy
+    {
+        public List<string> Events { get; } = [];
+
+        public Tensor? Watched { get; set; }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            if (method?.Name is "Sync" or "FreeWeights")
+                Events.Add($"{method.Name}:{(Watched is not null && IsDisposed(Watched) ? "disposed" : "alive")}");
+            return method?.ReturnType.IsValueType == true && method.ReturnType != typeof(void) ? Activator.CreateInstance(method.ReturnType) : null;
+        }
+
+        private static bool IsDisposed(Tensor tensor)
+        {
+            try
+            {
+                _ = tensor.AsReadOnlySpan<byte>().Length;
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                return true;
+            }
+        }
+    }
+
+    [Fact]
+    public void Release_DrainsTheBackendAndFreesItsCopiesBeforeTheConvertedTensorsAreDisposed()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        RecordingBackend recording = (RecordingBackend)proxy;
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        recording.Watched = converted;
+        List<Tensor> owned = [converted];
+
+        SamFlowWeights.Release(proxy, [converted], owned);
+
+        // Sync, then the free: both while the converted tensor is still alive; only afterwards is it disposed.
+        Assert.Equal(["Sync:alive", "FreeWeights:alive"], recording.Events);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
     }
 }

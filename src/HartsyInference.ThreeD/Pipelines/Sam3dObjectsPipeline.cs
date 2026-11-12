@@ -165,10 +165,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flowWeights.Values);
-            Backend.FreeWeights(narrowed);
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
+            SamFlowWeights.Release(Backend, [.. flowWeights.Values, .. narrowed], narrowed);
             Sweep([.. latents.Values]);
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
@@ -295,9 +292,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flow.EnumerateWeights());
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
+            SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed);
             latent = sampled["slat"];
             Sweep(latent);
             log($"SLAT flow sampled ({steps} steps)");
