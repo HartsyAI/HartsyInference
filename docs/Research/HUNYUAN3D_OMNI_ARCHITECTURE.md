@@ -12,7 +12,7 @@ Tencent Hunyuan 3D Omni Community License Agreement (release 2025-09-26, root `L
 
 ## Components (all from the configs)
 
-| Part | Config | Same as in this repository |
+| Part | Config | Expected match in this repository (inferred from the configs, not checked) |
 |---|---|---|
 | DiT | `HunYuanDiTPlain`: input 4096 x 64, width 2048, depth 21, 16 heads, `context_dim` 1024, `text_len` 1370, RMS q/k norm, no biases, no position embedding, MoE in 6 layers (8 experts, top 2) | The Hunyuan3D-2.1 shape DiT, which `Models/Hunyuan3D` already runs (`HUNYUAN3D_2_1_SHAPE_ARCHITECTURE.md`); the weights are fine-tuned |
 | Shape VAE | `ShapeVAE`: 4096 latents, `embed_dim` 64, width 1024, 8 encoder and 16 decoder layers, `scale_factor` 1.0079887561230991, `point_feats` 3, `sharpedge_label` | The 2.1 VAE family (`Hunyuan3DShapeVae`); whether the Omni VAE equals the 2.1 one is unknown |
@@ -31,7 +31,7 @@ All of it is small. `cond_encoder/pytorch_model.bin` is 464,828 bytes.
   - bbox: the three extents (length, height, width, each 0 to 1) are repeated to 6 values, one token;
   - voxel: the input points are quantised to a 16 x 16 x 16 grid, the unique voxel centres in [-1, 1] are repeated to 6 values, one token per occupied voxel;
   - point: the points repeated to 6 values, one token per point.
-- Classifier-free guidance: the unconditional branch replaces only the DINO tokens (`unconditional_embedding`) and keeps the control and signal tokens, so the conditional and unconditional batches differ in the image part only.
+- Classifier-free guidance: the unconditional branch replaces only the DINO tokens (`unconditional_embedding`) and keeps the control and signal tokens, so the conditional and unconditional batches differ in the image part only. Whether that replacement is `zeros_like` (as the 2.1 doc records for 2.1) has not been read (`DinoImageEncoder.unconditional_embedding`, line 212); until it is, reusing the 2.1 CFG path is unconfirmed.
 - `sampled_point` (pose bone starts, bbox corners, voxel centres, points) is returned for visualisation; the denoiser does not read it.
 - Training-only paths (`drop_point`, `random_noise`, `noise_ratio`) are off at inference (`disable_drop = True`).
 
@@ -51,8 +51,8 @@ All three weight files are pickles (read only through the safe pickle subset, ne
 
 | Need | Existing | Gap |
 |---|---|---|
-| DiT, MoE, flow sampler, MC / FlashVDM, VAE, DINOv2-large | `Models/Hunyuan3D` | loading from the pickles (the 12.2 GB F32 file is read tensor by tensor through the safe parser and widened or narrowed once); the context length is no longer fixed at 1370 |
-| Fourier embedder | the ShapeVae point embedder (8 frequencies, `include_pi` false) | check that it accepts 6-wide input |
+| DiT, MoE, flow sampler, MC / FlashVDM, VAE, DINOv2-large | `Models/Hunyuan3D` | loading from the pickles: the 12.2 GB F32 file has to be narrowed to F16 per tensor, and `HunyuanPaintLoader` today calls `PytorchPickleLoader.GetAllTensors()` for a whole file, so a per-tensor streaming read is a gap to check; the context length varies with the control signal (no 1370 constant was found under `Models/Hunyuan3D`, but the cross-attention and KV paths must be checked for a size fixed once from the config) |
+| Fourier embedder | `FourierEmbedSpec(InputDims, Bands, IncludeInput)` in `Core/Backends` (already generic: the VAE uses `InputDims: 3`, UniRig uses it too); Omni is `InputDims: 6`, 8 bands, input included, 102 wide | none expected; not compared numerically |
 | OmniEncoder | none | `Linear`, `RMSNorm`, GELU, an embedding table and the concatenation: a few dozen lines |
 | Control preprocessing | `Geometry/Ops` (surface sampler), PLY and mesh readers | PLY point reader, the 16-cube voxeliser, the bbox and bone-file formats (`demos/pose/*.txt`: one `x1 y1 z1 x2 y2 z2` line per bone); coordinates in [-1, 1] |
 | Image preprocessing | the existing Hunyuan3D image path (`ImageProcessorV2`) | none expected |
