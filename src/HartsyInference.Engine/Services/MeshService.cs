@@ -523,7 +523,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     Action<GenerationProgress> report = p =>
                     {
                         cancel.ThrowIfCancellationRequested();
-                        progress?.Report(MeshProgress.Map(MeshModelIds.Trellis2, request.Texture, request.GridResolution, p));
+                        progress?.Report(MeshProgress.Map(MeshModelIds.Trellis2, options.Texture, options.Grid, p));
                     };
                     if (options.Texture)
                     {
@@ -731,7 +731,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         int total = 2 + options.Steps + chainSteps;
         int stages = options.Chains ? 4 : 3;
         HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source, cancel, name =>
-            progress?.Report(MeshProgress.Plain(0, total, name, 0, 1, name == HairDeckPreprocessor.SegmentStage ? 1 : 2, stages)));
+            progress?.Report(MeshProgress.Plain(name == HairDeckPreprocessor.SegmentStage ? 0 : 1, total, name, 0, 1, name == HairDeckPreprocessor.SegmentStage ? 1 : 2, stages)));
         foreach (string note in prep.Notes)
         {
             // input_alpha only records that the input's alpha was applied as a mask; it does not degrade the result.
@@ -749,7 +749,6 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel, (stage, done, count) =>
             progress?.Report(MeshProgress.Plain(
                 2 + (stage == HairDeckCore.CardStage ? 0 : options.Steps) + done, total, stage, done, count, stage == HairDeckCore.CardStage ? 3 : 4, stages)));
-        progress?.Report(MeshProgress.Plain(total, total, "Done", 1, 1, stages, stages));
         if (!result.HasCards)
         {
             throw new InvalidOperationException("No hair cards were generated for this image. Try another seed or another image.");

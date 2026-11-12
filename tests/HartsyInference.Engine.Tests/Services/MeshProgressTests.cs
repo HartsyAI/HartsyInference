@@ -68,7 +68,7 @@ public sealed class MeshProgressTests
         Assert.Equal("Structure flow", structure.Stage);
         Assert.Equal(2, structure.StageIndex);
         Assert.Equal(9, structure.StageCount);
-        Assert.Equal(13, textured.StageCount);
+        Assert.Equal(12, textured.StageCount);
         Assert.Equal(2, structure.Step);
         Assert.Equal(13, structure.TotalSteps);
     }

@@ -228,7 +228,8 @@ public sealed class Pixal3DPipelineTests
 
         string[] stages = [.. reports.Select(p => p.Stage!).Distinct()];
         Assert.Equal(
-            ["Structure conditioning", "Structure flow", "Coarse conditioning", "Coarse shape flow", "Upsample", "Fine conditioning", "Fine shape flow", "Shape decode", "Mesh extraction"],
+            [MeshStageNames.StructureConditioning, MeshStageNames.StructureFlow, MeshStageNames.CoarseConditioning, MeshStageNames.CoarseShapeFlow, MeshStageNames.Upsample,
+                MeshStageNames.FineConditioning, MeshStageNames.FineShapeFlow, MeshStageNames.ShapeDecode, MeshStageNames.MeshExtraction],
             stages);
         Assert.All(reports.Where(p => p.Stage == "Structure flow"), p => Assert.Equal(3, p.StageSteps));
         Assert.Equal([1, 2, 3], reports.Where(p => p.Stage == "Structure flow").Select(p => p.StageStep));

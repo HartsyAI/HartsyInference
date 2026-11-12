@@ -1,24 +1,34 @@
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.ThreeD.Pipelines;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Turns a 3D pipeline's progress into a <see cref="StepPreview"/> with a stage and an overall fraction that does not reset between stages. The fraction weighs each stage by how long it usually takes (the shape flows dwarf everything else), so a bar driven by it moves at the pace the user waits at, not at the pace of the tick count.</summary>
+/// <summary>Turns a 3D pipeline's progress into a <see cref="StepPreview"/> with a stage and an overall fraction that does not reset between stages. For TRELLIS.2 and Pixal3D the fraction weighs each stage by how long it usually takes (the shape flows dwarf everything else), so a bar driven by it moves at the pace the user waits at, not at the pace of the tick count; the other models report the plain step ratio.</summary>
 internal static class MeshProgress
 {
-    /// <summary>Relative cost of each stage in pipeline order: the structure, coarse and fine flows, the decode and, with texture, the texture flow and bake. Approximate: taken from the 12 GB card timings recorded in the model status document, and the same for every grid.</summary>
+    /// <summary>Relative cost of each shape stage in pipeline order. Approximate: taken from the 12 GB card timings recorded in the model status document, and the same for every grid except the TRELLIS.2 512 type.</summary>
     private static readonly (string Name, double Weight)[] ShapeStages =
     [
-        ("Image conditioning", 3), ("Structure conditioning", 3), ("Structure flow", 40), ("Coarse conditioning", 1), ("Coarse shape flow", 30),
-        ("Shape flow 512", 30), ("Upsample", 7), ("Fine conditioning", 5), ("Fine shape flow", 260), ("Shape flow 1024", 260),
-        ("Shape decode", 30), ("Mesh extraction", 3),
+        (MeshStageNames.ImageConditioning, 3), (MeshStageNames.StructureConditioning, 3), (MeshStageNames.StructureFlow, 40),
+        (MeshStageNames.CoarseConditioning, 1), (MeshStageNames.CoarseShapeFlow, 30), (MeshStageNames.ShapeFlow512, 30),
+        (MeshStageNames.Upsample, 7), (MeshStageNames.FineConditioning, 5), (MeshStageNames.FineShapeFlow, 260),
+        (MeshStageNames.ShapeFlow1024, 260), (MeshStageNames.ShapeDecode, 30), (MeshStageNames.MeshExtraction, 3),
     ];
 
     private static readonly (string Name, double Weight)[] TextureStages =
     [
-        ("Texture conditioning", 4), ("Texture flow", 150), ("Texture decode", 35), ("Texture bake", 250),
+        (MeshStageNames.TextureConditioning, 4), (MeshStageNames.TextureFlow, 150), (MeshStageNames.TextureDecode, 35), (MeshStageNames.TextureBake, 250),
     ];
 
-    /// <summary>A tick of a model that has no stages: the steps, and optionally a named stage with its own steps.</summary>
+    private static readonly HashSet<string> PixalOnly =
+    [
+        MeshStageNames.StructureConditioning, MeshStageNames.CoarseConditioning, MeshStageNames.CoarseShapeFlow,
+        MeshStageNames.FineConditioning, MeshStageNames.FineShapeFlow,
+    ];
+
+    private static readonly HashSet<string> TrellisOnly = [MeshStageNames.ImageConditioning, MeshStageNames.ShapeFlow512, MeshStageNames.ShapeFlow1024];
+
+    /// <summary>A tick of a model that has no weighted stages: the steps, and optionally a named stage with its own steps and position.</summary>
     public static StepPreview Plain(int step, int total, string? stage = null, int stageStep = 0, int stageSteps = 0, int stageIndex = 0, int stageCount = 0) => new()
     {
         Step = step,
@@ -32,7 +42,7 @@ internal static class MeshProgress
     /// <summary>A tick of a staged TRELLIS.2 or Pixal3D run. A tick whose stage is not in the table falls back to the step count.</summary>
     public static StepPreview Map(string modelId, bool textured, int grid, GenerationProgress progress)
     {
-        (string Name, double Weight)[] stages = [.. PresentStages(modelId, grid), .. (textured ? TextureStages : [])];
+        (string Name, double Weight)[] stages = [.. Stages(modelId, textured, grid)];
         int index = Array.FindIndex(stages, s => s.Name == progress.Stage);
         StepPreview fallback = Plain(progress.Step, progress.TotalSteps, progress.Stage, progress.StageStep, progress.StageSteps);
         if (index < 0 || progress.TotalSteps <= 0)
@@ -48,20 +58,30 @@ internal static class MeshProgress
         };
     }
 
-    /// <summary>The shape stages one model runs, in order; names a pipeline does not use are left out so they do not stretch the bar.</summary>
-    private static IEnumerable<(string Name, double Weight)> PresentStages(string modelId, int grid)
+    /// <summary>The stages one run reports, in order: only those its pipeline ticks, so the stage count matches the stages a host sees.</summary>
+    internal static IEnumerable<(string Name, double Weight)> Stages(string modelId, bool textured, int grid)
     {
         bool pixal = modelId == MeshModelIds.Pixal3D;
         bool cascade = grid != 512;
         foreach ((string name, double weight) in ShapeStages)
         {
-            bool pixalOnly = name is "Structure conditioning" or "Coarse conditioning" or "Coarse shape flow" or "Fine conditioning" or "Fine shape flow";
-            bool trellisOnly = name is "Image conditioning" or "Shape flow 512" or "Shape flow 1024";
-            if (!cascade && name is "Upsample" or "Shape flow 1024")
+            if (pixal ? TrellisOnly.Contains(name) : PixalOnly.Contains(name))
                 continue;
-            if (pixal ? trellisOnly : pixalOnly)
+            if (!cascade && name is MeshStageNames.Upsample or MeshStageNames.ShapeFlow1024)
                 continue;
-            yield return (name, name == "Shape flow 512" && !cascade ? 120 : weight);
+            // A textured run goes from the decode straight to the texture stages: nothing ticks the meshing.
+            if (textured && name == MeshStageNames.MeshExtraction)
+                continue;
+            yield return (name, name == MeshStageNames.ShapeFlow512 && !cascade ? 120 : weight);
+        }
+        if (!textured)
+            yield break;
+        foreach ((string name, double weight) in TextureStages)
+        {
+            // TRELLIS.2 reuses the shape conditioning for its texture flow.
+            if (!pixal && name == MeshStageNames.TextureConditioning)
+                continue;
+            yield return (name, weight);
         }
     }
 }

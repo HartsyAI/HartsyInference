@@ -189,6 +189,22 @@ public sealed class Trellis2PipelineTests
     }
 
     [Fact]
+    public void Generate_NamesEachStageInOrderWithItsStepCounts()
+    {
+        using Rig rig = new();
+        List<GenerationProgress> reports = [];
+
+        rig.Pipeline.Generate(Image(), new Trellis2Options { Seed = 1 }, reports.Add);
+
+        Assert.Equal(
+            [MeshStageNames.ImageConditioning, MeshStageNames.StructureFlow, MeshStageNames.ShapeFlow512, MeshStageNames.Upsample,
+                MeshStageNames.ShapeFlow1024, MeshStageNames.ShapeDecode, MeshStageNames.MeshExtraction],
+            reports.Select(p => p.Stage!).Distinct());
+        Assert.Equal([1, 2, 3], reports.Where(p => p.Stage == MeshStageNames.StructureFlow).Select(p => p.StageStep));
+        Assert.All(reports.Where(p => p.Stage == MeshStageNames.StructureFlow), p => Assert.Equal(3, p.StageSteps));
+    }
+
+    [Fact]
     public void Generate_ReportsMonotonicProgressEndingAtTheTotal()
     {
         using Rig rig = new();
