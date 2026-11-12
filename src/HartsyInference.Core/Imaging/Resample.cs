@@ -94,6 +94,40 @@ public static class Resample
         }
     }
 
+    /// <summary>Bilinear resize of one row-major F32 plane with the triangle filter widened by the downscale factor
+    /// (<c>F.interpolate(mode="bilinear", antialias=True)</c>); enlarging is plain half-pixel bilinear.</summary>
+    public static void BilinearPlaneAntialias(ReadOnlySpan<float> src, int srcW, int srcH, Span<float> dst, int dstW, int dstH)
+    {
+        ValidateArgs(src.Length, srcW, srcH, dst.Length, dstW, dstH, channels: 1);
+        (int[] xStart, int[] xCount, float[] xWeights, int xTaps) = BuildWeights(srcW, dstW, 1.0, TriangleKernel, antialias: true);
+        (int[] yStart, int[] yCount, float[] yWeights, int yTaps) = BuildWeights(srcH, dstH, 1.0, TriangleKernel, antialias: true);
+        float[] tmp = new float[(long)srcH * dstW];
+        for (int y = 0; y < srcH; y++)
+        {
+            ReadOnlySpan<float> row = src.Slice(y * srcW, srcW);
+            for (int x = 0; x < dstW; x++)
+            {
+                float acc = 0f;
+                int lo = xStart[x];
+                for (int t = 0; t < xCount[x]; t++)
+                    acc += xWeights[x * xTaps + t] * row[lo + t];
+                tmp[(long)y * dstW + x] = acc;
+            }
+        }
+
+        for (int y = 0; y < dstH; y++)
+        {
+            int lo = yStart[y];
+            for (int x = 0; x < dstW; x++)
+            {
+                float acc = 0f;
+                for (int t = 0; t < yCount[y]; t++)
+                    acc += yWeights[y * yTaps + t] * tmp[(long)(lo + t) * dstW + x];
+                dst[y * dstW + x] = acc;
+            }
+        }
+    }
+
     private static (int[] Lo, int[] Hi, float[] Lambda) BuildTorchBilinearIndices(int srcLen, int dstLen)
     {
         double scale = (double)srcLen / dstLen;
