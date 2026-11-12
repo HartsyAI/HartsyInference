@@ -243,6 +243,9 @@ public sealed class InferenceEngine : IInferenceEngine
     public IMeshOperationService MeshOperations { get; } = new MeshOperationService();
 
     /// <inheritdoc/>
+    public IMeshThumbnailService MeshThumbnails { get; } = new MeshThumbnailService();
+
+    /// <inheritdoc/>
     public IMeshLifecycleService MeshLifecycle => _mesh.Value;
 
     internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;

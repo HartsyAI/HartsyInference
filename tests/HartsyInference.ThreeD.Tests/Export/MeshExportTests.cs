@@ -154,6 +154,35 @@ public sealed class MeshExportTests
     }
 
     [Fact]
+    public void ZeroNormalsOnVerticesNoTriangleUsesAreRepairedNotAllNormalsDropped()
+    {
+        // The shape of the engine's own textured outputs: smooth normals, plus a zero one on an unused vertex and on a degenerate face's corner.
+        const string json = """
+            {"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+             "meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]}],
+             "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"},{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"},{"bufferView":2,"componentType":5125,"count":3,"type":"SCALAR"}],
+             "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":48},{"buffer":0,"byteOffset":96,"byteLength":12}],"buffers":[{"byteLength":108}]}
+            """;
+        byte[] bin = new byte[108];
+        float[] positions = [0, 0, 0, 1, 0, 0, 0, 1, 0, 5, 5, 5];
+        float[] normals = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0];
+        for (int i = 0; i < 12; i++)
+        {
+            BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(i * 4), positions[i]);
+            BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(48 + i * 4), normals[i]);
+        }
+        BinaryPrimitives.WriteUInt32LittleEndian(bin.AsSpan(100), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(bin.AsSpan(104), 2);
+
+        MeshDocument document = GlbReader.ParseDocument(GlbContainer.Assemble(Encoding.UTF8.GetBytes(json), bin));
+
+        float[] read = document.Primitives.Single().Geometry.Normals!;
+        Assert.Equal([0f, 0f, 1f, 0f, 0f, 1f, 0f, 0f, 1f, 0f, 1f, 0f], read);
+        Assert.Contains(document.Notes, n => n.StartsWith("1 zero-length normal(s)"));
+        Assert.DoesNotContain(document.Notes, n => n.StartsWith("Normals (NORMAL) could not be read"));
+    }
+
+    [Fact]
     public void AnEmptyPrimitiveIsLeftOutSoTheFileWrittenBackIsValid()
     {
         const string json = """
