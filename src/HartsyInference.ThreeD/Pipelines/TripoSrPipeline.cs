@@ -68,12 +68,7 @@ public sealed unsafe class TripoSrPipeline : ThreeDPipelineBase
     /// <remarks><b>Input contract:</b> <see cref="ImageTo3DRequest.ImageRgb"/> must already be a foreground-isolated
     /// image on a neutral gray (0.5) background, matching TripoSR's <c>run.py</c> (rembg background removal →
     /// <c>resize_foreground(0.85)</c> → composite <c>rgb·α + (1−α)·0.5</c>). Passing a raw photo with a real
-    /// background produces a degenerate/noisy mesh. During e2e validation this compositing was done in Python.
-    /// TODO(3D/no-python): implement a pure-C# foreground preprocessor so the app never shells out to Python —
-    /// (1) a salient-object-segmentation model in HartsyInference.Vision (U²-Net / ISNet / BiRefNet → alpha mask),
-    /// (2) a <c>ForegroundComposite</c> helper here (bbox-crop → pad-to-square → resize to ratio → gray-0.5
-    /// composite). Then call it here when the request flags a raw/un-composited image. Tracked in
-    /// docs/Checklists/PHASE_11_THREED.md §5.</remarks>
+    /// background produces a degenerate/noisy mesh. <see cref="Preprocessing.TripoSrImageProcessor"/> makes that image, and the engine applies it for <c>MeshRequest.Preprocess = Auto</c>.</remarks>
     public ThreeDResult Generate(ImageTo3DRequest request, Action<GenerationProgress>? onProgress = null)
     {
         ThrowIfDisposed();

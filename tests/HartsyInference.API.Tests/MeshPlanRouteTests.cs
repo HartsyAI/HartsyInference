@@ -85,6 +85,22 @@ public sealed class MeshPlanRouteTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PrepareReturnsTheFramedImageAndTheCutoutForAModelThatFramesItsInput()
+    {
+        byte[] alpha = [.. Enumerable.Range(0, 64).Select(i => i % 8 is >= 2 and < 6 && i / 8 is >= 2 and < 6 ? (byte)255 : (byte)0)];
+        HttpResponseMessage response = await _http.PostAsJsonAsync("/v1/native/mesh/prepare", Body("hunyuan3d", new
+        {
+            image = new { rgb = Convert.ToBase64String(new byte[8 * 8 * 3]), width = 8, height = 8, alpha = Convert.ToBase64String(alpha) },
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using JsonDocument result = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(512, result.RootElement.GetProperty("width").GetInt32());
+        Assert.False(result.RootElement.GetProperty("matted").GetBoolean());
+        Assert.NotEqual(JsonValueKind.Null, result.RootElement.GetProperty("cutout").ValueKind);
+    }
+
+    [Fact]
     public async Task PlanOfAnUnsupportedFieldIs422WithTheIssue()
     {
         string folder = Path.GetTempPath();
