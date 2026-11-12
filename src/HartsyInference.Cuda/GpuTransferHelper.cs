@@ -572,6 +572,25 @@ internal static unsafe class GpuTransferHelper
             // PersistentBuffers is what makes the orphan sweep release it through cuMemFree rather than the pool.
         }
 
+        /// <summary>On Windows, an explicit preload stops making weights resident when it would leave under <c>vram.preloadHeadroomMb</c> free
+        /// (<c>cuMemGetInfo</c> counts the allocator pool's reservations as used, so a pool left by an earlier stage shrinks the room), so the
+        /// forward that follows still has room for its activations. Off elsewhere and when <c>vram.overcommitReliefMb</c> is 0.</summary>
+        protected override bool HasRoomForPreload(long bytes)
+        {
+            long headroom = EngineKnobs.PreloadHeadroomMb.Value << 20;
+            if (headroom <= 0 || !OvercommitGuardActive)
+            {
+                return true;
+            }
+
+            if (CudaDriverApi.cuMemGetInfo(out nuint free, out nuint total) != 0)
+            {
+                return true;
+            }
+            NoteUsage(this, free, total);
+            return (long)free - bytes >= headroom && UnderOvercommitLimit(this, bytes);
+        }
+
         /// <summary>A tensor uploaded twice with unchanged host data is behaving like a weight, whoever made it.
         /// Promotion happens HERE — on the miss, before a transient exists — because a promoted weight needs the
         /// persistent allocator, and re-uploading into a pool block would be the wrong lifetime.</summary>
@@ -650,6 +669,10 @@ internal static unsafe class GpuTransferHelper
         public readonly Dictionary<ulong, (nuint bytes, nint stream)> CaptureAllocs = new();
         public long CaptureAllocBytes, CaptureFreeBytes;
         public int CaptureAllocCount, CaptureFreeCount;
+
+        /// <summary>Per device (one State per backend): the device's used memory at its last reading that still showed free memory, and the
+        /// used-memory level a later reading of 0 free was found at. See <see cref="GpuTransferHelper.DeviceReportsFull"/>.</summary>
+        public long LastGoodUsedBytes, OvercommitLimitBytes;
     }
 
     /// <summary>Per-tensor H2D upload bookkeeping for weight auto-promotion.</summary>
@@ -1250,15 +1273,28 @@ internal static unsafe class GpuTransferHelper
     /// false when this backend already holds it.</summary>
     /// <remarks>The persistent allocation is the subclass's <c>AllocateWeight</c> override: a resident weight is
     /// freed synchronously, so it must be allocated synchronously and kept out of the stream-ordered pool.</remarks>
-    public static bool PreloadWeight(Tensor weight)
+    public static bool PreloadWeight(Tensor weight) => PreloadWeight(weight, out _);
+
+    /// <summary><see cref="PreloadWeight(Tensor)"/>, also saying whether a device buffer was allocated and filled from the host
+    /// (<paramref name="fromHost"/>). A weight that is not (a promoted activation, one left on the host) has nothing to give back that the host
+    /// still holds.</summary>
+    internal static bool PreloadWeight(Tensor weight, out bool fromHost)
     {
         State s = Resolve();
+        fromHost = false;
         if (s.TierOf(weight) == GpuResidencyTier.Weight)
         {
             return false;
         }
-        s.PreloadWeight(weight);
+        fromHost = s.PreloadWeightFromHost(weight);
         return true;
+    }
+
+    /// <summary>Weights and bytes the current device's explicit preloads left on the host for want of room.</summary>
+    internal static (long Weights, long Bytes) PreloadSkipped()
+    {
+        State s = Resolve();
+        return (s.PreloadSkippedWeights, s.PreloadSkippedBytes);
     }
 
 
@@ -1283,6 +1319,162 @@ internal static unsafe class GpuTransferHelper
 
     internal static bool IsActivationCached(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
 
+    /// <summary>The Windows 8 GiB guard is on: Windows only (it is the WDDM per-process video-memory budget that collapses; a full card elsewhere
+    /// fails with an out-of-memory error that the allocator already recovers from), and <c>vram.overcommitReliefMb</c> above 0.</summary>
+    internal static bool OvercommitGuardActive => OperatingSystem.IsWindows() && EngineKnobs.OvercommitReliefMb.Value > 0;
+
+    /// <summary>The device reports under 64 MB free. On Windows that is what the driver says once a process holds more than about 8 GiB of a
+    /// 12 GiB card, with several GiB still physically free: its video-memory budget collapses (from 11.3 to 5.4 GB on the RTX 3060 tested),
+    /// allocations go on succeeding out of system memory, and everything that touches them runs 10 to 100 times slower, without an error.
+    /// Always false off Windows or with <c>vram.overcommitReliefMb</c> at 0. The first such reading on a device records the limit it found.</summary>
+    internal static bool DeviceReportsFull()
+    {
+        if (!OvercommitGuardActive || CudaDriverApi.cuMemGetInfo(out nuint free, out nuint total) != 0)
+        {
+            return false;
+        }
+
+        State s = Resolve();
+        if (free >= (64UL << 20))
+        {
+            NoteUsage(s, free, total);
+            // A limit that real use has since passed with gigabytes to spare was learned from a transient reading (another process holding memory
+            // for a moment): forget it, the next full reading learns it again.
+            long limit = System.Threading.Volatile.Read(ref s.OvercommitLimitBytes);
+            if (limit != 0 && (long)(total - free) > limit && free >= (1UL << 30))
+            {
+                System.Threading.Volatile.Write(ref s.OvercommitLimitBytes, 0);
+            }
+            return false;
+        }
+
+        // The last reading before the collapse is where the limit is; later growth (promoted weights, cached casts) stays under it.
+        long lastGood = System.Threading.Volatile.Read(ref s.LastGoodUsedBytes);
+        if (System.Threading.Volatile.Read(ref s.OvercommitLimitBytes) == 0 && lastGood > 0)
+        {
+            System.Threading.Volatile.Write(ref s.OvercommitLimitBytes, lastGood);
+        }
+
+        return true;
+    }
+
+    /// <summary>Records the device's used memory from a reading that still showed free memory: the level a later full reading learns its limit
+    /// from. Every place that reads <c>cuMemGetInfo</c> feeds it, so it is never far behind.</summary>
+    private static void NoteUsage(State s, nuint free, nuint total)
+    {
+        if (free >= (64UL << 20))
+        {
+            System.Threading.Volatile.Write(ref s.LastGoodUsedBytes, (long)(total - free));
+        }
+    }
+
+    private static int _overcommitWarned;
+    private static long _lastOvercommitTrimTicks;
+
+    /// <summary>After a large allocation succeeded: says once, in the log, when the device now reports no free memory, and hands the allocator
+    /// pool's reserved-but-free memory back. Allocations go on succeeding when it does, out of system memory, so that line is the only sign
+    /// before a forward runs 10 to 100 times slower with no error. Does nothing while a step-graph capture is open: the trim synchronizes the
+    /// compute stream, which invalidates the capture (the allocator's own out-of-memory recovery refuses for the same reason).</summary>
+    internal static void NoteLargeAllocation(nuint byteSize)
+    {
+        if (byteSize < (128u << 20) || !OvercommitGuardActive)
+        {
+            return;
+        }
+
+        try
+        {
+            if (CurrentState.TrackCaptureWindow || !DeviceReportsFull())
+            {
+                return;
+            }
+
+            // Reserved-but-free pool memory is the part that can be handed back without touching a live buffer: a trim drops the process back under
+            // the limit when the pool is what took it over. Rate-limited, because the pool regrows and a trim stalls the stream.
+            long now = Environment.TickCount64;
+            if (now - System.Threading.Volatile.Read(ref _lastOvercommitTrimTicks) >= 1000)
+            {
+                System.Threading.Volatile.Write(ref _lastOvercommitTrimTicks, now);
+                // The allocating thread may be the upload stream's, so a capture on the compute stream can open between the flag check above and
+                // here: ask the driver, right before the stream sync that a capture cannot survive.
+                State s = CurrentState;
+                if (s.StreamHandle == 0 || (CudaDriverApi.cuStreamIsCapturing(s.StreamHandle, out int captureStatus) == 0 && captureStatus == 0))
+                {
+                    TrimPool();
+                }
+            }
+
+            if (System.Threading.Interlocked.Exchange(ref _overcommitWarned, 1) == 0)
+            {
+                Logs.Warning("[Cuda] The device reports no free memory after a large allocation, which succeeded. On Windows that means the process has gone "
+                    + "past the video memory it is given (about 8 GiB on a 12 GiB card): the rest is backed by system memory and every op that touches it runs "
+                    + "10 to 100 times slower, without an error. Free device memory between stages (weights, activations, the allocator pool) or stream weights "
+                    + "instead of keeping them resident. See docs/Checklists/TROUBLESHOOTING.md, GPU residency.");
+            }
+        }
+        catch (Exception)
+        {
+            // A diagnostic must never fail an allocation.
+        }
+    }
+
+    /// <summary>Whether growing the device's used memory by <paramref name="extraBytes"/> keeps it under the limit a <see cref="DeviceReportsFull"/>
+    /// reading found on this device (less 256 MB). Always true until one has been found.</summary>
+    internal static bool UnderOvercommitLimit(long extraBytes) => UnderOvercommitLimit(Resolve(), extraBytes);
+
+    private static bool UnderOvercommitLimit(State s, long extraBytes)
+    {
+        long limit = System.Threading.Volatile.Read(ref s.OvercommitLimitBytes);
+        if (limit == 0 || !OvercommitGuardActive)
+        {
+            return true;
+        }
+
+        if (CudaDriverApi.cuMemGetInfo(out nuint free, out nuint total) != 0)
+        {
+            return true;
+        }
+
+        NoteUsage(s, free, total);
+        return (long)(total - free) + extraBytes <= limit - (256L << 20);
+    }
+
+    /// <summary>Releases the weights a preload placed last, until the device reports free memory again and <c>vram.overcommitReliefMb</c> is given
+    /// back, so the pool and activations of the next forward fit under the limit. The weights stay on the host and upload per op.
+    /// <paramref name="placed"/> holds only weights this preload uploaded from the host (never a promoted activation, whose device buffer may be
+    /// the only copy of its contents); each one released also leaves <paramref name="rollback"/>.</summary>
+    internal static void ReleaseForOvercommit(List<Tensor> placed, List<Tensor> rollback)
+    {
+        long target = EngineKnobs.OvercommitReliefMb.Value << 20;
+        long released = 0;
+        int count = 0;
+        State s = Resolve();
+        while (placed.Count > 0)
+        {
+            nuint free = 0;
+            if (released >= target && CudaDriverApi.cuMemGetInfo(out free, out _) == 0 && free >= (256UL << 20))
+            {
+                break;
+            }
+
+            Tensor weight = placed[^1];
+            placed.RemoveAt(placed.Count - 1);
+            int at = rollback.LastIndexOf(weight);
+            if (at >= 0)
+            {
+                rollback.RemoveAt(at);
+            }
+            long bytes = (long)ByteSize(weight);
+            s.FreeWeights([weight]);
+            released += bytes;
+            count++;
+        }
+
+        Logs.Warning($"[Cuda] The device ran out of memory part-way through a weight preload (it reports no free memory while the card may still have "
+            + $"room: past about 8 GiB per process Windows pages the rest out). Released the last {count} preloaded weight(s), {released >> 20} MB, and left the "
+            + "rest on the host, where they upload per op. vram.overcommitReliefMb sets how much is given back.");
+    }
+
     /// <summary>Whether a tensor that has now missed twice should be made resident, and there is room for it.</summary>
     /// <remarks>Weights are the only tensors that live long enough to be uploaded twice — an activation is a fresh
     /// object every op — so a second miss on the same object identifies a weight belonging to a pipeline that never
@@ -1299,8 +1491,12 @@ internal static unsafe class GpuTransferHelper
         {
             return false;
         }
-        if (CudaDriverApi.cuMemGetInfo(out nuint free, out _) != 0
-            || (long)free - (long)byteSize < _autoPromoteHeadroomBytes)
+        if (CudaDriverApi.cuMemGetInfo(out nuint free, out nuint total) != 0)
+        {
+            return false;
+        }
+        NoteUsage(s, free, total);
+        if ((long)free - (long)byteSize < _autoPromoteHeadroomBytes || !UnderOvercommitLimit(s, (long)byteSize))
         {
             return false;
         }
