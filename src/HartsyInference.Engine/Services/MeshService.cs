@@ -257,15 +257,11 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         long? seed = null;
         if (descriptor.Fields[nameof(MeshRequest.Seed)].Access == MeshFieldAccess.Used)
         {
-            seed = MeshSeed.Resolve(request.Seed, WrapsLargeSeeds(id));
+            seed = MeshSeed.Resolve(request.Seed);
             parameters[nameof(MeshRequest.Seed)] = ParameterProvenance.Seed(request.Seed, seed.Value);
         }
         return new MeshSettingsUsed { ModelId = id, Seed = seed, Parameters = parameters, EngineVersion = EngineVersion };
     }
-
-    /// <summary>The models whose seed above <see cref="int.MaxValue"/> is cast to <c>int</c> unchecked. Read from the profile: <c>WrappingSeed()</c> in <see cref="MeshModelProfiles"/> is the one that shows no maximum, so editing it changes this.</summary>
-    private static bool WrapsLargeSeeds(string id) =>
-        MeshModelProfiles.Find(id)!.Fields.Single(f => f.Name == nameof(MeshRequest.Seed)) is { Access: MeshFieldAccess.Used, Max: null };
 
     private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
@@ -310,7 +306,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     Height = image.Height,
                     GridResolution = request.GridResolution,
                     Steps = request.Steps,
-                    Seed = request.Seed < 0 ? null : (int)request.Seed,
+                    Seed = MeshSeed.ForSampler(request.Seed),
                 };
                 ThreeDResult result = loaded.Generate(job, p =>
                 {
@@ -366,7 +362,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             {
                 cancel.ThrowIfCancellationRequested();
                 UniRigPipeline pipeline = GetOrLoadRig(spec, id);
-                UniRigResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, p =>
+                UniRigResult result = pipeline.Generate(input, MeshSeed.ForSampler(request.Seed), p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
@@ -416,7 +412,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             {
                 cancel.ThrowIfCancellationRequested();
                 P3SamPipeline pipeline = GetOrLoadPart(spec, id);
-                P3SamResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, onProgress: p =>
+                P3SamResult result = pipeline.Generate(input, MeshSeed.ForSampler(request.Seed), onProgress: p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
@@ -482,7 +478,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         {
             Steps = request.Steps == 0 ? null : request.Steps,
             TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
+            Seed = MeshSeed.ForSampler(request.Seed),
         };
 
         return Task.Run(

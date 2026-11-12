@@ -11,13 +11,12 @@ public static class Pixal3DRequestMapper
     public static Pixal3DOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Pixal3D seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
+        MeshSeed.Require(request);
         return new Pixal3DOptions
         {
             Grid = request.GridResolution,
             Steps = request.Steps,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
+            Seed = MeshSeed.ForSampler(request.Seed),
             FovRadians = request.FieldOfViewRadians,
             Texture = request.Texture,
             TextureSize = request.TextureSize,

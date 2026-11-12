@@ -41,23 +41,15 @@ public sealed class MeshSettingsTests
         Assert.False(settings.Parameters.ContainsKey(nameof(MeshRequest.Seed)));
     }
 
-    [Fact]
-    public void AModelThatWrapsALargeSeedReportsTheUnsignedLowBitsSoTheyReplay()
+    [Theory]
+    [InlineData("hunyuan3d")]
+    [InlineData("trellis")]
+    [InlineData("unirig")]
+    public void ASeedBeyondTheRangeIsReportedAsRequestedForTheValidatorToReject(string id)
     {
-        MeshSettingsUsed beyond = MeshService.SettingsOf("hunyuan3d", new MeshRequest { Seed = (1L << 32) + 5 });
-        MeshSettingsUsed negative = MeshService.SettingsOf("hunyuan3d", new MeshRequest { Seed = 1L << 31 });
+        MeshSettingsUsed settings = MeshService.SettingsOf(id, new MeshRequest { Seed = 1L << 32 });
 
-        Assert.Equal(5, beyond.Seed);
-        Assert.Equal(1L << 31, negative.Seed);
-        Assert.Equal(unchecked((int)(1L << 31)), unchecked((int)negative.Seed!.Value));
-    }
-
-    [Fact]
-    public void AModelThatChecksTheSeedKeepsTheRequestedValueForTheValidatorToReject()
-    {
-        MeshSettingsUsed settings = MeshService.SettingsOf("trellis2", new MeshRequest { Seed = 1L << 31 });
-
-        Assert.Equal(1L << 31, settings.Seed);
+        Assert.Equal(1L << 32, settings.Seed);
     }
 
     [Fact]

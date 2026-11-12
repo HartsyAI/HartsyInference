@@ -175,26 +175,50 @@ public sealed class MeshPlanningTests
 
     [Theory]
     [MemberData(nameof(Ids))]
-    public void TheSeedRangeOfTheProfileIsTheRuleTheValidatorEnforces(string id)
+    public void EveryModelRejectsASeedBeyondTheSamplersRangeAndAcceptsTheLargestOne(string id)
+    {
+        MeshRequest beyond = Valid(id) with { Seed = (long)int.MaxValue + 1 };
+        MeshRequest largest = Valid(id) with { Seed = int.MaxValue };
+        MeshRequest wrapsToZero = Valid(id) with { Seed = 1L << 32 };
+
+        foreach (MeshRequest request in new[] { beyond, wrapsToZero })
+        {
+            ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+            Assert.Equal(nameof(MeshRequest.Seed), MeshFieldTag.FieldOf(error));
+        }
+        Assert.Null(Record.Exception(() => MeshRequestValidator.Validate(id, largest, matterAvailable: false)));
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void TheProfileStatesTheSeedRangeTheValidatorEnforces(string id)
     {
         MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
-        MeshRequest request = Valid(id) with { Seed = (long)int.MaxValue + 1 };
-        Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
 
-        if (seed.Access == MeshFieldAccess.Used && seed.Max == int.MaxValue)
-            Assert.IsType<ArgumentOutOfRangeException>(error);
-        else
-            Assert.Null(error);
+        Assert.Equal((double)int.MaxValue, seed.Max);
+        Assert.Contains(seed.Access, new[] { MeshFieldAccess.Used, MeshFieldAccess.Ignored });
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d")]
+    [InlineData("trellis")]
+    [InlineData("unirig")]
+    [InlineData("triposr")]
+    public async Task TheModelsThatOnceWrappedALargeSeedNowReportItAsAPlanError(string id)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { Seed = (1L << 32) + 5 });
+
+        Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Seed));
     }
 
     [Fact]
-    public void TheModelsThatWrapALargeSeedSayTheyDo()
+    public void TheSamplerCastIsCheckedSoNoCallerCanWrapASeed()
     {
-        foreach (string id in new[] { "hunyuan3d", "trellis", "unirig" })
-        {
-            MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
-            Assert.Null(seed.Max);
-        }
+        Assert.Null(MeshSeed.ForSampler(-1));
+        Assert.Equal(7, MeshSeed.ForSampler(7));
+        Assert.Throws<OverflowException>(() => MeshSeed.ForSampler(1L << 32));
     }
 
     [Theory]
