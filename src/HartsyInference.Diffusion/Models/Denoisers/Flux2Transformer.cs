@@ -2,15 +2,13 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
+using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
 /// <summary>Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Distinct from <see cref="FluxTransformer"/>: LayerNorm for stream norms, top-level shared modulation projections (one Linear per stream type, output reused across all blocks), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.</summary>
 public sealed unsafe class Flux2Transformer : IDisposable
 {
-    /// <summary>The modality embedding's key, the same in the checkpoint and after conversion.</summary>
-    public const string ModalityEmbeddingKey = "modality_in.weight";
-
     private readonly Flux2Config _config;
     private readonly Flux2DoubleBlock[] _doubleBlocks;
     private readonly Flux2SingleBlock[] _singleBlocks;
@@ -837,12 +835,12 @@ public sealed unsafe class Flux2Transformer : IDisposable
         if (_config.ModalityCount == 0)
             return;
         int hidden = _config.HiddenSize;
-        if (!weights.TryGetValue(ModalityEmbeddingKey, out Tensor? table))
-            throw new KeyNotFoundException($"The checkpoint has no '{ModalityEmbeddingKey}', which this Flux.2 variant needs.");
+        if (!weights.TryGetValue(Flux2CheckpointConverter.ModalityEmbeddingKey, out Tensor? table))
+            throw new KeyNotFoundException($"The checkpoint has no '{Flux2CheckpointConverter.ModalityEmbeddingKey}', which this Flux.2 variant needs.");
         if (table.Shape.Rank != 2 || table.Shape[0] != _config.ModalityCount || table.Shape[1] != hidden)
         {
             throw new InvalidOperationException(
-                $"'{ModalityEmbeddingKey}' is {table.Shape}; expected [{_config.ModalityCount}, {hidden}].");
+                $"'{Flux2CheckpointConverter.ModalityEmbeddingKey}' is {table.Shape}; expected [{_config.ModalityCount}, {hidden}].");
         }
         Tensor f32 = TensorCasts.EnsureF32(table);
         try

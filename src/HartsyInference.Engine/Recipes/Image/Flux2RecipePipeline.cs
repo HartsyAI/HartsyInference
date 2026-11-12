@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Runtime.InteropServices;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -25,7 +24,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     private readonly Flux2Config _config = config;
     private readonly Qwen3Tokenizer? _qwenTokenizer = qwenTokenizer;
     private readonly ErnieTokenizer? _mistralTokenizer = mistralTokenizer;
-    private readonly string _mistralSystemPrompt = mistralSystemPrompt;
+    private readonly Flux2PromptTokenizer _tokenizer = new(config, qwenTokenizer, mistralTokenizer, mistralSystemPrompt);
     private readonly LlamaStyleEncoder _encoder = encoder;
     private readonly List<IDisposable> _loaders = loaders;
     private int _disposed;
@@ -54,12 +53,12 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         // makes for the same reason. Idempotent when nothing schedules, and a no-op on the weight tags ImagesService
         // already turned into parens.
         string flatPrompt = PromptTagFlattening.Flatten(prompt);
-        WeightedTokenSequence tokens = Tokenize(flatPrompt);
+        WeightedTokenSequence tokens = _tokenizer.Tokenize(flatPrompt);
         WeightedTokenSequence? promptWeights = tokens.IsUniformlyUnweighted ? null : tokens;
         // Each distinct step-text goes through the SAME Tokenize, so a branch carrying its own emphasis is weighted
         // per branch. Null when the prompt schedules nothing, which keeps an ordinary request on the single-encode
         // path; a schedule that collapses to one variant also lands there, on the flattened ids above.
-        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(prompt, steps, Tokenize);
+        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(prompt, steps, _tokenizer.Tokenize);
 
         // Resolved at the 16-rounded size Flux2Pipeline validates against.
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
@@ -126,51 +125,8 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         {
             // Regions are not weighted yet (C.2 work): strip the emphasis rather than let the parens and digits
             // reach the encoder as prose, which is what SwarmUI does for anything it is not weighting.
-            return _pipeline.EncodeRegionText(Tokenize(PromptWeighting.Join(PromptWeighting.Parse(text))).Tokens);
+            return _pipeline.EncodeRegionText(_tokenizer.Tokenize(PromptWeighting.Join(PromptWeighting.Parse(text))).Tokens);
         });
-    }
-
-    /// <summary>Tokenizes <paramref name="prompt"/> through whichever text stack this checkpoint carries, carrying the
-    /// per-token weights its emphasis grammar asks for. Klein's <see cref="Qwen3Tokenizer.EncodeChat"/> merges
-    /// <c>user\n</c> with the prompt in ONE BPE call, which is load-bearing for a prompt that begins with whitespace —
-    /// so an unweighted prompt keeps that call verbatim and only a weighted one splits per span.</summary>
-    /// <remarks>A WEIGHTED prompt therefore tokenizes per leaf, and a leaf that begins with whitespace will not merge
-    /// with the <c>user\n</c> before it: <c>"\n(cat:1.5)"</c> emits two newline tokens where <c>"\ncat"</c> emits
-    /// one. That is SwarmUI's own behaviour — <c>calc_leaf</c> tokenizes each leaf alone — so it is parity, not drift,
-    /// and <c>ChatTemplateWeightingTests</c> pins it so nobody later "fixes" it into a boundary shift.</remarks>
-    private WeightedTokenSequence Tokenize(string prompt)
-    {
-        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(prompt);
-        if (_config.TextEncoderType == Flux2TextEncoderType.Mistral)
-        {
-            return BuildMistralDevTokens(_mistralTokenizer!, spans);
-        }
-        if (!PromptWeighting.HasWeights(spans))
-        {
-            int[] plain = _qwenTokenizer!.EncodeChat(PromptWeighting.Join(spans));
-            return new WeightedTokenSequence(plain, Ones(plain.Length)) { UniformWeight = 1f };
-        }
-        (int[] prefix, int[] suffix) = _qwenTokenizer!.ChatTemplateIds();
-        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _qwenTokenizer.EncodeRaw, prefix, suffix);
-        return built.Truncate(_qwenTokenizer.MaxLength).PadTo(_qwenTokenizer.MaxLength, _qwenTokenizer.PadTokenId);
-    }
-
-    /// <summary>Builds Flux.2 Dev conditioning ids: <c>&lt;s&gt;[SYSTEM_PROMPT]sys[/SYSTEM_PROMPT][INST]prompt[/INST]</c>. Special markers are spliced as raw ids (BOS=1, [SYSTEM_PROMPT]=17, [/SYSTEM_PROMPT]=18, [INST]=3, [/INST]=4) around byte-level BPE segments — special strings are pre-token boundaries in the HF reference, so segment-wise encoding is id-exact. No EOS (ComfyUI <c>has_end_token=False</c>). The byte-level map is per-byte, so encoding each emphasis span separately concatenates to the same string the whole-prompt call would have produced.</summary>
-    private WeightedTokenSequence BuildMistralDevTokens(ErnieTokenizer tokenizer, IReadOnlyList<WeightedSpan> spans)
-    {
-        List<int> prefix = new List<int>(256) { 1, 17 };
-        prefix.AddRange(tokenizer.EncodeRaw(ByteLevelCodec.Encode(_mistralSystemPrompt)));
-        prefix.Add(18);
-        prefix.Add(3);
-        return WeightedTokenBuilder.Build(spans, text => tokenizer.EncodeRaw(ByteLevelCodec.Encode(text)),
-            CollectionsMarshal.AsSpan(prefix), [4]);
-    }
-
-    private static float[] Ones(int length)
-    {
-        float[] weights = new float[length];
-        Array.Fill(weights, 1f);
-        return weights;
     }
 
     /// <inheritdoc/>

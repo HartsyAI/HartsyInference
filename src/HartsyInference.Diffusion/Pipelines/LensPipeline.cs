@@ -202,7 +202,7 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Stopwatch sw = Stopwatch.StartNew();
 
         // ── 1. Empirical-mu schedule ──────────────────────────────
-        float mu = ComputeEmpiricalMu(imgSeqLen, steps);
+        float mu = FlowMatchEulerDiscreteScheduler.EmpiricalMu(imgSeqLen, steps);
         float shift = MathF.Exp(mu);
         Logs.Info($"Lens empirical_mu={mu:F4} → shift={shift:F4} (seq_len={imgSeqLen}, steps={steps})");
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(shift);
@@ -398,21 +398,6 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         Logs.Info($"Lens generation complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
 
         return (rgbData, imgW, imgH, seed);
-    }
-
-    /// <summary>Empirical-mu schedule from <c>lens/pipeline.py:compute_empirical_mu</c>. Piecewise linear in image_seq_len for short sequences (≤4300), single linear regression for long ones.</summary>
-    private static float ComputeEmpiricalMu(int imageSeqLen, int numSteps)
-    {
-        const double a1 = 8.73809524e-05, b1 = 1.89833333;
-        const double a2 = 0.00016927, b2 = 0.45666666;
-        if (imageSeqLen > 4300)
-            return (float)(a2 * imageSeqLen + b2);
-
-        double m200 = a2 * imageSeqLen + b2;
-        double m10 = a1 * imageSeqLen + b1;
-        double a = (m200 - m10) / 190.0;
-        double b = m200 - 200.0 * a;
-        return (float)(a * numSteps + b);
     }
 
     /// <summary>Applies upstream's norm-rescaled CFG: <c>comb = uncond + cfg * (cond - uncond)</c>, then per-token L2-norm rescale <c>noise = comb * (||cond|| / max(||comb||, 1e-12))</c>. Operates on packed-token tensors <c>[B, S, C]</c>; the norm is over the channel dim. Runs entirely through <see cref="IBackend"/> ops so the two velocity predictions never leave the device — the host <c>float*</c> version this replaces D2H-synced and evicted both of them (2 syncs + two 2 MB round-trips) on every step.</summary>

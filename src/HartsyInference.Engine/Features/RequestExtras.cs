@@ -103,6 +103,34 @@ public static class RequestExtras
     /// <summary>What steps outside the window do: <c>keep</c> (the reference stays in both branches) or <c>drop</c> (plain CFG on the base).</summary>
     public const string ReferenceOutside = "reference.outside";
 
+    /// <summary>The Iris-Z task: <c>image</c> (prompt to image), <c>rgbd</c> (prompt to image and depth), <c>depth</c> (the init
+    /// image to its depth map) or <c>paint</c> (the init image is a depth map to generate from). Absent means <c>depth</c> when an
+    /// init image is set and <c>image</c> otherwise.</summary>
+    public const string IrisZTask = "irisz.task";
+
+    /// <summary>How an Iris-Z <c>depth</c> result is rendered into the image: <c>colours</c> (default; near red, far blue,
+    /// sky black), <c>depth</c> (grey, bright is far) or <c>disparity</c> (grey, bright is near). The log depth itself is
+    /// always returned in <see cref="Requests.ImageResult.Depth"/>.</summary>
+    public const string IrisZDepthFormat = "irisz.depth_format";
+
+    /// <summary>How an Iris-Z <c>paint</c> init image encodes depth: <c>depth</c> (default, bright is far) or <c>disparity</c>
+    /// (bright is near).</summary>
+    public const string IrisZInputDepthFormat = "irisz.input_depth_format";
+
+    /// <summary>The working size of the Iris-Z <c>depth</c> and <c>paint</c> tasks, 512 or 1024 (about that many pixels
+    /// squared). Absent means 1024 for <c>paint</c>, and for <c>depth</c> 512 below 0.5 megapixels and 1024 above.</summary>
+    public const string IrisZResolution = "irisz.resolution";
+
+    /// <summary>Sampling steps of the Iris-Z <c>depth</c> task (default 4); the request's step count applies to generation only.</summary>
+    public const string IrisZDepthSteps = "irisz.depth_steps";
+
+    /// <summary>How many seeds the Iris-Z <c>depth</c> task combines (default 1; the published benchmarks use 10).</summary>
+    public const string IrisZDepthSeeds = "irisz.depth_seeds";
+
+    /// <summary>Returns the jointly denoised depth of an Iris-Z <c>rgbd</c> run instead of estimating it again from the
+    /// finished image (the default, which is sharper).</summary>
+    public const string IrisZJointDepth = "irisz.joint_depth";
+
     /// <summary>The boolean at <paramref name="key"/> (<c>true/false</c>, <c>on/off</c>, <c>1/0</c>, or a JSON boolean), or
     /// <paramref name="fallback"/> when absent or unparseable (logged).</summary>
     public static bool Bool(IReadOnlyDictionary<string, object>? extra, string key, bool fallback)
