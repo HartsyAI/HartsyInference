@@ -499,9 +499,9 @@ public static class P3SamPartLabeler
         return dx == 0 && dy == 0 && dz == 0 ? 0 : Math.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    // aabb_increase and the caller's max(np.max(min_increase), np.max(max_increase)). Upstream divides by the coordinate itself, not by the side length, so a
-    // box with a coordinate at or near 0 gives infinite or NaN growth; kept as is to reproduce upstream's choice of part. the relative growth |after - before| / |before| of each side of `before`
-    // when joined with `other`. np.max propagates NaN (a zero side gives 0 / 0), Python's max(a, b) keeps a unless b is greater.
+    // aabb_increase and the caller's max(np.max(min_increase), np.max(max_increase)): the relative growth |after - before| / |before| of each side of `before`
+    // when joined with `other`. Upstream divides by the coordinate itself, not by the side length, so a box with a coordinate at or near 0 gives infinite or NaN
+    // growth; kept as is to reproduce upstream's choice of part. np.max propagates NaN (a zero side gives 0 / 0), Python's max(a, b) keeps a unless b is greater.
     private static double BoxIncrease(double[] before, double[] other)
     {
         double[] low = new double[3], high = new double[3];

@@ -6,9 +6,9 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 
 /// <summary>A P3-SAM MLP: <c>Linear, GELU, Linear, GELU, Linear</c> (state-dict keys <c>{prefix}.0</c>, <c>.2</c>, <c>.4</c>), held as host arrays, with the matrix
 /// products going through the backend.</summary>
-internal sealed class P3SamMlp
+internal sealed class P3SamMlp : IDisposable
 {
-    public readonly float[] W0, B0, W1, B1, W2, B2;
+    public readonly float[] W0, B0;
     public readonly Tensor T0, TB0, T1, TB1, T2, TB2;
     public readonly int In, Hidden, Out;
 
@@ -20,16 +20,20 @@ internal sealed class P3SamMlp
         Out = (int)w2.Shape[0];
         if (w1.Shape[0] != Hidden || w1.Shape[1] != Hidden || w2.Shape[1] != Hidden)
             throw new HartsyInferenceException($"P3-SAM MLP '{prefix}' has inconsistent layer shapes.");
+        // The first layer stays as host arrays too (the heads split its columns); every layer lives as a tensor made once, so a forward pass does not copy
+        // the weights into a fresh tensor on every call.
         W0 = ToArray(w0);
         B0 = ToArray(Get(weights, prefix, 0, "bias"));
-        W1 = ToArray(w1);
-        B1 = ToArray(Get(weights, prefix, 2, "bias"));
-        W2 = ToArray(w2);
-        B2 = ToArray(Get(weights, prefix, 4, "bias"));
-        // The layers also live as tensors made once, so a forward pass does not copy the weights into a fresh tensor every call.
         (T0, TB0) = (Own(W0, Hidden, In), Own(B0, Hidden));
-        (T1, TB1) = (Own(W1, Hidden, Hidden), Own(B1, Hidden));
-        (T2, TB2) = (Own(W2, Out, Hidden), Own(B2, Out));
+        (T1, TB1) = (Own(ToArray(w1), Hidden, Hidden), Own(ToArray(Get(weights, prefix, 2, "bias")), Hidden));
+        (T2, TB2) = (Own(ToArray(w2), Out, Hidden), Own(ToArray(Get(weights, prefix, 4, "bias")), Out));
+    }
+
+    /// <summary>Releases the layer tensors.</summary>
+    public void Dispose()
+    {
+        foreach (Tensor tensor in new[] { T0, TB0, T1, TB1, T2, TB2 })
+            tensor.Dispose();
     }
 
     private static Tensor Own(float[] values, params long[] shape)

@@ -47,7 +47,8 @@ public sealed class P3SamAutoMaskTests
             state[key] = value;
         using CpuBackend backend = new();
         using P3SamFeatures features = new(backend, state, config);
-        P3SamAutoMask segmenter = new(backend, features, new P3SamHeads(state));
+        using P3SamHeads heads = new(state);
+        P3SamAutoMask segmenter = new(backend, features, heads);
         List<string> log = [];
         segmenter.StageLog = log.Add;
         P3SamAutoMask.Options options = new() { PointCount = 300, PromptCount = 8, Seed = 5 };

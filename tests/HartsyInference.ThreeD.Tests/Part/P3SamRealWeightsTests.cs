@@ -21,7 +21,7 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         Stopwatch watch = Stopwatch.StartNew();
         using P3SamFeatures features = new(backend, state);
-        P3SamHeads heads = new(state);
+        using P3SamHeads heads = new(state);
         output.WriteLine($"encoder and heads built: {watch.Elapsed.TotalSeconds:F1} s, feature width {features.FeatureDim}");
         Assert.Equal(512, features.FeatureDim);
         Assert.Equal(512, heads.FeatureDim);
@@ -54,7 +54,7 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
 
         float[] unit = new float[count * 3];
         for (int i = 0; i < unit.Length; i++)
-            unit[i] = (float)points[i] / (i % 3 == 1 ? 1f : 1f);
+            unit[i] = (float)points[i];
         watch.Restart();
         P3SamHeads.Prepared prepared = heads.Prepare(backend, feature, unit, count);
         output.WriteLine($"head setup: {watch.Elapsed.TotalSeconds:F1} s");
@@ -128,12 +128,14 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
             int[] expectedStageGrid = [.. ToArray(fixture[$"grid{s}"]).Select(v => (int)v)];
             int differing = detail.StageGrids[s].Length != expectedStageGrid.Length ? -1 : detail.StageGrids[s].Zip(expectedStageGrid).Count(p => p.First != p.Second);
             output.WriteLine($"stage {s} grid coordinates: {detail.StageGrids[s].Length / 3} rows, expected {expectedStageGrid.Length / 3}, differing values {differing}");
-            Report($"sonata stage {s}", detail.Stages[s], ToArray(fixture[$"stage{s}"]), 5e-3);
+            Assert.Equal(expectedStageGrid, detail.StageGrids[s]);
+            Report($"sonata stage {s}", detail.Stages[s], ToArray(fixture[$"stage{s}"]), 1e-3);
         }
-        Report("gathered 1232 channels", detail.Gathered, ToArray(fixture["gathered"]), 5e-3);
-        Report("features (512, per point)", detail.Features, ToArray(fixture["features"]), 5e-3);
+        Report("gathered 1232 channels", detail.Gathered, ToArray(fixture["gathered"]), 1e-3);
+        Report("features (512, per point)", detail.Features, ToArray(fixture["features"]), 1e-3);
 
-        P3SamHeads heads = new(state);
+        // The heads take the features of the fixture, not the C# ones, so the two halves are checked on their own.
+        using P3SamHeads heads = new(state);
         P3SamHeads.Prepared prepared = heads.Prepare(backend, ToArray(fixture["features"]), pointsFloat, count);
         for (int k = 0; k < 2; k++)
         {
@@ -146,8 +148,8 @@ public sealed class P3SamRealWeightsTests(ITestOutputHelper output)
             for (int i = 0; i < count; i++)
                 for (int m = 0; m < 3; m++)
                     actualMask[i * 3 + m] = result.Masks[m][i];
-            Report($"mask probabilities, prompt {k}", actualMask, expectedMask, 5e-3);
-            Report($"predicted IoU, prompt {k}", result.Iou, ToArray(fixture[$"iou_{k}"]), 5e-3);
+            Report($"mask probabilities, prompt {k}", actualMask, expectedMask, 1e-5);
+            Report($"predicted IoU, prompt {k}", result.Iou, ToArray(fixture[$"iou_{k}"]), 1e-5);
         }
     }
 }

@@ -10,7 +10,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 /// <para>The first layer of every head is linear in a concatenation whose per-point part (feature and point) does not depend on the prompt, so that part
 /// is computed once per mesh (<see cref="Prepare"/>) and only the prompt and logit terms are added per prompt. The result is the same function as
 /// upstream's concatenate-then-MLP, evaluated in a different order.</para></summary>
-public sealed class P3SamHeads
+public sealed class P3SamHeads : IDisposable
 {
     private const int PointWidth = 3, PromptWidth = 3, Masks = 3;
     private readonly P3SamMlp _seg1, _seg2, _seg3, _g, _s21, _s22, _s23, _iou, _iouOut;
@@ -35,6 +35,13 @@ public sealed class P3SamHeads
         foreach (P3SamMlp s2 in new[] { _s21, _s22, _s23 })
             Expect(s2.In == _hidden2 + _featureDim + PointWidth + PromptWidth + Masks && s2.Out == 1, "seg_s2_mlp input");
         Expect(_iou.In == _hidden2 + _featureDim + PointWidth + PromptWidth + Masks && _iouOut.Out == Masks, "iou head input");
+    }
+
+    /// <summary>Releases the layer tensors of every head.</summary>
+    public void Dispose()
+    {
+        foreach (P3SamMlp mlp in new[] { _seg1, _seg2, _seg3, _g, _s21, _s22, _s23, _iou, _iouOut })
+            mlp.Dispose();
     }
 
     /// <summary>Per-point feature width (512 for P3-SAM).</summary>

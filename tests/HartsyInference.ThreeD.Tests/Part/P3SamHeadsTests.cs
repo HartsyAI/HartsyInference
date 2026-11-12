@@ -97,7 +97,7 @@ public sealed class P3SamHeadsTests
         float[] points = Enumerable.Range(0, Points * 3).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray();
         float[] prompt = [0.3f, -0.2f, 0.5f];
         using CpuBackend backend = new();
-        P3SamHeads heads = new(w);
+        using P3SamHeads heads = new(w);
 
         P3SamHeads.Result result = heads.Segment(backend, heads.Prepare(backend, features, points, Points), prompt);
 
