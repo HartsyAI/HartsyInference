@@ -74,7 +74,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
         int latentH = height / 16, latentW = width / 16;
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
-        double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!);
+        double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!, RequiredSteps);
 
         // TODO(gpu): the picture label. The image path uses "Picture N: " with no brackets (nodes_minimax_h3.py); this
         // text-only path has no references, so no label is emitted yet. Phase 5b must add it.
@@ -86,24 +86,19 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             int textLen = (int)encoded.HiddenStates.Shape[0];
             MiniMaxH3PackedLayout layout = new MiniMaxH3PackedLayout(textLen, 1, latentH, latentW, 0);
 
-            // TODO(gpu): ComfyUI draws noise with its own generator. Matching the seed bit-for-bit is not required; the
-            // parity test feeds saved noise instead.
-            noise = SeedGenerator.CreateNoise(new TensorShape(new long[] { 1, _config.LatentsDim, 1, latentH, latentW }), seed);
+            // The same seed gives the same noise as ComfyUI's torch.randn (see TorchCompatibleNoise), so a request is comparable
+            // with the reference image, not just with itself.
+            noise = TorchCompatibleNoise.Randn(new TensorShape([1L, _config.LatentsDim, 1L, latentH, latentW]), seed);
             x = MiniMaxH3Latents.PackVideo(noise, _config);
 
-            (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(),
-                _config.AttentionHeadDim);
+            (Tensor cos, Tensor sin) = RopeTables(layout);
             try
             {
-                (Tensor stackedWeight, Tensor stackedBias) = _transformer.StackedVideoHead();
-                for (int step = 0; step < RequiredSteps; step++)
-                {
-                    cancel.ThrowIfCancellationRequested();
-                    x = DenoiseStep(x, layout, encoded, cos, sin, stackedWeight, stackedBias, sigmas[step],
-                        sigmas[step + 1]);
-                    // TODO(gpu): step progress and live previews through RecipeProgressAdapter and
-                    // LatentArchitecture.MiniMaxH3 are not wired yet.
-                }
+                (Tensor stackedWeight, Tensor stackedBias) = StackedHead();
+                // x is passed by ref so this frame always holds the live latent, even if a later step is cancelled.
+                RunSteps(ref x, sigmas, (current, sigma, sigmaNext) => DenoiseStep(current, layout, encoded, cos, sin,
+                    stackedWeight, stackedBias, sigma, sigmaNext), progress, cancel);
+                // TODO(gpu): live latent previews (LatentArchitecture.MiniMaxH3) are not wired yet; progress ticks are.
             }
             finally
             {
@@ -125,6 +120,12 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     /// refused upstream by the engine; these are the settings that reach the pipeline.</summary>
     internal static void RefuseUnsupported(ImageRequest request, ImageEffectiveSettings settings)
     {
+        if (request.Batch != 1)
+        {
+            throw new NotSupportedException(
+                $"MiniMax-H3-Image generates one image per request; got batch {request.Batch}. Send one request per image.");
+        }
+
         if (settings.Steps != RequiredSteps)
         {
             throw new NotSupportedException(
@@ -142,25 +143,70 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             throw new NotSupportedException("MiniMax-H3-Image does not take a negative prompt.");
         }
 
-        if (SamplingParamResolver.ResolveSchedulerName(request) is not null)
+        // The family's only schedule is simple. SamplingParamResolver treats normal and default as identity, so an
+        // explicit normal or default is accepted as that default; any other scheduler is refused by name.
+        string? selection = SamplingParamResolver.ResolveSchedulerName(request);
+        if (selection is not null && !IsSolverOwnSelection(selection))
         {
             throw new NotSupportedException(
-                "MiniMax-H3-Image picks its own sigma schedule; sampler and scheduler selection is not supported.");
+                $"MiniMax-H3-Image runs euler over the simple sigma schedule; sampler '{request.Sampler}' and "
+                + $"schedule '{request.Scheduler}' are not supported.");
         }
     }
+
+    /// <summary>True for the selections the image build's own solver already is: euler, or euler over the simple schedule.</summary>
+    internal static bool IsSolverOwnSelection(string selection) =>
+        selection.Trim().ToLowerInvariant() is "euler" or "euler_simple";
+
+    /// <summary>The prompt's token presentation for the image build. Plain text in, the way ComfyUI's image node presents
+    /// it: the Qwen byte-level BPE of the string as written, with no template and no special tokens.</summary>
+    internal static MiniMaxH3TextEncoding.Encoded PresentPrompt(Qwen2Tokenizer tokenizer, string prompt) =>
+        MiniMaxH3TextEncoding.Build(tokenizer, prompt, conditions: null, weightedPrompt: false);
 
     private MiniMaxH3TextEncoder.Result EncodePrompt(string prompt)
     {
         // TODO(gpu): the encoder's preload and release calls are not wired here; the video pipeline frees the encoder
         // weights after encoding, which matters once the image path shares a device with the DiT.
-        return _encoder.Encode(_textBackend, _tokenizer, prompt, null, null);
+        return _encoder.Encode(_textBackend, PresentPrompt(_tokenizer, prompt), null);
+    }
+
+    /// <summary>The text-side context the body receives, for device checks against ComfyUI's preprocessed context.</summary>
+    internal Tensor RefinedText(IBackend backend, Tensor textStates) => _transformer.RefinedText(backend, textStates);
+
+    /// <summary>The checkpoint-derived config the pipeline runs with.</summary>
+    internal MiniMaxH3Config Config => _config;
+
+    /// <summary>The rotary tables for one packed layout, as <see cref="Generate"/> builds them once per request.</summary>
+    internal (Tensor Cos, Tensor Sin) RopeTables(MiniMaxH3PackedLayout layout) =>
+        MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
+
+    /// <summary>The checkpoint's stacked video head, which <see cref="DenoiseStep"/> combines per step.</summary>
+    internal (Tensor Weight, Tensor Bias) StackedHead() => _transformer.StackedVideoHead();
+
+    /// <summary>Runs the sampler's steps over <paramref name="sigmas"/>: one denoise call per adjacent sigma pair, in order.
+    /// Cancellation is checked before each step, and each finished step reports one progress tick.</summary>
+    /// <remarks>The latent is passed by reference and replaced after every step, so the caller always holds the live tensor.
+    /// Each denoise call takes ownership of its input and returns the next latent; if a later step is cancelled, the caller
+    /// disposes the latent it holds, which is the one the last completed step returned.</remarks>
+    internal static void RunSteps(ref Tensor x, double[] sigmas, Func<Tensor, double, double, Tensor> denoise,
+        IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        int steps = sigmas.Length - 1;
+        for (int step = 0; step < steps; step++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            x = denoise(x, sigmas[step], sigmas[step + 1]);
+            progress?.Report(new StepPreview { Step = step + 1, TotalSteps = steps });
+        }
     }
 
     /// <summary>One sampler step: resolve the step's stacked head, run the image forward, and take the Euler step.</summary>
-    private Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
+    internal Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
         Tensor cos, Tensor sin, Tensor stackedWeight, Tensor stackedBias, double sigma, double sigmaNext)
     {
-        float tVideo = (float)(1.0 - sigma);
+        // ComfyUI hands the DiT float32(sigma * 1000) and runs on t = 1 - that / 1000. Only sigma * 1000 is rounded to float
+        // here; the rest, including dt below, is double, so t and dt can differ from ComfyUI's float32 by about one ulp.
+        float tVideo = (float)(1.0 - (double)(float)(sigma * 1000.0) / 1000.0);
         (float[] timesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
             MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, 0f, MiniMaxH3Schedule.VisualCondTimestep,
                 MiniMaxH3Schedule.AudioCondTimestep);
@@ -202,7 +248,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         }
     }
 
-    private ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
+    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
     {
         using Tensor latent = MiniMaxH3Latents.UnpackVideo(x, 1, latentH, latentW, _config);
         using Tensor frame = _decoder.Decode(_vaeBackend, latent);
