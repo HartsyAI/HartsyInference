@@ -37,7 +37,9 @@ public sealed class MeshServiceXPartFolderTests : IDisposable
 
         FileNotFoundException error = Assert.Throws<FileNotFoundException>(() => MeshService.XPartFolder(Path.Combine(_root, "p3sam", "p3sam.safetensors")));
         // The message starts with the path that was given (which names the P3-SAM file itself); the list of what is missing follows it.
-        string missing = error.Message[(error.Message.IndexOf("missing X-Part checkpoints:", StringComparison.Ordinal))..];
+        int start = error.Message.IndexOf("missing X-Part checkpoints:", StringComparison.Ordinal);
+        Assert.True(start >= 0, error.Message);
+        string missing = error.Message[start..];
         Assert.Contains("model/model.safetensors", missing);
         Assert.Contains("shapevae/shapevae.safetensors", missing);
         Assert.DoesNotContain("p3sam/p3sam.safetensors", missing);
