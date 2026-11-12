@@ -10,6 +10,9 @@ public sealed class PytorchPickleLoader : IDisposable
 {
     private readonly Dictionary<string, Tensor> _tensors = [];
     private ZipArchive? _lazyZip;
+    private Stream? _cursorStream;
+    private string? _cursorKey;
+    private long _cursorPosition;
     private Dictionary<string, PickleTensor>? _lazyMetas;
     private int _disposed;
 
@@ -83,7 +86,14 @@ public sealed class PytorchPickleLoader : IDisposable
             Dictionary<string, PickleTensor> metas = ParseZipMetas(zip, filePath, recursiveFlatten);
             Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
             foreach ((string name, PickleTensor meta) in metas)
-                descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = new TensorShape(meta.Size) };
+            {
+                descriptors[name] = new PytorchTensorDescriptor
+                {
+                    Name = name, DType = meta.Storage.DType, Shape = new TensorShape(meta.Size),
+                    StorageKey = meta.Storage.Key, StorageByteOffset = meta.Offset * meta.Storage.DType.SizeInBytes,
+                };
+            }
+
             FilePath = filePath;
             Descriptors = descriptors;
             _lazyMetas = metas;
@@ -96,7 +106,10 @@ public sealed class PytorchPickleLoader : IDisposable
         }
     }
 
-    /// <summary>Reads one tensor of a checkpoint opened with <see cref="OpenLazy"/> into new memory the caller owns, converted to <paramref name="convertTo"/> when given. At most the tensor and its converted copy are alive at once.</summary>
+    /// <summary>Reads one tensor of a checkpoint opened with <see cref="OpenLazy"/> into new memory the caller owns, converted to <paramref name="convertTo"/> when given. At most the tensor and its converted copy are alive at once.
+    /// <para>A ZIP entry cannot be seeked, so reading a tensor means reading the entry up to it. Some checkpoints keep every tensor as a view of one storage entry (Hunyuan3D-Omni's DiT: a single 12 GB entry): the loader keeps the
+    /// entry open between calls and continues from where the last tensor ended, so reading the tensors in ascending (<see cref="PytorchTensorDescriptor.StorageKey"/>, <see cref="PytorchTensorDescriptor.StorageByteOffset"/>) order
+    /// is one pass over the file; a tensor behind the cursor restarts the entry from its beginning.</para></summary>
     public unsafe Tensor ReadTensor(string name, DType? convertTo = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -108,7 +121,7 @@ public sealed class PytorchPickleLoader : IDisposable
         Tensor raw = new(shape, meta.Storage.DType);
         try
         {
-            ReadStorageInto(_lazyZip, meta, (byte*)raw.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
+            ReadFromCursor(_lazyZip, meta, (byte*)raw.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
             MakeRowMajor(raw, meta.Size, meta.Stride, meta.Storage.DType);
             if (convertTo is null || convertTo == raw.DType)
                 return raw;
@@ -121,6 +134,43 @@ public sealed class PytorchPickleLoader : IDisposable
             raw.Dispose();
             throw;
         }
+    }
+
+    private unsafe void ReadFromCursor(ZipArchive zip, PickleTensor meta, byte* dst, long byteCount)
+    {
+        string key = meta.Storage.Key;
+        long start = meta.Offset * meta.Storage.DType.SizeInBytes;
+        if (_cursorStream is null || _cursorKey != key || _cursorPosition > start)
+        {
+            _cursorStream?.Dispose();
+            _cursorStream = null;
+            ZipArchiveEntry entry = FindEntry(zip, "/data/" + key, "data/" + key)
+                ?? throw new InvalidOperationException($"Missing storage blob 'data/{key}'.");
+            _cursorStream = entry.Open();
+            _cursorKey = key;
+            _cursorPosition = 0;
+        }
+
+        Stream s = _cursorStream;
+        const int BufSize = 81920;
+        byte* buf = stackalloc byte[BufSize];
+        Span<byte> span = new(buf, BufSize);
+        for (long skip = start - _cursorPosition; skip > 0;)
+        {
+            int got = s.Read(span[..(int)Math.Min(skip, BufSize)]);
+            if (got <= 0) throw new EndOfStreamException("Truncated storage blob (skip).");
+            skip -= got;
+        }
+
+        long pos = 0;
+        while (pos < byteCount)
+        {
+            int got = s.Read(new Span<byte>(dst + pos, (int)Math.Min(byteCount - pos, 1 << 24)));
+            if (got <= 0) throw new EndOfStreamException("Truncated storage blob (data).");
+            pos += got;
+        }
+
+        _cursorPosition = start + byteCount;
     }
 
     private Dictionary<string, PickleTensor> ParseZipMetas(ZipArchive zip, string filePath, bool recursiveFlatten)
@@ -396,6 +446,8 @@ public sealed class PytorchPickleLoader : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Tensor t in _tensors.Values) t.Dispose();
         _tensors.Clear();
+        _cursorStream?.Dispose();
+        _cursorStream = null;
         _lazyZip?.Dispose();
         _lazyZip = null;
         _lazyMetas = null;
@@ -408,4 +460,10 @@ public sealed class PytorchTensorDescriptor
     public required string Name { get; init; }
     public required DType DType { get; init; }
     public required TensorShape Shape { get; init; }
+
+    /// <summary>The storage entry the tensor is a view of (set by <see cref="PytorchPickleLoader.OpenLazy"/>).</summary>
+    public string StorageKey { get; init; } = string.Empty;
+
+    /// <summary>Where the tensor starts inside its storage, in bytes (set by <see cref="PytorchPickleLoader.OpenLazy"/>).</summary>
+    public long StorageByteOffset { get; init; }
 }

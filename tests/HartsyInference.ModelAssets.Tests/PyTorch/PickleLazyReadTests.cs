@@ -50,6 +50,22 @@ public sealed class PickleLazyReadTests : IDisposable
     }
 
     [Fact]
+    public void ReadTensor_GivesTheSameValuesInAnyOrderAndForARepeatedTensor()
+    {
+        using PytorchPickleLoader loader = new();
+        loader.OpenLazy(_path);
+        PytorchTensorDescriptor a = loader.Descriptors["a.weight"], b = loader.Descriptors["b"];
+        Assert.NotEqual(a.StorageKey, b.StorageKey);
+        Assert.Equal(0, a.StorageByteOffset);
+
+        foreach (string name in new[] { "b", "a.weight", "a.weight", "b", "a.weight" })
+        {
+            using Tensor t = loader.ReadTensor(name);
+            Assert.Equal(name == "b" ? new float[] { 4f, 5f, 6f, 7f } : [1f, 2.5f, -3f, 0.1f, 65519f, 1e-8f], t.AsSpan<float>().ToArray());
+        }
+    }
+
+    [Fact]
     public void ReadTensor_ConvertsToHalfOneTensorAtATime()
     {
         using PytorchPickleLoader loader = new();

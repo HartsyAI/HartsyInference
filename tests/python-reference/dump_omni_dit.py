@@ -107,11 +107,32 @@ def main():
     with open(os.path.join(args.folder, "model", "config.json"), encoding="utf-8") as handle:
         params = json.load(handle)["params"]
     reader = load_module(os.path.join(HERE, "dump_paint21_unet.py"), "dump_paint21_unet")
-    # The reader clones every tensor out of its storage, which doubles the host memory of a 12 GB state dict while it loads; each storage here is read once and holds one tensor, so a view is enough.
+    # The reader of dump_paint21_unet.py copies every storage twice (bytes, then bytearray) and clones every tensor, which more than doubles the host memory of a 12 GB state dict while it loads. This version
+    # reads each storage straight into its tensor (the unpickler is still the restricted one) and keeps views, so the weights exist once.
+    def read_state(path):
+        import zipfile
+        with zipfile.ZipFile(path) as archive:
+            root = archive.namelist()[0].split("/")[0]
+
+            def storage(key, dtype, numel):
+                tensor = torch.empty(numel, dtype=dtype)
+                with archive.open(f"{root}/data/{key}") as handle:
+                    view = memoryview(tensor.numpy()).cast("B")
+                    done = 0
+                    while done < len(view):
+                        got = handle.readinto(view[done:done + (1 << 24)])
+                        if not got:
+                            raise EOFError(key)
+                        done += got
+                return tensor
+
+            with archive.open(f"{root}/data.pkl") as handle:
+                return reader.SafeUnpickler(handle, storage).load()
+
     reader._rebuild_tensor = lambda storage, offset, size, stride, requires_grad=False, backward_hooks=None, metadata=None: torch.as_strided(storage, tuple(size), tuple(stride), offset)
 
     start = time.time()
-    state = reader.read_state_dict(os.path.join(args.folder, "model", "pytorch_model.bin"))
+    state = read_state(os.path.join(args.folder, "model", "pytorch_model.bin"))
     print(f"read {len(state)} tensors in {time.time() - start:.0f} s", flush=True)
     with torch.device("meta"):
         dit = HunYuanDiTPlain(**params)

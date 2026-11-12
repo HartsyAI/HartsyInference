@@ -62,7 +62,8 @@ public sealed class OmniCheckpoint : IDisposable
         PytorchPickleLoader loader = new();
         _loaders.Add(loader);
         loader.OpenLazy(path);
-        string[] names = [.. loader.Descriptors.Keys.Where(include).OrderBy(k => k, StringComparer.Ordinal)];
+        // In storage order: the DiT file holds every tensor as a view of one 12 GB entry, which is then read in one pass.
+        string[] names = [.. loader.Descriptors.Values.Where(d => include(d.Name)).OrderBy(d => d.StorageKey, StringComparer.Ordinal).ThenBy(d => d.StorageByteOffset).Select(d => d.Name)];
         if (names.Length == 0)
             throw new InvalidDataException($"'{path}' holds none of the expected tensors.");
         for (int i = 0; i < names.Length; i++)
