@@ -178,8 +178,8 @@ public sealed class HunyuanPaintPipeline
             Stage("reference stream");
 
             dino = _conditioner?.Tokens(_backend, reference, size, size);
-            zeroDino = dino is null ? null : new Tensor(dino.Shape, DType.F32);
-            rotation = _config.UsePoseRope ? BuildRotation(positionMaps, n, size, latent) : null;
+            zeroDino = _conditioner?.UnconditionalTokens(_backend);
+            rotation = _config.UsePoseRope ? BuildRotation(positionMaps, n, size, latent, _config.BlockOutChannels[0] / _config.Heads[0]) : null;
             // The reference stream, the VAE encoder and DINO are done: sweep their cached weights and activations so the sampling UNet does not start on a
             // saturated card (which runs several times slower without failing). What later steps still read is offloaded to the host first.
             DeviceSweep(write.Embeds.Values.Append(dino).Append(zeroDino).Where(t => t is not null).Select(t => t!));
@@ -268,7 +268,7 @@ public sealed class HunyuanPaintPipeline
         }
     }
 
-    private Dictionary<int, (Tensor Cos, Tensor Sin)> BuildRotation(byte[][] positionMaps, int views, int size, int latent)
+    internal static Dictionary<int, (Tensor Cos, Tensor Sin)> BuildRotation(byte[][] positionMaps, int views, int size, int latent, int headDim)
     {
         Dictionary<int, (Tensor Cos, Tensor Sin)> tables = [];
         byte[] joined = new byte[positionMaps.Sum(p => p.Length)];
@@ -278,7 +278,6 @@ public sealed class HunyuanPaintPipeline
             map.CopyTo(joined, offset);
             offset += map.Length;
         }
-        int headDim = _config.BlockOutChannels[0] / _config.Heads[0];
         for (int level = 0; level < 4; level++)
         {
             int grid = latent >> level, voxels = latent * 8 >> level;
