@@ -16,8 +16,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 - **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text only (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run). Image input and multi-GPU placement are refused by name. The `kimi-k3.1-pro` catalog row is
-  Structural and not CLI-drivable. The Moonshot repo ships no `tokenizer.json`, so the real checkpoint is refused until one is supplied.
-  (Integration: consolidated entry, see final commit.)
+  Structural and not CLI-drivable. The Moonshot repo ships no `tokenizer.json`; the Text path reads its `tiktoken.model` and renders the built-in XTML chat template.
 
 - **Added: tensor- and expert-parallel sharding for the Kimi K3.1 decoder (CPU, virtual ranks; NCCL path not run).** Attention heads, the
   dense and shared FFN, the vocabulary and the routed experts split across ranks, with an all-to-all in `ICollectiveComm`. A rank count

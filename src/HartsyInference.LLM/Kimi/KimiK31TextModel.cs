@@ -8,7 +8,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 namespace HartsyInference.LLM.Kimi;
 
 /// <summary>Everything the Text path needs to run a Kimi K3.1 directory: the generation model, the tokenizer from the checkpoint's
-/// <c>tokenizer.json</c>, and the chat template from its <c>chat_template.jinja</c>.</summary>
+/// <c>tokenizer.json</c> or, when that is absent, its <c>tiktoken.model</c>, and the chat template from its <c>chat_template.jinja</c> or, when that
+/// is absent on a <c>tiktoken.model</c> checkpoint, the built-in XTML template (<see cref="KimiK31ChatTemplate"/>).</summary>
 /// <remarks>Text only: the vision tower is not loaded, and image input is refused by the engine. Owns the generation model, which owns the checkpoint.</remarks>
 public sealed class KimiK31TextModel : IHostReferenceTextModel
 {
@@ -32,16 +33,20 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
 
     /// <summary>Loads <paramref name="directory"/> onto <paramref name="backend"/>; the result owns everything it opened.</summary>
     /// <param name="maxSequenceTokens">Longest sequence (prompt plus generation) the decoder accepts; it sizes the positional tables.</param>
-    /// <exception cref="HartsyInferenceException">The directory lacks a tokenizer or chat template, the tokenizer is not usable, or its special ids disagree with <c>config.json</c>.</exception>
+    /// <exception cref="HartsyInferenceException">The directory has neither tokenizer file, lacks a chat template where it has no <c>tiktoken.model</c>, the tokenizer is not usable, or its special ids disagree with <c>config.json</c>.</exception>
     /// <exception cref="InvalidDataException">The config or a tensor does not match the Kimi K3.1 decoder.</exception>
     public static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentException.ThrowIfNullOrEmpty(directory);
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
-        if (!File.Exists(tokenizerPath))
-            throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the Kimi K3.1 Text path needs to build its prompt.");
-        if (!File.Exists(templatePath))
+        string tiktokenPath = Path.Combine(directory, KimiK31Tokenizer.TiktokenFile);
+        // The Moonshot repo ships tiktoken.model and no tokenizer.json; tokenizer.json wins when both are present.
+        bool useTiktoken = !File.Exists(tokenizerPath);
+        if (useTiktoken && !File.Exists(tiktokenPath))
+            throw new HartsyInferenceException($"'{directory}' has no tokenizer.json or tiktoken.model, which the Kimi K3.1 Text path needs to build its prompt.");
+        bool hasTemplate = File.Exists(templatePath);
+        if (!useTiktoken && !hasTemplate)
             throw new HartsyInferenceException($"'{directory}' has no chat_template.jinja, which the Kimi K3.1 Text path needs.");
 
         // Tokenizer and template first: both are cheap, so a bad file fails before the weight load.
@@ -52,11 +57,19 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
         IChatTemplate template;
         try
         {
-            (tokenizer, template) = HfChatAssets.Load(directory, stopIds, bosLiteral, eosLiteral);
+            if (useTiktoken)
+            {
+                tokenizer = KimiK31Tokenizer.Load(directory, stopIds, configBos, configEos);
+                template = hasTemplate ? new JinjaChatTemplate(File.ReadAllText(templatePath)) : new KimiK31ChatTemplate();
+            }
+            else
+            {
+                (tokenizer, template) = HfChatAssets.Load(directory, stopIds, bosLiteral, eosLiteral);
+            }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException or FormatException)
+        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or JsonException or FormatException or InvalidDataException or FileNotFoundException)
         {
-            throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
+            throw new HartsyInferenceException($"'{(useTiktoken ? tiktokenPath : tokenizerPath)}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
         KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, backend, maxSequenceTokens);
