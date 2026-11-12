@@ -86,7 +86,7 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
     internal static bool UsesPreparation(string id) =>
         id == "triposr" || id == "trellis" || MeshModelIds.Hunyuan3D.Contains(id) || MeshModelIds.PaintMesh.Contains(id);
 
-    /// <summary>Whether the image carries a cutout to use: an alpha plane with some transparency. An RGBA image whose alpha is entirely opaque (every ordinary RGBA export of a photo) has no foreground to find, as in upstream TRELLIS, so it is matted.</summary>
+    /// <summary>Whether the image carries a cutout to use: an alpha plane with some transparency. An RGBA image whose alpha is entirely opaque (every ordinary RGBA export of a photo) has no foreground to find, as in upstream TRELLIS (<c>np.all(alpha == 255)</c>), so it is matted; a plane that is nearly but not entirely opaque is taken as a cutout.</summary>
     internal static bool HasUsableAlpha(ImageData image) => image.HasAlpha && image.Alpha!.Any(a => a != 255);
 
     private IForegroundMatter Matter() => new SerializedMatter(this);
