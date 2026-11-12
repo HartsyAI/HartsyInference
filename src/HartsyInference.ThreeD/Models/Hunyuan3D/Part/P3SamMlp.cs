@@ -36,11 +36,40 @@ internal sealed class P3SamMlp : IDisposable
             tensor.Dispose();
     }
 
-    private static Tensor Own(float[] values, params long[] shape)
+    // A weight tensor made once. ForceF32Gemm keeps its matrix products in F32 on a GPU backend (the default path casts both operands to F16).
+    internal static Tensor Own(float[] values, params long[] shape)
     {
-        Tensor tensor = new(new TensorShape(shape), DType.F32);
+        Tensor tensor = new(new TensorShape(shape), DType.F32) { ForceF32Gemm = true };
         Copy(values, tensor);
         return tensor;
+    }
+
+    /// <summary>The per-column maximum over the rows of <paramref name="source"/> <c>[rows, width]</c> (reads it back to the host), split over cores.</summary>
+    internal static unsafe float[] MaxRows(Tensor source, int rows, int width)
+    {
+        float* data = (float*)source.DataPointer;
+        int chunks = Math.Max(1, Math.Min(Environment.ProcessorCount, rows / 1024));
+        float[][] partial = new float[chunks][];
+        Parallel.For(0, chunks, chunk =>
+        {
+            float[] max = new float[width];
+            Array.Fill(max, float.NegativeInfinity);
+            int from = (int)((long)rows * chunk / chunks), to = (int)((long)rows * (chunk + 1) / chunks);
+            for (int i = from; i < to; i++)
+            {
+                float* row = data + (long)i * width;
+                for (int c = 0; c < width; c++)
+                    if (row[c] > max[c])
+                        max[c] = row[c];
+            }
+
+            partial[chunk] = max;
+        });
+        float[] result = partial[0];
+        for (int k = 1; k < chunks; k++)
+            for (int c = 0; c < width; c++)
+                result[c] = Math.Max(result[c], partial[k][c]);
+        return result;
     }
 
     /// <summary>All rows through the whole MLP.</summary>
@@ -68,30 +97,6 @@ internal sealed class P3SamMlp : IDisposable
         return y;
     }
 
-    internal static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, float[] weight, int outDim, float[]? bias)
-    {
-        using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
-        using Tensor w = new(new TensorShape(outDim, inDim), DType.F32);
-        using Tensor y = new(new TensorShape(rows, outDim), DType.F32);
-        Tensor? b = bias is null ? null : new Tensor(new TensorShape(outDim), DType.F32);
-        try
-        {
-            Copy(input, x);
-            Copy(weight, w);
-            if (b is not null)
-                Copy(bias!, b);
-            backend.Linear(y, x, w, b);
-            float[] result = new float[(long)rows * outDim];
-            Read(y, result);
-            return result;
-        }
-        finally
-        {
-            b?.Dispose();
-        }
-    }
-
-    // The same product with weights that already are tensors.
     internal static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, Tensor weight, int outDim, Tensor? bias)
     {
         using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
@@ -105,6 +110,21 @@ internal sealed class P3SamMlp : IDisposable
 
     internal static unsafe void Copy(float[] source, Tensor destination) =>
         new ReadOnlySpan<float>(source).CopyTo(new Span<float>((float*)destination.DataPointer, source.Length));
+
+    /// <summary>Writes rows of <paramref name="left"/> (<paramref name="leftWidth"/> values each) followed by rows of <paramref name="right"/> into <paramref name="destination"/>.</summary>
+    internal static unsafe void CopyRows(float[] left, int leftWidth, float[] right, int rightWidth, int rows, Tensor destination)
+    {
+        float* target = (float*)destination.DataPointer;
+        int width = leftWidth + rightWidth;
+        for (int i = 0; i < rows; i++)
+        {
+            new ReadOnlySpan<float>(left, i * leftWidth, leftWidth).CopyTo(new Span<float>(target + (long)i * width, leftWidth));
+            new ReadOnlySpan<float>(right, i * rightWidth, rightWidth).CopyTo(new Span<float>(target + (long)i * width + leftWidth, rightWidth));
+        }
+    }
+
+    internal static unsafe void Fill(Tensor destination, float value) =>
+        new Span<float>((float*)destination.DataPointer, (int)destination.ElementCount).Fill(value);
 
     internal static unsafe void Read(Tensor source, float[] destination) =>
         new ReadOnlySpan<float>((float*)source.DataPointer, destination.Length).CopyTo(destination);
