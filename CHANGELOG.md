@@ -3,6 +3,11 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.426
+
+- **Fixed: a sharded checkpoint loads without its index file.** Picking any `name-00001-of-0000N.safetensors` shard now loads
+  its siblings by name when the folder has no `*.safetensors.index.json`, as after a download that fetched only the weights.
+
 ## alpha.425
 
 - **Added: Iris-Z image and depth generation (real weights not run).** Sperid Labs' FLUX.2 fine-tunes Iris-Z-small and Iris-Z-big load as
