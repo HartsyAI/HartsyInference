@@ -25,6 +25,7 @@ git preserves removed history.
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
+| What a 3D host needs from the engine: today's mesh contract, the additive API proposal, two engines on one card | [Research/HARTSY3D_ENGINE_PREREQS.md](Research/HARTSY3D_ENGINE_PREREQS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
 | SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
