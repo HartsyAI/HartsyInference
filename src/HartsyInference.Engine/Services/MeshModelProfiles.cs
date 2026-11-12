@@ -148,7 +148,18 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
         Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, PreprocessField(id)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+
+    private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
+        ? new()
+        {
+            Name = nameof(MeshRequest.Preprocess),
+            Access = MeshFieldAccess.Used,
+            Default = nameof(MeshPreprocess.None),
+            Values = [nameof(MeshPreprocess.None), nameof(MeshPreprocess.Auto)],
+            Note = "Auto mattes an image without a usable alpha plane (BiRefNet, loaded before the model and kept until memory is freed, not counted in the peak) and applies this model's framing; None uses the image as given.",
+        }
+        : Ignored(nameof(MeshRequest.Preprocess), "The model mattes and frames its own input, or takes no image.");
 
     private static MeshFieldSpec Steps(string? defaultValue, double min, double? max, string note) =>
         Used(nameof(MeshRequest.Steps), defaultValue, min, max, null, note);
