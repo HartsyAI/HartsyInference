@@ -67,7 +67,7 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                // Matting first, so the matting model and the shape model are not on the device together.
+                // Matting first, so on a cold start the matting forward pass does not overlap the shape model's first load; the matting weights stay resident afterwards.
                 ImageData image = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
