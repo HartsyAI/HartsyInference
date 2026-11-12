@@ -9,6 +9,9 @@ public sealed class Sam3dObjectsResult
     /// <summary>The Gaussian splats in the object's own frame; null when the structure stage found no voxel.</summary>
     public GaussianSplatCloud? Splats { get; init; }
 
+    /// <summary>The triangle mesh in the object's own frame (vertices in the unit cube, colours RGB and the normal map, six channels); set instead of <see cref="Splats"/> when the request asked for a mesh.</summary>
+    public SamMeshResult? Mesh { get; init; }
+
     /// <summary>The object-to-camera pose in the PyTorch3D convention (the splats are not transformed by it).</summary>
     public required SamPose Pose { get; init; }
 

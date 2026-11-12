@@ -854,6 +854,7 @@ public static class GenerationDispatch
             Chains = parameters.GetBool("no-chains", false) ? false : null,
             Texture = parameters.GetBool("texture", false),
             TextureSize = parameters.GetInt("texture-size", 0),
+            Mesh = parameters.GetBool("mesh", false),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
