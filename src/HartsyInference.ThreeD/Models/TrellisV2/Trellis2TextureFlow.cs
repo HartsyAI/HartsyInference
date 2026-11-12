@@ -43,6 +43,11 @@ public sealed class Trellis2TextureFlow : IDisposable
     /// <paramref name="tModel"/>, given the normalized shape latent <paramref name="shape"/> (<c>[1, N, ConcatChannels]</c>) of the same
     /// voxels and the image tokens <paramref name="cond"/>. <paramref name="coords"/> keeps its identity across the steps of one sample.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor shape, int[] coords, float tModel, Tensor cond)
+        => Forward(backend, x, shape, coords, tModel, cond, null);
+
+    /// <summary>As the plain call, for a projection flow (<see cref="Trellis2FlowConfig.HasProjection"/>): <paramref name="proj"/> holds one feature row
+    /// per voxel (<c>[1, N, ProjInChannels]</c>), and <paramref name="cond"/> the global tokens it cross-attends to.</summary>
+    public Tensor Forward(IBackend backend, Tensor x, Tensor shape, int[] coords, float tModel, Tensor cond, Tensor? proj)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(x);
@@ -54,7 +59,7 @@ public sealed class Trellis2TextureFlow : IDisposable
             throw new ArgumentException($"The shape latent must be [1, {n}, {ConcatChannels}]; got {shape.Shape}.", nameof(shape));
 
         using Tensor input = CfgHelper.ConcatLastDim(x, shape);
-        return _flow.Forward(backend, input, coords, tModel, cond);
+        return _flow.Forward(backend, input, coords, tModel, cond, proj);
     }
 
     public void Dispose() => _flow.Dispose();

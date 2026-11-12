@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS or TRELLIS.2 (shape-only, or textured with --texture), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2 or Pixal3D (shape-only, or textured with --texture for TRELLIS.2 and Pixal3D), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -48,14 +48,14 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Skip the spring-bone chains (hairdeck only).")]
         public bool NoChains { get; init; }
 
-        /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 only).</summary>
+        /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 and Pixal3D).</summary>
         [CommandOption("--texture")]
-        [Description("Texture the mesh with baked PBR textures (trellis2 only; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md).")]
+        [Description("Texture the mesh with baked PBR textures (trellis2 and pixal3d; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md and docs/Research/PIXAL3D_ARCHITECTURE.md).")]
         public bool Texture { get; init; }
 
-        /// <summary>Baked texture edge in texels (TRELLIS.2 with --texture).</summary>
+        /// <summary>Baked texture edge in texels (TRELLIS.2 and Pixal3D with --texture).</summary>
         [CommandOption("--texture-size")]
-        [Description("Baked texture size in texels, 16 to 8192 (trellis2 with --texture; 0 = 2048).")]
+        [Description("Baked texture size in texels, 16 to 8192 (trellis2 and pixal3d with --texture; 0 = 2048).")]
         public int TextureSize { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>
