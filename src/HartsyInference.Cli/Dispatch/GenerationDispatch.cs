@@ -117,7 +117,7 @@ public static class GenerationDispatch
             PreviewRgb = result.Rgb,
             PreviewWidth = result.Width,
             PreviewHeight = result.Height,
-            Companions = LayerCompanions(result),
+            Companions = Companions(result),
         };
         artifact.Meta["size"] = $"{result.Width}x{result.Height}";
         artifact.Meta["seed"] = result.Seed.ToString(CultureInfo.InvariantCulture);
@@ -130,7 +130,7 @@ public static class GenerationDispatch
     /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
     /// composite; empty for a single-layer result.</summary>
     /// <remarks>A result with depth beside its image (Iris-Z <c>rgbd</c>) adds <c>depth.png</c>, the colour-coded depth map.</remarks>
-    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result)
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> Companions(ImageResult result)
     {
         List<(string Suffix, byte[] Bytes)> companions = result.Layers is not { Count: > 0 } layers ? []
             : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();

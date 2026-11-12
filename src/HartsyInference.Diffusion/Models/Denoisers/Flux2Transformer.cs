@@ -39,6 +39,16 @@ public sealed unsafe class Flux2Transformer : IDisposable
     private Tensor[]? _modalitySelectors;
     private Tensor? _zeroRow;
 
+    // The multi-grid layout the segment layouts and rope tables were last built for. EnsureRope's own signatures are
+    // never this value: its text length would have to reach 2^31.
+    private const long GridRopeSignature = long.MinValue + 1;
+    private TokenSegmentLayout? _gridImageLayout;
+    private TokenSegmentLayout? _gridJointLayout;
+    private int _gridTextLength;
+    private int _gridHeight;
+    private int _gridWidth;
+    private float[] _gridTimes = [];
+
     /// <summary>True when this instance runs the audited F16 block loop (numerics.ditF16) with the exact
     /// <see cref="ChromaF16.ResidualDamp"/> residual damp — every branch input passes a no-affine LayerNorm
     /// and the final AdaLN-continuous norm cancels the factor before proj_out (the Chroma/Flux.1 recipe).</summary>
@@ -356,20 +366,16 @@ public sealed unsafe class Flux2Transformer : IDisposable
             throw new ArgumentException($"Text embeddings must be [1, L, D], got {textEmbeddings.Shape}.", nameof(textEmbeddings));
         int txtSeqLen = (int)textEmbeddings.Shape[1];
         int hidden = _config.HiddenSize;
-        Span<int> lengths = stackalloc int[gridCount + 1];
-        Span<int> groups = stackalloc int[gridCount + 1];
-        groups[0] = 0;
         Span<float> gridTimes = stackalloc float[gridCount];
-        lengths[0] = txtSeqLen;
         for (int g = 0; g < gridCount; g++)
         {
             if ((uint)grids[g].Modality >= (uint)_modalitySelectors.Length)
                 throw new ArgumentOutOfRangeException(nameof(grids), $"Grid {g} names modality {grids[g].Modality} of {_modalitySelectors.Length}.");
-            lengths[g + 1] = gridTokens;
-            groups[g + 1] = g + 1;
             gridTimes[g] = grids[g].TimeCoordinate;
         }
-        EnsureGridRope(txtSeqLen, hPacked, wPacked, gridTimes);
+        EnsureGridLayout(txtSeqLen, hPacked, wPacked, gridTimes);
+        TokenSegmentLayout imageLayout = _gridImageLayout!;
+        TokenSegmentLayout jointLayout = _gridJointLayout!;
 
         // Everything below is owned here; the finally frees whatever a failing stage left alive.
         List<IDisposable> owned = new List<IDisposable>(16);
@@ -378,8 +384,6 @@ public sealed unsafe class Flux2Transformer : IDisposable
         Tensor? joint = null;
         try
         {
-            TokenSegmentLayout imageLayout = Track(owned, new TokenSegmentLayout(lengths[1..], groups[..gridCount]));
-            TokenSegmentLayout jointLayout = Track(owned, new TokenSegmentLayout(lengths, groups));
             Tensor textVec = Track(owned, ComputeTimestepEmbedding(backend, textSigma, 0f, 1));
             Tensor[] gridVecs = new Tensor[gridCount];
             for (int g = 0; g < gridCount; g++)
@@ -404,9 +408,17 @@ public sealed unsafe class Flux2Transformer : IDisposable
             backend.Linear(txt, textEmbeddings, _contextEmbedWeight!, null);
 
             Tensor[] txtMod = TrackAll(owned, _doubleModTxt.Forward(backend, textVec));
-            SegmentModulation imgAttn = Track(owned, BuildSegments(backend, owned, _doubleModImg, gridVecs, null, imageLayout, 0));
-            SegmentModulation imgMlp = Track(owned, BuildSegments(backend, owned, _doubleModImg, gridVecs, null, imageLayout, 3));
-            SegmentModulation single = Track(owned, BuildSegments(backend, owned, _singleMod, gridVecs, textVec, jointLayout, 0));
+            Tensor[] textSingleMod = TrackAll(owned, _singleMod.Forward(backend, textVec));
+            Tensor[][] gridDoubleMods = new Tensor[gridCount][];
+            Tensor[][] gridSingleMods = new Tensor[gridCount][];
+            for (int g = 0; g < gridCount; g++)
+            {
+                gridDoubleMods[g] = TrackAll(owned, _doubleModImg.Forward(backend, gridVecs[g]));
+                gridSingleMods[g] = TrackAll(owned, _singleMod.Forward(backend, gridVecs[g]));
+            }
+            SegmentModulation imgAttn = Track(owned, StackSegments(backend, gridDoubleMods, null, imageLayout, 0));
+            SegmentModulation imgMlp = Track(owned, StackSegments(backend, gridDoubleMods, null, imageLayout, 3));
+            SegmentModulation single = Track(owned, StackSegments(backend, gridSingleMods, textSingleMod, jointLayout, 0));
 
             for (int i = 0; i < _config.Depth; i++)
             {
@@ -450,22 +462,16 @@ public sealed unsafe class Flux2Transformer : IDisposable
         }
     }
 
-    /// <summary>Stacks one <c>(shift, scale, gate)</c> triple per layout group, taken at <paramref name="offset"/> of
-    /// <paramref name="projection"/>'s output: group 0 from <paramref name="leadVec"/> when given, then one per grid vector.</summary>
-    private static SegmentModulation BuildSegments(IBackend backend, List<IDisposable> owned, AdaLNModulation projection,
-        Tensor[] gridVecs, Tensor? leadVec, TokenSegmentLayout layout, int offset)
+    /// <summary>Stacks one <c>(shift, scale, gate)</c> triple per layout group, taken at <paramref name="offset"/> of each
+    /// projected modulation: group 0 from <paramref name="lead"/> when given, then one per grid. The rows stay the caller's.</summary>
+    private static SegmentModulation StackSegments(IBackend backend, Tensor[][] gridMods, Tensor[]? lead, TokenSegmentLayout layout,
+        int offset)
     {
-        List<(Tensor, Tensor, Tensor)> rows = new List<(Tensor, Tensor, Tensor)>(gridVecs.Length + 1);
-        if (leadVec is not null)
-        {
-            Tensor[] lead = TrackAll(owned, projection.Forward(backend, leadVec));
+        List<(Tensor, Tensor, Tensor)> rows = new List<(Tensor, Tensor, Tensor)>(gridMods.Length + 1);
+        if (lead is not null)
             rows.Add((lead[offset], lead[offset + 1], lead[offset + 2]));
-        }
-        foreach (Tensor vec in gridVecs)
-        {
-            Tensor[] grid = TrackAll(owned, projection.Forward(backend, vec));
+        foreach (Tensor[] grid in gridMods)
             rows.Add((grid[offset], grid[offset + 1], grid[offset + 2]));
-        }
         return SegmentModulation.Build(backend, rows, layout);
     }
 
@@ -481,21 +487,46 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return items;
     }
 
-    /// <summary>Precomputes the rope tables for <c>[text, grids...]</c> when that layout changes.</summary>
-    private void EnsureGridRope(int txtSeqLen, int hPacked, int wPacked, ReadOnlySpan<float> gridTimes)
+    /// <summary>Builds the segment layouts and rope tables for <c>[text, grids...]</c> when that layout changes. The key is
+    /// compared exactly, never hashed: a collision would reuse another layout's positions and still produce an image.</summary>
+    private void EnsureGridLayout(int txtSeqLen, int hPacked, int wPacked, ReadOnlySpan<float> gridTimes)
     {
-        HashCode hash = new HashCode();
-        hash.Add(txtSeqLen);
-        hash.Add(hPacked);
-        hash.Add(wPacked);
-        foreach (float time in gridTimes) hash.Add(time);
-        // Bit 62 keeps a grid layout from ever matching a single-image signature.
-        long sig = (uint)hash.ToHashCode() | (1L << 62);
-        if (sig == _ropeSig)
+        bool sameKey = _gridImageLayout is not null && txtSeqLen == _gridTextLength && hPacked == _gridHeight
+            && wPacked == _gridWidth && gridTimes.SequenceEqual(_gridTimes);
+        if (!sameKey)
+        {
+            ReleaseGridLayouts();
+            int gridCount = gridTimes.Length;
+            Span<int> lengths = stackalloc int[gridCount + 1];
+            Span<int> groups = stackalloc int[gridCount + 1];
+            lengths[0] = txtSeqLen;
+            groups[0] = 0;
+            for (int g = 0; g < gridCount; g++)
+            {
+                lengths[g + 1] = hPacked * wPacked;
+                groups[g + 1] = g + 1;
+            }
+            _gridImageLayout = new TokenSegmentLayout(lengths[1..], groups[..gridCount]);
+            _gridJointLayout = new TokenSegmentLayout(lengths, groups);
+            _gridTextLength = txtSeqLen;
+            _gridHeight = hPacked;
+            _gridWidth = wPacked;
+            _gridTimes = gridTimes.ToArray();
+        }
+        // A single-image forward in between leaves its own signature, which also means the tables are no longer these.
+        if (sameKey && _ropeSig == GridRopeSignature)
             return;
         using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
         _rope.Precompute(posIds);
-        _ropeSig = sig;
+        _ropeSig = GridRopeSignature;
+    }
+
+    private void ReleaseGridLayouts()
+    {
+        _gridImageLayout?.Dispose();
+        _gridImageLayout = null;
+        _gridJointLayout?.Dispose();
+        _gridJointLayout = null;
     }
 
     /// <summary>Precomputes the rope tables only when the (text len, grid) signature changes.</summary>
@@ -931,6 +962,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             _graphVelocity?.Dispose();
             _graphVelocity = null;
             ReleaseModalityRows();
+            ReleaseGridLayouts();
         }
         GC.SuppressFinalize(this);
     }

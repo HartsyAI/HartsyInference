@@ -108,6 +108,11 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         // a66afece made for MiniMax-H3 — a foreach over the narrower type compiles and throws at teardown.
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
+        // Handed to the recipe pipeline on success; released here when construction fails part-way.
+        MergedLoraStack? loraStack = null;
+        LlamaStyleEncoder? encoder = null;
+        Qwen3Tokenizer? qwenTokenizer = null;
+        ErnieTokenizer? mistralTokenizer = null;
         try
         {
             // One container for either format: a Flux.2 GGUF is a repack of this same file and keeps its BFL key
@@ -142,10 +147,15 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // leaving them to the finalizer.
             checkpoint = new CompositeDisposable(source, prepared);
 
+            // The release's empty-prompt tensor loads first: it can need a download, and nothing heavier exists yet to strand.
+            Tensor? irisEmptyPrompt = Flux2Variants.IsIrisZ(variant) ? LoadIrisZEmptyPrompt(context, variant, loaders) : null;
+
             Flux2Transformer transformer = new Flux2Transformer(config);
+            // The transformer owns its fixed step-graph buffers and modality rows; the pipeline releases it with the loaders.
+            loaders.Add(transformer);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging
             // after would leave layers serving the pre-merge tensors (the Sd3Recipe ordering rule).
-            MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
+            loraStack = RecipeLoraMerge.Apply(
                 context,
                 new LoraMergeTargets { Transformer = converted },
                 "Flux2Recipe");
@@ -166,7 +176,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
 
             // LoadWeights runs the raw dict through TextEncoderQuantNormalizer (folds fp8 weight_scale companions,
             // dequantizes U8-packed NVFP4, drops .comfy_quant blobs) — hand it the RAW dict, do not pre-cast.
-            LlamaStyleEncoder encoder = new LlamaStyleEncoder(encoderConfig);
+            encoder = new LlamaStyleEncoder(encoderConfig);
             encoder.LoadWeights(qwenRaw);
 
             // Flux.2 VAE (distinct from Flux.1's ae): 32-channel latent + BatchNorm running stats stored alongside.
@@ -175,8 +185,6 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             loaders.Add(vae);
 
             // Tokenizer: Klein → embedded Qwen3 vocab/merges; Dev → Mistral tekken (HF tokenizer.json).
-            Qwen3Tokenizer? qwenTokenizer = null;
-            ErnieTokenizer? mistralTokenizer = null;
             if (config.TextEncoderType == Flux2TextEncoderType.Mistral)
             {
                 string mistralTokPath = EnsureMistralTokenizerJson();
@@ -188,15 +196,14 @@ public sealed class Flux2Recipe : IArchitectureRecipe
                 qwenTokenizer = new Qwen3Tokenizer(maxLength: 512);
             }
 
-            if (Flux2Variants.IsIrisZ(variant))
+            if (irisEmptyPrompt is not null)
             {
                 if (vae.Encoder is null)
                 {
                     throw new NotSupportedException("Iris-Z needs the FLUX.2 VAE encoder; the VAE file found is decode-only.");
                 }
-                Tensor emptyPrompt = LoadIrisZEmptyPrompt(context, variant, loaders);
                 IrisZPipeline irisPipeline = new IrisZPipeline(
-                    context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config, emptyPrompt,
+                    context.Backend, encoder, transformer, vae.Decoder, vae.Encoder, vae.BnMean, vae.BnVar, config, irisEmptyPrompt,
                     IrisZSkyCeiling(variant), IrisZTextEncoderLayers(config));
                 Logs.Info($"[Flux2Recipe] Iris-Z ready ({DescribeConfig(config)}).");
                 return new IrisZRecipePipeline(irisPipeline,
@@ -215,11 +222,8 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Flux2Recipe] Construction failed.", ex);
-            foreach (IDisposable loader in loaders)
-            {
-                loader.Dispose();
-            }
-            checkpoint?.Dispose();
+            // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+            new CompositeDisposable([qwenTokenizer, mistralTokenizer, encoder, .. loaders, checkpoint, loraStack]).Dispose();
             throw;
         }
     }

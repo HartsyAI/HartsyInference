@@ -26,6 +26,10 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
     /// <summary>Below this many pixels a photo's depth is estimated at about 512², above at about 1024².</summary>
     private const int SmallImagePixels = 500_000;
 
+    /// <summary>Upper bounds on the depth task's step and seed counts; each seed is a full pass.</summary>
+    private const int MaxDepthSteps = 200;
+    private const int MaxDepthSeeds = 64;
+
     private readonly IrisZPipeline _pipeline = pipeline;
     private readonly Flux2PromptTokenizer _tokenizer = tokenizer;
     private readonly float _skyCeiling = skyCeiling;
@@ -43,6 +47,18 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        // The recipe declares RefEdit so the init image reaches this pipeline; the other things that bit admits are refused here.
+        if (request.ReferenceImages is { Count: > 0 })
+        {
+            throw new NotSupportedException(
+                "Iris-Z takes one init image (the photo for the 'depth' task, the depth map for 'paint') and no reference images.");
+        }
+        if (request.Img2Img is { Mode: Img2ImgMode.Denoise })
+        {
+            throw new NotSupportedException(
+                "Iris-Z has no strength-based image-to-image, so it cannot denoise from an init image or serve as a refiner. "
+                + $"Its init image is a photo to estimate depth for ({RequestExtras.IrisZTask}=depth) or a depth map to generate from (=paint).");
+        }
         ImageData? init = request.Img2Img?.InitImage;
         string task = (RequestExtras.String(request.Extra, RequestExtras.IrisZTask) ?? (init is null ? "image" : "depth"))
             .Trim().ToLowerInvariant();
@@ -93,6 +109,8 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         int resolution = Resolution(request, fallback: 1024);
         (int width, int height) = IrisZDepth.EnlargedSize(depthMap.Width, depthMap.Height, resolution);
         float[] gray = IrisZDepth.ResizeBilinear(Luma(depthMap), depthMap.Width, depthMap.Height, width, height);
+        // No sky mask, as in the reference: a grey map names no sky, so its far end stops at the sky ceiling. Only the
+        // reference's colour-coded maps carry sky, and those are refused above.
         float[] encoded = IrisZDepth.EncodeLogDepth(IrisZDepth.LogDepthFromGray(gray, format == "disparity"), [], _skyCeiling);
         (IrisZPrompt? prompt, IrisZPrompt? empty) = Prompts(request.Prompt);
         IrisZImage image = _pipeline.DepthToImage(encoded, prompt, empty, Inner(request, settings, width, height), bridge);
@@ -103,13 +121,8 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
     {
         // Depth runs its own four-step Euler loop with clean-estimate averaging, which no named sampler reproduces.
         FlowMatchSampling.ThrowIfSamplerSelected(SamplingParamResolver.ResolveSchedulerName(request), "Iris-Z image to depth");
-        int steps = (int)RequestExtras.Number(request.Extra, RequestExtras.IrisZDepthSteps, IrisZPipeline.DepthSteps);
-        int seedCount = (int)RequestExtras.Number(request.Extra, RequestExtras.IrisZDepthSeeds, 1);
-        if (steps < 1 || seedCount < 1)
-        {
-            throw new ArgumentOutOfRangeException(nameof(request),
-                $"{RequestExtras.IrisZDepthSteps} and {RequestExtras.IrisZDepthSeeds} must be at least 1; got {steps} and {seedCount}.");
-        }
+        int steps = Count(request, RequestExtras.IrisZDepthSteps, IrisZPipeline.DepthSteps, MaxDepthSteps);
+        int seedCount = Count(request, RequestExtras.IrisZDepthSeeds, 1, MaxDepthSeeds);
         int resolution = Resolution(request, fallback: (long)photo.Width * photo.Height < SmallImagePixels ? 512 : 1024);
         (int width, int height) = IrisZDepth.ChooseResolution(photo.Width, photo.Height, resolution);
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
@@ -123,6 +136,13 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         // Back at the photo's own size: depth bilinear, the sky mask nearest, as the reference resizes them.
         bool[] sky = ResizeNearest(IrisZDepth.SkyMask(logDepth, _skyCeiling), width, height, photo.Width, photo.Height);
         float[] depth = IrisZDepth.ResizeBilinear(logDepth, width, height, photo.Width, photo.Height);
+        if (_skyCeiling < 1f)
+        {
+            // The plane is the only thing returned, so it must name the same sky as the rendering: bilinear blending
+            // would otherwise leave a halo of near-sky values along every sky edge.
+            float belowSky = MathF.BitDecrement(IrisZDepth.SkyValue);
+            for (int i = 0; i < depth.Length; i++) depth[i] = sky[i] ? 1f : MathF.Min(depth[i], belowSky);
+        }
         string format = (RequestExtras.String(request.Extra, RequestExtras.IrisZDepthFormat) ?? "colours").Trim().ToLowerInvariant();
         byte[] rgb = format switch
         {
@@ -149,7 +169,8 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
     };
 
     /// <summary>The prompt and the empty prompt, tokenized; both null for a blank prompt, which runs unguided on the
-    /// release's empty-prompt tensor and never loads the text encoder.</summary>
+    /// release's empty-prompt tensor and never loads the text encoder. A prompted run encodes the empty prompt through
+    /// the encoder for its unconditional branch, as the reference does (it encodes <c>["", prompt]</c> as one batch).</summary>
     private (IrisZPrompt? Prompt, IrisZPrompt? Empty) Prompts(string? prompt)
     {
         string flat = PromptTagFlattening.Flatten(prompt ?? "");
@@ -165,15 +186,26 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
             tokens.IsUniformlyUnweighted ? null : tokens);
     }
 
+    /// <summary>A whole count from the request's extras in <c>[1, max]</c>; the error names the value as sent.</summary>
+    private static int Count(ImageRequest request, string key, int fallback, int max)
+    {
+        double value = RequestExtras.Number(request.Extra, key, fallback);
+        if (!(value >= 1 && value <= max) || value != Math.Floor(value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), value, $"{key} must be a whole number from 1 to {max}.");
+        }
+        return (int)value;
+    }
+
     private static int Resolution(ImageRequest request, int fallback)
     {
-        int resolution = (int)RequestExtras.Number(request.Extra, RequestExtras.IrisZResolution, fallback);
+        double resolution = RequestExtras.Number(request.Extra, RequestExtras.IrisZResolution, fallback);
         if (resolution is not (512 or 1024))
         {
             throw new ArgumentOutOfRangeException(nameof(request), resolution,
                 $"{RequestExtras.IrisZResolution} is 512 or 1024, the sizes Iris-Z was trained at.");
         }
-        return resolution;
+        return (int)resolution;
     }
 
     private ImageResult Result(byte[] rgb, float[]? depth, int width, int height, int seed, string task, int steps) => new()
@@ -201,6 +233,11 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
     /// <summary>ITU-R 601 luma in <c>[0, 1]</c>, the grey conversion the reference applies to a colour depth map.</summary>
     private static float[] Luma(ImageData image)
     {
+        if (image.Rgb.Length != (long)image.Width * image.Height * 3)
+        {
+            throw new ArgumentException(
+                $"The depth map's {image.Rgb.Length} bytes are not {image.Width}x{image.Height} RGB24.", nameof(image));
+        }
         float[] gray = new float[image.Width * image.Height];
         ReadOnlySpan<byte> rgb = image.Rgb;
         for (int i = 0; i < gray.Length; i++)
