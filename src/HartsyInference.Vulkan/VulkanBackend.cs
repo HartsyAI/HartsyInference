@@ -2621,6 +2621,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     public void ConvTranspose1d(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int stride, int padLeft, int padRight, int dilation, int groups)
     {
+        if (input.Shape.Rank != 3 || weight.Shape.Rank != 3 || output.Shape.Rank != 3)
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose1d: input {input.Shape}, weight {weight.Shape} and output {output.Shape} must be rank-3.");
         int batch = (int)input.Shape[0], cIn = (int)input.Shape[1], tIn = (int)input.Shape[2];
         int outPerGroup = (int)weight.Shape[1], kernel = (int)weight.Shape[2];
         int cOut = (int)output.Shape[1], tOut = (int)output.Shape[2];
@@ -2630,6 +2633,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             throw new ArgumentException(
                 $"Vulkan ConvTranspose1d: input {input.Shape}, weight {weight.Shape}, output {output.Shape} do not match "
                 + $"(groups={groups}, stride={stride}, padLeft={padLeft}, padRight={padRight}, dilation={dilation}).");
+        if (input.DType != output.DType || weight.DType != output.DType || (bias is not null && bias.DType != DType.F32))
+            throw new ArgumentException(
+                $"Vulkan ConvTranspose1d: input {input.DType}, weight {weight.DType} and output {output.DType} must share one dtype, "
+                + "and bias must be F32 (the shader reads it as float).");
+        if (bias is not null && bias.ElementCount != cOut)
+            throw new ArgumentException($"Vulkan ConvTranspose1d: bias has {bias.ElementCount} elements, expected {cOut}.");
         using OpScope _op = EnterOp();
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer wBuf = GetBuffer(weight);
