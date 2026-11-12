@@ -46,7 +46,7 @@ public sealed class MeshOperationServiceTests
         Assert.Contains("\"seed\":11", document.AssetExtrasJson);
         Assert.Equal(["remove-small-components", "recenter", "rescale"], result.Steps.Select(s => s.Operation));
         Assert.Equal((11L, 13L), (result.Steps[0].VerticesBefore, result.Steps[0].TrianglesBefore));
-        Assert.Contains(result.Steps[0].Notes, n => n.StartsWith("Removed 1 of 2 piece(s)"));
+        Assert.Contains(result.Steps[0].Notes, n => n.StartsWith("Primitive 0: removed 1 triangle(s) of floating pieces"));
         Assert.Equal((8L, 12L), (result.Output.Vertices, result.Output.Triangles));
     }
 

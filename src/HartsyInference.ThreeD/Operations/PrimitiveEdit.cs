@@ -15,6 +15,7 @@ internal static class PrimitiveEdit
     {
         List<MeshPrimitive> primitives = [];
         List<MeshMaterial> materials = [.. document.Materials];
+        Dictionary<int, int> plainCopies = [];
         List<string> notes = [];
         for (int i = 0; i < document.Primitives.Count; i++)
         {
@@ -23,17 +24,48 @@ internal static class PrimitiveEdit
             (MeshPrimitive result, string? note) = edit(i, source);
             if (note is not null)
                 notes.Add(note);
-            if (!ReferenceEquals(result, source) && source.Geometry.Uvs is not null && result.Geometry.Uvs is null
-                && (uint)result.Material < (uint)materials.Count && materials[result.Material].Images.Any())
+            if (!ReferenceEquals(result, source))
             {
-                MeshMaterial plain = materials[result.Material] with { BaseColor = null, MetallicRoughness = null, Normal = null, Occlusion = null, Emissive = null };
-                materials.Add(plain);
-                result = new MeshPrimitive { Geometry = result.Geometry, Material = materials.Count - 1 };
-                notes.Add($"Primitive {i}: its textures were dropped, because {operation} does not carry UV coordinates; the material colour is kept.");
+                if (source.Geometry.Uvs is not null && result.Geometry.Uvs is null
+                    && (uint)result.Material < (uint)materials.Count && materials[result.Material].Images.Any())
+                {
+                    // One image-free copy per source material, shared by every primitive that used it.
+                    if (!plainCopies.TryGetValue(result.Material, out int plain))
+                    {
+                        materials.Add(materials[result.Material] with { BaseColor = null, MetallicRoughness = null, Normal = null, Occlusion = null, Emissive = null });
+                        plain = plainCopies[result.Material] = materials.Count - 1;
+                    }
+                    result = new MeshPrimitive { Geometry = result.Geometry, Material = plain };
+                    notes.Add($"Primitive {i}: its textures were dropped, because {operation} does not carry UV coordinates; the material colour is kept.");
+                }
+                if (source.Geometry.VertexColors is not null && result.Geometry.VertexColors is null)
+                    notes.Add($"Primitive {i}: its vertex colours were dropped, because {operation} does not carry them.");
             }
             primitives.Add(result);
         }
-        return new MeshOperationOutcome(document.With(primitives, materials), notes);
+        (List<MeshMaterial> kept, List<MeshPrimitive> remapped) = DropUnusedMaterials(materials, primitives);
+        return new MeshOperationOutcome(document.With(remapped, kept), notes);
+    }
+
+    /// <summary>Removes the materials no primitive uses, and with them the images only they held, and renumbers what is left. Without this an edit that orphans a texture (decimate, fill-holes) would still write the whole image into the file it was meant to make smaller.</summary>
+    private static (List<MeshMaterial>, List<MeshPrimitive>) DropUnusedMaterials(List<MeshMaterial> materials, List<MeshPrimitive> primitives)
+    {
+        HashSet<int> used = [.. primitives.Select(p => p.Material).Where(m => (uint)m < (uint)materials.Count)];
+        if (used.Count == materials.Count)
+            return (materials, primitives);
+        Dictionary<int, int> renumber = [];
+        List<MeshMaterial> kept = [];
+        for (int m = 0; m < materials.Count; m++)
+        {
+            if (!used.Contains(m))
+                continue;
+            renumber[m] = kept.Count;
+            kept.Add(materials[m]);
+        }
+        List<MeshPrimitive> remapped = [.. primitives.Select(p => renumber.TryGetValue(p.Material, out int to)
+            ? (p.Material == to ? p : new MeshPrimitive { Geometry = p.Geometry, Material = to })
+            : p.Material < 0 ? p : new MeshPrimitive { Geometry = p.Geometry, Material = -1 })];
+        return (kept, remapped);
     }
 
     /// <summary>A copy of <paramref name="mesh"/> with its vertex positions replaced and every other array shared.</summary>

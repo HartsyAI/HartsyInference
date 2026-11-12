@@ -27,12 +27,15 @@ public static class MeshOperations
     public static MeshOperationArguments Validate(IMeshOperation operation, IReadOnlyDictionary<string, double>? given)
     {
         Dictionary<string, double> values = [];
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
         foreach (MeshOperationParameter parameter in operation.Parameters.Where(p => p.Default is not null))
             values[parameter.Name] = parameter.Default!.Value;
         foreach ((string name, double value) in given ?? new Dictionary<string, double>())
         {
             MeshOperationParameter parameter = operation.Parameters.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
                 ?? throw new ArgumentException($"'{operation.Id}' has no parameter '{name}'; it takes {(operation.Parameters.Count == 0 ? "none" : string.Join(", ", operation.Parameters.Select(p => p.Name)))}.");
+            if (!seen.Add(parameter.Name))
+                throw new ArgumentException($"Parameter '{parameter.Name}' of '{operation.Id}' is given more than once (names are not case-sensitive).");
             if (!double.IsFinite(value))
                 throw new ArgumentException($"Parameter '{parameter.Name}' of '{operation.Id}' must be a finite number.");
             if (parameter.Integer && value != Math.Floor(value))
@@ -57,7 +60,9 @@ public static class MeshOperations
         foreach (MeshOperationStep step in steps)
         {
             IMeshOperation operation = Get(step.Operation);
-            prepared.Add((operation, Validate(operation, step.Parameters)));
+            MeshOperationArguments arguments = Validate(operation, step.Parameters);
+            operation.Check(arguments);
+            prepared.Add((operation, arguments));
         }
 
         List<MeshOperationReport> reports = [];

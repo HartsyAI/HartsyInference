@@ -252,7 +252,10 @@ public static class MeshCleaner
     }
 
     /// <summary>Removes vertex-connected components below <paramref name="areaRatio"/> of the total area; the largest always stays.</summary>
-    public static Mesh RemoveSmallComponents(Mesh mesh, double areaRatio)
+    public static Mesh RemoveSmallComponents(Mesh mesh, double areaRatio) => Rebuild(mesh, SmallComponentFaceMask(mesh, areaRatio));
+
+    /// <summary>For each face of <paramref name="mesh"/>, whether it belongs to a vertex-connected component that stays under <see cref="RemoveSmallComponents"/>'s rule (the largest always stays, any other needs <paramref name="areaRatio"/> of the total area). Exposed so a caller that has to keep per-vertex attributes can apply the same rule to a welded copy and cut its own mesh.</summary>
+    internal static bool[] SmallComponentFaceMask(Mesh mesh, double areaRatio)
     {
         Validate(mesh);
         if (areaRatio < 0 || double.IsNaN(areaRatio))
@@ -281,7 +284,7 @@ public static class MeshCleaner
             double a = area[Find(parent, mesh.Indices[f * 3])];
             keep[f] = a >= largest || a >= areaRatio * total;
         }
-        return Rebuild(mesh, keep);
+        return keep;
     }
 
     /// <summary>Closes boundary loops whose perimeter is at most <paramref name="maxPerimeter"/> (mesh units): a triangle for three

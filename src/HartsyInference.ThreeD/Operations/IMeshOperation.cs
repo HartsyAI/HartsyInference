@@ -14,7 +14,12 @@ public interface IMeshOperation
     /// <summary>The numbers it takes.</summary>
     IReadOnlyList<MeshOperationParameter> Parameters { get; }
 
-    /// <summary>Applies it. The arguments are already validated against <see cref="Parameters"/>; an operation that needs one of several optional numbers checks that itself and throws <see cref="ArgumentException"/>.</summary>
+    /// <summary>Checks the combination of arguments, which the per-parameter ranges cannot say (decimate takes triangles or ratio, not both and not neither). <see cref="MeshOperations.Run"/> calls it for every step before any step runs, so a bad last step costs no work; the default accepts everything.</summary>
     /// <exception cref="ArgumentException">The combination of arguments is not valid for this operation.</exception>
+    void Check(MeshOperationArguments arguments)
+    {
+    }
+
+    /// <summary>Applies it. The arguments are already validated against <see cref="Parameters"/> and <see cref="Check"/>.</summary>
     MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel);
 }

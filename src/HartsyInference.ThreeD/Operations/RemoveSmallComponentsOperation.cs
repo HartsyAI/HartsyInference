@@ -1,9 +1,10 @@
 using HartsyInference.ThreeD.Document;
 using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Geometry.Ops;
 
 namespace HartsyInference.ThreeD.Operations;
 
-/// <summary>Removes floating pieces: connected components (through shared surface points, so a UV seam does not split one) whose area is below a share of their primitive's total area; the largest always stays. Nothing else about the primitive changes: UVs, normals, vertex colours and textures are kept for what remains.</summary>
+/// <summary>Removes floating pieces: connected components (through shared surface points, so a UV seam does not split one) whose area is below a share of their primitive's total area; the largest always stays. The rule is <see cref="MeshCleaner"/>'s, applied to the welded copy of the primitive; the cut itself keeps every vertex attribute, so UVs, normals, vertex colours and textures survive for what remains.</summary>
 public sealed class RemoveSmallComponentsOperation : IMeshOperation
 {
     /// <inheritdoc/>
@@ -22,45 +23,14 @@ public sealed class RemoveSmallComponentsOperation : IMeshOperation
     public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
     {
         double ratio = arguments.Get("areaRatio");
-        return PrimitiveEdit.Map(document, Id, (_, primitive) =>
+        return PrimitiveEdit.Map(document, Id, (index, primitive) =>
         {
             Mesh g = primitive.Geometry;
-            WeldedVertices welded = WeldedVertices.Build(g);
-            int faces = g.TriangleCount;
-            int[] parent = new int[welded.Count];
-            for (int i = 0; i < parent.Length; i++)
-                parent[i] = i;
-            for (int f = 0; f < faces; f++)
-            {
-                Union(parent, welded.Indices[f * 3], welded.Indices[f * 3 + 1]);
-                Union(parent, welded.Indices[f * 3], welded.Indices[f * 3 + 2]);
-            }
-            double[] area = new double[welded.Count];
-            double total = 0;
-            for (int f = 0; f < faces; f++)
-            {
-                System.Numerics.Vector3 a = PrimitiveEdit.At(welded.Positions, welded.Indices[f * 3]);
-                double face = System.Numerics.Vector3.Cross(PrimitiveEdit.At(welded.Positions, welded.Indices[f * 3 + 1]) - a, PrimitiveEdit.At(welded.Positions, welded.Indices[f * 3 + 2]) - a).Length() * 0.5;
-                area[Find(parent, welded.Indices[f * 3])] += face;
-                total += face;
-            }
-            double largest = area.Max();
-            bool[] keep = new bool[faces];
-            int kept = 0;
-            HashSet<int> pieces = [], removedPieces = [];
-            for (int f = 0; f < faces; f++)
-            {
-                int root = Find(parent, welded.Indices[f * 3]);
-                pieces.Add(root);
-                keep[f] = area[root] >= largest || area[root] >= ratio * total;
-                kept += keep[f] ? 1 : 0;
-                if (!keep[f])
-                    removedPieces.Add(root);
-            }
-            if (kept == faces)
+            bool[] keep = MeshCleaner.SmallComponentFaceMask(WeldedVertices.Build(g).ToMesh(), ratio);
+            int kept = keep.Count(k => k);
+            if (kept == keep.Length)
                 return (primitive, null);
-            return (new MeshPrimitive { Geometry = Subset(g, keep), Material = primitive.Material },
-                $"Removed {removedPieces.Count} of {pieces.Count} piece(s) in a primitive ({faces - kept} triangles).");
+            return (new MeshPrimitive { Geometry = Subset(g, keep), Material = primitive.Material }, $"Primitive {index}: removed {keep.Length - kept} triangle(s) of floating pieces.");
         }, cancel);
     }
 
@@ -101,22 +71,5 @@ public sealed class RemoveSmallComponentsOperation : IMeshOperation
                 Array.Copy(mesh.VertexColors!, v * 3, colours, to * 3, 3);
         }
         return new Mesh { Vertices = vertices, Indices = [.. indices], Normals = normals, Uvs = uvs, VertexColors = colours };
-    }
-
-    private static int Find(int[] parent, int x)
-    {
-        while (parent[x] != x)
-        {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        return x;
-    }
-
-    private static void Union(int[] parent, int a, int b)
-    {
-        int ra = Find(parent, a), rb = Find(parent, b);
-        if (ra != rb)
-            parent[ra] = rb;
     }
 }

@@ -20,10 +20,16 @@ public sealed class RescaleOperation : IMeshOperation
     ];
 
     /// <inheritdoc/>
-    public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
+    public void Check(MeshOperationArguments arguments)
     {
         if (arguments.Has("factor") == arguments.Has("longestSide"))
             throw new ArgumentException("rescale takes exactly one of factor or longestSide.");
+    }
+
+    /// <inheritdoc/>
+    public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
+    {
+        Check(arguments);
         float factor;
         if (arguments.Has("factor"))
         {

@@ -107,6 +107,69 @@ public sealed class MeshOperationTests
     }
 
     [Fact]
+    public void AnEditThatOrphansATextureLeavesNoUnusedMaterialOrImageInTheFileItWrites()
+    {
+        // Two parts share one textured material; decimating both leaves the textured material with no user.
+        MeshDocument document = Textured(Sphere(30, 40), Sphere(30, 40, centreX: 4f));
+
+        MeshOperationRun run = Run(document, "decimate", ("ratio", 0.3));
+
+        Assert.False(run.Document.HasTextures);
+        Assert.Single(run.Document.Materials);
+        Assert.All(run.Document.Primitives, p => Assert.Equal(0, p.Material));
+        byte[] glb = MeshDocumentGlbWriter.Write(run.Document);
+        Assert.DoesNotContain("\"images\"", System.Text.Encoding.UTF8.GetString(glb, 20, Math.Min(glb.Length - 20, 4000)));
+        Assert.False(GlbReader.ParseDocument(glb).HasTextures);
+        Assert.True(glb.Length < MeshDocumentGlbWriter.Write(document).Length / 2, "The smaller model is a smaller file.");
+    }
+
+    [Fact]
+    public void AMaterialStillUsedByAnUntouchedPrimitiveKeepsItsTextureAndTheOthersAreRenumbered()
+    {
+        // The small part has no UVs, so decimating it does not strip its (textured) material; the big part does lose its.
+        Mesh small = Sphere(10, 12, centreX: 5f);
+        small = new Mesh { Vertices = small.Vertices, Indices = small.Indices, Normals = small.Normals };
+        MeshDocument document = new()
+        {
+            Primitives = [new MeshPrimitive { Geometry = Sphere(30, 40), Material = 1 }, new MeshPrimitive { Geometry = small, Material = 0 }],
+            Materials = [new MeshMaterial { Name = "kept", BaseColor = Png() }, new MeshMaterial { Name = "orphaned", BaseColor = Png() }],
+        };
+
+        MeshOperationRun run = Run(document, "decimate", ("ratio", 0.5));
+
+        Assert.Equal(2, run.Document.Materials.Count);
+        Assert.True(run.Document.Materials[run.Document.Primitives[1].Material].Images.Any(), "The material the untouched-UV part uses keeps its texture.");
+        Assert.False(run.Document.Materials[run.Document.Primitives[0].Material].Images.Any());
+        Assert.Equal(1, run.Document.Materials.Count(m => m.Images.Any()));
+    }
+
+    [Fact]
+    public void VertexColoursThatAnEditDropsAreReportedEvenWithoutUvsAndNotesNameTheirPrimitive()
+    {
+        Mesh coloured = Sphere(30, 40);
+        Mesh plain = new() { Vertices = coloured.Vertices, Indices = coloured.Indices, VertexColors = new float[coloured.Vertices.Length] };
+        MeshDocument document = new() { Primitives = [new MeshPrimitive { Geometry = plain }] };
+
+        MeshOperationRun run = Run(document, "decimate", ("ratio", 0.3));
+
+        Assert.Contains(run.Steps[0].Notes, n => n.StartsWith("Primitive 0: its vertex colours were dropped"));
+        Assert.Contains(run.Steps[0].Notes, n => n.StartsWith("Primitive 0: reduced from"));
+    }
+
+    [Fact]
+    public void AnInvalidLaterStepFailsBeforeAnyStepRunsAndANameGivenTwiceIsRefused()
+    {
+        MeshDocument document = Textured(Sphere(8, 12));
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        // With the token already cancelled, a step that ran first would throw OperationCanceledException; the argument error proves every step was checked up front.
+        Assert.Throws<ArgumentException>(() => MeshOperations.Run(document, [new("recenter"), new("decimate")], cancelled.Token));
+        Assert.Throws<ArgumentException>(() => MeshOperations.Run(document, [new("recenter"), new("rescale")], cancelled.Token));
+        Assert.Contains("more than once", Assert.Throws<ArgumentException>(() => Run(document, "rescale", ("factor", 1), ("Factor", 2))).Message);
+    }
+
+    [Fact]
     public void DecimateByRatioAndTheExactlyOneRule()
     {
         MeshDocument document = Textured(Sphere(30, 60));
@@ -179,7 +242,7 @@ public sealed class MeshOperationTests
         Assert.Equal(kept.VertexCount * 2, kept.Uvs!.Length);
         Assert.Equal(kept.VertexCount * 3, kept.Normals!.Length);
         Assert.True(run.Document.Materials[run.Document.Primitives[0].Material].Images.Any(), "Textures are kept.");
-        Assert.Contains(run.Steps[0].Notes, n => n.StartsWith("Removed 1 of 2 piece(s)"));
+        Assert.Contains(run.Steps[0].Notes, n => n.StartsWith("Primitive 0: removed 1 triangle(s) of floating pieces"));
     }
 
     [Fact]

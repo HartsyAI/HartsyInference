@@ -23,7 +23,7 @@ public sealed class FillHolesOperation : IMeshOperation
     public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
     {
         double share = arguments.Get("maxPerimeter");
-        return PrimitiveEdit.Map(document, Id, (_, primitive) =>
+        return PrimitiveEdit.Map(document, Id, (index, primitive) =>
         {
             Mesh g = primitive.Geometry;
             WeldedVertices welded = WeldedVertices.Build(g);
@@ -33,7 +33,7 @@ public sealed class FillHolesOperation : IMeshOperation
                 return (primitive, null);
             if (g.Normals is not null)
                 MeshOps.ComputeVertexNormals(filled);
-            return (new MeshPrimitive { Geometry = filled, Material = primitive.Material }, $"Holes were closed in a primitive: {filled.TriangleCount - weldedMesh.TriangleCount} triangle(s) added.");
+            return (new MeshPrimitive { Geometry = filled, Material = primitive.Material }, $"Primitive {index}: holes were closed, {filled.TriangleCount - weldedMesh.TriangleCount} triangle(s) added.");
         }, cancel);
     }
 }

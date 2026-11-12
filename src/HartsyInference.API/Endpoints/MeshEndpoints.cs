@@ -119,6 +119,11 @@ public static class MeshEndpoints
                     Archive = req.Archive ? System.Convert.ToBase64String(result.Archive()) : null,
                 });
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // The caller went away: nobody is left to read a response, and it is not a server error.
+                return Results.StatusCode(499);
+            }
             catch (NotSupportedException ex)
             {
                 // A format the converter does not read or write is the caller's request, not a missing server feature.
@@ -166,6 +171,10 @@ public static class MeshEndpoints
                     result.Steps,
                 });
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return Results.StatusCode(499);
+            }
             catch (NotSupportedException ex)
             {
                 return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
@@ -195,6 +204,10 @@ public static class MeshEndpoints
                     ThumbnailGate.Release();
                 }
                 return Results.Ok(new { Png = System.Convert.ToBase64String(thumbnail.Png), thumbnail.Width, thumbnail.Height, thumbnail.Kind, thumbnail.Notes });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return Results.StatusCode(499);
             }
             catch (NotSupportedException ex)
             {

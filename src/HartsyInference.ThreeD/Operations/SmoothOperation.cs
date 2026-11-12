@@ -15,7 +15,7 @@ public sealed class SmoothOperation : IMeshOperation
     /// <inheritdoc/>
     public IReadOnlyList<MeshOperationParameter> Parameters { get; } =
     [
-        new("iterations", "Smoothing passes (each is a shrink step and an inflate step).", 5, 1, 200, Integer: true),
+        new("iterations", "Smoothing passes (each is a shrink step and an inflate step); the cost grows with the count, about 0.5 s per pass on a million triangles.", 5, 1, 100, Integer: true),
         new("lambda", "The step towards the neighbour average; larger smooths faster.", 0.5, 0.01, 1),
     ];
 
@@ -26,7 +26,7 @@ public sealed class SmoothOperation : IMeshOperation
         float lambda = (float)arguments.Get("lambda");
         // The classic Taubin pair: 1/lambda + 1/mu is about 0.1, which passes low frequencies and removes high ones.
         float mu = 1f / (0.1f - 1f / lambda);
-        return PrimitiveEdit.Map(document, Id, (_, primitive) =>
+        return PrimitiveEdit.Map(document, Id, (index, primitive) =>
         {
             Mesh g = primitive.Geometry;
             WeldedVertices welded = WeldedVertices.Build(g);
@@ -37,7 +37,8 @@ public sealed class SmoothOperation : IMeshOperation
             Mesh moved = PrimitiveEdit.WithPositions(g, positions);
             if (g.Normals is not null)
                 moved.Normals = PrimitiveEdit.WeldedNormals(moved, WeldedVertices.Build(moved));
-            return (new MeshPrimitive { Geometry = moved, Material = primitive.Material }, null);
+            return (new MeshPrimitive { Geometry = moved, Material = primitive.Material },
+                g.Normals is null ? null : $"Primitive {index}: its normals were recomputed as smooth ones (shared across UV seams); authored flat or hard-edge normals are not kept.");
         }, cancel);
     }
 

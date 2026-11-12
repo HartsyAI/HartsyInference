@@ -21,14 +21,20 @@ public sealed class DecimateOperation : IMeshOperation
     ];
 
     /// <inheritdoc/>
-    public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
+    public void Check(MeshOperationArguments arguments)
     {
         if (arguments.Has("triangles") == arguments.Has("ratio"))
             throw new ArgumentException("decimate takes exactly one of triangles or ratio.");
+    }
+
+    /// <inheritdoc/>
+    public MeshOperationOutcome Apply(MeshDocument document, MeshOperationArguments arguments, CancellationToken cancel)
+    {
+        Check(arguments);
         long total = document.TriangleCount;
         long target = arguments.Has("triangles") ? arguments.GetInt("triangles") : (long)Math.Round(total * arguments.Get("ratio"));
         target = Math.Max(target, 1);
-        return PrimitiveEdit.Map(document, Id, (_, primitive) =>
+        return PrimitiveEdit.Map(document, Id, (index, primitive) =>
         {
             Mesh g = primitive.Geometry;
             int share = (int)Math.Clamp((long)Math.Round((double)target * g.TriangleCount / Math.Max(total, 1)), 1, int.MaxValue);
@@ -39,7 +45,7 @@ public sealed class DecimateOperation : IMeshOperation
                 MeshOps.ComputeVertexNormals(reduced);
             // A mesh that runs out of legal collapses (boundaries, folds) stops above its share; say so rather than let the count surprise the caller.
             string stopped = reduced.TriangleCount > share * 1.05 + 2 ? " The share was not reached: no legal collapse was left." : "";
-            return (new MeshPrimitive { Geometry = reduced, Material = primitive.Material }, $"A primitive was reduced from {g.TriangleCount} to {reduced.TriangleCount} triangles (its share of the target is {share}).{stopped}");
+            return (new MeshPrimitive { Geometry = reduced, Material = primitive.Material }, $"Primitive {index}: reduced from {g.TriangleCount} to {reduced.TriangleCount} triangles (its share of the target is {share}).{stopped}");
         }, cancel);
     }
 }

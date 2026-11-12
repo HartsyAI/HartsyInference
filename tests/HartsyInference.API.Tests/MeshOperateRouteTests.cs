@@ -46,7 +46,7 @@ public sealed class MeshOperateRouteTests : IAsyncLifetime
         Assert.Equal(["remove-small-components", "fill-holes", "decimate", "smooth", "recompute-normals", "recenter", "rescale"], ids);
         JsonElement smooth = all.RootElement.EnumerateArray().Single(e => e.GetProperty("id").GetString() == "smooth");
         JsonElement iterations = smooth.GetProperty("parameters").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "iterations");
-        Assert.Equal((5, 1, 200, true), (iterations.GetProperty("default").GetInt32(), iterations.GetProperty("min").GetInt32(), iterations.GetProperty("max").GetInt32(), iterations.GetProperty("integer").GetBoolean()));
+        Assert.Equal((5, 1, 100, true), (iterations.GetProperty("default").GetInt32(), iterations.GetProperty("min").GetInt32(), iterations.GetProperty("max").GetInt32(), iterations.GetProperty("integer").GetBoolean()));
     }
 
     [Fact]
