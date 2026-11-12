@@ -23,6 +23,17 @@ public sealed class MeshDocument
     /// <summary>The source's <c>asset.extras</c> object as JSON text (the engine's settings block lives there), carried through so a conversion or an operation keeps it; null when the source had none.</summary>
     public string? AssetExtrasJson { get; init; }
 
+    /// <summary>A copy with other primitives (and, when given, other materials), everything else carried over: animations, skin, notes and the source's extras.</summary>
+    public MeshDocument With(IReadOnlyList<MeshPrimitive> primitives, IReadOnlyList<MeshMaterial>? materials = null) => new()
+    {
+        Primitives = primitives,
+        Materials = materials ?? Materials,
+        Animations = Animations,
+        HasSkin = HasSkin,
+        Notes = Notes,
+        AssetExtrasJson = AssetExtrasJson,
+    };
+
     /// <summary>Vertices over all primitives.</summary>
     public long VertexCount => Primitives.Sum(p => (long)p.Geometry.VertexCount);
 
