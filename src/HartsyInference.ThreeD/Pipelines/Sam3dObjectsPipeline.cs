@@ -43,6 +43,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     public static bool HasWeights(string modelDirectory) =>
         Directory.Exists(modelDirectory) && new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs" }.All(stem => Find(modelDirectory, stem) is not null);
 
+    /// <summary>Whether <paramref name="modelDirectory"/> holds the mesh decoder (<c>slat_decoder_mesh</c>, <c>.safetensors</c> or <c>.ckpt</c>).</summary>
+    public static bool HasMeshDecoder(string modelDirectory) => Directory.Exists(modelDirectory) && Find(modelDirectory, "slat_decoder_mesh") is not null;
+
     /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c> only: the upstream pickle nests its state dict under <c>model</c> and is not read; its config JSON is optional).</summary>
     public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, MogeFile));
 
@@ -72,8 +75,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         if (voxels == 0)
             return new Sam3dObjectsResult { Splats = null, Pose = pose, Voxels = 0, Seed = seed };
 
-        GaussianSplatCloud cloud = SlatStage(prepared, coords, request.SlatSteps, seed, Log, onStep);
-        return new Sam3dObjectsResult { Splats = cloud, Pose = pose, Voxels = voxels, Seed = seed };
+        (GaussianSplatCloud? cloud, SamMeshResult? mesh) = SlatStage(prepared, coords, request.SlatSteps, seed, request.Mesh, Log, onStep);
+        return new Sam3dObjectsResult { Splats = cloud, Mesh = mesh, Pose = pose, Voxels = voxels, Seed = seed };
     }
 
     /// <summary>The planar float image (0 to 1) and the mask (alpha over 255, so 0 to 1 with soft edges kept) of the request.</summary>
@@ -266,7 +269,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     }
 
     /// <summary>SLAT condition and flow over the voxels, de-normalisation and the Gaussian decode.</summary>
-    private GaussianSplatCloud SlatStage(SamPrepared prepared, int[] coords, int steps, int seed, Action<string> log, Action<string, int>? onStep)
+    private (GaussianSplatCloud? Cloud, SamMeshResult? Mesh) SlatStage(SamPrepared prepared, int[] coords, int steps, int seed, bool mesh, Action<string> log, Action<string, int>? onStep)
     {
         int voxels = coords.Length / 4;
         Tensor latent;
@@ -335,6 +338,29 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             TrellisSlatSampler.Denormalize(slat, mean, std);
         }
 
+        if (mesh)
+        {
+            try
+            {
+                using SamCheckpoint meshCheckpoint = OpenCheckpoint("slat_decoder_mesh");
+                SlatMeshDecoder meshDecoder = new();
+                meshDecoder.LoadWeights(meshCheckpoint.Section(SamCheckpointSection.Root));
+                Backend.PreloadWeights(meshDecoder.EnumerateWeights());
+                SparseTensor head = meshDecoder.Forward(Backend, new SparseTensor(latent, coords, 64));
+                Backend.Sync();
+                Backend.FreeWeights(meshDecoder.EnumerateWeights());
+                log($"mesh decoder features {head.Feats.Shape} on the {head.Resolution}-grid");
+                SamMeshResult extracted = SamSparseFeatures2Mesh.Extract(head.Coords, head.Feats.AsReadOnlySpan<float>().ToArray(), SamFlexiCubesData.Tables, head.Resolution);
+                head.Feats.Dispose();
+                log($"mesh extracted: {extracted.VertexCount} vertices, {extracted.FaceCount} triangles");
+                return (null, extracted);
+            }
+            finally
+            {
+                latent.Dispose();
+            }
+        }
+
         try
         {
             using SamCheckpoint decoderCheckpoint = OpenCheckpoint("slat_decoder_gs");
@@ -345,7 +371,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Backend.FreeWeights(decoder.EnumerateWeights());
             GaussianSplatCloud cloud = TrellisGaussianRepresentation.Build(gs, rotationScale: 0.1f);   // slat_decoder_gs.yaml: lr 0.1 for _rotation
             log($"Gaussians decoded ({voxels} voxels)");
-            return cloud;
+            return (cloud, null);
         }
         finally
         {

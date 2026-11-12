@@ -12,6 +12,7 @@ namespace HartsyInference.ThreeD.Pipelines;
 /// <param name="Seed">Random seed; null picks one.</param>
 /// <param name="StructureSteps">Euler steps of the structure flow (upstream 25).</param>
 /// <param name="SlatSteps">Euler steps of the SLAT flow (upstream 25).</param>
+/// <param name="Mesh">Decode the SLAT with the mesh decoder and extract a triangle mesh (FlexiCubes at 256) instead of Gaussian splats; needs <c>slat_decoder_mesh.safetensors</c>. The result then holds <see cref="Sam3dObjectsResult.Mesh"/> and no splats.</param>
 /// <param name="MogeResolutionLevel">0 to 9, MoGe's token budget between its minimum and maximum (upstream 9); read only when the pointmap is estimated.</param>
 public sealed record Sam3dObjectsRequest(
     byte[] Rgb,
@@ -22,4 +23,5 @@ public sealed record Sam3dObjectsRequest(
     int? Seed = null,
     int StructureSteps = 25,
     int SlatSteps = 25,
-    int MogeResolutionLevel = 9);
+    int MogeResolutionLevel = 9,
+    bool Mesh = false);
