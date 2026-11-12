@@ -12,7 +12,7 @@ public sealed class ModelDownloaderCheckpointFolderTests : IDisposable
             Directory.Delete(_folder, recursive: true);
     }
 
-    private static CatalogEntry Entry() => ModelCatalog.Find("sam3d-objects") ?? throw new InvalidOperationException("The SAM 3D catalog entry is missing.");
+    private static CatalogEntry Sam3d() => ModelCatalog.Find("sam3d-objects") ?? throw new InvalidOperationException("The SAM 3D catalog entry is missing.");
 
     private void Place(params ModelAsset[] assets)
     {
@@ -22,35 +22,50 @@ public sealed class ModelDownloaderCheckpointFolderTests : IDisposable
     }
 
     [Fact]
+    public void Sam3dEntry_LoadsFromFolder()
+    {
+        Assert.True(Sam3d().LoadsFromFolder);
+    }
+
+    [Fact]
     public void MissingAssets_AFolderHoldingEveryFileIsTheInstallWhereverTheCatalogWouldPutIt()
     {
-        CatalogEntry entry = Entry();
+        CatalogEntry entry = Sam3d();
         Place([.. entry.Assets]);
 
         Assert.Empty(ModelDownloader.MissingAssets(entry, _folder));
     }
 
     [Fact]
-    public void MissingAssets_ListsOnlyTheFilesTheFolderLacks()
+    public void MissingAssets_ListsExactlyTheFilesTheFolderLacks()
     {
-        CatalogEntry entry = Entry();
-        int baseline = ModelDownloader.MissingAssets(entry).Count;
+        CatalogEntry entry = Sam3d();
+        IReadOnlyList<ModelAsset> baseline = ModelDownloader.MissingAssets(entry);
         ModelAsset[] present = [.. entry.Assets.Take(2)];
         Place(present);
 
         IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(entry, _folder);
 
-        Assert.DoesNotContain(missing, asset => present.Contains(asset));
-        Assert.True(missing.Count < baseline || baseline == 0);
+        Assert.Equal(baseline.Except(present), missing);
     }
 
     [Fact]
     public void MissingAssets_NoFolderOrAFolderThatDoesNotExistChangesNothing()
     {
-        CatalogEntry entry = Entry();
+        CatalogEntry entry = Sam3d();
         IReadOnlyList<ModelAsset> baseline = ModelDownloader.MissingAssets(entry);
 
         Assert.Equal(baseline, ModelDownloader.MissingAssets(entry, null));
+        Assert.Equal(baseline, ModelDownloader.MissingAssets(entry, _folder));
+    }
+
+    [Fact]
+    public void MissingAssets_AnEntryWhoseLoaderReadsTheCatalogFoldersIgnoresTheFolder()
+    {
+        CatalogEntry entry = ModelCatalog.All.First(e => !e.LoadsFromFolder && e.Assets.Count > 0);
+        IReadOnlyList<ModelAsset> baseline = ModelDownloader.MissingAssets(entry);
+        Place([.. entry.Assets]);
+
         Assert.Equal(baseline, ModelDownloader.MissingAssets(entry, _folder));
     }
 }

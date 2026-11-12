@@ -33,6 +33,10 @@ public sealed record CatalogEntry
     /// when no preset download is defined.</summary>
     public IReadOnlyList<ModelAsset> Assets { get; init; } = Array.Empty<ModelAsset>();
 
+    /// <summary>Whether the loader reads every file of the model from the folder named with <c>--model-path</c> (SAM 3D Objects does), so that a folder holding the
+    /// <see cref="Assets"/> is the install wherever the catalog would have put them. False for models whose loaders look their side files up under the catalog folders.</summary>
+    public bool LoadsFromFolder { get; init; }
+
     /// <summary>What a world model accepts, checked before any weight loads. Null for every non-world entry; a
     /// catalog-less world spec gets the defaults.</summary>
     public WorldCapabilities? World { get; init; }

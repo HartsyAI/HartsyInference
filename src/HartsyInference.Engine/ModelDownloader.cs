@@ -52,17 +52,21 @@ public static class ModelDownloader
     }
 
     /// <summary>The subset of <paramref name="entry"/>'s assets not already present on disk.</summary>
-    public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry) =>
-        entry.Assets.Where(a => !File.Exists(TargetPath(a))).ToList();
+    public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry) => MissingAssets(entry, null);
 
     /// <summary>
-    /// The subset of <paramref name="entry"/>'s assets present neither at their catalog path nor, when <paramref name="checkpointFolder"/> is an existing folder, in that folder under
-    /// the asset's file name: a folder named with <c>--model-path</c> that already holds the model's files is the install, wherever the catalog would have put it.
+    /// The subset of <paramref name="entry"/>'s assets present neither at their catalog path nor, for an entry whose loader reads <see cref="CatalogEntry.LoadsFromFolder"/>, in
+    /// <paramref name="checkpointFolder"/> (an existing folder named with <c>--model-path</c>) under the asset's exact file name: such a folder is the install, wherever the catalog would
+    /// have put it. The folder is ignored for every other entry, whose loaders look their side files up under the catalog folders. The match is by the catalog's file name only (no
+    /// <c>.ckpt</c> spelling, no <see cref="ModelAsset.LegacyTargetNames"/>), so a folder of other spellings is still asked about.
     /// </summary>
-    public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry, string? checkpointFolder) =>
-        entry.Assets
-            .Where(a => !File.Exists(TargetPath(a)) && !(checkpointFolder is not null && Directory.Exists(checkpointFolder) && File.Exists(Path.Combine(checkpointFolder, a.FileName))))
+    public static IReadOnlyList<ModelAsset> MissingAssets(CatalogEntry entry, string? checkpointFolder)
+    {
+        string? folder = entry.LoadsFromFolder && checkpointFolder is not null && Directory.Exists(checkpointFolder) ? checkpointFolder : null;
+        return entry.Assets
+            .Where(a => !(folder is not null && File.Exists(Path.Combine(folder, a.FileName))) && !File.Exists(TargetPath(a)))
             .ToList();
+    }
 
     /// <summary>The local path of the model's primary file (its transformer/checkpoint), or null when the entry has no
     /// assets. Used as the resolved <c>LocalPath</c> once the set is present.</summary>
