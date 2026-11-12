@@ -8,6 +8,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 /// <summary>Flux.2 Diffusion Transformer (Klein 4B / Klein 9B / Dev). Distinct from <see cref="FluxTransformer"/>: LayerNorm for stream norms, top-level shared modulation projections (one Linear per stream type, output reused across all blocks), 4-axis RoPE with theta=2000, parallel single-stream block (fused QKV+MLP), SwiGLU MLP in both block types. Reference: <c>diffusers.transformer_flux2.Flux2Transformer2DModel</c>.</summary>
 public sealed unsafe class Flux2Transformer : IDisposable
 {
+    /// <summary>The modality embedding's key, the same in the checkpoint and after conversion.</summary>
+    public const string ModalityEmbeddingKey = "modality_in.weight";
+
     private readonly Flux2Config _config;
     private readonly Flux2DoubleBlock[] _doubleBlocks;
     private readonly Flux2SingleBlock[] _singleBlocks;
@@ -31,6 +34,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
     // Final layer: AdaLN-Continuous (shift, scale only — no gate) + proj_out
     private Tensor? _normOutLinearWeight;
     private Tensor? _projOutWeight;
+
+    // Iris-Z modality embedding: one owned F32 [1, hidden] row per modality, and the zero row that leaves the stream unscaled.
+    private Tensor[]? _modalityRows;
+    private Tensor? _zeroRow;
 
     /// <summary>True when this instance runs the audited F16 block loop (numerics.ditF16) with the exact
     /// <see cref="ChromaF16.ResidualDamp"/> residual damp — every branch input passes a no-affine LayerNorm
@@ -115,6 +122,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
         _normOutLinearWeight = weights["norm_out.linear.weight"];
         _projOutWeight = weights["proj_out.weight"];
+        LoadModalityRows(weights);
 
         _hasQuantizedWeights = false;
         foreach (Tensor w in EnumerateWeights())
@@ -314,6 +322,174 @@ public sealed unsafe class Flux2Transformer : IDisposable
         for (int i = 0; i < sgMod.Length; i++) sgMod[i].Dispose();
 
         return output;
+    }
+
+    /// <summary>Predicts the velocity of every token of <c>[grid 0, grid 1, ...]</c>, each grid a
+    /// <paramref name="hPacked"/> × <paramref name="wPacked"/> patch layout with its own noise level, modality row and RoPE
+    /// T coordinate (Iris-Z: an RGB grid and a depth grid on the same positions). Text tokens are modulated at
+    /// <paramref name="textSigma"/>, each grid's tokens at their own sigma, and each grid's rows go through the final
+    /// layer under that grid's time vector. Needs a checkpoint with a modality embedding; batch 1, F32 stream.</summary>
+    /// <param name="packedTokens"><c>[1, grids·H·W, in_channels]</c>, the grids in order.</param>
+    /// <returns><c>[1, grids·H·W, out_channels]</c>.</returns>
+    public Tensor ForwardGrids(IBackend backend, Tensor packedTokens, Tensor textEmbeddings, float textSigma,
+        ReadOnlySpan<Flux2Grid> grids, int hPacked, int wPacked)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(packedTokens);
+        ArgumentNullException.ThrowIfNull(textEmbeddings);
+        if (_modalityRows is null)
+            throw new InvalidOperationException("This Flux.2 checkpoint has no modality embedding; a multi-grid forward needs one.");
+        if (grids.IsEmpty)
+            throw new ArgumentException("At least one image grid is required.", nameof(grids));
+        int gridCount = grids.Length;
+        int gridTokens = hPacked * wPacked;
+        int imgSeqLen = gridCount * gridTokens;
+        if (packedTokens.Shape.Rank != 3 || packedTokens.Shape[0] != 1 || packedTokens.Shape[1] != imgSeqLen
+            || packedTokens.Shape[2] != _config.InChannels)
+        {
+            throw new ArgumentException(
+                $"{gridCount} grids of {hPacked}x{wPacked} need packed tokens [1, {imgSeqLen}, {_config.InChannels}], got {packedTokens.Shape}.",
+                nameof(packedTokens));
+        }
+        if (textEmbeddings.Shape.Rank != 3 || textEmbeddings.Shape[0] != 1)
+            throw new ArgumentException($"Text embeddings must be [1, L, D], got {textEmbeddings.Shape}.", nameof(textEmbeddings));
+        int txtSeqLen = (int)textEmbeddings.Shape[1];
+        int hidden = _config.HiddenSize;
+        Span<int> lengths = stackalloc int[gridCount + 1];
+        Span<int> groups = stackalloc int[gridCount + 1];
+        groups[0] = 0;
+        Span<float> gridTimes = stackalloc float[gridCount];
+        lengths[0] = txtSeqLen;
+        for (int g = 0; g < gridCount; g++)
+        {
+            if ((uint)grids[g].Modality >= (uint)_modalityRows.Length)
+                throw new ArgumentOutOfRangeException(nameof(grids), $"Grid {g} names modality {grids[g].Modality} of {_modalityRows.Length}.");
+            lengths[g + 1] = gridTokens;
+            groups[g + 1] = g + 1;
+            gridTimes[g] = grids[g].TimeCoordinate;
+        }
+        EnsureGridRope(txtSeqLen, hPacked, wPacked, gridTimes);
+
+        // Everything below is owned here; the finally frees whatever a failing stage left alive.
+        List<IDisposable> owned = new List<IDisposable>(16);
+        Tensor? img = null;
+        Tensor? txt = null;
+        Tensor? joint = null;
+        try
+        {
+            TokenSegmentLayout imageLayout = Track(owned, new TokenSegmentLayout(lengths[1..], groups[..gridCount]));
+            TokenSegmentLayout jointLayout = Track(owned, new TokenSegmentLayout(lengths, groups));
+            Tensor textVec = Track(owned, ComputeTimestepEmbedding(backend, textSigma, 0f, 1));
+            Tensor[] gridVecs = new Tensor[gridCount];
+            for (int g = 0; g < gridCount; g++)
+                gridVecs[g] = Track(owned, ComputeTimestepEmbedding(backend, grids[g].Sigma, 0f, 1));
+
+            // The modality embedding joins after the input projection, as x + modality[g]: a zero scale leaves x itself.
+            Tensor embedded = new Tensor(new TensorShape(1, imgSeqLen, hidden), DType.F32);
+            using (embedded)
+            {
+                backend.Linear(embedded, packedTokens, _xEmbedWeight!, null);
+                List<(Tensor, Tensor, Tensor)> modalityRows = new List<(Tensor, Tensor, Tensor)>(gridCount);
+                for (int g = 0; g < gridCount; g++) modalityRows.Add((_modalityRows[grids[g].Modality], _zeroRow!, _zeroRow!));
+                using SegmentModulation modality = SegmentModulation.Build(backend, modalityRows, imageLayout);
+                img = modality.Affine(backend, embedded);
+            }
+            txt = new Tensor(new TensorShape(1, txtSeqLen, hidden), DType.F32);
+            backend.Linear(txt, textEmbeddings, _contextEmbedWeight!, null);
+
+            Tensor[] txtMod = TrackAll(owned, _doubleModTxt.Forward(backend, textVec));
+            SegmentModulation imgAttn = Track(owned, BuildSegments(backend, owned, _doubleModImg, gridVecs, null, imageLayout, 0));
+            SegmentModulation imgMlp = Track(owned, BuildSegments(backend, owned, _doubleModImg, gridVecs, null, imageLayout, 3));
+            SegmentModulation single = Track(owned, BuildSegments(backend, owned, _singleMod, gridVecs, textVec, jointLayout, 0));
+
+            for (int i = 0; i < _config.Depth; i++)
+            {
+                (Tensor newImg, Tensor newTxt) = _doubleBlocks[i].Forward(backend, img, txt, [], txtMod, _rope, null, imgAttn, imgMlp);
+                img.Dispose();
+                txt.Dispose();
+                img = newImg;
+                txt = newTxt;
+            }
+
+            joint = new Tensor(new TensorShape(1, txtSeqLen + imgSeqLen, hidden), DType.F32);
+            backend.Concat(joint, new Tensor[] { txt, img }, 1);
+            img.Dispose();
+            img = null;
+            txt.Dispose();
+            txt = null;
+            for (int i = 0; i < _config.DepthSingleBlocks; i++)
+            {
+                Tensor next = _singleBlocks[i].Forward(backend, joint, [], _rope, null, single);
+                joint.Dispose();
+                joint = next;
+            }
+
+            Tensor[] velocities = new Tensor[gridCount];
+            for (int g = 0; g < gridCount; g++)
+            {
+                using Tensor gridRows = new Tensor(new TensorShape(1, gridTokens, hidden), DType.F32);
+                backend.SliceRows(gridRows, joint, txtSeqLen + g * gridTokens);
+                velocities[g] = Track(owned, ApplyFinalLayer(backend, gridRows, gridVecs[g], 1, gridTokens));
+            }
+            Tensor velocity = new Tensor(new TensorShape(1, imgSeqLen, _config.OutChannels), DType.F32);
+            backend.Concat(velocity, velocities, 1);
+            return velocity;
+        }
+        finally
+        {
+            img?.Dispose();
+            txt?.Dispose();
+            joint?.Dispose();
+            for (int i = owned.Count - 1; i >= 0; i--) owned[i].Dispose();
+        }
+    }
+
+    /// <summary>Stacks one <c>(shift, scale, gate)</c> triple per layout group, taken at <paramref name="offset"/> of
+    /// <paramref name="projection"/>'s output: group 0 from <paramref name="leadVec"/> when given, then one per grid vector.</summary>
+    private static SegmentModulation BuildSegments(IBackend backend, List<IDisposable> owned, AdaLNModulation projection,
+        Tensor[] gridVecs, Tensor? leadVec, TokenSegmentLayout layout, int offset)
+    {
+        List<(Tensor, Tensor, Tensor)> rows = new List<(Tensor, Tensor, Tensor)>(gridVecs.Length + 1);
+        if (leadVec is not null)
+        {
+            Tensor[] lead = TrackAll(owned, projection.Forward(backend, leadVec));
+            rows.Add((lead[offset], lead[offset + 1], lead[offset + 2]));
+        }
+        foreach (Tensor vec in gridVecs)
+        {
+            Tensor[] grid = TrackAll(owned, projection.Forward(backend, vec));
+            rows.Add((grid[offset], grid[offset + 1], grid[offset + 2]));
+        }
+        return SegmentModulation.Build(backend, rows, layout);
+    }
+
+    private static T Track<T>(List<IDisposable> owned, T item) where T : IDisposable
+    {
+        owned.Add(item);
+        return item;
+    }
+
+    private static Tensor[] TrackAll(List<IDisposable> owned, Tensor[] items)
+    {
+        owned.AddRange(items);
+        return items;
+    }
+
+    /// <summary>Precomputes the rope tables for <c>[text, grids...]</c> when that layout changes.</summary>
+    private void EnsureGridRope(int txtSeqLen, int hPacked, int wPacked, ReadOnlySpan<float> gridTimes)
+    {
+        HashCode hash = new HashCode();
+        hash.Add(txtSeqLen);
+        hash.Add(hPacked);
+        hash.Add(wPacked);
+        foreach (float time in gridTimes) hash.Add(time);
+        // Bit 62 keeps a grid layout from ever matching a single-image signature.
+        long sig = (uint)hash.ToHashCode() | (1L << 62);
+        if (sig == _ropeSig)
+            return;
+        using Tensor posIds = Flux2PosEmbed.BuildGridPositionIds(txtSeqLen, hPacked, wPacked, gridTimes);
+        _rope.Precompute(posIds);
+        _ropeSig = sig;
     }
 
     /// <summary>Precomputes the rope tables only when the (text len, grid) signature changes.</summary>
@@ -654,6 +830,53 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return projected;
     }
 
+    /// <summary>Copies the modality embedding into owned F32 rows, at the residual-stream scale the embedders enter at.</summary>
+    private void LoadModalityRows(IReadOnlyDictionary<string, Tensor> weights)
+    {
+        ReleaseModalityRows();
+        if (_config.ModalityCount == 0)
+            return;
+        int hidden = _config.HiddenSize;
+        if (!weights.TryGetValue(ModalityEmbeddingKey, out Tensor? table))
+            throw new KeyNotFoundException($"The checkpoint has no '{ModalityEmbeddingKey}', which this Flux.2 variant needs.");
+        if (table.Shape.Rank != 2 || table.Shape[0] != _config.ModalityCount || table.Shape[1] != hidden)
+        {
+            throw new InvalidOperationException(
+                $"'{ModalityEmbeddingKey}' is {table.Shape}; expected [{_config.ModalityCount}, {hidden}].");
+        }
+        Tensor f32 = TensorCasts.EnsureF32(table);
+        try
+        {
+            float damp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
+            float* source = (float*)f32.DataPointer;
+            Tensor[] rows = new Tensor[_config.ModalityCount];
+            for (int r = 0; r < rows.Length; r++)
+            {
+                rows[r] = new Tensor(new TensorShape(1, hidden), DType.F32);
+                float* dest = (float*)rows[r].DataPointer;
+                for (int d = 0; d < hidden; d++) dest[d] = source[(long)r * hidden + d] * damp;
+            }
+            _modalityRows = rows;
+            _zeroRow = new Tensor(new TensorShape(1, hidden), DType.F32);
+            new Span<float>((void*)_zeroRow.DataPointer, hidden).Clear();
+        }
+        finally
+        {
+            if (!ReferenceEquals(f32, table)) f32.Dispose();
+        }
+    }
+
+    private void ReleaseModalityRows()
+    {
+        if (_modalityRows is not null)
+        {
+            foreach (Tensor row in _modalityRows) row.Dispose();
+            _modalityRows = null;
+        }
+        _zeroRow?.Dispose();
+        _zeroRow = null;
+    }
+
     private static void ExtractImageTokens(Tensor output, Tensor input, int batch, int txtSeqLen, int imgSeqLen, int dim)
     {
         float* inPtr = (float*)input.DataPointer;
@@ -689,6 +912,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             _guidanceSinFixed = null;
             _graphVelocity?.Dispose();
             _graphVelocity = null;
+            ReleaseModalityRows();
         }
         GC.SuppressFinalize(this);
     }
