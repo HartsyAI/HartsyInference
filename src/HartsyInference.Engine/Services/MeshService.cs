@@ -93,18 +93,32 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// <summary>The pipelines that have no run gate of their own: a run takes a count, and a disposal waits for the count to reach zero and holds new runs off meanwhile.</summary>
     private static bool HasNoRunGate(string kind) => kind is "image" or "scene" or "rig" or "paint" or "part";
 
+    /// <summary>Whether the model's runtime serialises its own runs (and so waits for one before it is disposed); every other model runs counted.</summary>
+    private static bool RunsGated(string id, ModelSpec spec) =>
+        id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Sam3dObjects || id == MeshModelIds.HairDeck || IsHairDeck(spec);
+
     private readonly object _runLock = new();
     private int _ungatedRuns;
     private bool _disposing;
+    private TaskCompletionSource _reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _drained;
 
-    /// <summary>Runs one generation on a pipeline without a run gate, counted so that <see cref="Free"/> cannot dispose it under the run.</summary>
-    internal async Task<MeshResult> RunCounted(Func<Task<MeshResult>> run)
+    /// <summary>Runs one generation on a pipeline without a run gate, counted so that <see cref="Free"/> cannot dispose it under the run. While a disposal is waiting or running the run waits without holding a thread, and gives up when <paramref name="cancel"/> is cancelled.</summary>
+    internal async Task<MeshResult> RunCounted(Func<Task<MeshResult>> run, CancellationToken cancel = default)
     {
-        lock (_runLock)
+        while (true)
         {
-            while (_disposing)
-                Monitor.Wait(_runLock);
-            _ungatedRuns++;
+            Task reopened;
+            lock (_runLock)
+            {
+                if (!_disposing)
+                {
+                    _ungatedRuns++;
+                    break;
+                }
+                reopened = _reopened.Task;
+            }
+            await reopened.WaitAsync(cancel).ConfigureAwait(false);
         }
         try
         {
@@ -114,25 +128,39 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         {
             lock (_runLock)
             {
-                _ungatedRuns--;
-                Monitor.PulseAll(_runLock);
+                if (--_ungatedRuns == 0)
+                    _drained?.TrySetResult();
             }
         }
     }
 
-    /// <summary>Runs <paramref name="dispose"/> once no counted run is in progress, holding new ones off until it finishes.</summary>
+    /// <summary>Runs <paramref name="dispose"/> once no counted run is in progress, holding new ones off until it finishes. The caller's thread waits: the lifecycle calls it serves are synchronous.</summary>
     private void WhenNoCountedRun(Action dispose)
     {
-        lock (_runLock)
+        TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        while (true)
         {
-            while (_disposing)
-                Monitor.Wait(_runLock);
-            _disposing = true;
-            while (_ungatedRuns > 0)
-                Monitor.Wait(_runLock);
+            Task? other = null;
+            lock (_runLock)
+            {
+                if (_disposing)
+                    other = _reopened.Task;
+                else
+                {
+                    _disposing = true;
+                    _reopened = reopened;
+                    _drained = drained;
+                    if (_ungatedRuns == 0)
+                        drained.TrySetResult();
+                    break;
+                }
+            }
+            other.Wait();
         }
         try
         {
+            drained.Task.Wait();
             dispose();
         }
         finally
@@ -140,8 +168,9 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             lock (_runLock)
             {
                 _disposing = false;
-                Monitor.PulseAll(_runLock);
+                _drained = null;
             }
+            reopened.TrySetResult();
         }
     }
 
@@ -241,8 +270,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         MeshRequestValidator.Validate(id, request, MatterAvailable());
-        bool gated = id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Sam3dObjects || id == MeshModelIds.HairDeck;
-        return gated ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(() => DispatchAsync(id, spec, request, progress, cancel));
+        return RunsGated(id, spec) ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(() => DispatchAsync(id, spec, request, progress, cancel), cancel);
     }
 
     private Task<MeshResult> DispatchAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

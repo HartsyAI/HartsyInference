@@ -1188,9 +1188,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public void FreeMemory()
     {
-        // A free between jobs never waits on a request and never disposes a pipeline one holds. While any pipeline is leased, the
+        // A free between jobs never waits on a recipe request and never disposes a pipeline one holds. While any pipeline is leased, the
         // free is skipped and logged; the next free after that request finishes releases everything. The device release below
-        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory.
+        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory. The 3D service is the exception: it
+        // waits for its own running generations before it disposes their pipelines (see MeshService.Free).
         EvictedPipelines taken;
         lock (_pipelineCacheLock)
         {

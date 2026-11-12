@@ -124,6 +124,41 @@ public sealed class MeshLifecycleTests : IDisposable
     }
 
     [Fact]
+    public async Task ARunQueuedBehindAWaitingFreeHonoursItsCancellationAndRunsAfterTheFree()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshService mesh = (MeshService)engine.Mesh;
+        Adopt(mesh, Rig("queued"));
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<MeshResult> running = mesh.RunCounted(async () =>
+        {
+            started.SetResult();
+            await release.Task;
+            return Result();
+        });
+        await started.Task;
+        Task<int> free = Task.Run(() => engine.MeshLifecycle.Free("queued"));
+        await Task.Delay(300);
+        using CancellationTokenSource cancel = new();
+        bool entered = false;
+
+        Task<MeshResult> cancelled = mesh.RunCounted(() => { entered = true; return Task.FromResult(Result()); }, cancel.Token);
+        Task<MeshResult> patient = mesh.RunCounted(() => Task.FromResult(Result()));
+        await Task.Delay(100);
+
+        Assert.False(cancelled.IsCompleted, "A run queued behind a free did not wait.");
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled);
+        Assert.False(entered);
+        Assert.False(patient.IsCompleted);
+        release.SetResult();
+        Assert.Equal(1, await free);
+        await running;
+        Assert.NotNull(await patient);
+    }
+
+    [Fact]
     public void ANameKeepsNoPathAndAFolderBesideTheModelsRootIsNotRelativeToIt()
     {
         using InferenceEngine engine = new("cpu");
