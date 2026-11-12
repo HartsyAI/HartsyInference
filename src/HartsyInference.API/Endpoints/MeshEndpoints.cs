@@ -1,5 +1,6 @@
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -12,6 +13,39 @@ public static class MeshEndpoints
     /// <summary>Maps <c>/v1/native/mesh</c> and its SSE step-preview variant.</summary>
     public static void MapMeshEndpoints(this WebApplication app)
     {
+        app.MapGet("/v1/native/mesh/describe", IResult (IInferenceEngine engine) => Results.Json(engine.MeshPlanning.DescribeAll()));
+
+        app.MapGet("/v1/native/mesh/describe/{id}", IResult (string id, IInferenceEngine engine) =>
+        {
+            try
+            {
+                return Results.Json(engine.MeshPlanning.Describe(id));
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
+                MeshPlan plan = await engine.MeshPlanning.PlanAsync(spec, req.ToMeshRequest(), ct);
+                NativeMeshPlanResponse response = NativeMeshPlanResponse.Create(plan);
+                return plan.IsValid ? Results.Ok(response) : Results.Json(response, statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
+            }
+            catch (ArgumentException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
+        });
+
         app.MapPost("/v1/native/mesh", async (NativeMeshRequest req, IInferenceEngine engine, InferenceQueue queue, CancellationToken ct) =>
         {
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);

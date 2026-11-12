@@ -17,8 +17,10 @@ internal static class HairDeckRequestMapper
     public static HairDeckOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The HairDeck seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
         long seed = request.Seed < 0 ? Random.Shared.NextInt64(0, int.MaxValue) : request.Seed;
-        return new HairDeckOptions
+        HairDeckOptions options = new()
         {
             Seed = seed,
             Steps = request.Steps > 0 ? request.Steps : DefaultSteps,
@@ -27,7 +29,16 @@ internal static class HairDeckRequestMapper
             Colors = request.Colors ?? true,
             Chains = request.Chains ?? true,
             Rigged = request.Rigged,
-        }.Validate();
+        };
+        try
+        {
+            return options.Validate();
+        }
+        catch (NotSupportedException error)
+        {
+            error.ForField(options.Samples != 1 ? nameof(MeshRequest.Samples) : nameof(MeshRequest.Rigged));
+            throw;
+        }
     }
 
     /// <summary>Fails when a HairDeck-only option is set for another model, so the request is never silently changed.</summary>
@@ -37,17 +48,17 @@ internal static class HairDeckRequestMapper
         ArgumentNullException.ThrowIfNull(request);
         if (request.Samples != 1)
         {
-            throw new NotSupportedException($"'{modelId}' generates one sample per request; {request.Samples} samples were requested.");
+            throw new NotSupportedException($"'{modelId}' generates one sample per request; {request.Samples} samples were requested.").ForField(nameof(MeshRequest.Samples));
         }
 
         if (request.Rigged)
         {
-            throw new NotSupportedException($"'{modelId}' has no rigged output; rigged output is HairDeck-only.");
+            throw new NotSupportedException($"'{modelId}' has no rigged output; rigged output is HairDeck-only.").ForField(nameof(MeshRequest.Rigged));
         }
 
         if (request.Colors is not null || request.Chains is not null)
         {
-            throw new NotSupportedException($"'{modelId}' takes no colour or chain option; those are HairDeck-only.");
+            throw new NotSupportedException($"'{modelId}' takes no colour or chain option; those are HairDeck-only.").ForField(request.Colors is not null ? nameof(MeshRequest.Colors) : nameof(MeshRequest.Chains));
         }
     }
 }
