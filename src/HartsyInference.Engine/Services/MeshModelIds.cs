@@ -3,6 +3,12 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Catalog ids of the 3D models with a wired pipeline, grouped by the input they take.</summary>
 public static class MeshModelIds
 {
+    /// <summary>HairDeck: image to hair cards; it has its own request options and is not part of <see cref="ImageToMesh"/>.</summary>
+    public const string HairDeck = "hairdeck";
+
+    /// <summary>TRELLIS.2: image to mesh, shape-only or textured.</summary>
+    public const string Trellis2 = "trellis2";
+
     /// <summary>Pixal3D: image to mesh, shape-only or textured, with projected DINOv3 features.</summary>
     public const string Pixal3D = "pixal3d";
 
@@ -31,4 +37,7 @@ public static class MeshModelIds
 
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
     public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh];
+
+    /// <summary><see cref="All"/> and <see cref="HairDeck"/>: every id a host can describe and plan.</summary>
+    public static readonly IReadOnlyList<string> Described = [.. All, HairDeck];
 }
