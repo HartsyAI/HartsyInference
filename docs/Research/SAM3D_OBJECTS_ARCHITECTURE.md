@@ -25,7 +25,7 @@ Source files read: `README.md`, `doc/setup.md`, `LICENSE`, `demo.py`, `requireme
 `models/structured_latent_vae/{base,decoder_gs,decoder_mesh}.py`, `modules/transformer/{blocks,modulated}.py`,
 `modules/attention/modules.py`, `modules/sparse/transformer/modulated.py`, `modules/sparse/spatial.py`,
 `representations/gaussian/gaussian_model.py`, `representations/mesh/cube2mesh.py`, `utils/postprocessing_utils.py`,
-`data/dataset/tdfy/{preprocessor,img_processing,img_and_mask_transforms,pose_target}.py`. Not read: `tables.py` (FlexiCubes lookup tables),
+`data/dataset/tdfy/{preprocessor,img_processing,img_and_mask_transforms,pose_target}.py`. `tables.py` (FlexiCubes lookup tables) is not in Meta's repository; it was read as data from NVIDIA's FlexiCubes (`nv-tlabs/FlexiCubes` at `4cc7d6c3`, Apache-2.0; see the mesh section),
 sparse attention kernels, the training and visualisation code, the notebooks.
 
 ## Licence (from the text of `LICENSE`, "SAM License", last updated 2025-11-19; not legal advice)
@@ -66,7 +66,7 @@ that requests from there are rejected. Approval is per Hugging Face account and 
 | `sam3d_objects/**` (most files) | "Copyright Meta Platforms", under the SAM License | the architecture is implemented from this source |
 | `representations/gaussian/gaussian_model.py` | Meta header only | the activation formulas (see below) may be ported |
 | `renderers/gaussian_render.py`, `representations/gaussian/general_utils.py` | Inria GRAPHDECO header: "free for non-commercial, research and evaluation use" | **do not port these files**; the repository has no splat rasteriser (see [MODEL_STATUS_3D.md](../Checklists/MODEL_STATUS_3D.md)) and any future one must come from the published method, not this code |
-| `representations/mesh/flexicubes/flexicubes.py` | Apache-2.0, NVIDIA | portable with attribution; `tables.py` header not read: unverified |
+| `representations/mesh/flexicubes/flexicubes.py` | Apache-2.0, NVIDIA | portable with attribution; the tables come from `nv-tlabs/FlexiCubes` `tables.py` at `4cc7d6c3` (Apache-2.0, copyright 2025 NVIDIA, licence text carried in `Models/Sam3dObjects/`) |
 | MoGe, DINOv2 (via `torch.hub`), spconv, kaolin, gsplat, pytorch3d, nvdiffrast | not read | check each before port; unverified |
 
 ## Configs read (`pipeline.yaml`, `ss_generator.yaml`, `slat_generator.yaml`, `ss_decoder.yaml`, `slat_decoder_gs.yaml`, `slat_decoder_mesh.yaml`)
@@ -282,7 +282,7 @@ Missing (new code, all of it specified by the public source and testable on tiny
 4. SAM 3D preprocessor (mask-box crop with factor 1.2, pad, resize, NaN-filled pointmap crop) and the `ObjectCentricSSI` normaliser.
 5. Pose decoder (6D rotation, `ScaleShiftInvariant`), `prune_sparse_structure` and `downsample_sparse_structure`.
 6. A Gaussian representation needs no new constants (the YAML values equal the existing hard-coded ones); only the `lr` 0.1 for rotation needs checking against the C# code.
-7. Mesh branch: sparse convolution, `SparseSubdivide`, FlexiCubes extraction (needs `tables.py`, whose licence is not read).
+7. Mesh branch: sparse convolution, `SparseSubdivide`, FlexiCubes extraction (needs the FlexiCubes `tables.py`: Apache-2.0, carried as data in #833).
 8. MoGe (pointmap and intrinsics), if the pose output is wanted; its own dossier.
 9. A safe `.ckpt` path: every released weight is a Lightning `.ckpt` pickle (see below).
 
@@ -444,7 +444,7 @@ Torch 2.6.0+cu124 is installed here, without `spconv`, `xformers`, `flash_attn`,
 | prune, downsample, pose decode | `inference_utils.py`, `pose_target.py` | `pytorch3d.transforms` (quaternion and rotation helpers) | shim the five functions with their closed forms; compare the pose from fixed outputs |
 | SLAT flow | `slat_flow` over `SparseTensor` | `spconv`: the container, and the res-blocks' submanifold convolutions (a pure-torch oracle was written for the comparison) | a minimal container with `.features`, `.indices`, `.spatial_shape`, `.batch_size`; one forward at a fixed `t`, 16,132 voxels is feasible on the CPU |
 | Gaussian decode | `decoder_gs.py` (swin blocks, no convolution) | the container above | compare the Gaussian parameters before the PLY write |
-| mesh decoder | `decoder_mesh.py`, `cube2mesh.py`, `flexicubes.py` | `spconv` sparse convolutions in the subdivide blocks (a pure-torch oracle was written); `kaolin.utils.testing.check_tensor` (an assert helper); `tables.py` is missing from the checkout | features: done (parity table). Extraction: not compared, it needs the real tables |
+| mesh decoder | `decoder_mesh.py`, `cube2mesh.py`, `flexicubes.py` | `spconv` sparse convolutions in the subdivide blocks (a pure-torch oracle was written); `kaolin.utils.testing.check_tensor` (an assert helper); the tables are read as data from NVIDIA's `tables.py` | features and extraction: done (parity table) |
 | MoGe | `moge.model.v1` | none | done for the forward (torch 2.6 CPU F32); the SciPy `least_squares` solver is still not compared |
 | render and layout optimisation | `pytorch3d`, `gsplat` | CUDA wheels | out of scope (layout is dropped on purpose) |
 
@@ -494,11 +494,11 @@ Traced against `decoder_gs.py` and `gaussian_model.py`: the layout (`_xyz`, `_fe
 
 ### Mesh output (features ported, extraction partly)
 
-`slat_decoder_mesh.safetensors` (F32, on disk) runs: `SlatMeshDecoder` and `SamSparseSubdivideBlock` (#805) give the 101 features per voxel of the 256 grid and match upstream at relative L2 7.6e-7 (parity table). The extraction (`SparseFeatures2Mesh` with FlexiCubes in inference mode) is written in #810 with the three case tables injected and checked only on stand-in tables (a sphere gives a closed manifold). **Not done:** the real tables (`flexicubes/tables.py` is absent from Meta's repository and is not fetched), any comparison of the mesh with upstream's, the pipeline and CLI wiring (a `--format` for the mesh), a mesh from the decoded bust (counts, watertightness, a render), and memory and speed at about a million voxels.
+`slat_decoder_mesh.safetensors` (F32, on disk) runs: `SlatMeshDecoder` and `SamSparseSubdivideBlock` (#805) give the 101 features per voxel of the 256 grid and match upstream at relative L2 7.6e-7 (parity table). The extraction (`SparseFeatures2Mesh` with FlexiCubes in inference mode, #810) runs with the real case tables from NVIDIA's FlexiCubes (`nv-tlabs/FlexiCubes` commit `4cc7d6c3d0cee83c011ce36721b81adff0dd7db6`, `tables.py` 40,967 bytes, sha256 `de9535d0...c442`, Apache-2.0; fetched on the user's go-ahead into a scratch folder, parsed with `ast.literal_eval` and never executed; only `dmc_table` 256 x 4 x 7, `num_vd_table` and `check_table` are carried, as #833) and **matches upstream torch face for face**: Meta's `SparseFeatures2Mesh` and `FlexiCubes` inference path on the CPU against `SamSparseFeatures2Mesh` on four noisy configurations with random SDF noise, deformations, weights and colours (64 grid twice, 96 and 128; 36,007 to 143,168 voxels, 13,828 to 62,858 vertices, 27,648 to 125,708 faces): equal counts, identical faces row for row, vertices within 1.2e-7, colours within 2.4e-7. **Not done:** the extraction at the real 256 grid (torch's dense grids need several GB), the pipeline and CLI wiring (a mesh option), a mesh from the decoded bust (counts, watertightness, a render), and memory and speed at about a million voxels.
 
 ## Open items
 
 - Settled by reading the checkpoints (see "Checkpoints read"): per-block `adaLN_modulation`, stored dtypes, key prefixes, safe extraction of the `state_dict`, and that the DINO and pointmap embedder weights are in the checkpoints.
-- The licences of `Ruicheng/moge-vitl` and `tables.py`, and the MoGe checkpoint's files (the MoGe source was read as MIT-licensed, the weights' licence was not).
+- The licence of `Ruicheng/moge-vitl` and the MoGe checkpoint's files (the MoGe source was read as MIT-licensed, the weights' licence was not).
 - How the structure generator behaves with the pointmap tokens zeroed (object-only mode).
 - Whether the release's quality needs the 25-step CFG schedule at all on the 12 GB target, and the cost of the shape stage when the 1024-token pointmap group and the image groups are all present.
