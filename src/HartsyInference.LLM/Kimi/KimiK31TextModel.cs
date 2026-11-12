@@ -38,6 +38,17 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     public static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        return Load([backend], null, directory, maxSequenceTokens);
+    }
+
+    /// <summary>Loads <paramref name="directory"/> sharded over <paramref name="rankBackends"/>, one backend per rank, with <paramref name="comm"/>
+    /// the collective over them. Each rank loads only its share; the result owns the backends' decoder but not the backends.</summary>
+    /// <exception cref="ArgumentException">The rank backends are empty, or the config does not split across them.</exception>
+    /// <exception cref="HartsyInferenceException">As <see cref="Load(IBackend, string, int)"/>.</exception>
+    public static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens)
+    {
+        ArgumentNullException.ThrowIfNull(rankBackends);
+        if (rankBackends.Count == 0) throw new ArgumentException("A Kimi K3.1 load needs at least one rank backend.", nameof(rankBackends));
         ArgumentException.ThrowIfNullOrEmpty(directory);
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
         string tiktokenPath = Path.Combine(directory, KimiK31Tokenizer.TiktokenFile);
@@ -72,7 +83,7 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{(useTiktoken ? tiktokenPath : tokenizerPath)}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
-        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, backend, maxSequenceTokens);
+        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, rankBackends, comm, maxSequenceTokens);
         try
         {
             // a mismatch would make the model read the wrong embeddings, so refuse rather than guess
@@ -80,7 +91,7 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
                 throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
             if (configEos is { } eos && tokenizer.EosId != eos)
                 throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
-            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, backend, maxSequenceTokens), tokenizer, template);
+            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, rankBackends[0], maxSequenceTokens), tokenizer, template);
         }
         catch
         {

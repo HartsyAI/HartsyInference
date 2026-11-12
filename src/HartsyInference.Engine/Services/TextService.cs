@@ -915,7 +915,10 @@ public sealed partial class TextService : ITextService, IDisposable
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
         if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
-            KimiK31Refusals.RefuseMultiGpuPlacement(deviceKey, ResolveShardDevices(deviceKey).Length, _engine.Placement.TensorParallelDegree);
+        {
+            KimiK31Refusals.RequireRunnablePlacement(deviceKey, ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree,
+                _engine.Placement.ShardRatios, HfTextDirectoryLoader.ReadKimiK31Config(checkpoint));
+        }
         if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
@@ -995,22 +998,34 @@ public sealed partial class TextService : ITextService, IDisposable
         return CreateBackendFor("cpu");
     }
 
-    /// <summary>Loads a Kimi K3.1 directory onto the device the request names: CUDA or Vulkan when asked, else the CPU. A device that cannot be created
-    /// throws; the load never falls back to the CPU. Requests take the pipeline route, which gates the device they name, because the decoder has no batched decode.</summary>
+    /// <summary>Loads a Kimi K3.1 directory onto the devices the request names. One device loads the whole decoder; two or more (a request-level
+    /// composite or the engine's shard devices) shard it, one rank per device, over the collective those devices support. A device that cannot be
+    /// created throws; the load never falls back to fewer devices or to the CPU. Requests take the pipeline route, which gates the device they name,
+    /// because the decoder has no batched decode.</summary>
     private void LoadKimiK31Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         DisposeSlotBackends(slot);
-        IBackend backend = CreateBackendFor(deviceKey);
+        string[] rankDevices = ResolveShardDevices(deviceKey);
+        bool sharded = rankDevices.Length >= 2;
+        List<IBackend> backends = [];
+        ICollectiveComm? comm = null;
         try
         {
-            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
+            foreach (string device in sharded ? rankDevices : new[] { deviceKey }) backends.Add(CreateBackendFor(device));
+            comm = sharded ? CollectiveComm.Create(backends) : null;
+            slot.HostReference = sharded
+                ? HfTextDirectoryLoader.LoadKimiK31Sharded(checkpoint, backends, comm)
+                : HfTextDirectoryLoader.LoadHostReference(checkpoint, backends[0]);
         }
         catch
         {
-            backend.Dispose();
+            comm?.Dispose();
+            foreach (IBackend backend in backends) backend.Dispose();
             throw;
         }
-        slot.Backend = backend;
+        slot.TpComm = comm;
+        slot.Backend = backends[0];
+        slot.ExtraStageBackends = backends.Skip(1).ToList();
         slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
         slot.Scheduler = null;
         slot.ResidencyPlan = null;
@@ -1018,8 +1033,10 @@ public sealed partial class TextService : ITextService, IDisposable
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
-        Logs.Warning("[TextService] Kimi K3.1 has no host memory guard yet; its dense weights are widened to F32 at load, so the peak is not checked against free RAM.");
-        Logs.Info($"[TextService] Loaded Kimi K3.1 '{name}' on {deviceKey}.");
+        Logs.Warning("[TextService] Kimi K3.1 has no host memory guard yet; each rank's share is read at load and is not checked against free RAM.");
+        Logs.Info(sharded
+            ? $"[TextService] Loaded Kimi K3.1 '{name}' sharded over {rankDevices.Length} ranks ({string.Join(" + ", rankDevices)}) on the {comm!.Transport} collective."
+            : $"[TextService] Loaded Kimi K3.1 '{name}' on {deviceKey}.");
     }
 
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
