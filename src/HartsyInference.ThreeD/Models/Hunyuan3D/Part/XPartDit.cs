@@ -10,7 +10,7 @@ public sealed record XPartDitConfig(int Width = 2048, int Depth = 21, int Heads 
 /// <summary>The X-Part DiT: all parts of one object are denoised together as a batch of <c>K</c> latent sets. Each block runs self-attention over its own part (even layers) or over the
 /// tokens of every part at once (odd layers, upstream's <c>LocalGlobalProcessor(use_global=True)</c>), then cross-attends to the object tokens and to the part-in-box tokens, which
 /// are summed with the hidden state. The velocity <c>[K, N, 64]</c> comes from the final norm and projection after the time token is dropped.</summary>
-/// <remarks>The timestep is the flow sigma itself (upstream feeds <c>t / 1000</c> and embeds it with no time factor), unlike the 2.1 DiT. The part ids are the caller's:
+/// <remarks>The timestep is the flow sigma itself (upstream feeds <c>t / 1000</c> and embeds it with no time factor), as in the 2.1 plain DiT. The part ids are the caller's:
 /// upstream draws <c>torch.randperm(50)[:K]</c> at every call, which is not reproducible, so a caller passes the ids it wants. Activations are F32; weights widen to F32 on load.</remarks>
 public sealed class XPartDit : IDisposable
 {
