@@ -11,4 +11,7 @@ public enum MeshAssetBlockerKind
 
     /// <summary>The model has no catalog entry with files: the user supplies the checkpoint folder as the model path.</summary>
     NoCatalogEntry,
+
+    /// <summary>The fetch failed: the connection dropped, the server errored, or the file did not match its pinned hash. Trying again may work.</summary>
+    FetchFailed,
 }

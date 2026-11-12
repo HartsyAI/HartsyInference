@@ -162,6 +162,100 @@ public sealed class MeshAssetTests : IDisposable
         Assert.NotNull(result.PrimaryPath);
     }
 
+    /// <summary>pixal3d with everything placed except the gated encoder and the primary file, and a token set so both are fetchable.</summary>
+    private static ModelSpec PixalMissingEncoderAndPrimary(string root)
+    {
+        Environment.SetEnvironmentVariable("HF_TOKEN", "hf_test");
+        PlaceCatalog("pixal3d", a => a.Role.Contains("gated") || a.Role == "config");
+        Place(Path.Combine(root, "3D", "pixal3d", "naf_release.pth"));
+        return Spec("pixal3d");
+    }
+
+    [Fact]
+    public async Task AFileTheServerRefusesBecomesAGatedBlockerAndTheRestStillDownloadsWithThePrimaryLast()
+    {
+        ModelSpec spec = PixalMissingEncoderAndPrimary(_root);
+        List<string> order = [];
+
+        ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(spec, null, (asset, _) =>
+        {
+            order.Add(asset.Role);
+            if (asset.Role.Contains("gated"))
+                throw new HartsyInference.Core.Exceptions.HartsyInferenceException("HuggingFace API request failed for download: HTTP 403 Forbidden. Body: ");
+            Place(ModelDownloader.TargetPath(asset));
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.Equal(["encoder (gated)", "config"], order);
+        Assert.True(result.Supported);
+        MeshAssetBlocker blocker = Assert.Single(result.Blockers);
+        Assert.Equal(MeshAssetBlockerKind.Gated, blocker.Kind);
+        Assert.Contains("HF_TOKEN", blocker.Message);
+        Assert.NotNull(result.PrimaryPath);
+    }
+
+    [Theory]
+    [InlineData(typeof(HttpRequestException))]
+    [InlineData(typeof(IOException))]
+    public async Task ANetworkFailureBecomesAFetchFailedBlockerNotAnException(Type failure)
+    {
+        ModelSpec spec = PixalMissingEncoderAndPrimary(_root);
+
+        ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(spec, null,
+            (_, _) => throw (Exception)Activator.CreateInstance(failure, "connection reset")!, CancellationToken.None);
+
+        Assert.Equal(2, result.Blockers.Count);
+        Assert.All(result.Blockers, b => Assert.Equal(MeshAssetBlockerKind.FetchFailed, b.Kind));
+        Assert.Null(result.PrimaryPath);
+    }
+
+    [Fact]
+    public async Task ACancellationStillPropagates()
+    {
+        ModelSpec spec = PixalMissingEncoderAndPrimary(_root);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            ModelPrefetchService.PrefetchMeshAsync(spec, null, (_, _) => throw new OperationCanceledException(), CancellationToken.None));
+    }
+
+    [Fact]
+    public void TheManualFileIsLookedUpBesideTheModelFolderTheCallerNamed()
+    {
+        string custom = Path.Combine(_root, "elsewhere");
+        PlaceCatalog("pixal3d");
+        Place(Path.Combine(_root, "3D", "pixal3d", "naf_release.pth"));
+
+        MeshAssetInfo naf = new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
+        Assert.False(naf.Present);
+        Place(Path.Combine(custom, "naf_release.pth"));
+        MeshAssetInfo placed = new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
+
+        Assert.True(placed.Present);
+    }
+
+    [Fact]
+    public async Task FilesFoundInTheLoadersOtherFoldersAreListedAsInstalled()
+    {
+        PlaceCatalog("trellis2", a => a.FileName == "shape_dec_next_dc_f16c32_fp16.safetensors");
+        Place(Path.Combine(_root, "TRELLIS2-ShapeVAE", "shape_dec_next_dc_f16c32_fp16.safetensors"));
+        Environment.SetEnvironmentVariable("HF_TOKEN", "hf_test");
+
+        ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(Spec("trellis2"), null, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+        Assert.Contains(result.Files, f => f.Contains("TRELLIS2-ShapeVAE"));
+    }
+
+    [Fact]
+    public async Task ThePlanOfAModelWithoutCatalogFilesRepeatsTheBlockersAdvice()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), new Requests.MeshRequest { Image = new Requests.ImageData { Rgb = new byte[12], Width = 2, Height = 2 } });
+
+        MeshPlanIssue issue = Assert.Single(plan.Issues, i => i.Code == "mesh.model.not_installed");
+        Assert.Contains("checkpoint folder", issue.Message);
+    }
+
     [Fact]
     public async Task APlanListsTheMissingFilesAsWarningsAndCarriesTheInventory()
     {

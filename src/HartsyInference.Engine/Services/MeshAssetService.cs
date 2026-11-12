@@ -9,20 +9,27 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Answers <see cref="IMeshAssetService"/> from the catalog and the places the loaders look; nothing is loaded or read beyond file metadata.</summary>
 public sealed class MeshAssetService : IMeshAssetService
 {
+    private const string NoFilesMessage = "This model has no downloadable files in the catalog. Place its checkpoint folder on disk and pass it as the model path.";
+
     /// <summary>Files no catalog entry can fetch, by model id: the file's catalog-relative path, its role and what the user does.</summary>
     private static readonly Dictionary<string, (string Role, string RelativePath, string Instructions)[]> ManualFiles = new(StringComparer.OrdinalIgnoreCase)
     {
         [MeshModelIds.Pixal3D] =
         [
             ("NAF upsampler (manual)", "3D/pixal3d/naf_release.pth",
-                "Download the 'model' asset of the valeoai/NAF GitHub release (naf_release.pth, 2,664,431 bytes) and place it in 3D/pixal3d."),
+                "Download the 'model' asset of the valeoai/NAF GitHub release (naf_release.pth, 2,664,431 bytes) and place it in the model folder (3D/pixal3d)."),
         ],
     };
 
-    private const string NoFilesMessage = "This model has no downloadable files in the catalog. Place its checkpoint folder on disk and pass it as the model path.";
-
     /// <inheritdoc/>
-    public MeshAssetStatus GetStatus(ModelSpec spec)
+    public MeshAssetStatus GetStatus(ModelSpec spec) => GetInventory(spec).Status;
+
+    /// <summary>The instructions of a gated file the user has to unlock on Hugging Face.</summary>
+    internal static string GatedInstructions(string repo) =>
+        $"{repo} is gated: accept its terms on Hugging Face and set HF_TOKEN to a token with read access, then fetch again.";
+
+    /// <summary>The status of <paramref name="spec"/>'s model with the catalog asset and found path behind each row.</summary>
+    internal MeshInventory GetInventory(ModelSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
         string id = MeshService.IdOf(spec);
@@ -31,41 +38,44 @@ public sealed class MeshAssetService : IMeshAssetService
         CatalogEntry? entry = spec.Catalog ?? ModelCatalog.Find(id);
         if (entry is null || entry.Assets.Count == 0)
         {
-            return new MeshAssetStatus
+            MeshAssetStatus none = new()
             {
                 ModelId = id,
                 Assets = [],
                 ModelBlocker = new MeshAssetBlocker("checkpoint", MeshAssetBlockerKind.NoCatalogEntry, NoFilesMessage),
             };
+            return new MeshInventory(none, [], []);
         }
 
         bool token = HasToken();
         string root = RepoPaths.ModelsRoot();
         List<MeshAssetInfo> assets = [];
+        List<ModelAsset?> catalog = [];
+        List<string?> paths = [];
         foreach (ModelAsset asset in entry.Assets)
         {
             string? path = Locate(asset, id, entry, spec.LocalPath, root);
-            bool gated = asset.Role.Contains("gated", StringComparison.OrdinalIgnoreCase);
+            bool gated = IsGated(asset);
             bool blockedByToken = gated && !token;
             assets.Add(new MeshAssetInfo
             {
                 Role = asset.Role,
                 RelativePath = Relative(asset),
-                Required = !asset.Role.Contains("optional", StringComparison.OrdinalIgnoreCase),
+                Required = !IsOptional(asset),
                 Present = path is not null,
                 SizeBytes = path is null ? null : new FileInfo(path).Length,
                 Gated = gated,
                 Blocker = path is null && blockedByToken ? MeshAssetBlockerKind.Gated : null,
-                Instructions = path is null && blockedByToken
-                    ? $"{asset.Repo} is gated: accept its terms on Hugging Face and set HF_TOKEN to a token with read access, then fetch again."
-                    : null,
+                Instructions = path is null && blockedByToken ? GatedInstructions(asset.Repo) : null,
             });
+            catalog.Add(asset);
+            paths.Add(path);
         }
         if (ManualFiles.TryGetValue(id, out (string Role, string RelativePath, string Instructions)[]? manual))
         {
             foreach ((string role, string relative, string instructions) in manual)
             {
-                string? path = FindManual(relative, root);
+                string? path = FindManual(relative, spec.LocalPath, root);
                 assets.Add(new MeshAssetInfo
                 {
                     Role = role,
@@ -76,13 +86,21 @@ public sealed class MeshAssetService : IMeshAssetService
                     Blocker = path is null ? MeshAssetBlockerKind.ManualPlacement : null,
                     Instructions = path is null ? instructions : null,
                 });
+                catalog.Add(null);
+                paths.Add(path);
             }
         }
-        return new MeshAssetStatus { ModelId = id, Assets = assets };
+        return new MeshInventory(new MeshAssetStatus { ModelId = id, Assets = assets }, catalog, paths);
     }
 
     /// <summary>Whether a Hugging Face token is configured, the way the downloader reads it.</summary>
     internal static bool HasToken() => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("HF_TOKEN"));
+
+    /// <summary>The catalog marks a gated repository in the role text, as <c>encoder (gated)</c>; the catalog test pins every role that carries the word.</summary>
+    internal static bool IsGated(ModelAsset asset) => asset.Role.Contains("gated", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The catalog marks an asset only an optional feature needs in the role text, as <c>matting (optional)</c>.</summary>
+    internal static bool IsOptional(ModelAsset asset) => asset.Role.Contains("optional", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The path the loader will read <paramref name="asset"/> from, or null: the catalog path, a legacy name, the model folder the caller named, or a folder the loader also searches.</summary>
     internal static string? Locate(ModelAsset asset, string id, CatalogEntry entry, string? localPath, string root)
@@ -90,7 +108,7 @@ public sealed class MeshAssetService : IMeshAssetService
         string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
         if (found is not null)
             return found;
-        string? folder = localPath is null ? null : File.Exists(localPath) ? Path.GetDirectoryName(localPath) : localPath;
+        string? folder = ModelFolderOf(localPath);
         if (entry.LoadsFromFolder && folder is not null && Directory.Exists(folder))
         {
             string inFolder = Path.Combine(folder, asset.FileName);
@@ -119,11 +137,17 @@ public sealed class MeshAssetService : IMeshAssetService
         return null;
     }
 
-    private static string? FindManual(string relative, string root)
+    /// <summary>A file placed by hand is looked up where the loader reads it: beside the checkpoints of the model folder the caller named, else in the catalog folder.</summary>
+    private static string? FindManual(string relative, string? localPath, string root)
     {
-        string path = Path.Combine(root, ModelFolders.MapSubdir(Path.GetDirectoryName(relative) ?? ""), Path.GetFileName(relative));
-        return FirstExisting(path);
+        string name = Path.GetFileName(relative);
+        string? folder = ModelFolderOf(localPath);
+        if (folder is not null)
+            return FirstExisting(Path.Combine(folder, name));
+        return FirstExisting(Path.Combine(root, ModelFolders.MapSubdir(Path.GetDirectoryName(relative) ?? ""), name));
     }
+
+    private static string? ModelFolderOf(string? localPath) => localPath is null ? null : File.Exists(localPath) ? Path.GetDirectoryName(localPath) : localPath;
 
     private static string? FirstExisting(string path) => File.Exists(path) ? path : null;
 
