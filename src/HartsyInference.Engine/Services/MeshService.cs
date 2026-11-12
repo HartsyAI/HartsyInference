@@ -20,7 +20,7 @@ namespace HartsyInference.Engine.Services;
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
 /// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
-public sealed class MeshService : IMeshService, IDisposable
+public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposable
 {
     private static readonly string EngineVersion = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
@@ -50,8 +50,201 @@ public sealed class MeshService : IMeshService, IDisposable
         string id = IdOf(spec);
         MeshSettingsUsed settings = SettingsOf(id, request);
         MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? request with { Seed = seed } : request;
-        MeshResult raw = await GenerateRawAsync(id, spec, effective, progress, cancel).ConfigureAwait(false);
+        MeshResult raw = await WithOutOfVramRetry(
+            () => GenerateRawAsync(id, spec, effective, progress, cancel),
+            () =>
+            {
+                progress?.Report(MeshProgress.Plain(0, 0, "Retrying after out of memory"));
+                FreeAfterOutOfVram();
+            }).ConfigureAwait(false);
         return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, settings, cancel), cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs <paramref name="run"/>; when it fails for lack of device memory, calls <paramref name="free"/> and runs it once more. The retry re-resolves its pipeline, which is why it can live here: the failed run's cached pipeline was freed, so nothing believes weights it no longer has are resident. A second failure, any other failure and a cancellation propagate.</summary>
+    internal static async Task<MeshResult> WithOutOfVramRetry(Func<Task<MeshResult>> run, Action free)
+    {
+        try
+        {
+            return await run().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (InferenceEngine.IsOutOfVram(ex))
+        {
+            Logs.Warning($"[Mesh] A generation ran out of VRAM; freeing the loaded 3D models and retrying once: {ex.Message}");
+            free();
+            return await run().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Gives back what the 3D side holds: its resident pipelines and the matting model, then the driver pool's cached-but-free blocks. It does not sweep the backend's weight and activation caches, which the engine's cached image and video pipelines still believe are resident (a sweep under them returns garbage, see <c>InferenceEngine.GenerateWithVramCleanup</c>).</summary>
+    private void FreeAfterOutOfVram()
+    {
+        Free();
+        _engine.MeshPreparationInternal.Dispose();
+        try
+        {
+            _engine.Backend.TrimMemoryPool();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logs.Error("[Mesh] Trimming the device pool after an out-of-memory failure failed; the retry may fail too.", ex);
+        }
+    }
+
+    /// <summary>The pipelines that have no run gate of their own: a run takes a count, and a disposal waits for the count to reach zero and holds new runs off meanwhile.</summary>
+    private static bool HasNoRunGate(string kind) => kind is "image" or "scene" or "rig" or "paint" or "part";
+
+    /// <summary>Whether the model's runtime serialises its own runs (and so waits for one before it is disposed); every other model runs counted.</summary>
+    private static bool RunsGated(string id, ModelSpec spec) =>
+        id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Sam3dObjects || id == MeshModelIds.HairDeck || IsHairDeck(spec);
+
+    private readonly object _runLock = new();
+    private int _ungatedRuns;
+    private bool _disposing;
+    private TaskCompletionSource _reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _drained;
+
+    /// <summary>Runs one generation on a pipeline without a run gate, counted so that <see cref="Free"/> cannot dispose it under the run. While a disposal is waiting or running the run waits without holding a thread, and gives up when <paramref name="cancel"/> is cancelled.</summary>
+    internal async Task<MeshResult> RunCounted(Func<Task<MeshResult>> run, CancellationToken cancel = default)
+    {
+        while (true)
+        {
+            Task reopened;
+            lock (_runLock)
+            {
+                if (!_disposing)
+                {
+                    _ungatedRuns++;
+                    break;
+                }
+                reopened = _reopened.Task;
+            }
+            await reopened.WaitAsync(cancel).ConfigureAwait(false);
+        }
+        try
+        {
+            return await run().ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_runLock)
+            {
+                if (--_ungatedRuns == 0)
+                    _drained?.TrySetResult();
+            }
+        }
+    }
+
+    /// <summary>Runs <paramref name="dispose"/> once no counted run is in progress, holding new ones off until it finishes. The caller's thread waits: the lifecycle calls it serves are synchronous.</summary>
+    private void WhenNoCountedRun(Action dispose)
+    {
+        TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        while (true)
+        {
+            Task? other = null;
+            lock (_runLock)
+            {
+                if (_disposing)
+                    other = _reopened.Task;
+                else
+                {
+                    _disposing = true;
+                    _reopened = reopened;
+                    _drained = drained;
+                    if (_ungatedRuns == 0)
+                        drained.TrySetResult();
+                    break;
+                }
+            }
+            other.Wait();
+        }
+        try
+        {
+            drained.Task.Wait();
+            dispose();
+        }
+        finally
+        {
+            lock (_runLock)
+            {
+                _disposing = false;
+                _drained = null;
+            }
+            reopened.TrySetResult();
+        }
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<MeshLoadedModel> Loaded()
+    {
+        lock (_gate)
+        {
+            return [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
+        }
+    }
+
+    /// <inheritdoc/>
+    public int Free(string? name = null)
+    {
+        List<(string Kind, string Name, IDisposable Item)> freed = [];
+        lock (_gate)
+        {
+            foreach ((string kind, string key, IDisposable item) in Resident().ToList())
+            {
+                if (name is not null && !string.Equals(NameOf(key), name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                RemoveResident(kind, key);
+                freed.Add((kind, NameOf(key), item));
+            }
+        }
+        // A disposal waits for the run in progress, so it happens outside the lock that every load takes: the gated runtimes wait on their own gate, the others on the run count.
+        foreach ((string kind, string _, IDisposable item) in freed.Where(f => !HasNoRunGate(f.Kind)))
+            item.Dispose();
+        List<IDisposable> counted = [.. freed.Where(f => HasNoRunGate(f.Kind)).Select(f => f.Item)];
+        if (counted.Count > 0)
+            WhenNoCountedRun(() => counted.ForEach(item => item.Dispose()));
+        if (freed.Count > 0)
+            Logs.Info($"[Mesh] Freed {freed.Count} resident 3D model(s): {string.Join(", ", freed.Select(f => $"{f.Kind} {f.Name}"))}.");
+        return freed.Count;
+    }
+
+    private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
+    {
+        foreach (KeyValuePair<string, LoadedMesh> e in _pipelines) yield return ("image", e.Key, e.Value.Pipeline);
+        foreach (KeyValuePair<string, CoLa3DPipeline> e in _scenePipelines) yield return ("scene", e.Key, e.Value);
+        foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return ("rig", e.Key, e.Value);
+        foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return ("paint", e.Key, e.Value);
+        foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return ("part", e.Key, e.Value);
+        foreach (KeyValuePair<string, HairDeckRuntime> e in _hairDecks) yield return ("hairdeck", e.Key, e.Value);
+        foreach (KeyValuePair<string, Trellis2Runtime> e in _trellis2) yield return ("trellis2", e.Key, e.Value);
+        foreach (KeyValuePair<string, Pixal3DRuntime> e in _pixal3d) yield return ("pixal3d", e.Key, e.Value);
+    }
+
+    private void RemoveResident(string kind, string key)
+    {
+        switch (kind)
+        {
+            case "image": _pipelines.Remove(key); break;
+            case "scene": _scenePipelines.Remove(key); break;
+            case "rig": _rigPipelines.Remove(key); break;
+            case "paint": _paintPipelines.Remove(key); break;
+            case "part": _partPipelines.Remove(key); break;
+            case "hairdeck": _hairDecks.Remove(key); break;
+            case "trellis2": _trellis2.Remove(key); break;
+            default: _pixal3d.Remove(key); break;
+        }
+    }
+
+    /// <summary>The key a pipeline is cached under as a name that holds no absolute path: relative to the models root when under it, else the last segment. A scene key carries its variant after a bar and keeps it.</summary>
+    private static string NameOf(string key)
+    {
+        string[] parts = key.Split('|');
+        string root = RepoPaths.ModelsRoot();
+        string path = parts[0];
+        string name = path.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetRelativePath(root, path).Replace('\\', '/')
+            : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return parts.Length > 1 ? name + "|" + parts[1] : name;
     }
 
     /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
@@ -77,6 +270,11 @@ public sealed class MeshService : IMeshService, IDisposable
     private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         MeshRequestValidator.Validate(id, request, MatterAvailable());
+        return RunsGated(id, spec) ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(() => DispatchAsync(id, spec, request, progress, cancel), cancel);
+    }
+
+    private Task<MeshResult> DispatchAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
@@ -883,26 +1081,20 @@ public sealed class MeshService : IMeshService, IDisposable
             _trellis2.Clear();
             _pixal3d.Clear();
         }
-        foreach (LoadedMesh loaded in pipelines)
+        // The pipelines without a run gate wait for the counted runs; the gated runtimes below wait on their own gate.
+        WhenNoCountedRun(() =>
         {
-            loaded.Pipeline.Dispose();
-        }
-        foreach (CoLa3DPipeline pipeline in scenePipelines)
-        {
-            pipeline.Dispose();
-        }
-        foreach (UniRigPipeline pipeline in rigPipelines)
-        {
-            pipeline.Dispose();
-        }
-        foreach (HunyuanPaintLoader loader in paintPipelines)
-        {
-            loader.Dispose();
-        }
-        foreach (P3SamPipeline pipeline in partPipelines)
-        {
-            pipeline.Dispose();
-        }
+            foreach (LoadedMesh loaded in pipelines)
+                loaded.Pipeline.Dispose();
+            foreach (CoLa3DPipeline pipeline in scenePipelines)
+                pipeline.Dispose();
+            foreach (UniRigPipeline pipeline in rigPipelines)
+                pipeline.Dispose();
+            foreach (HunyuanPaintLoader loader in paintPipelines)
+                loader.Dispose();
+            foreach (P3SamPipeline pipeline in partPipelines)
+                pipeline.Dispose();
+        });
         foreach (HairDeckRuntime runtime in hairDecks)
         {
             runtime.Dispose();

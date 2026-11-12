@@ -13,6 +13,11 @@ public static class MeshEndpoints
     /// <summary>Maps <c>/v1/native/mesh</c> and its SSE step-preview variant.</summary>
     public static void MapMeshEndpoints(this WebApplication app)
     {
+        app.MapGet("/v1/native/mesh/loaded", IResult (IInferenceEngine engine) => Results.Json(engine.MeshLifecycle.Loaded()));
+
+        app.MapPost("/v1/native/mesh/free", IResult (NativeMeshFreeRequest? req, IInferenceEngine engine) =>
+            Results.Ok(new { Freed = engine.MeshLifecycle.Free(req?.Name) }));
+
         app.MapGet("/v1/native/mesh/describe", IResult (IInferenceEngine engine) => Results.Json(engine.MeshPlanning.DescribeAll()));
 
         app.MapGet("/v1/native/mesh/describe/{id}", IResult (string id, IInferenceEngine engine) =>
