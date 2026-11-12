@@ -351,7 +351,7 @@ public static class ModelCatalog
     {
         Id = "sam3d-objects", Modality = Modality.Mesh, DisplayName = "SAM 3D Objects (image + mask to Gaussian splats; SAM License)",
         Architecture = "MoT shortcut-flow structure generator (DINOv2-L x2 + pointmap), TRELLIS sparse SLAT flow, Gaussian decoder, MoGe pointmap",
-        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "apozz/sam-3d-objects-safetensors",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "apozz/sam-3d-objects-safetensors", LoadsFromFolder = true,
         Assets = new ModelAsset[]
         {
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "ss_generator.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "structure generator (with both DINOv2 towers)",
