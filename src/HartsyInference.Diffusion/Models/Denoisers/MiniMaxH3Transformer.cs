@@ -556,6 +556,9 @@ public sealed unsafe class MiniMaxH3Transformer : IDisposable
     private Tensor ProjectIntoStream(IBackend backend, Tensor rows, string prefix, int outDim)
         => DtypeCastHelper.EnsureDtype(backend, Project(backend, rows, prefix, outDim, DType.F32), BodyDType);
 
+    /// <summary>The text-side context the body receives: condition_proj, then the token refiner. Exposed for device checks against the reference's preprocessed context.</summary>
+    internal Tensor RefinedText(IBackend backend, Tensor textStates) => RefineText(backend, textStates);
+
     /// <summary>condition_proj to hidden width, then the token refiner's self-attention blocks (no modulation, no rope).</summary>
     private Tensor RefineText(IBackend backend, Tensor textStates)
     {

@@ -32,7 +32,13 @@ public sealed class MiniMaxH3ImageGpuTests
     // Tolerances are set from the first measured run, and reported with it. Relative L2 is ||a-b|| / ||b||.
     private const double VaeRelativeL2Floor = 2e-2;
     private const double TextRelativeL2Floor = 2e-2;
-    private const double VelocityRelativeL2Floor = 2e-2;
+    // Exact-precision reference: our f32 body against ComfyUI in fp32 with exact attention. Set from the measured run.
+    private const double ExactVelocityRelativeL2Floor = 5e-3;
+    // Default reference: ComfyUI's bf16 body and comfy_kitchen_int8 attention. Its attention scheme alone moves the velocity by
+    // about 6% (relative L2 0.060), so the bound is set above that, with the reason stated here.
+    private const double DefaultVelocityRelativeL2Floor = 1e-1;
+    private const double TextRefinerRelativeL2Floor = 2e-2;
+    private const double Int8LinearRelativeL2Floor = 2e-3;
 
     [MiniMaxH3ImageGpuFact]
     public void VaeDecodeOfTheReferenceLatentMatchesComfyUiPixels()
@@ -126,27 +132,106 @@ public sealed class MiniMaxH3ImageGpuTests
     }
 
     [MiniMaxH3ImageGpuFact]
-    public void DenoiseStepVelocityMatchesComfyUiAtStepZero()
+    public void TextRefinerMatchesComfyUiPreprocessedContext()
     {
-        AssertDenoiseStepMatches(step: 0);
+        // Localises a body-side gap: ComfyUI's context is condition_proj plus the two-block token refiner, from the bf16 cast of
+        // the encoder output. If this matches, the gap is in the image tokens or the body, not the text side.
+        string refDir = ReferenceDir();
+        int[] ids = ReadTextIds(refDir);
+        float[] hidden = ReadFloats(Path.Combine(refDir, "text_hidden_f32.bin"));
+        float[] refined = ReadFloats(Path.Combine(refDir, "text_refined_f32.bin"));
+
+        using CudaBackend cuda = new(0, Ernie5ModelGpuParityTests.PtxDirectory());
+        MiniMaxH3ImageRecipePipeline pipeline = (MiniMaxH3ImageRecipePipeline)new MiniMaxH3ImageRecipe().Construct(new RecipeContext
+        {
+            CheckpointPath = Path.Combine(ModelsDir(), DitRelative),
+            Backend = cuda,
+        });
+        try
+        {
+            using Tensor textStates = new(new TensorShape([(long)ids.Length, 5120L]), DType.F32);
+            CopyFloats(hidden, textStates.AsSpan<float>());
+            using Tensor ours = pipeline.RefinedText(cuda, textStates);
+            float[] actual = ours.AsSpan<float>().ToArray();
+
+            Assert.Equal(refined.Length, actual.Length);
+            double relative = RelativeL2(actual, refined);
+            Assert.True(relative < TextRefinerRelativeL2Floor, Diagnose("Text refiner", actual, refined, relative));
+        }
+        finally
+        {
+            pipeline.Dispose();
+        }
+    }
+
+    /// <summary>One int8 ConvRot linear on the same input as ComfyUI's module (block 0 attn.qkv_proj). It isolates the
+    /// quantized matmul from the rest of the body: rotate, per-row quantize, int8 GEMM, rescale.</summary>
+    [MiniMaxH3ImageGpuFact]
+    public void Int8QkvLinearMatchesComfyUiOnTheSameInput()
+    {
+        string linearDir = Path.Combine(Path.GetDirectoryName(ReferenceDir().TrimEnd(Path.DirectorySeparatorChar))!, "h3_linear_qkv");
+        float[] input = ReadFloats(Path.Combine(linearDir, "lin_in_f32.bin"));
+        float[] expected = ReadFloats(Path.Combine(linearDir, "lin_out_f32.bin"));
+
+        using CudaBackend cuda = new(0, Ernie5ModelGpuParityTests.PtxDirectory());
+        List<IDisposable> loaders = [];
+        try
+        {
+            using MiniMaxH3Transformer transformer = MiniMaxH3Components.LoadTransformer(
+                Path.Combine(ModelsDir(), DitRelative), loaders, DType.F32, [cuda], out _, out Dictionary<string, Tensor> weights);
+            Tensor qkv = weights["blocks.0.attn.qkv_proj.weight"];
+            Assert.Equal(DType.I8, qkv.DType);
+
+            using Tensor x = new(new TensorShape([64L, 5376L]), DType.F32);
+            CopyFloats(input, x.AsSpan<float>());
+            using Tensor y = new(new TensorShape([64L, 21504L]), DType.F32);
+            cuda.Linear(y, x, qkv, null);
+
+            float[] actual = y.AsSpan<float>().ToArray();
+            double relative = RelativeL2(actual, expected);
+            Assert.True(relative < Int8LinearRelativeL2Floor, Diagnose("int8 qkv linear", actual, expected, relative));
+        }
+        finally
+        {
+            foreach (IDisposable loader in loaders)
+            {
+                loader.Dispose();
+            }
+        }
+    }
+
+    /// <summary>The structural check: our f32 body with exact attention against ComfyUI run in fp32 with exact SDPA. It is the
+    /// only reference that removes the reference's own bf16 body and int8 attention, so it is the floor for the body itself.</summary>
+    [MiniMaxH3ImageExactReferenceFact]
+    public void DenoiseStepVelocityMatchesExactComfyUiAtStepZero()
+    {
+        AssertDenoiseStepMatches(step: 0, inputsDir: ReferenceDir(), targetDir: ExactReferenceDir(), floor: ExactVelocityRelativeL2Floor);
+    }
+
+    /// <summary>The bounded check: against the default ComfyUI dump (bf16 body, comfy_kitchen_int8 attention). The gap is the
+    /// reference's own approximation, measured as 6% from its attention scheme alone, so the floor is set to that reason.</summary>
+    [MiniMaxH3ImageGpuFact]
+    public void DenoiseStepVelocityMatchesDefaultComfyUiAtStepZeroWithinItsOwnPrecision()
+    {
+        AssertDenoiseStepMatches(step: 0, inputsDir: ReferenceDir(), targetDir: ReferenceDir(), floor: DefaultVelocityRelativeL2Floor);
     }
 
     [MiniMaxH3ImageGpuFact]
     public void DenoiseStepVelocityMatchesComfyUiAtTheLastStep()
     {
-        AssertDenoiseStepMatches(step: 5);
+        AssertDenoiseStepMatches(step: 5, inputsDir: ReferenceDir(), targetDir: ReferenceDir(), floor: DefaultVelocityRelativeL2Floor);
     }
 
-    private static void AssertDenoiseStepMatches(int step)
+    private static void AssertDenoiseStepMatches(int step, string inputsDir, string targetDir, double floor)
     {
-        string refDir = ReferenceDir();
+        string refDir = inputsDir;
         JsonElement manifest = ReadManifest(refDir);
         double[] sigmas = manifest.GetProperty("sigmas_7_float64").EnumerateArray().Select(e => e.GetDouble()).ToArray();
         int[] expectedIds = ReadTextIds(refDir);
         int tokens = expectedIds.Length;
         float[] hidden = ReadFloats(Path.Combine(refDir, "text_hidden_f32.bin"));
         float[] xValues = ReadFloats(Path.Combine(refDir, $"step{step}_x_f32.bin"));
-        float[] velocityValues = ReadFloats(Path.Combine(refDir, $"step{step}_model_out_f32.bin"));
+        float[] velocityValues = ReadFloats(Path.Combine(targetDir, $"step{step}_model_out_f32.bin"));
 
         using CudaBackend cuda = new(0, Ernie5ModelGpuParityTests.PtxDirectory());
         RecipeContext context = new()
@@ -193,8 +278,8 @@ public sealed class MiniMaxH3ImageGpuTests
                     }
                     float[] referenceVelocityValues = referenceVelocity.AsSpan<float>().ToArray();
                     double relative = RelativeL2(velocity, referenceVelocityValues);
-                    Assert.True(relative < VelocityRelativeL2Floor,
-                        $"DiT step {step} velocity relative L2 vs ComfyUI was {relative:E3}");
+                    Assert.True(relative < floor,
+                        Diagnose($"DiT step {step} velocity", velocity, referenceVelocityValues, relative));
                 }
             }
         }
@@ -217,6 +302,12 @@ public sealed class MiniMaxH3ImageGpuTests
     {
         string? dir = Environment.GetEnvironmentVariable(ReferenceDirVariable);
         return dir ?? throw new InvalidOperationException($"{ReferenceDirVariable} is not set.");
+    }
+
+    private static string ExactReferenceDir()
+    {
+        string root = ReferenceDir();
+        return Path.Combine(Path.GetDirectoryName(root.TrimEnd(Path.DirectorySeparatorChar))!, Path.GetFileName(root) + "_exact_fp32");
     }
 
     private static string ModelsDir() =>
@@ -290,6 +381,20 @@ public sealed class MiniMaxH3ImageGpuTests
             norm += (double)expected[i] * expected[i];
         }
         return Math.Sqrt(diff) / Math.Max(1e-30, Math.Sqrt(norm));
+    }
+}
+
+/// <summary>A GPU fact that also needs the exact-precision ComfyUI dump beside the default one (<c>&lt;dir&gt;_exact_fp32</c>).</summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+public sealed class MiniMaxH3ImageExactReferenceFactAttribute : FactAttribute
+{
+    public MiniMaxH3ImageExactReferenceFactAttribute()
+    {
+        string? refs = Environment.GetEnvironmentVariable("HARTSY_H3_REF_DIR");
+        if (string.IsNullOrWhiteSpace(refs) || !File.Exists(Path.Combine(refs.TrimEnd(Path.DirectorySeparatorChar) + "_exact_fp32", "step0_model_out_f32.bin")))
+        {
+            Skip = "SKIPPED: the exact-precision ComfyUI dump (<HARTSY_H3_REF_DIR>_exact_fp32) is not present; this structural check did not run.";
+        }
     }
 }
 

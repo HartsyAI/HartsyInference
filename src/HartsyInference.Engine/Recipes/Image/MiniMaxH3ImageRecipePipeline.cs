@@ -170,6 +170,9 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         return _encoder.Encode(_textBackend, PresentPrompt(_tokenizer, prompt), null);
     }
 
+    /// <summary>The text-side context the body receives, for device checks against ComfyUI's preprocessed context.</summary>
+    internal Tensor RefinedText(IBackend backend, Tensor textStates) => _transformer.RefinedText(backend, textStates);
+
     /// <summary>The checkpoint-derived config the pipeline runs with.</summary>
     internal MiniMaxH3Config Config => _config;
 
