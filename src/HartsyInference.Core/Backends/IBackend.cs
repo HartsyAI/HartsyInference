@@ -162,6 +162,12 @@ public partial interface IBackend : IDisposable
     /// <summary>Waits for all pending GPU work (no-op on CPU) — call at phase boundaries so deferred frees land before large allocations.</summary>
     void Sync() { }
 
+    /// <summary>Dequantizes a packed single-expert NVFP4 bank <c>[1, out, in/2]</c>, its block scales and its global scale into the
+    /// BF16 <c>[out, in]</c> <paramref name="destination"/> on the device. Returns false and writes nothing when the backend has no
+    /// such kernel, so the caller runs its host dequant. The device result is registered against <paramref name="destination"/> for
+    /// the next <see cref="Linear"/> and released by <c>FreeWeights</c>.</summary>
+    bool TryDequantNvfp4ToBf16(Tensor packed, Tensor blockScale, Tensor globalScale, Tensor destination) => false;
+
     /// <summary>Marks the end of the work issued so far and returns a handle <see cref="WaitFence"/> can block on; 0 on a
     /// backend whose ops have finished by the time they return (the default), where there is nothing to wait for.</summary>
     /// <remarks>Lets a caller bound how far the host runs ahead of the device without draining it: waiting on a fence

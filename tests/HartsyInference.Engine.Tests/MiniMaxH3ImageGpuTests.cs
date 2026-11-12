@@ -120,7 +120,15 @@ public sealed class MiniMaxH3ImageGpuTests
                 new HartsyInference.ModelAssets.Tokenizers.Qwen2Tokenizer(), Prompt);
 
             Assert.Equal(expectedIds, presented.TokenIds);
+            System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+            MiniMaxH3TextEncoder.Result first = encoder.Encode(cuda, presented, null);
+            cuda.Sync();
+            double coldMs = clock.Elapsed.TotalMilliseconds;
+            first.HiddenStates.Dispose();
+            clock.Restart();
             MiniMaxH3TextEncoder.Result encoded = encoder.Encode(cuda, presented, null);
+            cuda.Sync();
+            Console.WriteLine($"[h3-device] Text encoder encode ms: cold {coldMs:F1}, warm {clock.Elapsed.TotalMilliseconds:F1}");
             using (encoded.HiddenStates)
             {
                 Assert.Equal(expectedHidden.Length, encoded.HiddenStates.ElementCount);

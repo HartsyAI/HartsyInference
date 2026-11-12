@@ -34,6 +34,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     private readonly IReadOnlyList<IDisposable> _loaders;
     private readonly StackedOutputHeads _heads;
     private bool _disposed;
+    private readonly PromptEncodingCache _promptCache = new(8);
 
     internal MiniMaxH3ImageRecipePipeline(MiniMaxH3Transformer transformer, MiniMaxH3Config config,
         MiniMaxH3VideoVaeDecoder decoder, MiniMaxH3TextEncoder encoder, Qwen2Tokenizer tokenizer,
@@ -78,7 +79,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
         // TODO(gpu): the picture label. The image path uses "Picture N: " with no brackets (nodes_minimax_h3.py); this
         // text-only path has no references, so no label is emitted yet. Phase 5b must add it.
-        MiniMaxH3TextEncoder.Result encoded = EncodePrompt(request.Prompt);
+        MiniMaxH3TextEncoder.Result encoded = EncodePromptCached(request.Prompt);
         Tensor? x = null;
         Tensor? noise = null;
         try
@@ -162,6 +163,19 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     /// it: the Qwen byte-level BPE of the string as written, with no template and no special tokens.</summary>
     internal static MiniMaxH3TextEncoding.Encoded PresentPrompt(Qwen2Tokenizer tokenizer, string prompt) =>
         MiniMaxH3TextEncoding.Build(tokenizer, prompt, conditions: null, weightedPrompt: false);
+
+    /// <summary>The prompt's encoder states: a cached copy when this prompt was encoded recently, otherwise a fresh encode.</summary>
+    private MiniMaxH3TextEncoder.Result EncodePromptCached(string prompt)
+    {
+        MiniMaxH3TextEncoder.Result? cached = _promptCache.Get(prompt);
+        if (cached is not null)
+        {
+            return cached;
+        }
+        MiniMaxH3TextEncoder.Result fresh = EncodePrompt(prompt);
+        _promptCache.Put(prompt, fresh);
+        return fresh;
+    }
 
     private MiniMaxH3TextEncoder.Result EncodePrompt(string prompt)
     {

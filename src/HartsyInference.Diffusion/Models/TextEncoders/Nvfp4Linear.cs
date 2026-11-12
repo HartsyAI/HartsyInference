@@ -175,7 +175,10 @@ public sealed unsafe class Nvfp4Linear : IDisposable
             Tensor slice = BorrowSlice(dequantScratch);
             try
             {
-                DequantBf16(_packed!, _blockScale!, _globalScale!, slice);
+                if (!backend.TryDequantNvfp4ToBf16(_packed!, _blockScale!, _globalScale!, slice))
+                {
+                    DequantBf16(_packed!, _blockScale!, _globalScale!, slice);
+                }
                 backend.Linear(output, x, slice, null);
             }
             finally
