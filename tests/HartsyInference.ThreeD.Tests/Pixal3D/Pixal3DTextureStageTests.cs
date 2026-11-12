@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ThreeD.Models.Pixal3D;
 using HartsyInference.ThreeD.Models.TrellisV2;
+using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Stages;
 using HartsyInference.ThreeD.Tests.TrellisV2;
 using Xunit;
@@ -183,6 +184,127 @@ public sealed class Pixal3DTextureStageTests : IDisposable
 
         Assert.Throws<HartsyInferenceException>(() => new Pixal3DTextureFlowStage(Path.Combine(_directory, "x.safetensors"), shapeOnly));
     }
+
+    // The texture files are optional: whatever is wrong with them leaves the texture path off with a reason and builds nothing, so shape-only loads.
+    [Theory]
+    [InlineData("missing-sidecar")]
+    [InlineData("truncated-json")]
+    [InlineData("wrong-name")]
+    [InlineData("missing-field")]
+    [InlineData("wrong-channels")]
+    [InlineData("not-a-projection-flow")]
+    public void LoadTexture_ALoadFailureLeavesTextureOffWithTheReasonAndBuildsNothing(string problem)
+    {
+        string flow = Path.Combine(_directory, "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors"), decoder = Path.Combine(_directory, "tex_dec.safetensors");
+        File.WriteAllBytes(flow, [0]);
+        File.WriteAllBytes(decoder, [0]);
+        string sidecar = Path.ChangeExtension(flow, ".json");
+        string Args(int inChannels, string mode) => $$$"""
+            {"name": "ElasticSLatFlowModel", "args": {"resolution": 64, "in_channels": {{{inChannels}}}, "out_channels": 32, "model_channels": 16,
+            "cond_channels": 1024, "num_blocks": 2, "num_heads": 2, "mlp_ratio": 2.0, "pe_mode": "rope", "share_mod": true,
+            "qk_rms_norm": true, "qk_rms_norm_cross": true{{{mode}}}}}
+            """;
+        switch (problem)
+        {
+            case "missing-sidecar":
+                break;
+            case "truncated-json":
+                File.WriteAllText(sidecar, "{\"name\": \"ElasticSLatFlowModel\", \"ar");
+                break;
+            case "wrong-name":
+                File.WriteAllText(sidecar, "{\"name\": \"SomethingElse\", \"args\": {}}");
+                break;
+            case "missing-field":
+                File.WriteAllText(sidecar, "{\"name\": \"ElasticSLatFlowModel\"}");
+                break;
+            case "wrong-channels":
+                File.WriteAllText(sidecar, Args(40, ", \"image_attn_mode\": \"proj\", \"proj_in_channels\": 2048"));
+                break;
+            default:
+                File.WriteAllText(sidecar, Args(64, string.Empty));
+                break;
+        }
+
+        Pixal3DModelFiles files = new()
+        {
+            Pipeline = "p", StructureFlow = "s", StructureDecoder = "d", ShapeFlow512 = "a", ShapeFlow1024 = "b", ShapeDecoder = "c", Dino = "e", Naf = "n",
+            TextureFlow = flow, TextureDecoder = decoder,
+        };
+        List<IDisposable> owned = [];
+
+        (IPixal3DTextureFlowStage? stage, ITrellis2TextureDecoderStage? textureDecoder, string? reason) =
+            Pixal3DImageTo3DPipeline.LoadTexture(files, TexturePipelineConfig(), 1024, owned);
+
+        Assert.Null(stage);
+        Assert.Null(textureDecoder);
+        Assert.Empty(owned);
+        Assert.False(string.IsNullOrWhiteSpace(reason));
+        Assert.Contains(flow, reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("..", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LoadTexture_BuildsBothStagesForAFittingInstallAndNamesEveryMissingPiece()
+    {
+        string flow = Path.Combine(_directory, "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors"), decoder = Path.Combine(_directory, "tex_dec.safetensors");
+        File.WriteAllBytes(flow, [0]);
+        File.WriteAllBytes(decoder, [0]);
+        File.WriteAllText(Path.ChangeExtension(flow, ".json"), """
+            {"name": "ElasticSLatFlowModel", "args": {"resolution": 64, "in_channels": 64, "out_channels": 32, "model_channels": 16,
+            "cond_channels": 1024, "num_blocks": 2, "num_heads": 2, "mlp_ratio": 2.0, "pe_mode": "rope", "share_mod": true,
+            "qk_rms_norm": true, "qk_rms_norm_cross": true, "image_attn_mode": "proj", "proj_in_channels": 2048}}
+            """);
+        Pixal3DModelFiles files = new()
+        {
+            Pipeline = "p", StructureFlow = "s", StructureDecoder = "d", ShapeFlow512 = "a", ShapeFlow1024 = "b", ShapeDecoder = "c", Dino = "e", Naf = "n",
+            TextureFlow = flow, TextureDecoder = decoder,
+        };
+        List<IDisposable> owned = [];
+
+        (IPixal3DTextureFlowStage? stage, ITrellis2TextureDecoderStage? textureDecoder, string? reason) =
+            Pixal3DImageTo3DPipeline.LoadTexture(files, TexturePipelineConfig(), 1024, owned);
+
+        Assert.NotNull(stage);
+        Assert.NotNull(textureDecoder);
+        Assert.Null(reason);
+        Assert.Single(owned);
+        foreach (IDisposable disposable in owned)
+            disposable.Dispose();
+
+        (_, _, string? missing) = Pixal3DImageTo3DPipeline.LoadTexture(
+            files with { TextureFlow = null, TextureDecoder = null }, ShapeOnlyConfig(), 1024, []);
+        Assert.NotNull(missing);
+        Assert.Contains("1024_bf16.safetensors is not installed", missing, StringComparison.Ordinal);
+        Assert.Contains("tex_dec_next_dc_f16c32_fp16.safetensors is not installed", missing, StringComparison.Ordinal);
+        Assert.Contains("3D/trellis2", missing, StringComparison.Ordinal);
+        Assert.Contains("pipeline.json has no tex_slat_sampler", missing, StringComparison.Ordinal);
+    }
+
+    private static readonly string ZeroStats = "[" + string.Join(",", Enumerable.Repeat("0", 32)) + "]";
+    private static readonly string OneStats = "[" + string.Join(",", Enumerable.Repeat("1", 32)) + "]";
+
+    private static string PipelineJson(bool texture)
+    {
+        string sampler(int steps, string guidance, string rescale, string interval, string rescaleT) =>
+            "{\"name\": \"FlowEulerGuidanceIntervalSampler\", \"args\": {\"sigma_min\": 1e-5}, \"params\": {\"steps\": " + steps
+            + ", \"guidance_strength\": " + guidance + ", \"guidance_rescale\": " + rescale + ", \"guidance_interval\": " + interval
+            + ", \"rescale_t\": " + rescaleT + "}}";
+        string json = "{\"name\": \"Trellis2ImageTo3DPipeline\", \"args\": {"
+            + "\"sparse_structure_sampler\": " + sampler(3, "7.5", "0.7", "[0.6, 1.0]", "5.0") + ", "
+            + "\"shape_slat_sampler\": " + sampler(2, "7.5", "0.5", "[0.6, 1.0]", "3.0") + ", "
+            + "\"shape_slat_normalization\": {\"mean\": " + ZeroStats + ", \"std\": " + OneStats + "}";
+        if (texture)
+        {
+            json += ", \"tex_slat_sampler\": " + sampler(2, "1.0", "0.0", "[0.6, 0.9]", "3.0")
+                + ", \"tex_slat_normalization\": {\"mean\": " + ZeroStats + ", \"std\": " + OneStats + "}";
+        }
+
+        return json + "}}";
+    }
+
+    private static Trellis2PipelineConfig TexturePipelineConfig() => Trellis2PipelineConfig.FromJson(PipelineJson(texture: true));
+
+    private static Trellis2PipelineConfig ShapeOnlyConfig() => Trellis2PipelineConfig.FromJson(PipelineJson(texture: false));
 
     [Fact]
     public void ModelFiles_ReportTextureOnlyWhenTheFlowAndTheDecoderAreBothInstalled()
