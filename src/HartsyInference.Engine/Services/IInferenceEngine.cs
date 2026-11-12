@@ -74,6 +74,10 @@ public interface IInferenceEngine : IDisposable
     IMeshAssetService MeshAssets =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh asset status.");
 
+    /// <summary>Which 3D pipelines are resident, and freeing them (a 3D model does not unload on its own).</summary>
+    IMeshLifecycleService MeshLifecycle =>
+        throw new NotSupportedException("This inference-engine implementation does not expose 3D lifecycle control.");
+
     /// <summary>The input preparation a 3D model applies (matte, framing, compositing), as an image a host can show.</summary>
     IMeshPreparationService MeshPreparation =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh image preparation.");

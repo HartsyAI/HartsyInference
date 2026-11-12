@@ -10,7 +10,9 @@ namespace HartsyInference.ThreeD.Models.HairDeck;
 public static class HairDeckEulerSampler
 {
     /// <summary>Samples tokens from the initial noise <paramref name="noise"/> <c>[N, TokenDim]</c>; the caller disposes the result.</summary>
-    public static Tensor Sample(IBackend backend, HairDeckSetDit model, Tensor ctx, Tensor noise, int steps, float cfg, CancellationToken cancel = default)
+    /// <param name="onStep">Called with the number of steps done after each step.</param>
+    public static Tensor Sample(
+        IBackend backend, HairDeckSetDit model, Tensor ctx, Tensor noise, int steps, float cfg, CancellationToken cancel = default, Action<int>? onStep = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(model);
@@ -31,10 +33,13 @@ public static class HairDeckEulerSampler
             if (cfg == 1f)
             {
                 backend.GuidedEulerStep(x, vCond, vCond, GuidedEulerSpec.Lerp(1f, delta));
-                continue;
             }
-            using Tensor vUncond = model.Forward(backend, x, t, ctx, uncond: true);
-            backend.GuidedEulerStep(x, vCond, vUncond, GuidedEulerSpec.Lerp(cfg, delta));
+            else
+            {
+                using Tensor vUncond = model.Forward(backend, x, t, ctx, uncond: true);
+                backend.GuidedEulerStep(x, vCond, vUncond, GuidedEulerSpec.Lerp(cfg, delta));
+            }
+            onStep?.Invoke(i + 1);
         }
         return x;
     }

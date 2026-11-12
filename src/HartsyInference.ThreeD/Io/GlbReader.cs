@@ -13,9 +13,6 @@ namespace HartsyInference.ThreeD.Io;
 /// </summary>
 public static class GlbReader
 {
-    private const uint Magic = 0x46546C67;
-    private const uint JsonChunk = 0x4E4F534A;
-    private const uint BinChunk = 0x004E4942;
     private const int TrianglesMode = 4;
     private const int FloatType = 5126;
     private const int UnsignedByteType = 5121;
@@ -41,29 +38,8 @@ public static class GlbReader
 
     private static (byte[] Json, byte[] Bin) SplitChunks(byte[] glb)
     {
-        if (glb.Length < 20 || BinaryPrimitives.ReadUInt32LittleEndian(glb) != Magic)
-            throw new HartsyInferenceException("File is not a binary glTF (GLB) container.");
-        if (BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan(4)) != 2)
-            throw new HartsyInferenceException("Only glTF 2.0 GLB containers are supported.");
-
-        byte[]? json = null, bin = null;
-        long offset = 12;
-        while (offset + 8 <= glb.Length)
-        {
-            long length = BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan((int)offset));
-            uint type = BinaryPrimitives.ReadUInt32LittleEndian(glb.AsSpan((int)offset + 4));
-            long start = offset + 8;
-            if (start + length > glb.Length)
-                throw new HartsyInferenceException("GLB chunk runs past the end of the file.");
-            byte[] chunk = glb.AsSpan((int)start, (int)length).ToArray();
-            if (type == JsonChunk) json = chunk;
-            else if (type == BinChunk) bin = chunk;
-            offset = start + length;
-        }
-
-        return json is null
-            ? throw new HartsyInferenceException("GLB file has no JSON chunk.")
-            : (json, bin ?? []);
+        GlbContainer.Chunks chunks = GlbContainer.Split(glb);
+        return (chunks.Json, glb.AsSpan(chunks.BinOffset, chunks.BinLength).ToArray());
     }
 
     private static JsonDocument ParseJson(byte[] json)

@@ -83,6 +83,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Other models / features
 - [ ] Hunyuan3D Paint: per-stage parity against the Python reference (2.0 runs on real weights and renders), the 2.1 weights and path, the delight stage, a view-count field on `MeshRequest`. Hunyuan3D Part and Omni follow as their own spikes. ([details](#hunyuan3d-paint))
 - [ ] Splat rasterizer.
+- [ ] Output frame: `MeshRequest.Frame = GltfYUpMetres` turns only Pixal3D (a half turn, derived from its export code); the front direction and up axis of every other model's real output are unchecked and need one real GLB each viewed from several sides. Hunyuan3D, TripoSR and TRELLIS emit decoder-grid units, not metres: the longest side is scaled to 1 m by convention, since a generated object has no real size.
 
 ## Details
 
@@ -195,7 +196,7 @@ Image → hair cards from `hyz317/HairDeck` (pinned revision in the catalog). St
 - **Evidence:** CUDA (RTX 3060, driver 610.88) on `ex01.png`, seed 0: static and rigged GLBs written. Independent Python check of the rigged GLB: rest-pose error 1.5e-8 m; peak displacement 0.19–0.30 m per clip. Unit tests: spring simulation matches the reference's `sim.py` output to 1e-9 for turn and jump.
 - **Not run:** `ex02`–`ex12`; cuDNN fast path (the CUDA 12 cuDNN build is rejected under the CUDA 13 driver); per-step timings and VRAM; real-weight integration tests.
 - **Assumptions in the rig:** head-motion pivot is the mean card root; face width is 0.15 m (the reference takes both from a VRM body).
-- **Cancellation:** the image sampler checks the token every step. Preprocessing (SAM 3, BiRefNet, DINOv3) does not observe it, so a cancel takes effect after the current preprocessing stage.
+- **Cancellation:** the token is checked between the preprocessing stages (load, SAM 3, BiRefNet) and at every sampler step of the card and chain samplers (the card sampler did not receive it before: `HairDeckCore.Generate` dropped it). A SAM 3 or BiRefNet forward pass in progress finishes first, as those models take no token. Progress: the stages and their sampler steps are reported through `StepPreview` and `/v1/native/mesh/stream`.
 - **Not implemented:** VRM packaging. Upstream exports VRM 0.x; `VRMC_springBone` is VRM 1.0. A VRM export needs a VRM body asset, which is not in the repo.
 - **Licences:** HairDeck weights Apache-2.0 (`hyz317/HairDeck`). SAM 3 under the SAM License (Hugging Face tag `other`, gated). DINOv3 under the DINOv3 License (Meta, `ai.meta.com`). BiRefNet-matting MIT (`ZhengPeng7/BiRefNet-matting`).
 
