@@ -219,6 +219,121 @@ public sealed class MeshRenderTests
         Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ascii[..^10]));
     }
 
+    private static byte[] BinaryPly(string properties, params float[] values)
+    {
+        int perVertex = properties.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        byte[] head = Encoding.ASCII.GetBytes($"ply\nformat binary_little_endian 1.0\nelement vertex {values.Length / perVertex}\n{properties}end_header\n");
+        byte[] data = new byte[head.Length + values.Length * 4];
+        head.CopyTo(data, 0);
+        for (int i = 0; i < values.Length; i++)
+            BinaryPrimitives.WriteSingleLittleEndian(data.AsSpan(head.Length + i * 4), values[i]);
+        return data;
+    }
+
+    private const string Xyz = "property float x\nproperty float y\nproperty float z\n";
+
+    [Theory]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    public void ABinaryPlyWithANonFiniteCoordinateIsADomainErrorLikeTheAsciiPath(float bad)
+    {
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(BinaryPly(Xyz, 0, 0, 0, bad, 1, 1)));
+
+        Assert.Contains("not a finite number", error.Message);
+    }
+
+    [Fact]
+    public void AHeaderCountFarBeyondTheFileIsRefusedBeforeAnythingIsSizedFromIt()
+    {
+        byte[] head = Encoding.ASCII.GetBytes($"ply\nformat binary_little_endian 1.0\nelement vertex 2000000000\n{Xyz}end_header\n");
+        byte[] ply = [.. head, .. new byte[24]];
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ply));
+
+        Assert.Contains("holds only", error.Message);
+    }
+
+    [Fact]
+    public void ATruncatedBinaryPlyAndAVertexElementThatIsNotFirstAreDomainErrors()
+    {
+        byte[] whole = BinaryPly(Xyz, 0, 0, 0, 1, 1, 1, 2, 2, 2);
+        byte[] late = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement face 1\nproperty list uchar int vertex_indices\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n");
+
+        Assert.Contains("shorter than its header", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(whole[..^5])).Message);
+        Assert.Contains("comes before the vertex element", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(late)).Message);
+    }
+
+    [Fact]
+    public void SixteenBitPlyColoursAreScaledByTheirRangeNotSaturated()
+    {
+        byte[] head = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty ushort red\nproperty ushort green\nproperty ushort blue\nend_header\n0 0 0 65535 32768 0\n");
+
+        float[] colours = PointPlyReader.Read(head).Cloud.Colors!;
+
+        Assert.Equal([1f, 32768f / 65535f, 0f], colours);
+    }
+
+    [Fact]
+    public void ADocumentWithNothingToDrawIsADomainErrorNotABlankPicture()
+    {
+        MeshDocument empty = new() { Primitives = [new MeshPrimitive { Geometry = new Mesh { Vertices = [], Indices = [] } }] };
+
+        Assert.Throws<HartsyInferenceException>(() => MeshRenderer.Render(empty, Front));
+    }
+
+    [Fact]
+    public void ARenderThatWouldHoldMoreThanTheSampleCapIsRefusedAndACancelledOneStops()
+    {
+        MeshRenderOptions huge = new() { Width = 2048, Height = 2048, Samples = 3 };
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshRenderer.Render(Doc(Quad()), huge));
+        Assert.Throws<OperationCanceledException>(() => MeshRenderer.Render(Doc(Quad()), Front, cancelled.Token));
+        Assert.Null(Record.Exception(() => MeshRenderer.Render(Doc(Quad()), new MeshRenderOptions { Width = 2048, Height = 2048, Samples = 2 })));
+    }
+
+    private static byte[] PngWith(int width, int height, byte[] inflated)
+    {
+        using MemoryStream png = new();
+        png.Write([0x89, (byte)'P', (byte)'N', (byte)'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        void Chunk(string type, byte[] body)
+        {
+            byte[] length = new byte[4];
+            BinaryPrimitives.WriteInt32BigEndian(length, body.Length);
+            png.Write(length);
+            png.Write(Encoding.ASCII.GetBytes(type));
+            png.Write(body);
+            png.Write(new byte[4]);
+        }
+        byte[] header = new byte[13];
+        BinaryPrimitives.WriteInt32BigEndian(header, width);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(4), height);
+        header[8] = 8;
+        header[9] = 2;
+        Chunk("IHDR", header);
+        using MemoryStream compressed = new();
+        using (System.IO.Compression.ZLibStream zlib = new(compressed, System.IO.Compression.CompressionLevel.SmallestSize, leaveOpen: true))
+            zlib.Write(inflated);
+        Chunk("IDAT", compressed.ToArray());
+        Chunk("IEND", []);
+        return png.ToArray();
+    }
+
+    [Theory]
+    [InlineData(60000, 60000, 64)]
+    [InlineData(2, 2, 64 * 1024 * 1024)]
+    public void ATextureThatClaimsAHugeSizeOrInflatesBeyondItsHeaderIsRefusedWithoutBeingHeld(int width, int height, int inflatedBytes)
+    {
+        MeshDocument document = Doc(Quad(), new MeshMaterial { BaseColor = new MeshImage("image/png", PngWith(width, height, new byte[inflatedBytes])) });
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        MeshRender render = MeshRenderer.Render(document, Front with { Width = 32, Height = 32, Samples = 1 });
+
+        Assert.Contains(render.Notes, n => n.Contains("PNG texture could not be decoded"));
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32L * 1024 * 1024, "The decoder allocated far more than the header promised.");
+    }
+
     private static byte[] SplatPly((float X, float Y, float Z, float Dc, float Opacity)[] splats)
     {
         string header = $"ply\nformat binary_little_endian 1.0\nelement vertex {splats.Length}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nproperty float opacity\nproperty float scale_0\nend_header\n";
