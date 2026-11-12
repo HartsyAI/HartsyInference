@@ -1,3 +1,5 @@
+using System.Reflection;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
@@ -651,5 +653,108 @@ public sealed class SamMotFlowTests
         double relative = Math.Sqrt(difference / magnitude);
         Assert.True(relative > 0, "F16 weights must change the result at least a little; identical output means the narrowing did nothing.");
         Assert.True(relative < 5e-3, $"relative L2 {relative}");
+    }
+
+    // Public (and non-sealed) because DispatchProxy needs an accessible, non-sealed proxy type.
+    /// <summary>An <see cref="IBackend"/> that records <c>Sync</c> and <c>FreeWeights</c> and, at each, whether a watched tensor is still alive; every other call does nothing.</summary>
+    public class RecordingBackend : DispatchProxy
+    {
+        public List<string> Events { get; } = [];
+
+        public bool ThrowOnSync { get; set; }
+
+        public Tensor? Watched { get; set; }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            if (method?.Name == "Sync" && ThrowOnSync)
+                throw new InvalidOperationException("device error");
+            if (method?.Name is "Sync" or "FreeWeights")
+                Events.Add($"{method.Name}:{(Watched is not null && IsDisposed(Watched) ? "disposed" : "alive")}");
+            return method?.ReturnType.IsValueType == true && method.ReturnType != typeof(void) ? Activator.CreateInstance(method.ReturnType) : null;
+        }
+
+        public bool IsWatchedDisposed => Watched is not null && IsDisposed(Watched);
+
+        private static bool IsDisposed(Tensor tensor)
+        {
+            try
+            {
+                _ = tensor.AsReadOnlySpan<byte>().Length;
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                return true;
+            }
+        }
+    }
+
+    [Fact]
+    public void Release_DrainsFreesAndSweepsBeforeTheConvertedTensorsAreDisposed()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        RecordingBackend recording = (RecordingBackend)proxy;
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        recording.Watched = converted;
+        List<Tensor> owned = [converted];
+
+        SamFlowWeights.Release(proxy, [converted], owned, () => recording.Events.Add($"Sweep:{(recording.IsWatchedDisposed ? "disposed" : "alive")}"));
+
+        // Sync, the free and the sweep all run while the converted tensor is alive; only afterwards is it disposed.
+        Assert.Equal(["Sync:alive", "FreeWeights:alive", "Sweep:alive"], recording.Events);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void Release_DisposesTheConvertedTensorsEvenWhenTheSweepThrows()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        List<Tensor> owned = [converted];
+
+        Assert.Throws<InvalidOperationException>(() => SamFlowWeights.Release(proxy, [converted], owned, () => throw new InvalidOperationException("sweep")));
+
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void ReleaseAfterFailure_SweepsDisposesAndNeverReplacesTheOriginalFailure()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        RecordingBackend recording = (RecordingBackend)proxy;
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        recording.Watched = converted;
+        List<Tensor> owned = [converted];
+
+        // A sweep that throws (a sticky device error) is swallowed; the tensors are still disposed after it.
+        SamFlowWeights.ReleaseAfterFailure(proxy, [converted], owned, () =>
+        {
+            recording.Events.Add($"Sweep:{(recording.IsWatchedDisposed ? "disposed" : "alive")}");
+            throw new InvalidOperationException("device error");
+        });
+
+        Assert.Equal(["Sync:alive", "FreeWeights:alive", "Sweep:alive"], recording.Events);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void ReleaseAfterFailure_WhenTheDrainThrowsStillDisposesAndReportsTheCleanupError()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        ((RecordingBackend)proxy).ThrowOnSync = true;
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        List<Tensor> owned = [converted];
+        List<string> reported = [];
+
+        SamFlowWeights.ReleaseAfterFailure(proxy, [converted], owned, () => reported.Add("swept"), error => reported.Add(error.Message));
+
+        // The drain failed, so the free and the sweep were skipped; the tensor is disposed and the error was handed over, not thrown.
+        Assert.Equal(["device error"], reported);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
     }
 }

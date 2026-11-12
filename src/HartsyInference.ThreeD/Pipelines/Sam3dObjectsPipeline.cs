@@ -144,8 +144,19 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
             List<Tensor> narrowed = [];
-            Dictionary<string, Tensor> narrowedWeights = SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed);
-            SamMotFlow flow = new(SamMotFlowConfig.Released, narrowedWeights);
+            Dictionary<string, Tensor> narrowedWeights;
+            SamMotFlow flow;
+            try
+            {
+                narrowedWeights = SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed);
+                flow = new(SamMotFlowConfig.Released, narrowedWeights);
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, [], narrowed, () => Sweep(), error => log($"cleanup after a failed flow load also failed: {error.Message}"));
+                throw;
+            }
+
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = [];
             try
@@ -159,17 +170,19 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     (x, tModel, dModel, unconditional) => flow.Forward(Backend, x, tModel, unconditional ? zeros : cond, dModel),
                     step => onStep?.Invoke("structure", step));
             }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, narrowedWeights.Values, narrowed, () => Sweep(), error => log($"cleanup after a failed flow also failed: {error.Message}"));
+                throw;
+            }
             finally
             {
                 foreach (Tensor tensor in noise.Values)
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flowWeights.Values);
-            Backend.FreeWeights(narrowed);
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
-            Sweep([.. latents.Values]);
+            Tensor[] sampledLatents = [.. latents.Values];
+            SamFlowWeights.Release(Backend, narrowedWeights.Values, narrowed, () => Sweep(sampledLatents));
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
 
@@ -269,7 +282,16 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
             List<Tensor> narrowed = [];
             SlatFlowModel flow = new();
-            flow.LoadWeights(SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed));
+            try
+            {
+                flow.LoadWeights(SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed));
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, [], narrowed, () => Sweep(), error => log($"cleanup after a failed flow load also failed: {error.Message}"));
+                throw;
+            }
+
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = new()
             {
@@ -289,17 +311,20 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     },
                     step => onStep?.Invoke("slat", step));
             }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, flow.EnumerateWeights(), narrowed, () => Sweep(), error => log($"cleanup after a failed flow also failed: {error.Message}"));
+                throw;
+            }
             finally
             {
                 foreach (Tensor tensor in noise.Values)
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flow.EnumerateWeights());
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
             latent = sampled["slat"];
-            Sweep(latent);
+            Tensor sampledLatent = latent;
+            SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed, () => Sweep(sampledLatent));
             log($"SLAT flow sampled ({steps} steps)");
         }
 

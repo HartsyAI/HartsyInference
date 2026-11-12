@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
@@ -38,5 +39,49 @@ public static class SamFlowWeights
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Ends a flow's use of its weights, in the order that was run on the GPU: drain the backend, free its device copies of <paramref name="resident"/>, run <paramref name="sweep"/> (the
+    /// between-stage sweep: stream drain, cached activations, attention plans, pool), and only then dispose the converted tensors in <paramref name="owned"/>, also when a step throws.
+    /// Disposing the converted tensors before the sweep crashed the next stage's weight load with an access violation on one seed (two runs on seed 2, none on seed 1; F32, which converts
+    /// nothing, and F16 with the tensors left undisposed did not crash). The mechanism inside the backend was not traced; the structure flow does not preload its weights, so they reach the
+    /// device through on-demand caching, and a converted tensor may still be held by a cache tier when it is disposed.
+    /// </summary>
+    public static void Release(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned, Action? sweep = null)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(resident);
+        ArgumentNullException.ThrowIfNull(owned);
+        try
+        {
+            backend.Sync();
+            backend.FreeWeights(resident);
+            sweep?.Invoke();
+        }
+        finally
+        {
+            foreach (Tensor tensor in owned)
+                tensor.Dispose();
+            owned.Clear();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Release"/> for a stage that is being abandoned because a step failed: sweeps with nothing live, and never throws, so the failure that is about to be rethrown is not replaced by a
+    /// second one from the cleanup (a device error is sticky, and the drain would raise it again). A swallowed error is passed to <paramref name="onCleanupError"/>. If the drain itself throws, the
+    /// free and the sweep are skipped, so "sweep before dispose" holds only when the drain succeeds; the converted tensors are disposed either way.
+    /// </summary>
+    public static void ReleaseAfterFailure(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned, Action sweep, Action<Exception>? onCleanupError = null)
+    {
+        try
+        {
+            Release(backend, resident, owned, sweep);
+        }
+        catch (Exception cleanup)
+        {
+            // The caller rethrows the original failure; the converted tensors were disposed by Release's finally.
+            onCleanupError?.Invoke(cleanup);
+        }
     }
 }
