@@ -17,11 +17,13 @@ public sealed record SamPointPatchConfig(int InputSize, int PatchSize, int Embed
     /// <summary>Windows per side.</summary>
     public int WindowsPerSide => InputSize / PatchSize;
 
+    /// <summary>Windows in the image, one output token each.</summary>
     public int Windows => WindowsPerSide * WindowsPerSide;
 
     /// <summary>Tokens in one window's attention: the pooled token plus the pixels.</summary>
     public int WindowTokens => 1 + PatchSize * PatchSize;
 
+    /// <summary>Hidden width of the block's MLP (<c>int(dim · ratio)</c>, as timm's <c>Mlp</c>).</summary>
     public int MlpHidden => (int)(EmbedDim * MlpRatio);
 
     /// <exception cref="ArgumentException">The configuration is inconsistent.</exception>

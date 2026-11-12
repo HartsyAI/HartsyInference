@@ -224,6 +224,34 @@ public sealed class SamPointPatchEmbedTests
     }
 
     [Fact]
+    public void Embed_ExpDisparityStaysFiniteWhenInvalidPointsAreZeroedBeforeTheRemap()
+    {
+        // exp_disparity maps z = 0 to infinity or NaN, so an invalid point left at 0 would poison its window if it were not replaced by the token afterwards.
+        SamPointPatchConfig config = Config with { Remap = SamPointRemapType.ExpDisparity };
+        Random rng = new(25);
+        Dictionary<string, Tensor> w = Weights(rng);
+        using Owned owned = new(w.Values);
+        using CpuBackend backend = new();
+        SamPointPatchEmbed embed = new(config, w);
+        float[] map = new float[3 * 8 * 8];
+        for (int i = 0; i < 64; i++)
+        {
+            map[i] = (float)((rng.NextDouble() - 0.5) * 2);
+            map[64 + i] = (float)((rng.NextDouble() - 0.5) * 2);
+            map[128 + i] = (float)(0.5 + rng.NextDouble() * 2.5);
+        }
+
+        map[3] = float.NaN;
+        map[64 + 9] = float.PositiveInfinity;
+        map[128 + 40] = float.NegativeInfinity;
+
+        using Tensor tokens = embed.Embed(backend, map, 8, 8);
+
+        foreach (float value in tokens.AsReadOnlySpan<float>())
+            Assert.True(float.IsFinite(value));
+    }
+
+    [Fact]
     public void Embed_RejectsAPointmapOfTheWrongLength()
     {
         Random rng = new(23);

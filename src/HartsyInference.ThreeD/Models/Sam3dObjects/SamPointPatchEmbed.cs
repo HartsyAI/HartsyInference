@@ -150,39 +150,83 @@ public sealed class SamPointPatchEmbed
         return result;
     }
 
-    /// <summary>The timm <c>Block</c>: <c>x + attn(norm1(x))</c>, then <c>x + mlp(norm2(x))</c> with an exact-GELU MLP.</summary>
+    /// <summary>The timm <c>Block</c>: <c>x + attn(norm1(x))</c>, then <c>x + mlp(norm2(x))</c> with an exact-GELU MLP. Each half keeps only what it still needs alive, so the
+    /// released size (1024 windows of 65 tokens at width 512) does not hold every intermediate until the block returns.</summary>
     private Tensor Block(IBackend backend, Tensor x)
     {
-        int d = _config.EmbedDim, heads = _config.Heads, headDim = d / heads;
-        long batch = x.Shape[0], tokens = x.Shape[1];
+        using Tensor afterAttention = Attention(backend, x);
+        return Mlp(backend, afterAttention);
+    }
 
-        using Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, _norm1Weight, _norm1Bias, NormEps);
-        using Tensor qkv = new(new TensorShape(batch, tokens, 3 * d), DType.F32);
-        backend.Linear(qkv, normed, _qkvWeight, _qkvBias);
-        Tensor attended = _attention.AttendHeadMajorOperands(
-            backend,
-            SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, 0, d), heads, headDim),
-            SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, d, d), heads, headDim),
-            SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, 2 * d, d), heads, headDim),
-            default);
+    /// <summary><c>x + proj(attn(norm1(x)))</c>.</summary>
+    private Tensor Attention(IBackend backend, Tensor x)
+    {
+        int d = _config.EmbedDim, heads = _config.Heads, headDim = d / heads;
+        Tensor q, k, v;
+        using (Tensor qkv = Qkv(backend, x))
+        {
+            // Built one at a time so a failure on the later ones does not strand the earlier ones; the attention call takes the three over.
+            q = SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, 0, d), heads, headDim);
+            try
+            {
+                k = SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, d, d), heads, headDim);
+            }
+            catch
+            {
+                q.Dispose();
+                throw;
+            }
+
+            try
+            {
+                v = SamMotOps.ToHeadMajor(backend, SamMotOps.Slice(backend, qkv, 2 * d, d), heads, headDim);
+            }
+            catch
+            {
+                q.Dispose();
+                k.Dispose();
+                throw;
+            }
+        }
+
+        Tensor attended = _attention.AttendHeadMajorOperands(backend, q, k, v, default);
         using Tensor attendedTokens = SamMotOps.ToTokenMajor(backend, attended);
         using Tensor projected = new(x.Shape, DType.F32);
         backend.Linear(projected, attendedTokens, _attnOutWeight, _attnOutBias);
-        using Tensor afterAttention = new(x.Shape, DType.F32);
-        backend.Add(afterAttention, x, projected);
+        Tensor result = new(x.Shape, DType.F32);
+        backend.Add(result, x, projected);
+        return result;
+    }
 
-        using Tensor normed2 = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed2, afterAttention, _norm2Weight, _norm2Bias, NormEps);
-        using Tensor up = new(new TensorShape(batch, tokens, _config.MlpHidden), DType.F32);
-        backend.Linear(up, normed2, _fc1Weight, _fc1Bias);
-        using Tensor activated = new(up.Shape, DType.F32);
-        backend.GeluErf(activated, up);
+    private Tensor Qkv(IBackend backend, Tensor x)
+    {
+        using Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNorm(normed, x, _norm1Weight, _norm1Bias, NormEps);
+        Tensor qkv = new(new TensorShape(x.Shape[0], x.Shape[1], 3 * _config.EmbedDim), DType.F32);
+        backend.Linear(qkv, normed, _qkvWeight, _qkvBias);
+        return qkv;
+    }
+
+    /// <summary><c>x + fc2(gelu(fc1(norm2(x))))</c>.</summary>
+    private Tensor Mlp(IBackend backend, Tensor x)
+    {
+        using Tensor activated = Activated(backend, x);
         using Tensor down = new(x.Shape, DType.F32);
         backend.Linear(down, activated, _fc2Weight, _fc2Bias);
         Tensor result = new(x.Shape, DType.F32);
-        backend.Add(result, afterAttention, down);
+        backend.Add(result, x, down);
         return result;
+    }
+
+    private Tensor Activated(IBackend backend, Tensor x)
+    {
+        using Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNorm(normed, x, _norm2Weight, _norm2Bias, NormEps);
+        using Tensor up = new(new TensorShape(x.Shape[0], x.Shape[1], _config.MlpHidden), DType.F32);
+        backend.Linear(up, normed, _fc1Weight, _fc1Bias);
+        Tensor activated = new(up.Shape, DType.F32);
+        backend.GeluErf(activated, up);
+        return activated;
     }
 
     /// <summary>The pooled (first) token of every window plus the learned patch position, <c>[windows, dim]</c>.</summary>
