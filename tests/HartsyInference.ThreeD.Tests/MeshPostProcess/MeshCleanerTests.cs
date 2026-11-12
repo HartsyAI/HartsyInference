@@ -75,6 +75,87 @@ public sealed class MeshCleanerTests
                     Assert.Equal(fins.Vertices[fins.Indices[f * 3 + c] * 3 + axis], repaired.Vertices[repaired.Indices[f * 3 + c] * 3 + axis]);
     }
 
+    // Three fans of triangles hang off the line v0-v1-v2-v3, so each of its three edges has one face per fan. Within a fan the triangles
+    // are joined through manifold edges (at v1 and v2 by a connector triangle). Fan A is wound the other way, so the pair kept at an edge
+    // is A with whichever of B and C has the larger triangle there. heights[fan][i] is the height of that fan's triangle on edge i.
+    private static Mesh ThreeFanChain(float[][] heights)
+    {
+        List<float> vertices = [];
+        for (int i = 0; i < 4; i++) vertices.AddRange([i, 0f, 0f]);
+        List<int> indices = [];
+        for (int fan = 0; fan < 3; fan++)
+        {
+            double angle = fan * 2 * Math.PI / 3;
+            int[] apex = new int[3];
+            for (int i = 0; i < 3; i++)
+            {
+                apex[i] = vertices.Count / 3;
+                vertices.AddRange([i + 0.5f, heights[fan][i] * (float)Math.Cos(angle), heights[fan][i] * (float)Math.Sin(angle)]);
+            }
+            List<int[]> triangles = [[0, 1, apex[0]], [1, 2, apex[1]], [2, 3, apex[2]], [apex[0], 1, apex[1]], [apex[1], 2, apex[2]]];
+            foreach (int[] t in triangles)
+                indices.AddRange(fan == 0 ? [t[2], t[1], t[0]] : t);
+        }
+        return new Mesh { Vertices = [.. vertices], Indices = [.. indices] };
+    }
+
+    [Fact]
+    public void RepairNonManifoldEdges_CutsAnEdgeWhoseKeptPairIsJoinedBackByItsNeighbours()
+    {
+        // The kept pair is (A, B) on the first edge, (A, C) on the middle one and (A, B) on the last. Joins made for the first and last edge
+        // link A, B and C at v1 and v2 alike, so the middle edge would keep all three faces unless it is cut.
+        Mesh chain = ThreeFanChain([[1f, 1f, 1f], [2f, 1f, 2f], [1f, 2f, 1f]]);
+        Assert.Equal(3, SyntheticMeshes.Topology(chain).NonManifold);
+
+        Mesh repaired = MeshCleaner.RepairNonManifoldEdges(chain);
+
+        Assert.Equal(chain.TriangleCount, repaired.TriangleCount);
+        Assert.Equal(0, SyntheticMeshes.Topology(repaired).NonManifold);
+    }
+
+    [Fact]
+    public void RepairNonManifoldEdges_LeavesNoEdgeWithMoreThanTwoFaces_ForEveryHeightPattern()
+    {
+        float[] values = [1f, 2f, 3f];
+        for (int code = 0; code < 19683; code++)
+        {
+            float[][] heights = [new float[3], new float[3], new float[3]];
+            int c = code;
+            for (int fan = 0; fan < 3; fan++)
+                for (int i = 0; i < 3; i++, c /= 3)
+                    heights[fan][i] = values[c % 3];
+            Mesh chain = ThreeFanChain(heights);
+
+            Mesh repaired = MeshCleaner.RepairNonManifoldEdges(chain);
+
+            Assert.True(SyntheticMeshes.Topology(repaired).NonManifold == 0, $"heights {string.Join("|", heights.Select(h => string.Join(",", h)))}");
+            Assert.Equal(chain.TriangleCount, repaired.TriangleCount);
+        }
+    }
+
+    [Fact]
+    public void RepairNonManifoldEdges_ReturnsACompactedCopy()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(1);
+        Mesh withStray = new() { Vertices = [.. sphere.Vertices, 9f, 9f, 9f], Indices = sphere.Indices };
+
+        Mesh repaired = MeshCleaner.RepairNonManifoldEdges(withStray);
+
+        Assert.NotSame(withStray, repaired);
+        Assert.Equal(sphere.VertexCount, repaired.VertexCount);
+    }
+
+    [Fact]
+    public void FillHoles_DoesNotCapATriangleWithADuplicateOfItself()
+    {
+        // A fin split off a surface is a lone triangle whose three edges are a boundary loop; capping it would add the same triangle again.
+        Mesh fin = new() { Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0], Indices = [0, 1, 2] };
+
+        Mesh filled = MeshCleaner.FillHoles(fin, 100);
+
+        Assert.Equal(1, filled.TriangleCount);
+    }
+
     [Fact]
     public void RepairNonManifoldEdges_ReturnsAManifoldMeshUnchanged()
     {

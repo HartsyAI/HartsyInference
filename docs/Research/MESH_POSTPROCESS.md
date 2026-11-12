@@ -64,15 +64,21 @@ Measured on the TRELLIS.2 512 bust (seed 1), raw mesher output of 736,637 vertic
 | After the first clean (weld, hole fill 0.03) | 14,565 | 30,845 | |
 | Decimation to 1M alone | 14,493 | 30,845 | 0.165 |
 | Face-dropping repair, then decimation (earlier behaviour) | 38,634 | 20 | **25.8** (12,789 edges) |
-| Vertex-splitting repair, then decimation (now) | 34,511, of which the split copies are the same positions | 5,217 | 0.41 |
-| Final mesh after UV unwrap, vertices welded by position (now) | 16,229 | 21,120 | |
+| Vertex-splitting repair, then decimation (now) | 26,482 (the split copies sit at the same positions; one loop of 9.5 and 5,220 edges is a chain of them) | 0 | 9.5 by index, closed once welded |
+| Final mesh after UV unwrap, vertices welded by position (now) | 12,545 | 10,881 | |
 
 - The raw field itself is not closed: the dual grid emits a quad only where all four neighbouring voxels exist, so a missing neighbour leaves a
   small hole (about 4,900 loops, nearly all under 3% of the bounding box), and a voxel that several surfaces cross gives edges with more than
   two faces. `flexible_dual_grid_to_mesh` makes the same quads by its source (same
   neighbour offsets, same split rule); running it on the decoded field to confirm identical triangles is a separate check.
 - Our cleaner made it worse: `RepairNonManifoldEdges` dropped faces, which cut cracks along the non-manifold chains (a 12,789-edge loop of
-  perimeter 25.8 on the bust). Upstream's `repair_non_manifold_edges` splits vertices instead. It does now.
+  perimeter 25.8 on the bust, visible as dark lines across the jacket). Upstream's `repair_non_manifold_edges` splits vertices instead. It does now, and
+  checks its own result: when the pairs kept at neighbouring edges of a chain join all the faces of one edge back together at both ends, that edge is
+  cut as well and the grouping redone, so no edge keeps more than two faces (a fan that wraps back onto itself around a vertex is the one exception).
+  The pair kept at an edge is the consistently wound one, then the larger by area (the area term used to be lost to a `1e30` bonus added to it).
+- Fins cut off by the repair are vertex-disconnected from the surface, so `RemoveSmallComponents` drops the small ones, as upstream's order does
+  (repair, small components, fill holes). Hole filling skips a lone triangle (its cap would be the same face reversed); a larger cut-off fin whose
+  boundary loop is under the fill perimeter still gets a centroid fan.
 - UV unwrap is not a cause: by vertex index the unwrapped mesh shows thousands of components and 140,000 boundary edges because seams
   split vertices, and welded by position it has the topology of the mesh that went in. A count of "components" taken on a GLB measures UV
   charts, not the surface.
