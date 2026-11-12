@@ -66,3 +66,16 @@ All three weight files are pickles (read only through the safe pickle subset, ne
 ## Not checked
 
 No weight was opened, no code was run, the dtypes and key names are unread, the Omni VAE is not compared with the 2.1 VAE, the Fourier embedder is not compared with the ShapeVae one, the pipeline's unread parts (`prepare_image`, the guidance schedule `prev_guidance_scale`, the post-processors `FloaterRemover` and `DegenerateFaceRemover`) are not read in full.
+
+## Weights downloaded and compared (2026-11-12)
+
+User-approved download of `tencent/Hunyuan3D-Omni` @ `70e803bfb4e127d534049d8ab8c8cb511780d485` into `Models/3D/hunyuan3d-omni/` (`.part` then rename, size and sha256 checked against the HF tree API): `model/pytorch_model.bin` (the non-EMA file), `vae/pytorch_model.bin`, `cond_encoder/pytorch_model.bin` and the six small configs. The EMA file was not downloaded. The pickles were read only through the restricted unpickler of `tests/python-reference/dump_paint21_unet.py` (nothing executed); the DiT and cond_encoder were read as names and shapes only, without loading the tensors.
+
+| File | Tensors | Finding |
+|---|---|---|
+| `model/pytorch_model.bin` | 752, all F32 | The key set and every shape equal the `model.*` group of the 2.1 shape file (`hunyuan3d-21/dit/model.fp16.safetensors`, also 752): the Omni DiT is the 2.1 DiT architecture unchanged, so `Hunyuan3DPlainDit` loads it as it is; the values were not compared |
+| `vae/pytorch_model.bin` | 410, all F32, keys prefixed `sal.` | The same 410 keys and shapes as the 2.1 VAE (`vae.*` in the 2.1 shape file) apart from the prefix, but the values differ: none of the 410 tensors equals the 2.1 one after rounding to F16 (largest absolute difference 0.50). Omni needs its own VAE weights, loaded with prefix `sal` by the existing `Hunyuan3DShapeVae`; the 2.1 VAE cannot stand in |
+| `cond_encoder/pytorch_model.bin` | 6, all F32 | `cond_signal_embedding.weight` [4, 8], `cond_signal_linear.weight` [1024, 8] and `.bias`, `linear.0` and `linear.1` weight [1024, 102] and bias: the point-cloud, voxel, bounding-box and skeleton control signals share one small encoder |
+
+So the engine work for Omni is the control encoder with its four preprocessors, the longer context (DINO tokens, control tokens, 10 signal tokens), reading the 12.2 GB F32 pickle per tensor straight into F16 (the host would otherwise hold 12 GB), and the pipeline wiring; no DiT or VAE code changes. Nothing was run; no tensor values were compared except the VAE.
+
