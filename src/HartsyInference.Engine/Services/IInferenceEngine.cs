@@ -74,6 +74,10 @@ public interface IInferenceEngine : IDisposable
     IMeshAssetService MeshAssets =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh asset status.");
 
+    /// <summary>The input preparation a 3D model applies (matte, framing, compositing), as an image a host can show.</summary>
+    IMeshPreparationService MeshPreparation =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh image preparation.");
+
     /// <summary>3D preflight: what each 3D model accepts, and whether one request would run, without loading weights.</summary>
     IMeshPlanningService MeshPlanning =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh planning.");

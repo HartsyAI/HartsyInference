@@ -107,6 +107,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<RestoreService> _restore;
     private readonly Lazy<MeshService> _mesh;
     private readonly Lazy<MeshPlanningService> _meshPlanning;
+    private readonly Lazy<MeshPreparationService> _meshPreparation;
     private readonly Lazy<WorldService> _world;
     private readonly Lazy<EmbeddingService> _embeddings;
     private readonly Lazy<DecisionService> _decisions;
@@ -132,6 +133,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
+        _meshPreparation = new Lazy<MeshPreparationService>(() => new MeshPreparationService(this));
         _meshPlanning = new Lazy<MeshPlanningService>(() => new MeshPlanningService(_memoryEstimation.Value, MeshAssets));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
@@ -230,6 +232,11 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IMeshAssetService MeshAssets { get; } = new MeshAssetService();
+
+    /// <inheritdoc/>
+    public IMeshPreparationService MeshPreparation => _meshPreparation.Value;
+
+    internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
 
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
@@ -1224,6 +1231,8 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_restore.IsValueCreated)
             ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
         // A restore placed on another device keeps its weights and its device context in that service; the teardown below disposes them.
+        if (_meshPreparation.IsValueCreated)
+            ReleaseLogged("the mesh image preparation", _meshPreparation.Value.Dispose, ref failures);
         if (_mesh.IsValueCreated)
             ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
