@@ -177,8 +177,6 @@ internal static class MeshRequestValidator
             throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.").ForField(nameof(MeshRequest.Image));
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
-        if (request.Seed > int.MaxValue)
-            throw SeedTooLarge(request, "The X-Part seed");
         if (request.Steps is < 0 or > 1000)
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
         if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)

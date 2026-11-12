@@ -441,7 +441,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 XPartPipeline pipeline = GetOrLoadXPart(spec, id);
                 XPartOptions options = new()
                 {
-                    Seed = request.Seed < 0 ? 42 : (int)request.Seed,
+                    Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
                     Steps = request.Steps == 0 ? 50 : request.Steps,
                     GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
                 };
