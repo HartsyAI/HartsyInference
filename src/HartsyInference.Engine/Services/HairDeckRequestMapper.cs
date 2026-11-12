@@ -17,9 +17,8 @@ internal static class HairDeckRequestMapper
     public static HairDeckOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The HairDeck seed must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
-        long seed = request.Seed < 0 ? Random.Shared.NextInt64(0, int.MaxValue) : request.Seed;
+        MeshSeed.Require(request);
+        long seed = MeshSeed.Resolve(request.Seed);
         HairDeckOptions options = new()
         {
             Seed = seed,
