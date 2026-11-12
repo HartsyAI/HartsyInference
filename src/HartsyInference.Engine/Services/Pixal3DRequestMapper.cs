@@ -19,6 +19,8 @@ public static class Pixal3DRequestMapper
             Steps = request.Steps,
             Seed = request.Seed < 0 ? null : (int)request.Seed,
             FovRadians = request.FieldOfViewRadians,
+            Texture = request.Texture,
+            TextureSize = request.TextureSize,
         };
     }
 

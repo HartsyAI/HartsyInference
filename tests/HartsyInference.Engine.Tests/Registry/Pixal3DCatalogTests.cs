@@ -20,11 +20,24 @@ public sealed class Pixal3DCatalogTests
         Assert.True(entry.CliDrivable);
         Assert.Equal(ModelStatus.Structural, entry.Status);
         Assert.All(entry.Assets, asset => Assert.Matches(Sha256, asset.Sha256 ?? string.Empty));
-        // pipeline.json, three flows with their configs, and the two decoders.
-        Assert.Equal(9, entry.Assets.Count(a => a.TargetSubdir == "3D/pixal3d"));
+        // pipeline.json, three flows with their configs, the two decoders, and the optional texture flow with its config and decoder.
+        Assert.Equal(12, entry.Assets.Count(a => a.TargetSubdir == "3D/pixal3d"));
         Assert.Contains(entry.Assets, a => a.RepoPath == "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors" && a.Repo == "TencentARC/Pixal3D");
         // NAF is a GitHub release asset the catalog cannot fetch, so no entry may pretend to carry it.
         Assert.DoesNotContain(entry.Assets, a => a.RepoPath.Contains("naf", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Entry_CarriesTheTextureFlowAndDecoderWithTheirLfsHashes()
+    {
+        CatalogEntry entry = ModelCatalog.Find("pixal3d")!;
+
+        ModelAsset flow = Assert.Single(entry.Assets, a => a.RepoPath == "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors");
+        Assert.Equal("65df179ad02f9e92bc18335d7861fadd95f268e6249217352468dd83cb79d1d0", flow.Sha256);
+        Assert.Contains(entry.Assets, a => a.RepoPath == "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json");
+        ModelAsset decoder = Assert.Single(entry.Assets, a => a.RepoPath == "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors");
+        Assert.Equal("97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c", decoder.Sha256);
+        Assert.All([flow, decoder], asset => Assert.Equal("3D/pixal3d", asset.TargetSubdir));
     }
 
     [Fact]
