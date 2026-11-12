@@ -30,7 +30,9 @@ path = os.path.join(models, "slat_flow_imgshape2tex_dit_1_3B_512_bf16")
 if "--bf16" in sys.argv:
     cfg = json.load(open(path + ".json"))
     flow = getattr(upstream_models, cfg["name"])(**cfg["args"])
-    flow.load_state_dict(load_file(path + ".safetensors"), strict=False)
+    missing, unexpected = flow.load_state_dict(load_file(path + ".safetensors"), strict=False)
+    if missing or unexpected:
+        raise SystemExit(f"{path}: {len(missing)} missing, {len(unexpected)} unexpected keys")
     flow.eval()
 else:
     flow = load_model(path)

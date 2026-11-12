@@ -25,7 +25,8 @@ print("threads", torch.get_num_threads(), flush=True)
 sd = read_tns(f"{cap}/shape_decode.tns")
 dec = load_model(shape_vae)
 latent = sp.SparseTensor(torch.from_numpy(sd["latent_feats"]), torch.from_numpy(sd["latent_coords"]).int())
-resolution = int(sd["latent_coords"][:, 1:].max() + 1) * 16
+meshc = read_tns(f"{cap}/mesh.tns")
+resolution = int(meshc["grid"][0])  # the grid the C# run meshed on (the cascades can shrink it)
 dec.set_resolution(resolution)
 h, subs = timed("shape decode", lambda: SparseUnetVaeDecoder.forward(dec, latent, return_subs=True))
 print(f"{h.feats.shape[0]} voxels, {len(subs)} subdivision levels", flush=True)
@@ -56,6 +57,8 @@ def kids(parents, logits, perm):
 perm = next((list(p) for p in itertools.permutations(range(3))
              if np.isin(keys(kids(subs[0].coords.numpy(), subs[0].feats.numpy(), list(p))), keys(subs[1].coords.numpy())).all()), None)
 print("child bit -> axis order", perm, flush=True)
+if perm is None:
+    raise SystemExit("no child order puts every kept child on the next level: the subdivision levels cannot be aligned")
 parents = sd["latent_coords"].copy()
 for i, s in enumerate(subs):
     logits = sd[f"subdiv{i}"].reshape(-1, 8)
@@ -68,7 +71,6 @@ for i, s in enumerate(subs):
         parents = kids(parents, logits, perm)
 
 # ---- mesher: upstream's flexible_dual_grid_to_mesh on the C# field (isolates the mesher) and on the upstream field ----
-meshc = read_tns(f"{cap}/mesh.tns")
 field = (torch.from_numpy(sd["coords"]).int(), torch.from_numpy(cs_offsets), torch.from_numpy(sd["inter"]).bool(), torch.from_numpy(sd["split"])[:, None])
 v1, f1 = timed("upstream mesher", lambda: flexible_dual_grid_to_mesh(*field, aabb=[[-0.5] * 3, [0.5] * 3], grid_size=resolution, train=False))
 print(f"mesh on the C# field: upstream {v1.shape[0]} vertices {f1.shape[0]} triangles; C# {meshc['vertices'].shape[0]} vertices {meshc['indices'].shape[0]} triangles", flush=True)

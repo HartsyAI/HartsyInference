@@ -18,9 +18,11 @@ int grid = int.Parse(args[2]), steps = int.Parse(args[5]);
 bool shapeOnly = args.Length > 6 && args[6] == "shape";
 byte[] rgba = File.ReadAllBytes(imagePath);
 int size = (int)Math.Sqrt(rgba.Length / 4);
+if (rgba.Length != size * size * 4) throw new ArgumentException($"'{imagePath}' is not a square raw RGBA image ({rgba.Length} bytes).");
 byte[] rgb = new byte[size * size * 3], alpha = new byte[size * size];
 for (int i = 0; i < size * size; i++) { rgb[i * 3] = rgba[i * 4]; rgb[i * 3 + 1] = rgba[i * 4 + 1]; rgb[i * 3 + 2] = rgba[i * 4 + 2]; alpha[i] = rgba[i * 4 + 3]; }
 Directory.CreateDirectory(outDir);
+File.Delete(Path.Combine(outDir, "times.txt"));
 Stopwatch t0 = Stopwatch.StartNew();
 using CudaBackend backend = new(0, ptx);
 using Trellis2ImageTo3DPipeline pipeline = Trellis2ImageTo3DPipeline.LoadFromPath(backend, folder);
@@ -70,6 +72,7 @@ sealed class ShapeSpy(ITrellis2ShapeFlowStage inner) : ITrellis2ShapeFlowStage
     {
         Stopwatch sw = Stopwatch.StartNew();
         SparseTensor r = inner.Sample(b, kind, coords, grid, cond, neg, seed, p, onStep);
+        b.Sync();
         Stage.Time($"shape_flow_{kind}", sw.Elapsed.TotalMilliseconds);
         Tns.Write(Path.Combine(Stage.Out, $"shape_{kind}.tns"), [.. Stage.Sparse("latent", r), Stage.Dense("cond", cond), ("voxels", coords, [coords.Length / 4, 4])]);
         return r;
@@ -83,6 +86,7 @@ sealed class DecoderSpy(ISparseShapeSubdivisionDecoder inner) : ISparseShapeSubd
     {
         Stopwatch sw = Stopwatch.StartNew();
         DualGridField f = inner.Decode(b, latent, rec);
+        b.Sync();
         Stage.Time("shape_decode", sw.Elapsed.TotalMilliseconds);
         List<(string, Array, long[])> items = [.. Stage.Sparse("latent", latent)];
         DualGridVoxels v = f.Voxels; int n = v.Coords.Length / 3;
@@ -115,6 +119,7 @@ sealed class TexFlowSpy(ITrellis2TextureFlowStage inner) : ITrellis2TextureFlowS
     {
         Stopwatch sw = Stopwatch.StartNew();
         SparseTensor r = inner.Sample(b, kind, shape, cond, neg, seed, p, onStep);
+        b.Sync();
         Stage.Time("texture_flow", sw.Elapsed.TotalMilliseconds);
         Tns.Write(Path.Combine(Stage.Out, "texture_flow.tns"), [.. Stage.Sparse("shape", shape), Stage.Dense("cond", cond), .. Stage.Sparse("tex_latent", r)]);
         return r;
@@ -127,6 +132,7 @@ sealed class TexDecSpy(ITrellis2TextureDecoderStage inner) : ITrellis2TextureDec
     {
         Stopwatch sw = Stopwatch.StartNew();
         SparseTensor r = inner.Decode(b, latent, guides);
+        b.Sync();
         Stage.Time("texture_decode", sw.Elapsed.TotalMilliseconds);
         Tns.Write(Path.Combine(Stage.Out, "texture_decode.tns"), [.. Stage.Sparse("latent", latent), .. Stage.Sparse("out", r)]);
         return r;

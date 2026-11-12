@@ -28,7 +28,6 @@ def setup(upstream, models, shape_vae):
     package = types.ModuleType("trellis2")
     package.__path__ = [os.path.join(upstream, "trellis2")]
     sys.modules["trellis2"] = package
-    state.update(models=models, shape_vae=shape_vae)
     import torch
     torch.set_grad_enabled(False)
     return torch
@@ -95,6 +94,8 @@ def align(ref_coords, got_coords):
     rk, gk = keys(ref_coords), keys(got_coords)
     ro, go = np.argsort(rk), np.argsort(gk)
     _, ri, gi = np.intersect1d(rk[ro], gk[go], return_indices=True)
+    if len(ri) == 0:
+        raise SystemExit("no coordinate is present on both sides: the capture and the upstream clone or checkpoints do not belong together")
     return ro[ri], go[gi], len(rk), len(gk)
 
 
