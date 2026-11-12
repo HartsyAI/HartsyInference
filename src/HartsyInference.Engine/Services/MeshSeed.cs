@@ -12,6 +12,7 @@ internal static class MeshSeed
         {
             return Random.Shared.Next(0, int.MaxValue);
         }
-        return wrapsLargeSeeds && requested > int.MaxValue ? unchecked((int)requested) : requested;
+        // The sampler gets the low 32 bits as an int. Report them as an unsigned value: sending a reported seed back wraps to the same int, where a negative one would draw a new random seed.
+        return wrapsLargeSeeds && requested > int.MaxValue ? requested & 0xFFFFFFFFL : requested;
     }
 }

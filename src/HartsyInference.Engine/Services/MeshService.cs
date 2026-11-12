@@ -22,6 +22,10 @@ namespace HartsyInference.Engine.Services;
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
+    private static readonly string EngineVersion = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
+        ?? typeof(MeshService).Assembly.GetName().Version?.ToString() ?? "unknown";
+
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -53,11 +57,8 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
     internal static MeshSettingsUsed SettingsOf(string id, MeshRequest request)
     {
-        string version = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
-            ?? typeof(MeshService).Assembly.GetName().Version?.ToString() ?? "unknown";
         if (MeshModelProfiles.Find(id) is null)
-            return new MeshSettingsUsed { ModelId = id, EngineVersion = version };
+            return new MeshSettingsUsed { ModelId = id, EngineVersion = EngineVersion };
         MeshModelDescriptor descriptor = MeshPlanningService.DescriptorOf(id);
         Dictionary<string, ResolvedParameter> parameters = new(MeshPlanningService.Settings(request, descriptor));
         long? seed = null;
@@ -66,10 +67,10 @@ public sealed class MeshService : IMeshService, IDisposable
             seed = MeshSeed.Resolve(request.Seed, WrapsLargeSeeds(id));
             parameters[nameof(MeshRequest.Seed)] = ParameterProvenance.Seed(request.Seed, seed.Value);
         }
-        return new MeshSettingsUsed { ModelId = id, Seed = seed, Parameters = parameters, EngineVersion = version };
+        return new MeshSettingsUsed { ModelId = id, Seed = seed, Parameters = parameters, EngineVersion = EngineVersion };
     }
 
-    /// <summary>The models whose seed above <see cref="int.MaxValue"/> is cast to <c>int</c> unchecked (the profile shows no maximum for them).</summary>
+    /// <summary>The models whose seed above <see cref="int.MaxValue"/> is cast to <c>int</c> unchecked. Read from the profile: <c>WrappingSeed()</c> in <see cref="MeshModelProfiles"/> is the one that shows no maximum, so editing it changes this.</summary>
     private static bool WrapsLargeSeeds(string id) =>
         MeshModelProfiles.Find(id)!.Fields.Single(f => f.Name == nameof(MeshRequest.Seed)) is { Access: MeshFieldAccess.Used, Max: null };
 
