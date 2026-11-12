@@ -58,6 +58,14 @@ code.
 | `HostMemoryInfo.AvailableBytes()` | Available host RAM, cross-platform, best effort. |
 | `DeviceKind.IsCpu` / `IsCuda` / `IsVulkan` / `IsGpu` | Device family of a tensor or backend. |
 
+## 3D preflight (`IInferenceEngine.MeshPlanning`, `POST /v1/native/mesh/plan`)
+
+| Member | Use |
+|---|---|
+| `DescribeAll()` / `Describe(id)` (`GET /v1/native/mesh/describe[/{id}]`) | Per 3D model: input and output kinds, how it treats each tunable `MeshRequest` field (access, default, legal values or range, unit), licence and gated repositories, cost. A host builds its form from this. |
+| `PlanAsync(spec, request)` | The validation generation runs, the settings with their provenance, ignored-field warnings, catalog files not at their catalog path, and whether the recorded peak fits the card; nothing loads. A plan with an error issue answers `422` over HTTP. |
+| `IMemoryEstimationService` for a mesh spec | The recorded whole-card peak of the default request as a one-stage estimate; a model with no recorded peak throws `NotSupportedException` from `EstimateAsync` and answers `Unknown` from `AssessAsync`. |
+
 ## Realtime audio primitives (`HartsyInference.Core.Runtime`)
 
 | Member | Use |

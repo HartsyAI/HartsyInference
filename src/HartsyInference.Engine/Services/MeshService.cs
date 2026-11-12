@@ -21,9 +21,6 @@ namespace HartsyInference.Engine.Services;
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
 public sealed class MeshService : IMeshService, IDisposable
 {
-    private const string HairDeckId = "hairdeck";
-    private const string Trellis2Id = "trellis2";
-
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CoLa3DPipeline> _scenePipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -45,10 +42,8 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
-        string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
-        if (id != Trellis2Id && id != MeshModelIds.Pixal3D)
-            Trellis2RequestMapper.RejectForOtherModels(request, id);
-        Pixal3DRequestMapper.RejectForOtherModels(request, id);
+        string id = IdOf(spec);
+        MeshRequestValidator.Validate(id, request, MatterAvailable(id));
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
@@ -58,19 +53,11 @@ public sealed class MeshService : IMeshService, IDisposable
         if (MeshModelIds.PartMesh.Contains(id))
             return GeneratePartAsync(spec, id, request, progress, cancel);
 
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
-        if (request.Image is null)
-        {
-            throw new NotSupportedException(
-                "Text-to-3D has no wired pipeline; supply MeshRequest.Image for image-to-3D (TripoSR / Hunyuan3D).");
-        }
         if (IsHairDeck(spec))
         {
             return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
         }
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (id == Trellis2Id)
+        if (id == MeshModelIds.Trellis2)
             return GenerateTrellis2Async(spec, request, progress, cancel);
         if (id == MeshModelIds.Pixal3D)
             return GeneratePixal3DAsync(spec, request, progress, cancel);
@@ -81,11 +68,12 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 LoadedMesh loaded = GetOrLoad(spec, id);
+                ImageData image = request.Image!;
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
-                    ImageRgb = request.Image.Rgb,
-                    Width = request.Image.Width,
-                    Height = request.Image.Height,
+                    ImageRgb = image.Rgb,
+                    Width = image.Width,
+                    Height = image.Height,
                     GridResolution = request.GridResolution,
                     Steps = request.Steps,
                     Seed = request.Seed < 0 ? null : (int)request.Seed,
@@ -111,19 +99,9 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>Scene decomposition: one GLB holding a mesh node per object.</summary>
     private Task<MeshResult> GenerateSceneAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' decomposes a triangle scene; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
-        SceneMeshData sceneMesh = request.SceneMesh;
+        SceneMeshData sceneMesh = request.SceneMesh!;
         CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : ToCoLa3DPrompt(request.ScenePrompt);
         CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
-        // Rejects the request before the checkpoint loads; the pipeline checks it again on Generate.
-        CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
 
         return Task.Run(
             () =>
@@ -146,19 +124,7 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>Rigging: one GLB holding the input mesh, a generated skeleton and per-vertex skin weights.</summary>
     private Task<MeshResult> GenerateRiggedAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' rigs a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Steps != 0 || request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
         UniRigPipeline.ValidateMesh(input);
 
         return Task.Run(
@@ -208,21 +174,7 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the surface sampling; the point and prompt counts are the upstream ones (100,000 and 400).</summary>
     private Task<MeshResult> GeneratePartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' segments a triangle mesh into parts; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Steps != 0 || request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The P3-SAM seed must be at most {int.MaxValue}.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
         P3SamPipeline.ValidateMesh(input);
 
         return Task.Run(
@@ -291,20 +243,8 @@ public sealed class MeshService : IMeshService, IDisposable
     /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null || request.Image is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.");
-        }
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Paint seed must be at most {int.MaxValue}.");
-        if (request.Steps < 0 || request.GridResolution < 0)
-            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
-        ImageData reference = request.Image;
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
+        ImageData reference = request.Image!;
         byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
         HunyuanPaintOptions options = new()
         {
@@ -433,11 +373,7 @@ public sealed class MeshService : IMeshService, IDisposable
         ImageData source = request.Image!;
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
         Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
-        if (!request.Texture && request.TextureSize != 0)
-            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only TRELLIS.2 mesh.");
         string modelsRoot = RepoPaths.ModelsRoot();
-        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
-        Trellis2ImageTo3DPipeline.ValidateRequest(options, image, Trellis2Runtime.MatterAvailable(modelsRoot));
 
         return Task.Run(
             () =>
@@ -479,12 +415,8 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         ImageData source = request.Image!;
         Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
-        if (!request.Texture && request.TextureSize != 0)
-            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only Pixal3D mesh.");
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
         string modelsRoot = RepoPaths.ModelsRoot();
-        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
-        Pixal3DImageTo3DPipeline.ValidateRequest(options, image, Pixal3DRuntime.MatterAvailable(modelsRoot));
 
         return Task.Run(
             () =>
@@ -514,7 +446,6 @@ public sealed class MeshService : IMeshService, IDisposable
     /// </summary>
     private Task<MeshResult> GenerateSam3dAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        Sam3dObjectsRequestMapper.Validate(request);
         string directory = spec.LocalPath ?? throw new FileNotFoundException("No checkpoint folder found for 'sam3d-objects'. Download the catalog assets or supply the model directory as the local path.");
         if (!Sam3dObjectsPipeline.HasWeights(directory))
             throw new FileNotFoundException($"'{directory}' lacks SAM 3D checkpoints: ss_generator, ss_decoder, slat_generator and slat_decoder_gs (.safetensors or .ckpt) must all be there.");
@@ -625,8 +556,15 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
+    /// <summary>The lower-case catalog id a spec names.</summary>
+    internal static string IdOf(ModelSpec spec) => (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+
+    /// <summary>Whether the matting checkpoint the model uses for images without alpha is installed right now; false for models that matte nothing.</summary>
+    internal static bool MatterAvailable(string id) =>
+        (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D) && Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
+
     private static bool IsHairDeck(ModelSpec spec) =>
-        string.Equals(spec.Catalog?.Id, HairDeckId, StringComparison.OrdinalIgnoreCase);
+        IdOf(spec) == MeshModelIds.HairDeck;
 
     /// <summary>One HairDeck request: the preprocessing of the image, then the image model; the GLB carries the chains when they were made.</summary>
     private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, CancellationToken cancel)
@@ -732,7 +670,7 @@ public sealed class MeshService : IMeshService, IDisposable
             if (!MeshModelIds.ImageToMesh.Contains(id))
             {
                 throw new NotSupportedException(
-                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.All.Append(HairDeckId))}.");
+                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.Described)}.");
             }
             try
             {
@@ -782,7 +720,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Converts the wire prompt to the pipeline's prompt, checking that exactly one kind is given.</summary>
-    private static CoLa3DPrompt ToCoLa3DPrompt(SceneMeshPrompt prompt)
+    internal static CoLa3DPrompt ToCoLa3DPrompt(SceneMeshPrompt prompt)
     {
         if ((prompt.Masks is null) == (prompt.Points is null))
             throw new ArgumentException("A scene prompt gives masks or points, not both and not neither.", nameof(prompt));

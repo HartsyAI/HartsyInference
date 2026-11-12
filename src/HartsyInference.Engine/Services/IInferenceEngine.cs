@@ -70,6 +70,10 @@ public interface IInferenceEngine : IDisposable
     /// <summary>3D mesh generation.</summary>
     IMeshService Mesh { get; }
 
+    /// <summary>3D preflight: what each 3D model accepts, and whether one request would run, without loading weights.</summary>
+    IMeshPlanningService MeshPlanning =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh planning.");
+
     /// <summary>Interactive world sessions.</summary>
     IWorldService World { get; }
 
