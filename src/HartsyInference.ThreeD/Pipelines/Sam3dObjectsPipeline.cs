@@ -23,6 +23,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     private static readonly float[] SlatMean = [0.12211431f, 0.37204156f, -1.26521907f, -2.05276058f, -3.10432536f, -0.11294304f, -0.85146744f, 0.45506954f];
     private static readonly float[] SlatStd = [2.37326008f, 2.13174402f, 2.2413953f, 2.30589401f, 2.1191894f, 1.8969511f, 2.41684989f, 2.08374642f];
 
+    private const string MogeFile = "moge_vitl.safetensors";
+
     private readonly string _modelDirectory;
 
     /// <param name="backend">The compute backend; not owned.</param>
@@ -40,8 +42,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     public static bool HasWeights(string modelDirectory) =>
         Directory.Exists(modelDirectory) && new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs" }.All(stem => Find(modelDirectory, stem) is not null);
 
-    /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c>; its config JSON is optional).</summary>
-    public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, "moge_vitl.safetensors"));
+    /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c> only: the upstream pickle nests its state dict under <c>model</c> and is not read; its config JSON is optional).</summary>
+    public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, MogeFile));
 
     /// <summary>Generates the splats and the pose of one object.</summary>
     /// <param name="log">Receives one line per stage with the elapsed time since the call started.</param>
@@ -57,6 +59,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         Stopwatch clock = Stopwatch.StartNew();
         void Log(string message) => log?.Invoke($"[{clock.Elapsed.TotalSeconds,7:F1}s] {message}");
 
+        if (request.Pointmap is null && request.MogeResolutionLevel is < 0 or > 9)
+            throw new ArgumentOutOfRangeException(nameof(request), request.MogeResolutionLevel, "The MoGe resolution level is 0 to 9.");
         (float[] rgb, float[] mask) = Planar(request);
         SamPointmapInput pointmap = request.Pointmap ?? EstimatePointmap(rgb, request, Log);
         SamPrepared prepared = SamPreprocessor.Prepare(rgb, mask, pointmap, request.Height, request.Width);
@@ -93,17 +97,26 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     /// </summary>
     private SamPointmapInput EstimatePointmap(float[] rgb, Sam3dObjectsRequest request, Action<string> log)
     {
-        string checkpointPath = Find(_modelDirectory, "moge_vitl")
-            ?? throw new FileNotFoundException($"The request has no pointmap and '{_modelDirectory}' holds no 'moge_vitl.safetensors' to estimate one with.");
+        string checkpointPath = Path.Combine(_modelDirectory, MogeFile);
+        if (!File.Exists(checkpointPath))
+            throw new FileNotFoundException($"The request has no pointmap and '{_modelDirectory}' holds no '{MogeFile}' to estimate one with.", checkpointPath);
         string configPath = Path.Combine(_modelDirectory, "moge_vitl_config.json");
         MogeConfig config = File.Exists(configPath) ? MogeConfig.FromJson(File.ReadAllText(configPath)) : MogeConfig.Released;
         MogeResult result;
         using (SamCheckpoint checkpoint = SamCheckpoint.Load(checkpointPath))
         {
             MogeModel model = new(config, checkpoint.Tensors);
-            Backend.PreloadWeights(checkpoint.Tensors.Values);
-            result = model.Infer(Backend, rgb, request.Height, request.Width, request.MogeResolutionLevel);
-            Backend.FreeWeights(checkpoint.Tensors.Values);
+            // The model's own tensors, not the checkpoint's: the backbone q, k and v are views of the fused ones, and the backend caches by tensor object.
+            List<Tensor> weights = [.. model.EnumerateWeights()];
+            try
+            {
+                Backend.PreloadWeights(weights);
+                result = model.Infer(Backend, rgb, request.Height, request.Width, request.MogeResolutionLevel);
+            }
+            finally
+            {
+                Backend.FreeWeights(weights);
+            }
         }
 
         Sweep();
