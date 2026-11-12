@@ -120,6 +120,30 @@ public sealed class MeshImageProcessorTests
     }
 
     [Fact]
+    public void Hunyuan3D_CentresAWideForegroundOnTheSquareCanvasWithTheBorderOnTheShortAxis()
+    {
+        // A 16 x 8 image with an 8 x 4 block: box 7 x 3, canvas 16, scale int(16 * 0.85) / 7 = 13 / 7, so a 13 x 5 foreground sits at left (16 - 13) / 2 = 1 and top (16 - 5) / 2 = 5.
+        (byte[] rgb, byte[] alpha) = Block(16, 8, 4, 2, 12, 6, 0, 0, 0);
+
+        PreparedImage image = Hunyuan3DImageProcessor.Process(rgb, alpha, 16, 8, size: 16);
+
+        Assert.Equal(new byte[] { 0, 0, 0 }, Pixel(image, 1, 5));
+        Assert.Equal(new byte[] { 0, 0, 0 }, Pixel(image, 13, 9));
+        Assert.Equal(new byte[] { 255, 255, 255 }, Pixel(image, 0, 5));
+        Assert.Equal(new byte[] { 255, 255, 255 }, Pixel(image, 14, 9));
+        Assert.Equal(new byte[] { 255, 255, 255 }, Pixel(image, 1, 4));
+        Assert.Equal(new byte[] { 255, 255, 255 }, Pixel(image, 1, 10));
+    }
+
+    [Fact]
+    public void TripoSr_RefusesAOnePixelWideForegroundLikeHunyuan3D()
+    {
+        (byte[] rgb, byte[] thin) = Block(8, 8, 3, 1, 4, 7, 1, 1, 1);
+
+        Assert.Throws<ArgumentException>(() => TripoSrImageProcessor.Process(rgb, thin, 8, 8));
+    }
+
+    [Fact]
     public void TripoSr_RefusesAnImageWithNoForeground()
     {
         (byte[] rgb, byte[] empty) = Block(8, 8, 0, 0, 0, 0, 1, 1, 1);

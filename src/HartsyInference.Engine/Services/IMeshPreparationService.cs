@@ -7,6 +7,6 @@ namespace HartsyInference.Engine.Services;
 public interface IMeshPreparationService
 {
     /// <summary>Prepares <paramref name="image"/> for <paramref name="spec"/>'s model: mattes it when it has no alpha, then applies the model's framing and compositing.</summary>
-    /// <exception cref="NotSupportedException">The model has no wired pipeline, takes no image, or the matting checkpoint is needed and not installed.</exception>
+    /// <exception cref="NotSupportedException">The model has no wired pipeline, or the matting checkpoint is needed and not installed. A model that takes no image, or prepares its own, gets the image back with a note.</exception>
     Task<PreparedMeshImage> PrepareImageAsync(ModelSpec spec, ImageData image, CancellationToken cancel = default);
 }
