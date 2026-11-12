@@ -296,7 +296,7 @@ public sealed class MeshService : IMeshService, IDisposable
         {
             return null;
         }
-        foreach (string relative in new[] { "hunyuan3d2/hunyuan3d-dit-v2-0/model.fp16.safetensors", "hunyuan3d-fast/model.fp16.safetensors", "hunyuan3d-turbo/model.fp16.safetensors" })
+        foreach (string relative in new[] { "hunyuan3d/model.fp16.safetensors", "hunyuan3d2/hunyuan3d-dit-v2-0/model.fp16.safetensors", "hunyuan3d-fast/model.fp16.safetensors", "hunyuan3d-turbo/model.fp16.safetensors" })
         {
             string candidate = Path.Combine(models3D, relative);
             if (File.Exists(candidate))
