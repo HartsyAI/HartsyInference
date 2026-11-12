@@ -12,8 +12,8 @@ namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 /// pixels with a learned in-window position row, one timm <c>Block</c> (LayerNorm eps 1e-6, full self-attention with QKV bias, exact-GELU MLP) mixes the window,
 /// and the pooled token plus the learned patch position is the window's output token. Dropout of the pointmap is the fuser's job at inference (forced
 /// drop by keyword), so the training-time <c>dropped_xyz_token</c> is not read. Keys under the prefix: <c>point_proj.{weight,bias}</c>, <c>invalid_xyz_token</c>,
-/// <c>pos_embed</c> (<c>[1, dim, windows, windows]</c>), <c>pos_embed_window</c>, <c>cls_token</c>, <c>blocks.0.{norm1,attn.qkv,attn.proj,norm2,mlp.fc1,mlp.fc2}.*</c>; names follow
-/// the module structure and are unverified against a checkpoint. The weights are F32 and stay owned by the caller.
+/// <c>pos_embed</c> (<c>[1, dim, windows, windows]</c>), <c>pos_embed_window</c>, <c>cls_token</c>, <c>blocks.0.{norm1,attn.qkv,attn.proj,norm2,mlp.fc1,mlp.fc2}.*</c>; key names, shapes and the F32 dtype were checked against the released
+/// checkpoints (numeric agreement with upstream is not). The weights are F32 and stay owned by the caller.
 /// </summary>
 public sealed class SamPointPatchEmbed
 {
