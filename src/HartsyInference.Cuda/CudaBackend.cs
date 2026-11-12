@@ -6232,6 +6232,19 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The tile size in bytes the allocation last had to shrink to (0: it has not had to); see <see cref="TileRows"/>.</summary>
     private long _sdpaTileCapBytes;
 
+    /// <summary>The remembered tile cap after a call: the size that fit when the call had to halve its tile; doubled by a call that fitted at the
+    /// cap, until it reaches <see cref="MinTileScoreBytes"/> and is dropped (so a transient failure costs a few calls, and the Windows reading that
+    /// stays near zero cannot hold the tile small for good); unchanged when the tile height was forced, because a forced height says nothing about
+    /// what the card has free.</summary>
+    internal static long NextTileCap(long capBytes, bool halved, long usedBytes, bool forced)
+    {
+        if (forced) return capBytes;
+        if (halved) return usedBytes;
+        if (capBytes <= 0) return 0;
+        long raised = capBytes * 2;
+        return raised >= MinTileScoreBytes ? 0 : raised;
+    }
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
     /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
     /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
@@ -6267,7 +6280,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
             // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
-            // allocator recovery) are paid once, not on every call. The memory reading turning plentiful again clears the memory.
+            // allocator recovery) are paid once, not on every call. The memory grows back (see NextTileCap): a transient failure must not
+            // pin the tile small for the backend's lifetime.
             bool halved = false;
             while (true)
             {
@@ -6283,10 +6297,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
             }
 
-            if (halved)
-                Volatile.Write(ref _sdpaTileCapBytes, perRow * Br);
-            else if (Volatile.Read(ref _sdpaTileCapBytes) > 0 && (long)(freeBytes / 4) >= 2 * Volatile.Read(ref _sdpaTileCapBytes))
-                Volatile.Write(ref _sdpaTileCapBytes, 0);
+            Volatile.Write(ref _sdpaTileCapBytes, NextTileCap(Volatile.Read(ref _sdpaTileCapBytes), halved, perRow * Br, EngineKnobs.SdpaTile.Value is > 0));
             if (pBias != 0)
             {
                 pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));

@@ -221,7 +221,7 @@ The planner reproduces these until the row that owns each is rewritten.
 - CUDA's materialized F32→F16 cast does not saturate; cuDNN's does.
 - CUDA chooses between the materialized and tiled paths, the tile height, and cuDNN or FA2 prefill from free VRAM. The tile holds about a
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
-  does not fit, in which case the tile is halved until it does and later calls start from that height), because `cuMemGetInfo` reads far too low on a card a process has filled past about
+  does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back as they fit), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
 - CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and
   so does each query tile. Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an

@@ -68,6 +68,31 @@ public sealed class SdpaTileRowsTests
     }
 
     [Fact]
+    public void TheRememberedCapIsSetByAHalvingAndGrowsBackUntilItIsDropped()
+    {
+        long mb = 1L << 20;
+
+        // A halving records the size that fit.
+        Assert.Equal(16 * mb, CudaBackend.NextTileCap(0, halved: true, usedBytes: 16 * mb, forced: false));
+        Assert.Equal(4 * mb, CudaBackend.NextTileCap(16 * mb, halved: true, usedBytes: 4 * mb, forced: false));
+        // Each call that fits at the cap doubles it, and a cap that reaches the floor is dropped.
+        long cap = 8 * mb;
+        List<long> caps = [];
+        for (int call = 0; call < 6 && cap > 0; call++)
+        {
+            cap = CudaBackend.NextTileCap(cap, halved: false, usedBytes: cap, forced: false);
+            caps.Add(cap);
+        }
+
+        Assert.Equal([16 * mb, 32 * mb, 64 * mb, 0], caps);
+        // No cap stays no cap; a forced height changes nothing either way.
+        Assert.Equal(0, CudaBackend.NextTileCap(0, halved: false, usedBytes: 100 * mb, forced: false));
+        Assert.Equal(8 * mb, CudaBackend.NextTileCap(8 * mb, halved: true, usedBytes: 1 * mb, forced: true));
+        Assert.Equal(8 * mb, CudaBackend.NextTileCap(8 * mb, halved: false, usedBytes: 8 * mb, forced: true));
+        Assert.Equal(0, CudaBackend.NextTileCap(0, halved: true, usedBytes: 1 * mb, forced: true));
+    }
+
+    [Fact]
     public void ATileOfOneRowPastTheAddressableScoresIsRefused()
     {
         // 2^32 / (heads * keys) < 1: even one query row of every head is more scores than the softmax addresses.
