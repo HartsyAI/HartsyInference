@@ -136,7 +136,7 @@ public sealed unsafe class Hunyuan3DPlainDit : IHunyuan3DDenoiser
     }
 
     // diffusers-style Timesteps(width): frequencies exp(-ln(10000) * i / half), sine block then cosine block, no extra scale.
-    private static void TimestepEmbedding(Tensor output, float timestep, int width)
+    internal static void TimestepEmbedding(Tensor output, float timestep, int width)
     {
         float* p = (float*)output.DataPointer;
         int half = width / 2;
