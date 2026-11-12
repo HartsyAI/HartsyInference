@@ -829,7 +829,7 @@ public static class GenerationDispatch
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
-            Image = paint ? LoadMeshImage(imagePath!) : scene ? null : LoadMeshImage(prompt),
+            Image = paint ? LoadMeshImage(imagePath!) : scene ? null : WithMask(LoadMeshImage(prompt), parameters.GetStringOrNull("mask"), meshId),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
@@ -1605,6 +1605,28 @@ public static class GenerationDispatch
 
         DecodedPng png = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
         return new ImageData { Rgb = png.Rgb, Alpha = png.Alpha, Width = png.Width, Height = png.Height };
+    }
+
+    /// <summary>
+    /// The image with <paramref name="maskPath"/>'s red channel as its alpha plane (the object mask of sam3d-objects); the image itself when there is no mask file.
+    /// </summary>
+    /// <exception cref="ArgumentException">A mask for a model that does not read one, a missing file, or a size that is not the image's.</exception>
+    internal static ImageData WithMask(ImageData image, string? maskPath, string meshId)
+    {
+        if (string.IsNullOrWhiteSpace(maskPath))
+            return image;
+        if (meshId != MeshModelIds.Sam3dObjects)
+            throw new ArgumentException($"3D model '{meshId}' takes no --mask; the mask belongs to {MeshModelIds.Sam3dObjects}.");
+        string path = maskPath.Trim().Trim('"');
+        if (!path.EndsWith(".png", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            throw new ArgumentException($"The mask must be an existing PNG file: {path}");
+        DecodedPng mask = PngDecoder.DecodeWithAlpha(File.ReadAllBytes(path));
+        if (mask.Width != image.Width || mask.Height != image.Height)
+            throw new ArgumentException($"The mask is {mask.Width} x {mask.Height} but the image is {image.Width} x {image.Height}; they must match.");
+        byte[] alpha = new byte[mask.Width * mask.Height];
+        for (int i = 0; i < alpha.Length; i++)
+            alpha[i] = mask.Rgb[i * 3];
+        return image with { Alpha = alpha };
     }
 
     /// <summary>Reads an image file (PNG or BMP) into the engine's RGB24 <see cref="ImageData"/> contract.</summary>

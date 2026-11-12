@@ -33,6 +33,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
+    private readonly SemaphoreSlim _sam3dGate = new(1, 1);
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal MeshService(InferenceEngine engine) => _engine = engine;
@@ -69,6 +70,8 @@ public sealed class MeshService : IMeshService, IDisposable
             return GenerateTrellis2Async(spec, request, progress, cancel);
         if (id == MeshModelIds.Pixal3D)
             return GeneratePixal3DAsync(spec, request, progress, cancel);
+        if (id == MeshModelIds.Sam3dObjects)
+            return GenerateSam3dAsync(spec, request, progress, cancel);
         return Task.Run(
             () =>
             {
@@ -401,6 +404,50 @@ public sealed class MeshService : IMeshService, IDisposable
                     pipeline => options.Texture
                         ? Pixal3DImageTo3DPipeline.ToGlb(pipeline.GenerateTextured(image, options, Report, cancel))
                         : GlbWriter.Write(pipeline.Generate(image, options, Report)));
+            },
+            cancel);
+    }
+
+    /// <summary>
+    /// SAM 3D Objects: the image's alpha plane is the mask of the object to lift, MoGe estimates the pointmap, and the result is a Gaussian-splat PLY in the object's own frame (the pose is
+    /// logged, not stored in the file). The pipeline opens each checkpoint for its stage and releases it, so nothing stays loaded between requests; requests run one at a time.
+    /// </summary>
+    private Task<MeshResult> GenerateSam3dAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        Sam3dObjectsRequestMapper.Validate(request);
+        string directory = spec.LocalPath ?? throw new FileNotFoundException("No checkpoint folder found for 'sam3d-objects'. Download the catalog assets or supply the model directory as the local path.");
+        if (!Sam3dObjectsPipeline.HasWeights(directory))
+            throw new FileNotFoundException($"'{directory}' lacks SAM 3D checkpoints: ss_generator, ss_decoder, slat_generator and slat_decoder_gs (.safetensors or .ckpt) must all be there.");
+        if (!Sam3dObjectsPipeline.HasMoge(directory))
+            throw new FileNotFoundException($"'{directory}' lacks moge_vitl.safetensors, which estimates the scene's pointmap.");
+        Sam3dObjectsRequest job = Sam3dObjectsRequestMapper.ToRequest(request);
+        int total = job.StructureSteps + job.SlatSteps;
+
+        return Task.Run(
+            () =>
+            {
+                _sam3dGate.Wait(cancel);
+                try
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    using Sam3dObjectsPipeline pipeline = new(_engine.Backend, directory);
+                    Sam3dObjectsResult result = pipeline.Generate(
+                        job,
+                        line => Logs.Info($"[sam3d-objects] {line}"),
+                        (stage, step) =>
+                        {
+                            cancel.ThrowIfCancellationRequested();
+                            progress?.Report(new StepPreview { Step = stage == "structure" ? step : job.StructureSteps + step, TotalSteps = total });
+                        });
+                    if (result.Splats is not { Count: > 0 } splats)
+                        throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
+                    Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, {splats.Count} splats from {result.Voxels} voxels");
+                    return new MeshResult { Data = PlyWriter.WriteSplats(splats), Format = "ply" };
+                }
+                finally
+                {
+                    _sam3dGate.Release();
+                }
             },
             cancel);
     }
