@@ -13,28 +13,14 @@ namespace HartsyInference.Diffusion.Tests;
 /// against the properties the reference's layout implies; they are not parity with speridlabs/iris-z-sdk.</summary>
 public sealed class IrisZTransformerTests
 {
-    private const int Hidden = 32;
-    private const int Mlp = 96;
-    private const int Channels = 8;
-    private const int Context = 12;
+    private const int Hidden = IrisZTestData.Hidden;
+    private const int Channels = IrisZTestData.Channels;
+    private const int Context = IrisZTestData.Context;
     private const int GridHeight = 2;
     private const int GridWidth = 3;
     private const int TextLength = 5;
 
-    private static Flux2Config TinyConfig(int modalities) => new()
-    {
-        HiddenSize = Hidden,
-        NumHeads = 2,
-        HeadDim = 16,
-        Depth = 1,
-        DepthSingleBlocks = 2,
-        InChannels = Channels,
-        OutChannels = Channels,
-        ContextInDim = Context,
-        AxesDim = [4, 4, 4, 4],
-        ModalityCount = modalities,
-        TextEncoderType = Flux2TextEncoderType.Qwen,
-    };
+    private static Flux2Config TinyConfig(int modalities) => IrisZTestData.Config(modalities);
 
     [Fact]
     public void ConverterKeepsTheModalityEmbedding()
@@ -172,62 +158,7 @@ public sealed class IrisZTransformerTests
         return max;
     }
 
-    /// <summary>A random tiny checkpoint in BFL key names, run through the converter the recipe uses.</summary>
-    private static Dictionary<string, Tensor> Converted(bool zeroModality)
-    {
-        Random rng = new(7);
-        Dictionary<string, Tensor> bfl = new(StringComparer.Ordinal)
-        {
-            ["img_in.weight"] = Random(rng, Hidden, Channels),
-            ["txt_in.weight"] = Random(rng, Hidden, Context),
-            ["time_in.in_layer.weight"] = Random(rng, Hidden, 256),
-            ["time_in.out_layer.weight"] = Random(rng, Hidden, Hidden),
-            ["double_stream_modulation_img.lin.weight"] = Random(rng, 6 * Hidden, Hidden),
-            ["double_stream_modulation_txt.lin.weight"] = Random(rng, 6 * Hidden, Hidden),
-            ["single_stream_modulation.lin.weight"] = Random(rng, 3 * Hidden, Hidden),
-            ["final_layer.adaLN_modulation.1.weight"] = Random(rng, 2 * Hidden, Hidden),
-            ["final_layer.linear.weight"] = Random(rng, Channels, Hidden),
-            ["modality_in.weight"] = zeroModality ? Zeros(4, Hidden) : Random(rng, 4, Hidden),
-        };
-        foreach (string stream in new[] { "img", "txt" })
-        {
-            bfl[$"double_blocks.0.{stream}_attn.qkv.weight"] = Random(rng, 3 * Hidden, Hidden);
-            bfl[$"double_blocks.0.{stream}_attn.proj.weight"] = Random(rng, Hidden, Hidden);
-            bfl[$"double_blocks.0.{stream}_attn.norm.query_norm.scale"] = Scale(rng, 16);
-            bfl[$"double_blocks.0.{stream}_attn.norm.key_norm.scale"] = Scale(rng, 16);
-            bfl[$"double_blocks.0.{stream}_mlp.0.weight"] = Random(rng, 2 * Mlp, Hidden);
-            bfl[$"double_blocks.0.{stream}_mlp.2.weight"] = Random(rng, Hidden, Mlp);
-        }
-        for (int block = 0; block < 2; block++)
-        {
-            bfl[$"single_blocks.{block}.linear1.weight"] = Random(rng, 3 * Hidden + 2 * Mlp, Hidden);
-            bfl[$"single_blocks.{block}.linear2.weight"] = Random(rng, Hidden, Hidden + Mlp);
-            bfl[$"single_blocks.{block}.norm.query_norm.scale"] = Scale(rng, 16);
-            bfl[$"single_blocks.{block}.norm.key_norm.scale"] = Scale(rng, 16);
-        }
-        return new Flux2CheckpointConverter(Hidden, Mlp).ConvertTransformer(bfl);
-    }
+    private static Dictionary<string, Tensor> Converted(bool zeroModality) => IrisZTestData.Converted(zeroModality);
 
-    private static Tensor Random(Random rng, params long[] dims)
-    {
-        Tensor tensor = new(new TensorShape(dims), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++) values[i] = (float)(rng.NextDouble() * 0.4 - 0.2);
-        return tensor;
-    }
-
-    private static Tensor Scale(Random rng, int length)
-    {
-        Tensor tensor = new(new TensorShape(length), DType.F32);
-        Span<float> values = tensor.AsSpan<float>();
-        for (int i = 0; i < values.Length; i++) values[i] = (float)(0.5 + rng.NextDouble());
-        return tensor;
-    }
-
-    private static Tensor Zeros(params long[] dims)
-    {
-        Tensor tensor = new(new TensorShape(dims), DType.F32);
-        tensor.AsSpan<float>().Clear();
-        return tensor;
-    }
+    private static Tensor Random(Random rng, params long[] dims) => IrisZTestData.Random(rng, dims);
 }

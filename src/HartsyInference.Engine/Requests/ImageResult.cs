@@ -29,7 +29,7 @@ public sealed record ImageResult
     public IReadOnlyList<ImageLayer>? Layers { get; init; }
 
     /// <summary>Optional relative log depth per pixel, row-major like <see cref="Rgb"/>, length <see cref="Width"/> *
-    /// <see cref="Height"/>: values in <c>[-1, 1]</c>, near is low and sky is +1. Null unless the family estimates depth
+    /// <see cref="Height"/>: nominally <c>[-1, 1]</c> (averaged estimates can overshoot slightly), near is low and sky is +1. Null unless the family estimates depth
     /// (Iris-Z); render it with <c>IrisZDepth.Colourize</c> or <c>IrisZDepth.ToGray</c>.</summary>
     public float[]? Depth { get; init; }
 
