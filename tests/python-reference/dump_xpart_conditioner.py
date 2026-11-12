@@ -63,7 +63,8 @@ def main():
     # Sonata features of the object (the seg_feat_encoder).
     p3.install_stubs()
     sonata = p3.load_sonata(args.upstream)
-    config = json.load(open(os.path.join(args.upstream, "XPart", "partgen", "config", "sonata.json")))
+    with open(os.path.join(args.upstream, "XPart", "partgen", "config", "sonata.json"), encoding="utf-8") as handle:
+        config = json.load(handle)
     config.update(enable_flash=False, shuffle_orders=False, drop_path=0.0)
     model = sonata.PointTransformerV3(**config)
     state = {k[len("seg_feat_encoder."):]: v for k, v in everything.items() if k.startswith("seg_feat_encoder.")}
@@ -99,6 +100,7 @@ def main():
 
     # The two shape encoders (object, and the part in its box) as in the encoder oracle.
     pts = torch.tensor(points, dtype=torch.float32)
+    # [normal, sharp-edge label]: upstream's label is 0 or 1; a continuous value here only exercises the 4th input channel.
     obj_feats = torch.cat([torch.tensor(normals, dtype=torch.float32), torch.rand(count, 1)], dim=1)
     blocks = enc.load_upstream(os.path.join(args.upstream, "XPart", "partgen", "models", "autoencoders"))
     obj_query = enc.farthest_points(pts, args.queries)
@@ -112,7 +114,7 @@ def main():
     geo_proj = linear(everything, "geo_out_proj")
     local_state = {k: v for k, v in everything.items() if k.startswith("geo_encoder.local_encoder.encoder.")}
     for k in range(2):
-        # A part: points of the object surface inside a box, re-sampled with a different seed and nudged so that the nearest object point is not the point itself.
+        # A part (a stand-in for sample_bbox_points_from_trimesh): points of the object surface inside a box, re-sampled with a different seed and nudged so that the nearest object point is not the point itself.
         keep = torch.nonzero(pts[:, 0] * (1 if k == 0 else -1) > -0.1).squeeze(1)
         take = keep[torch.randperm(len(keep))[:count]] if len(keep) >= count else keep[torch.randint(len(keep), (count,))]
         part_pts = pts[take] + 0.002 * torch.randn(count, 3)

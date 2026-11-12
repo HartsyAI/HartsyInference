@@ -3,7 +3,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 
-/// <summary>One part's conditioning tokens and the object's, each <c>[Q, 1024]</c> as <see cref="Tensor"/> <c>[1, Q, 1024]</c>.</summary>
+/// <summary>The object's conditioning tokens and one set per part, each a <see cref="Tensor"/> <c>[1, Q, 1024]</c>.</summary>
 /// <param name="ObjectTokens">The object tokens (the same for every part); the caller disposes them.</param>
 /// <param name="PartTokens">One <c>geo_cond</c> per part, in the order of the parts passed in; the caller disposes them.</param>
 public sealed record XPartConditioning(Tensor ObjectTokens, IReadOnlyList<Tensor> PartTokens);
@@ -63,6 +63,7 @@ public sealed class XPartConditioner : IDisposable
     /// <summary>The Sonata feature of every object point, <c>[N, 512]</c>, row-major. The object points are the caller's surface samples (upstream: 81,920 of them, in the 0.8 box).</summary>
     public float[] SonataFeatures(ReadOnlySpan<float> points, ReadOnlySpan<float> features, P3SamVoxelPick pick = P3SamVoxelPick.First)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         int count = ObjectCount(points, features);
         double[] xyz = new double[3 * count];
         float[] normals = new float[3 * count];
@@ -85,10 +86,11 @@ public sealed class XPartConditioner : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(parts);
-        ObjectCount(points, features);
         float[] sonata = SonataFeatures(points, features, pick);
+        float[] objectPoints = points.ToArray();
 
-        Tensor objectTokens = Project(_objectEncoder.Encode(points, features, objectQueries), sonata, Nearest(points, objectQueries, points), _objectProjW, _objectProjB);
+        // The object's own queries find themselves (distance 0, and a later duplicate cannot beat the first minimum): the search stops at the query.
+        Tensor objectTokens = Project(_objectEncoder.Encode(points, features, objectQueries), sonata, Nearest(points, objectQueries, objectPoints, selfSearch: true), _objectProjW, _objectProjB);
         List<Tensor> partTokens = [];
         try
         {
@@ -97,7 +99,7 @@ public sealed class XPartConditioner : IDisposable
                 if (part.Points.Length % 3 != 0 || part.Features.Length != part.Points.Length / 3 * 4)
                     throw new ArgumentException("A part needs 3 floats and 4 features per point.", nameof(parts));
                 Tensor encoded = _partEncoder.Encode(part.Points, part.Features, part.QueryIndices);
-                partTokens.Add(Project(encoded, sonata, Nearest(part.Points, part.QueryIndices, points), _partProjW, _partProjB));
+                partTokens.Add(Project(encoded, sonata, Nearest(part.Points, part.QueryIndices, objectPoints, selfSearch: false), _partProjW, _partProjB));
             }
         }
         catch
@@ -146,19 +148,19 @@ public sealed class XPartConditioner : IDisposable
     }
 
     // For each query point (a row of queryPoints picked by queryIndices), the index of the nearest object point: torch.cdist(...).argmin with the first minimum on ties.
-    private static int[] Nearest(ReadOnlySpan<float> queryPoints, ReadOnlySpan<int> queryIndices, ReadOnlySpan<float> objectPoints)
+    private static int[] Nearest(ReadOnlySpan<float> queryPoints, ReadOnlySpan<int> queryIndices, float[] objects, bool selfSearch)
     {
         float[] queries = new float[3 * queryIndices.Length];
         for (int i = 0; i < queryIndices.Length; i++)
             queryPoints.Slice(3 * queryIndices[i], 3).CopyTo(queries.AsSpan(3 * i, 3));
-        float[] objects = objectPoints.ToArray();
         int objectCount = objects.Length / 3;
+        int[] picked = queryIndices.ToArray();
         int[] nearest = new int[queryIndices.Length];
         Parallel.For(0, nearest.Length, i =>
         {
             float qx = queries[3 * i], qy = queries[3 * i + 1], qz = queries[3 * i + 2], best = float.MaxValue;
-            int arg = 0;
-            for (int j = 0; j < objectCount; j++)
+            int arg = 0, last = selfSearch ? picked[i] + 1 : objectCount;
+            for (int j = 0; j < last; j++)
             {
                 float dx = objects[3 * j] - qx, dy = objects[3 * j + 1] - qy, dz = objects[3 * j + 2] - qz;
                 float d = dx * dx + dy * dy + dz * dz;
