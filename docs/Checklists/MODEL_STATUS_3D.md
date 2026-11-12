@@ -83,6 +83,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Other models / features
 - [ ] Hunyuan3D Paint: per-stage parity against the Python reference (2.0 runs on real weights and renders), the 2.1 weights and path, the delight stage, a view-count field on `MeshRequest`. Hunyuan3D Part and Omni follow as their own spikes. ([details](#hunyuan3d-paint))
 - [ ] Splat rasterizer.
+- [ ] Output frame: `MeshRequest.Frame = GltfYUpMetres` turns only Pixal3D (a half turn, derived from its export code); the front direction and up axis of every other model's real output are unchecked and need one real GLB each viewed from several sides. Hunyuan3D, TripoSR and TRELLIS emit decoder-grid units, not metres: the longest side is scaled to 1 m by convention, since a generated object has no real size.
 
 ## Details
 

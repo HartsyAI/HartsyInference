@@ -16,6 +16,8 @@ internal static class MeshRequestValidator
     public static void Validate(string id, MeshRequest request, bool matterAvailable)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.PreviewTriangles < 0)
+            throw new ArgumentOutOfRangeException(nameof(request), request.PreviewTriangles, "PreviewTriangles must not be negative; 0 returns no preview.").ForField(nameof(MeshRequest.PreviewTriangles));
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);

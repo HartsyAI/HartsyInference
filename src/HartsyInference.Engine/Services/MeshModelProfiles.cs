@@ -135,7 +135,31 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
         Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, PreprocessField(id)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+
+    private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
+    {
+        if (outputs == MeshOutputKinds.Splats)
+        {
+            return
+            [
+                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate."),
+                Ignored(nameof(MeshRequest.Frame), "A splat result is returned in the object's own frame."),
+            ];
+        }
+        return
+        [
+            Used(nameof(MeshRequest.PreviewTriangles), "0", 0, null, "triangles", "Also return a copy decimated to about this many triangles for a viewer; 0 returns none. The copy is geometry only."),
+            new MeshFieldSpec
+            {
+                Name = nameof(MeshRequest.Frame),
+                Access = MeshFieldAccess.Used,
+                Default = nameof(MeshFrame.Native),
+                Values = [nameof(MeshFrame.Native), nameof(MeshFrame.GltfYUpMetres)],
+                Note = "GltfYUpMetres centres the result, scales its longest side to 1 m and turns it to glTF's front where the model's front is known.",
+            },
+        ];
+    }
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()

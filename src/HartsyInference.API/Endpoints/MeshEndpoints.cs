@@ -140,6 +140,10 @@ public static class MeshEndpoints
         result.Data,
         result.Format,
         result.Parts,
+        result.Preview,
+        result.Info,
+        result.Frame,
+        result.Warnings,
         savedPath,
     };
 }
