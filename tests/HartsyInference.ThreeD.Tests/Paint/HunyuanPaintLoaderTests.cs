@@ -114,4 +114,33 @@ public sealed class HunyuanPaintLoaderTests
         Dictionary<string, Tensor> current = new() { ["encoder.mid_block.attentions.0.to_q.weight"] = q };
         Assert.Same(current, HunyuanPaintLoader.ModernizeVaeKeys(current));
     }
+
+    [Fact]
+    public void UnconditionalTokens_AreTheProjectionOfZerosNotZeros()
+    {
+        // Upstream zeroes the DINO hidden states and projects them like any others, so the unconditional tokens are layer_norm(bias): non-zero.
+        const int Dim = 4;
+        using Tensor projWeight = Empty(4 * Dim, 1536), projBias = Empty(4 * Dim), normWeight = Empty(Dim), normBias = Empty(Dim);
+        unsafe
+        {
+            float* b = (float*)projBias.DataPointer, w = (float*)normWeight.DataPointer;
+            for (int i = 0; i < 4 * Dim; i++)
+                b[i] = (i % Dim) * 0.5f;
+            for (int i = 0; i < Dim; i++)
+                w[i] = 1f;
+        }
+        using CpuBackend backend = new();
+        PaintDinoConditioner conditioner = new(new HartsyInference.Vision.Dinov2.Dinov2VisionEncoder(HartsyInference.Vision.Dinov2.Dinov2Preset.Giant), projWeight, projBias, normWeight, normBias);
+
+        using Tensor tokens = conditioner.UnconditionalTokens(backend);
+
+        Assert.Equal(new TensorShape(1, 257 * 4, Dim), tokens.Shape);
+        float[] values = new float[tokens.ElementCount];
+        unsafe
+        {
+            new ReadOnlySpan<float>((float*)tokens.DataPointer, values.Length).CopyTo(values);
+        }
+        Assert.Contains(values, v => Math.Abs(v) > 0.1f);
+        Assert.All(values, v => Assert.True(float.IsFinite(v)));
+    }
 }
