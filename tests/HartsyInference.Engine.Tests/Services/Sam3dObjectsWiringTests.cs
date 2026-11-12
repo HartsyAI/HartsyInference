@@ -188,6 +188,14 @@ public sealed class Sam3dObjectsWiringTests
     }
 
     [Fact]
+    public void ToMesh_RefusesColoursOfTheWrongLength()
+    {
+        SamMeshResult result = new([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f], [0, 1, 2], [0.1f, 0.2f, 0.3f]);
+
+        Assert.Throws<ArgumentException>(() => Sam3dObjectsMesh.ToMesh(result));
+    }
+
+    [Fact]
     public void Finish_DropsAFloatingPieceOfAbout3In10000OfTheAreaThatTheSharedDefaultKeeps()
     {
         // A tetrahedron of unit edges (area about 1.73) and a far triangle of area 0.0005, so 3e-4 of the total: above the default 1e-5, below the 1e-3 used here.

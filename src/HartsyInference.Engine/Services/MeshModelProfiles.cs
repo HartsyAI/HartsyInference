@@ -59,7 +59,8 @@ internal static class MeshModelProfiles
                     Summary = "SAM License (binds on use and redistribution)",
                     Restrictions = ["Use ends for trade-controlled parties and for military, nuclear, espionage and weapons end uses; read the licence text fetched beside the weights"],
                 },
-                new MeshCost { TypicalSeconds = 450, Basis = "RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated." },
+                new MeshCost { TypicalSeconds = 450, Basis = "Splats: RTX 3060, F32 flows, one example image; the SLAT flow fills the card, so no peak is stated. Mesh: RTX 3060, F16 flow weights (numerics.flowF16Weights), one bust, 340 s and an 11.8 GiB peak of the 12 GiB card (F32 flows are not recorded for the mesh path)." },
+                peak: request => request.Mesh ? 11.8 : null,
                 note: "The image's alpha plane is the mask of the object to lift."),
             Profile(MeshModelIds.HairDeck, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.RiggedMesh,
                 [Steps("50", 1, null, "Euler steps of the card sampler."), Ignored(nameof(MeshRequest.GridResolution), "HairDeck has no grid."),
@@ -152,12 +153,12 @@ internal static class MeshModelProfiles
 
     private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
     {
-        if (outputs.HasFlag(MeshOutputKinds.Splats))
+        if (outputs == MeshOutputKinds.Splats)
         {
             return
             [
-                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate, and a SAM 3D mesh is returned undecimated."),
-                Ignored(nameof(MeshRequest.Frame), "A splat or SAM 3D mesh result is returned in the object's own frame."),
+                Ignored(nameof(MeshRequest.PreviewTriangles), "A splat result has no triangles to decimate."),
+                Ignored(nameof(MeshRequest.Frame), "A splat result is returned in the object's own frame."),
             ];
         }
         return

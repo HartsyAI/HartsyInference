@@ -795,8 +795,10 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                         return new MeshResult { Data = GlbWriter.Write(Sam3dObjectsMesh.Finish(Sam3dObjectsMesh.ToMesh(meshResult))), Format = "glb" };
                     }
 
+                    if (result.Voxels == 0)
+                        throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
                     if (request.Mesh)
-                        throw new InvalidOperationException("SAM 3D's mesh decoder found no surface for this mask (try splats, or a larger or cleaner mask).");
+                        throw new InvalidOperationException("SAM 3D's mesh extraction found no surface for this mask (try splats, or a larger or cleaner mask).");
                     if (result.Splats is not { Count: > 0 } splats)
                         throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
                     Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, {splats.Count} splats from {result.Voxels} voxels");

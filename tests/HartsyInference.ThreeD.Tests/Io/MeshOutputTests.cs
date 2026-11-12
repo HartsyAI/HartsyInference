@@ -165,4 +165,32 @@ public sealed class MeshOutputTests
         Assert.Equal(mesh.Vertices, read.Vertices);
         Assert.Equal(mesh.Indices, read.Indices);
     }
+
+    [Fact]
+    public void NormalsAndColoursTogetherPointAtVec3FloatAccessorsOfTheVertexCountAndTheIndicesStillRead()
+    {
+        Mesh mesh = Tetrahedron();
+        mesh.VertexColors = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f];
+        MeshOps.ComputeVertexNormals(mesh);
+
+        byte[] glb = GlbWriter.Write(mesh, vertexColors: true);
+
+        int jsonLength = BitConverter.ToInt32(glb, 12);
+        using System.Text.Json.JsonDocument json = System.Text.Json.JsonDocument.Parse(glb.AsMemory(20, jsonLength));
+        System.Text.Json.JsonElement root = json.RootElement;
+        System.Text.Json.JsonElement primitive = root.GetProperty("meshes")[0].GetProperty("primitives")[0];
+        System.Text.Json.JsonElement attributes = primitive.GetProperty("attributes");
+        System.Text.Json.JsonElement accessors = root.GetProperty("accessors");
+        foreach (string name in new[] { "POSITION", "NORMAL", "COLOR_0" })
+        {
+            System.Text.Json.JsonElement accessor = accessors[attributes.GetProperty(name).GetInt32()];
+            Assert.Equal("VEC3", accessor.GetProperty("type").GetString());
+            Assert.Equal(5126, accessor.GetProperty("componentType").GetInt32());
+            Assert.Equal(mesh.VertexCount, accessor.GetProperty("count").GetInt32());
+        }
+        Assert.Equal(mesh.Indices.Length, accessors[primitive.GetProperty("indices").GetInt32()].GetProperty("count").GetInt32());
+        Mesh read = GlbReader.Parse(glb);
+        Assert.Equal(mesh.Vertices, read.Vertices);
+        Assert.Equal(mesh.Indices, read.Indices);
+    }
 }

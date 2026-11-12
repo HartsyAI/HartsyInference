@@ -346,14 +346,28 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                 SlatMeshDecoder meshDecoder = new();
                 meshDecoder.LoadWeights(meshCheckpoint.Section(SamCheckpointSection.Root));
                 Backend.PreloadWeights(meshDecoder.EnumerateWeights());
-                SparseTensor head = meshDecoder.Forward(Backend, new SparseTensor(latent, coords, 64));
-                Backend.Sync();
-                Backend.FreeWeights(meshDecoder.EnumerateWeights());
-                log($"mesh decoder features {head.Feats.Shape} on the {head.Resolution}-grid");
-                SamMeshResult extracted = SamSparseFeatures2Mesh.Extract(head.Coords, head.Feats.AsReadOnlySpan<float>().ToArray(), SamFlexiCubesData.Tables, head.Resolution);
-                head.Feats.Dispose();
-                log($"mesh extracted: {extracted.VertexCount} vertices, {extracted.FaceCount} triangles");
-                return (null, extracted);
+                SparseTensor head;
+                try
+                {
+                    head = meshDecoder.Forward(Backend, new SparseTensor(latent, coords, 64));
+                    Backend.Sync();
+                }
+                finally
+                {
+                    Backend.FreeWeights(meshDecoder.EnumerateWeights());
+                }
+
+                try
+                {
+                    log($"mesh decoder features {head.Feats.Shape} on the {head.Resolution}-grid");
+                    SamMeshResult extracted = SamSparseFeatures2Mesh.Extract(head.Coords, head.Feats.AsReadOnlySpan<float>().ToArray(), SamFlexiCubesData.Tables, head.Resolution);
+                    log($"mesh extracted: {extracted.VertexCount} vertices, {extracted.FaceCount} triangles");
+                    return (null, extracted);
+                }
+                finally
+                {
+                    head.Feats.Dispose();
+                }
             }
             finally
             {

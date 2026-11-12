@@ -429,6 +429,32 @@ public sealed class MeshPlanningTests
     }
 
     [Fact]
+    public async Task ASam3dMeshRequestIsPlannedAsMeshTrueFromTheUserAndKeepsPreviewAndFrameUsed()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("sam3d-objects") with { Mesh = true };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), request);
+        MeshPlan splats = await engine.MeshPlanning.PlanAsync(Spec("sam3d-objects"), Valid("sam3d-objects"));
+
+        Assert.Equal(new ResolvedParameter("true", ParameterSource.UserOverride), plan.Settings[nameof(MeshRequest.Mesh)]);
+        Assert.Equal(new ResolvedParameter("false", ParameterSource.RecipeDefault), splats.Settings[nameof(MeshRequest.Mesh)]);
+        // The finisher decimates a preview and applies the frame to every glb, so a model that can return a mesh describes both as used.
+        Assert.All([nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame)], name => Assert.Equal(MeshFieldAccess.Used, Profile("sam3d-objects").Fields.Single(f => f.Name == name).Access));
+        Assert.Equal(MeshFieldAccess.Ignored, Profile("trellis").Fields.Single(f => f.Name == nameof(MeshRequest.Frame)).Access);
+    }
+
+    [Fact]
+    public void ASam3dMeshRunHasAMeasuredPeakAndASplatRunHasNone()
+    {
+        MemoryEstimate? mesh = MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest { Mesh = true });
+
+        Assert.NotNull(mesh);
+        Assert.Equal(MemoryEstimateAccuracy.Measured, mesh.Accuracy);
+        Assert.Null(MeshMemoryProfile.Estimate("sam3d-objects", new MeshRequest()));
+    }
+
+    [Fact]
     public void MeasuredPeaksBecomeAOneStageEstimateAndOthersHaveNone()
     {
         MemoryEstimate? p1024 = MeshMemoryProfile.Estimate("pixal3d", new MeshRequest());

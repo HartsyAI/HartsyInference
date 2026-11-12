@@ -17,6 +17,8 @@ internal static class Sam3dObjectsMesh
     public static Mesh ToMesh(SamMeshResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
+        if (result.Colors.Length != result.VertexCount * 6)
+            throw new ArgumentException($"The mesh has {result.VertexCount} vertices, so six colour channels each need {result.VertexCount * 6} values; got {result.Colors.Length}.", nameof(result));
         float[] vertices = new float[result.Vertices.Length];
         float[] colours = new float[result.VertexCount * 3];
         for (int v = 0; v < result.VertexCount; v++)
