@@ -2,16 +2,19 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.ThreeD.Document;
 using HartsyInference.ThreeD.Geometry;
 
 namespace HartsyInference.ThreeD.Io;
 
 /// <summary>
 /// Reads triangle primitives from a binary glTF 2.0 file. Each primitive is placed by the node graph of the default scene
-/// (every root node when the file has no scenes), so positions come out in world space. Materials and animation are
-/// ignored; sparse, compressed and buffer-less accessors are refused.
+/// (every root node when the file has no scenes), so positions come out in world space. <see cref="Parse"/> returns the
+/// geometry alone; <see cref="ParseDocument"/> also returns normals, UVs, vertex colours and materials with their embedded
+/// images. Animation, skins and morph targets are not read (the document records that they were there); sparse, compressed
+/// and buffer-less accessors are refused. A primitive without an index accessor is read as a triangle soup.
 /// </summary>
-public static class GlbReader
+public static partial class GlbReader
 {
     private const int TrianglesMode = 4;
     private const int FloatType = 5126;
@@ -19,8 +22,11 @@ public static class GlbReader
     private const int UnsignedShortType = 5123;
     private const int UnsignedIntType = 5125;
 
-    /// <summary>Parses a GLB container and concatenates every triangle primitive its scene places.</summary>
-    public static Mesh Parse(byte[] glb)
+    /// <summary>Parses a GLB container and concatenates the positions and indices of every triangle primitive its scene places.</summary>
+    public static Mesh Parse(byte[] glb) => ParseDocument(glb).MergeGeometry();
+
+    /// <summary>Parses a GLB container into its triangle primitives with their attributes and materials.</summary>
+    public static MeshDocument ParseDocument(byte[] glb)
     {
         ArgumentNullException.ThrowIfNull(glb);
         (byte[] json, byte[] bin) = SplitChunks(glb);
@@ -29,11 +35,37 @@ public static class GlbReader
         if (!TryArray(root, "meshes", out JsonElement meshes) || meshes.GetArrayLength() == 0)
             throw new HartsyInferenceException("GLB file has no meshes.");
 
-        Collector collector = new(root, bin, meshes);
+        List<string> notes = [];
+        Collector collector = new(root, bin, meshes, notes);
         collector.PlaceScene();
-        if (collector.Indices.Count == 0)
+        if (collector.Primitives.Count == 0)
             throw new HartsyInferenceException("GLB file has no triangle primitives.");
-        return new Mesh { Vertices = [.. collector.Vertices], Indices = [.. collector.Indices] };
+        if (collector.SkippedPrimitives > 0)
+            notes.Add($"{collector.SkippedPrimitives} primitive(s) in strip, fan, line or point mode were skipped; only triangle lists are read.");
+        if (collector.HasMorphTargets)
+            notes.Add("Morph targets were dropped.");
+        return new MeshDocument
+        {
+            Primitives = collector.Primitives,
+            Materials = ReadMaterials(root, bin, notes),
+            Animations = AnimationNames(root),
+            HasSkin = TryArray(root, "skins", out JsonElement skins) && skins.GetArrayLength() > 0,
+            Notes = notes,
+        };
+    }
+
+    private static List<string> AnimationNames(JsonElement root)
+    {
+        List<string> names = [];
+        if (!TryArray(root, "animations", out JsonElement animations))
+            return names;
+        int i = 0;
+        foreach (JsonElement animation in animations.EnumerateArray())
+        {
+            names.Add(TryMember(animation, "name", out JsonElement name) && name.ValueKind == JsonValueKind.String ? name.GetString()! : $"animation_{i}");
+            i++;
+        }
+        return names;
     }
 
     private static (byte[] Json, byte[] Bin) SplitChunks(byte[] glb)
@@ -55,11 +87,15 @@ public static class GlbReader
     }
 
     /// <summary>Walks the scene graph and appends each placed primitive to the output buffers.</summary>
-    private sealed class Collector(JsonElement root, byte[] bin, JsonElement meshes)
+    private sealed class Collector(JsonElement root, byte[] bin, JsonElement meshes, List<string> notes)
     {
-        public List<float> Vertices { get; } = [];
+        private bool _notedUvSet, _notedColour;
 
-        public List<int> Indices { get; } = [];
+        public List<MeshPrimitive> Primitives { get; } = [];
+
+        public int SkippedPrimitives { get; private set; }
+
+        public bool HasMorphTargets { get; private set; }
 
         /// <summary>Places every mesh the scene reaches. A file with no node list places each mesh at the origin.</summary>
         public void PlaceScene()
@@ -136,34 +172,50 @@ public static class GlbReader
             foreach (JsonElement primitive in RequiredArray(mesh, "primitives").EnumerateArray())
             {
                 if (IntMember(primitive, "mode", TrianglesMode) != TrianglesMode)
+                {
+                    SkippedPrimitives++;
                     continue;
-                if (!TryMember(primitive, "indices", out JsonElement indexAccessor))
-                    throw new HartsyInferenceException("GLB triangle primitive has no index accessor.");
-
-                int baseVertex = Vertices.Count / 3;
-                ReadPositions(NaturalMember(Member(primitive, "attributes"), "POSITION"), world);
-                int vertexCount = Vertices.Count / 3 - baseVertex;
-                int firstIndex = Indices.Count;
-                ReadIndices(Natural(indexAccessor, "accessor index"), baseVertex, vertexCount);
-                if ((Indices.Count - firstIndex) % 3 != 0)
+                }
+                JsonElement attributes = Member(primitive, "attributes");
+                float[] positions = ReadPositions(NaturalMember(attributes, "POSITION"), world);
+                int vertexCount = positions.Length / 3;
+                int[] indices = TryMember(primitive, "indices", out JsonElement indexAccessor)
+                    ? ReadIndices(Natural(indexAccessor, "accessor index"), vertexCount)
+                    : Enumerable.Range(0, vertexCount).ToArray();
+                if (indices.Length % 3 != 0)
                     throw new HartsyInferenceException("GLB triangle index count is not a multiple of three.");
 
                 // A mirroring transform turns each triangle inside out; swapping two corners restores its facing.
                 if (mirrored)
                 {
-                    for (int i = firstIndex; i < Indices.Count; i += 3)
-                        (Indices[i + 1], Indices[i + 2]) = (Indices[i + 2], Indices[i + 1]);
+                    for (int i = 0; i < indices.Length; i += 3)
+                        (indices[i + 1], indices[i + 2]) = (indices[i + 2], indices[i + 1]);
                 }
+                if (TryArray(primitive, "targets", out JsonElement targets) && targets.GetArrayLength() > 0)
+                    HasMorphTargets = true;
+                Primitives.Add(new MeshPrimitive
+                {
+                    Geometry = new Mesh
+                    {
+                        Vertices = positions,
+                        Indices = indices,
+                        Normals = ReadNormals(attributes, vertexCount, world),
+                        Uvs = ReadUvs(attributes, vertexCount),
+                        VertexColors = ReadColours(attributes, vertexCount),
+                    },
+                    Material = IntMember(primitive, "material", -1),
+                });
             }
         }
 
-        private void ReadPositions(int accessorIndex, Matrix4x4 world)
+        private float[] ReadPositions(int accessorIndex, Matrix4x4 world)
         {
             JsonElement accessor = Item(RequiredArray(root, "accessors"), accessorIndex, "accessor");
             if (IntMember(accessor, "componentType") != FloatType || StringMember(accessor, "type") != "VEC3")
                 throw new HartsyInferenceException("GLB POSITION accessor must be float VEC3.");
             int count = NaturalMember(accessor, "count");
             byte[] src = AccessorBytes(accessor, 12, count);
+            float[] positions = new float[count * 3];
             for (int i = 0; i < count; i++)
             {
                 Vector3 position = Vector3.Transform(new Vector3(
@@ -172,13 +224,102 @@ public static class GlbReader
                     BinaryPrimitives.ReadSingleLittleEndian(src.AsSpan(i * 12 + 8))), world);
                 if (!float.IsFinite(position.X) || !float.IsFinite(position.Y) || !float.IsFinite(position.Z))
                     throw new HartsyInferenceException("GLB POSITION accessor holds a non-finite coordinate.");
-                Vertices.Add(position.X);
-                Vertices.Add(position.Y);
-                Vertices.Add(position.Z);
+                positions[i * 3] = position.X;
+                positions[i * 3 + 1] = position.Y;
+                positions[i * 3 + 2] = position.Z;
             }
+            return positions;
         }
 
-        private void ReadIndices(int accessorIndex, int baseVertex, int vertexCount)
+        /// <summary>The NORMAL attribute carried by the node's normal matrix (the inverse transpose), renormalised; null when absent or when its count differs from the positions.</summary>
+        private float[]? ReadNormals(JsonElement attributes, int vertexCount, Matrix4x4 world)
+        {
+            if (!TryMember(attributes, "NORMAL", out JsonElement accessorIndex))
+                return null;
+            float[]? values = ReadFloats(Natural(accessorIndex, "accessor index"), 3, vertexCount);
+            if (values is null)
+                return null;
+            Matrix4x4 normalMatrix = Matrix4x4.Invert(world, out Matrix4x4 inverse) ? Matrix4x4.Transpose(inverse) : world;
+            for (int i = 0; i < vertexCount; i++)
+            {
+                Vector3 n = Vector3.TransformNormal(new Vector3(values[i * 3], values[i * 3 + 1], values[i * 3 + 2]), normalMatrix);
+                n = n.LengthSquared() > 0 ? Vector3.Normalize(n) : n;
+                values[i * 3] = n.X;
+                values[i * 3 + 1] = n.Y;
+                values[i * 3 + 2] = n.Z;
+            }
+            return values;
+        }
+
+        private float[]? ReadUvs(JsonElement attributes, int vertexCount)
+        {
+            if (!TryMember(attributes, "TEXCOORD_0", out JsonElement accessorIndex))
+            {
+                if (TryMember(attributes, "TEXCOORD_1", out _) && !_notedUvSet)
+                {
+                    _notedUvSet = true;
+                    notes.Add("A primitive has only a second UV set (TEXCOORD_1); UV set 0 is the only one carried.");
+                }
+                return null;
+            }
+            return ReadFloats(Natural(accessorIndex, "accessor index"), 2, vertexCount);
+        }
+
+        private float[]? ReadColours(JsonElement attributes, int vertexCount)
+        {
+            if (!TryMember(attributes, "COLOR_0", out JsonElement accessorIndex))
+                return null;
+            JsonElement accessor = Item(RequiredArray(root, "accessors"), Natural(accessorIndex, "accessor index"), "accessor");
+            int components = StringMember(accessor, "type") == "VEC4" ? 4 : 3;
+            float[]? values = ReadFloats(Natural(accessorIndex, "accessor index"), components, vertexCount);
+            if (values is null || components == 3)
+                return values;
+            if (!_notedColour)
+            {
+                _notedColour = true;
+                notes.Add("Vertex colour alpha (COLOR_0 as RGBA) was dropped; the RGB is kept.");
+            }
+            float[] rgb = new float[vertexCount * 3];
+            for (int i = 0; i < vertexCount; i++)
+                Array.Copy(values, i * 4, rgb, i * 3, 3);
+            return rgb;
+        }
+
+        /// <summary>Reads a float accessor, or a normalised unsigned byte or short one, with <paramref name="components"/> values per element; null when its element count is not <paramref name="vertexCount"/> or its type is not the one asked for.</summary>
+        private float[]? ReadFloats(int accessorIndex, int components, int vertexCount)
+        {
+            JsonElement accessor = Item(RequiredArray(root, "accessors"), accessorIndex, "accessor");
+            string type = StringMember(accessor, "type");
+            if (NaturalMember(accessor, "count") != vertexCount || type != $"VEC{components}")
+                return null;
+            int componentType = IntMember(accessor, "componentType");
+            int size = componentType switch
+            {
+                FloatType => 4,
+                UnsignedByteType => 1,
+                UnsignedShortType => 2,
+                _ => 0,
+            };
+            bool normalised = TryMember(accessor, "normalized", out JsonElement flag) && flag.ValueKind == JsonValueKind.True;
+            if (size == 0 || size != 4 && !normalised)
+                return null;
+            byte[] src = AccessorBytes(accessor, size * components, vertexCount);
+            float[] values = new float[vertexCount * components];
+            for (int i = 0; i < values.Length; i++)
+            {
+                values[i] = size switch
+                {
+                    4 => BinaryPrimitives.ReadSingleLittleEndian(src.AsSpan(i * 4)),
+                    2 => BinaryPrimitives.ReadUInt16LittleEndian(src.AsSpan(i * 2)) / 65535f,
+                    _ => src[i] / 255f,
+                };
+                if (!float.IsFinite(values[i]))
+                    throw new HartsyInferenceException("GLB attribute accessor holds a non-finite value.");
+            }
+            return values;
+        }
+
+        private int[] ReadIndices(int accessorIndex, int vertexCount)
         {
             JsonElement accessor = Item(RequiredArray(root, "accessors"), accessorIndex, "accessor");
             int componentType = IntMember(accessor, "componentType");
@@ -191,6 +332,7 @@ public static class GlbReader
             };
             int count = NaturalMember(accessor, "count");
             byte[] src = AccessorBytes(accessor, size, count);
+            int[] indices = new int[count];
             for (int i = 0; i < count; i++)
             {
                 uint value = size switch
@@ -201,8 +343,9 @@ public static class GlbReader
                 };
                 if (value >= (uint)vertexCount)
                     throw new HartsyInferenceException($"GLB index {value} is outside its primitive's {vertexCount} vertices.");
-                Indices.Add(baseVertex + (int)value);
+                indices[i] = (int)value;
             }
+            return indices;
         }
 
         // Returns the accessor's elements packed at elementSize, honouring its buffer view's byte stride and bounds.
