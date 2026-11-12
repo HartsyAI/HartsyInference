@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2 or Pixal3D (shape-only, or textured with --texture for TRELLIS.2 and Pixal3D), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, a GLB with one coloured node per part from a mesh with Hunyuan3D-Part (P3-SAM), or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, Pixal3D or SAM 3D Objects (an RGBA image or --mask in, splats out; shape-only, or textured with --texture for TRELLIS.2 and Pixal3D), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, a GLB with one coloured node per part from a mesh with Hunyuan3D-Part (P3-SAM), or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -15,18 +15,23 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d, unirig, hunyuan3d-part and the paint models.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-part, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d, sam3d-objects) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-part, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Reference image for the texturing models (hunyuan3d-paint, hunyuan3d-paint21).</summary>
         [CommandOption("--image")]
         [Description("Reference image (PNG) the texturing models paint the input mesh from (hunyuan3d-paint, hunyuan3d-paint21). With --grid it sets the texture size (default 2048) and --steps the sampler steps (default 30 for hunyuan3d-paint, 15 for hunyuan3d-paint21).")]
         public string? Image { get; init; }
+
+        /// <summary>Object mask for sam3d-objects.</summary>
+        [CommandOption("--mask")]
+        [Description("Object mask PNG for sam3d-objects, which lifts the masked object: the red channel is the coverage (non-zero is the object), as for --prompt-mask. Without it the input PNG alpha channel is the mask. It must have the input image size.")]
+        public string? Mask { get; init; }
 
         /// <summary>Samples to generate (HairDeck only; this build accepts 1).</summary>
         [CommandOption("-n|--samples")]
@@ -138,6 +143,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("prompt-point", string.Join('\n', settings.PromptPoints));
         if (settings.Image is not null)
             parameters.Put("image", settings.Image);
+        if (settings.Mask is not null)
+            parameters.Put("mask", settings.Mask);
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));

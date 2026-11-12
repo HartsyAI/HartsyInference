@@ -6,11 +6,14 @@ public static class MeshModelIds
     /// <summary>Pixal3D: image to mesh, shape-only or textured, with projected DINOv3 features.</summary>
     public const string Pixal3D = "pixal3d";
 
+    /// <summary>SAM 3D Objects: image plus object mask to Gaussian splats (PLY); the mask is the request image's alpha plane and MoGe estimates the pointmap.</summary>
+    public const string Sam3dObjects = "sam3d-objects";
+
     /// <summary>The Hunyuan3D-2 shape builds: each id is its own checkpoint folder, and the checkpoint's <c>config.yaml</c> sets the architecture.</summary>
     public static readonly IReadOnlyList<string> Hunyuan3D = ["hunyuan3d", "hunyuan3d-fast", "hunyuan3d-turbo", "hunyuan3d-mini"];
 
     /// <summary>Image-to-3D models: their request carries <see cref="Requests.MeshRequest.Image"/>.</summary>
-    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D];
+    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D, Sam3dObjects];
 
     /// <summary>Scene-decomposition models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/>.</summary>
     public static readonly IReadOnlyList<string> SceneMesh = ["cola3d"];

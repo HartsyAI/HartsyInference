@@ -14,7 +14,7 @@ internal static class SamMotOps
         return result;
     }
 
-    /// <summary>Token-major <c>[1, n, heads·dim]</c> to head-major <c>[1, heads, n, dim]</c>; <paramref name="flat"/> is disposed.</summary>
+    /// <summary>Token-major <c>[B, n, heads·dim]</c> to head-major <c>[B, heads, n, dim]</c>; <paramref name="flat"/> is disposed.</summary>
     public static Tensor ToHeadMajor(IBackend backend, Tensor flat, int heads, int headDim)
     {
         int tokens = (int)flat.Shape[1];
@@ -24,7 +24,7 @@ internal static class SamMotOps
         return result;
     }
 
-    /// <summary>Head-major <c>[1, heads, n, dim]</c> back to token-major <c>[1, n, heads·dim]</c>; <paramref name="headMajor"/> is disposed.</summary>
+    /// <summary>Head-major <c>[B, heads, n, dim]</c> back to token-major <c>[B, n, heads·dim]</c>; <paramref name="headMajor"/> is disposed.</summary>
     public static Tensor ToTokenMajor(IBackend backend, Tensor headMajor)
     {
         int heads = (int)headMajor.Shape[1], tokens = (int)headMajor.Shape[2], headDim = (int)headMajor.Shape[3];
