@@ -248,6 +248,19 @@ public sealed class MeshPlanningTests
         Assert.Equal(nameof(MeshRequest.Seed), seed.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
     }
 
+    [Theory]
+    [InlineData(2, 2, 11, null)]
+    [InlineData(2, 2, 12, 3)]
+    public void AMalformedImageBufferIsReportedAgainstTheImageField(int width, int height, int rgbLength, int? alphaLength)
+    {
+        ImageData image = new() { Rgb = new byte[rgbLength], Width = width, Height = height, Alpha = alphaLength is int n ? new byte[n] : null };
+
+        ArgumentException error = Assert.ThrowsAny<ArgumentException>(
+            () => MeshRequestValidator.Validate("trellis2", new MeshRequest { Image = image }, matterAvailable: true));
+
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
+    }
+
     [Fact]
     public async Task PlanNamesTheFieldOfRejectedOptionsOfOtherModels()
     {
