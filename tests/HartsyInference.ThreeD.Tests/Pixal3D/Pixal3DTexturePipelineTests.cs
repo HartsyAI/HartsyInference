@@ -169,6 +169,43 @@ public sealed class Pixal3DTexturePipelineTests
     }
 
     [Fact]
+    public void GenerateTextured_ObservesAnAlreadyCancelledTokenBeforeAnyStageRuns()
+    {
+        using Rig rig = new();
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => rig.Pipeline.GenerateTextured(Image(), Options(), null, cancelled.Token));
+        Assert.Empty(rig.Calls);
+    }
+
+    // The token alone, with no throwing progress callback, must stop the run at the next stage or sampler step and release every tensor.
+    [Theory]
+    [InlineData(3)]
+    [InlineData(9)]
+    [InlineData(14)]
+    public void GenerateTextured_StopsOnATokenCancelledMidRunAndReleasesEveryTensor(int cancelAtStep)
+    {
+        using Rig rig = new();
+        using CancellationTokenSource source = new();
+
+        Assert.Throws<OperationCanceledException>(() => rig.Pipeline.GenerateTextured(
+            Image(),
+            Options(),
+            p =>
+            {
+                if (p.Step == cancelAtStep)
+                    source.Cancel();
+            },
+            source.Token));
+
+        Assert.DoesNotContain(rig.Calls, c => c.StartsWith("texture-decode", StringComparison.Ordinal));
+        Assert.NotEmpty(rig.Tensors);
+        foreach (Tensor t in rig.Tensors)
+            Trellis2TestData.AssertDisposed(t);
+    }
+
+    [Fact]
     public void GenerateTextured_ReleasesEveryTensorAfterASuccessfulRun()
     {
         using Rig rig = new();

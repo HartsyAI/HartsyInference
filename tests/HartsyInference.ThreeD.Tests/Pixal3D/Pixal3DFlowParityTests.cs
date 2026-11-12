@@ -8,7 +8,8 @@ namespace HartsyInference.ThreeD.Tests.Pixal3D;
 
 /// <summary>The real Pixal3D flows against upstream's own torch code: a forward over the dumps of <c>tests/python-reference/dump_pixal3d_structure_flow.py</c>
 /// and <c>dump_pixal3d_slat_flows.py</c> (float32 on the CPU, the real checkpoints, random but fixed inputs), compared with this engine's CPU backend. Integration
-/// lane; skipped, not passed, unless <c>PIXAL3D_FLOW_DUMPS</c> names a folder holding the dump folders <c>out_ss</c> and <c>out_slat</c> and the flows are installed.
+/// lane; skipped, not passed, unless <c>PIXAL3D_FLOW_DUMPS</c> names a folder holding the dump folders <c>out_ss</c> and <c>out_slat</c> and the flows are installed
+/// (<see cref="Pixal3DFlowParityFactAttribute"/>).
 /// The structure flow takes about 6 minutes on the CPU, each sparse flow about 1 minute.</summary>
 [Trait("Category", "Integration")]
 public sealed class Pixal3DFlowParityTests
@@ -24,13 +25,10 @@ public sealed class Pixal3DFlowParityTests
 
     private static string? Dumps => Environment.GetEnvironmentVariable("PIXAL3D_FLOW_DUMPS");
 
-    [Pixal3DRealWeightsFact(StructureFlow + ".safetensors", StructureFlow + ".json")]
+    [Pixal3DFlowParityFact("out_ss", StructureFlow + ".safetensors", StructureFlow + ".json")]
     public void StructureFlow_MatchesUpstreamTorchOnTheCpu()
     {
-        string? dumps = Dumps;
-        if (dumps is null || !Directory.Exists(Path.Combine(dumps, "out_ss")))
-            return;
-        string dir = Path.Combine(dumps, "out_ss");
+        string dir = Path.Combine(Dumps!, "out_ss");
         using CpuBackend backend = new();
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, StructureFlow + ".safetensors"));
         using Trellis2SparseStructureFlow flow = new(weights);
@@ -41,11 +39,10 @@ public sealed class Pixal3DFlowParityTests
         AssertClose(y.AsReadOnlySpan<float>(), Floats(dir, "out"), "structure flow");
     }
 
-    [Pixal3DRealWeightsFact(ShapeFlow1024 + ".safetensors", ShapeFlow1024 + ".json")]
+    [Pixal3DFlowParityFact("out_slat", ShapeFlow1024 + ".safetensors", ShapeFlow1024 + ".json")]
     public void ShapeFlow1024_MatchesUpstreamTorchOnTheCpu()
     {
-        if (!TryOpen("out_slat", out string dir, out int[] coords))
-            return;
+        (string dir, int[] coords) = Open("out_slat");
         int n = coords.Length / 4;
         using CpuBackend backend = new();
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, ShapeFlow1024 + ".safetensors"));
@@ -57,11 +54,10 @@ public sealed class Pixal3DFlowParityTests
         AssertClose(y.AsReadOnlySpan<float>(), Floats(dir, "shape_out"), "1024 shape flow");
     }
 
-    [Pixal3DRealWeightsFact(TextureFlow1024 + ".safetensors", TextureFlow1024 + ".json")]
+    [Pixal3DFlowParityFact("out_slat", TextureFlow1024 + ".safetensors", TextureFlow1024 + ".json")]
     public void TextureFlow1024_MatchesUpstreamTorchOnTheCpu()
     {
-        if (!TryOpen("out_slat", out string dir, out int[] coords))
-            return;
+        (string dir, int[] coords) = Open("out_slat");
         int n = coords.Length / 4;
         using CpuBackend backend = new();
         using Trellis2FlowWeights weights = Trellis2FlowWeights.Load(Path.Combine(Pixal3DRealWeightsFactAttribute.FindFolder()!, TextureFlow1024 + ".safetensors"));
@@ -74,16 +70,13 @@ public sealed class Pixal3DFlowParityTests
         AssertClose(y.AsReadOnlySpan<float>(), Floats(dir, "texture_out"), "1024 texture flow");
     }
 
-    private static bool TryOpen(string folder, out string dir, out int[] coords)
+    private static (string Dir, int[] Coords) Open(string folder)
     {
-        dir = Dumps is null ? string.Empty : Path.Combine(Dumps, folder);
-        coords = [];
-        if (!Directory.Exists(dir))
-            return false;
+        string dir = Path.Combine(Dumps!, folder);
         byte[] raw = File.ReadAllBytes(Path.Combine(dir, "coords.bin"));
-        coords = new int[raw.Length / 4];
+        int[] coords = new int[raw.Length / 4];
         Buffer.BlockCopy(raw, 0, coords, 0, raw.Length);
-        return true;
+        return (dir, coords);
     }
 
     private static float[] Floats(string dir, string name)

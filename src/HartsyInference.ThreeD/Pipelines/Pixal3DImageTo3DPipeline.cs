@@ -276,14 +276,18 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
         int done = 0;
         long started = MonotonicClock.NowNs();
         void Report() => onProgress?.Invoke(new GenerationProgress(done, total, (MonotonicClock.NowNs() - started) / 1e6));
+
+        // Every stage and every sampler step passes here, so the token is observed throughout and not only at the bake.
         void Stage()
         {
+            cancellationToken.ThrowIfCancellationRequested();
             done++;
             Report();
         }
 
         void Tick(int _) => Stage();
 
+        cancellationToken.ThrowIfCancellationRequested();
         Trellis2PreparedImage prepared = Trellis2ImagePreprocessor.Prepare(Backend, image, _matter, CropScale);
         Pixal3DCondition? cond = null, negCond = null;
         SparseTensor? coarse = null, fine = null, textureLatent = null, textureVoxels = null;
