@@ -20,7 +20,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, hunyuan3d-xpart, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out, or a GLB mesh with --mesh), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Reference image for the texturing models (hunyuan3d-paint, hunyuan3d-paint21).</summary>
@@ -52,6 +52,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [CommandOption("--no-chains")]
         [Description("Skip the spring-bone chains (hairdeck only).")]
         public bool NoChains { get; init; }
+
+        /// <summary>SAM 3D Objects: return a triangle mesh (GLB) instead of Gaussian splats (PLY).</summary>
+        [CommandOption("--mesh")]
+        [Description("sam3d-objects: return a triangle mesh (geometry-only GLB) instead of Gaussian splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")]
+        public bool Mesh { get; init; }
 
         /// <summary>Texture the mesh with baked PBR textures (TRELLIS.2 and Pixal3D).</summary>
         [CommandOption("--texture")]
@@ -155,6 +160,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
         parameters.Put("no-chains", settings.NoChains ? "true" : "false");
         parameters.Put("texture", settings.Texture ? "true" : "false");
+        parameters.Put("mesh", settings.Mesh ? "true" : "false");
         parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
