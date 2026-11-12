@@ -38,7 +38,7 @@ public sealed class SamFlexiCubesTables
         {
             if (check[c * 5] is not (0 or 1))
                 throw new ArgumentException($"The check flag of case {c} is {check[c * 5]}; it is 0 or 1.", nameof(check));
-            if (check[c * 5 + 4] < 0 || check[c * 5 + 4] >= Cases)
+            if (check[c * 5] == 1 && (check[c * 5 + 4] < 0 || check[c * 5 + 4] >= Cases))
                 throw new ArgumentException($"The replacement case of case {c} is {check[c * 5 + 4]}; it is 0 to {Cases - 1}.", nameof(check));
             for (int g = 0; g < numVd[c]; g++)
             {
@@ -50,21 +50,23 @@ public sealed class SamFlexiCubesTables
             }
         }
 
-        Dmc = dmc;
+        _dmc = [.. dmc];
         MaxVertices = maxVertices;
-        NumVd = numVd;
-        Check = check;
+        _numVd = [.. numVd];
+        _check = [.. check];
     }
 
-    /// <summary>Dual-vertex edge lists, <c>[256, MaxVertices, 7]</c> flat.</summary>
-    public int[] Dmc { get; }
+    private readonly int[] _dmc, _numVd, _check;
+
+    /// <summary>Dual-vertex edge lists, <c>[256, MaxVertices, 7]</c> flat (read-only; the tables are copied on construction, so a caller cannot change shared data).</summary>
+    public ReadOnlySpan<int> Dmc => _dmc;
 
     /// <summary>Second extent of <see cref="Dmc"/>.</summary>
     public int MaxVertices { get; }
 
     /// <summary>Dual vertices per case.</summary>
-    public int[] NumVd { get; }
+    public ReadOnlySpan<int> NumVd => _numVd;
 
     /// <summary>Ambiguity table, <c>[256, 5]</c> flat.</summary>
-    public int[] Check { get; }
+    public ReadOnlySpan<int> Check => _check;
 }

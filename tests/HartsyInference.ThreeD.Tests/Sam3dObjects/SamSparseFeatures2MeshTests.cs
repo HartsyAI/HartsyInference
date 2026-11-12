@@ -136,6 +136,50 @@ public sealed class SamSparseFeatures2MeshTests
     }
 
     [Fact]
+    public void Extract_ASphereThroughTheReleasedTablesIsAClosedManifoldToo()
+    {
+        const int res = 16;
+        (int[] coords, float[] features) = SphereFeatures(res, 0.3);
+
+        SamMeshResult mesh = SamSparseFeatures2Mesh.Extract(coords, features, SamFlexiCubesData.Tables, res);
+
+        Assert.True(mesh.FaceCount > 100);
+        // Every undirected edge borders exactly two triangles, and no triangle is degenerate.
+        Dictionary<(int, int), int> edgeUses = [];
+        for (int f = 0; f < mesh.FaceCount; f++)
+        {
+            int[] v = [mesh.Faces[f * 3], mesh.Faces[f * 3 + 1], mesh.Faces[f * 3 + 2]];
+            Assert.Equal(3, v.Distinct().Count());
+            for (int k = 0; k < 3; k++)
+            {
+                (int, int) edge = (Math.Min(v[k], v[(k + 1) % 3]), Math.Max(v[k], v[(k + 1) % 3]));
+                edgeUses[edge] = edgeUses.GetValueOrDefault(edge) + 1;
+            }
+        }
+
+        Assert.All(edgeUses, pair => Assert.Equal(2, pair.Value));
+        // A sphere: Euler characteristic 2, vertices at the radius (the bias of -1/res moves the surface out by one voxel at most).
+        Assert.Equal(2, mesh.VertexCount - edgeUses.Count + mesh.FaceCount);
+        for (int v = 0; v < mesh.VertexCount; v++)
+        {
+            double r = Math.Sqrt(mesh.Vertices[v * 3] * mesh.Vertices[v * 3] + mesh.Vertices[v * 3 + 1] * mesh.Vertices[v * 3 + 1] + mesh.Vertices[v * 3 + 2] * mesh.Vertices[v * 3 + 2]);
+            Assert.InRange(r, 0.3 - 2.0 / res, 0.3 + 2.0 / res);
+        }
+
+        // Outward-facing triangles: the normal of every face points away from the centre.
+        for (int f = 0; f < mesh.FaceCount; f++)
+        {
+            double[][] p = new double[3][];
+            for (int k = 0; k < 3; k++)
+                p[k] = [mesh.Vertices[mesh.Faces[f * 3 + k] * 3], mesh.Vertices[mesh.Faces[f * 3 + k] * 3 + 1], mesh.Vertices[mesh.Faces[f * 3 + k] * 3 + 2]];
+            double[] a = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]], b = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+            double[] n = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            double dot = n[0] * (p[0][0] + p[1][0] + p[2][0]) + n[1] * (p[0][1] + p[1][1] + p[2][1]) + n[2] * (p[0][2] + p[1][2] + p[2][2]);
+            Assert.True(dot > 0, $"face {f} points inwards");
+        }
+    }
+
+    [Fact]
     public void Extract_ColoursAreTheSigmoidOfTheCornerColoursAndComeBackPerVertex()
     {
         const int res = 8;
@@ -188,6 +232,7 @@ public sealed class SamSparseFeatures2MeshTests
         flag[5 * 3] = 2;
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, flag));
         int[] replacement = new int[1280];
+        replacement[7 * 5] = 1;   // only a flagged row names a replacement (the released table has zeros in every unflagged row)
         replacement[7 * 5 + 4] = 256;
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, replacement));
         // A case that emits a vertex but lists no edge for it.
