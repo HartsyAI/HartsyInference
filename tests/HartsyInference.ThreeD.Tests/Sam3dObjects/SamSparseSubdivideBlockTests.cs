@@ -234,4 +234,15 @@ public sealed class SamSparseSubdivideBlockTests
         Dictionary<string, Tensor> w = Weights(new Random(1), 32, 32);
         Assert.Throws<ArgumentException>(() => new SamSparseSubdivideBlock(w, "b", 30, 30));
     }
+
+    [Fact]
+    public void SlatMeshDecoder_EnumeratesNothingBeforeItsWeightsAreLoadedAndRejectsAForwardPass()
+    {
+        SlatMeshDecoder decoder = new();
+
+        Assert.Empty(decoder.EnumerateWeights());
+        using CpuBackend backend = new();
+        using Tensor feats = new(new TensorShape(1, 1, 8), DType.F32);
+        Assert.Throws<InvalidOperationException>(() => decoder.Forward(backend, new SparseTensor(feats, [0, 0, 0, 0], 64)));
+    }
 }

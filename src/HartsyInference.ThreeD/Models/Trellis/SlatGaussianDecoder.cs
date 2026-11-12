@@ -49,7 +49,7 @@ public sealed unsafe class SlatGaussianDecoder
         Tensor h0 = SlatLinear(backend, x.Feats, _inW!, _inB!, n);
         SparseTensor h = x.Replace(h0);
         Tensor ape = SlatFlowModel.AbsolutePositionEmbed(x.Coords, n, Width);
-        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, ape); ape.Dispose();
+        Tensor hAdd = new(h.Feats.Shape, DType.F32); backend.Add(hAdd, h.Feats, ape); ape.Dispose(); h0.Dispose();
         h = h.Replace(hAdd);
 
         // Two block-diagonal window masks (shift 0 and window/2), reused across alternating blocks.
@@ -61,7 +61,9 @@ public sealed unsafe class SlatGaussianDecoder
         for (int i = 0; i < 12; i++)
         {
             Tensor nf = _blocks[i].Forward(backend, cur, (i % 2 == 0) ? mask0 : mask4, n);
+            // The first block's input is hAdd, which h still references: free it here, once the first block has consumed it.
             if (!ReferenceEquals(cur, h.Feats)) cur.Dispose();
+            else hAdd.Dispose();
             cur = nf;
         }
         h = h.Replace(cur);

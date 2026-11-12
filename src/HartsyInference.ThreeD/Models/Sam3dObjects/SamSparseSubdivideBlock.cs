@@ -66,13 +66,25 @@ internal sealed unsafe class SamSparseSubdivideBlock
         if (x.Channels != _channels)
             throw new ArgumentException($"The block takes {_channels} channels; got {x.Channels}.", nameof(x));
 
+        // The skip acts on each voxel on its own and the subdivision only copies, so it runs on the N coarse rows and is subdivided last (8 times fewer rows for the GEMM, and nothing of the
+        // 8 N-row input is alive during the convolutions).
+        Tensor skipCoarse;
+        if (_skipWeight is null)
+        {
+            skipCoarse = x.Feats;
+        }
+        else
+        {
+            skipCoarse = new Tensor(new TensorShape(1, x.Count, _outChannels), DType.F32);
+            backend.Linear(skipCoarse, SparseOps.As3D(x.Feats), _skipWeight, _skipBias!);
+        }
+
         Tensor normed = GroupNorm(x.Feats, _norm1Weight, _norm1Bias, _channels);
         Tensor activated = new(normed.Shape, DType.F32);
         backend.Silu(activated, normed);
         normed.Dispose();
         SparseTensor subdividedActivation = Subdivide(x.Replace(activated));
         activated.Dispose();
-        SparseTensor subdividedInput = Subdivide(x);
 
         SparseTensor c1 = SparseOps.SubmanifoldConv3dSparse(backend, subdividedActivation, _conv1Slices, _conv1Bias);
         subdividedActivation.Feats.Dispose();
@@ -84,22 +96,13 @@ internal sealed unsafe class SamSparseSubdivideBlock
         activated2.Dispose();
         c1.Feats.Dispose();
 
-        int rows = c2.Count;
-        Tensor result = new(new TensorShape(1, rows, _outChannels), DType.F32);
-        if (_skipWeight is null)
-        {
-            backend.Add(result, SparseOps.As3D(c2.Feats), SparseOps.As3D(subdividedInput.Feats));
-        }
-        else
-        {
-            Tensor skip = new(new TensorShape(1, rows, _outChannels), DType.F32);
-            backend.Linear(skip, SparseOps.As3D(subdividedInput.Feats), _skipWeight, _skipBias!);
-            backend.Add(result, SparseOps.As3D(c2.Feats), skip);
-            skip.Dispose();
-        }
-
+        SparseTensor skipFine = Subdivide(x.Replace(skipCoarse));
+        if (!ReferenceEquals(skipCoarse, x.Feats))
+            skipCoarse.Dispose();
+        Tensor result = new(new TensorShape(1, c2.Count, _outChannels), DType.F32);
+        backend.Add(result, SparseOps.As3D(c2.Feats), SparseOps.As3D(skipFine.Feats));
         c2.Feats.Dispose();
-        subdividedInput.Feats.Dispose();
+        skipFine.Feats.Dispose();
         return c2.Replace(result);
     }
 

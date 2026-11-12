@@ -35,10 +35,10 @@ public sealed class SlatMeshDecoder
     /// <summary>Every tensor the decoder reads, for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c>.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor t in _trunk.EnumerateWeights())
-            yield return t;
         if (_first is null)
             yield break;
+        foreach (Tensor t in _trunk.EnumerateWeights())
+            yield return t;
         foreach (Tensor t in _first.Weights())
             yield return t;
         foreach (Tensor t in _second!.Weights())
