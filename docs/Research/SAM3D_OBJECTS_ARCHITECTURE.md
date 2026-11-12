@@ -450,7 +450,26 @@ Cost: the structure flow at 4,096 shape tokens against 7,528 condition tokens an
 
 ### CPU parity status (2026-11-12)
 
-A torch reference for the occupancy decoder runs on the CPU here: `ss_decoder.safetensors` loaded with `load_state_dict` into upstream's `SparseStructureDecoder`, stub packages for `loguru` and the package `__init__` files, a seeded latent (3.3 s for the full `[1, 8, 16, 16, 16]` to `[1, 1, 64, 64, 64]` forward). The C# side could not be compared: `SparseStructureDecoder.Decode` on the CPU backend does not return, even for a 2 x 2 x 2 latent. Debug prints show it stops in the first convolution of `middle_block.0`; the same operations (norm, SiLU, the 512-channel `Conv3d` with the same weights, add) complete in a standalone harness in under a second, and the cause was not found. On CUDA the same decoder takes about 2 s in the pipeline, so the comparison goes to the next GPU slot. Not done yet: a seeded run of the other stages (pose decode, SLAT flow, Gaussian decoder).
+Reference scripts (scratch, run with `python -I`; torch 2.6 CPU F32, the real `.safetensors` read with `load_state_dict`, stub packages for `loguru`, `spconv` (a minimal `SparseConvTensor`), `sam3d_objects.data.utils` and the representations, upstream's attention backend `sdpa`), each with a seeded input and a C# harness on the same input:
+
+| Stage | Input | torch CPU | C# | max abs diff | relative L2 | correlation |
+|---|---|---|---|---|---|---|
+| occupancy decoder (`ss_decoder`) | seeded latent `[1, 8, 16, 16, 16]` -> `[1, 1, 64, 64, 64]` | 1.7 s | 0.03 s on CUDA (the CPU backend does not return, see below) | 1.8e-4 (output -115 to -28) | 1.6e-6 (max/absmax) | 0.99999999999 |
+| Gaussian decoder (`slat_decoder_gs`, 12 swin blocks, 448 outputs) | 3,000 seeded voxels (a ball on the 64 grid), seeded 8-channel features | 2.7 s | 20.3 s on CPU | 6.5e-4 (output absmax 19.4) | 3.5e-6 | 0.99999999999 (per group: xyz 1.9e-5, colour `f_dc` 6.9e-6, scaling 3.0e-6, rotation 3.1e-6, opacity 3.6e-6) |
+
+So the decoders and the sparse swin attention are right; the colour channels leave the decoder as upstream's do. The occupancy check uses a random latent whose logits are all negative, so it shows the numbers match, not the occupied-voxel decision. The C# CPU backend is also slow for this decoder (7.5 times torch).
+
+`SparseStructureDecoder.Decode` on the CPU backend does not return, even for a 2 x 2 x 2 latent. Debug prints show it stops in the first convolution of `middle_block.0`; the same operations (norm, SiLU, the 512-channel `Conv3d` with the same weights, add) complete in a standalone harness in under a second, and the cause was not found. It is a CPU-backend problem, not a SAM 3D one (the pipeline runs the decoder on CUDA).
+
+Not done: the structure flow (`SamMotFlow`) and the SLAT flow (`SlatFlowModel`) against upstream (the SLAT flow needs a pure-torch submanifold convolution as the oracle for the res-blocks, since `spconv` is CUDA-only), the point-patch embedder and the DINO towers against upstream, pose decode against `pytorch3d`'s closed forms, the whole pipeline against `InferencePipelinePointmap`, and anything on a photograph.
+
+### Colour path (2026-11-12)
+
+Traced against `decoder_gs.py` and `gaussian_model.py`: the layout (`_xyz`, `_features_dc`, `_scaling`, `_rotation`, `_opacity`: 96, 96, 96, 128, 32 channels), `features_dc` written raw to `f_dc_*`, the scaling bias and softplus, the opacity bias, `lr` 1.0 for colour and the `slat_mean` and `slat_std` constants (digit by digit against `pipeline.yaml`) all match the C# code, and the Gaussian decoder's colour output matches torch to 6.9e-6 relative L2. One deviation was found: the rotation `lr` of 0.1 was not applied (#792); it does not touch colour. The blue tint of the mouth therefore does not come from the decode or the PLY writer; it is in the SLAT latent the flow produced for that region (condition or flow), which no comparison covers yet.
+
+### Mesh output (not ported)
+
+`slat_decoder_mesh.safetensors` is on disk, but nothing in the repository runs it: it needs the sparse swin trunk (exists), two `SparseSubdivideBlock3d` (group norm, SiLU, subdivide, two sparse 3 x 3 x 3 convolutions, skip), an output layer, and `SparseFeatures2Mesh` / FlexiCubes (`cube2mesh.py` 159 lines, `flexicubes.py` 390 lines, `tables.py`) at 256^3. About 1,000 lines of C# with its own tests, and its parity needs a pure-torch sparse convolution again.
 
 ## Open items
 
