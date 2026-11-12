@@ -16,6 +16,8 @@ internal sealed unsafe class Hunyuan3DPlainBlock
     private Tensor? _n1W, _n1B, _n2W, _n2B, _n3W, _n3B;
     private Tensor? _sqW, _skW, _svW, _sqNorm, _skNorm, _soW, _soB;
     private Tensor? _cqW, _ckW, _cvW, _cqNorm, _ckNorm, _coW, _coB;
+    // X-Part's second cross-attention (attn2_2 with its own norm2_2), absent in 2.1.
+    private Tensor? _n22W, _n22B, _c2qW, _c2kW, _c2vW, _c2qNorm, _c2kNorm, _c2oW, _c2oB;
     private Tensor? _fc1W, _fc1B, _fc2W, _fc2B;
     private Tensor? _gateW;
     private Tensor?[]? _expertFc1W, _expertFc1B, _expertFc2W, _expertFc2B;
@@ -32,6 +34,9 @@ internal sealed unsafe class Hunyuan3DPlainBlock
     }
 
     internal bool HasSkip => _skip;
+
+    /// <summary>True when the loaded block has X-Part's second cross-attention (<c>attn2_2</c>).</summary>
+    internal bool HasSecondCross => _c2qW is not null;
 
     /// <summary>Hidden width of the dense MLP (or of the shared expert in a MoE block), read from the loaded weights.</summary>
     internal int HiddenDim => (int)_fc1W!.Shape[0];
@@ -56,6 +61,17 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         Release(ck, w[$"{p}.attn2.to_k.weight"]); Release(cv, w[$"{p}.attn2.to_v.weight"]);
         _cqNorm = F(w, $"{p}.attn2.q_norm.weight"); _ckNorm = F(w, $"{p}.attn2.k_norm.weight");
         _coW = F(w, $"{p}.attn2.out_proj.weight"); _coB = F(w, $"{p}.attn2.out_proj.bias");
+        if (w.ContainsKey($"{p}.attn2_2.to_q.weight"))
+        {
+            _n22W = F(w, $"{p}.norm2_2.weight"); _n22B = F(w, $"{p}.norm2_2.bias");
+            _c2qW = F(w, $"{p}.attn2_2.to_q.weight");
+            Tensor c2k = F(w, $"{p}.attn2_2.to_k.weight"), c2v = F(w, $"{p}.attn2_2.to_v.weight");
+            (_c2kW, _c2vW, _) = Regroup(c2k, c2v, null, 2);
+            Release(c2k, w[$"{p}.attn2_2.to_k.weight"]); Release(c2v, w[$"{p}.attn2_2.to_v.weight"]);
+            _c2qNorm = F(w, $"{p}.attn2_2.q_norm.weight"); _c2kNorm = F(w, $"{p}.attn2_2.k_norm.weight");
+            _c2oW = F(w, $"{p}.attn2_2.out_proj.weight"); _c2oB = F(w, $"{p}.attn2_2.out_proj.bias");
+        }
+
         if (_skip)
         {
             _skipW = F(w, $"{p}.skip_linear.weight"); _skipB = F(w, $"{p}.skip_linear.bias");
@@ -87,6 +103,7 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         [
             _skipW, _skipB, _skipNormW, _skipNormB, _n1W, _n1B, _n2W, _n2B, _n3W, _n3B, _sqW, _skW, _svW, _sqNorm, _skNorm, _soW, _soB,
             _cqW, _ckW, _cvW, _cqNorm, _ckNorm, _coW, _coB, _fc1W, _fc1B, _fc2W, _fc2B, _gateW,
+            _n22W, _n22B, _c2qW, _c2kW, _c2vW, _c2qNorm, _c2kNorm, _c2oW, _c2oB,
         ];
         foreach (Tensor? t in all)
         {
@@ -153,10 +170,83 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         return x3;
     }
 
-    private Tensor Attention(IBackend backend, Tensor q, Tensor kv, int sq, int sk, Tensor qW, Tensor kW, Tensor vW,
-        Tensor qNorm, Tensor kNorm, Tensor oW, Tensor oB)
+    /// <summary>X-Part's block over <paramref name="parts"/> parts held as <paramref name="x"/> <c>[K, S, W]</c> (consumed): optional U-skip, self-attention that is local to each part or,
+    /// with <paramref name="globalSelf"/>, one attention over the <c>K * S</c> tokens of all parts, both cross-attentions (each from the same hidden state, their outputs summed with it),
+    /// then the dense MLP or mixture of experts. The contexts are <c>[K, Sc, 1024]</c>. The skip value (not consumed) has the shape of <paramref name="x"/>.</summary>
+    internal Tensor ForwardParts(IBackend backend, Tensor x, Tensor context, Tensor context2, Tensor? skipValue, bool globalSelf)
     {
-        TensorShape qHeads = new(1, sq, _heads, _headDim), kHeads = new(1, sk, _heads, _headDim);
+        if (!HasSecondCross)
+            throw new InvalidOperationException("This block has no second cross-attention; load X-Part weights.");
+        int k = (int)x.Shape[0], s = (int)x.Shape[1], rows = k * s;
+        TensorShape flat = new(k, s, _width), pooled = new(1, rows, _width);
+        if (_skip)
+        {
+            Tensor cat = new(new TensorShape(k, s, 2 * _width), DType.F32);
+            backend.Concat(cat, [skipValue!, x], 2);
+            x.Dispose();
+            Tensor lin = new(flat, DType.F32);
+            backend.Linear(lin, cat, _skipW!, _skipB!);
+            cat.Dispose();
+            x = new(flat, DType.F32);
+            backend.LayerNorm(x, lin, _skipNormW!, _skipNormB!, Eps);
+            lin.Dispose();
+        }
+
+        Tensor n1 = new(flat, DType.F32);
+        backend.LayerNorm(n1, x, _n1W!, _n1B!, Eps);
+        Tensor a1;
+        if (globalSelf)
+        {
+            using Tensor pooledIn = n1.Reshape(pooled);
+            using Tensor pooledOut = Attention(backend, pooledIn, pooledIn, rows, rows, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!);
+            a1 = new(flat, DType.F32);
+            backend.CopyInto(a1, pooledOut.Reshape(flat));
+        }
+        else
+        {
+            a1 = Attention(backend, n1, n1, s, s, _sqW!, _skW!, _svW!, _sqNorm!, _skNorm!, _soW!, _soB!, k);
+        }
+
+        n1.Dispose();
+        Tensor x1 = new(flat, DType.F32);
+        backend.Add(x1, x, a1);
+        x.Dispose();
+        a1.Dispose();
+
+        Tensor n2 = new(flat, DType.F32);
+        backend.LayerNorm(n2, x1, _n2W!, _n2B!, Eps);
+        Tensor a2 = Attention(backend, n2, context, s, (int)context.Shape[1], _cqW!, _ckW!, _cvW!, _cqNorm!, _ckNorm!, _coW!, _coB!, k);
+        n2.Dispose();
+        Tensor n22 = new(flat, DType.F32);
+        backend.LayerNorm(n22, x1, _n22W!, _n22B!, Eps);
+        Tensor a3 = Attention(backend, n22, context2, s, (int)context2.Shape[1], _c2qW!, _c2kW!, _c2vW!, _c2qNorm!, _c2kNorm!, _c2oW!, _c2oB!, k);
+        n22.Dispose();
+        Tensor x2a = new(flat, DType.F32);
+        backend.Add(x2a, x1, a2);
+        x1.Dispose();
+        a2.Dispose();
+        Tensor x2 = new(flat, DType.F32);
+        backend.Add(x2, x2a, a3);
+        x2a.Dispose();
+        a3.Dispose();
+
+        Tensor n3 = new(flat, DType.F32);
+        backend.LayerNorm(n3, x2, _n3W!, _n3B!, Eps);
+        using Tensor n3Rows = n3.Reshape(pooled);
+        Tensor ff = _moe ? Moe(backend, n3Rows, rows) : Mlp(backend, n3Rows, _fc1W!, _fc1B!, _fc2W!, _fc2B!, rows);
+        using Tensor ffParts = ff.Reshape(flat);
+        n3.Dispose();
+        Tensor x3 = new(flat, DType.F32);
+        backend.Add(x3, x2, ffParts);
+        x2.Dispose();
+        ff.Dispose();
+        return x3;
+    }
+
+    private Tensor Attention(IBackend backend, Tensor q, Tensor kv, int sq, int sk, Tensor qW, Tensor kW, Tensor vW,
+        Tensor qNorm, Tensor kNorm, Tensor oW, Tensor oB, int batch = 1)
+    {
+        TensorShape qHeads = new(batch, sq, _heads, _headDim), kHeads = new(batch, sk, _heads, _headDim);
         Tensor qp = new(qHeads, DType.F32);
         backend.Linear(qp, q, qW, null);
         Tensor kp = new(kHeads, DType.F32);
@@ -169,18 +259,18 @@ internal sealed unsafe class Hunyuan3DPlainBlock
         Tensor kn = new(kHeads, DType.F32);
         backend.RmsNorm(kn, kp, kNorm, Eps);
         kp.Dispose();
-        Tensor qm = new(new TensorShape(1, _heads, sq, _headDim), DType.F32);
+        Tensor qm = new(new TensorShape(batch, _heads, sq, _headDim), DType.F32);
         backend.Permute0213(qm, qn, sq, _heads, _headDim);
         qn.Dispose();
-        Tensor km = new(new TensorShape(1, _heads, sk, _headDim), DType.F32);
+        Tensor km = new(new TensorShape(batch, _heads, sk, _headDim), DType.F32);
         backend.Permute0213(km, kn, sk, _heads, _headDim);
         kn.Dispose();
-        Tensor vm = new(new TensorShape(1, _heads, sk, _headDim), DType.F32);
+        Tensor vm = new(new TensorShape(batch, _heads, sk, _headDim), DType.F32);
         backend.Permute0213(vm, vp, sk, _heads, _headDim);
         vp.Dispose();
         Tensor attn = _attn.AttendHeadMajorOperands(backend, qm, km, vm, default, OperandOwnership.All);
-        Tensor merged = _attn.MergeHeads(backend, attn, new TensorShape(1, sq, _width));
-        Tensor o = new(new TensorShape(1, sq, _width), DType.F32);
+        Tensor merged = _attn.MergeHeads(backend, attn, new TensorShape(batch, sq, _width));
+        Tensor o = new(new TensorShape(batch, sq, _width), DType.F32);
         backend.Linear(o, merged, oW, oB);
         merged.Dispose();
         return o;
