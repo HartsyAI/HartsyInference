@@ -161,7 +161,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             }
             catch
             {
-                SamFlowWeights.Release(Backend, narrowedWeights.Values, narrowed);
+                SamFlowWeights.ReleaseAfterFailure(Backend, narrowedWeights.Values, narrowed, () => Sweep());
                 throw;
             }
             finally
@@ -293,7 +293,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             }
             catch
             {
-                SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed);
+                SamFlowWeights.ReleaseAfterFailure(Backend, flow.EnumerateWeights(), narrowed, () => Sweep());
                 throw;
             }
             finally

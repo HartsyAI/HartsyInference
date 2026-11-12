@@ -66,4 +66,20 @@ public static class SamFlowWeights
             owned.Clear();
         }
     }
+
+    /// <summary>
+    /// <see cref="Release"/> for a stage that is being abandoned because a step failed: sweeps with nothing live, and never throws, so the failure that is about to be rethrown is not replaced by a
+    /// second one from the cleanup (a device error is sticky, and the drain would raise it again).
+    /// </summary>
+    public static void ReleaseAfterFailure(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned, Action sweep)
+    {
+        try
+        {
+            Release(backend, resident, owned, sweep);
+        }
+        catch (Exception)
+        {
+            // The caller rethrows the original failure; the converted tensors were disposed by Release's finally.
+        }
+    }
 }
