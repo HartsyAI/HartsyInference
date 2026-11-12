@@ -5,7 +5,7 @@ namespace HartsyInference.LLM.Kimi;
 
 /// <summary>Kimi K3.1 tensors read from a safetensors checkpoint directory through its <c>model.safetensors.index.json</c>. Each tensor is a
 /// borrowed view of its shard's mapping (the view keeps the mapping alive), in the dtype the checkpoint stores it; the loader converts to F32.</summary>
-public sealed class KimiK31CheckpointWeights : IKimiK31WeightSource, IDisposable
+public sealed class KimiK31CheckpointWeights : IKimiK31WeightStore
 {
     private ShardedSafeTensorSet? _set;
 
