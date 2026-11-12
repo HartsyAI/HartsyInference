@@ -11,8 +11,13 @@ namespace HartsyInference.Engine.Services;
 public sealed class MeshPlanningService : IMeshPlanningService
 {
     private readonly MemoryEstimationService _memory;
+    private readonly IMeshAssetService _assets;
 
-    internal MeshPlanningService(MemoryEstimationService memory) => _memory = memory;
+    internal MeshPlanningService(MemoryEstimationService memory, IMeshAssetService assets)
+    {
+        _memory = memory;
+        _assets = assets;
+    }
 
     /// <inheritdoc/>
     public IReadOnlyList<MeshModelDescriptor> DescribeAll() => [.. MeshModelIds.Described.Select(Describe)];
@@ -50,14 +55,15 @@ public sealed class MeshPlanningService : IMeshPlanningService
         List<MeshPlanIssue> issues = [];
         try
         {
-            MeshRequestValidator.Validate(id, request, MeshService.MatterAvailable(id));
+            MeshRequestValidator.Validate(id, request, MeshService.MatterAvailable());
         }
         catch (Exception ex) when (ex is NotSupportedException or ArgumentException or HartsyInferenceException)
         {
             issues.Add(Rejection(ex, descriptor));
         }
         AddIgnoredFieldWarnings(request, descriptor, issues);
-        IReadOnlyList<MeshMissingArtifact> missing = MissingArtifacts(spec, issues);
+        MeshAssetStatus assets = _assets.GetStatus(spec);
+        AddAssetIssues(spec, assets, issues);
         MemoryFit memory = _memory.AssessMesh(id, request, request.Vram);
         if (memory.Verdict == MemoryFitVerdict.Infeasible)
         {
@@ -69,13 +75,13 @@ public sealed class MeshPlanningService : IMeshPlanningService
             Descriptor = descriptor,
             Settings = Settings(request, descriptor),
             Issues = issues,
-            MissingArtifacts = missing,
+            Assets = assets,
             Memory = memory,
         });
     }
 
     private static string[] GatedRepos(CatalogEntry? catalog) =>
-        catalog is null ? [] : [.. catalog.Assets.Where(asset => asset.Role.Contains("gated", StringComparison.OrdinalIgnoreCase)).Select(asset => asset.Repo).Distinct()];
+        catalog is null ? [] : [.. catalog.Assets.Where(MeshAssetService.IsGated).Select(asset => asset.Repo).Distinct()];
 
     private static MeshPlanIssue Rejection(Exception error, MeshModelDescriptor descriptor)
     {
@@ -104,8 +110,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
         }
     }
 
-    /// <summary>The catalog files not at their catalog path. The loader may find a file elsewhere (a legacy folder), so these are warnings; a model with no checkpoint at all cannot run.</summary>
-    private static IReadOnlyList<MeshMissingArtifact> MissingArtifacts(ModelSpec spec, List<MeshPlanIssue> issues)
+    /// <summary>One warning per absent file (the loader may find a model path the catalog does not know, so an absent file does not block), with what to do when the engine cannot fetch it; an error when no checkpoint resolved at all.</summary>
+    private static void AddAssetIssues(ModelSpec spec, MeshAssetStatus status, List<MeshPlanIssue> issues)
     {
         if (spec.LocalPath is null)
         {
@@ -113,27 +119,20 @@ public sealed class MeshPlanningService : IMeshPlanningService
             {
                 Code = "mesh.model.not_installed",
                 Severity = MeshPlanIssueSeverity.Error,
-                Message = $"No checkpoint was found for '{spec.Requested}'; fetch its catalog files or supply the model path.",
+                Message = status.ModelBlocker is MeshAssetBlocker whole
+                    ? $"No checkpoint was found for '{spec.Requested}'. {whole.Message}"
+                    : $"No checkpoint was found for '{spec.Requested}'; fetch its catalog files or supply the model path.",
             });
         }
-        if (spec.Catalog is null)
+        foreach (MeshAssetInfo asset in status.Missing)
         {
-            return [];
-        }
-        List<MeshMissingArtifact> missing = [];
-        foreach (ModelAsset asset in ModelDownloader.MissingAssets(spec.Catalog, spec.LocalPath))
-        {
-            bool required = !asset.Role.Contains("optional", StringComparison.OrdinalIgnoreCase);
-            string relative = Path.Combine(asset.TargetSubdir, asset.FileName).Replace('\\', '/');
-            missing.Add(new MeshMissingArtifact(asset.Role, relative, required));
             issues.Add(new MeshPlanIssue
             {
-                Code = "mesh.artifact.missing",
+                Code = asset.Blocker is null ? "mesh.artifact.missing" : "mesh.artifact.blocked",
                 Severity = MeshPlanIssueSeverity.Warning,
-                Message = $"{asset.Role} ({relative}) is not at its catalog path.",
+                Message = asset.Instructions ?? $"{asset.Role} ({asset.RelativePath}) is not installed; fetch the model's files.",
             });
         }
-        return missing;
     }
 
     private static bool IsSet(MeshRequest request, string name) => name switch
@@ -148,6 +147,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Rigged) => request.Rigged,
         nameof(MeshRequest.Texture) => request.Texture,
         nameof(MeshRequest.TextureSize) => request.TextureSize != 0,
+        nameof(MeshRequest.Preprocess) => request.Preprocess != MeshPreprocess.None,
         _ => false,
     };
 
@@ -178,6 +178,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Rigged) => request.Rigged.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Texture) => request.Texture.ToString().ToLowerInvariant(),
         nameof(MeshRequest.TextureSize) => request.TextureSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        nameof(MeshRequest.Preprocess) => request.Preprocess.ToString(),
         _ => null,
     };
 }

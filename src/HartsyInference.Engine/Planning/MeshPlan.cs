@@ -18,8 +18,8 @@ public sealed record MeshPlan
     /// <summary>Blocking errors and non-blocking warnings.</summary>
     public required IReadOnlyList<MeshPlanIssue> Issues { get; init; }
 
-    /// <summary>Catalog files that are not on disk.</summary>
-    public required IReadOnlyList<MeshMissingArtifact> MissingArtifacts { get; init; }
+    /// <summary>The model's file inventory: what is present, what is missing, and what the engine cannot fetch.</summary>
+    public required MeshAssetStatus Assets { get; init; }
 
     /// <summary>Whether the request fits this engine's device. The verdict is <see cref="MemoryFitVerdict.Unknown"/>, with the reason, when the model has no recorded peak or the device reports no memory.</summary>
     public required MemoryFit Memory { get; init; }

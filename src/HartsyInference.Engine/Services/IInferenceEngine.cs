@@ -70,6 +70,14 @@ public interface IInferenceEngine : IDisposable
     /// <summary>3D mesh generation.</summary>
     IMeshService Mesh { get; }
 
+    /// <summary>The files a 3D model needs and which are on disk; fetch them through <see cref="ModelPrefetch"/>.</summary>
+    IMeshAssetService MeshAssets =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh asset status.");
+
+    /// <summary>The input preparation a 3D model applies (matte, framing, compositing), as an image a host can show.</summary>
+    IMeshPreparationService MeshPreparation =>
+        throw new NotSupportedException("This inference-engine implementation does not expose mesh image preparation.");
+
     /// <summary>3D preflight: what each 3D model accepts, and whether one request would run, without loading weights.</summary>
     IMeshPlanningService MeshPlanning =>
         throw new NotSupportedException("This inference-engine implementation does not expose mesh planning.");

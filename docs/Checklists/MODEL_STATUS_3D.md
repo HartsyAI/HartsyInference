@@ -62,7 +62,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [x] Hunyuan3D-2 mesh "melting-wax" surface defect: bisected and fixed (see [details](#hunyuan3d-2)).
 - [ ] Hunyuan3D-2 before ✅: compare the C# conditioner output with the reference on this input, run the default 50 steps at grid 256, add a second subject (a chair), and port the upstream image preprocessing (below).
 - [ ] Hunyuan3D-2 variants before ✅: more subjects, the default step counts, a four-view 2mv run, the unchecked builds (mini-Fast, 2mv-Fast, 2mv-Turbo), and a `MeshRequest.Views` proposal so 2mv is reachable from the CLI and API.
-- [ ] Hunyuan3D-2 raw RGBA input: upstream recentres the foreground with a 15% border, composites it on **white** and resizes to 512 (`ImageProcessorV2`); the engine takes the RGB bytes as they are, so the caller must prepare that image. The "foreground-on-gray" hint in `MeshService` is the TripoSR contract and is wrong for Hunyuan3D.
+- [ ] Input preparation: `MeshRequest.Preprocess = Auto` mattes an image without alpha (BiRefNet) and applies the Hunyuan3D `ImageProcessorV2`, TripoSR `resize_foreground` + gray composite and TRELLIS (v1) `preprocess_image` ports (`ThreeD/Preprocessing`, hand-computed fixtures). Not compared with the Python on photographs: OpenCV `INTER_AREA` (upscaling uses bilinear), `INTER_CUBIC` border handling, PIL premultiplied Lanczos; the matte is BiRefNet, not rembg or RMBG.
 
 ### HairDeck
 - [ ] Run demo `ex02`–`ex12` (downloads need approval; ~5.9 MB total).
@@ -73,7 +73,6 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Sparse-3D conv / attn backend op.
 - [ ] Flexicubes + splat rendering.
 - [ ] Mesh (flexicubes) + radiance-field decoders (only the GS decoder is done).
-- [ ] Raw-image preprocessing for a full in-engine CLI path.
 - [ ] Phase-F perf (stage-1, F16, CUDA graphs).
 
 ### TRELLIS.2
@@ -84,7 +83,6 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Other models / features
 - [ ] Hunyuan3D Paint: per-stage parity against the Python reference (2.0 runs on real weights and renders), the 2.1 weights and path, the delight stage, a view-count field on `MeshRequest`. Hunyuan3D Part and Omni follow as their own spikes. ([details](#hunyuan3d-paint))
 - [ ] Splat rasterizer.
-- [ ] `ForegroundComposite` helper + CLI wiring (currently `TODO(3D/no-python)`).
 
 ## Details
 

@@ -27,6 +27,63 @@ public static class MeshEndpoints
             }
         });
 
+        app.MapGet("/v1/native/mesh/assets/{id}", IResult (string id, string? modelPath, IInferenceEngine engine) =>
+        {
+            try
+            {
+                return Results.Json(engine.MeshAssets.GetStatus(ModelResolver.Resolve(id, modelPath, Modality.Mesh)));
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/prefetch", async Task<IResult> (
+            NativeMeshPrefetchRequest req, IInferenceEngine engine,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
+                ModelPrefetchResult result = await queue.EnqueueAsync(() => engine.ModelPrefetch.PrefetchAsync(spec, null, ct), ct);
+                return Results.Ok(new { result.Supported, result.Message, result.Blockers, Installed = engine.MeshAssets.GetStatus(spec).Complete });
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/prepare", async Task<IResult> (
+            NativeMeshRequest req, IInferenceEngine engine,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, CancellationToken ct) =>
+        {
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
+                HartsyInference.Engine.Requests.ImageData image = req.ToMeshRequest().Image ?? throw new ArgumentException("Send the image as ImagePng or Request.Image.");
+                PreparedMeshImage prepared = await queue.EnqueueAsync(() => engine.MeshPreparation.PrepareImageAsync(spec, image, ct), ct);
+                return Results.Ok(new
+                {
+                    Image = Convert.ToBase64String(PngEncoder.Encode(prepared.Image)),
+                    prepared.Image.Width,
+                    prepared.Image.Height,
+                    Cutout = prepared.Cutout is null ? null : Convert.ToBase64String(PngEncoder.Encode(prepared.Cutout)),
+                    prepared.Matted,
+                    prepared.Notes,
+                });
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
         app.MapPost("/v1/native/mesh/plan", async Task<IResult> (NativeMeshRequest req, IInferenceEngine engine, CancellationToken ct) =>
         {
             try
