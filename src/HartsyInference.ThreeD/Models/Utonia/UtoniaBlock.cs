@@ -54,7 +54,7 @@ internal sealed class UtoniaBlock : IDisposable
 
         UtoniaLinear qkv = Linear(weights, prefix, UtoniaCheckpointKeys.AttnQkv, 3 * c, c, config.QkvBias);
         UtoniaLinear proj = Linear(weights, prefix, UtoniaCheckpointKeys.AttnProj, c, c, true);
-        _attention = new UtoniaSerializedAttention(backend, qkv, proj, channels, heads, patchSize, config.RopeBase, orderIndex, chunkBytes);
+        _attention = new UtoniaSerializedAttention(backend, qkv, proj, channels, heads, patchSize, config.UseRope ? config.RopeBase : 0f, orderIndex, chunkBytes);
         _fc1 = Linear(weights, prefix, UtoniaCheckpointKeys.MlpFc1, hidden, c, true);
         _fc2 = Linear(weights, prefix, UtoniaCheckpointKeys.MlpFc2, c, hidden, true);
         _rowsPerChunk = UtoniaRowChunks.RowsPerChunk(chunkBytes, Math.Max(channels, hidden));

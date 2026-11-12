@@ -151,7 +151,10 @@ public static class UtoniaCheckpointKeys
 
         AddLinear(parameters, torchBlock + ".attn.qkv", cs + AttnQkv, 3 * c, c, config.QkvBias);
         AddLinear(parameters, torchBlock + ".attn.proj", cs + AttnProj, c, c, true);
-        buffers?.Add(torchBlock + ".attn.rope.inv_freq");
+        if (config.UseRope)
+        {
+            buffers?.Add(torchBlock + ".attn.rope.inv_freq");
+        }
         AddNorm(parameters, torchBlock + ".norm2.0", cs + Norm2, c);
         if (config.LayerScaleInit is not null)
         {

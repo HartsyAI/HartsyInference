@@ -43,7 +43,7 @@ public sealed class MeshService : IMeshService, IDisposable
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
-        if (id != Trellis2Id)
+        if (id != Trellis2Id && id != MeshModelIds.Pixal3D)
             Trellis2RequestMapper.RejectForOtherModels(request, id);
         Pixal3DRequestMapper.RejectForOtherModels(request, id);
         if (MeshModelIds.SceneMesh.Contains(id))
@@ -269,8 +269,9 @@ public sealed class MeshService : IMeshService, IDisposable
             }
             try
             {
-                string dino = Path.Combine(folder, "dino", "model.safetensors"), upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
-                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, File.Exists(dino) ? dino : null, File.Exists(upscaler) ? upscaler : null);
+                string? dino = FindPaintDino(folder);
+                string upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, File.Exists(upscaler) ? upscaler : null);
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -280,6 +281,30 @@ public sealed class MeshService : IMeshService, IDisposable
                 throw;
             }
         }
+    }
+
+    // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
+    private static string? FindPaintDino(string folder)
+    {
+        string own = Path.Combine(folder, "dino", "model.safetensors");
+        if (File.Exists(own))
+        {
+            return own;
+        }
+        string? models3D = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (models3D is null)
+        {
+            return null;
+        }
+        foreach (string relative in new[] { "hunyuan3d/model.fp16.safetensors", "hunyuan3d2/hunyuan3d-dit-v2-0/model.fp16.safetensors", "hunyuan3d-fast/model.fp16.safetensors", "hunyuan3d-turbo/model.fp16.safetensors" })
+        {
+            string candidate = Path.Combine(models3D, relative);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     // The folder holding unet/ and vae/: the path itself, or the nearest parent of a file (any asset of the model may be the representative one).
@@ -344,12 +369,15 @@ public sealed class MeshService : IMeshService, IDisposable
             cancel);
     }
 
-    /// <summary>Pixal3D shape-only image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (1024 or 1536; 0 is 1024; 512
-    /// has no Pixal3D pipeline), <see cref="MeshRequest.FieldOfViewRadians"/> the camera; all checked with the image and seed before the checkpoints load.</summary>
+    /// <summary>Pixal3D image to mesh: <see cref="MeshRequest.GridResolution"/> is the final dual-grid resolution (1024 or 1536; 0 is 1024; 512
+    /// has no Pixal3D pipeline), <see cref="MeshRequest.FieldOfViewRadians"/> the camera; with <see cref="MeshRequest.Texture"/> it returns a textured PBR
+    /// GLB; all checked with the image and seed before the checkpoints load.</summary>
     private Task<MeshResult> GeneratePixal3DAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         ImageData source = request.Image!;
         Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
+        if (!request.Texture && request.TextureSize != 0)
+            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only Pixal3D mesh.");
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
         string modelsRoot = RepoPaths.ModelsRoot();
         // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
@@ -360,25 +388,33 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 Pixal3DRuntime runtime = GetOrLoadPixal3D(spec, modelsRoot);
-                return RunGated(runtime, "Pixal3D", cancel, pipeline => pipeline.Generate(image, options, p =>
+                void Report(GenerationProgress p)
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
-                }));
+                }
+
+                return RunGated(
+                    runtime,
+                    "Pixal3D",
+                    cancel,
+                    pipeline => options.Texture
+                        ? Pixal3DImageTo3DPipeline.ToGlb(pipeline.GenerateTextured(image, options, Report, cancel))
+                        : GlbWriter.Write(pipeline.Generate(image, options, Report)));
             },
             cancel);
     }
 
     /// <summary>Runs one generation on <paramref name="runtime"/>, one at a time per loaded model; a queued request gives up when its own cancellation fires.</summary>
     private static MeshResult RunGated<TPipeline>(
-        MatterGatedRuntime<TPipeline> runtime, string label, CancellationToken cancel, Func<TPipeline, Mesh> generate) where TPipeline : IDisposable
+        MatterGatedRuntime<TPipeline> runtime, string label, CancellationToken cancel, Func<TPipeline, byte[]> generate) where TPipeline : IDisposable
     {
         runtime.Gate.Wait(cancel);
         try
         {
             if (runtime.IsDisposed)
                 throw new ModelUnloadedException($"The {label} model was unloaded while this request was queued; retry the request.");
-            return new MeshResult { Data = GlbWriter.Write(generate(runtime.Pipeline)), Format = "glb" };
+            return new MeshResult { Data = generate(runtime.Pipeline), Format = "glb" };
         }
         finally
         {

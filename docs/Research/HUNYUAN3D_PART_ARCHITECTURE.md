@@ -53,3 +53,30 @@ Download needed for step 1: `tencent/Hunyuan3D-Part` @ `677174466c…` `p3sam/p3
 ## Not checked
 
 The tensor values (only the P3-SAM header was read), no code was run, the Sonata internals are not yet compared with `Models/Utonia`, the Sonata key names inside the P3-SAM file were grouped but not mapped to `sonata/model.py`, the X-Part file dtypes (headers not read; sizes imply 2-byte), the `fpsample` default variant and start index (which decide the 400 prompts), the post-processing thresholds beyond those quoted were not read in full (`mesh_sam` is 480 lines), and the X-Part pipeline (`partformer_pipeline.py`, 736 lines, and the conditioner files) was read only through its configuration.
+
+## Implemented (2026-11-12, branch `feat/hunyuan-part-p3sam`)
+
+`ThreeD/Models/Hunyuan3D/Part`: `P3SamCheckpoint` (the `sonata.` tensors to the Utonia encoder, the rest to the heads), `P3SamGridSample` (Sonata's `CenterShift` and `GridSample` at 0.005 with the FNV hash), `P3SamFeatures` (encoder, stage gathering through the pooling maps, the 1232 to 512 MLP, per-point expansion), `P3SamHeads` and `P3SamMlp` (the mask and IoU MLPs, with the prompt-independent first-layer terms computed once per mesh and held as backend tensors; a prompt runs on the backend with F32 GEMMs and only the per-point logits and the two max-pool inputs return to the host, so no prompt batch is needed: the work buffers are three `[points, 512]` tensors, about 2.3 GB on the device with the eight first-layer terms at 100k points; the max-pool reads two `[points, 512]` tensors back per prompt until a device row-max exists; `Own` sets `ForceF32Gemm`, so the 1232 to 512 feature MLP also runs F32 GEMMs), `P3SamPartLabeler` (the step-for-step port of the auto-mask heuristics), `P3SamAutoMask` (surface sampling, 400 farthest-point prompts, best-IoU mask per prompt, per-stage log). `UtoniaConfig.Sonata` and the `UseRope` switch make the existing Utonia encoder the Sonata backbone (same tensor names, no `attn.rope.inv_freq`).
+
+Tested on random weights first (superseded by the real-weight comparison below): the heads against a transcription of upstream's concatenate-then-MLP (4 decimals; it shares this repository's reading of the column order, which the real-weight comparison proves), the grid sample, the feature gather, the labeler on synthetic cubes, and a tiny whole run. Not done: engine and CLI wiring, GPU runs. Differences from upstream: the encoder uses the fixed order sequence, while upstream permutes the serialisation orders at random on every pooling (see the real-weight section), the surface sampler is this repository's generator (the Python seed does not reproduce its points), `fpsample` is replaced by `SurfaceSampler.FarthestPointIndices` (the prompts can differ), the voxel pick is random as in upstream's train-mode `GridSample` (a deterministic mode exists), and the mesh cleaning (`merge_vertices`, `process`) is left to the caller.
+
+## Real weights and parity (2026-11-12)
+
+`p3sam.safetensors` (450,968,044 B, sha256 `eb76550cfbe06f154c6e9b17167ccfc28222bb4a216ec7b12ac2bf7d762de38c`) and `p3sam/config.json` (134 B, sha256 `fe06e1ef…`) are in `Models/3D/hunyuan3d-part/p3sam`, fetched at revision `67717446` with a size and hash check. Every tensor loads into the C# modules with no leftover (only `sonata.embedding.mask_token`, a training token, is unused).
+
+Oracle: `tests/python-reference/dump_p3sam_features.py` runs upstream's Sonata modules (`XPart/partgen/models/sonata`) on the CPU with stand-ins for `spconv` (a brute-force `SubMConv3d`, kernel index k meaning offset k - 1), `torch_scatter`, `timm` and `addict`, and transcribes `get_feat` and the head forward; the input is 6000 points on an ellipsoid (`HARTSY_P3SAM`, `HARTSY_P3SAM_REF`, `P3SamRealWeightsTests.FeaturesAndHeads_MatchUpstreamOnTheCpu`). Results against this repository (CPU, F32; tolerance relRMS 5e-3 and correlation 0.9999 enforced):
+
+| Stage | max abs diff | relative RMS | correlation |
+|---|---|---|---|
+| grid sample: selected voxel points, inverse map, grid coordinates (5945 voxels) | 0 values differ | | |
+| Sonata stage 0 to 4 (5945, 5777, 5216, 3625, 1448 voxels; pooled grid coordinates identical) | 2.4e-5, 1.2e-5, 2.0e-5, 2.7e-3, 1.4e-3 | 2.2e-6, 1.9e-6, 1.9e-6, 7.6e-5, 1.1e-4 | 1.000000 |
+| gathered 1232 channels | 2.7e-3 | 7.6e-5 | 1.000000 |
+| features, 512 per point | 1.9e-4 | 4.2e-5 | 1.000000 |
+| mask probabilities and predicted IoU, two prompts | 2.8e-6 / 8.9e-7 | 5.7e-7 / 8.2e-7 | 1.000000 |
+
+Times on the CPU (i7-9700K): this repository, features for 6000 points 12.5 s (5945 voxels), one prompt 0.56 s; the Python oracle, Sonata forward 10 s, one prompt 0.1 to 0.2 s.
+
+Findings: (1) upstream's `PointTransformerV3.__init__` builds its `GridPooling` layers without `shuffle_orders`, so they keep the default `True` and permute the serialisation orders at random on every pooling, at inference too: upstream's features from stage 1 on differ from run to run (about 10 % RMS between two runs of the unmodified code). The oracle pins it off; this repository always uses the fixed order sequence, which is one of the outputs upstream can produce. (2) `GridSample` in the `train` mode picks a random point per voxel; the oracle and this repository's `First` pick agree on the voxel selection, the random pick is not reproducible against Python.
+
+Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, the farthest-point prompts (`fpsample` versus `SurfaceSampler`), a whole run on a real mesh, the GPU. The Sonata weights licence is not stated by the model card (the pickle `sonata.pth` and the Sonata repository were not read); this file is distributed under the Tencent licence above, but Sonata's own terms are unverified.
+

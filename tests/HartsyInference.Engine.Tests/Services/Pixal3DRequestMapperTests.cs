@@ -18,6 +18,16 @@ public sealed class Pixal3DRequestMapperTests
     }
 
     [Fact]
+    public void ToOptions_MapsTextureAndItsSize()
+    {
+        Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(new MeshRequest { Texture = true, TextureSize = 1024 });
+
+        Assert.True(options.Texture);
+        Assert.Equal(1024, options.TextureSize);
+        Assert.False(Pixal3DRequestMapper.ToOptions(new MeshRequest()).Texture);
+    }
+
+    [Fact]
     public void ToOptions_LeavesTheDefaultsToThePipeline()
     {
         Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(new MeshRequest());
