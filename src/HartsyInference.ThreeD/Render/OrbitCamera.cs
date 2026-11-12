@@ -1,4 +1,5 @@
 using System.Numerics;
+using HartsyInference.Core.Exceptions;
 
 namespace HartsyInference.ThreeD.Render;
 
@@ -14,6 +15,9 @@ internal sealed class OrbitCamera
         _height = height;
         Vector3 centre = (min + max) * 0.5f;
         float radius = Math.Max((max - min).Length() * 0.5f, 1e-6f);
+        // Coordinates near the float limits are finite, but their extent overflows and the camera would be NaN.
+        if (!float.IsFinite(radius) || !float.IsFinite(radius * 4f))
+            throw new HartsyInferenceException("The model's bounds are too large to frame.");
         float fov = options.FovDegrees * MathF.PI / 180f;
         float aspect = width / (float)height;
         float halfAngle = MathF.Atan(MathF.Min(MathF.Tan(fov / 2), MathF.Tan(fov / 2) * aspect));

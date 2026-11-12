@@ -33,6 +33,9 @@ public sealed record MeshRenderOptions
     /// <summary>Whether base-colour textures are sampled; false draws the material colour and the vertex colours only.</summary>
     public bool Textured { get; init; } = true;
 
+    /// <summary>The most texture pixels the render decodes in all, 1 to <see cref="MeshRenderer.TextureBudgetPixels"/>; textures past it are drawn with their material colour and a note.</summary>
+    public long TexturePixelBudget { get; init; } = MeshRenderer.TextureBudgetPixels;
+
     /// <summary>Point size in output pixels for a point or splat cloud.</summary>
     public float PointSize { get; init; } = 2f;
 
@@ -54,6 +57,8 @@ public sealed record MeshRenderOptions
             throw new ArgumentOutOfRangeException(nameof(Viewpoint), Viewpoint, "Elevation must be between -90 and 90 degrees.");
         if (Background is { Length: not 3 })
             throw new ArgumentOutOfRangeException(nameof(Background), "Background must be three RGB bytes.");
+        if (TexturePixelBudget is < 1 or > MeshRenderer.TextureBudgetPixels)
+            throw new ArgumentOutOfRangeException(nameof(TexturePixelBudget), TexturePixelBudget, $"TexturePixelBudget must be between 1 and {MeshRenderer.TextureBudgetPixels}.");
         if (!(PointSize is >= 0.5f and <= 32f))
             throw new ArgumentOutOfRangeException(nameof(PointSize), PointSize, "PointSize must be between 0.5 and 32 pixels.");
     }

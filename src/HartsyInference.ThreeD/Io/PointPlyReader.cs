@@ -83,29 +83,34 @@ public static class PointPlyReader
             wanted.AddRange(rgb);
         if (splat && opacity >= 0)
             wanted.Add(opacity);
-        double[] values = format == "ascii" ? ReadAscii(ply, bodyStart, count, properties.Count, wanted) : ReadBinary(ply, bodyStart, count, properties, wanted);
         int columns = wanted.Count;
+        // One vertex at a time into a small row, straight into the output arrays: nothing the size of the file is built in between.
+        Action<int, double[]> fill = format == "ascii" ? AsciiRows(ply, bodyStart, count, properties.Count, wanted) : BinaryRows(ply, bodyStart, count, properties, wanted);
+        double[] values = new double[columns];
 
         float[] positions = new float[count * 3];
         float[]? colours = coloured ? new float[count * 3] : null;
         int kept = 0, dropped = 0;
         for (int i = 0; i < count; i++)
         {
-            int row = i * columns;
-            if (splat && opacity >= 0 && 1.0 / (1.0 + Math.Exp(-values[row + columns - 1])) < 0.05)
+            fill(i, values);
+            // A value that is finite as a double can still be infinite as a float, and a NaN or infinite coordinate makes the bounds, and so the camera, meaningless.
+            for (int c = 0; c < columns; c++)
+            {
+                if (!float.IsFinite((float)values[c]))
+                    throw new HartsyInferenceException($"PLY vertex {i + 1} holds a value ({properties[wanted[c]].Name}) that is not a finite number in float range.");
+            }
+            if (splat && opacity >= 0 && 1.0 / (1.0 + Math.Exp(-values[columns - 1])) < 0.05)
             {
                 dropped++;
                 continue;
             }
             for (int c = 0; c < 3; c++)
-                positions[kept * 3 + c] = (float)values[row + c];
+                positions[kept * 3 + c] = (float)values[c];
             if (colours is not null)
             {
                 for (int c = 0; c < 3; c++)
-                {
-                    double v = values[row + 3 + c];
-                    colours[kept * 3 + c] = (float)Math.Clamp(splat ? 0.5 + ShC0 * v : v / colourScale, 0.0, 1.0);
-                }
+                    colours[kept * 3 + c] = (float)Math.Clamp(splat ? 0.5 + ShC0 * values[3 + c] : values[3 + c] / colourScale, 0.0, 1.0);
             }
             kept++;
         }
@@ -117,8 +122,8 @@ public static class PointPlyReader
         return new Result(new PointCloud { Positions = positions, Colors = colours }, splat, dropped);
     }
 
-    /// <summary>The <paramref name="wanted"/> properties of every vertex, row by row.</summary>
-    private static double[] ReadBinary(byte[] ply, int start, int count, List<(string Type, string Name)> properties, List<int> wanted)
+    /// <summary>A reader of the <paramref name="wanted"/> properties of vertex <c>i</c> from a binary body; the body's length is checked here, before any vertex is read.</summary>
+    private static Action<int, double[]> BinaryRows(byte[] ply, int start, int count, List<(string Type, string Name)> properties, List<int> wanted)
     {
         int[] sizes = [.. properties.Select(p => SizeOf(p.Type))];
         int[] offsets = new int[sizes.Length];
@@ -127,41 +132,36 @@ public static class PointPlyReader
         long stride = sizes.Sum();
         if (ply.LongLength < start + stride * count)
             throw new HartsyInferenceException($"The PLY file is shorter than its header says ({count} vertices of {stride} bytes).");
-        double[] values = new double[(long)count * wanted.Count];
-        for (int i = 0; i < count; i++)
+        return (i, row) =>
         {
-            long row = start + i * stride;
+            long at = start + i * stride;
             for (int w = 0; w < wanted.Count; w++)
-            {
-                double value = Decode(properties[wanted[w]].Type, ply.AsSpan((int)(row + offsets[wanted[w]])));
-                // A NaN or infinite coordinate would make the bounds, and so the camera, meaningless; the ASCII path refuses them too.
-                if (!double.IsFinite(value))
-                    throw new HartsyInferenceException($"PLY vertex {i + 1} holds a value ({properties[wanted[w]].Name}) that is not a finite number.");
-                values[(long)i * wanted.Count + w] = value;
-            }
-        }
-        return values;
+                row[w] = Decode(properties[wanted[w]].Type, ply.AsSpan((int)(at + offsets[wanted[w]])));
+        };
     }
 
-    private static double[] ReadAscii(byte[] ply, int start, int count, int properties, List<int> wanted)
+    /// <summary>A reader of the <paramref name="wanted"/> properties of vertex <c>i</c> from an ASCII body, one line at a time over the bytes (vertices are read in order). </summary>
+    private static Action<int, double[]> AsciiRows(byte[] ply, int start, int count, int properties, List<int> wanted)
     {
-        string[] lines = Encoding.ASCII.GetString(ply, start, ply.Length - start).Split('\n');
-        if (lines.Length < count)
-            throw new HartsyInferenceException("The PLY file has fewer vertex lines than its header says.");
-        double[] values = new double[(long)count * wanted.Count];
-        for (int i = 0; i < count; i++)
+        int position = start;
+        return (i, row) =>
         {
-            string[] tokens = lines[i].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (position >= ply.Length)
+                throw new HartsyInferenceException($"The PLY file has fewer vertex lines than its header says ({count}).");
+            int end = Array.IndexOf(ply, (byte)'\n', position);
+            if (end < 0)
+                end = ply.Length;
+            string[] tokens = Encoding.ASCII.GetString(ply, position, end - position).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            position = end + 1;
             if (tokens.Length < properties)
                 throw new HartsyInferenceException($"PLY vertex line {i + 1} has fewer than {properties} values.");
             for (int w = 0; w < wanted.Count; w++)
             {
                 if (!double.TryParse(tokens[wanted[w]], NumberStyles.Float, CultureInfo.InvariantCulture, out double d) || !double.IsFinite(d))
                     throw new HartsyInferenceException($"PLY vertex line {i + 1} holds a value that is not a finite number.");
-                values[(long)i * wanted.Count + w] = d;
+                row[w] = d;
             }
-        }
-        return values;
+        };
     }
 
     private static int SizeOf(string type) => type switch

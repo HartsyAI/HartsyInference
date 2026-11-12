@@ -10,6 +10,9 @@ namespace HartsyInference.ThreeD.Render;
 /// <summary>Draws a <see cref="MeshDocument"/> into a picture with a software rasteriser: a perspective camera on an orbit, a depth buffer, a headlight, and supersampling for smooth edges. It reads the document, not the model that made it, so it draws every 3D model's mesh the same way. Both sides of every triangle are drawn and lit.</summary>
 public static class MeshRenderer
 {
+    /// <summary>The most texture pixels one render decodes in all (64 M, about 200 MB as RGB and alpha); textures past it are drawn with their material colour and a note.</summary>
+    public const long TextureBudgetPixels = 64L * 1024 * 1024;
+
     /// <summary>Draws <paramref name="document"/>.</summary>
     /// <returns>The picture (RGBA, or RGB with a background) and notes about what was not drawn as the file describes it.</returns>
     /// <exception cref="ArgumentOutOfRangeException">An option is out of range.</exception>
@@ -37,7 +40,9 @@ public static class MeshRenderer
         SampleBuffer buffer = new(options);
         OrbitCamera camera = new(min, max, options, buffer.Width, buffer.Height);
         Dictionary<MeshImage, Texture?> textures = new(ReferenceEqualityComparer.Instance);
-        bool jpegSkipped = false, undecodable = false;
+        bool jpegSkipped = false, undecodable = false, overBudget = false;
+        long decodedPixels = 0;
+        HashSet<MeshImage> budgetSkipped = new(ReferenceEqualityComparer.Instance);
         foreach ((MeshPrimitive primitive, Prepared geometry) in prepared)
         {
             cancel.ThrowIfCancellationRequested();
@@ -47,19 +52,35 @@ public static class MeshRenderer
             {
                 if (!textures.TryGetValue(image, out texture))
                 {
-                    texture = image.MimeType == "image/png" ? Texture.TryDecode(image.Data) : null;
+                    if (image.MimeType == "image/png")
+                    {
+                        long pixels = Texture.PixelsOf(image.Data);
+                        // A texture within its own limit but past what the render may hold in all is drawn with its colour; an oversize one is refused by the decoder.
+                        if (pixels <= Texture.MaxPixels && pixels > options.TexturePixelBudget - decodedPixels)
+                        {
+                            overBudget = true;
+                            budgetSkipped.Add(image);
+                        }
+                        else
+                        {
+                            texture = Texture.TryDecode(image.Data);
+                            decodedPixels += texture is null ? 0 : pixels;
+                        }
+                    }
                     textures[image] = texture;
                 }
                 if (texture is null)
                 {
                     jpegSkipped |= image.MimeType != "image/png";
-                    undecodable |= image.MimeType == "image/png";
+                    undecodable |= image.MimeType == "image/png" && !budgetSkipped.Contains(image);
                 }
             }
             Draw(geometry, material, texture, camera, buffer, cancel);
         }
         if (jpegSkipped)
             notes.Add("A base-colour texture is a JPEG, which the renderer does not decode, so that material is drawn with its colour only.");
+        if (overBudget)
+            notes.Add($"The textures together hold more than {options.TexturePixelBudget} pixels, so the ones past that budget are drawn with their material colour only.");
         if (undecodable)
             notes.Add($"A base-colour PNG texture could not be decoded (it is corrupt or larger than {Texture.MaxPixels} pixels), so that material is drawn with its colour only.");
         return new MeshRender(buffer.Resolve(options), notes);
@@ -220,10 +241,13 @@ public static class MeshRenderer
         /// <summary>The most pixels a texture may have (8192 x 8192); the decoder is not run on a larger one.</summary>
         public const long MaxPixels = 8192L * 8192;
 
+        /// <summary>The pixel count the PNG header names, or 0 when there is no header. The header is the first chunk, so its width and height sit at byte 16 and 20 (the signature is 8 bytes, the chunk length and type 8 more); nothing has been inflated at this point.</summary>
+        public static long PixelsOf(byte[] data) =>
+            data.Length < 24 ? 0 : (long)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(16)) * BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(20));
+
         public static Texture? TryDecode(byte[] data)
         {
-            // The PNG header names the size before any of the image is inflated: width and height are the first IHDR fields.
-            if (data.Length < 24 || (long)BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(16)) * BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(20)) > MaxPixels)
+            if (data.Length < 24 || PixelsOf(data) > MaxPixels)
                 return null;
             try
             {

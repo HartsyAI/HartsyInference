@@ -129,7 +129,8 @@ public static class PngDecoder
         byte[] decompressed;
         using (MemoryStream ms = new(deflated.ToArray()))
         using (DeflateStream df = new(ms, CompressionMode.Decompress))
-        using (MemoryStream output = new())
+        // Presized to what the header promises so it does not grow by doubling, but only up to 64 MiB: a header can promise far more than the data holds.
+        using (MemoryStream output = new(Math.Min(expected + 1, 64 << 20)))
         {
             byte[] block = new byte[81920];
             int read;

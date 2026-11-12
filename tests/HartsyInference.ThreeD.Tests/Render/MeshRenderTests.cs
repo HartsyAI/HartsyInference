@@ -334,6 +334,44 @@ public sealed class MeshRenderTests
         Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 32L * 1024 * 1024, "The decoder allocated far more than the header promised.");
     }
 
+    [Fact]
+    public void AValueThatIsFiniteAsADoubleButNotAsAFloatIsRefusedInBothPlyEncodings()
+    {
+        byte[] head = Encoding.ASCII.GetBytes("ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty double x\nproperty double y\nproperty double z\nend_header\n");
+        byte[] binary = new byte[head.Length + 24];
+        head.CopyTo(binary, 0);
+        BinaryPrimitives.WriteDoubleLittleEndian(binary.AsSpan(head.Length), 1e300);
+        byte[] ascii = Encoding.ASCII.GetBytes("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n1e300 0 0\n");
+
+        Assert.Contains("float range", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(binary)).Message);
+        Assert.Contains("float range", Assert.Throws<HartsyInferenceException>(() => PointPlyReader.Read(ascii)).Message);
+    }
+
+    [Fact]
+    public void BoundsThatOverflowTheCameraAreADomainErrorNotABlankPicture()
+    {
+        Mesh wide = new() { Vertices = [-3e38f, 0, 0, 3e38f, 0, 0, 0, 1, 0], Indices = [0, 1, 2] };
+
+        Assert.Contains("too large to frame", Assert.Throws<HartsyInferenceException>(() => MeshRenderer.Render(Doc(wide), Front)).Message);
+    }
+
+    [Fact]
+    public void TexturesPastTheRendersPixelBudgetAreDrawnWithTheirColourAndANote()
+    {
+        MeshImage Uniform(byte value) => new("image/png", PngTextureEncoder.Encode(new TextureImage(8, 8, 3, [.. Enumerable.Repeat(value, 8 * 8 * 3)])));
+        MeshDocument document = new()
+        {
+            Primitives = [.. Enumerable.Range(0, 3).Select(i => new MeshPrimitive { Geometry = Quad(i * 0.01f), Material = i })],
+            Materials = [.. Enumerable.Range(0, 3).Select(i => new MeshMaterial { BaseColor = Uniform((byte)(50 + i)) })],
+        };
+
+        MeshRender render = MeshRenderer.Render(document, Front with { TexturePixelBudget = 8 * 8 * 2 });
+
+        Assert.Contains(render.Notes, n => n.StartsWith("The textures together hold more than 128 pixels"));
+        Assert.DoesNotContain(render.Notes, n => n.Contains("could not be decoded"));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshRenderer.Render(document, Front with { TexturePixelBudget = 0 }));
+    }
+
     private static byte[] SplatPly((float X, float Y, float Z, float Dc, float Opacity)[] splats)
     {
         string header = $"ply\nformat binary_little_endian 1.0\nelement vertex {splats.Length}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float f_dc_0\nproperty float f_dc_1\nproperty float f_dc_2\nproperty float opacity\nproperty float scale_0\nend_header\n";
