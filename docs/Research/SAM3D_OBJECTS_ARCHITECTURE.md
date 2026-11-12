@@ -354,11 +354,49 @@ the files go through the existing safe `PytorchPickleLoader` (a pickle machine t
 4. A rendered look of the splat from several angles (needs a splat viewer; there is no rasteriser in the engine) and a mesh render for the FlexiCubes branch.
 5. Only then a status row above 🔧; ✅ needs real-weight parity and a rendered look.
 
-## Open items (unverified until the checkpoints are read)
+## Checkpoints read (2026-11-11, from the sha256-verified ungated mirror)
 
-- Per-block key names. Neither YAML sets `share_mod`, and both flows default it to `False`, so each block should carry its own `adaLN_modulation` (to confirm against the keys).
-- The stored dtype of each checkpoint, the key prefixes and whether a plain `state_dict` can be extracted without executing anything.
-- Whether `ss_generator.ckpt` carries the DINO and pointmap embedder weights (the pipeline loads the condition embedder from the same file through the `_base_models.condition_embedder.` prefix) or fetches DINO from `torch.hub` at run time.
+Read through `SamCheckpoint` (the safe-subset pickle reader; nothing from the files is executed). The four `.ckpt` files below match the sizes and hashes in the table above; `slat_decoder_mesh.ckpt` was not fetched (its safetensors conversion was, see below).
+
+| File | Tensors | dtype | Key layout |
+|---|---|---|---|
+| `ss_generator.ckpt` | 1741 | all F32 | envelope `state_dict.`, then `_base_models.generator.reverse_fn.backbone.` (the flow: 945 tensors), `_base_models.condition_embedder.` (722) and `_base_models.decoder.` (the occupancy decoder, bundled; `ss_decoder.ckpt` has the same layout; the two were not compared tensor by tensor) |
+| `slat_generator.ckpt` | 1225 | all F32 | same envelope: `generator.reverse_fn.backbone.` (526) and `condition_embedder.` (699: two DINO towers plus `idx_emb` and two `projection_nets`; no pointmap embedder) |
+| `ss_decoder.ckpt` | 74 | 38 F32 (norms), 36 F16 (convolutions) | no envelope, no prefix: `input_layer`, `middle_block.i`, `blocks.i`, `out_layer.{0,2}` |
+| `slat_decoder_gs.ckpt` | 101 | 5 F32, 96 F16 | no envelope, no prefix: `blocks.i.{attn,mlp,...}` |
+
+Confirmed against the files:
+
+- Structure flow keys equal what `SamMotBlock`, `SamLatentProjection` and `SamTimestepEmbedder` read (streams `shape` and `6drotation_normalized`, `latent_mapping.{name}.pos_emb` of `[4096, 1024]` for the shape grid and `[1, 1024]` per pose latent, `d_embedder`, per-head `gamma` `[16, 64]`, `adaLN_modulation` per block so `share_mod` is false). `SamMotFlow`, `SamEmbedderFuser` (hidden 2816, `idx_emb` `[3, 1024]`) and `SamPointPatchEmbed` (under `condition_embedder.module_list.2.`) construct from the real tensors with the released configs, which checks every key and shape they read.
+- The condition embedders sit under `condition_embedder.module_list.{0,1}.backbone.` (the two DINOv2-L towers, F32, `torch.hub` names with `ls1`/`ls2` layer scale, registers, `pos_embed` `[1, 1370, 1024]`) and `module_list.2.` (the pointmap embedder). The DINO weights are therefore in the checkpoint and need no `torch.hub` fetch.
+- The SLAT flow keys (`input_layer`, `input_blocks.i`, `blocks.i`, `out_blocks.i`, `out_layer`, `t_embedder`; spconv convolutions `[out, 3, 3, 3, in]`; no `d_embedder`, no position-embedder weights) load into the existing `Trellis/SlatFlowModel`; `Trellis/SparseStructureDecoder` and `Trellis/SlatGaussianDecoder` load `ss_decoder.ckpt` and `slat_decoder_gs.ckpt` without a key map. This shows the keys are present; it does not show the outputs agree.
+- A conversion to safetensors should keep or drop the envelope and prefixes (`SamCheckpointKeys` accepts both); the generators are F32 and the decoders mixed, so only the decoders need widening before an F32-only module reads them.
+
+Still unverified: every number (no reference dumps exist), the MoGe checkpoint's use, and behaviour with the pointmap group dropped.
+
+### The safetensors set (`apozz/sam-3d-objects-safetensors`, revision `cbb995af`, fetched 2026-11-11)
+
+Ungated third-party conversion, placed in `Models/3D/sam3d/` with `SAM3D_LICENSE` beside it (the SAM License binds on use and on redistribution, including through this mirror). Every file's size and sha256 was checked against the Hugging Face tree listing.
+
+| File | Bytes | sha256 | Tensors, dtypes |
+|---|---|---|---|
+| `ss_generator.safetensors` | 6,689,521,984 | `9f0fd0a7e288eadf7e51b6ead30f70aea0cd2ac4fe4160ee1deb412916bcfa0d` | 1741, F32 |
+| `slat_generator.safetensors` | 4,906,129,160 | `ee0c1601f3259f61cb22030bad839a3fe30a95b5f78bc9451babdbd8836fd06d` | 1225, F32 |
+| `ss_decoder.safetensors` | 147,591,972 | `f192156b047dc467f82f8efa851157c32ad9d7a008f01bc92c846f5ef0a4293f` | 74, 38 F32 + 36 F16 |
+| `slat_decoder_gs.safetensors` | 171,450,952 | `48a3dc3271f56efe9c8b1e601d0350d9ab7914fec0e635048682aa8f7c9e86be` | 101, 5 F32 + 96 F16 |
+| `slat_decoder_mesh.safetensors` | 363,718,540 | `51f27a1c7a7892eff9576cf73bb888a255d4a184a76a9bfd9675f0d9ba464f5a` | 120, F32 |
+| `dinov2_vitl14_reg.safetensors` | 1,217,523,408 | `30e20dce587ad621a8dfc20e4ed66198d2998974928d44f06a6baf7732503dcc` | 344, F32 |
+| `moge_vitl.safetensors` | 1,256,740,032 | `dbdf89d1f7651b9213a507923b4f100fed87489bb7425fda7f7d430bcb31d8a9` | 421, F32 |
+
+Compared against Meta's `.ckpt` files (the four above that exist locally, loaded through `SamCheckpoint`, nothing executed): every tensor of `ss_generator`, `slat_generator`, `ss_decoder` and `slat_decoder_gs` is present with the same shape and dtype and **byte-identical contents** (3141 tensors). The generators drop the Lightning envelope (`state_dict._base_models.`), the decoders keep their unprefixed names. `dinov2_vitl14_reg.safetensors` is byte-identical to **both** DINO towers bundled in `ss_generator.ckpt` (`condition_embedder.module_list.{0,1}.backbone.`, 344 tensors each), so the two towers hold the same weights. This shows the conversion is lossless for those files; it says nothing about whether the C# forward matches upstream.
+
+Measured on the RTX 3060 (12 GB, CUDA backend, 2026-11-11, one process): weights open from `ss_generator.safetensors` 11 s (1741 tensors, F32), the point-patch embedder on a synthetic 256 x 256 pointmap with invalid corner pixels 0.56 s (output `[1024, 512]`, finite), and one structure-flow forward (24 blocks, 4096 shape tokens, 4764 synthetic condition tokens in place of the unwired DINO towers, `d` 0) 2.5 s cold and 2.4 s warm with finite velocities for all five latents. VRAM read with `nvidia-smi` after each stage: about 1.2 GB before loading, 3.0 GB after the first forward and 6.7 GB after the second (device total, the desktop's 1 GB included; not a peak trace). Roughly 125 s for 25 CFG steps at two forwards each, an estimate, not a run. These numbers show the real tensors run through the flow without error; the velocities are not compared with anything.
+
+Not compared with a Meta file: `slat_decoder_mesh.safetensors` (the `.ckpt` was not fetched; header names match the `blocks.i.attn`, `blocks.i.mlp`, `input_layer`, `out_layer` and `upsample.i` layout of the YAML's 12 swin blocks at width 768) and `moge_vitl.safetensors` (backbone plus a multi-scale head, with `image_mean` and `image_std`; its licence is not recorded yet).
+
+## Open items
+
+- Settled by reading the checkpoints (see "Checkpoints read"): per-block `adaLN_modulation`, stored dtypes, key prefixes, safe extraction of the `state_dict`, and that the DINO and pointmap embedder weights are in the checkpoints.
 - The licences of `Ruicheng/moge-vitl`, MoGe and `tables.py`, and the MoGe checkpoint's files.
 - How the structure generator behaves with the pointmap tokens zeroed (object-only mode).
 - Whether the release's quality needs the 25-step CFG schedule at all on the 12 GB target, and the cost of the shape stage when the 1024-token pointmap group and the image groups are all present.

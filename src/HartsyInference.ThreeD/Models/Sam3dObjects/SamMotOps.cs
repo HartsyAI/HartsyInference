@@ -3,13 +3,13 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ThreeD.Models.Sam3dObjects;
 
-/// <summary>Layout helpers of the structure flow, on F32 token-major <c>[1, tokens, width]</c> tensors.</summary>
+/// <summary>Layout helpers of the SAM 3D transformers, on F32 token-major <c>[batch, tokens, width]</c> tensors (the concatenation helpers take one batch item).</summary>
 internal static class SamMotOps
 {
     /// <summary>The <paramref name="width"/> columns from <paramref name="offset"/> of <paramref name="packed"/> (a fused projection split).</summary>
     public static Tensor Slice(IBackend backend, Tensor packed, int offset, int width)
     {
-        Tensor result = new(new TensorShape(1, packed.Shape[1], width), DType.F32);
+        Tensor result = new(new TensorShape(packed.Shape[0], packed.Shape[1], width), DType.F32);
         backend.SliceLastDim(result, packed, offset);
         return result;
     }
@@ -18,7 +18,7 @@ internal static class SamMotOps
     public static Tensor ToHeadMajor(IBackend backend, Tensor flat, int heads, int headDim)
     {
         int tokens = (int)flat.Shape[1];
-        Tensor result = new(new TensorShape(1, heads, tokens, headDim), DType.F32);
+        Tensor result = new(new TensorShape(flat.Shape[0], heads, tokens, headDim), DType.F32);
         backend.Permute0213(result, flat, tokens, heads, headDim);
         flat.Dispose();
         return result;
@@ -28,7 +28,7 @@ internal static class SamMotOps
     public static Tensor ToTokenMajor(IBackend backend, Tensor headMajor)
     {
         int heads = (int)headMajor.Shape[1], tokens = (int)headMajor.Shape[2], headDim = (int)headMajor.Shape[3];
-        Tensor result = new(new TensorShape(1, tokens, heads * headDim), DType.F32);
+        Tensor result = new(new TensorShape(headMajor.Shape[0], tokens, heads * headDim), DType.F32);
         backend.Permute0213(result, headMajor, heads, tokens, headDim);
         headMajor.Dispose();
         return result;
