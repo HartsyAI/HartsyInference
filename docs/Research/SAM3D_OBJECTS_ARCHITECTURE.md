@@ -406,6 +406,41 @@ Ported from `microsoft/MoGe` `model/v1.py` and `utils/geometry_torch.py` (the re
 
 Checked: the head against a naive double-precision reference on a tiny network (`MogeHeadTests`), the focal and shift solver against known pinhole scenes (`MogeFocalShiftTests`), and **the forward pass on the real `moge_vitl.safetensors` against torch 2.6 on the CPU in F32** (upstream's `MoGeModel.forward` with a minimal transcription of the hub ViT, strict `load_state_dict` of the same file; a 256 x 176 frame at a budget of 600 tokens, which exercises the non-square position-embedding interpolation): points max abs difference 2.4e-6 (values -0.84 to 1.76), mask 4.8e-6. The focal and shift recovered from both outputs by one independent solver agree to 3e-6 in the shift. **Not compared:** upstream's `recover_focal_shift` itself (it uses SciPy's `least_squares` with `ftol=1e-3`, SciPy was not installed, and this port minimises to a tight tolerance, so expect agreement to about that looseness, not bit for bit); the fp16 autocast of upstream's `infer` (the port runs F32); the whole `infer` path on a photo; and what MoGe gives SAM 3D on a real scene, which no run here has seen yet.
 
+### Device memory at the 8 GiB budget
+
+What the 2026-11-12 run showed (device totals from `nvidia-smi`, the desktop's 1.1 GB included, so a process is about 1.1 GB below the figure). Nothing here is a fix; the options are untested.
+
+| Point | Device | Step time |
+|---|---|---|
+| structure flow, steps 5 to 25 | 8,740 MiB, flat | 5.7 s |
+| after the structure sweep | about 2.0 GB | |
+| SLAT flow, step 5 | 8,592 MiB | about 2 s |
+| SLAT flow, step 10 onwards | 11,702 to 11,734 MiB (the card is full) | about 12 s |
+
+- **Weights are F32 on disk and are preloaded as F32.** The generators are F32 (6.69 GB structure, 4.91 GB SLAT) and the run's log shows `Tf32Gemm=True`. Upstream's pipeline `dtype` is float16 and its SLAT flow and both decoders say `use_fp16: true` (the structure generator YAML says `use_fp16: false` where it is set). The decoders hold F16 tensors and ran. **Not checked:** whether `CacheWeightCasts` also keeps a converted copy of a weight beside the F32 one (`GpuResidencyCache` stores one only when an op asks for a dtype other than the weight's, and the flow's activations are F32, so none is expected; a copy of every SLAT weight would add up to 4.9 GB). One log line of the cache's cast bytes after a SLAT step settles it.
+- **The structure flow fits** (about 7.6 GB for the process, under 8 GiB by a few hundred MB), so it has no headroom on a 12 GB card shared with a desktop and none on an 8 GB card.
+- **The SLAT flow does not.** Its weights are 4.9 GB, the condition and the base 2.5 GB, and the flow then grows by about 3 GB between steps 5 and 10 and stops growing only because the card is full. Which allocation grows (the activation cache, the fused-attention plans for the 16,132-voxel windows, the pool reservation) has not been traced; no counter was read inside the flow.
+- **Remedies, in the order to try them.** (1) The between-stage sweep (`Trellis2DeviceMemory.ReleaseBetweenStages`) inside the sampler step, for example every step or every fifth: about 7 minutes of solo GPU and it shows whether the growth is reclaimable cache. (2) A narrowed SLAT flow (F16 weights, as upstream's `use_fp16`): the 4.9 GB weights halve to about 2.5 GB, which alone would put step 5 near 6 GB; it needs the sparse flow to read F16 weights and a comparison of the velocities against the F32 ones. Pixal3D is building an F16/BF16 flow track, so the narrowing helper should come from there, not be written here. (3) Not recommended: streaming blocks from the host, it costs a 4.9 GB read per step.
+
+## CPU reference plan
+
+Torch 2.6.0+cu124 is installed here, without `spconv`, `xformers`, `flash_attn`, `pytorch3d`, `utils3d`, `kaolin`, `torchsparse` or `gsplat`. Upstream reads its attention backend from `ATTN_BACKEND` and `SPARSE_ATTN_BACKEND` and defaults to `sdpa`, which runs on the CPU; only the pipeline's own entry points set `flash_attn`. What the CPU run needs is therefore a harness that imports the stage modules directly, not `inference_pipeline.py` (it imports `pytorch3d` at the top).
+
+| Stage | Upstream pieces | CPU blocker | Plan |
+|---|---|---|---|
+| mask crop, pointmap normaliser | `img_and_mask_transforms.py`, `pipeline/utils/pointmap.py` | `utils3d` import (one numpy helper) | shim the import, compare the tensors on the synthetic scene and one real photo |
+| conditions (two DINO towers, point-patch embedder, fuser) | `dino.py`, `pointmap.py`, `embedder_fuser.py` | none | compare the token tensors `[1, 7528, 1024]` and `[1, 5496, 1024]`; F32 on both sides, expect about 1e-5 |
+| structure flow | `mot_sparse_structure_flow.py` | none (`sdpa`) | one forward on injected latents and noise at a fixed `t` (`d` = 0 and a shortcut `d`), not 25 steps; then 2 to 3 sampler steps to check the schedule and the CFG mix |
+| occupancy decode | `sparse_structure_vae.py` (dense 3-D convolutions) | none | compare the `[1, 1, 64, 64, 64]` logits from a fixed latent |
+| prune, downsample, pose decode | `inference_utils.py`, `pose_target.py` | `pytorch3d.transforms` (quaternion and rotation helpers) | shim the five functions with their closed forms; compare the pose from fixed outputs |
+| SLAT flow | `slat_flow` over `SparseTensor` | `spconv.pytorch.SparseConvTensor` as the container (the flow has no sparse convolutions) | a minimal container with `.features`, `.indices`, `.spatial_shape`, `.batch_size`; one forward at a fixed `t`, 16,132 voxels is feasible on the CPU |
+| Gaussian decode | `decoder_gs.py` (swin blocks, no convolution) | the container above | compare the Gaussian parameters before the PLY write |
+| mesh decoder | `decoder_mesh.py`, `cube2mesh.py`, `flexicubes.py` | `spconv` sparse convolutions in the subdivide blocks; `kaolin.utils.testing.check_tensor` (one assert helper) | CPU is only possible with a pure-torch reimplementation of the sparse convolution as the comparison oracle: write that after the C# port, as test code, not before |
+| MoGe | `moge.model.v1` | none | done for the forward (torch 2.6 CPU F32); the SciPy `least_squares` solver is still not compared |
+| render and layout optimisation | `pytorch3d`, `gsplat` | CUDA wheels | out of scope (layout is dropped on purpose) |
+
+Cost: the structure flow at 4,096 shape tokens against 7,528 condition tokens and 24 blocks is minutes per forward on the CPU, so the plan compares single forwards on injected inputs, not whole samplers. Each comparison needs one scratch script, run with `python -I`, that loads the same `.safetensors` the engine reads (no pickles) and dumps F32 arrays; no download is needed. The comparison on a real photo needs the photo and an object mask from the user.
+
 ## Open items
 
 - Settled by reading the checkpoints (see "Checkpoints read"): per-block `adaLN_modulation`, stored dtypes, key prefixes, safe extraction of the `state_dict`, and that the DINO and pointmap embedder weights are in the checkpoints.
