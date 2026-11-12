@@ -16,7 +16,7 @@ public sealed record MeshCleanOptions
     /// <summary>Drop faces that reuse another face's three vertices (either winding).</summary>
     public bool RemoveDuplicateFaces { get; init; } = true;
 
-    /// <summary>Thin edges shared by more than two faces down to the best two.</summary>
+    /// <summary>Split vertices so no edge is shared by more than two faces (upstream's <c>repair_non_manifold_edges</c>); no face is removed.</summary>
     public bool RepairNonManifoldEdges { get; init; } = true;
 
     /// <summary>Remove vertex-connected components whose area is below this fraction of the total area; 0 disables.</summary>

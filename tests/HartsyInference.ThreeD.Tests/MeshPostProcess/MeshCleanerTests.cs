@@ -37,22 +37,73 @@ public sealed class MeshCleanerTests
         Assert.Equal(4, MeshCleaner.RemoveDegenerateFaces(dirty).TriangleCount);
     }
 
-    [Fact]
-    public void RepairNonManifoldEdges_KeepsAtMostTwoFacesPerEdge()
+    // Three fins share the edge 0-1; the fin opposite in winding to the first should be kept with it.
+    private static Mesh ThreeFins() => new()
     {
-        // Three fins share the edge 0-1; the fin opposite in winding to the first should be kept with it.
-        Mesh fins = new()
-        {
-            Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1],
-            Indices = [0, 1, 2, 1, 0, 3, 0, 1, 4],
-        };
+        Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1],
+        Indices = [0, 1, 2, 1, 0, 3, 0, 1, 4],
+    };
+
+    [Fact]
+    public void RemoveNonManifoldFaces_KeepsAtMostTwoFacesPerEdge()
+    {
+        Mesh fins = ThreeFins();
         Assert.Equal(1, SyntheticMeshes.Topology(fins).NonManifold);
 
-        Mesh repaired = MeshCleaner.RepairNonManifoldEdges(fins);
+        Mesh repaired = MeshCleaner.RemoveNonManifoldFaces(fins);
 
         Assert.Equal(2, repaired.TriangleCount);
         Assert.Equal(0, SyntheticMeshes.Topology(repaired).NonManifold);
         Assert.True(SyntheticMeshes.Topology(repaired).ConsistentWinding);
+    }
+
+    [Fact]
+    public void RepairNonManifoldEdges_SplitsVerticesAndKeepsEveryFace()
+    {
+        Mesh fins = ThreeFins();
+
+        Mesh repaired = MeshCleaner.RepairNonManifoldEdges(fins);
+
+        // All three faces survive; the third fin is cut off along the edge with copies of its two vertices.
+        Assert.Equal(3, repaired.TriangleCount);
+        Assert.Equal(fins.VertexCount + 2, repaired.VertexCount);
+        Assert.Equal(0, SyntheticMeshes.Topology(repaired).NonManifold);
+        Assert.True(SyntheticMeshes.Topology(repaired).ConsistentWinding);
+        for (int f = 0; f < 3; f++)
+            for (int c = 0; c < 3; c++)
+                for (int axis = 0; axis < 3; axis++)
+                    Assert.Equal(fins.Vertices[fins.Indices[f * 3 + c] * 3 + axis], repaired.Vertices[repaired.Indices[f * 3 + c] * 3 + axis]);
+    }
+
+    [Fact]
+    public void RepairNonManifoldEdges_ReturnsAManifoldMeshUnchanged()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2);
+
+        Mesh repaired = MeshCleaner.RepairNonManifoldEdges(sphere);
+
+        Assert.Equal(sphere.Indices, repaired.Indices);
+        Assert.Equal(sphere.Vertices, repaired.Vertices);
+    }
+
+    [Fact]
+    public void Clean_KeepsTheSurfaceClosedWhereAFinMeetsIt()
+    {
+        // A fin glued to one edge of a closed sphere makes that edge non-manifold. Dropping a face (the old repair) opened a crack in the
+        // sphere or lost the fin; splitting vertices leaves the sphere closed and the fin as its own three boundary edges.
+        Mesh sphere = SyntheticMeshes.Icosphere(2);
+        int a = sphere.Indices[0], b = sphere.Indices[1];
+        float[] vertices = [.. sphere.Vertices, 3f, 3f, 3f];
+        int[] indices = [.. sphere.Indices, b, a, sphere.VertexCount];
+        Mesh withFin = new() { Vertices = vertices, Indices = indices };
+        Assert.Equal(1, SyntheticMeshes.Topology(withFin).NonManifold);
+
+        Mesh cleaned = MeshCleaner.Clean(withFin, new MeshCleanOptions { SmallComponentAreaRatio = 0, HoleFillMaxPerimeter = 0, UnifyOrientation = false });
+
+        (int _, int boundary, int nonManifold, bool _) = SyntheticMeshes.Topology(cleaned);
+        Assert.Equal(sphere.TriangleCount + 1, cleaned.TriangleCount);
+        Assert.Equal(0, nonManifold);
+        Assert.Equal(3, boundary);
     }
 
     [Fact]
