@@ -114,8 +114,13 @@ def main():
         with zipfile.ZipFile(path) as archive:
             root = archive.namelist()[0].split("/")[0]
 
+            cache = {}
+
             def storage(key, dtype, numel):
-                tensor = torch.empty(numel, dtype=dtype)
+                # The DiT file keeps every tensor as a view of one 12 GB storage and the unpickler asks for it once per tensor: read it once.
+                if key in cache:
+                    return cache[key]
+                tensor = cache[key] = torch.empty(numel, dtype=dtype)
                 with archive.open(f"{root}/data/{key}") as handle:
                     view = memoryview(tensor.numpy()).cast("B")
                     done = 0
@@ -158,7 +163,7 @@ def main():
     for n, sigma in enumerate(sigmas):
         t0 = time.time()
         with torch.no_grad():
-            v = dit(latents, torch.tensor([sigma]), {"main": context})
+            v = dit(latents, torch.tensor([sigma]), {"main": context, "cond": context})
         out[f"velocity_cond_{n}"] = v.numpy()
         if n == 0:
             out.update(captured)
@@ -168,7 +173,7 @@ def main():
     uncond[:, : params["text_len"]] = 0
     t0 = time.time()
     with torch.no_grad():
-        out["velocity_uncond_0"] = dit(latents, torch.tensor([sigmas[0]]), {"main": uncond}).numpy()
+        out["velocity_uncond_0"] = dit(latents, torch.tensor([sigmas[0]]), {"main": uncond, "cond": uncond}).numpy()
     print(f"uncond: {time.time() - t0:.0f} s; total {time.time() - start:.0f} s", flush=True)
     np.savez(args.out, **out)
     print("wrote", args.out)
