@@ -119,6 +119,14 @@ public static class RefinerStage
                 + "img2img path to consume the base image with.");
         }
 
+        // Iris-Z declares RefEdit, but its init image is a photo or a depth map, never something to denoise. Refused
+        // here, before its checkpoint loads; the pipeline's own refusal is the backstop.
+        if (Recipes.Image.Flux2Variants.IsIrisZ(Catalog.RecipeResolution.ResolveVariant(refinerSpec)))
+        {
+            throw new NotSupportedException(
+                $"'{Path.GetFileName(spec.Model)}' is Iris-Z, which has no strength-based image-to-image and can't be used as a refiner.");
+        }
+
         if (!string.Equals(spec.Method, "PostApply", StringComparison.OrdinalIgnoreCase))
         {
             // True StepSwap needs a shared latent space mid-loop, which only the SDXL internal pair has. The pixel

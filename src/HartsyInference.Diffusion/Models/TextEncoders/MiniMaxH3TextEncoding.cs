@@ -140,16 +140,19 @@ public static class MiniMaxH3TextEncoding
 
     /// <summary>Builds the presentation with a Qwen tokenizer, encoding each text segment byte-level-exact and without
     /// special tokens, as the reference's per-segment <c>add_special_tokens=False</c> calls do.</summary>
-    public static Encoded Build(Qwen2Tokenizer tokenizer, string prompt, IReadOnlyList<Condition>? conditions = null)
+    public static Encoded Build(Qwen2Tokenizer tokenizer, string prompt, IReadOnlyList<Condition>? conditions = null,
+        bool weightedPrompt = true)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
-        return Build(tokenizer.EncodeRawByteLevel, prompt, conditions);
+        return Build(tokenizer.EncodeRawByteLevel, prompt, conditions, weightedPrompt);
     }
 
     /// <summary>Builds the presentation over any text encoder; <paramref name="encodeText"/> must add no special
     /// tokens and is called once per presented segment.</summary>
+    /// <param name="weightedPrompt">True applies the prompt's <c>(text:weight)</c> syntax as per-token weights (the video
+    /// path's CondScale). False tokenizes the prompt as written, which is ComfyUI's image node behaviour.</param>
     public static Encoded Build(Func<string, IReadOnlyList<int>> encodeText, string prompt,
-        IReadOnlyList<Condition>? conditions = null)
+        IReadOnlyList<Condition>? conditions = null, bool weightedPrompt = true)
     {
         ArgumentNullException.ThrowIfNull(encodeText);
         ArgumentNullException.ThrowIfNull(prompt);
@@ -208,8 +211,10 @@ public static class MiniMaxH3TextEncoding
         }
         // The prompt goes last, which is what makes the weights right-alignable against the whole sequence.
         float[]? promptWeights = null;
-        IReadOnlyList<Prompting.WeightedSpan> spans = Prompting.PromptWeighting.Parse(prompt);
-        if (Prompting.PromptWeighting.HasWeights(spans))
+        IReadOnlyList<Prompting.WeightedSpan> spans = weightedPrompt
+            ? Prompting.PromptWeighting.Parse(prompt)
+            : [new Prompting.WeightedSpan(prompt, 1f)];
+        if (weightedPrompt && Prompting.PromptWeighting.HasWeights(spans))
         {
             List<float> weights = new List<float>(64);
             foreach (Prompting.WeightedSpan span in spans)

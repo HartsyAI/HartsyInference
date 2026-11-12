@@ -117,7 +117,7 @@ public static class GenerationDispatch
             PreviewRgb = result.Rgb,
             PreviewWidth = result.Width,
             PreviewHeight = result.Height,
-            Companions = LayerCompanions(result),
+            Companions = Companions(result),
         };
         artifact.Meta["size"] = $"{result.Width}x{result.Height}";
         artifact.Meta["seed"] = result.Seed.ToString(CultureInfo.InvariantCulture);
@@ -129,9 +129,17 @@ public static class GenerationDispatch
 
     /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
     /// composite; empty for a single-layer result.</summary>
-    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result) =>
-        result.Layers is not { Count: > 0 } layers ? []
+    /// <remarks>A result with depth beside its image (Iris-Z <c>rgbd</c>) adds <c>depth.png</c>, the colour-coded depth map.</remarks>
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> Companions(ImageResult result)
+    {
+        List<(string Suffix, byte[] Bytes)> companions = result.Layers is not { Count: > 0 } layers ? []
             : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();
+        if (HartsyInference.Engine.Features.DepthImage.Companion(result) is { } depthRgb)
+        {
+            companions.Add(("depth.png", PngEncoder.Encode(depthRgb, null, result.Width, result.Height)));
+        }
+        return companions;
+    }
 
     /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
     private static int[] ReadScoredTokenIds(string path)
@@ -816,13 +824,16 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
+    private static string DescribePart(MeshPart part) =>
+        $"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]";
+
     /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d, a mesh to rig for unirig.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         bool paint = MeshModelIds.PaintMesh.Contains(meshId);
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || paint;
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || paint;
         string? imagePath = parameters.GetStringOrNull("image");
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
@@ -861,10 +872,19 @@ public static class GenerationDispatch
             Kind = ArtifactKind.Mesh,
             FileBytes = result.Data,
             Extension = result.Format,
-            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)",
+            Text = $"{result.Format.ToUpperInvariant()} mesh ({result.Data.Length / 1024} KB)" + (result.Parts is { } found ? $", {found.Count} parts" : string.Empty),
             SlugHint = spec.Catalog?.Id ?? "mesh",
         };
         artifact.Meta["format"] = result.Format;
+        if (result.Parts is { } parts)
+        {
+            artifact.Meta["parts"] = string.Join("; ", parts.Select(DescribePart));
+            if (!quiet)
+            {
+                foreach (MeshPart part in parts)
+                    Console.WriteLine(DescribePart(part));
+            }
+        }
         return artifact;
     }
 
@@ -1385,6 +1405,33 @@ public static class GenerationDispatch
         foreach ((string flag, string key) in slgNumbers)
         {
             if (parameters.GetDoubleOrNull(flag) is { } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisStrings =
+        [
+            ("iris-task", HartsyInference.Engine.Features.RequestExtras.IrisZTask),
+            ("iris-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZDepthFormat),
+            ("iris-input-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZInputDepthFormat),
+            ("iris-joint-depth", HartsyInference.Engine.Features.RequestExtras.IrisZJointDepth),
+        ];
+        foreach ((string flag, string key) in irisStrings)
+        {
+            if (parameters.GetStringOrNull(flag) is { Length: > 0 } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisInts =
+        [
+            ("iris-resolution", HartsyInference.Engine.Features.RequestExtras.IrisZResolution),
+            ("iris-depth-steps", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSteps),
+            ("iris-depth-seeds", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSeeds),
+        ];
+        foreach ((string flag, string key) in irisInts)
+        {
+            if (parameters.GetIntOrNull(flag) is { } value)
             {
                 extra[key] = value;
             }

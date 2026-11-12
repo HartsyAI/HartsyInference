@@ -64,6 +64,9 @@ public static class ModelIdentityCatalog
             Image("flux1", "Flux.1-dev", "Flux.1 Dev", "Black Forest Labs", "other", "1024x1024", "black-forest-labs/FLUX.1-dev"),
             Image("minimax-h3-image", "minimax-h3-image", "MiniMax-H3-Image", "MiniMax", "other", "2048x2048"),
             Image("flux2", "flux.2-dev", "Flux.2 Dev", "Black Forest Labs", "other", "1024x1024"),
+            // Iris-Z has no SwarmUI core class; the Hartsy extension registers these ids. FLUX non-commercial licence.
+            Image("iris-z-small", "iris-z-small", "Iris-Z-small", "Sperid Labs", "other", "1024x1024", "speridlabs/iris-z"),
+            Image("iris-z-big", "iris-z-big", "Iris-Z-big", "Sperid Labs", "other", "1024x1024", "speridlabs/iris-z"),
             // One SwarmUI class covers the full and the step-distilled build; the weights tell them apart.
             Image("flux3", "flux.3-klein", "Flux.3 Klein", "Black Forest Labs", "other", "1024x1024",
                 "black-forest-labs/flux-3-image-klein-comfy"),

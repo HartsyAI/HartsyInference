@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.Engine\HartsyInference.Engine.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.ThreeD\HartsyInference.ThreeD.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Vision\HartsyInference.Vision.csproj" />

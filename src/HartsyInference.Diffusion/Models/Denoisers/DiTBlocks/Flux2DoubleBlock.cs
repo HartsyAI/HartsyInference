@@ -169,9 +169,17 @@ public sealed unsafe class Flux2DoubleBlock
     }
 
     /// <summary>Forward pass. Modulation tensors (<paramref name="imgMod"/>, <paramref name="txtMod"/>) are 6 elements each: <c>(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)</c>, shape <c>[B, hidden]</c>. Computed once at the top level (shared modulation) and passed unchanged to every double block.</summary>
+    /// <param name="imgAttnSegments">Per-token-segment modulation of the image stream's attention branch, replacing
+    /// <paramref name="imgMod"/>[0..2]; needs an F32 stream and <paramref name="imgMlpSegments"/>.</param>
+    /// <param name="imgMlpSegments">The same for the image stream's MLP branch, replacing <paramref name="imgMod"/>[3..5].</param>
     public (Tensor image, Tensor text) Forward(IBackend backend, Tensor image, Tensor text, Tensor[] imgMod,
-        Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null)
+        Tensor[] txtMod, FluxRope rope, Tensor? attnBias = null, SegmentModulation? imgAttnSegments = null,
+        SegmentModulation? imgMlpSegments = null)
     {
+        if ((imgAttnSegments is null) != (imgMlpSegments is null))
+            throw new ArgumentException("Segment modulation needs both the attention and the MLP tables.", nameof(imgMlpSegments));
+        if (imgAttnSegments is not null && image.DType != DType.F32)
+            throw new ArgumentException($"Segment modulation needs an F32 image stream, got {image.DType}.", nameof(image));
         int batch = (int)image.Shape[0];
         int imgSeqLen = (int)image.Shape[1];
         int txtSeqLen = (int)text.Shape[1];
@@ -183,7 +191,9 @@ public sealed unsafe class Flux2DoubleBlock
         TensorShape txtShape = new TensorShape(batch, txtSeqLen, _hiddenSize);
 
         // ── 1. LayerNorm (no affine) + modulate x*(1+scale)+shift (img and txt streams independently) ──
-        Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape, _layerNormEps);
+        Tensor imgModulated = imgAttnSegments is null
+            ? DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape, _layerNormEps)
+            : imgAttnSegments.NormAffine(backend, image, _layerNormEps);
         Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape, _layerNormEps);
 
         // ── 2-9. Joint attention over [txt, img], output projections, gated residuals ──
@@ -193,8 +203,16 @@ public sealed unsafe class Flux2DoubleBlock
         Span<Tensor?> attended = [null, null];
         _attention!.Attend(backend, [imgModulated, txtModulated], attended, new JointCallContext { Joint = joint, ReleaseInputs = true });
         Tensor imgAttnProj = _attention.ProjectOutput(backend, 0, attended[0]!);
-        Tensor imgAfterAttn = new Tensor(imgShape, act);
-        backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
+        Tensor imgAfterAttn;
+        if (imgAttnSegments is null)
+        {
+            imgAfterAttn = new Tensor(imgShape, act);
+            backend.GatedResidualLastDim(imgAfterAttn, image, imgAttnProj, imgMod[2]);
+        }
+        else
+        {
+            imgAfterAttn = imgAttnSegments.GatedResidual(backend, image, imgAttnProj);
+        }
         imgAttnProj.Dispose();
 
         Tensor txtAttnProj = _attention.ProjectOutput(backend, 1, attended[1]!);
@@ -203,11 +221,21 @@ public sealed unsafe class Flux2DoubleBlock
         txtAttnProj.Dispose();
 
         // ── 10. Image MLP: LayerNorm + modulate + SwiGLU + gated residual ──
-        Tensor imgMlpModulated = DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape, _layerNormEps);
+        Tensor imgMlpModulated = imgMlpSegments is null
+            ? DiTUtils.NormModulate(backend, imgAfterAttn, imgMod[3], imgMod[4], imgShape, _layerNormEps)
+            : imgMlpSegments.NormAffine(backend, imgAfterAttn, _layerNormEps);
         Tensor imgMlpOut = _imgFfn.Forward(backend, imgMlpModulated, batch, imgSeqLen);
         imgMlpModulated.Dispose();
-        Tensor imgFinal = new Tensor(imgShape, act);
-        backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
+        Tensor imgFinal;
+        if (imgMlpSegments is null)
+        {
+            imgFinal = new Tensor(imgShape, act);
+            backend.GatedResidualLastDim(imgFinal, imgAfterAttn, imgMlpOut, imgMod[5]);
+        }
+        else
+        {
+            imgFinal = imgMlpSegments.GatedResidual(backend, imgAfterAttn, imgMlpOut);
+        }
         imgMlpOut.Dispose();
         imgAfterAttn.Dispose();
 

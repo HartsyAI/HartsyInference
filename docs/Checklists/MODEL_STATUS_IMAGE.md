@@ -90,6 +90,7 @@ per-model architecture notes and build plans.
 | **Hunyuan Image 2.1** | ✅ **FIRST E2E 07-10** (`44.52-local`): sharp 2048²/20st/cfg3.5 astronaut, warm **~50.0s** (**ComfyUI baseline 48.08 s → 1.04× MATCHED**; 07-18 A/B on `alpha.61`: F16 50.1 s ≈ F32 49.9 s. ([details](#hunyuan-image-21)) |
 | **F-Lite (Freepik / Fal.ai)** | T5-XXL layer-17 encode; ~29.4 GB checkpoint. |
 | **FLUX.3 Klein** (5.6B, full + step-distilled) | 🔧 Built 2026-10-15. Text-to-image, img2img, inpaint, up to 10 reference images, the native layout table, and LoRA (diffusers/PEFT, ComfyUI and kohya names). Tiny-config parity against ComfyUI passes; no real-weight or GPU run yet. ([details](#flux3-klein)) |
+| **Iris-Z** (small 9.1B, big 32.2B; image + depth) | 🔧 Built 2026-11-12 as two variants of the FLUX.2 recipe. Prompt to image, prompt to image + depth, image to depth and depth to image. CPU tests on tiny random weights pass; no real-weight or GPU run, and no parity against the reference yet. FLUX non-commercial licence. ([details](#iris-z)) |
 | **Fibo 2.0** (Bria, 44-layer DiT + Qwen3-VL-4B, `fibo2-dev`, `fibo2-edit-turbo`) | 🔧 2026-10-22: dev bf16 text-to-image ran on the real checkpoint (sha256 `2a09866f…`, header read: injection layers 6/14/22/30/38, FFN 9728, 512 queries) through SwarmUI on the RTX 4090 and produced a coherent 1024×1024 image that matches its caption (50 steps, CFG 5, seed 42). Speed: about 4.0 s/step before the F16 self-attention change, against ComfyUI 87ed5a066d9c at 1.09 s/step and 17.7 GB peak VRAM on the same card (bf16, CFG 5), so the engine was about 3.7× slower; re-measure after that change. Not yet compared with ComfyUI on the same noise and tokens (the baseline artifacts are saved); the other features (img2img, mask inpaint, LoRA, reference/masked editing, the int8 ConvRot builds) are covered only by CPU tests on tiny fixtures and have not run on real weights or a GPU. Glyph text images are refused (the rasteriser needs ComfyUI's Aileron font). CC-BY-NC-4.0. ([details](../Research/FIBO2_GPU_HANDOFF.md)) |
 | **MOSS-Image** (5B DiT + Qwen3.5-9B, Base + SFT) | 🔧 Built 2026-10-16; real weights on CUDA 2026-10-20 (text-to-image, reference edits, colorize LoRA, inpaint; no A/B or speed run yet). Text-to-image, img2img, inpaint, the native layout JSON, two- and three-pass skip-layer guidance, LoRA (PEFT, ComfyUI, kohya names), reference-image edits in the Ostris / ai-toolkit layout (up to 3, cached or joint), every weight format through `CheckpointSource` and GGUF, a one-launch CUDA step graph and Vulkan kernels. Tiny-config parity passes on CPU and Vulkan, edits included; no speed run yet. ([details](#moss-image)) |
 
@@ -585,6 +586,36 @@ Architecture and sources: [FLUX3_KLEIN_ARCHITECTURE.md](../Research/FLUX3_KLEIN_
   synthetic smoke tests, converter, LoRA mapping and merge tests. **Not verified:** a real-weight generation, the
   text-encoder taps against ComfyUI, GPU backends, and an A/B of the hoisted Flux.2 latent and VAE code on Flux.2,
   Krea 2 and Lens.
+
+### Iris-Z
+
+**Built, not yet run on real weights (2026-11-12).** Sperid Labs' FLUX.2 fine-tunes that generate an image and its
+depth with one set of weights: Iris-Z-small (FLUX.2 Klein base 9B, Qwen3-8B text encoder) and Iris-Z-big (FLUX.2 Dev
+without its guidance embedding, Mistral-Small-3). They are the `iris-z-small` and `iris-z-big` variants of the `flux2`
+recipe, told from their bases by the `modality_in.weight` tensor, and have catalog ids of the same names. The weights
+carry the **FLUX non-commercial licence**. Architecture and sources: [IRIS_Z_ARCHITECTURE.md](../Research/IRIS_Z_ARCHITECTURE.md).
+
+- **Tasks** (`irisz.task` in the request's `Extra`, `--iris-task` on the CLI): `image` (prompt to image), `rgbd` (prompt
+  to image, with the depth in `ImageResult.Depth`), `depth` (the init image to its depth map) and `paint` (an init image
+  that is a depth map, to an image). Without the key the task is `depth` when an init image is set and `image` otherwise.
+- **Defaults.** 50 steps, true CFG 4.0 (small) or 3.5 (big), 1024². Depth runs 4 steps with the last two clean-depth
+  estimates averaged (`irisz.depth_steps`, `irisz.depth_seeds`); `irisz.resolution` picks the 512 or 1024 working size.
+- **Output.** `depth` returns the depth rendered as the image (`irisz.depth_format`: `colours`, `depth` or `disparity`)
+  and the log depth plane. `rgbd` returns the image plus the plane; the CLI writes `depth.png` beside the image and the
+  API adds `depthPng`.
+- **Weights.** The release is sharded (4 shards and 18.2 GB for small, 14 shards and 64.3 GB for big, BF16) with a
+  `transformer.safetensors.index.json`; the recipe opens the set from any shard, the index or the folder. The
+  `empty_prompt.safetensors` beside them conditions every run without a prompt, so those never load the text encoder.
+- **Refused by name:** image-to-image and inpaint (the model has no noised-init task), an init image on `image` or `rgbd`,
+  a named sampler on `depth`, and colour-coded depth maps as `paint` input. Regions, prompt scheduling and the refiner
+  are not declared for these variants. LoRAs merge as for the FLUX.2 bases, untested.
+- **Verified so far:** on tiny random weights on the CPU, one grid at the text's sigma reproduces the single-image
+  FLUX.2 forward, each grid's sigma, modality row and position reach the output, and all four tasks run end to end
+  without a prompt. Depth encoding, ensembles, working sizes and the schedule's `mu` match values worked out from the
+  reference's formulas.
+- **Not verified:** any real-weight generation, parity against speridlabs/iris-z-sdk (it was not run), the prompted
+  CFG path (it needs the text encoder), CUDA and Vulkan, memory at 1024² (twice FLUX.2's image tokens), and Iris-Z-big
+  at all: it has no quantized build, and its Mistral prompt is not padded to 512 tokens as the reference pads it.
 
 ### MOSS-Image
 
