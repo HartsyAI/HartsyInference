@@ -23,7 +23,7 @@ public static class HunyuanPaintRope
             for (int gy = 0; gy < grid; gy++)
                 for (int gx = 0; gx < grid; gx++)
                 {
-                    double sx = 0, sy = 0, sz = 0;
+                    float sx = 0, sy = 0, sz = 0;
                     int count = 0;
                     for (int y = gy * cell; y < (gy + 1) * cell; y++)
                         for (int x = gx * cell; x < (gx + 1) * cell; x++)
@@ -31,17 +31,17 @@ public static class HunyuanPaintRope
                             int p = ((v * pixels + y) * pixels + x) * 3;
                             if (positions[p] == 255 || positions[p + 1] == 255 || positions[p + 2] == 255)
                                 continue;
-                            sx += positions[p] / 255.0;
-                            sy += positions[p + 1] / 255.0;
-                            sz += positions[p + 2] / 255.0;
+                            sx += (float)(Half)(positions[p] / 255f);
+                            sy += (float)(Half)(positions[p + 1] / 255f);
+                            sz += (float)(Half)(positions[p + 2] / 255f);
                             count++;
                         }
                     int token = ((v * grid + gy) * grid + gx) * 3;
                     if (count < threshold || count == 0)
                         continue;
-                    indices[token] = Voxel(sx / count, voxelResolution);
-                    indices[token + 1] = Voxel(sy / count, voxelResolution);
-                    indices[token + 2] = Voxel(sz / count, voxelResolution);
+                    indices[token] = Voxel(sx, count, voxelResolution);
+                    indices[token + 1] = Voxel(sy, count, voxelResolution);
+                    indices[token + 2] = Voxel(sz, count, voxelResolution);
                 }
         return indices;
     }
@@ -90,6 +90,15 @@ public static class HunyuanPaintRope
         return (c, s);
     }
 
-    private static int Voxel(double mean, int voxelResolution) =>
-        (int)Math.Round(Math.Clamp(mean, 0.0, 1.0) * (voxelResolution - 1), MidpointRounding.ToEven);
+    // Upstream pools in half precision (`position.half()`): the values, the sum, the mean and the scaled index are each rounded to F16 (the sum accumulates
+    // in F32 and is rounded once), then torch.round rounds half to even. Doing the same keeps every index equal to upstream's; in F32 about 4 % of the
+    // finest-level indices land one voxel away.
+    private static int Voxel(float sum, int count, int voxelResolution)
+    {
+        Half total = (Half)sum;
+        Half mean = (Half)((float)total / count);
+        float clamped = Math.Clamp((float)mean, 0f, 1f);
+        Half scaled = (Half)(clamped * (voxelResolution - 1));
+        return (int)Math.Round((float)scaled, MidpointRounding.ToEven);
+    }
 }

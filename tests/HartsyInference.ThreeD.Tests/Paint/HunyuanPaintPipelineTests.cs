@@ -99,5 +99,7 @@ public sealed unsafe class HunyuanPaintPipelineTests
     private sealed class RandomConditioner(int dim) : IPaintConditioner
     {
         public Tensor Tokens(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height) => HunyuanPaintUnetTests.Random(77, 1, 3, dim);
+
+        public Tensor UnconditionalTokens(IBackend backend) => new(new TensorShape(1, 3, dim), DType.F32);
     }
 }
