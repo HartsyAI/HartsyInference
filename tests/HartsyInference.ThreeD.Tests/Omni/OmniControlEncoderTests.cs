@@ -45,6 +45,66 @@ public sealed class OmniControlEncoderTests(ITestOutputHelper output)
         Assert.Equal(0.9375f, clamped[0], 5);
         Assert.Equal(-0.9375f, clamped[1], 5);
         Assert.Throws<ArgumentException>(() => OmniControlEncoder.VoxelRows([1, 2]));
+        Assert.Throws<ArgumentException>(() => OmniControlEncoder.VoxelRows([0f, float.NaN, 0f]));
+    }
+
+    private static Dictionary<string, Tensor> RandomWeights(int seed)
+    {
+        Random random = new(seed);
+        Dictionary<string, Tensor> w = [];
+        void Add(string key, params long[] shape)
+        {
+            Tensor t = new(new TensorShape(shape), DType.F32);
+            foreach (ref float v in t.AsSpan<float>())
+                v = (float)(random.NextDouble() - 0.5);
+            w[key] = t;
+        }
+
+        Add("linear.0.weight", 1024, 102); Add("linear.0.bias", 1024); Add("linear.1.weight", 1024);
+        Add("cond_signal_embedding.weight", 4, 8); Add("cond_signal_linear.weight", 1024, 8); Add("cond_signal_linear.bias", 1024);
+        return w;
+    }
+
+    [Fact]
+    public void Encode_OnRandomWeights_GivesControlTokensThenTenIdenticalSignalTokens()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RandomWeights(1);
+        using OmniControlEncoder encoder = new(backend, weights);
+
+        using Tensor tokens = encoder.Encode(OmniControlKind.Voxel, OmniControlEncoder.VoxelRows([0.1f, 0.2f, 0.3f, -0.5f, 0.5f, 0.9f]));
+
+        Assert.Equal(new TensorShape(1, 2 + 10, 1024), tokens.Shape);
+        ReadOnlySpan<float> data = tokens.AsSpan<float>();
+        Assert.All(data.ToArray(), v => Assert.True(float.IsFinite(v)));
+        for (int i = 3; i < 12; i++)
+            Assert.True(data.Slice(2 * 1024, 1024).SequenceEqual(data.Slice(i * 1024, 1024)));
+        // The signal token is table[kind] through Linear(8, 1024).
+        float[] table = weights["cond_signal_embedding.weight"].AsSpan<float>().ToArray(), w = weights["cond_signal_linear.weight"].AsSpan<float>().ToArray(), b = weights["cond_signal_linear.bias"].AsSpan<float>().ToArray();
+        for (int c = 0; c < 1024; c += 97)
+        {
+            double expected = b[c];
+            for (int k = 0; k < 8; k++)
+                expected += table[2 * 8 + k] * w[c * 8 + k];
+            Assert.Equal(expected, data[2 * 1024 + c], 4);
+        }
+
+        Assert.Throws<ArgumentException>(() => encoder.Encode(OmniControlKind.Point, []));
+        Assert.Throws<ArgumentException>(() => encoder.Encode(OmniControlKind.Point, new float[7]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Encode((OmniControlKind)4, new float[6]));
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+    }
+
+    [Fact]
+    public void Constructor_RejectsAMissingTensorAndAWrongShape()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RandomWeights(2);
+        weights.Remove("cond_signal_linear.bias");
+        Assert.Throws<KeyNotFoundException>(() => new OmniControlEncoder(backend, weights));
+        weights["cond_signal_linear.bias"] = new Tensor(new TensorShape(512), DType.F32);
+        Assert.Throws<InvalidDataException>(() => new OmniControlEncoder(backend, weights));
     }
 
     private static unsafe float[] Values(Tensor t)

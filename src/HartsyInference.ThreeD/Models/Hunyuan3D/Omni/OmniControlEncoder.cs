@@ -40,8 +40,8 @@ public sealed class OmniControlEncoder : IDisposable
     private readonly Tensor _linearW, _linearB, _normW, _signalTable, _signalW, _signalB;
     private bool _disposed;
 
-    /// <summary>Builds the encoder from the tensors of <c>cond_encoder/pytorch_model.bin</c> (<c>linear.0</c> and <c>linear.1</c>, <c>cond_signal_embedding</c>, <c>cond_signal_linear</c>); the caller keeps ownership
-    /// of <paramref name="weights"/>.</summary>
+    /// <summary>Builds the encoder from the tensors of <c>cond_encoder/pytorch_model.bin</c> (<c>linear.0</c> and <c>linear.1</c>, <c>cond_signal_embedding</c>, <c>cond_signal_linear</c>). The caller keeps ownership
+    /// of <paramref name="weights"/> and must keep them alive for as long as the encoder is used: tensors that are already F32 are borrowed, not copied.</summary>
     public OmniControlEncoder(IBackend backend, IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -59,6 +59,8 @@ public sealed class OmniControlEncoder : IDisposable
     public Tensor Encode(OmniControlKind kind, ReadOnlySpan<float> rows)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!Enum.IsDefined(kind))
+            throw new ArgumentOutOfRangeException(nameof(kind), kind, "The control kind must be Pose, BoundingBox, Voxel or Point.");
         if (rows.Length == 0 || rows.Length % RowWidth != 0)
             throw new ArgumentException($"The control needs rows of {RowWidth} values and at least one row; got {rows.Length} values.", nameof(rows));
         int count = rows.Length / RowWidth;
@@ -105,6 +107,8 @@ public sealed class OmniControlEncoder : IDisposable
         SortedSet<int> occupied = [];
         for (int i = 0; i < points.Length; i += 3)
         {
+            if (!float.IsFinite(points[i]) || !float.IsFinite(points[i + 1]) || !float.IsFinite(points[i + 2]))
+                throw new ArgumentException($"Point {i / 3} is not finite.", nameof(points));
             int x = Quantise(points[i]), y = Quantise(points[i + 1]), z = Quantise(points[i + 2]);
             occupied.Add(x + y * VoxelResolution + z * VoxelResolution * VoxelResolution);
         }
@@ -115,12 +119,10 @@ public sealed class OmniControlEncoder : IDisposable
         foreach (int index in occupied)
         {
             int z = index / (VoxelResolution * VoxelResolution), y = index % (VoxelResolution * VoxelResolution) / VoxelResolution, x = index % VoxelResolution;
-            float[] center = [x * size + size / 2 - 1, y * size + size / 2 - 1, z * size + size / 2 - 1];
-            for (int c = 0; c < 3; c++)
-            {
-                rows[row * RowWidth + c] = center[c];
-                rows[row * RowWidth + 3 + c] = center[c];
-            }
+            float cx = x * size + size / 2 - 1, cy = y * size + size / 2 - 1, cz = z * size + size / 2 - 1;
+            rows[row * RowWidth] = rows[row * RowWidth + 3] = cx;
+            rows[row * RowWidth + 1] = rows[row * RowWidth + 4] = cy;
+            rows[row * RowWidth + 2] = rows[row * RowWidth + 5] = cz;
 
             row++;
         }
