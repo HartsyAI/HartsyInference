@@ -47,6 +47,18 @@ public sealed class MogeFocalShiftTests
     }
 
     [Fact]
+    public void Recover_StartsInFrontOfTheCameraWhenTheRawDepthsAreNotPositive()
+    {
+        // The linear and sinh remaps allow raw depths below zero: true depths of 2 to 3 shifted back by 3 are all at or below zero.
+        (float[] points, bool[] valid) = Scene(48, 64, focal: 1.1, shift: 3.0, (u, v) => 2.5 + 0.4 * u);
+
+        (double focal, double shift) = MogeFocalShift.Recover(points, valid, 48, 64);
+
+        Assert.Equal(1.1, focal, 2);
+        Assert.Equal(3.0, shift, 2);
+    }
+
+    [Fact]
     public void Recover_IgnoresMaskedPointsAndFallsBackWhenTooFewAreValid()
     {
         (float[] points, bool[] valid) = Scene(48, 64, focal: 0.9, shift: 0.25, (u, v) => 2.5 + 0.3 * u);

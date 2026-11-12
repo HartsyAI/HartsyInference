@@ -40,8 +40,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     public static bool HasWeights(string modelDirectory) =>
         Directory.Exists(modelDirectory) && new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs" }.All(stem => Find(modelDirectory, stem) is not null);
 
-    /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c>; its config JSON is optional).</summary>
-    public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, "moge_vitl.safetensors"));
+    /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c>, or a <c>.ckpt</c> of it; its config JSON is optional).</summary>
+    public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && Find(modelDirectory, "moge_vitl") is not null;
 
     /// <summary>Generates the splats and the pose of one object.</summary>
     /// <param name="log">Receives one line per stage with the elapsed time since the call started.</param>
@@ -57,6 +57,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         Stopwatch clock = Stopwatch.StartNew();
         void Log(string message) => log?.Invoke($"[{clock.Elapsed.TotalSeconds,7:F1}s] {message}");
 
+        if (request.Pointmap is null && request.MogeResolutionLevel is < 0 or > 9)
+            throw new ArgumentOutOfRangeException(nameof(request), request.MogeResolutionLevel, "The MoGe resolution level is 0 to 9.");
         (float[] rgb, float[] mask) = Planar(request);
         SamPointmapInput pointmap = request.Pointmap ?? EstimatePointmap(rgb, request, Log);
         SamPrepared prepared = SamPreprocessor.Prepare(rgb, mask, pointmap, request.Height, request.Width);
@@ -101,9 +103,17 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         using (SamCheckpoint checkpoint = SamCheckpoint.Load(checkpointPath))
         {
             MogeModel model = new(config, checkpoint.Tensors);
-            Backend.PreloadWeights(checkpoint.Tensors.Values);
-            result = model.Infer(Backend, rgb, request.Height, request.Width, request.MogeResolutionLevel);
-            Backend.FreeWeights(checkpoint.Tensors.Values);
+            // The model's own tensors, not the checkpoint's: the backbone q, k and v are views of the fused ones, and the backend caches by tensor object.
+            List<Tensor> weights = [.. model.EnumerateWeights()];
+            try
+            {
+                Backend.PreloadWeights(weights);
+                result = model.Infer(Backend, rgb, request.Height, request.Width, request.MogeResolutionLevel);
+            }
+            finally
+            {
+                Backend.FreeWeights(weights);
+            }
         }
 
         Sweep();

@@ -54,8 +54,11 @@ public sealed class MogeModel
         _layers = [.. Enumerable.Range(preset.NumLayers - config.IntermediateLayers, config.IntermediateLayers)];
     }
 
-    /// <summary>The tensors the backbone reads, for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c> (the head's are borrowed from the checkpoint).</summary>
-    public IEnumerable<Tensor> EnumerateBackboneWeights() => _backbone.EnumerateWeights();
+    /// <summary>
+    /// The tensors the model reads, for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c>: the backbone's (its query, key and value projections are views of the fused checkpoint tensors, and
+    /// the backend caches by tensor object, so the checkpoint's own fused tensors are not the ones to preload or free) and the head's.
+    /// </summary>
+    public IEnumerable<Tensor> EnumerateWeights() => _backbone.EnumerateWeights().Concat(_head.EnumerateWeights());
 
     /// <summary>
     /// The model's <c>forward</c>: resize to the token budget, run backbone and head, resize the outputs to the input, remap the points. Returns planar points <c>[3, height, width]</c>

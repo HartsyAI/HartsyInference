@@ -50,9 +50,11 @@ public static class MogeFocalShift
             return cost;
         }
 
-        double shiftNow = 0, cost = Evaluate(shiftNow, residual), lambda = 1e-3;
-        if (double.IsNaN(cost))
-            throw new ArgumentException("A point is at or behind the camera for a zero shift; the solver needs positive depths.");
+        // Upstream starts at a zero shift. A map with depths at or below zero there (the linear and sinh remaps allow it) starts at the smallest shift that puts every point in front instead.
+        double minimumDepth = double.PositiveInfinity;
+        for (int i = 0; i < n; i++)
+            minimumDepth = Math.Min(minimumDepth, xyz[3 * i + 2]);
+        double shiftNow = minimumDepth > 1e-9 ? 0 : 1e-3 - minimumDepth, cost = Evaluate(shiftNow, residual), lambda = 1e-3;
         for (int iteration = 0; iteration < MaxIterations; iteration++)
         {
             double h = 1e-6 * Math.Max(1.0, Math.Abs(shiftNow));

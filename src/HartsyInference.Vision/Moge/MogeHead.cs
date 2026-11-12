@@ -49,6 +49,10 @@ public sealed class MogeHead
 
     private static readonly int[] OutputChannels = [3, 1];
 
+    /// <summary>The head's tensors (every one of the checkpoint under the head prefix), for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c>.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() =>
+        _weights.Where(entry => entry.Key.StartsWith(_prefix, StringComparison.Ordinal)).Select(entry => entry.Value);
+
     private Tensor Weight(string name, params long[] shape)
     {
         string key = _prefix + name;
