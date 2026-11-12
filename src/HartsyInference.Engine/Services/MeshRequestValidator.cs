@@ -107,7 +107,7 @@ internal static class MeshRequestValidator
 
     private static void RequireMatteForAuto(string id, MeshRequest request, bool matterAvailable)
     {
-        if (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id) && request.Image is { HasAlpha: false } && !matterAvailable)
+        if (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id) && request.Image is { } image && !MeshPreparationService.HasUsableAlpha(image) && !matterAvailable)
         {
             throw new NotSupportedException(
                 $"Preprocess Auto needs the foreground cut out for {id}: send an image with alpha, or install the BiRefNet matting checkpoint (Vision/BiRefNet-matting/model.safetensors).")

@@ -11,7 +11,11 @@ internal static class ForegroundPixels
             throw new ArgumentException($"A {width} x {height} image holds {(long)width * height * 3} RGB bytes; got {rgb.Length}.", nameof(rgb));
         if (alpha is not null && alpha.Length != width * height)
             throw new ArgumentException($"A {width} x {height} alpha plane holds {width * height} bytes; got {alpha.Length}.", nameof(alpha));
-        return alpha ?? Enumerable.Repeat((byte)255, width * height).ToArray();
+        if (alpha is not null)
+            return alpha;
+        byte[] opaque = new byte[width * height];
+        Array.Fill(opaque, (byte)255);
+        return opaque;
     }
 
     /// <summary>The inclusive box of the pixels whose alpha is above <paramref name="threshold"/>, or null when there are none.</summary>

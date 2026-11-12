@@ -18,8 +18,10 @@ public static class TripoSrImageProcessor
             throw new ArgumentException("The image has no foreground; supply a cutout or let the engine matte it.", nameof(alpha));
 
         // Upstream slices image[y1:y2, x1:x2] with the inclusive extremes, so the last foreground row and column fall outside the crop.
-        int cropWidth = Math.Max(box.Value.MaxX - box.Value.MinX, 1);
-        int cropHeight = Math.Max(box.Value.MaxY - box.Value.MinY, 1);
+        int cropWidth = box.Value.MaxX - box.Value.MinX;
+        int cropHeight = box.Value.MaxY - box.Value.MinY;
+        if (cropWidth == 0 || cropHeight == 0)
+            throw new ArgumentException("The image has no foreground at least two pixels in each direction; supply a cutout or let the engine matte it.", nameof(alpha));
         byte[] rgba = ForegroundPixels.ToRgba(rgb, coverage);
         byte[] crop = ForegroundPixels.CropRgba(rgba, width, height, box.Value.MinX, box.Value.MinY, box.Value.MinX + cropWidth, box.Value.MinY + cropHeight);
 
