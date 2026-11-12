@@ -34,6 +34,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new object();
     private readonly SemaphoreSlim _sam3dGate = new(1, 1);
+    private volatile bool _disposed;
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal MeshService(InferenceEngine engine) => _engine = engine;
@@ -424,12 +425,14 @@ public sealed class MeshService : IMeshService, IDisposable
         int total = job.StructureSteps + job.SlatSteps;
 
         return Task.Run(
-            () =>
+            async () =>
             {
-                _sam3dGate.Wait(cancel);
+                await _sam3dGate.WaitAsync(cancel).ConfigureAwait(false);
                 try
                 {
                     cancel.ThrowIfCancellationRequested();
+                    if (_disposed)
+                        throw new ModelUnloadedException("The service was disposed while this SAM 3D request was queued; retry the request.");
                     using Sam3dObjectsPipeline pipeline = new(_engine.Backend, directory);
                     Sam3dObjectsResult result = pipeline.Generate(
                         job,
@@ -762,6 +765,11 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        // A SAM 3D run builds its pipeline on the engine's backend: wait for the one in progress, and a request queued behind it finds the flag set.
+        _disposed = true;
+        _sam3dGate.Wait();
+        _sam3dGate.Release();
+
         // Take the entries out under the lock, then dispose outside it: a HairDeck disposal waits for a run in progress,
         // and holding the lock meanwhile would stall every other model load.
         List<LoadedMesh> pipelines;

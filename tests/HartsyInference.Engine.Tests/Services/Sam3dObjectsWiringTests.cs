@@ -72,6 +72,18 @@ public sealed class Sam3dObjectsWiringTests
     }
 
     [Fact]
+    public void AlphaFromMask_MapsEveryNonZeroRedValueToFullCoverage()
+    {
+        // A 0/1 label mask is the object, not a 1/255 sliver of it; the green and blue channels are not read.
+        byte[] rgb = [0, 9, 9, 1, 0, 0, 255, 0, 0, 128, 7, 7];
+
+        byte[] alpha = Sam3dObjectsRequestMapper.AlphaFromMask(rgb, 4, 1);
+
+        Assert.Equal([(byte)0, (byte)255, (byte)255, (byte)255], alpha);
+        Assert.Throws<ArgumentException>(() => Sam3dObjectsRequestMapper.AlphaFromMask(rgb, 3, 1));
+    }
+
+    [Fact]
     public void Validate_RejectsAMissingImageMaskOrAnEmptyMask()
     {
         Assert.Throws<NotSupportedException>(() => Sam3dObjectsRequestMapper.Validate(new MeshRequest()));

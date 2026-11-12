@@ -75,7 +75,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         return new Sam3dObjectsResult { Splats = cloud, Pose = pose, Voxels = voxels, Seed = seed };
     }
 
-    /// <summary>The planar float image (0 to 1) and the mask (0 or 1) of the request.</summary>
+    /// <summary>The planar float image (0 to 1) and the mask (alpha over 255, so 0 to 1 with soft edges kept) of the request.</summary>
     private static (float[] Rgb, float[] Mask) Planar(Sam3dObjectsRequest request)
     {
         int pixels = request.Width * request.Height;

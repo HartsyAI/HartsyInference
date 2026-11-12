@@ -15,12 +15,28 @@ public static class Sam3dObjectsRequestMapper
     public static Sam3dObjectsRequest ToRequest(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        // Callers validate first to fail before they load anything; this keeps ToRequest safe on its own.
         Validate(request);
         ImageData image = request.Image!;
         int steps = request.Steps == 0 ? DefaultSteps : request.Steps;
         return new Sam3dObjectsRequest(
             image.Rgb, image.Alpha!, image.Width, image.Height, Pointmap: null,
             Seed: request.Seed < 0 ? null : (int)request.Seed, StructureSteps: steps, SlatSteps: steps);
+    }
+
+    /// <summary>
+    /// The alpha plane of a mask image: the red channel (the coverage convention of <c>--prompt-mask</c>) with every non-zero value mapped to 255, so a 0/1 label mask is the object and
+    /// not a 1/255 sliver of it. The pipeline reads the plane as <c>alpha / 255</c>.
+    /// </summary>
+    /// <param name="rgb">Interleaved RGB, <c>width x height x 3</c>.</param>
+    public static byte[] AlphaFromMask(ReadOnlySpan<byte> rgb, int width, int height)
+    {
+        if (width <= 0 || height <= 0 || rgb.Length != (long)width * height * 3)
+            throw new ArgumentException($"A {width} x {height} mask holds {(long)width * height * 3} RGB bytes; got {rgb.Length}.", nameof(rgb));
+        byte[] alpha = new byte[width * height];
+        for (int i = 0; i < alpha.Length; i++)
+            alpha[i] = rgb[i * 3] == 0 ? (byte)0 : (byte)255;
+        return alpha;
     }
 
     /// <summary>Checks a SAM 3D request before any checkpoint loads.</summary>
