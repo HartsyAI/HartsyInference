@@ -96,6 +96,46 @@ public sealed class MeshLifecycleTests : IDisposable
         Assert.Empty(engine.MeshLifecycle.Loaded());
     }
 
+    [Fact]
+    public async Task FreeWaitsForARunOnAPipelineWithoutAGateAndNewRunsWaitForTheFree()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshService mesh = (MeshService)engine.Mesh;
+        Adopt(mesh, Rig("busy"));
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<MeshResult> run = mesh.RunCounted(async () =>
+        {
+            started.SetResult();
+            await release.Task;
+            return Result();
+        });
+        await started.Task;
+
+        Task<int> free = Task.Run(() => engine.MeshLifecycle.Free("busy"));
+        await Task.Delay(300);
+
+        Assert.False(free.IsCompleted, "Free disposed a pipeline while a run was using it.");
+        release.SetResult();
+        Assert.Equal(1, await free);
+        await run;
+        Assert.Empty(engine.MeshLifecycle.Loaded());
+        Assert.NotNull(await mesh.RunCounted(() => Task.FromResult(Result())));
+    }
+
+    [Fact]
+    public void ANameKeepsNoPathAndAFolderBesideTheModelsRootIsNotRelativeToIt()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshService mesh = (MeshService)engine.Mesh;
+        Adopt(mesh, Rig("plain"));
+
+        MeshLoadedModel model = Assert.Single(engine.MeshLifecycle.Loaded());
+
+        Assert.Equal("plain", model.Name);
+        Assert.DoesNotContain("..", model.Name);
+    }
+
     private string Rig(string name)
     {
         string folder = Path.Combine(_folder, name);

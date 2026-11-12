@@ -8,6 +8,6 @@ public interface IMeshLifecycleService
     /// <summary>The pipelines resident now.</summary>
     IReadOnlyList<MeshLoadedModel> Loaded();
 
-    /// <summary>Frees the pipeline loaded from <paramref name="name"/> (<see cref="MeshLoadedModel.Name"/>, case-insensitive), or every one when it is null, and returns how many were freed. A generation running on one finishes first; the next request loads it again.</summary>
+    /// <summary>Frees the pipeline loaded from <paramref name="name"/> (<see cref="MeshLoadedModel.Name"/>, case-insensitive), or every one when it is null, and returns how many were freed. A generation running on one finishes first; the next request loads it again. Two kinds cached from the same folder share a name and are freed together.</summary>
     int Free(string? name = null);
 }

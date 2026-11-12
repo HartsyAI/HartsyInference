@@ -18,7 +18,7 @@ public static class MeshEndpoints
         app.MapPost("/v1/native/mesh/free", IResult (NativeMeshFreeRequest? req, IInferenceEngine engine) =>
             Results.Ok(new { Freed = engine.MeshLifecycle.Free(req?.Name) }));
 
-        app.MapGet("/v1/native/mesh/describe",IResult (IInferenceEngine engine) => Results.Json(engine.MeshPlanning.DescribeAll()));
+        app.MapGet("/v1/native/mesh/describe", IResult (IInferenceEngine engine) => Results.Json(engine.MeshPlanning.DescribeAll()));
 
         app.MapGet("/v1/native/mesh/describe/{id}", IResult (string id, IInferenceEngine engine) =>
         {
