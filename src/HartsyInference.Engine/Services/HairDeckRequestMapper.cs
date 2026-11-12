@@ -37,17 +37,17 @@ internal static class HairDeckRequestMapper
         ArgumentNullException.ThrowIfNull(request);
         if (request.Samples != 1)
         {
-            throw new NotSupportedException($"'{modelId}' generates one sample per request; {request.Samples} samples were requested.");
+            throw new NotSupportedException($"'{modelId}' generates one sample per request; {request.Samples} samples were requested.").ForField(nameof(MeshRequest.Samples));
         }
 
         if (request.Rigged)
         {
-            throw new NotSupportedException($"'{modelId}' has no rigged output; rigged output is HairDeck-only.");
+            throw new NotSupportedException($"'{modelId}' has no rigged output; rigged output is HairDeck-only.").ForField(nameof(MeshRequest.Rigged));
         }
 
         if (request.Colors is not null || request.Chains is not null)
         {
-            throw new NotSupportedException($"'{modelId}' takes no colour or chain option; those are HairDeck-only.");
+            throw new NotSupportedException($"'{modelId}' takes no colour or chain option; those are HairDeck-only.").ForField(request.Colors is not null ? nameof(MeshRequest.Colors) : nameof(MeshRequest.Chains));
         }
     }
 }

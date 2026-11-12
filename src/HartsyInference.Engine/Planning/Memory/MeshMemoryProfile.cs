@@ -37,7 +37,7 @@ internal static class MeshMemoryProfile
             CapacityBytes = totalBytes,
             EffectiveTier = tier,
             Reason = fits
-                ? $"A recorded run peaked at {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card."
+                ? $"A recorded run peaked at {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card; free memory is not checked, so other programs on the card can still make it fail."
                 : $"A recorded run peaked at {ByteFormat.GbF1(peak)}; this card has {ByteFormat.GbF1(totalBytes)}.",
         };
     }

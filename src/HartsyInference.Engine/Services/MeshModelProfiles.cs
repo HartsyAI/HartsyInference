@@ -33,7 +33,7 @@ internal static class MeshModelProfiles
             .. HunyuanShapeProfiles(),
             Profile("trellis", MeshInputKind.Image, MeshOutputKinds.Splats,
                 [Steps("25", 1, null, "Sampler steps of both flows."), Ignored(nameof(MeshRequest.GridResolution), "The output is a splat cloud."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "MIT (TRELLIS-image-large)" },
                 new MeshCost { Basis = "No time or memory figure is recorded." },
                 note: "Returns Gaussian splats (ply), not a mesh."),
@@ -81,7 +81,7 @@ internal static class MeshModelProfiles
                 note: "Takes a scene mesh and, optionally, a mask or point prompt in ScenePrompt."),
             Profile("unirig", MeshInputKind.SceneMesh, MeshOutputKinds.RiggedMesh,
                 [Rejected(nameof(MeshRequest.Steps)), Rejected(nameof(MeshRequest.GridResolution)), Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "Seeds the skeleton sampling."), .. NoHairDeck(), .. NoTexture()],
+                    WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = "MIT (code and weights); training data CC-BY-4.0" },
                 new MeshCost { Basis = "CPU F32 skinning of one mesh took 400 s; no GPU figure is recorded." },
                 note: "Skeleton and skin weights for a triangle mesh; the result is a rigged glb."),
@@ -112,7 +112,7 @@ internal static class MeshModelProfiles
             yield return Profile(id, MeshInputKind.Image, MeshOutputKinds.Mesh,
                 [Steps(null, 1, null, "Sampler steps; the build's own default (50 standard, 10 Fast, 5 Turbo) when unset."),
                     Grid(null, null, 1, null, "Marching-cubes samples per axis; the checkpoint's default when unset."),
-                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), WrappingSeed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
                 new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
                 note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.");
@@ -122,7 +122,7 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Paint(string id, string terms, string note, MeshCost cost, Func<MeshRequest, double?>? peak) =>
         Profile(id, MeshInputKind.SceneMeshAndImage, MeshOutputKinds.TexturedMesh,
             [Steps(null, 0, null, "Sampler steps; 0 takes the checkpoint's default."),
-                Used(nameof(MeshRequest.GridResolution), "2048", 1, null, "texels", "The baked texture's edge, not a grid."),
+                Used(nameof(MeshRequest.GridResolution), "2048", 0, null, "texels", "The baked texture's edge, not a grid; 0 takes 2048."),
                 Rejected(nameof(MeshRequest.FieldOfViewRadians)), Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "Seeds the multiview noise."),
                 .. NoHairDeck(), .. NoTexture()],
             new MeshLicence
@@ -142,6 +142,9 @@ internal static class MeshModelProfiles
 
     private static MeshFieldSpec Grid(string? defaultValue, IReadOnlyList<string>? values, double? min, double? max, string note) =>
         new() { Name = nameof(MeshRequest.GridResolution), Access = MeshFieldAccess.Used, Default = defaultValue, Values = values, Min = min, Max = max, Note = note };
+
+    private static MeshFieldSpec WrappingSeed() =>
+        Used(nameof(MeshRequest.Seed), "random", 0, null, null, "A negative value draws a random seed. Only the low 32 bits are used: a larger value wraps instead of failing.");
 
     private static MeshFieldSpec Seed() =>
         Used(nameof(MeshRequest.Seed), "random", 0, int.MaxValue, null, "A negative value draws a random seed.");

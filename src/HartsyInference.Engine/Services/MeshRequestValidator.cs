@@ -26,7 +26,7 @@ internal static class MeshRequestValidator
         }
         if (MeshModelIds.RigMesh.Contains(id))
         {
-            ValidateRig(id, request);
+            RequireMeshOnly(id, request, "rigs a triangle mesh");
             return;
         }
         if (MeshModelIds.PaintMesh.Contains(id))
@@ -36,15 +36,17 @@ internal static class MeshRequestValidator
         }
         if (MeshModelIds.PartMesh.Contains(id))
         {
-            ValidatePart(id, request);
+            RequireMeshOnly(id, request, "segments a triangle mesh into parts");
+            if (request.Seed > int.MaxValue)
+                throw SeedTooLarge(request, "The P3-SAM seed");
             return;
         }
         if (id != MeshModelIds.HairDeck && !MeshModelIds.ImageToMesh.Contains(id))
             throw new NotSupportedException($"3D model '{id}' has no wired pipeline; supported: {string.Join(", ", MeshModelIds.Described)}.");
         if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).").ForField(nameof(MeshRequest.ScenePrompt));
         if (request.Image is null)
-            throw new NotSupportedException("Text-to-3D has no wired pipeline; supply MeshRequest.Image for image-to-3D (TripoSR / Hunyuan3D).");
+            throw new NotSupportedException("Text-to-3D has no wired pipeline; supply MeshRequest.Image for image-to-3D (TripoSR / Hunyuan3D).").ForField(nameof(MeshRequest.Image));
         if (id == MeshModelIds.HairDeck)
         {
             HairDeckRequestMapper.ToOptions(request);
@@ -72,42 +74,50 @@ internal static class MeshRequestValidator
     private static Trellis2InputImage ToInput(ImageData source) =>
         new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
 
+    private static ArgumentOutOfRangeException SeedTooLarge(MeshRequest request, string what) =>
+        new ArgumentOutOfRangeException(nameof(request), request.Seed, $"{what} must be at most {int.MaxValue}.").ForField(nameof(MeshRequest.Seed));
+
     private static void RequireTextureForSize(MeshRequest request, string model)
     {
         if (!request.Texture && request.TextureSize != 0)
-            throw new NotSupportedException($"TextureSize needs Texture; leave it at 0 for a shape-only {model} mesh.");
+            throw new NotSupportedException($"TextureSize needs Texture; leave it at 0 for a shape-only {model} mesh.").ForField(nameof(MeshRequest.TextureSize));
     }
 
     private static void ValidateScene(string id, MeshRequest request)
     {
         HairDeckRequestMapper.RejectForOtherModels(request, id);
         if (request.SceneMesh is null)
-            throw new NotSupportedException($"3D model '{id}' decomposes a triangle scene; supply MeshRequest.SceneMesh as obj or glb.");
+            throw new NotSupportedException($"3D model '{id}' decomposes a triangle scene; supply MeshRequest.SceneMesh as obj or glb.").ForField(nameof(MeshRequest.SceneMesh));
         if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
+            throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.").ForField(nameof(MeshRequest.Image));
         CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : MeshService.ToCoLa3DPrompt(request.ScenePrompt);
         CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
-        CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
+        try
+        {
+            CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
+        }
+        catch (ArgumentException error) when (error.ParamName == "resolution")
+        {
+            error.ForField(nameof(MeshRequest.GridResolution));
+            throw;
+        }
     }
 
-    private static void ValidateRig(string id, MeshRequest request)
+    /// <summary>The checks of a model that takes a mesh and nothing else (UniRig, P3-SAM); <paramref name="verb"/> says what the model does to it.</summary>
+    private static void RequireMeshOnly(string id, MeshRequest request, string verb)
     {
         HairDeckRequestMapper.RejectForOtherModels(request, id);
         if (request.SceneMesh is null)
-            throw new NotSupportedException($"3D model '{id}' rigs a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.");
+            throw new NotSupportedException($"3D model '{id}' {verb}; supply MeshRequest.SceneMesh as obj or glb.").ForField(nameof(MeshRequest.SceneMesh));
         if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
+            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.").ForField(nameof(MeshRequest.Image));
         if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
         if (request.Steps != 0 || request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
-    }
-
-    private static void ValidatePart(string id, MeshRequest request)
-    {
-        ValidateRig(id, request);
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The P3-SAM seed must be at most {int.MaxValue}.");
+        {
+            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.")
+                .ForField(request.Steps != 0 ? nameof(MeshRequest.Steps) : nameof(MeshRequest.GridResolution));
+        }
     }
 
     private static void ValidatePaint(string id, MeshRequest request)
@@ -116,13 +126,17 @@ internal static class MeshRequestValidator
         if (request.SceneMesh is null || request.Image is null)
         {
             throw new NotSupportedException(
-                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.");
+                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.")
+                .ForField(request.SceneMesh is null ? nameof(MeshRequest.SceneMesh) : nameof(MeshRequest.Image));
         }
         if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
         if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Paint seed must be at most {int.MaxValue}.");
+            throw SeedTooLarge(request, "The Paint seed");
         if (request.Steps < 0 || request.GridResolution < 0)
-            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.");
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.")
+                .ForField(request.Steps < 0 ? nameof(MeshRequest.Steps) : nameof(MeshRequest.GridResolution));
+        }
     }
 }

@@ -173,15 +173,84 @@ public sealed class MeshPlanningTests
         Assert.Equal(legal, error is null);
     }
 
-    [Fact]
-    public void ASeedAboveInt32IsRejectedByTheModelsThatSayTheirMaximumIsInt32()
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void TheSeedRangeOfTheProfileIsTheRuleTheValidatorEnforces(string id)
     {
-        foreach (string id in new[] { "trellis2", "pixal3d", "sam3d-objects", "hunyuan3d-part", "hunyuan3d-paint", "hunyuan3d-paint21" })
+        MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
+        MeshRequest request = Valid(id) with { Seed = (long)int.MaxValue + 1 };
+        Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+
+        if (seed.Access == MeshFieldAccess.Used && seed.Max == int.MaxValue)
+            Assert.IsType<ArgumentOutOfRangeException>(error);
+        else
+            Assert.Null(error);
+    }
+
+    [Fact]
+    public void TheModelsThatWrapALargeSeedSayTheyDo()
+    {
+        foreach (string id in new[] { "triposr", "hunyuan3d", "trellis", "unirig" })
         {
-            MeshRequest request = Valid(id) with { Seed = (long)int.MaxValue + 1 };
-            Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
-            Assert.Equal((double)int.MaxValue, Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed)).Max);
+            MeshFieldSpec seed = Profile(id).Fields.Single(f => f.Name == nameof(MeshRequest.Seed));
+            Assert.Null(seed.Max);
         }
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-part", "segments a triangle mesh into parts")]
+    [InlineData("unirig", "rigs a triangle mesh")]
+    public void ASceneModelWithoutAMeshSaysWhatItDoes(string id, string verb)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate(id, new MeshRequest(), matterAvailable: false));
+
+        Assert.Contains(verb, error.Message);
+        Assert.Equal(nameof(MeshRequest.SceneMesh), MeshFieldTag.FieldOf(error));
+    }
+
+    [Theory]
+    [InlineData("trellis2", "TextureSize")]
+    [InlineData("pixal3d", "TextureSize")]
+    public async Task PlanNamesTheFieldOfAnIssue(string id, string field)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), Valid(id) with { TextureSize = 512 });
+
+        Assert.Equal(field, Assert.Single(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Fact]
+    public async Task PlanNamesTheFieldOfRejectedOptionsOfOtherModels()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan samples = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Samples = 2 });
+        MeshPlan chains = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Chains = false });
+        MeshPlan seed = await engine.MeshPlanning.PlanAsync(Spec("hunyuan3d-part"), Valid("hunyuan3d-part") with { Seed = (long)int.MaxValue + 1 });
+
+        Assert.Equal(nameof(MeshRequest.Samples), samples.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Chains), chains.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+        Assert.Equal(nameof(MeshRequest.Seed), seed.Issues.Single(i => i.Severity == MeshPlanIssueSeverity.Error).Field);
+    }
+
+    [Fact]
+    public async Task APlanForAModelWithoutARecordedPeakSaysWhyThereIsNoFit()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr"));
+
+        Assert.Equal(MemoryFitVerdict.Unknown, plan.Memory.Verdict);
+        Assert.Contains("No device-memory peak", plan.Memory.Reason);
+    }
+
+    [Fact]
+    public void AMissingRequiredInputIsReportedAgainstItsField()
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("triposr", new MeshRequest(), matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.Image), MeshFieldTag.FieldOf(error));
     }
 
     [Fact]
