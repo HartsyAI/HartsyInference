@@ -62,7 +62,7 @@ public static partial class EngineKnobs
 
     /// <summary>Upscales each generated Paint 2.1 view 4x with Real-ESRGAN before it is baked. Off by default: on a 12 GB card it added 232 s to a 116 s run and showed no visible gain.</summary>
     public static readonly Knob<bool> PaintUpscaleViews =
-        new("numerics.paintUpscaleViews", false, KnobScope.Construction, KnobDomain.Numerics,
+        Bool("numerics.paintUpscaleViews", false, KnobScope.Construction, KnobDomain.Numerics,
             "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking; off by default (232 s extra on a 12 GB card, no visible gain).");
 
     /// <summary>Forces the HeartCodec scalar-decode chunk length in frames; unset uses the model's ChunkFrames.</summary>

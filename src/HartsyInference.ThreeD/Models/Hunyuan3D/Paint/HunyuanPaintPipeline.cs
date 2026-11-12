@@ -87,8 +87,9 @@ public sealed class HunyuanPaintPipeline
         return baked;
     }
 
-    /// <summary>Merges vertices at the same position and drops degenerate and duplicate faces and unreferenced vertices, and nothing else (no hole filling, no component removal, no
-    /// reorientation), so that the unwrapper sees the mesh's real connectivity.</summary>
+    /// <summary>Merges vertices at the same position (exact match) and drops degenerate and duplicate faces and unreferenced vertices, and does nothing else to the surface (no hole filling,
+    /// no component removal, no reorientation), so that the unwrapper sees the mesh's real connectivity. Like every <c>MeshCleaner</c> result it holds positions and indices only: supplied
+    /// normals and vertex colours are dropped (the bake replaces the colours, the renderer uses face normals). An edge shared by three or more faces stays; the unwrapper treats it as a boundary.</summary>
     internal static Mesh WeldForUnwrap(Mesh mesh) => MeshCleaner.Clean(mesh, new MeshCleanOptions
     {
         WeldVertices = true,

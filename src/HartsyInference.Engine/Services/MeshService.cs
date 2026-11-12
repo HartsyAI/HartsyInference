@@ -360,7 +360,13 @@ public sealed class MeshService : IMeshService, IDisposable
             try
             {
                 string? dino = FindPaintDino(folder);
-                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, PaintUpscaler(folder, EngineKnobs.PaintUpscaleViews.Value));
+                bool upscale = EngineKnobs.PaintUpscaleViews.Value;
+                string? upscaler = PaintUpscaler(folder, upscale);
+                if (upscale && upscaler is null)
+                {
+                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
+                }
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -372,7 +378,6 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
-    // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
     /// <summary>The Real-ESRGAN checkpoint the Paint 2.1 views are upscaled with: only when the <c>numerics.paintUpscaleViews</c> knob is on and <c>RealESRGAN_x4plus.pth</c> is in
     /// <paramref name="folder"/>; otherwise <c>null</c> and the views are baked as generated.</summary>
     internal static string? PaintUpscaler(string folder, bool enabled)
@@ -381,6 +386,7 @@ public sealed class MeshService : IMeshService, IDisposable
         return enabled && File.Exists(path) ? path : null;
     }
 
+    // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
     private static string? FindPaintDino(string folder)
     {
         string own = Path.Combine(folder, "dino", "model.safetensors");
