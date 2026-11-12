@@ -6,7 +6,7 @@ using HartsyInference.ThreeD.Geometry.Ops;
 namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 
 /// <summary>Shape of the X-Part ShapeVAE encoder (<c>PointCrossAttentionEncoder</c> of <c>partgen/models/autoencoders</c>, <c>infer.yaml</c>): width 1024, 16 heads, 8 self-attention
-/// blocks, 8 Fourier frequencies without pi, 4 point features (the normal and one more channel), q/k LayerNorm over the head dimension.</summary>
+/// blocks, 8 Fourier frequencies without pi, 4 point features (the unit normal and the sharp-edge label, upstream's `[xyz, normal, sharp-edge label]` surface rows), q/k LayerNorm over the head dimension.</summary>
 public sealed record XPartShapeEncoderConfig(int Width = 1024, int Heads = 16, int Layers = 8, int NumFreqs = 8, int PointFeats = 4)
 {
     /// <summary>Elements per Fourier-embedded point: <c>3 (2 NumFreqs + 1)</c>.</summary>
@@ -31,10 +31,10 @@ public sealed class XPartShapeEncoder : IDisposable
     private readonly XPartShapeEncoderConfig _config;
     private readonly FourierEmbedSpec _fourier;
     private readonly List<Tensor> _owned = [];
-    private Tensor _fourierWeight = null!, _featureWeight = null!, _inputBias = null!, _postW = null!, _postB = null!;
+    private Tensor _inputWeight = null!, _inputBias = null!, _postW = null!, _postB = null!;
     private CrossBlock _cross = null!;
     private SelfBlock[] _blocks = [];
-    private bool _disposed;
+    private bool _loaded, _disposed;
 
     /// <summary>Creates an encoder with no weights; call <see cref="LoadWeights"/>.</summary>
     public XPartShapeEncoder(IBackend backend, XPartShapeEncoderConfig? config = null)
@@ -53,18 +53,22 @@ public sealed class XPartShapeEncoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "")
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_loaded)
+            throw new InvalidOperationException("The weights are already loaded; create a new encoder for another set.");
         string p = prefix.Length == 0 ? "encoder" : prefix + ".encoder";
         int width = _config.Width, heads = _config.Heads, headDim = _config.HeadDim;
-        Tensor inputProj = Own(F32(weights, $"{p}.input_proj.weight", width, _config.InputWidth));
-        _fourierWeight = Own(SliceColumns(inputProj, 0, _config.FourierWidth));
-        _featureWeight = Own(SliceColumns(inputProj, _config.FourierWidth, _config.PointFeats));
-        _inputBias = Own(F32(weights, $"{p}.input_proj.bias", width));
+        // F32 owns what it widens and returns the caller's tensor as it is when it is already F32, so nothing here is wrapped in Own again.
+        _inputWeight = F32(weights, $"{p}.input_proj.weight", width, _config.InputWidth);
+        _inputBias = F32(weights, $"{p}.input_proj.bias", width);
         _cross = new CrossBlock(this, weights, $"{p}.cross_attn", width, heads, headDim);
-        _blocks = new SelfBlock[_config.Layers];
-        for (int i = 0; i < _blocks.Length; i++)
-            _blocks[i] = new SelfBlock(this, weights, $"{p}.self_attn.resblocks.{i}", width, heads, headDim);
-        _postW = Own(F32(weights, $"{p}.ln_post.weight", width));
-        _postB = Own(F32(weights, $"{p}.ln_post.bias", width));
+        SelfBlock[] blocks = new SelfBlock[_config.Layers];
+        for (int i = 0; i < blocks.Length; i++)
+            blocks[i] = new SelfBlock(this, weights, $"{p}.self_attn.resblocks.{i}", width, heads, headDim);
+        _postW = F32(weights, $"{p}.ln_post.weight", width);
+        _postB = F32(weights, $"{p}.ln_post.bias", width);
+        _blocks = blocks;
+        _loaded = true;
     }
 
     /// <summary>Encodes <paramref name="points"/> (length <c>3 N</c>) with <paramref name="features"/> (length <c>PointFeats N</c>), using the points at <paramref name="queryIndices"/> as queries.
@@ -73,7 +77,7 @@ public sealed class XPartShapeEncoder : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         int count = points.Length / 3, feats = _config.PointFeats;
-        if (_blocks.Length == 0 && _config.Layers > 0)
+        if (!_loaded)
             throw new InvalidOperationException("Call LoadWeights first.");
         if (count == 0 || points.Length != 3 * count || features.Length != feats * count || queryIndices.Length == 0)
             throw new ArgumentException($"The encoder needs 3 floats and {feats} features per point and at least one query; got {points.Length}, {features.Length} and {queryIndices.Length} queries.");
@@ -98,8 +102,15 @@ public sealed class XPartShapeEncoder : IDisposable
 
     /// <summary>As <see cref="Encode(ReadOnlySpan{float}, ReadOnlySpan{float}, ReadOnlySpan{int})"/> with <paramref name="queryCount"/> farthest-point samples as queries, starting from
     /// <paramref name="startIndex"/> (upstream starts from a random point).</summary>
-    public Tensor Encode(ReadOnlySpan<float> points, ReadOnlySpan<float> features, int queryCount, int startIndex = 0) =>
-        Encode(points, features, SurfaceSampler.FarthestPointIndices(points, queryCount, startIndex));
+    public Tensor Encode(ReadOnlySpan<float> points, ReadOnlySpan<float> features, int queryCount, int startIndex = 0)
+    {
+        int count = points.Length / 3;
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queryCount);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(queryCount, count);
+        ArgumentOutOfRangeException.ThrowIfNegative(startIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(startIndex, count);
+        return Encode(points, features, SurfaceSampler.FarthestPointIndices(points, queryCount, startIndex));
+    }
 
     /// <summary>Releases the converted weights.</summary>
     public void Dispose()
@@ -111,18 +122,18 @@ public sealed class XPartShapeEncoder : IDisposable
             t.Dispose();
     }
 
+    // input_proj over [Fourier(points) | features], one GEMM.
     private Tensor Embed(ReadOnlySpan<float> points, ReadOnlySpan<float> features, int count)
     {
-        int width = _config.Width;
         using Tensor coords = FromFloats(points, new TensorShape(count, 3));
         using Tensor fourier = new(new TensorShape(1, count, _fourier.Width), DType.F32);
         _backend.FourierEmbed(fourier, coords, _fourier);
-        using Tensor projected = new(new TensorShape(1, count, width), DType.F32);
-        _backend.Linear(projected, fourier, _fourierWeight, _inputBias);
         using Tensor featTensor = FromFloats(features, new TensorShape(1, count, _config.PointFeats));
-        using Tensor featProjected = new(projected.Shape, DType.F32);
-        _backend.Linear(featProjected, featTensor, _featureWeight, null);
-        return Add(projected, featProjected);
+        using Tensor joined = new(new TensorShape(1, count, _config.InputWidth), DType.F32);
+        _backend.Concat(joined, [fourier, featTensor], 2);
+        Tensor projected = new(new TensorShape(1, count, _config.Width), DType.F32);
+        _backend.Linear(projected, joined, _inputWeight, _inputBias);
+        return projected;
     }
 
     private Tensor Add(Tensor a, Tensor b)
@@ -182,17 +193,6 @@ public sealed class XPartShapeEncoder : IDisposable
         return tensor;
     }
 
-    private static Tensor SliceColumns(Tensor matrix, int start, int count)
-    {
-        int rows = (int)matrix.Shape[0], columns = (int)matrix.Shape[1];
-        Tensor slice = new(new TensorShape(rows, count), DType.F32);
-        ReadOnlySpan<float> source = matrix.AsSpan<float>();
-        Span<float> target = slice.AsSpan<float>();
-        for (int r = 0; r < rows; r++)
-            source.Slice(r * columns + start, count).CopyTo(target.Slice(r * count, count));
-        return slice;
-    }
-
     // ResidualCrossAttentionBlock: x = x + c_proj(attn(q_norm(c_q(ln_1 x)), k_norm(c_kv(ln_2 data)), v)); x = x + mlp(ln_3 x).
     private sealed class CrossBlock
     {
@@ -224,16 +224,18 @@ public sealed class XPartShapeEncoder : IDisposable
             IBackend b = _o._backend;
             int nq = (int)queries.Shape[1], nd = (int)data.Shape[1], width = _heads * _headDim;
             using Tensor n1 = _o.LayerNorm(queries, _ln1W, _ln1B, Eps);
-            using Tensor n2 = _o.LayerNorm(data, _ln2W, _ln2B, Eps);
+            Tensor n2 = _o.LayerNorm(data, _ln2W, _ln2B, Eps);
             TensorShape queryHeads = new(1, nq, _heads, _headDim), dataHeads = new(1, nd, _heads, _headDim);
             using Tensor q = new(queryHeads, DType.F32);
             b.Linear(q, n1, _cq, null);
-            using Tensor k = new(dataHeads, DType.F32);
+            Tensor k = new(dataHeads, DType.F32);
             b.Linear(k, n2, _ck, null);
             using Tensor vh = new(dataHeads, DType.F32);
             b.Linear(vh, n2, _cv, null);
+            n2.Dispose();
             using Tensor qn = _o.HeadNorm(q, _qnW, _qnB);
             using Tensor kn = _o.HeadNorm(k, _knW, _knB);
+            k.Dispose();
             using Tensor attended = _attention.Attend(b, qn, kn, vh, new TensorShape(1, nq, width), default);
             using Tensor projected = _attention.ProjectOutput(b, attended);
             Tensor x = _o.Add(queries, projected);

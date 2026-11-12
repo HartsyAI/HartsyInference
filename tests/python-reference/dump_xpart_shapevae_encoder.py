@@ -13,7 +13,7 @@ tencent/Hunyuan3D-Part (pinned in docs/Research/HUNYUAN3D_PART_ARCHITECTURE.md) 
     python dump_xpart_shapevae_encoder.py --upstream <checkout>/XPart/partgen/models/autoencoders --part <hunyuan3d-part folder> --out <fixture.safetensors>
 
 Fixture keys: `points` [N, 3], `feats` [N, 4], `query_idx` [Q] (float32), and for the encoder of `shapevae/shapevae.safetensors` (`vae.*`) and of the object encoder inside
-`conditioner/conditioner.safetensors` (`obj.*`): `after_cross` [Q, 1024] and `latents` [Q, 1024]. Times are printed.
+`conditioner/conditioner.safetensors` (`obj.*`) and of its local encoder (`local.*`): `latents` [Q, 1024]. Times are printed.
 """
 import argparse
 import logging
@@ -114,11 +114,12 @@ def main():
     for name, path, prefix in (
         ("vae", os.path.join(args.part, "shapevae", "shapevae.safetensors"), ""),
         ("obj", os.path.join(args.part, "conditioner", "conditioner.safetensors"), "obj_encoder."),
+        ("local", os.path.join(args.part, "conditioner", "conditioner.safetensors"), "geo_encoder.local_encoder."),
     ):
         tensors = read(path, prefix + "encoder.")
         start = time.time()
-        cross, latents = encode(blocks, tensors, prefix, points, feats, query_idx)
-        out[f"{name}.after_cross"], out[f"{name}.latents"] = cross, latents
+        _, latents = encode(blocks, tensors, prefix, points, feats, query_idx)
+        out[f"{name}.latents"] = latents
         print(f"{name}: {tuple(latents.shape)} in {time.time() - start:.1f} s, latent std {latents.std():.4f}")
     save_file({k: v.contiguous() for k, v in out.items()}, args.out)
     print("wrote", args.out)

@@ -103,6 +103,45 @@ public sealed class XPartShapeEncoderTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Encode_WithAQueryCountTakesTheFarthestPointsFromTheStartIndex()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RandomWeights(Tiny, 1);
+        using XPartShapeEncoder encoder = new(backend, Tiny);
+        encoder.LoadWeights(weights);
+        (float[] points, float[] feats) = Cloud(64, 5);
+        int[] picked = HartsyInference.ThreeD.Geometry.Ops.SurfaceSampler.FarthestPointIndices(points, 6, 3);
+        using Tensor byIndex = encoder.Encode(points, feats, picked);
+        using Tensor byCount = encoder.Encode(points, feats, 6, 3);
+        Assert.Equal(byIndex.AsSpan<float>().ToArray(), byCount.AsSpan<float>().ToArray());
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+    }
+
+    [Fact]
+    public void Dispose_LeavesTheCallersF32WeightsUsable()
+    {
+        using CpuBackend backend = new();
+        Dictionary<string, Tensor> weights = RandomWeights(Tiny, 1);
+        (float[] points, float[] feats) = Cloud(16, 6);
+        float[] first;
+        using (XPartShapeEncoder one = new(backend, Tiny))
+        {
+            one.LoadWeights(weights);
+            using Tensor t = one.Encode(points, feats, [1, 2]);
+            first = t.AsSpan<float>().ToArray();
+        }
+
+        // The weights are F32, so the encoder uses the caller's tensors as they are: disposing it must not free them, and a second encoder over the same dictionary agrees.
+        using XPartShapeEncoder two = new(backend, Tiny);
+        two.LoadWeights(weights);
+        using Tensor again = two.Encode(points, feats, [1, 2]);
+        Assert.Equal(first, again.AsSpan<float>().ToArray());
+        foreach (Tensor t in weights.Values)
+            t.Dispose();
+    }
+
+    [Fact]
     public void Encode_RejectsMalformedInputAndWeights()
     {
         using CpuBackend backend = new();
@@ -114,7 +153,12 @@ public sealed class XPartShapeEncoderTests(ITestOutputHelper output)
         Assert.Throws<ArgumentException>(() => encoder.Encode(points, feats[..^1], [0]));
         Assert.Throws<ArgumentException>(() => encoder.Encode(points, feats, []));
         Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Encode(points, feats, [8]));
-        Assert.Equal(8, encoder.Encode(points, feats, 8).Shape[1]);
+        using Tensor all = encoder.Encode(points, feats, 8);
+        Assert.Equal(8, all.Shape[1]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Encode(points, feats, 9));
+        Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Encode(points, feats, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => encoder.Encode(points, feats, 2, 8));
+        Assert.Throws<InvalidOperationException>(() => encoder.LoadWeights(weights));
 
         weights.Remove("encoder.ln_post.bias");
         using XPartShapeEncoder broken = new(backend, Tiny);
@@ -164,6 +208,7 @@ public sealed class XPartShapeEncoderTests(ITestOutputHelper output)
         {
             ("vae", Environment.GetEnvironmentVariable("HARTSY_XPART_SHAPEVAE")!, ""),
             ("obj", Environment.GetEnvironmentVariable("HARTSY_XPART_CONDITIONER")!, "obj_encoder"),
+            ("local", Environment.GetEnvironmentVariable("HARTSY_XPART_CONDITIONER")!, "geo_encoder.local_encoder"),
         })
         {
             using SafeTensorsLoader loader = new();
