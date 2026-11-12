@@ -518,6 +518,7 @@ public sealed partial class TextService : ITextService, IDisposable
             try
             {
                 ImageData? image = LastImage(request);
+                KimiK31Refusals.RefuseImage(slot.HostReference, image is not null);
                 if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 if (slot.MossVl is null) RequireNoVideo(request);
@@ -913,6 +914,8 @@ public sealed partial class TextService : ITextService, IDisposable
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
+        if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
+            KimiK31Refusals.RefuseMultiGpuPlacement(deviceKey, ResolveShardDevices(deviceKey).Length, _engine.Placement.TensorParallelDegree);
         if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
@@ -924,6 +927,11 @@ public sealed partial class TextService : ITextService, IDisposable
         if (string.Equals(checkpoint.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal))
         {
             LoadMiniMaxM3Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
+        {
+            LoadKimiK31Directory(slot, deviceKey, checkpoint, path);
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
@@ -957,8 +965,8 @@ public sealed partial class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
-    /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
-    private IBackend ReplaceWithHostBackend(TextDeviceSlot slot, string deviceKey, string modelName)
+    /// <summary>Disposes the slot's stage and primary backends and clears its placement, before a load builds its own backend.</summary>
+    private static void DisposeSlotBackends(TextDeviceSlot slot)
     {
         if (slot.ExtraStageBackends is not null)
         {
@@ -976,9 +984,42 @@ public sealed partial class TextService : ITextService, IDisposable
             slot.Backend = null;
         }
         slot.Placement = null;
+    }
+
+    /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
+    private IBackend ReplaceWithHostBackend(TextDeviceSlot slot, string deviceKey, string modelName)
+    {
+        DisposeSlotBackends(slot);
         if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
             Logs.Warning($"[TextService] {modelName} runs on the host only; '{deviceKey}' is ignored and the model loads on the CPU.");
         return CreateBackendFor("cpu");
+    }
+
+    /// <summary>Loads a Kimi K3.1 directory onto the device the request names: CUDA or Vulkan when asked, else the CPU. A device that cannot be created
+    /// throws; the load never falls back to the CPU. Requests take the pipeline route, which gates the device they name, because the decoder has no batched decode.</summary>
+    private void LoadKimiK31Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        try
+        {
+            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
+        }
+        catch
+        {
+            backend.Dispose();
+            throw;
+        }
+        slot.Backend = backend;
+        slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
+        slot.Scheduler = null;
+        slot.ResidencyPlan = null;
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning("[TextService] Kimi K3.1 has no host memory guard yet; its dense weights are widened to F32 at load, so the peak is not checked against free RAM.");
+        Logs.Info($"[TextService] Loaded Kimi K3.1 '{name}' on {deviceKey}.");
     }
 
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>

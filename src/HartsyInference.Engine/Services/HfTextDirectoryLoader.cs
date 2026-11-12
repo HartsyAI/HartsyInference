@@ -5,6 +5,7 @@ using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Models.Lfm3;
 using HartsyInference.LLM.Models.Spark;
 using HartsyInference.LLM.Ssm;
@@ -14,9 +15,12 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1 and ERNIE-5.5 (host reference models), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
+/// <summary>Opens a Hugging Face safetensors directory for the Text path; DeepSeek-V4.1, ERNIE-5.5 and Kimi K3.1 (host reference models), stateful families (LFM3, Spark-X) and MiniMax-M3 are recognised.</summary>
 internal static class HfTextDirectoryLoader
 {
+    /// <summary>The <c>model_type</c> of a Kimi K3.1 checkpoint.</summary>
+    internal const string KimiK31ModelType = "kimi_k31";
+
     /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 or ERNIE model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
     internal const int MaxSequenceTokens = 16384;
 
@@ -29,18 +33,25 @@ internal static class HfTextDirectoryLoader
     /// <summary>The ERNIE-5.5 options the Text path loads with: layers are dequantized one at a time from the mapped checkpoint on every forward.</summary>
     internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
 
-    /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1 or ERNIE-5.5) that <see cref="LoadHostReference"/> serves.</summary>
+    /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1) that <see cref="LoadHostReference"/> serves.</summary>
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
         string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal)
-        || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal);
+        || string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal)
+        || IsKimiK31(info);
 
-    /// <summary>Loads a host reference directory onto <paramref name="backend"/> (the CPU backend: the reference models keep their weights on the host).</summary>
+    /// <summary>Whether <paramref name="info"/> is a Kimi K3.1 checkpoint. Its backend follows the requested device rather than the CPU.</summary>
+    internal static bool IsKimiK31(HfCheckpointInfo info) => string.Equals(info.ModelType, KimiK31ModelType, StringComparison.Ordinal);
+
+    /// <summary>Loads a host reference directory onto <paramref name="backend"/>. DeepSeek-V4.1 and ERNIE-5.5 keep their weights on the host, so the caller
+    /// passes a CPU backend; a Kimi K3.1 directory runs on the backend it is given.</summary>
     /// <exception cref="HartsyInferenceException">The directory's model_type is not supported, it has no usable tokenizer.json, or the checkpoint is invalid.</exception>
     internal static IHostReferenceTextModel LoadHostReference(HfCheckpointInfo info, IBackend backend)
     {
         RequireSupported(info);
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             return Ernie5TextModel.Load(backend, info.Root, Ernie5Options);
+        if (IsKimiK31(info))
+            return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
@@ -79,6 +90,8 @@ internal static class HfTextDirectoryLoader
     {
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
             Ernie5Config.RequireRunnable(info.Root, info.ConfigPath);
+        if (IsKimiK31(info))
+            RequireKimiK31Runnable(info);
         bool stateful = IsStatefulFamily(info);
         bool miniMax = string.Equals(info.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal);
         if (!stateful && !miniMax && !IsHostReferenceFamily(info))
@@ -100,5 +113,20 @@ internal static class HfTextDirectoryLoader
         }
         if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
             throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the Text path needs to build its prompt.");
+    }
+
+    /// <summary>Refuses a Kimi K3.1 directory the Text path cannot read before any weight is opened: the Moonshot repo ships tiktoken.model, not tokenizer.json.</summary>
+    /// <exception cref="HartsyInferenceException">The shard index, tokenizer.json or chat_template.jinja is missing.</exception>
+    private static void RequireKimiK31Runnable(HfCheckpointInfo info)
+    {
+        if (info.IndexPath is null)
+            throw new HartsyInferenceException($"'{info.Root}' has no model.safetensors.index.json, which the Kimi K3.1 Text path needs to find its shards.");
+        if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
+        {
+            throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json. The Kimi K3.1 Text path reads tokenizer.json; "
+                + "the Moonshot checkpoint ships tiktoken.model and tokenization_kimi.py instead, which are not loaded.");
+        }
+        if (!File.Exists(Path.Combine(info.Root, "chat_template.jinja")))
+            throw new HartsyInferenceException($"'{info.Root}' has no chat_template.jinja, which the Kimi K3.1 Text path needs.");
     }
 }
