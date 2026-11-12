@@ -15,7 +15,6 @@ namespace HartsyInference.Engine.Recipes.Image;
 public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
 {
     private const string FamilyId = "minimax-h3-image";
-    private const string ImageVaeFile = "minimax_h3_image_vae_fp16.safetensors";
 
     /// <inheritdoc/>
     public string Name => FamilyId;
@@ -43,17 +42,8 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
     public IRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        string checkpointDir = Path.GetDirectoryName(Path.GetFullPath(context.CheckpointPath))
-            ?? throw new ArgumentException("The checkpoint path has no directory.", nameof(context));
-        // TODO(gpu): honour context.Components for the text encoder and image VAE, as the video recipe does through
-        // MiniMaxH3Assets. The lookup below assumes the Comfy-Org repack layout.
-        string imageVae = FindFile(checkpointDir, ImageVaeFile, "vae")
-            ?? throw new FileNotFoundException(
-                $"MiniMax-H3-Image needs {ImageVaeFile} next to the checkpoint (vae/).");
-        string textEncoder = FindFile(checkpointDir, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "text_encoders")
-            ?? FindFile(checkpointDir, "qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "text_encoders")
-            ?? throw new FileNotFoundException(
-                "MiniMax-H3-Image needs its Qwen3-VL-32B text encoder next to the checkpoint (text_encoders/).");
+        // The VAE and the text encoder are found from the DiT's location, or taken from the request's component overrides.
+        MiniMaxH3ImageAssets assets = MiniMaxH3ImageAssets.Resolve(context.CheckpointPath, context.Components);
 
         List<IDisposable> loaders = new List<IDisposable>();
         bool handedOff = false;
@@ -64,9 +54,9 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
                 DType.F32, context.TransformerBackends, out MiniMaxH3Config config, out Dictionary<string, Tensor> ditWeights);
             // LoadTransformer converts the weights but does not bind them; the video recipe binds them the same way.
             transformer.LoadWeights(ditWeights);
-            MiniMaxH3TextEncoder encoder = MiniMaxH3Components.LoadTextEncoder(textEncoder, loaders);
+            MiniMaxH3TextEncoder encoder = MiniMaxH3Components.LoadTextEncoder(assets.TextEncoder, loaders);
             Qwen2Tokenizer tokenizer = MiniMaxH3Components.LoadTokenizer(null);
-            MiniMaxH3VideoVaeDecoder decoder = LoadImageVae(imageVae, loaders);
+            MiniMaxH3VideoVaeDecoder decoder = LoadImageVae(assets.ImageVae, loaders);
 
             MiniMaxH3ImageRecipePipeline pipeline = new MiniMaxH3ImageRecipePipeline(transformer, config, decoder,
                 encoder, tokenizer, context.Backend, context.TextEncoderBackendOrDefault,
@@ -98,23 +88,5 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
         MiniMaxH3VideoVaeDecoder decoder = new MiniMaxH3VideoVaeDecoder(config);
         decoder.LoadWeights(weights);
         return decoder;
-    }
-
-    private static string? FindFile(string checkpointDir, string fileName, string subdir)
-    {
-        string[] candidates =
-        [
-            Path.Combine(checkpointDir, fileName),
-            Path.Combine(checkpointDir, subdir, fileName),
-            Path.Combine(checkpointDir, "..", subdir, fileName),
-        ];
-        foreach (string candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return Path.GetFullPath(candidate);
-            }
-        }
-        return null;
     }
 }
