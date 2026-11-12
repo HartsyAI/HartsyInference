@@ -14,7 +14,7 @@ public sealed class P3SamHeads
 {
     private const int PointWidth = 3, PromptWidth = 3, Masks = 3;
     private readonly P3SamMlp _seg1, _seg2, _seg3, _g, _s21, _s22, _s23, _iou, _iouOut;
-    private readonly int _featureDim, _hidden1, _hidden2;
+    private readonly int _featureDim, _hidden2;
 
     /// <summary>Reads the heads from <paramref name="weights"/> (keys such as <c>seg_mlp_1.0.weight</c>, the names in <c>p3sam.safetensors</c>).</summary>
     public P3SamHeads(IReadOnlyDictionary<string, Tensor> weights)
@@ -30,7 +30,6 @@ public sealed class P3SamHeads
         _iou = new P3SamMlp(weights, "iou_mlp");
         _iouOut = new P3SamMlp(weights, "iou_mlp_out");
         _featureDim = _seg1.In - PointWidth - PromptWidth;
-        _hidden1 = _seg1.Hidden;
         _hidden2 = _g.Out;
         Expect(_g.In == _featureDim + PointWidth + PromptWidth + Masks, "seg_s2_mlp_g input");
         foreach (P3SamMlp s2 in new[] { _s21, _s22, _s23 })
@@ -180,9 +179,9 @@ public sealed class P3SamHeads
     private static float[] Tail(IBackend backend, P3SamMlp mlp, float[] firstLayer, int n, bool activateLast)
     {
         float[] h = P3SamMlp.Gelu(backend, firstLayer);
-        h = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.W1, mlp.Hidden, mlp.B1);
+        h = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.T1, mlp.Hidden, mlp.TB1);
         h = P3SamMlp.Gelu(backend, h);
-        float[] output = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.W2, mlp.Out, mlp.B2);
+        float[] output = P3SamMlp.Matmul(backend, h, n, mlp.Hidden, mlp.T2, mlp.Out, mlp.TB2);
         return activateLast ? P3SamMlp.Gelu(backend, output) : output;
     }
 

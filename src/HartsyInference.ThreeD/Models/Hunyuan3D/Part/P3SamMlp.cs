@@ -9,6 +9,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Part;
 internal sealed class P3SamMlp
 {
     public readonly float[] W0, B0, W1, B1, W2, B2;
+    public readonly Tensor T0, TB0, T1, TB1, T2, TB2;
     public readonly int In, Hidden, Out;
 
     public P3SamMlp(IReadOnlyDictionary<string, Tensor> weights, string prefix)
@@ -25,16 +26,27 @@ internal sealed class P3SamMlp
         B1 = ToArray(Get(weights, prefix, 2, "bias"));
         W2 = ToArray(w2);
         B2 = ToArray(Get(weights, prefix, 4, "bias"));
+        // The layers also live as tensors made once, so a forward pass does not copy the weights into a fresh tensor every call.
+        (T0, TB0) = (Own(W0, Hidden, In), Own(B0, Hidden));
+        (T1, TB1) = (Own(W1, Hidden, Hidden), Own(B1, Hidden));
+        (T2, TB2) = (Own(W2, Out, Hidden), Own(B2, Out));
+    }
+
+    private static Tensor Own(float[] values, params long[] shape)
+    {
+        Tensor tensor = new(new TensorShape(shape), DType.F32);
+        Copy(values, tensor);
+        return tensor;
     }
 
     /// <summary>All rows through the whole MLP.</summary>
     public float[] Forward(IBackend backend, float[] rows, int count)
     {
-        float[] h = Matmul(backend, rows, count, In, W0, Hidden, B0);
+        float[] h = Matmul(backend, rows, count, In, T0, Hidden, TB0);
         h = Gelu(backend, h);
-        h = Matmul(backend, h, count, Hidden, W1, Hidden, B1);
+        h = Matmul(backend, h, count, Hidden, T1, Hidden, TB1);
         h = Gelu(backend, h);
-        return Matmul(backend, h, count, Hidden, W2, Out, B2);
+        return Matmul(backend, h, count, Hidden, T2, Out, TB2);
     }
 
     /// <summary>One row through the whole MLP.</summary>
@@ -73,6 +85,18 @@ internal sealed class P3SamMlp
         {
             b?.Dispose();
         }
+    }
+
+    // The same product with weights that already are tensors.
+    internal static float[] Matmul(IBackend backend, float[] input, int rows, int inDim, Tensor weight, int outDim, Tensor? bias)
+    {
+        using Tensor x = new(new TensorShape(rows, inDim), DType.F32);
+        using Tensor y = new(new TensorShape(rows, outDim), DType.F32);
+        Copy(input, x);
+        backend.Linear(y, x, weight, bias);
+        float[] result = new float[(long)rows * outDim];
+        Read(y, result);
+        return result;
     }
 
     internal static unsafe void Copy(float[] source, Tensor destination) =>

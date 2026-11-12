@@ -29,13 +29,15 @@ public static class P3SamPartLabeler
         int[] rank = [.. Enumerable.Range(0, masks.Length).OrderByDescending(i => iou[i])];
         bool[][] sorted = [.. rank.Select(i => masks[i])];
 
-        // NMS: a mask joins the first earlier cluster it overlaps by more than 0.9, otherwise it opens a cluster.
+        // NMS: a mask joins the first earlier cluster it overlaps by more than 0.9, otherwise it opens a cluster. The masks are packed into 64-bit words so an
+        // IoU is a few thousand population counts instead of a pass over every point.
+        ulong[][] packed = [.. sorted.Select(Pack)];
         List<(int Head, int Count)> clusters = [];
         for (int i = 0; i < sorted.Length; i++)
         {
             bool joined = false;
             for (int c = 0; c < clusters.Count; c++)
-                if (MaskIou(sorted[i], sorted[clusters[c].Head]) > NmsIou)
+                if (PackedIou(packed[i], packed[clusters[c].Head]) > NmsIou)
                 {
                     clusters[c] = (clusters[c].Head, clusters[c].Count + 1);
                     joined = true;
@@ -428,15 +430,23 @@ public static class P3SamPartLabeler
         return area;
     }
 
-    private static double MaskIou(bool[] a, bool[] b)
+    private static ulong[] Pack(bool[] mask)
     {
-        int both = 0, either = 0;
-        for (int i = 0; i < a.Length; i++)
+        ulong[] words = new ulong[(mask.Length + 63) / 64];
+        for (int i = 0; i < mask.Length; i++)
+            if (mask[i])
+                words[i >> 6] |= 1UL << (i & 63);
+        return words;
+    }
+
+    // cal_iou on packed masks: intersection over union, NaN when both are empty (numpy's 0 / 0).
+    private static double PackedIou(ulong[] a, ulong[] b)
+    {
+        long both = 0, either = 0;
+        for (int w = 0; w < a.Length; w++)
         {
-            if (a[i] && b[i])
-                both++;
-            if (a[i] || b[i])
-                either++;
+            both += System.Numerics.BitOperations.PopCount(a[w] & b[w]);
+            either += System.Numerics.BitOperations.PopCount(a[w] | b[w]);
         }
 
         return either == 0 ? double.NaN : (double)both / either;
@@ -481,13 +491,16 @@ public static class P3SamPartLabeler
 
     private static double BoxVolume(double[] box) => (box[3] - box[0]) * (box[4] - box[1]) * (box[5] - box[2]);
 
+    // aabb_distance as upstream writes it: the per-axis term is max(0, b.max - a.min, a.max - b.min), which is not the gap between the boxes (it is at least
+    // the extent they share), so the "nearest part" fallback ranks parts by that quantity. Kept as is to reproduce upstream's choice of neighbour.
     private static double BoxDistance(double[] a, double[] b)
     {
         double dx = Math.Max(0, Math.Max(b[3] - a[0], a[3] - b[0])), dy = Math.Max(0, Math.Max(b[4] - a[1], a[4] - b[1])), dz = Math.Max(0, Math.Max(b[5] - a[2], a[5] - b[2]));
         return dx == 0 && dy == 0 && dz == 0 ? 0 : Math.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    // aabb_increase and the caller's max(np.max(min_increase), np.max(max_increase)): the relative growth |after - before| / |before| of each side of `before`
+    // aabb_increase and the caller's max(np.max(min_increase), np.max(max_increase)). Upstream divides by the coordinate itself, not by the side length, so a
+    // box with a coordinate at or near 0 gives infinite or NaN growth; kept as is to reproduce upstream's choice of part. the relative growth |after - before| / |before| of each side of `before`
     // when joined with `other`. np.max propagates NaN (a zero side gives 0 / 0), Python's max(a, b) keeps a unless b is greater.
     private static double BoxIncrease(double[] before, double[] other)
     {
