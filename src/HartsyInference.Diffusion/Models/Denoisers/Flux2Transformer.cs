@@ -33,8 +33,10 @@ public sealed unsafe class Flux2Transformer : IDisposable
     private Tensor? _normOutLinearWeight;
     private Tensor? _projOutWeight;
 
-    // Iris-Z modality embedding: one owned F32 [1, hidden] row per modality, and the zero row that leaves the stream unscaled.
-    private Tensor[]? _modalityRows;
+    // Iris-Z modality embedding as an owned F32 Linear weight [hidden, modalities], read through one-hot selectors so the
+    // backend scales it exactly as it scales the input embedders; the zero row leaves the stream's own scale at 1.
+    private Tensor? _modalityWeight;
+    private Tensor[]? _modalitySelectors;
     private Tensor? _zeroRow;
 
     /// <summary>True when this instance runs the audited F16 block loop (numerics.ditF16) with the exact
@@ -145,6 +147,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         if (_guidanceLinear2Weight is not null) yield return _guidanceLinear2Weight;
         if (_normOutLinearWeight is not null) yield return _normOutLinearWeight;
         if (_projOutWeight is not null) yield return _projOutWeight;
+        if (_modalityWeight is not null) yield return _modalityWeight;
         foreach (Tensor w in _doubleModImg.EnumerateWeights()) yield return w;
         foreach (Tensor w in _doubleModTxt.EnumerateWeights()) yield return w;
         foreach (Tensor w in _singleMod.EnumerateWeights()) yield return w;
@@ -335,7 +338,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(packedTokens);
         ArgumentNullException.ThrowIfNull(textEmbeddings);
-        if (_modalityRows is null)
+        if (_modalitySelectors is null)
             throw new InvalidOperationException("This Flux.2 checkpoint has no modality embedding; a multi-grid forward needs one.");
         if (grids.IsEmpty)
             throw new ArgumentException("At least one image grid is required.", nameof(grids));
@@ -360,8 +363,8 @@ public sealed unsafe class Flux2Transformer : IDisposable
         lengths[0] = txtSeqLen;
         for (int g = 0; g < gridCount; g++)
         {
-            if ((uint)grids[g].Modality >= (uint)_modalityRows.Length)
-                throw new ArgumentOutOfRangeException(nameof(grids), $"Grid {g} names modality {grids[g].Modality} of {_modalityRows.Length}.");
+            if ((uint)grids[g].Modality >= (uint)_modalitySelectors.Length)
+                throw new ArgumentOutOfRangeException(nameof(grids), $"Grid {g} names modality {grids[g].Modality} of {_modalitySelectors.Length}.");
             lengths[g + 1] = gridTokens;
             groups[g + 1] = g + 1;
             gridTimes[g] = grids[g].TimeCoordinate;
@@ -388,7 +391,12 @@ public sealed unsafe class Flux2Transformer : IDisposable
             {
                 backend.Linear(embedded, packedTokens, _xEmbedWeight!, null);
                 List<(Tensor, Tensor, Tensor)> modalityRows = new List<(Tensor, Tensor, Tensor)>(gridCount);
-                for (int g = 0; g < gridCount; g++) modalityRows.Add((_modalityRows[grids[g].Modality], _zeroRow!, _zeroRow!));
+                for (int g = 0; g < gridCount; g++)
+                {
+                    Tensor row = Track(owned, new Tensor(new TensorShape(1, hidden), DType.F32));
+                    backend.Linear(row, _modalitySelectors[grids[g].Modality], _modalityWeight!, null);
+                    modalityRows.Add((row, _zeroRow!, _zeroRow!));
+                }
                 using SegmentModulation modality = SegmentModulation.Build(backend, modalityRows, imageLayout);
                 img = modality.Affine(backend, embedded);
             }
@@ -828,33 +836,43 @@ public sealed unsafe class Flux2Transformer : IDisposable
         return projected;
     }
 
-    /// <summary>Copies the modality embedding into owned F32 rows, at the residual-stream scale the embedders enter at.</summary>
+    /// <summary>Copies the modality embedding into an owned F32 Linear weight (the table transposed) that carries the
+    /// embedders' residual damp, with a one-hot selector per modality.</summary>
     private void LoadModalityRows(IReadOnlyDictionary<string, Tensor> weights)
     {
         ReleaseModalityRows();
         if (_config.ModalityCount == 0)
             return;
         int hidden = _config.HiddenSize;
+        int count = _config.ModalityCount;
         if (!weights.TryGetValue(Flux2CheckpointConverter.ModalityEmbeddingKey, out Tensor? table))
             throw new KeyNotFoundException($"The checkpoint has no '{Flux2CheckpointConverter.ModalityEmbeddingKey}', which this Flux.2 variant needs.");
-        if (table.Shape.Rank != 2 || table.Shape[0] != _config.ModalityCount || table.Shape[1] != hidden)
+        if (table.Shape.Rank != 2 || table.Shape[0] != count || table.Shape[1] != hidden)
         {
             throw new InvalidOperationException(
-                $"'{Flux2CheckpointConverter.ModalityEmbeddingKey}' is {table.Shape}; expected [{_config.ModalityCount}, {hidden}].");
+                $"'{Flux2CheckpointConverter.ModalityEmbeddingKey}' is {table.Shape}; expected [{count}, {hidden}].");
         }
         Tensor f32 = TensorCasts.EnsureF32(table);
         try
         {
-            float damp = _f16Mode ? ChromaF16.ResidualDamp : 1.0f;
             float* source = (float*)f32.DataPointer;
-            Tensor[] rows = new Tensor[_config.ModalityCount];
-            for (int r = 0; r < rows.Length; r++)
+            Tensor weight = new Tensor(new TensorShape(hidden, count), DType.F32);
+            float* dest = (float*)weight.DataPointer;
+            for (int m = 0; m < count; m++)
             {
-                rows[r] = new Tensor(new TensorShape(1, hidden), DType.F32);
-                float* dest = (float*)rows[r].DataPointer;
-                for (int d = 0; d < hidden; d++) dest[d] = source[(long)r * hidden + d] * damp;
+                for (int d = 0; d < hidden; d++) dest[(long)d * count + m] = source[(long)m * hidden + d];
             }
-            _modalityRows = rows;
+            if (_f16Mode) weight.Fp8ScaleFactor *= ChromaF16.ResidualDamp;
+            _modalityWeight = weight;
+            Tensor[] selectors = new Tensor[count];
+            for (int m = 0; m < count; m++)
+            {
+                selectors[m] = new Tensor(new TensorShape(1, count), DType.F32);
+                Span<float> oneHot = new Span<float>((void*)selectors[m].DataPointer, count);
+                oneHot.Clear();
+                oneHot[m] = 1f;
+            }
+            _modalitySelectors = selectors;
             _zeroRow = new Tensor(new TensorShape(1, hidden), DType.F32);
             new Span<float>((void*)_zeroRow.DataPointer, hidden).Clear();
         }
@@ -866,11 +884,13 @@ public sealed unsafe class Flux2Transformer : IDisposable
 
     private void ReleaseModalityRows()
     {
-        if (_modalityRows is not null)
+        if (_modalitySelectors is not null)
         {
-            foreach (Tensor row in _modalityRows) row.Dispose();
-            _modalityRows = null;
+            foreach (Tensor selector in _modalitySelectors) selector.Dispose();
+            _modalitySelectors = null;
         }
+        _modalityWeight?.Dispose();
+        _modalityWeight = null;
         _zeroRow?.Dispose();
         _zeroRow = null;
     }

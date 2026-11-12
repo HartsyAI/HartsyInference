@@ -122,6 +122,42 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("How to consume --init-image: denoise (strength-based img2img), reference (in-context edit), or auto.")]
         public string? InitImageMode { get; init; }
 
+        /// <summary>The Iris-Z task.</summary>
+        [CommandOption("--iris-task")]
+        [Description("Iris-Z task: image (prompt to image), rgbd (prompt to image + depth.png), depth (--init-image photo to its "
+            + "depth map) or paint (--init-image depth map to an image). Default: depth with --init-image, image without.")]
+        public string? IrisTask { get; init; }
+
+        /// <summary>How an Iris-Z depth result is rendered.</summary>
+        [CommandOption("--iris-depth-format")]
+        [Description("Iris-Z depth output: colours (default; near red, far blue), depth (grey, bright is far) or disparity.")]
+        public string? IrisDepthFormat { get; init; }
+
+        /// <summary>How an Iris-Z paint input encodes depth.</summary>
+        [CommandOption("--iris-input-depth-format")]
+        [Description("Iris-Z paint input: depth (default, bright is far) or disparity (bright is near).")]
+        public string? IrisInputDepthFormat { get; init; }
+
+        /// <summary>Working size of the Iris-Z depth and paint tasks.</summary>
+        [CommandOption("--iris-resolution")]
+        [Description("Iris-Z depth/paint working size: 512 or 1024. Default: 1024 for paint; for depth, 512 under 0.5 MP.")]
+        public int? IrisResolution { get; init; }
+
+        /// <summary>Sampling steps of the Iris-Z depth task.</summary>
+        [CommandOption("--iris-depth-steps")]
+        [Description("Iris-Z depth sampling steps (default 4); --steps applies to generation only.")]
+        public int? IrisDepthSteps { get; init; }
+
+        /// <summary>Seeds the Iris-Z depth task combines.</summary>
+        [CommandOption("--iris-depth-seeds")]
+        [Description("Iris-Z depth: how many seeds to combine (default 1).")]
+        public int? IrisDepthSeeds { get; init; }
+
+        /// <summary>Returns the joint depth of an Iris-Z rgbd run.</summary>
+        [CommandOption("--iris-joint-depth")]
+        [Description("Iris-Z rgbd: true returns the jointly generated depth instead of re-estimating it from the image.")]
+        public string? IrisJointDepth { get; init; }
+
         /// <summary>Extra reference images for an edit family, in the order the prompt refers to them.</summary>
         [CommandOption("--reference-image")]
         [Description("Path to an extra reference image for an edit family; repeatable. The init image is the first reference.")]
@@ -316,6 +352,13 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         {
             parameters.Put("reference-images", string.Join('\n', settings.ReferenceImages));
         }
+        parameters.PutIfSet("iris-task", settings.IrisTask);
+        parameters.PutIfSet("iris-depth-format", settings.IrisDepthFormat);
+        parameters.PutIfSet("iris-input-depth-format", settings.IrisInputDepthFormat);
+        parameters.PutIfSet("iris-resolution", settings.IrisResolution);
+        parameters.PutIfSet("iris-depth-steps", settings.IrisDepthSteps);
+        parameters.PutIfSet("iris-depth-seeds", settings.IrisDepthSeeds);
+        parameters.PutIfSet("iris-joint-depth", settings.IrisJointDepth);
         parameters.PutIfSet("reference-kv-cache", settings.ReferenceKvCache);
         parameters.PutIfSet("reference-max-pixels", settings.ReferenceMaxPixels);
         parameters.PutIfSet("reference-vision-pixels", settings.ReferenceVisionPixels);

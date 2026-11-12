@@ -187,7 +187,8 @@ public sealed class IrisZRecipePipeline(IrisZPipeline pipeline, Flux2PromptToken
         {
             ["arch"] = "flux2",
             ["variant"] = _variantId,
-            ["task"] = task,
+            [DepthImage.TaskMeta] = task,
+            [DepthImage.SkyCeilingMeta] = _skyCeiling.ToString(CultureInfo.InvariantCulture),
             ["size"] = $"{width}x{height}",
             ["seed"] = seed.ToString(CultureInfo.InvariantCulture),
             ["steps"] = steps.ToString(CultureInfo.InvariantCulture),

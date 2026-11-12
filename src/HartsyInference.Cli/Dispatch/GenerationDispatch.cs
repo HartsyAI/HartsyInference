@@ -129,9 +129,17 @@ public static class GenerationDispatch
 
     /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
     /// composite; empty for a single-layer result.</summary>
-    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result) =>
-        result.Layers is not { Count: > 0 } layers ? []
+    /// <remarks>A result with depth beside its image (Iris-Z <c>rgbd</c>) adds <c>depth.png</c>, the colour-coded depth map.</remarks>
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result)
+    {
+        List<(string Suffix, byte[] Bytes)> companions = result.Layers is not { Count: > 0 } layers ? []
             : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();
+        if (HartsyInference.Engine.Features.DepthImage.Companion(result) is { } depthRgb)
+        {
+            companions.Add(("depth.png", PngEncoder.Encode(depthRgb, null, result.Width, result.Height)));
+        }
+        return companions;
+    }
 
     /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
     private static int[] ReadScoredTokenIds(string path)
@@ -1385,6 +1393,33 @@ public static class GenerationDispatch
         foreach ((string flag, string key) in slgNumbers)
         {
             if (parameters.GetDoubleOrNull(flag) is { } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisStrings =
+        [
+            ("iris-task", HartsyInference.Engine.Features.RequestExtras.IrisZTask),
+            ("iris-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZDepthFormat),
+            ("iris-input-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZInputDepthFormat),
+            ("iris-joint-depth", HartsyInference.Engine.Features.RequestExtras.IrisZJointDepth),
+        ];
+        foreach ((string flag, string key) in irisStrings)
+        {
+            if (parameters.GetStringOrNull(flag) is { Length: > 0 } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisInts =
+        [
+            ("iris-resolution", HartsyInference.Engine.Features.RequestExtras.IrisZResolution),
+            ("iris-depth-steps", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSteps),
+            ("iris-depth-seeds", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSeeds),
+        ];
+        foreach ((string flag, string key) in irisInts)
+        {
+            if (parameters.GetIntOrNull(flag) is { } value)
             {
                 extra[key] = value;
             }
