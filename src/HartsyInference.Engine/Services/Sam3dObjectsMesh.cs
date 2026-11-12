@@ -7,9 +7,9 @@ namespace HartsyInference.Engine.Services;
 internal static class Sam3dObjectsMesh
 {
     /// <summary>
-    /// The mesh is in the decoder's frame (z up), the same one the splats are in before the pipeline turns them: the splats are written as <c>(x, -z, y)</c>, a proper rotation to the y-up frame the
-    /// PLY and glTF use, and so is the mesh, so the two outputs agree and the winding is kept. The vertex colour is the sigmoid RGB (the first three of the six colour channels; the last three are
-    /// a normal map and are not read).
+    /// The extraction's output frame turned to glTF's (y up, front toward +z): <c>(x, y, z)</c> becomes <c>(x, z, -y)</c>, a proper rotation, so the winding is kept. This is not the splats' turn,
+    /// <c>(x, -z, y)</c>: the first attempt used that and the real bust came out upside down; the turn here was found by rendering that bust, which stands upright and faces the camera. The vertex colour
+    /// is the sigmoid RGB (the first three of the six colour channels; the last three are a normal map and are not read).
     /// </summary>
     public static Mesh ToMesh(SamMeshResult result)
     {
@@ -20,8 +20,8 @@ internal static class Sam3dObjectsMesh
         {
             float x = result.Vertices[v * 3], y = result.Vertices[v * 3 + 1], z = result.Vertices[v * 3 + 2];
             vertices[v * 3] = x;
-            vertices[v * 3 + 1] = -z;
-            vertices[v * 3 + 2] = y;
+            vertices[v * 3 + 1] = z;
+            vertices[v * 3 + 2] = -y;
             colours[v * 3] = result.Colors[v * 6];
             colours[v * 3 + 1] = result.Colors[v * 6 + 1];
             colours[v * 3 + 2] = result.Colors[v * 6 + 2];

@@ -13,14 +13,16 @@ public static class GlbWriter
     private const uint BinChunk = 0x004E4942;   // "BIN\0"
 
     /// <summary>Serializes <paramref name="mesh"/> to a self-contained GLB byte array.</summary>
-    public static byte[] Write(Mesh mesh)
+    /// <param name="mesh">The mesh.</param>
+    /// <param name="vertexColors">Also write <see cref="Mesh.VertexColors"/> as COLOR_0 (float RGB) when the mesh has them; off by default, which keeps every existing output as it was.</param>
+    public static byte[] Write(Mesh mesh, bool vertexColors = false)
     {
         ArgumentNullException.ThrowIfNull(mesh);
-        return Write([mesh]);
+        return Write([mesh], vertexColors);
     }
 
     /// <summary>Serializes every mesh in <paramref name="meshes"/> into one scene, one node per mesh, in order.</summary>
-    public static byte[] Write(IReadOnlyList<Mesh> meshes)
+    public static byte[] Write(IReadOnlyList<Mesh> meshes, bool vertexColors = false)
     {
         ArgumentNullException.ThrowIfNull(meshes);
         if (meshes.Count == 0)
@@ -34,7 +36,8 @@ public static class GlbWriter
             if (mesh.VertexCount == 0 || mesh.TriangleCount == 0)
                 throw new ArgumentException("Mesh has no geometry to export.", nameof(meshes));
             bool hasNormals = mesh.Normals is { Length: > 0 } && mesh.Normals.Length == mesh.Vertices.Length;
-            Layout layout = new(mesh, hasNormals, binLength) { Accessor = accessorCount };
+            bool hasColors = vertexColors && mesh.VertexColors is { Length: > 0 } && mesh.VertexColors.Length == mesh.Vertices.Length;
+            Layout layout = new(mesh, hasNormals, hasColors, binLength) { Accessor = accessorCount };
             layouts.Add(layout);
             binLength = checked(binLength + layout.TotalBytes);
             accessorCount += layout.ViewCount;
@@ -46,6 +49,7 @@ public static class GlbWriter
             int off = layout.BinOffset;
             WriteFloats(bin, ref off, layout.Mesh.Vertices);
             if (layout.HasNormals) WriteFloats(bin, ref off, layout.Mesh.Normals!);
+            if (layout.HasColors) WriteFloats(bin, ref off, layout.Mesh.VertexColors!);
             foreach (int i in layout.Mesh.Indices) { BinaryPrimitives.WriteUInt32LittleEndian(bin.AsSpan(off), (uint)i); off += 4; }
         }
 
@@ -109,8 +113,9 @@ public static class GlbWriter
                 w.WriteStartObject("attributes");
                 w.WriteNumber("POSITION", layout.Accessor);
                 if (layout.HasNormals) w.WriteNumber("NORMAL", layout.Accessor + 1);
+                if (layout.HasColors) w.WriteNumber("COLOR_0", layout.Accessor + (layout.HasNormals ? 2 : 1));
                 w.WriteEndObject();
-                w.WriteNumber("indices", layout.Accessor + (layout.HasNormals ? 2 : 1));
+                w.WriteNumber("indices", layout.Accessor + layout.ViewCount - 1);
                 w.WriteNumber("mode", 4); // TRIANGLES
                 w.WriteEndObject();
                 w.WriteEndArray();
@@ -122,7 +127,14 @@ public static class GlbWriter
             foreach (Layout layout in layouts)
             {
                 WriteBufferView(w, layout.BinOffset, layout.Mesh.Vertices.Length * 4, 34962);
-                if (layout.HasNormals) WriteBufferView(w, layout.BinOffset + layout.Mesh.Vertices.Length * 4, layout.Mesh.Normals!.Length * 4, 34962);
+                int next = layout.BinOffset + layout.Mesh.Vertices.Length * 4;
+                if (layout.HasNormals)
+                {
+                    WriteBufferView(w, next, layout.Mesh.Normals!.Length * 4, 34962);
+                    next += layout.Mesh.Normals.Length * 4;
+                }
+
+                if (layout.HasColors) WriteBufferView(w, next, layout.Mesh.VertexColors!.Length * 4, 34962);
                 WriteBufferView(w, layout.IndexOffset, layout.Mesh.Indices.Length * 4, 34963);
             }
             w.WriteEndArray();
@@ -133,7 +145,8 @@ public static class GlbWriter
                 (float[] min, float[] max) = Bounds(layout.Mesh.Vertices);
                 WritePositionAccessor(w, layout.Accessor, layout.Mesh.VertexCount, min, max);
                 if (layout.HasNormals) WriteVec3Accessor(w, layout.Accessor + 1, layout.Mesh.VertexCount);
-                WriteIndexAccessor(w, layout.Accessor + (layout.HasNormals ? 2 : 1), layout.Mesh.Indices.Length);
+                if (layout.HasColors) WriteVec3Accessor(w, layout.Accessor + (layout.HasNormals ? 2 : 1), layout.Mesh.VertexCount);
+                WriteIndexAccessor(w, layout.Accessor + layout.ViewCount - 1, layout.Mesh.Indices.Length);
             }
             w.WriteEndArray();
 
@@ -225,17 +238,20 @@ public static class GlbWriter
     /// <summary>Where one mesh sits in the binary buffer and in the accessor and view numbering.</summary>
     private sealed class Layout
     {
-        public Layout(Mesh mesh, bool hasNormals, int binOffset)
+        public Layout(Mesh mesh, bool hasNormals, bool hasColors, int binOffset)
         {
             Mesh = mesh;
             HasNormals = hasNormals;
+            HasColors = hasColors;
             BinOffset = binOffset;
-            IndexOffset = binOffset + mesh.Vertices.Length * 4 + (hasNormals ? mesh.Normals!.Length * 4 : 0);
+            IndexOffset = binOffset + mesh.Vertices.Length * 4 + (hasNormals ? mesh.Normals!.Length * 4 : 0) + (hasColors ? mesh.VertexColors!.Length * 4 : 0);
         }
 
         public Mesh Mesh { get; }
 
         public bool HasNormals { get; }
+
+        public bool HasColors { get; }
 
         /// <summary>Byte offset of this mesh's positions in the buffer.</summary>
         public int BinOffset { get; }
@@ -245,7 +261,7 @@ public static class GlbWriter
 
         public int TotalBytes => IndexOffset + Mesh.Indices.Length * 4 - BinOffset;
 
-        public int ViewCount => HasNormals ? 3 : 2;
+        public int ViewCount => 2 + (HasNormals ? 1 : 0) + (HasColors ? 1 : 0);
 
         /// <summary>Index of this mesh's position accessor and view; its views and accessors follow in order.</summary>
         public int Accessor { get; set; }

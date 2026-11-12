@@ -149,4 +149,20 @@ public sealed class MeshOutputTests
     {
         Assert.ThrowsAny<Exception>(() => GlbFrame.Wrap([0x67, 0x6C, 0x54, 0x46], Matrix4x4.Identity));
     }
+
+    [Fact]
+    public void VertexColoursAreWrittenAsColor0OnlyWhenAskedAndTheMeshStillReadsBack()
+    {
+        Mesh mesh = Tetrahedron();
+        mesh.VertexColors = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f];
+
+        byte[] plain = GlbWriter.Write(mesh);
+        byte[] coloured = GlbWriter.Write(mesh, vertexColors: true);
+
+        Assert.DoesNotContain("COLOR_0", System.Text.Encoding.UTF8.GetString(plain));
+        Assert.Contains("COLOR_0", System.Text.Encoding.UTF8.GetString(coloured));
+        Mesh read = GlbReader.Parse(coloured);
+        Assert.Equal(mesh.Vertices, read.Vertices);
+        Assert.Equal(mesh.Indices, read.Indices);
+    }
 }

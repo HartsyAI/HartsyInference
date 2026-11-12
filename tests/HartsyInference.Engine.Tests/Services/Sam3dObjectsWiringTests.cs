@@ -174,14 +174,14 @@ public sealed class Sam3dObjectsWiringTests
     }
 
     [Fact]
-    public void ToMesh_TurnsTheDecoderFrameLikeTheSplatsAndTakesTheFirstThreeColourChannels()
+    public void ToMesh_TurnsTheExtractionFrameToGltfAndTakesTheFirstThreeColourChannels()
     {
         SamMeshResult result = new([1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f], [0, 1, 2], [0.1f, 0.2f, 0.3f, 0.9f, 0.9f, 0.9f, 0.4f, 0.5f, 0.6f, 0.9f, 0.9f, 0.9f, 0.7f, 0.8f, 0.9f, 0.9f, 0.9f, 0.9f]);
 
         Mesh mesh = Sam3dObjectsMesh.ToMesh(result);
 
-        // (x, y, z) becomes (x, -z, y), as the splats are written; the winding is kept.
-        Assert.Equal([1f, -3f, 2f, 4f, -6f, 5f, 7f, -9f, 8f], mesh.Vertices);
+        // (x, y, z) becomes (x, z, -y), found on the real bust; the winding is kept.
+        Assert.Equal([1f, 3f, -2f, 4f, 6f, -5f, 7f, 9f, -8f], mesh.Vertices);
         Assert.Equal([0, 1, 2], mesh.Indices);
         Assert.Equal([0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f], mesh.VertexColors!);
     }
