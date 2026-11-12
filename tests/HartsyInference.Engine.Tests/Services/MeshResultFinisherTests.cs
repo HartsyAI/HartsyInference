@@ -225,12 +225,10 @@ public sealed class MeshResultFinisherTests
     [Fact]
     public void BoundsAreNotReportedInTheFilesOwnSpaceOnceTheFrameMovedThem()
     {
-        // Non-indexed primitive: the reader refuses it, so only the accessor bounds (pre-frame) exist.
+        // An index accessor of a type the reader refuses, so only the accessor bounds (pre-frame) exist.
         Mesh mesh = Sphere(6, 8);
         byte[] glb = Raw(mesh).Data;
-        string text = Encoding.UTF8.GetString(glb);
-        Assert.Contains("\"indices\":", text);
-        byte[] noIndices = Corrupt(glb, "\"indices\":", "\"indicex\":");
+        byte[] noIndices = Corrupt(glb, "\"componentType\":5125", "\"componentType\":5124");
 
         MeshResult native = MeshResultFinisher.Finish("hunyuan3d", new MeshRequest(), new MeshResult { Data = noIndices }, S, CancellationToken.None);
 

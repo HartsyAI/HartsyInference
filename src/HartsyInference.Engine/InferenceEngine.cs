@@ -237,6 +237,9 @@ public sealed class InferenceEngine : IInferenceEngine
     public IMeshPreparationService MeshPreparation => _meshPreparation.Value;
 
     /// <inheritdoc/>
+    public IMeshConversionService MeshConversion { get; } = new MeshConversionService();
+
+    /// <inheritdoc/>
     public IMeshLifecycleService MeshLifecycle => _mesh.Value;
 
     internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
