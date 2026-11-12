@@ -13,12 +13,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
     public sealed class Settings : CommandSettings
     {
-        /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d and unirig.</summary>
+        /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d, unirig, hunyuan3d-part and the paint models.</summary>
         [CommandArgument(0, "<input>")]
         [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-part, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
-        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig, or hairdeck.</summary>
+        /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, or hairdeck.</summary>
         [CommandOption("-m|--model")]
         [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), or hairdeck.")]
         public string Model { get; init; } = "triposr";

@@ -231,7 +231,7 @@ public sealed class MeshService : IMeshService, IDisposable
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
                 }, cancel: cancel);
-                MeshPart[] parts = [.. result.PartIds.Select((partId, i) => new MeshPart(partId, result.Boxes[i], result.FaceIds.Count(f => f == partId)))];
+                MeshPart[] parts = [.. result.PartIds.Select((partId, i) => new MeshPart(partId, result.Boxes[i], result.FaceCounts[i]))];
                 return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
             },
             cancel);
@@ -267,7 +267,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     // The checkpoint file: the path itself when it is a file, else p3sam.safetensors in the folder or in its p3sam/ subfolder.
-    private static string PartCheckpoint(string localPath)
+    internal static string PartCheckpoint(string localPath)
     {
         if (File.Exists(localPath))
         {

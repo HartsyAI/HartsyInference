@@ -816,6 +816,9 @@ public static class GenerationDispatch
         throw new ArgumentException($"Unknown sparse-attention policy '{value}'. Expected auto, require, or disable.");
     }
 
+    private static string DescribePart(MeshPart part) =>
+        $"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]";
+
     /// <summary>3D generation through <see cref="IMeshService"/>; the CLI's "prompt" is the input path: an image for image models, a scene mesh for cola3d, a mesh to rig for unirig.</summary>
     private static async Task<GeneratedArtifact> MeshAsync(
         IInferenceEngine engine, ModelSpec spec, string prompt, ParamState parameters, bool quiet, CancellationToken cancel)
@@ -866,12 +869,11 @@ public static class GenerationDispatch
         artifact.Meta["format"] = result.Format;
         if (result.Parts is { } parts)
         {
-            artifact.Meta["parts"] = string.Join("; ", parts.Select(p =>
-                $"part {p.Id}: {p.FaceCount} faces, box [{string.Join(", ", p.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]"));
+            artifact.Meta["parts"] = string.Join("; ", parts.Select(DescribePart));
             if (!quiet)
             {
                 foreach (MeshPart part in parts)
-                    Console.WriteLine($"part {part.Id}: {part.FaceCount} faces, box [{string.Join(", ", part.Box.Select(v => v.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)))}]");
+                    Console.WriteLine(DescribePart(part));
             }
         }
         return artifact;

@@ -42,19 +42,21 @@ public static class PartGlbWriter
         if (boxes.Length != partIds.Length)
             throw new ArgumentException("One box per part is required.", nameof(boxes));
 
+        // One pass over the faces: the faces of each part, and those whose label is no part.
+        Dictionary<int, List<int>> byPart = partIds.Distinct().ToDictionary(id => id, _ => new List<int>());
+        List<int> loose = [];
+        for (int f = 0; f < faceIds.Length; f++)
+            (byPart.TryGetValue(faceIds[f], out List<int>? faces) ? faces : loose).Add(f);
         List<Node> nodes = [];
         for (int i = 0; i < partIds.Length; i++)
         {
-            int id = partIds[i];
-            int[] faces = [.. Enumerable.Range(0, faceIds.Length).Where(f => faceIds[f] == id)];
-            if (faces.Length > 0)
-                nodes.Add(Split(mesh, faces, $"part_{id}", Color(i), id, boxes[i]));
+            int[] partFaces = [.. byPart[partIds[i]]];
+            if (partFaces.Length > 0)
+                nodes.Add(Split(mesh, partFaces, $"part_{partIds[i]}", Color(i), partIds[i], boxes[i]));
         }
 
-        HashSet<int> known = [.. partIds];
-        int[] loose = [.. Enumerable.Range(0, faceIds.Length).Where(f => !known.Contains(faceIds[f]))];
-        if (loose.Length > 0)
-            nodes.Add(Split(mesh, loose, "unassigned", [0.45f, 0.45f, 0.45f, 1f], -1, null));
+        if (loose.Count > 0)
+            nodes.Add(Split(mesh, [.. loose], "unassigned", [0.45f, 0.45f, 0.45f, 1f], -1, null));
         if (nodes.Count == 0)
             throw new ArgumentException("The mesh has no faces to export.", nameof(mesh));
 

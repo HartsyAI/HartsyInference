@@ -48,6 +48,7 @@ public static class MeshEndpoints
     {
         result.Data,
         result.Format,
+        result.Parts,
         savedPath,
     };
 }

@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
-using HartsyInference.ThreeD.Pipelines;
 
 namespace HartsyInference.ThreeD.Tests.Part;
 
@@ -70,13 +69,11 @@ public sealed class PartGlbWriterTests
     }
 
     [Fact]
-    public void DropUnreferencedVertices_KeepsOnlyTheVerticesTheFacesUse()
+    public void Write_SkipsAPartWithNoFaces()
     {
-        Mesh mesh = new() { Vertices = [9, 9, 9, 0, 0, 0, 1, 0, 0, 0, 1, 0, 7, 7, 7], Indices = [1, 2, 3] };
+        byte[] glb = PartGlbWriter.Write(ThreeTriangles(), [0, 0, 0], [0, 99], [[0, 0, 0, 10, 10, 9], [0, 0, 0, 0, 0, 0]]);
 
-        Mesh result = P3SamPipeline.DropUnreferencedVertices(mesh);
-
-        Assert.Equal([0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f], result.Vertices);
-        Assert.Equal([0, 1, 2], result.Indices);
+        JsonElement root = ReadJson(glb, out _);
+        Assert.Equal(new[] { "part_0" }, root.GetProperty("nodes").EnumerateArray().Select(n => n.GetProperty("name").GetString()!).ToArray());
     }
 }

@@ -17,8 +17,9 @@ namespace HartsyInference.ThreeD.Pipelines;
 /// <param name="FaceIds">One label per triangle of <paramref name="Mesh"/>; -1 for a face with no mask and -2 for one with no sampled point.</param>
 /// <param name="PartIds">The labels of the parts, ascending.</param>
 /// <param name="Boxes">Per part, <c>[minX, minY, minZ, maxX, maxY, maxZ]</c> over the vertices of its faces, in the order of <paramref name="PartIds"/>.</param>
+/// <param name="FaceCounts">Per part, its number of triangles, in the order of <paramref name="PartIds"/>.</param>
 /// <param name="Glb">The mesh split into one coloured node per part.</param>
-public sealed record P3SamResult(Mesh Mesh, int[] FaceIds, int[] PartIds, float[][] Boxes, byte[] Glb);
+public sealed record P3SamResult(Mesh Mesh, int[] FaceIds, int[] PartIds, float[][] Boxes, int[] FaceCounts, byte[] Glb);
 
 /// <summary>P3-SAM (Hunyuan3D-Part): a triangle mesh is segmented into parts. 100,000 surface points get Sonata features, 400 farthest-point prompts each predict
 /// three masks and their IoUs, and the masks become per-face part labels (<see cref="P3SamAutoMask"/>).</summary>
@@ -27,8 +28,8 @@ public sealed class P3SamPipeline : IDisposable
     /// <summary>The checkpoint file the pipeline reads (<c>tencent/Hunyuan3D-Part</c>, <c>p3sam/p3sam.safetensors</c>).</summary>
     public const string Checkpoint = "p3sam.safetensors";
 
-    /// <summary>Progress steps: surface points, features, prompts, masks, labels.</summary>
-    public const int Steps = 5;
+    /// <summary>Progress steps of a run: the five stages (surface points, features, prompts, masks, labels) plus one per 50 prompts, which keeps the mask stage moving.</summary>
+    public static int ProgressSteps(int promptCount) => 5 + promptCount / 50;
 
     private readonly IBackend _backend;
     private readonly SafeTensorsLoader _loader;
@@ -95,22 +96,21 @@ public sealed class P3SamPipeline : IDisposable
         if (options.PointCount < 1 || options.PromptCount < 1)
             throw new ArgumentOutOfRangeException(nameof(pointCount), "P3-SAM needs at least one point and one prompt.");
 
-        int step = 0;
+        int step = 0, totalSteps = ProgressSteps(options.PromptCount);
         P3SamAutoMask auto = new(_backend, _features, _heads)
         {
-            StageLog = line =>
-            {
-                // One line per finished stage; the progress lines every 50 prompts start with spaces.
-                if (!line.StartsWith(' '))
-                    onProgress?.Invoke(new GenerationProgress(++step, Steps, clock.Elapsed.TotalMilliseconds));
-            },
+            // One line per finished stage and one per 50 prompts.
+            StageLog = _ => onProgress?.Invoke(new GenerationProgress(Math.Min(++step, totalSteps), totalSteps, clock.Elapsed.TotalMilliseconds)),
         };
         P3SamPartLabeler.Result labels = auto.Run(cleaned.Vertices, cleaned.Indices, options, cancel);
         byte[] glb = PartGlbWriter.Write(cleaned, labels.FaceIds, labels.PartIds, labels.Boxes);
-        return new P3SamResult(cleaned, labels.FaceIds, labels.PartIds, labels.Boxes, glb);
+        Dictionary<int, int> counts = [];
+        foreach (int id in labels.FaceIds)
+            counts[id] = counts.GetValueOrDefault(id) + 1;
+        return new P3SamResult(cleaned, labels.FaceIds, labels.PartIds, labels.Boxes, [.. labels.PartIds.Select(id => counts.GetValueOrDefault(id))], glb);
     }
 
-    // merge_vertices and process(validate=True): merged vertices, no degenerate or duplicate faces, no unreferenced vertices.
+    // merge_vertices and process(validate=True): merged vertices, no degenerate or duplicate faces (the cleaner compacts away unreferenced vertices as it goes).
     private static Mesh Clean(Mesh mesh)
     {
         Mesh cleaned = MeshCleaner.Clean(mesh, new MeshCleanOptions
@@ -126,30 +126,7 @@ public sealed class P3SamPipeline : IDisposable
         });
         if (cleaned.TriangleCount == 0)
             throw new HartsyInferenceException("The mesh has no faces left after removing degenerate and duplicate ones.");
-        return DropUnreferencedVertices(cleaned);
-    }
-
-    internal static Mesh DropUnreferencedVertices(Mesh mesh)
-    {
-        int[] remap = new int[mesh.VertexCount];
-        Array.Fill(remap, -1);
-        List<float> vertices = [];
-        int[] indices = new int[mesh.Indices.Length];
-        for (int i = 0; i < indices.Length; i++)
-        {
-            int source = mesh.Indices[i];
-            if (remap[source] < 0)
-            {
-                remap[source] = vertices.Count / 3;
-                vertices.Add(mesh.Vertices[source * 3]);
-                vertices.Add(mesh.Vertices[source * 3 + 1]);
-                vertices.Add(mesh.Vertices[source * 3 + 2]);
-            }
-
-            indices[i] = remap[source];
-        }
-
-        return new Mesh { Vertices = [.. vertices], Indices = indices };
+        return cleaned;
     }
 
     /// <summary>Releases the checkpoint and the model tensors.</summary>

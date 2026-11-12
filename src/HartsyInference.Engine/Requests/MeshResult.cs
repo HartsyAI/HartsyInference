@@ -17,4 +17,4 @@ public sealed record MeshResult
 /// <param name="Id">The part label.</param>
 /// <param name="Box"><c>[minX, minY, minZ, maxX, maxY, maxZ]</c> in the units of the mesh the model segmented.</param>
 /// <param name="FaceCount">Triangles of the part.</param>
-public sealed record MeshPart(int Id, float[] Box, int FaceCount);
+public sealed record MeshPart(int Id, IReadOnlyList<float> Box, int FaceCount);
