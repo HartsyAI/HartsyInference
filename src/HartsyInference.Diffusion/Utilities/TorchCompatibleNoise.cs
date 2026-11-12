@@ -5,17 +5,25 @@ namespace HartsyInference.Diffusion.Utilities;
 /// <summary>Standard-normal noise that reproduces <c>torch.randn</c> on the CPU after <c>torch.manual_seed</c>. The stream is
 /// the same Mersenne Twister, the same 24-bit uniforms, and the same Box-Muller blocks of 16 (with the final block recomputed
 /// when the count is not a multiple of 16). Values agree with torch to float32 rounding; torch's AVX2 path can differ from
-/// libm in the last bit. Used where a request's noise must match the PyTorch reference's for the same seed. Other models keep
-/// <see cref="SeedGenerator"/>.</summary>
+/// libm in the last bit. Counts from 1 to 15 are refused: torch takes a different serial path below 16 float32 elements
+/// and this port does not implement it. Used where a request's noise must match the PyTorch reference's for the same
+/// seed. Other models keep <see cref="SeedGenerator"/>.</summary>
 public static class TorchCompatibleNoise
 {
     /// <summary>Noise for <paramref name="shape"/> from <paramref name="seed"/>, as <c>torch.randn(shape, dtype=float32)</c>
     /// after <c>torch.manual_seed(seed)</c> would fill it. The caller disposes the tensor.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The shape holds 1 to 15 elements.</exception>
     public static Tensor Randn(TensorShape shape, long seed)
     {
         Tensor noise = new Tensor(shape, DType.F32);
         Span<float> values = noise.AsSpan<float>();
         int count = values.Length;
+        if (count is > 0 and < 16)
+        {
+            noise.Dispose();
+            throw new ArgumentOutOfRangeException(nameof(shape), count,
+                "torch takes a different serial path below 16 float32 elements and this port does not implement it.");
+        }
 
         // torch seeds its mt19937 with the seed's low 32 bits.
         MersenneTwister19937 rng = new((uint)(seed & 0xFFFFFFFFL));

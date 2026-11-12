@@ -62,6 +62,23 @@ public sealed class MiniMaxH3FlatLayoutResolutionTests
         });
     }
 
+    [Fact]
+    public void ImageResolverFindsTheVaeAndEncoderInTheModelsRootLayout()
+    {
+        WithTempRoot(root =>
+        {
+            string dit = WriteFile(Path.Combine(root, "diffusion_models", "MiniMaxH3Image",
+                "minimax_h3_image_pruned_int8_convrot.safetensors"));
+            string vae = WriteFile(Path.Combine(root, "VAE", "MiniMaxH3", "minimax_h3_image_vae_fp16.safetensors"));
+            string encoder = WriteFile(Path.Combine(root, "text_encoders", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"));
+
+            MiniMaxH3ImageAssets assets = MiniMaxH3ImageAssets.Resolve(dit, components: null);
+
+            Assert.Equal(vae, assets.ImageVae);
+            Assert.Equal(encoder, assets.TextEncoder);
+        });
+    }
+
     private static void WithTempRoot(Action<string> test)
     {
         string root = Path.Combine(Path.GetTempPath(), "h3-flat-layout-" + Guid.NewGuid().ToString("N"));

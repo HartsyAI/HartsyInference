@@ -62,7 +62,8 @@ public static class MiniMaxH3Schedule
     /// (<c>comfy/ldm/minimax/sampling.py</c>), samples its 1000-entry table at <c>int(x * 1000 / steps)</c> from the top
     /// (<c>comfy/samplers.py</c>, <c>simple_scheduler</c>), and appends 0. At six steps the timesteps are 1000, 834, 667,
     /// 500, 334 and 167, so four of the sigmas sit between grid points. The heads are still chosen by nearest grid point.
-    /// The values match ComfyUI 0.45.0 run on CPU to float32 precision.</summary>
+    /// The schedule values follow ComfyUI's simple scheduler; the arithmetic is in double, so they can differ from ComfyUI's
+    /// float32 by about one ulp.</summary>
     public static double[] ImageSigmas(IReadOnlyList<double> grid, int steps = 6)
     {
         ArgumentNullException.ThrowIfNull(grid);

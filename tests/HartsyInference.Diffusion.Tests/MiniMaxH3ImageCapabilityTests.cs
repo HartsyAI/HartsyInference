@@ -208,6 +208,12 @@ public sealed class MiniMaxH3ImageCapabilityTests
         Assert.NotEqual(first.AsSpan<float>().ToArray(), other.AsSpan<float>().ToArray());
     }
 
+    [Fact]
+    public void NoiseBelowSixteenElementsIsRefusedBecauseTorchTakesAnotherPath()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => TorchCompatibleNoise.Randn(new TensorShape([15L]), seed: 1));
+    }
+
     // ---- VRAM modes and chunking ------------------------------------------------------------------------------
 
     [Fact]

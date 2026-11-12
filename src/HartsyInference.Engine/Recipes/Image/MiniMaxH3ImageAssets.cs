@@ -49,6 +49,8 @@ internal sealed record MiniMaxH3ImageAssets
 
     private static string? FirstMatch(List<string> roots, string[] hints)
     {
+        // Hint-major on purpose: an nvfp4_awq encoder up to three ancestors away beats an int8_convrot one beside the DiT,
+        // because the ComfyUI reference uses nvfp4_awq.
         foreach (string hint in hints)
         {
             string? found = MiniMaxH3Assets.FindFlat(roots, TextEncoderFolders, [hint]);

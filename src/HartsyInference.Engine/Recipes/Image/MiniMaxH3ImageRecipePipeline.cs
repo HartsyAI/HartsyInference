@@ -74,7 +74,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
         int latentH = height / 16, latentW = width / 16;
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
-        double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!);
+        double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!, RequiredSteps);
 
         // TODO(gpu): the picture label. The image path uses "Picture N: " with no brackets (nodes_minimax_h3.py); this
         // text-only path has no references, so no label is emitted yet. Phase 5b must add it.
@@ -143,8 +143,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             throw new NotSupportedException("MiniMax-H3-Image does not take a negative prompt.");
         }
 
-        // The image build's solver is euler over the simple schedule, so that pair (or no selection) is exact. Any other
-        // sampler or sigma schedule would silently run a different solver, so it is refused by name.
+        // The family's only schedule is simple. SamplingParamResolver treats normal and default as identity, so an
+        // explicit normal or default is accepted as that default; any other scheduler is refused by name.
         string? selection = SamplingParamResolver.ResolveSchedulerName(request);
         if (selection is not null && !IsSolverOwnSelection(selection))
         {
@@ -204,7 +204,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     internal Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
         Tensor cos, Tensor sin, Tensor stackedWeight, Tensor stackedBias, double sigma, double sigmaNext)
     {
-        // ComfyUI hands the DiT float32(sigma * 1000) and runs on t = 1 - that / 1000, so the same rounding is mirrored.
+        // ComfyUI hands the DiT float32(sigma * 1000) and runs on t = 1 - that / 1000. Only sigma * 1000 is rounded to float
+        // here; the rest, including dt below, is double, so t and dt can differ from ComfyUI's float32 by about one ulp.
         float tVideo = (float)(1.0 - (double)(float)(sigma * 1000.0) / 1000.0);
         (float[] timesteps, IReadOnlyDictionary<MiniMaxH3SegmentKind, int> rowOf) =
             MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, 0f, MiniMaxH3Schedule.VisualCondTimestep,
