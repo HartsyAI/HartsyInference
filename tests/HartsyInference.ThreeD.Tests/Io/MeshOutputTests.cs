@@ -115,6 +115,36 @@ public sealed class MeshOutputTests
     }
 
     [Fact]
+    public void ATransformedParentOfAMeshMakesTheFrameRefuseTheFile()
+    {
+        byte[] framed = GlbFrame.Normalize(GlbWriter.Write(Tetrahedron()), Matrix4x4.CreateRotationY(MathF.PI));
+
+        // The frame node itself is a transformed node above the mesh: framing a framed file would size it from local accessor bounds.
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GlbFrame.Normalize(framed, Matrix4x4.Identity));
+    }
+
+    [Fact]
+    public void TheBinaryChunkIsNotCopiedBySplitAndTheReaderStillReadsIt()
+    {
+        byte[] glb = GlbWriter.Write(Tetrahedron());
+
+        GlbContainer.Chunks chunks = GlbContainer.Split(glb);
+
+        Assert.True(chunks.BinLength > 0);
+        Assert.Equal(4, GlbReader.Parse(glb).VertexCount);
+    }
+
+    [Fact]
+    public void AnInspectorJsonThatIsNotAnObjectIsReportedAsMalformed()
+    {
+        byte[] glb = GlbWriter.Write(Tetrahedron());
+        byte[] broken = GlbContainer.ReplaceJson(glb, System.Text.Encoding.UTF8.GetBytes("null"));
+
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GlbInspector.Read(broken));
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GlbFrame.Wrap(broken, Matrix4x4.Identity));
+    }
+
+    [Fact]
     public void AFileWithoutASceneCannotBeFramed()
     {
         Assert.ThrowsAny<Exception>(() => GlbFrame.Wrap([0x67, 0x6C, 0x54, 0x46], Matrix4x4.Identity));

@@ -39,7 +39,7 @@ public static class GlbReader
     private static (byte[] Json, byte[] Bin) SplitChunks(byte[] glb)
     {
         GlbContainer.Chunks chunks = GlbContainer.Split(glb);
-        return (chunks.Json, chunks.Bin);
+        return (chunks.Json, glb.AsSpan(chunks.BinOffset, chunks.BinLength).ToArray());
     }
 
     private static JsonDocument ParseJson(byte[] json)

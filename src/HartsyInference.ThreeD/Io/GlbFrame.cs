@@ -39,11 +39,11 @@ public static class GlbFrame
     {
         try
         {
-            JsonObject root = JsonNode.Parse(GlbContainer.Split(glb).Json)!.AsObject();
+            JsonObject root = JsonNode.Parse(GlbContainer.Split(glb).Json) as JsonObject ?? throw new HartsyInferenceException("The GLB's JSON is not an object.");
             if (root["scenes"] is not JsonArray scenes || scenes.Count == 0 || root["nodes"] is not JsonArray nodes)
                 throw new HartsyInferenceException("The GLB has no scene to put in a frame.");
-            RequireUntransformedMeshNodes(nodes);
-            JsonObject scene = scenes[root["scene"]?.GetValue<int>() ?? 0]!.AsObject();
+            RequireUntransformedNodes(root, nodes);
+            JsonObject scene = scenes[root["scene"]?.GetValue<int>() ?? 0] as JsonObject ?? throw new HartsyInferenceException("The GLB's default scene is not an object.");
             JsonArray children = scene["nodes"] is JsonArray existing ? (JsonArray)existing.DeepClone() : [];
             int frameIndex = nodes.Count;
             nodes.Add(new JsonObject
@@ -63,15 +63,24 @@ public static class GlbFrame
         }
     }
 
-    /// <summary>The frame is sized from the POSITION accessors' own bounds, which is right only while the nodes that carry meshes have no transform of their own (joints may).</summary>
-    private static void RequireUntransformedMeshNodes(JsonArray nodes)
+    /// <summary>The frame is sized from the POSITION accessors' own bounds, which is right only while no node places a mesh away from them: a node with a transform is refused unless it is a joint of a skin.</summary>
+    private static void RequireUntransformedNodes(JsonObject root, JsonArray nodes)
     {
-        foreach (JsonNode? node in nodes)
+        HashSet<int> joints = [];
+        if (root["skins"] is JsonArray skins)
         {
-            if (node is JsonObject { } obj && obj.ContainsKey("mesh")
+            foreach (JsonNode? skin in skins)
+            {
+                if (skin?["joints"] is JsonArray list)
+                    joints.UnionWith(list.Select(j => j!.GetValue<int>()));
+            }
+        }
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            if (nodes[i] is JsonObject obj && !joints.Contains(i)
                 && (obj.ContainsKey("matrix") || obj.ContainsKey("translation") || obj.ContainsKey("rotation") || obj.ContainsKey("scale")))
             {
-                throw new HartsyInferenceException("A mesh node of the GLB carries its own transform, so its bounds are not known to the frame step.");
+                throw new HartsyInferenceException($"Node {i} of the GLB carries its own transform, so the bounds of the meshes below it are not known to the frame step.");
             }
         }
     }
