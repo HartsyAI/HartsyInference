@@ -30,6 +30,7 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, UniRigPipeline> _rigPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HunyuanPaintLoader> _paintPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, P3SamPipeline> _partPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, XPartPipeline> _xpartPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
@@ -57,6 +58,8 @@ public sealed class MeshService : IMeshService, IDisposable
             return GeneratePaintAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.PartMesh.Contains(id))
             return GeneratePartAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.XPartMesh.Contains(id))
+            return GenerateXPartAsync(spec, id, request, progress, cancel);
 
         if (request.ScenePrompt is not null)
             throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
@@ -239,6 +242,97 @@ public sealed class MeshService : IMeshService, IDisposable
                 return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
             },
             cancel);
+    }
+
+    /// <summary>X-Part: P3-SAM splits the mesh into parts and every part is generated again as a complete shape. One GLB with a coloured node per part, the parts' boxes and face counts in
+    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (negative: 42), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
+    /// <see cref="MeshRequest.GridResolution"/> the marching-cubes grid of each part (0: 256).</summary>
+    private Task<MeshResult> GenerateXPartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.SceneMesh is null)
+        {
+            throw new NotSupportedException(
+                $"3D model '{id}' generates the parts of a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.");
+        }
+        if (request.Image is not null)
+            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
+        if (request.Seed > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The X-Part seed must be at most {int.MaxValue}.");
+        if (request.Steps is < 0 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).");
+        if (request.GridResolution != 0 && request.GridResolution is < 32 or > 1024)
+            throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The X-Part grid must be between 32 and 1024 (0 takes the default of 256).");
+        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        P3SamPipeline.ValidateMesh(input);
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                XPartPipeline pipeline = GetOrLoadXPart(spec, id);
+                XPartOptions options = new()
+                {
+                    Seed = request.Seed < 0 ? 42 : (int)request.Seed,
+                    Steps = request.Steps == 0 ? 50 : request.Steps,
+                    GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
+                };
+                XPartResult result = pipeline.Generate(input, options, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }, cancel);
+                MeshPart[] parts = [.. result.Parts.Select((part, i) => new MeshPart(i, result.Boxes[i], part.TriangleCount))];
+                return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
+            },
+            cancel);
+    }
+
+    /// <summary>Returns the cached X-Part pipeline for <paramref name="spec"/>: the folder holding the four checkpoints (each stage loads its file when it runs).</summary>
+    private XPartPipeline GetOrLoadXPart(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding {string.Join(", ", XPartPipeline.Files)} as the local path.");
+        }
+        string folder = XPartFolder(spec.LocalPath);
+        lock (_gate)
+        {
+            if (_xpartPipelines.TryGetValue(folder, out XPartPipeline? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                XPartPipeline pipeline = new(_engine.Backend, folder);
+                _xpartPipelines[folder] = pipeline;
+                return pipeline;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to prepare the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
+    }
+
+    // The folder holding p3sam/, conditioner/, model/ and shapevae/: the path itself, or the folder above the file or subfolder a path points at.
+    internal static string XPartFolder(string localPath)
+    {
+        string folder = File.Exists(localPath) ? Path.GetDirectoryName(Path.GetFullPath(localPath))! : localPath;
+        string? parent = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        foreach (string? candidate in new[] { folder, parent })
+        {
+            if (candidate is not null && XPartPipeline.Files.All(file => File.Exists(Path.Combine(candidate, file))))
+            {
+                return Path.GetFullPath(candidate);
+            }
+        }
+        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(folder, XPartPipeline.Files[0]));
     }
 
     /// <summary>Returns the cached P3-SAM pipeline for <paramref name="spec"/>: <c>p3sam.safetensors</c>, given directly or found in the folder it was given as.</summary>
@@ -889,6 +983,7 @@ public sealed class MeshService : IMeshService, IDisposable
             rigPipelines = _rigPipelines.Values.ToList();
             paintPipelines = _paintPipelines.Values.ToList();
             partPipelines = _partPipelines.Values.ToList();
+            _xpartPipelines.Clear();
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
             pixal3dRuntimes = _pixal3d.Values.ToList();
