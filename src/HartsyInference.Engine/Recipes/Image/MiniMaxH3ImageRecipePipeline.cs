@@ -73,8 +73,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
         int latentH = height / 16, latentW = width / 16;
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
-        // torch.manual_seed keeps the low 32 bits, so a request seed from 2^31 up needs its own bit 31 to match ComfyUI.
-        long noiseSeed = request.Seed >= 1L << 31 ? request.Seed & 0xFFFFFFFFL : seed;
+        // torch.manual_seed keeps the low 32 bits of the seed, so the full request seed drives the noise (TorchCompatibleNoise masks it).
+        long noiseSeed = NoiseSeed(request.Seed, seed);
         double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!, RequiredSteps);
 
         // TODO(gpu): the picture label. The image path uses "Picture N: " with no brackets (nodes_minimax_h3.py); this
@@ -109,7 +109,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
                 sin.Dispose();
             }
 
-            return Decode(x, latentH, latentW, width, height, seed);
+            return Decode(x, latentH, latentW, width, height, seed, noiseSeed);
         }
         finally
         {
@@ -251,7 +251,12 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         }
     }
 
-    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
+    /// <summary>The seed that drives the noise. A non-negative request seed goes to the noise unchanged, because torch.manual_seed
+    /// keeps the low 32 bits and TorchCompatibleNoise masks the seed the same way. Only a negative or unset seed takes the
+    /// 31-bit <paramref name="fallback"/>.</summary>
+    internal static long NoiseSeed(long requestSeed, int fallback) => requestSeed >= 0 ? requestSeed : fallback;
+
+    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed, long noiseSeed)
     {
         using Tensor latent = MiniMaxH3Latents.UnpackVideo(x, 1, latentH, latentW, _config);
         using Tensor frame = _decoder.Decode(_vaeBackend, latent);
@@ -264,12 +269,13 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             Rgb = rgb,
             Width = width,
             Height = height,
+            // Seed is the 31-bit alias. Meta["seed"] carries the seed that drove the noise, which reproduces the image.
             Seed = seed,
             Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["arch"] = "minimax-h3-image",
                 ["size"] = $"{width}x{height}",
-                ["seed"] = seed.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["seed"] = noiseSeed.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["steps"] = RequiredSteps.ToString(System.Globalization.CultureInfo.InvariantCulture),
             },
         };
