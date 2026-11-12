@@ -15,6 +15,6 @@ public sealed class NativeMeshConvertRequest
     /// <summary>The base name of the output files; <c>model</c> when absent.</summary>
     public string? Name { get; set; }
 
-    /// <summary>Also return the files as one zip archive, base64, in <c>Archive</c>.</summary>
+    /// <summary>Return the files as one zip archive, base64, in <c>Archive</c>, instead of each file's bytes in <c>Files</c> (which then list names and types only).</summary>
     public bool Archive { get; set; }
 }
