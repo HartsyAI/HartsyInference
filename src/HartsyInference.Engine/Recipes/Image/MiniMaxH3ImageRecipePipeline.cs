@@ -34,7 +34,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     private readonly IReadOnlyList<IDisposable> _loaders;
     private readonly StackedOutputHeads _heads;
     private bool _disposed;
-    private readonly PromptEncodingCache _promptCache = new(8);
+    private const int PromptCacheCapacity = 8;
+    private readonly PromptEncodingCache _promptCache = new(PromptCacheCapacity);
 
     internal MiniMaxH3ImageRecipePipeline(MiniMaxH3Transformer transformer, MiniMaxH3Config config,
         MiniMaxH3VideoVaeDecoder decoder, MiniMaxH3TextEncoder encoder, Qwen2Tokenizer tokenizer,
@@ -167,6 +168,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     /// <summary>The prompt's encoder states: a cached copy when this prompt was encoded recently, otherwise a fresh encode.</summary>
     private MiniMaxH3TextEncoder.Result EncodePromptCached(string prompt)
     {
+        // The key is the prompt alone. Add the conditioning inputs (picture label, references) to the key once they are wired.
         MiniMaxH3TextEncoder.Result? cached = _promptCache.Get(prompt);
         if (cached is not null)
         {

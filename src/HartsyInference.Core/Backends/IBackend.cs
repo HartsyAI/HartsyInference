@@ -165,7 +165,7 @@ public partial interface IBackend : IDisposable
     /// <summary>Dequantizes a packed single-expert NVFP4 bank <c>[1, out, in/2]</c>, its block scales and its global scale into the
     /// BF16 <c>[out, in]</c> <paramref name="destination"/> on the device. Returns false and writes nothing when the backend has no
     /// such kernel, so the caller runs its host dequant. The device result is registered against <paramref name="destination"/> for
-    /// the next <see cref="Linear"/> and released by <c>FreeWeights</c>.</summary>
+    /// the next <see cref="Linear"/> and released when <paramref name="destination"/> is disposed. Its host bytes are not written on this path.</summary>
     bool TryDequantNvfp4ToBf16(Tensor packed, Tensor blockScale, Tensor globalScale, Tensor destination) => false;
 
     /// <summary>Marks the end of the work issued so far and returns a handle <see cref="WaitFence"/> can block on; 0 on a

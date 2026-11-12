@@ -37,7 +37,8 @@ namespace HartsyInference.Diffusion.Models.TextEncoders;
 /// <item>The host buffer comes from a caller-owned scratch (see <see cref="CreateDequantScratch"/>) shared by every
 /// layer, so a 50-layer encode allocates one buffer instead of 350. The <see cref="Tensor"/> wrapper is still fresh
 /// per call: reusing a Tensor <i>object</i> whose bytes change is what corrupts the reference-keyed device caches.</item>
-/// </list></para></summary>
+/// </list>
+/// <para>On CUDA the device path uploads only the packed bytes and block scales per call (about a quarter of the BF16 slice) and dequantizes them on the device through <see cref="IBackend.TryDequantNvfp4ToBf16"/>. The banks are excluded from auto-promotion, so none stays resident.</para></summary>
 public sealed unsafe class Nvfp4Linear : IDisposable
 {
     /// <summary>Dtype the packed weight is dequantized to for the GEMM.</summary>
@@ -195,9 +196,9 @@ public sealed unsafe class Nvfp4Linear : IDisposable
         }
     }
 
-    /// <summary>Enumerates the resident weight tensors for GPU preloading; the packed bank and its scales are
-    /// excluded because the dequant reads them on the HOST — preloading would put a device-cached tensor in front of
-    /// those reads and evict it on every layer.</summary>
+    /// <summary>Enumerates the resident weight tensors for GPU preloading. The packed bank and its scales are excluded:
+    /// the host dequant reads them on the HOST, and the device dequant uploads them per call without caching them, so a
+    /// preloaded device copy would be evicted on every layer.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         if (_dense is not null) yield return _dense;

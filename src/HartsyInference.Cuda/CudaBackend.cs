@@ -5289,6 +5289,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         bool cachedOutput = false;
         try
         {
+            // The banks are long-lived weights: keep them out of auto-promotion so the encoder does not hold them resident.
+            GpuTransferHelper.ExcludeFromAutoPromotion(packed);
+            GpuTransferHelper.ExcludeFromAutoPromotion(blockScale);
             pWeight = GpuTransferHelper.CopyToDevice(packed);
             pScales = GpuTransferHelper.CopyToDevice(blockScale);
             nuint outBytes = GpuTransferHelper.ByteSize(destination);

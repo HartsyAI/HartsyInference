@@ -62,4 +62,33 @@ public sealed class PromptEncodingCacheTests
         Assert.NotNull(cache.Get("b"));
         Assert.NotNull(cache.Get("c"));
     }
+    [Fact]
+    public void RePutMovesThePromptToTheNewestSlot()
+    {
+        PromptEncodingCache cache = new(2);
+        cache.Put("a", Encoded(1f));
+        cache.Put("b", Encoded(2f));
+        cache.Put("a", Encoded(3f));
+        cache.Put("c", Encoded(4f));
+
+        Assert.Equal(2, cache.Count);
+        Assert.Null(cache.Get("b"));
+        Assert.NotNull(cache.Get("a"));
+        Assert.NotNull(cache.Get("c"));
+    }
+
+    [Fact]
+    public void PutKeepsItsOwnCopyAfterTheSourceIsDisposed()
+    {
+        PromptEncodingCache cache = new(4);
+        MiniMaxH3TextEncoder.Result source = Encoded(5f);
+        cache.Put("p", source);
+        source.HiddenStates.Dispose();
+
+        MiniMaxH3TextEncoder.Result? hit = cache.Get("p");
+
+        Assert.NotNull(hit);
+        Assert.Equal(5f, hit!.HiddenStates.AsSpan<float>()[0]);
+        hit.HiddenStates.Dispose();
+    }
 }
