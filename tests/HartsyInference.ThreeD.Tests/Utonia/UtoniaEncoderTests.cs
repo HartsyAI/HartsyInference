@@ -27,6 +27,28 @@ public sealed class UtoniaEncoderTests
     }
 
     [Fact]
+    public void SonataConfig_HasNoRopeAndAcceptsHeadsThatRopeWouldRefuse()
+    {
+        // Sonata's heads are 16 wide (48 / 3), which the 3D RoPE of Utonia could not split; with UseRope off the config validates, the checkpoint lists no
+        // rope buffers, and the encoder runs.
+        UtoniaConfig.Sonata.Validate();
+        Assert.Empty(UtoniaCheckpointKeys.Buffers(UtoniaConfig.Sonata));
+        Assert.NotEmpty(UtoniaCheckpointKeys.Buffers(UtoniaTestData.TinyConfig()));
+        UtoniaConfig withRope = UtoniaConfig.Sonata with { UseRope = true };
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => withRope.Validate());
+
+        UtoniaConfig tiny = UtoniaTestData.TinyConfig() with { UseRope = false, EncChannels = [8, 16, 24], EncNumHeads = [2, 4, 6], LayerScaleInit = null };
+        using UtoniaEncoder encoder = new(new CpuBackend(), tiny, UtoniaTestData.RandomWeights(tiny, 5));
+        (int[] coords, int batchSize) = RandomCoords(seed: 3, grid: 16, perSample: new[] { 10 });
+
+        UtoniaFeatures result = encoder.ForwardLevel4(coords, batchSize);
+
+        Assert.Equal(24L, result.Feats.Shape[1]);
+        Assert.All(UtoniaTestData.Read(result.Feats), v => Assert.True(float.IsFinite(v)));
+        result.Feats.Dispose();
+    }
+
+    [Fact]
     public void ForwardLevel4_IsDeterministicForFixedWeights()
     {
         UtoniaConfig config = UtoniaTestData.TinyConfig();

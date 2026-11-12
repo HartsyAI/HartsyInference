@@ -117,7 +117,11 @@ internal sealed class UtoniaSerializedAttention
         unsafe
         {
             float* qkvPtr = (float*)qkv.DataPointer;
-            UtoniaRope.Apply(qkvPtr, slotCoord.AsSpan(slotStart * 3, chunkRows * 3), _channels, _heads, _ropeBase);
+            if (_ropeBase > 0f)
+            {
+                UtoniaRope.Apply(qkvPtr, slotCoord.AsSpan(slotStart * 3, chunkRows * 3), _channels, _heads, _ropeBase);
+            }
+
             AttendSegments(qkvPtr, (float*)attnSlots.DataPointer, plan, segmentFirst, segmentEnd, slotStart);
         }
 

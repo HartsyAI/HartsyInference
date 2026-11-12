@@ -36,6 +36,10 @@ public sealed record UtoniaConfig
 
     public float RopeBase { get; init; } = 10f;
 
+    /// <summary>Whether attention rotates queries and keys with the 3D RoPE of Utonia. Sonata (the P3-SAM backbone) has none: its attention is plain scaled
+    /// dot product over the serialised patch, and its checkpoint carries no <c>attn.rope.inv_freq</c> buffers.</summary>
+    public bool UseRope { get; init; } = true;
+
     /// <summary>Checks the shape and divisibility rules the modules rely on. Throws for an unusable config.</summary>
     /// <summary>
     /// Encoder of the CoLa3D Utonia checkpoint. Depths, widths, the 18-channel head size (from the RoPE buffer's
@@ -56,6 +60,29 @@ public sealed record UtoniaConfig
         QkvBias = true,
         PreNorm = true,
         LayerScaleInit = null,
+    };
+
+    /// <summary>
+    /// Sonata (<c>facebook/sonata</c>, the Point Transformer V3 backbone of Hunyuan3D-Part's P3-SAM; its weights sit inside <c>p3sam.safetensors</c> under
+    /// <c>sonata.</c>): five stages of 48, 96, 192, 384 and 512 channels with 3, 3, 3, 12 and 3 blocks, 3 to 32 heads, patch 1024, the four curves,
+    /// stride 2, a CPE per block, no RoPE and no decoder. The widths, depths and head counts are read from the checkpoint header and Hunyuan3D-Part's
+    /// <c>sonata.json</c>; the stride and curve order follow that file too.
+    /// </summary>
+    public static UtoniaConfig Sonata => new()
+    {
+        InChannels = 9,
+        Order = ["z", "z-trans", "hilbert", "hilbert-trans"],
+        Stride = [2, 2, 2, 2],
+        EncDepths = [3, 3, 3, 12, 3],
+        EncChannels = [48, 96, 192, 384, 512],
+        EncNumHeads = [3, 6, 12, 24, 32],
+        EncPatchSize = [1024, 1024, 1024, 1024, 1024],
+        EncoderOnly = true,
+        MlpRatio = 4.0,
+        QkvBias = true,
+        PreNorm = true,
+        LayerScaleInit = null,
+        UseRope = false,
     };
 
     public void Validate()
@@ -81,7 +108,7 @@ public sealed record UtoniaConfig
             throw Invalid("at least one encoder stage is required");
         }
 
-        ValidateStages("enc", EncDepths!, EncChannels, EncNumHeads, EncPatchSize, stages);
+        ValidateStages("enc", EncDepths!, EncChannels, EncNumHeads, EncPatchSize, stages, UseRope);
         if (Stride is null || Stride.Length != stages - 1)
         {
             throw Invalid($"Stride must have {stages - 1} entries for {stages} encoder stages");
@@ -97,7 +124,7 @@ public sealed record UtoniaConfig
 
         if (!EncoderOnly)
         {
-            ValidateStages("dec", DecDepths, DecChannels, DecNumHeads, DecPatchSize, stages - 1);
+            ValidateStages("dec", DecDepths, DecChannels, DecNumHeads, DecPatchSize, stages - 1, UseRope);
         }
 
         if (MlpRatio <= 0)
@@ -111,7 +138,7 @@ public sealed record UtoniaConfig
         }
     }
 
-    private static void ValidateStages(string name, int[] depths, int[] channels, int[] heads, int[] patch, int count)
+    private static void ValidateStages(string name, int[] depths, int[] channels, int[] heads, int[] patch, int count, bool rope)
     {
         if (depths.Length != count || channels.Length != count || heads.Length != count || patch.Length != count)
         {
@@ -131,7 +158,7 @@ public sealed record UtoniaConfig
             }
 
             // 3D RoPE splits each head into x, y, z chunks, and each chunk into rotary pairs.
-            if (depths[s] > 0 && (channels[s] / heads[s]) % 6 != 0)
+            if (rope && depths[s] > 0 && (channels[s] / heads[s]) % 6 != 0)
             {
                 throw Invalid($"{name} stage {s}: head dim {channels[s] / heads[s]} must be divisible by 6 for 3D RoPE");
             }
