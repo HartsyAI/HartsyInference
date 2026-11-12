@@ -4,6 +4,7 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
 using HartsyInference.ThreeD.Pipelines;
 
@@ -184,5 +185,22 @@ public sealed class Sam3dObjectsWiringTests
         Assert.Equal([1f, 3f, -2f, 4f, 6f, -5f, 7f, 9f, -8f], mesh.Vertices);
         Assert.Equal([0, 1, 2], mesh.Indices);
         Assert.Equal([0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f], mesh.VertexColors!);
+    }
+
+    [Fact]
+    public void Finish_DropsAFloatingPieceOfAbout3In10000OfTheAreaThatTheSharedDefaultKeeps()
+    {
+        // A tetrahedron of unit edges (area about 1.73) and a far triangle of area 0.0005, so 3e-4 of the total: above the default 1e-5, below the 1e-3 used here.
+        Mesh mesh = new()
+        {
+            Vertices = [0f, 0f, 0f, 1f, 0f, 0f, 0.5f, 0.866f, 0f, 0.5f, 0.289f, 0.816f, 5f, 5f, 5f, 5.0316f, 5f, 5f, 5f, 5.0316f, 5f],
+            Indices = [0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3, 4, 5, 6],
+        };
+        Assert.Equal(2, MeshStatistics.Measure(ShapeMeshFinisher.Finish(mesh)).Components);
+
+        MeshStats finished = MeshStatistics.Measure(Sam3dObjectsMesh.Finish(mesh));
+
+        Assert.Equal(1, finished.Components);
+        Assert.Equal(4, finished.TriangleCount);
     }
 }

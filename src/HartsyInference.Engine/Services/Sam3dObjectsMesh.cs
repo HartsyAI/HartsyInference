@@ -1,4 +1,5 @@
 using HartsyInference.ThreeD.Geometry;
+using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Models.Sam3dObjects;
 
 namespace HartsyInference.Engine.Services;
@@ -31,4 +32,11 @@ internal static class Sam3dObjectsMesh
 
         return new Mesh { Vertices = vertices, Indices = result.Faces, VertexColors = colours };
     }
+
+    /// <summary>
+    /// The shared shape-mesh repair (<see cref="ShapeMeshFinisher"/>) with components under 0.1 % of the total area dropped, 100 times the default. FlexiCubes leaves floating pieces much larger than
+    /// the default's specks: on the real bust the default left 360 components and 552 boundary edges (906 and 772 before), 0.1 % left 4 and 466, and the render shows the bust whole. One object, one threshold;
+    /// the remaining boundary is larger openings the hole filler's perimeter limit does not close.
+    /// </summary>
+    public static Mesh Finish(Mesh mesh) => ShapeMeshFinisher.Finish(mesh, clean: true, smallComponentAreaRatio: 1e-3);
 }
