@@ -29,9 +29,8 @@ public sealed class SdpaTiledGpuTests
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
 
-        bool forcedBefore = EngineKnobs.SdpaForceTiled.Value;
-        int tileBefore = EngineKnobs.SdpaTile.Value ?? 0;
-        KnobFile.Apply("{\"settings\": {\"vram.sdpaForceTiled\": true, \"numerics.sdpaTile\": " + tileRows + "}}", "SdpaTiledGpuTests");
+        KnobStore.Set(EngineKnobs.SdpaForceTiled, true);
+        KnobStore.Set(EngineKnobs.SdpaTile, (int?)tileRows);
         try
         {
             using CudaBackend backend = new(0, PtxDir());
@@ -53,10 +52,8 @@ public sealed class SdpaTiledGpuTests
         }
         finally
         {
-            // Back to what was set before; a tile height of 0 is "no override" (TileRows ignores a non-positive height).
-            KnobFile.Apply(
-                "{\"settings\": {\"vram.sdpaForceTiled\": " + (forcedBefore ? "true" : "false") + ", \"numerics.sdpaTile\": " + tileBefore + "}}",
-                "SdpaTiledGpuTests");
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+            KnobStore.Clear(EngineKnobs.SdpaTile);
         }
     }
 

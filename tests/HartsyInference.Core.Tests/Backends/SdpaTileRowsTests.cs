@@ -52,6 +52,22 @@ public sealed class SdpaTileRowsTests
     }
 
     [Fact]
+    public void ARememberedCapLimitsTheTileLikeTheFreeMemoryReadingDoes()
+    {
+        long capBytes = 40 * PerRowBytes;
+
+        // A card that really is full: the floor would ask for more than fits, the cap says what did.
+        Assert.Equal(40, CudaBackend.TileRows(0, Heads, Tokens, Tokens, forced: null, capBytes));
+        Assert.Equal(40, CudaBackend.TileRows(8UL << 30, Heads, Tokens, Tokens, forced: null, capBytes));
+        // No cap, and a cap larger than the budget, change nothing; a forced height still wins.
+        Assert.Equal(CudaBackend.TileRows(0, Heads, Tokens, Tokens, null), CudaBackend.TileRows(0, Heads, Tokens, Tokens, null, 0));
+        Assert.Equal(CudaBackend.TileRows(0, Heads, Tokens, Tokens, null), CudaBackend.TileRows(0, Heads, Tokens, Tokens, null, 1L << 40));
+        Assert.Equal(256, CudaBackend.TileRows(0, Heads, Tokens, Tokens, forced: 256, capBytes));
+        // A cap below one row still gives one.
+        Assert.Equal(1, CudaBackend.TileRows(0, Heads, Tokens, Tokens, forced: null, capBytes: 1));
+    }
+
+    [Fact]
     public void ATileOfOneRowPastTheAddressableScoresIsRefused()
     {
         // 2^32 / (heads * keys) < 1: even one query row of every head is more scores than the softmax addresses.

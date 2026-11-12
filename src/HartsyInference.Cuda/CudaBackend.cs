@@ -6229,11 +6229,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// tile of one query row is one cuBLAS launch per head per row (about 800 thousand per call at 32 thousand tokens, minutes per layer).</summary>
     internal const long MinTileScoreBytes = 128L << 20;
 
+    /// <summary>The tile size in bytes the allocation last had to shrink to (0: it has not had to); see <see cref="TileRows"/>.</summary>
+    private long _sdpaTileCapBytes;
+
     /// <summary>The query tile's height: <c>[totalHeads, Br, Skv]</c> F32 scores in about a quarter of free VRAM (room for Q/K/V/out and
     /// the weights) but never less than <see cref="MinTileScoreBytes"/>, or the height <c>numerics.sdpaTile</c> forces, and never past the
-    /// score elements the softmax addresses.</summary>
+    /// score elements the softmax addresses. <paramref name="capBytes"/> is a tile size an earlier call found to be the largest that fits (0: none);
+    /// it limits the tile like the free-memory reading does, so a card that really is full pays its allocation failures once and not on every call.</summary>
     /// <exception cref="AttentionUnsupportedException">One query row across every head is already past them.</exception>
-    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced)
+    internal static long TileRows(ulong freeBytes, long totalHeads, long sq, long skv, int? forced, long capBytes = 0)
     {
         long cap = MaterializedMaxScores / Math.Max(1, totalHeads * skv);
         if (cap < 1)
@@ -6242,6 +6246,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long perRow = totalHeads * skv * sizeof(float);
         long budget = (long)Math.Max(freeBytes / 4, (ulong)MinTileScoreBytes);
         long rows = budget / Math.Max(1, perRow);
+        if (capBytes > 0) rows = Math.Min(rows, capBytes / Math.Max(1, perRow));
         if (rows < 1) rows = 1;
         if (rows > sq) rows = sq;
         if (forced is int f && f > 0) rows = Math.Min(f, sq);
@@ -6257,22 +6262,31 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         try
         {
             (nuint freeBytes, _) = _context.GetMemoryInfo();
-            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value);
+            long perRow = totalHeads * skv * sizeof(float);
+            long Br = TileRows((ulong)freeBytes, totalHeads, sq, skv, EngineKnobs.SdpaTile.Value, Volatile.Read(ref _sdpaTileCapBytes));
 
             // The floor on the tile can ask for more than is really free (the reading was accurate, not too low): halve the tile until it fits,
-            // so the floor never turns a slow call into a failed one.
+            // so the floor never turns a slow call into a failed one, and remember the height that fit so the failures (each one a full
+            // allocator recovery) are paid once, not on every call. The memory reading turning plentiful again clears the memory.
+            bool halved = false;
             while (true)
             {
                 try
                 {
-                    scoresBuf = CudaMemory.Allocate((nuint)(totalHeads * Br * skv * sizeof(float)));
+                    scoresBuf = CudaMemory.Allocate((nuint)(perRow * Br));
                     break;
                 }
                 catch (OutOfVramException) when (Br > 1)
                 {
                     Br = Math.Max(1, Br / 2);
+                    halved = true;
                 }
             }
+
+            if (halved)
+                Volatile.Write(ref _sdpaTileCapBytes, perRow * Br);
+            else if (Volatile.Read(ref _sdpaTileCapBytes) > 0 && (long)(freeBytes / 4) >= 2 * Volatile.Read(ref _sdpaTileCapBytes))
+                Volatile.Write(ref _sdpaTileCapBytes, 0);
             if (pBias != 0)
             {
                 pOnes = CudaMemory.Allocate((nuint)(Br * sizeof(float)));
