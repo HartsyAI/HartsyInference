@@ -10,6 +10,9 @@ namespace HartsyInference.API.Endpoints;
 /// <summary>Native 3D-mesh route. Unlike the other Phase 3 additions, <see cref="IMeshService.GenerateAsync"/> takes an <see cref="IProgress{T}"/> just like images do, so this gets the same <c>/stream</c> variant.</summary>
 public static class MeshEndpoints
 {
+    /// <summary>The thumbnail renders that may run at once.</summary>
+    private static readonly SemaphoreSlim ThumbnailGate = new(2);
+
     /// <summary>Maps <c>/v1/native/mesh</c> and its SSE step-preview variant.</summary>
     public static void MapMeshEndpoints(this WebApplication app)
     {
@@ -115,6 +118,36 @@ public static class MeshEndpoints
             catch (NotSupportedException ex)
             {
                 // A format the converter does not read or write is the caller's request, not a missing server feature.
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapPost("/v1/native/mesh/thumbnail", async Task<IResult> (NativeMeshThumbnailRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(req.Data) || string.IsNullOrWhiteSpace(req.Format))
+                    throw new ArgumentException("Send Data (base64) and Format.");
+                byte[] data = MeshBase64.Decode(req.Data);
+                // A render is CPU and memory heavy and runs next to model work, so only a couple run at once; the rest wait here, and give up if their caller does.
+                await ThumbnailGate.WaitAsync(ct);
+                MeshThumbnail thumbnail;
+                try
+                {
+                    thumbnail = await Task.Run(() => engine.MeshThumbnails.Render(data, req.Format, req.Options, ct), ct);
+                }
+                finally
+                {
+                    ThumbnailGate.Release();
+                }
+                return Results.Ok(new { Png = System.Convert.ToBase64String(thumbnail.Png), thumbnail.Width, thumbnail.Height, thumbnail.Kind, thumbnail.Notes });
+            }
+            catch (NotSupportedException ex)
+            {
                 return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
             }
             catch (Exception ex)
