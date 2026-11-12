@@ -1,7 +1,9 @@
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Text;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Logging;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
@@ -19,12 +21,17 @@ internal static class MeshResultFinisher
     private static readonly HashSet<string> HalfTurnedAboutY = new(StringComparer.OrdinalIgnoreCase) { MeshModelIds.Pixal3D };
 
     /// <summary>Applies the request's frame, measures the result and makes the preview.</summary>
-    public static MeshResult Finish(string id, MeshRequest request, MeshResult raw, CancellationToken cancel)
+    public static MeshResult Finish(string id, MeshRequest request, MeshResult raw, MeshSettingsUsed settings, CancellationToken cancel)
     {
-        if (raw.Format != "glb")
-            return raw with { Info = SplatInfo(raw.Data) };
-
         List<string> warnings = [.. raw.Warnings];
+        if (raw.Format is not ("glb" or "ply"))
+            return raw with { Settings = settings };
+        if (raw.Format == "ply")
+        {
+            byte[] ply = Step("The settings were not embedded", warnings, () => MeshMetadata.SetPly(raw.Data, Describe(settings, MeshFrame.Native))) ?? raw.Data;
+            return raw with { Data = ply, Info = SplatInfo(ply), Settings = settings, Warnings = warnings };
+        }
+
         byte[] data = raw.Data;
         MeshFrame frame = MeshFrame.Native;
         if (request.Frame == MeshFrame.GltfYUpMetres)
@@ -38,6 +45,8 @@ internal static class MeshResultFinisher
                     warnings.Add($"'{id}' was centred and scaled to one metre; its front direction is not verified, so it was not turned.");
             }
         }
+        byte[] framedData = data;
+        data = Step("The settings were not embedded", warnings, () => MeshMetadata.SetGlb(framedData, Describe(settings, frame))) ?? framedData;
         cancel.ThrowIfCancellationRequested();
 
         GlbSummary? summary = Step("The glb could not be inspected", warnings, () => GlbInspector.Read(data));
@@ -52,7 +61,23 @@ internal static class MeshResultFinisher
         byte[]? preview = null;
         if (mesh is not null && wantsPreview && mesh.TriangleCount > request.PreviewTriangles)
             preview = Step("The preview could not be made", warnings, () => MakePreview(mesh, request.PreviewTriangles, cancel));
-        return raw with { Data = data, Frame = frame, Info = info, Preview = preview, Warnings = warnings };
+        return raw with { Data = data, Frame = frame, Info = info, Preview = preview, Warnings = warnings, Settings = settings };
+    }
+
+    /// <summary>The description of how a result was made, as embedded in its file.</summary>
+    internal static JsonObject Describe(MeshSettingsUsed settings, MeshFrame frame)
+    {
+        JsonObject parameters = [];
+        foreach ((string name, ResolvedParameter parameter) in settings.Parameters)
+            parameters[name] = new JsonObject { ["value"] = parameter.Value, ["source"] = parameter.Source.ToString() };
+        return new JsonObject
+        {
+            ["generator"] = "HartsyInference " + settings.EngineVersion,
+            ["model"] = settings.ModelId,
+            ["seed"] = settings.Seed,
+            ["frame"] = frame.ToString(),
+            ["settings"] = parameters,
+        };
     }
 
     /// <summary>The rotation that takes a model's native glb into glTF's frame; identity where the native front is not verified.</summary>
