@@ -10,7 +10,10 @@ public static unsafe class TrellisGaussianRepresentation
     private const int NumGaussians = 32, Resolution = 64;
     private const float VoxelSize = 1.5f, MinKernel = 0.0009f;
 
-    public static GaussianSplatCloud Build(SparseTensor netOut)
+    /// <param name="netOut">The decoder's <c>[voxels, 448]</c> output.</param>
+    /// <param name="rotationScale">The decoder config's <c>lr</c> for <c>_rotation</c>, which upstream multiplies the raw rotation channels by before adding the identity quaternion (SAM 3D's
+    /// <c>slat_decoder_gs.yaml</c> gives 0.1). 1 keeps the raw channels, which is what the TRELLIS pipeline has always passed.</param>
+    public static GaussianSplatCloud Build(SparseTensor netOut, float rotationScale = 1f)
     {
         int nv = netOut.Count;
         int splats = nv * NumGaussians;
@@ -53,7 +56,7 @@ public static unsafe class TrellisGaussianRepresentation
                 // opacity: logit = _opacity + bias.
                 op[s] = row[rOp + g] + opacityBias;
                 // rotation: (_rotation + [1,0,0,0]) rotated by q_R (y-up transform).
-                float qw = row[rRot + g * 4 + 0] + 1f, qx = row[rRot + g * 4 + 1], qy = row[rRot + g * 4 + 2], qz = row[rRot + g * 4 + 3];
+                float qw = row[rRot + g * 4 + 0] * rotationScale + 1f, qx = row[rRot + g * 4 + 1] * rotationScale, qy = row[rRot + g * 4 + 2] * rotationScale, qz = row[rRot + g * 4 + 3] * rotationScale;
                 rot[s * 4 + 0] = c45 * qw - c45 * qx; rot[s * 4 + 1] = c45 * qx + c45 * qw;
                 rot[s * 4 + 2] = c45 * qy + c45 * qz; rot[s * 4 + 3] = c45 * qz - c45 * qy;   // q_R ⊗ q
             }

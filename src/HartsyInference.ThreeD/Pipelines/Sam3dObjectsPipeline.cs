@@ -318,7 +318,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Backend.PreloadWeights(decoder.EnumerateWeights());
             SparseTensor gs = decoder.Forward(Backend, new SparseTensor(latent, coords, 64));
             Backend.FreeWeights(decoder.EnumerateWeights());
-            GaussianSplatCloud cloud = TrellisGaussianRepresentation.Build(gs);
+            GaussianSplatCloud cloud = TrellisGaussianRepresentation.Build(gs, rotationScale: 0.1f);   // slat_decoder_gs.yaml: lr 0.1 for _rotation
             log($"Gaussians decoded ({voxels} voxels)");
             return cloud;
         }

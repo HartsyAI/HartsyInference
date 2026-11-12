@@ -25,6 +25,10 @@ public static class MeshModelIds
     /// <see cref="Requests.MeshRequest.Image"/> and the result is a textured GLB.</summary>
     public static readonly IReadOnlyList<string> PaintMesh = ["hunyuan3d-paint", "hunyuan3d-paint21"];
 
+    /// <summary>Part-segmentation models (Hunyuan3D-Part P3-SAM): their request carries <see cref="Requests.MeshRequest.SceneMesh"/>, and the result is a GLB with one
+    /// coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
+    public static readonly IReadOnlyList<string> PartMesh = ["hunyuan3d-part"];
+
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
-    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh];
+    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh];
 }
