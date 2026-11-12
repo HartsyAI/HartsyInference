@@ -26,7 +26,7 @@ git preserves removed history.
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |
-| SAM 3D Objects (image + mask to splat or mesh with pose): licence text, stage map, public-source constants, reuse map, what the gated files must supply | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
+| SAM 3D Objects (image + mask to Gaussian splats with pose; the mesh decoder is not ported): licence text, stage map, constants, checkpoint layouts of the ungated mirror, MoGe, device memory at 8 GiB, CPU parity against upstream, colour-path trace | [Research/SAM3D_OBJECTS_ARCHITECTURE.md](Research/SAM3D_OBJECTS_ARCHITECTURE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
 | Embedding the engine in a host application: the public entry points | [HOST_INTEGRATION.md](HOST_INTEGRATION.md) |
