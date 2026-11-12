@@ -17,4 +17,18 @@ internal static class SamWeights
             throw new InvalidOperationException($"SAM 3D weight '{key}' has shape {tensor.Shape}, expected {new TensorShape(shape)}.");
         return tensor;
     }
+
+    /// <summary>
+    /// As <see cref="Require"/> for a linear weight a backend GEMM reads: F32, F16 or BF16 (see <see cref="SamFlowWeights"/>).
+    /// </summary>
+    public static Tensor RequireLinear(IReadOnlyDictionary<string, Tensor> weights, string key, params long[] shape)
+    {
+        if (!weights.TryGetValue(key, out Tensor? tensor))
+            throw new InvalidOperationException($"SAM 3D weight '{key}' is missing.");
+        if (tensor.DType != DType.F32 && tensor.DType != DType.F16 && tensor.DType != DType.BF16)
+            throw new InvalidOperationException($"SAM 3D weight '{key}' is {tensor.DType}; the module takes F32, F16 or BF16 linear weights.");
+        if (!tensor.Shape.Equals(new TensorShape(shape)))
+            throw new InvalidOperationException($"SAM 3D weight '{key}' has shape {tensor.Shape}, expected {new TensorShape(shape)}.");
+        return tensor;
+    }
 }

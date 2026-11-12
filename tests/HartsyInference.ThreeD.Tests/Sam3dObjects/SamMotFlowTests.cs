@@ -588,4 +588,68 @@ public sealed class SamMotFlowTests
         Assert.Throws<ArgumentException>(() => (Config with { Heads = 3 }).Validate());
         Assert.Throws<ArgumentException>(() => (Config with { Protected = ["shape", "shape"] }).Validate());
     }
+
+    [Fact]
+    public void Narrow_ConvertsOnlyTheBlockLinearsAndLeavesEverythingElseTheSameObject()
+    {
+        Random rng = new(31);
+        Dictionary<string, Tensor> w = Weights(rng, Config);
+        using Owned owned = new(w.Values);
+        List<Tensor> converted = [];
+
+        Dictionary<string, Tensor> narrowed = SamFlowWeights.Narrow(w, DType.F16, converted);
+        using Owned convertedOwned = new(converted);
+
+        Assert.NotEmpty(converted);
+        foreach ((string key, Tensor tensor) in w)
+        {
+            if (SamFlowWeights.IsBlockLinear(key, tensor))
+            {
+                Assert.Equal(DType.F16, narrowed[key].DType);
+                Assert.Contains(narrowed[key], converted);
+            }
+            else
+            {
+                Assert.Same(tensor, narrowed[key]);
+            }
+        }
+
+        List<Tensor> none = [];
+        Dictionary<string, Tensor> same = SamFlowWeights.Narrow(w, DType.F32, none);
+        Assert.Empty(none);
+        Assert.All(w, entry => Assert.Same(entry.Value, same[entry.Key]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => SamFlowWeights.Narrow(w, DType.I32, []));
+    }
+
+    [Fact]
+    public void Forward_WithF16BlockLinearsStaysCloseToTheF32Forward()
+    {
+        Random rng = new(32);
+        Dictionary<string, Tensor> w = Weights(rng, Config);
+        Dictionary<string, Tensor> latents = Latents(rng, Config);
+        Tensor cond = Filled(rng, 2.0, 1, 5, Config.CondChannels);
+        List<Tensor> converted = [];
+        Dictionary<string, Tensor> narrowed = SamFlowWeights.Narrow(w, DType.F16, converted);
+        using Owned owned = new(w.Values, latents.Values, [cond], converted);
+        using CpuBackend backend = new();
+
+        Dictionary<string, Tensor> exact = new SamMotFlow(Config, w).Forward(backend, latents, 321f, cond, 0f);
+        Dictionary<string, Tensor> half = new SamMotFlow(Config, narrowed).Forward(backend, latents, 321f, cond, 0f);
+        using Owned results = new(exact.Values, half.Values);
+
+        double difference = 0, magnitude = 0;
+        foreach (SamMotLatent latent in Config.Latents)
+        {
+            ReadOnlySpan<float> a = exact[latent.Name].AsReadOnlySpan<float>(), b = half[latent.Name].AsReadOnlySpan<float>();
+            for (int i = 0; i < a.Length; i++)
+            {
+                difference += (a[i] - b[i]) * (double)(a[i] - b[i]);
+                magnitude += a[i] * (double)a[i];
+            }
+        }
+
+        double relative = Math.Sqrt(difference / magnitude);
+        Assert.True(relative > 0, "F16 weights must change the result at least a little; identical output means the narrowing did nothing.");
+        Assert.True(relative < 5e-3, $"relative L2 {relative}");
+    }
 }
