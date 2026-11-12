@@ -1,7 +1,7 @@
 # Engine prerequisites of a 3D host (Hartsy3D): spike
 
 Scope: what the engine already offers a host that runs the 3D models (a SwarmUI extension is the first), what it lacks, the
-additive API that closes the gap, and the answer to the shared-GPU question. Source snapshot: `origin/main` `524cd8ebb`
+additive API that closes the gap. Source snapshot: `origin/main` `524cd8ebb`
 (2026-11-12), read against the handoff written at `3295deef4`. Nothing here is implemented; each section ends with the PR
 that would do it. The host-side split is a rule: the engine owns everything that is not specific to one host (capabilities,
 plans, contracts, preparation, post-processing, conversion, previews, asset status, progress, memory); a viewer, three.js or
@@ -19,7 +19,7 @@ host types never enter the engine.
 | Request mappers as one source of truth | They are not: `Trellis2RequestMapper`, `Pixal3DRequestMapper`, `HairDeckRequestMapper`, `Sam3dObjectsRequestMapper` hold the rejection rules and defaults, but `MeshService` re-checks per branch (`GeneratePaintAsync`, `GeneratePartAsync`, `GenerateRiggedAsync`, `GenerateSceneAsync` each carry their own `NotSupportedException` lines), and the ranges (grid values, texture size 16 to 8192, field of view) live in the pipelines' `ValidateRequest`. |
 | Seeds | `request.Seed < 0 ? null : (int)request.Seed` is unchecked in the generic branch (TripoSR, Hunyuan3D, TRELLIS): 2^32 + 5 runs as 5. TRELLIS.2, Pixal3D, SAM 3D, P3-SAM and Paint throw `ArgumentOutOfRangeException` above `int.MaxValue`. HairDeck takes the full `long` (its `HairDeckOptions.Seed` is `long`). The resolved seed of a negative request is not returned anywhere (HairDeck draws it inside the mapper). |
 | Progress | `StepPreview { Step, TotalSteps, Preview* }`, one counter per stage. Pixal3D and TRELLIS.2 report `GenerationProgress` per stage and the service forwards it as is, so the number resets between stages. HairDeck reports none; the preprocessing (SAM 3, BiRefNet, DINOv3) never reads the token (`HairDeckRuntime.Preprocessor.Process(source)` takes none). |
-| Cancellation and OOM | `MeshService` does not take `DeviceGate` and does not run under `InferenceEngine.GenerateWithVramCleanup`; only `ImagesService` and the refiner do. A TRELLIS.2 or Pixal3D out-of-memory failure therefore leaves its half-loaded stage weights resident, and a mesh run is not serialized with an image run on the same card. `FreeMemory()` disposes the whole `MeshService`; there is no listing and no per-model free. |
+| Cancellation and OOM | `MeshService` does not run under `InferenceEngine.GenerateWithVramCleanup`; only `ImagesService` and the refiner do. A TRELLIS.2 or Pixal3D out-of-memory failure therefore leaves its half-loaded stage weights resident. `FreeMemory()` disposes the whole `MeshService`; there is no listing and no per-model free. |
 | Models added since the handoff | Catalog ids `hunyuan3d-paint` (2.0 albedo) and `hunyuan3d-paint21` (2.1 PBR) texture a mesh; `hunyuan3d-part` (P3-SAM) segments a mesh into parts and fills `MeshResult.Parts`; `sam3d-objects` lifts an object from an image plus mask (alpha plane) to a splat PLY; `pixal3d` has `Texture` and F16 flow weights through `numerics.flowF16Weights`; `unirig` rigs. Hunyuan3D-2.1 shape and X-Part have no catalog id and no engine wiring (X-Part's ShapeVAE encoder, conditioner and DiT are ported; sampler, pipeline and wiring are not). `hunyuan3d-mv` is catalogued but has no mesh path. |
 
 Frames today (read from code comments and the status doc, not measured on real output): TRELLIS.2 shape-only is rotated to Y-up in the
@@ -131,7 +131,7 @@ reported as a warning or an error, never silently; `RenderThumbnail`; operations
 and small components, recompute normals, smooth, recentre and rescale, each reporting what it could not keep, a texture first of all),
 lifecycle (`MeshService` lists its loaded pipelines and frees one by id or all; one automatic retry after the free for
 `OutOfVramException`, the same contract `GenerateWithVramCleanup` gives images, with the retry re-resolving the pipeline because the
-cached one believes its weights are resident), and `DeviceGate` plus the cleanup around every mesh generation.
+cached one believes its weights are resident), and the same cleanup around every mesh generation.
 
 ## Decisions for the user
 
@@ -143,42 +143,6 @@ cached one believes its weights are resident), and `DeviceGate` plus the cleanup
 5. A mesh-specific issue type (`MeshPlanIssue`) instead of reusing `VideoPlanIssue`, whose name says video.
 
 Items 1, 2, 3 and 5 are not breaking in the form proposed. Item 4 is a validation tightening on a path that was already silently wrong.
-
-## Two engines on one card (the handoff's question 10)
-
-Question: an extension loads its own `InferenceEngine` beside the Hartsy backend's, each in its own `AssemblyLoadContext`, so no
-statics are shared; is VRAM accounting process-local or device-level?
-
-Answer: the free and total readings are device-level; the planning, the gate and the policy are not, so two engines each plan for the
-whole card and nothing orders their runs.
-
-- `GetVramInfo()` is `cuMemGetInfo` on the primary context (`cuDevicePrimaryCtxRetain`, one per device per process), so it counts every
-  allocation on the card: the other engine's, another process's, the desktop's. Whatever sizes from a free reading (streaming prefix
-  size, `FreeAfterTrim`, the pipeline-eviction check, the attention tile) sees the other engine's memory.
-- `MemoryEstimationService` capacity is deliberately total VRAM less a 2 GiB reserve, never free (its remarks say why: routing
-  stability). With two engines each concludes "fits", although the other holds 7 GB.
-- `DeviceGate` (a static `ConcurrentDictionary<int, SemaphoreSlim>`) is per load context. Measured on the CPU, with the built
-  `HartsyInference.Engine.dll` loaded into two contexts and `DeviceGate.AcquireForCudaOrdinal(0)` taken in the first: a second
-  acquire in the same context blocked past 1.5 s; the acquire in the second context returned at once. `VramPolicyRegistry` and every
-  pipeline cache are per-context in the same way, and the gate is not shared across processes either.
-- `TrimMemoryPool` acts on the device's default stream-ordered pool, which both engines share (one process, one driver library), so one
-  engine's trim returns the other's cached blocks (harmless, a re-reservation cost). `FreeAllDeviceMemory` frees only the calling
-  engine's caches.
-- Separate from the contexts: the mesh path takes no `DeviceGate` at all, so even inside one engine a mesh run and an image run on the
-  card are not ordered (above).
-
-Proposed fix, in two parts. (a) Live accounting in the plan: `MeshPlan.Memory` reports the planned peak against the card's total
-(what a model could ever do) and against the driver's free memory plus the bytes this engine itself holds (what it can do now),
-with the reason ("another process holds N GB"), so the host warns before a ten-minute run. (b) An arbiter that crosses contexts and
-processes: `DeviceGate` additionally takes a named OS semaphore per device (`Global\HartsyInference.Gpu.<ordinal>` on Windows, a lock
-file on Linux), behind a knob (`vram.crossInstanceGate`, off by default so nothing changes for a single engine), taken around every
-GPU generation including the mesh path. A shared reservation ledger (a memory-mapped file per device that engines write their
-resident bytes to) is the heavier option and is not proposed first. The structural answer, outside the engine, is that the extension
-uses the Hartsy backend's engine or the HTTP server, so one process-wide accounting exists; that is the host's choice (its scope
-question 1).
-
-Not verified: the driver's accounting across two contexts on a real card (a two-minute run that has one context allocate 3 GiB and the
-other read `GetVramInfo`, needs a GPU slot), and the behaviour of `cuMemPoolTrimTo` on a pool shared between contexts.
 
 ## Order of the PRs
 
