@@ -23,7 +23,10 @@ public sealed class MeshPlanningService : IMeshPlanningService
     public IReadOnlyList<MeshModelDescriptor> DescribeAll() => [.. MeshModelIds.Described.Select(Describe)];
 
     /// <inheritdoc/>
-    public MeshModelDescriptor Describe(string modelId)
+    public MeshModelDescriptor Describe(string modelId) => DescriptorOf(modelId);
+
+    /// <summary>The descriptor of <paramref name="modelId"/>; the service holds no state, so a generation reads it too.</summary>
+    internal static MeshModelDescriptor DescriptorOf(string modelId)
     {
         ArgumentNullException.ThrowIfNull(modelId);
         string id = modelId.ToLowerInvariant();
@@ -148,11 +151,13 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Texture) => request.Texture,
         nameof(MeshRequest.TextureSize) => request.TextureSize != 0,
         nameof(MeshRequest.Preprocess) => request.Preprocess != MeshPreprocess.None,
+        nameof(MeshRequest.PreviewTriangles) => request.PreviewTriangles != 0,
+        nameof(MeshRequest.Frame) => request.Frame != MeshFrame.Native,
         _ => false,
     };
 
     /// <summary>What will run for each tunable field, and whether the caller or the model chose it.</summary>
-    private static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor)
+    internal static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor)
     {
         Dictionary<string, ResolvedParameter> settings = new(StringComparer.Ordinal);
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))
@@ -179,6 +184,8 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Texture) => request.Texture.ToString().ToLowerInvariant(),
         nameof(MeshRequest.TextureSize) => request.TextureSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
         nameof(MeshRequest.Preprocess) => request.Preprocess.ToString(),
+        nameof(MeshRequest.PreviewTriangles) => request.PreviewTriangles.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        nameof(MeshRequest.Frame) => request.Frame.ToString(),
         _ => null,
     };
 }

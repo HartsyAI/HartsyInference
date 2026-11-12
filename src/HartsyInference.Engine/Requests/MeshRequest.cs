@@ -53,6 +53,12 @@ public sealed record MeshRequest
     /// <summary>Input image preparation: <see cref="MeshPreprocess.None"/> (default) uses the image as given, <see cref="MeshPreprocess.Auto"/> mattes and frames it for the model. Models that prepare their own input ignore it.</summary>
     public MeshPreprocess Preprocess { get; init; }
 
+    /// <summary>Also return <see cref="MeshResult.Preview"/>, a copy decimated to about this many triangles for a viewer; 0 (default) returns none. Glb results only.</summary>
+    public int PreviewTriangles { get; init; }
+
+    /// <summary>The frame to return a glb in: <see cref="MeshFrame.Native"/> (default) keeps the model's own, <see cref="MeshFrame.GltfYUpMetres"/> normalises it. Splat results are not changed.</summary>
+    public MeshFrame Frame { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 

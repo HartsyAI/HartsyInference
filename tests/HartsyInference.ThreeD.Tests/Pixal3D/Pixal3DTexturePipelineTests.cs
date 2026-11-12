@@ -169,6 +169,8 @@ public sealed class Pixal3DTexturePipelineTests
         int total = 5 + 3 + 2 + 2 + 1 + 2 + 2;
         Assert.All(reports, p => Assert.Equal(total, p.TotalSteps));
         Assert.Equal(Enumerable.Range(1, total), reports.Select(p => p.Step));
+        Assert.DoesNotContain(MeshStageNames.MeshExtraction, reports.Select(p => p.Stage));
+        Assert.Contains(MeshStageNames.TextureConditioning, reports.Select(p => p.Stage));
     }
 
     // A cancel raised from the progress callback at any step must stop the run and release every tensor a stage handed out.

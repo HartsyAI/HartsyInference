@@ -41,6 +41,10 @@ public sealed record XPartOptions
 
     /// <summary>The logit the surface is extracted at (upstream <c>mc_level</c>, -1/512).</summary>
     public float Level { get; init; } = -1f / 512;
+
+    /// <summary>Decode each part with the hierarchical FlashVDM decoder (a coarse grid, then only a band around the surface at each finer level, with adaptive key selection) instead of the dense grid.
+    /// It is much faster and approximates the dense field; upstream's X-Part decodes densely. The grid then follows the FlashVDM levels, not <see cref="GridResolution"/> exactly.</summary>
+    public bool FastDecode { get; init; }
 }
 
 /// <summary>X-Part (Hunyuan3D-Part): a mesh is split into parts by P3-SAM and every part is generated again as a complete shape. The mesh is normalised, P3-SAM gives the part boxes, the
@@ -171,7 +175,9 @@ public sealed class XPartPipeline
                 latents.AsSpan<float>().Slice(k * LatentTokens * LatentChannels, LatentTokens * LatentChannels).CopyTo(one.AsSpan<float>());
                 using Tensor scaled = new(one.Shape, DType.F32);
                 _backend.Scale(scaled, one, 1f / VaeScaleFactor);
-                ScalarField3D field = vae.Decode(_backend, scaled, options.GridResolution, options.BoxExtent);
+                ScalarField3D field = options.FastDecode
+                    ? vae.DecodeFlashVdm(_backend, scaled, options.GridResolution, options.BoxExtent, -options.Level)
+                    : vae.Decode(_backend, scaled, options.GridResolution, options.BoxExtent);
                 Mesh part = Hunyuan3DSurface.Extract(field, options.Level);
                 result[k] = new Mesh { Vertices = XPartSampling.Denormalize(part.Vertices, center, scale), Indices = part.Indices };
                 Advance();
