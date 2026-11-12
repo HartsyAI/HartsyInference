@@ -145,6 +145,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Rigged) => request.Rigged,
         nameof(MeshRequest.Texture) => request.Texture,
         nameof(MeshRequest.TextureSize) => request.TextureSize != 0,
+        nameof(MeshRequest.Preprocess) => request.Preprocess != MeshPreprocess.None,
         _ => false,
     };
 
@@ -175,6 +176,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Rigged) => request.Rigged.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Texture) => request.Texture.ToString().ToLowerInvariant(),
         nameof(MeshRequest.TextureSize) => request.TextureSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        nameof(MeshRequest.Preprocess) => request.Preprocess.ToString(),
         _ => null,
     };
 }

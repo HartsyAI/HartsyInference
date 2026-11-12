@@ -69,6 +69,8 @@ public sealed class MeshService : IMeshService, IDisposable
                 cancel.ThrowIfCancellationRequested();
                 LoadedMesh loaded = GetOrLoad(spec, id);
                 ImageData image = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
                     ImageRgb = image.Rgb,
@@ -244,8 +246,6 @@ public sealed class MeshService : IMeshService, IDisposable
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
-        ImageData reference = request.Image!;
-        byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
         HunyuanPaintOptions options = new()
         {
             Steps = request.Steps == 0 ? null : request.Steps,
@@ -257,6 +257,10 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
+                ImageData reference = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
+                byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
                 ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
                 {
@@ -559,9 +563,9 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>The lower-case catalog id a spec names.</summary>
     internal static string IdOf(ModelSpec spec) => (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
 
-    /// <summary>Whether the matting checkpoint the model uses for images without alpha is installed right now; false for models that matte nothing.</summary>
+    /// <summary>Whether the BiRefNet matting checkpoint that mattes images without alpha is installed right now.</summary>
     internal static bool MatterAvailable(string id) =>
-        (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D) && Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
+        Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
 
     private static bool IsHairDeck(ModelSpec spec) =>
         IdOf(spec) == MeshModelIds.HairDeck;
