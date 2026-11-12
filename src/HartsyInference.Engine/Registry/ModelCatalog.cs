@@ -2883,7 +2883,7 @@ public static class ModelCatalog
             E("hunyuan3d-part", d3, "Hunyuan3D-Part P3-SAM (part segmentation)", "Sonata (PTv3) encoder + prompt-conditioned mask and IoU heads, auto-mask labelling", st, cli: true)
                 with { Assets = Hunyuan3DPartAssets },
             E("hunyuan3d-xpart", d3, "Hunyuan3D-Part X-Part (part generation)", "P3-SAM boxes + Sonata/ShapeVAE conditioner + part flow DiT, a complete shape per part", st, cli: true)
-                with { Assets = Hunyuan3DXPartAssets },
+                with { Assets = Hunyuan3DXPartAssets, LoadsFromFolder = true },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),

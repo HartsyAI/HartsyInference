@@ -31,6 +31,12 @@ public sealed class HunyuanXPartCatalogTests
     }
 
     [Fact]
+    public void XPart_LoadsFromAFolder_SoAModelPathFolderCountsAsInstalled()
+    {
+        Assert.True(ModelCatalog.Find("hunyuan3d-xpart")!.LoadsFromFolder);
+    }
+
+    [Fact]
     public void XPart_IsWiredToTheMeshServiceAsAMeshOnlyModel()
     {
         Assert.Equal(["hunyuan3d-xpart"], MeshModelIds.XPartMesh);
