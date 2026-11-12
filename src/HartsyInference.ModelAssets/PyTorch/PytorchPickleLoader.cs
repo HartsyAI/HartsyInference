@@ -9,6 +9,8 @@ namespace HartsyInference.ModelAssets.PyTorch;
 public sealed class PytorchPickleLoader : IDisposable
 {
     private readonly Dictionary<string, Tensor> _tensors = [];
+    private ZipArchive? _lazyZip;
+    private Dictionary<string, PickleTensor>? _lazyMetas;
     private int _disposed;
 
     /// <summary>Tensor name → metadata (shape/dtype) parsed from the pickle.</summary>
@@ -48,6 +50,81 @@ public sealed class PytorchPickleLoader : IDisposable
     private unsafe void LoadZip(string filePath, bool recursiveFlatten)
     {
         using ZipArchive zip = ZipFile.OpenRead(filePath);
+        Dictionary<string, PickleTensor> metas = ParseZipMetas(zip, filePath, recursiveFlatten);
+
+        Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
+        foreach ((string name, PickleTensor meta) in metas)
+        {
+            TensorShape shape = new(meta.Size);
+            Tensor t = new(shape, meta.Storage.DType);
+            ReadStorageInto(zip, meta, (byte*)t.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
+            MakeRowMajor(t, meta.Size, meta.Stride, meta.Storage.DType);
+            _tensors[name] = t;
+            descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
+        }
+        Descriptors = descriptors;
+    }
+
+    /// <summary>Opens a modern (ZIP) <c>torch.save</c> checkpoint and parses its tensor table without reading any tensor: <see cref="Descriptors"/> is filled and <see cref="ReadTensor"/> reads one tensor at a time. For checkpoints
+    /// too large to hold whole, such as a 12 GB F32 state dict that is narrowed to F16 per tensor. The same safe pickle subset as <see cref="Load"/> parses the table; nothing in the file is executed.</summary>
+    /// <exception cref="NotSupportedException">The file is a legacy (non-ZIP) checkpoint, which has to be read whole with <see cref="Load"/>.</exception>
+    public void OpenLazy(string filePath, bool recursiveFlatten = false)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_lazyZip is not null || _tensors.Count != 0)
+            throw new InvalidOperationException("This loader already holds a checkpoint.");
+        Span<byte> magic = stackalloc byte[2];
+        using (FileStream fs = File.OpenRead(filePath))
+            if (fs.Read(magic) < 2 || magic[0] != 0x50 || magic[1] != 0x4b)
+                throw new NotSupportedException($"'{filePath}' is not a ZIP torch checkpoint; only that format can be read tensor by tensor.");
+        ZipArchive zip = ZipFile.OpenRead(filePath);
+        try
+        {
+            Dictionary<string, PickleTensor> metas = ParseZipMetas(zip, filePath, recursiveFlatten);
+            Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
+            foreach ((string name, PickleTensor meta) in metas)
+                descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = new TensorShape(meta.Size) };
+            FilePath = filePath;
+            Descriptors = descriptors;
+            _lazyMetas = metas;
+            _lazyZip = zip;
+        }
+        catch
+        {
+            zip.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Reads one tensor of a checkpoint opened with <see cref="OpenLazy"/> into new memory the caller owns, converted to <paramref name="convertTo"/> when given. At most the tensor and its converted copy are alive at once.</summary>
+    public unsafe Tensor ReadTensor(string name, DType? convertTo = null)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_lazyZip is null || _lazyMetas is null)
+            throw new InvalidOperationException("ReadTensor needs a checkpoint opened with OpenLazy.");
+        if (!_lazyMetas.TryGetValue(name, out PickleTensor? meta))
+            throw new KeyNotFoundException($"'{FilePath}' has no tensor '{name}'.");
+        TensorShape shape = new(meta.Size);
+        Tensor raw = new(shape, meta.Storage.DType);
+        try
+        {
+            ReadStorageInto(_lazyZip, meta, (byte*)raw.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
+            MakeRowMajor(raw, meta.Size, meta.Stride, meta.Storage.DType);
+            if (convertTo is null || convertTo == raw.DType)
+                return raw;
+            Tensor converted = raw.CastTo(convertTo.Value);
+            raw.Dispose();
+            return converted;
+        }
+        catch
+        {
+            raw.Dispose();
+            throw;
+        }
+    }
+
+    private Dictionary<string, PickleTensor> ParseZipMetas(ZipArchive zip, string filePath, bool recursiveFlatten)
+    {
         ZipArchiveEntry pkl = FindEntry(zip, "/data.pkl", "data.pkl")
             ?? throw new InvalidOperationException($"'{filePath}' is not a torch ZIP checkpoint (no data.pkl).");
 
@@ -68,17 +145,7 @@ public sealed class PytorchPickleLoader : IDisposable
             WrapperTensorCounts = CountWrappers(root);
         }
 
-        Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
-        foreach ((string name, PickleTensor meta) in metas)
-        {
-            TensorShape shape = new(meta.Size);
-            Tensor t = new(shape, meta.Storage.DType);
-            ReadStorageInto(zip, meta, (byte*)t.DataPointer, shape.ElementCount * meta.Storage.DType.SizeInBytes);
-            MakeRowMajor(t, meta.Size, meta.Stride, meta.Storage.DType);
-            _tensors[name] = t;
-            descriptors[name] = new PytorchTensorDescriptor { Name = name, DType = meta.Storage.DType, Shape = shape };
-        }
-        Descriptors = descriptors;
+        return metas;
     }
 
     /// <summary>Legacy <c>torch.save</c> path (<c>_legacy_save</c>): five back-to-back pickle streams (MAGIC_NUMBER, PROTOCOL_VERSION, sys_info, the state_dict, then the storage-key list) followed by each storage's raw bytes in key-list order, prefixed by an <c>int64</c> element count. No ZIP, no per-storage alignment. The whole file is read into memory (legacy checkpoints predate the &gt;2 GB era; .NET caps a single read at ~2 GB, which this format never exceeds in practice).</summary>
@@ -329,6 +396,9 @@ public sealed class PytorchPickleLoader : IDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (Tensor t in _tensors.Values) t.Dispose();
         _tensors.Clear();
+        _lazyZip?.Dispose();
+        _lazyZip = null;
+        _lazyMetas = null;
     }
 }
 
