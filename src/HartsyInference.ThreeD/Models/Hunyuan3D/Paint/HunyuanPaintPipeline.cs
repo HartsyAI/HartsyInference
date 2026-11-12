@@ -65,9 +65,6 @@ public sealed class HunyuanPaintPipeline
         _stage.Restart();
         if (mesh.Uvs is null)
         {
-            // Charts grow across shared vertices only: a mesh whose vertices are split along every face (a triangle soup, or a decimated mesh with duplicated seam vertices)
-            // unwraps into thousands of one-face charts, an atlas that is mostly padding and a bake that is mostly inpainting. Merge them first.
-            mesh = WeldForUnwrap(mesh);
             mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
             Stage("uv unwrap");
         }
@@ -86,20 +83,6 @@ public sealed class HunyuanPaintPipeline
         Stage("bake");
         return baked;
     }
-
-    /// <summary>Merges vertices at the same position and drops degenerate and duplicate faces and unreferenced vertices, and nothing else (no hole filling, no component removal, no
-    /// reorientation), so that the unwrapper sees the mesh's real connectivity.</summary>
-    internal static Mesh WeldForUnwrap(Mesh mesh) => MeshCleaner.Clean(mesh, new MeshCleanOptions
-    {
-        WeldVertices = true,
-        RemoveDegenerateFaces = true,
-        RemoveDuplicateFaces = true,
-        RepairNonManifoldEdges = false,
-        SmallComponentAreaRatio = 0,
-        HoleFillMaxPerimeter = 0,
-        UnifyOrientation = false,
-        OrientOutward = false,
-    });
 
     /// <summary>Encodes and decodes one image with the pipeline's VAE (a diagnostic for checking the VAE weights and timing): resizes to <paramref name="size"/>
     /// square, reports the latent statistics through <see cref="StageLog"/> and returns the decoded RGB bytes.</summary>
