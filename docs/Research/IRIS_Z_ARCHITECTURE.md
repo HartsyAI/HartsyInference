@@ -92,9 +92,13 @@ about 512² for a photo under 0.5 MP and 1024² above, with sides that are multi
 | Sampling | `FlowMatchEulerDiscreteScheduler` and the sampler seam |
 | Depth encoding, ensembles, rendering | `IrisZDepth` |
 | Tasks | `IrisZPipeline` |
-| Recipe, variants, defaults | `IrisZRecipe`, `IrisZVariants` |
+| Recipe, variants, defaults | `Flux2Recipe` with the `iris-z-small` and `iris-z-big` variants of `Flux2Variants`; `IrisZRecipePipeline` |
 
 True CFG runs as two batch-1 forwards, which is the same arithmetic as the reference's batch of two.
+
+A bare Iris-Z checkpoint resolves to the `flux2` family, because its keys are FLUX.2's. Making Iris-Z two variants of
+that recipe, detected by `modality_in.weight`, routes it correctly however it is selected. Without that it would load as
+Klein 9B or Dev, drop the modality embedding and generate noise.
 
 ## Open questions for a real-weight run
 
