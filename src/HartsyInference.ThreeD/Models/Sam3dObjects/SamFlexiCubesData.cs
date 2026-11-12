@@ -21,7 +21,7 @@ public static class SamFlexiCubesData
     /// <summary>The released tables, validated once.</summary>
     public static SamFlexiCubesTables Tables => Released.Value;
 
-    internal static readonly int[] Dmc =
+    private static readonly int[] Dmc =
     [
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
         0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -281,7 +281,7 @@ public static class SamFlexiCubesData
         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
     ];
 
-    internal static readonly int[] NumVd =
+    private static readonly int[] NumVd =
     [
         0, 1, 1, 1, 1, 1, 2, 1, 1, 2, 1, 1, 1, 1, 1, 1,
         1, 1, 2, 1, 2, 1, 3, 1, 2, 2, 2, 1, 2, 1, 2, 1,
@@ -301,7 +301,7 @@ public static class SamFlexiCubesData
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0
     ];
 
-    internal static readonly int[] Check =
+    private static readonly int[] Check =
     [
         0, 0, 0, 0, 0,
         0, 0, 0, 0, 0,

@@ -232,7 +232,7 @@ public sealed class SamSparseFeatures2MeshTests
         flag[5 * 3] = 2;
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, flag));
         int[] replacement = new int[1280];
-        replacement[7 * 5] = 1;   // only a flagged row names a replacement; the real table pads the others with -1
+        replacement[7 * 5] = 1;   // only a flagged row names a replacement (the released table has zeros in every unflagged row)
         replacement[7 * 5 + 4] = 256;
         Assert.Throws<ArgumentException>(() => new SamFlexiCubesTables(Valid(), 4, numVd, replacement));
         // A case that emits a vertex but lists no edge for it.
