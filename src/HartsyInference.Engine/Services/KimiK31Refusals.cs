@@ -3,8 +3,8 @@ using HartsyInference.LLM.Kimi;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>The requests the Kimi K3.1 Text route refuses by name: image input, because the text decoder runs no vision tower, and multi-GPU
-/// placement, which the decoder does not shard yet.</summary>
+/// <summary>The requests the Kimi K3.1 Text route refuses by name: image input, because the route loads no vision tower, and multi-GPU
+/// placement, because the route does not build the sharded decoder (verified on CPU virtual ranks only).</summary>
 internal static class KimiK31Refusals
 {
     /// <summary>Refuses an image on a Kimi K3.1 slot. The checkpoint's vision tower is not loaded, so an image would be dropped silently otherwise.</summary>
@@ -15,7 +15,7 @@ internal static class KimiK31Refusals
             throw new NotSupportedException("Kimi K3.1 image input is not supported: the Text path loads the text decoder only and runs no vision tower (vision_tower.*).");
     }
 
-    /// <summary>Placeholder for multi-GPU placement of Kimi K3.1: refuses any request that spreads the model over more than one device.</summary>
+    /// <summary>Refuses any Kimi K3.1 request that spreads the model over more than one device, rather than loading it on one.</summary>
     /// <param name="deviceKey">The device the request names, possibly a composite such as <c>cuda:0+cuda:1</c>.</param>
     /// <param name="shardDeviceCount">The stage devices the engine placement would shard over, for the slot's device.</param>
     /// <param name="tensorParallelDegree">The engine's tensor-parallel degree.</param>

@@ -19,6 +19,7 @@ public sealed class PackedMoeTests
 
     // The same MoE on a device backend: the packed projections run through IBackend.Mxfp4LinearF32 there.
     [Fact]
+    [Trait("Category", "GpuIntegration")]
     public void Cuda_PackedExperts_MatchTheF32Dequantization()
     {
         if (!HartsyInference.Cuda.CudaContext.IsAvailable()) return;
@@ -27,6 +28,7 @@ public sealed class PackedMoeTests
     }
 
     [Fact]
+    [Trait("Category", "GpuIntegration")]
     public void Vulkan_PackedExperts_MatchTheF32Dequantization()
     {
         if (!HartsyInference.Vulkan.VulkanContext.IsAvailable()) return;
