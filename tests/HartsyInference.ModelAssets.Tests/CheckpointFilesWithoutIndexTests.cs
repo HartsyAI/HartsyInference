@@ -40,6 +40,22 @@ public sealed class CheckpointFilesWithoutIndexTests : IDisposable
     }
 
     [Fact]
+    public void SiblingsKeepTheSpellingOfTheGivenName()
+    {
+        string[] shards = Touch("Model-00001-OF-00002.SafeTensors", "Model-00002-OF-00002.SafeTensors");
+
+        Assert.Equal(shards, HfCheckpointDirectory.CheckpointFiles(shards[1]));
+    }
+
+    [Fact]
+    public void AShardNumberedPastItsTotalIsRefused()
+    {
+        string[] files = Touch("transformer-00005-of-00004.safetensors");
+
+        Assert.Throws<InvalidDataException>(() => HfCheckpointDirectory.CheckpointFiles(files[0]));
+    }
+
+    [Fact]
     public void AFileNotNamedAsAShardStandsAlone()
     {
         string[] files = Touch("model.safetensors", "transformer-00001-of-00002.safetensors", "transformer-00002-of-00002.safetensors");
