@@ -32,8 +32,8 @@ public sealed class MogeModel
     private readonly int[] _layers;
 
     /// <param name="config">The architecture knobs (<see cref="MogeConfig.FromJson"/>).</param>
-    /// <param name="weights">The checkpoint's tensors by name: <c>backbone.*</c> (hub DINOv2 names) and <c>head.*</c>, F32 for the head, any dtype for the backbone; they must outlive this object.</param>
-    /// <exception cref="InvalidOperationException">A weight is missing or of the wrong shape.</exception>
+    /// <param name="weights">The checkpoint's tensors by name: <c>backbone.*</c> (hub DINOv2 names) and <c>head.*</c>, F32; they must outlive this object.</param>
+    /// <exception cref="InvalidOperationException">A weight is missing, not F32 or of the wrong shape.</exception>
     public MogeModel(MogeConfig config, IReadOnlyDictionary<string, Tensor> weights)
         : this(config, Dinov2Preset.Large, weights)
     {
@@ -49,7 +49,7 @@ public sealed class MogeModel
             throw new ArgumentException($"The head taps {config.IntermediateLayers} blocks but the backbone has {preset.NumLayers}.", nameof(config));
         _config = config;
         _backbone = new Dinov2VisionEncoder(preset);
-        _backbone.LoadWeights(Dinov2HubKeys.Remap(weights, "backbone.", preset));
+        _backbone.LoadWeights(Dinov2HubKeys.Remap(weights, "backbone.", preset, requireF32: true));
         _head = new MogeHead(config, weights, "head.", preset.HiddenSize);
         _layers = [.. Enumerable.Range(preset.NumLayers - config.IntermediateLayers, config.IntermediateLayers)];
     }
