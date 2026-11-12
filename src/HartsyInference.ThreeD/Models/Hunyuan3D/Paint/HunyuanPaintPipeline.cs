@@ -303,11 +303,20 @@ public sealed class HunyuanPaintPipeline
     // u + g s (b - u) per view with s from the azimuth (2.1: b is the full prediction, see Diffuse) and s = 1 for 2.0.
     private float[] Guide(float[][] branch, IReadOnlyList<PaintViewCandidate> views, float guidance, int n, int latent)
     {
+        float[] scales = new float[n];
+        for (int v = 0; v < n; v++)
+            scales[v] = _config.UsePoseRope ? ViewScale(views[v].Azimuth) : 1f;
+        return Guide(branch, scales, guidance, n, latent);
+    }
+
+    // Per view v, result = u + guidance * viewScales[v] * (b - u) over the view's latent plane.
+    internal static float[] Guide(float[][] branch, float[] viewScales, float guidance, int n, int latent)
+    {
         int plane = latent * latent * 4;
         float[] result = new float[branch[0].Length];
         for (int v = 0; v < n; v++)
         {
-            float s = _config.UsePoseRope ? guidance * ViewScale(views[v].Azimuth) : guidance;
+            float s = guidance * viewScales[v];
             for (int i = v * plane; i < (v + 1) * plane; i++)
                 result[i] = branch[0][i] + s * (branch[1][i] - branch[0][i]);
         }
