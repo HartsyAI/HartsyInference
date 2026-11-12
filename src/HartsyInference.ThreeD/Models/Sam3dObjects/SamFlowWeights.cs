@@ -42,19 +42,28 @@ public static class SamFlowWeights
     }
 
     /// <summary>
-    /// Ends a flow's use of its weights: drains the backend, frees its device copies of <paramref name="resident"/>, then disposes the converted tensors in <paramref name="owned"/>. The order is the
-    /// contract: a converted tensor's host memory must outlive every transfer and kernel the backend still has queued against it, and disposing it first freed memory the backend was still using (an
-    /// access violation in the next stage on one seed in two).
+    /// Ends a flow's use of its weights, in the order that was run on the GPU: drain the backend, free its device copies of <paramref name="resident"/>, run <paramref name="sweep"/> (the
+    /// between-stage sweep: stream drain, cached activations, attention plans, pool), and only then dispose the converted tensors in <paramref name="owned"/>, also when a step throws.
+    /// Disposing the converted tensors before the sweep crashed the next stage's weight load with an access violation on one seed (two runs on seed 2, none on seed 1; F32, which converts
+    /// nothing, and F16 with the tensors left undisposed did not crash). The mechanism inside the backend was not traced; the structure flow does not preload its weights, so they reach the
+    /// device through on-demand caching, and a converted tensor may still be held by a cache tier when it is disposed.
     /// </summary>
-    public static void Release(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned)
+    public static void Release(IBackend backend, IEnumerable<Tensor> resident, List<Tensor> owned, Action? sweep = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(resident);
         ArgumentNullException.ThrowIfNull(owned);
-        backend.Sync();
-        backend.FreeWeights(resident);
-        foreach (Tensor tensor in owned)
-            tensor.Dispose();
-        owned.Clear();
+        try
+        {
+            backend.Sync();
+            backend.FreeWeights(resident);
+            sweep?.Invoke();
+        }
+        finally
+        {
+            foreach (Tensor tensor in owned)
+                tensor.Dispose();
+            owned.Clear();
+        }
     }
 }

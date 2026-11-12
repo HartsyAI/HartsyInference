@@ -669,6 +669,8 @@ public sealed class SamMotFlowTests
             return method?.ReturnType.IsValueType == true && method.ReturnType != typeof(void) ? Activator.CreateInstance(method.ReturnType) : null;
         }
 
+        public bool IsWatchedDisposed => Watched is not null && IsDisposed(Watched);
+
         private static bool IsDisposed(Tensor tensor)
         {
             try
@@ -684,7 +686,7 @@ public sealed class SamMotFlowTests
     }
 
     [Fact]
-    public void Release_DrainsTheBackendAndFreesItsCopiesBeforeTheConvertedTensorsAreDisposed()
+    public void Release_DrainsFreesAndSweepsBeforeTheConvertedTensorsAreDisposed()
     {
         IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
         RecordingBackend recording = (RecordingBackend)proxy;
@@ -692,10 +694,23 @@ public sealed class SamMotFlowTests
         recording.Watched = converted;
         List<Tensor> owned = [converted];
 
-        SamFlowWeights.Release(proxy, [converted], owned);
+        SamFlowWeights.Release(proxy, [converted], owned, () => recording.Events.Add($"Sweep:{(recording.IsWatchedDisposed ? "disposed" : "alive")}"));
 
-        // Sync, then the free: both while the converted tensor is still alive; only afterwards is it disposed.
-        Assert.Equal(["Sync:alive", "FreeWeights:alive"], recording.Events);
+        // Sync, the free and the sweep all run while the converted tensor is alive; only afterwards is it disposed.
+        Assert.Equal(["Sync:alive", "FreeWeights:alive", "Sweep:alive"], recording.Events);
+        Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void Release_DisposesTheConvertedTensorsEvenWhenTheSweepThrows()
+    {
+        IBackend proxy = DispatchProxy.Create<IBackend, RecordingBackend>();
+        Tensor converted = new(new TensorShape(4, 4), DType.F16);
+        List<Tensor> owned = [converted];
+
+        Assert.Throws<InvalidOperationException>(() => SamFlowWeights.Release(proxy, [converted], owned, () => throw new InvalidOperationException("sweep")));
+
         Assert.Throws<ObjectDisposedException>(() => { _ = converted.AsReadOnlySpan<byte>().Length; });
         Assert.Empty(owned);
     }

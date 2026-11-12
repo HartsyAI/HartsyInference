@@ -159,14 +159,19 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     (x, tModel, dModel, unconditional) => flow.Forward(Backend, x, tModel, unconditional ? zeros : cond, dModel),
                     step => onStep?.Invoke("structure", step));
             }
+            catch
+            {
+                SamFlowWeights.Release(Backend, narrowedWeights.Values, narrowed);
+                throw;
+            }
             finally
             {
                 foreach (Tensor tensor in noise.Values)
                     tensor.Dispose();
             }
 
-            SamFlowWeights.Release(Backend, [.. flowWeights.Values, .. narrowed], narrowed);
-            Sweep([.. latents.Values]);
+            Tensor[] sampledLatents = [.. latents.Values];
+            SamFlowWeights.Release(Backend, narrowedWeights.Values, narrowed, () => Sweep(sampledLatents));
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
 
@@ -286,15 +291,20 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     },
                     step => onStep?.Invoke("slat", step));
             }
+            catch
+            {
+                SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed);
+                throw;
+            }
             finally
             {
                 foreach (Tensor tensor in noise.Values)
                     tensor.Dispose();
             }
 
-            SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed);
             latent = sampled["slat"];
-            Sweep(latent);
+            Tensor sampledLatent = latent;
+            SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed, () => Sweep(sampledLatent));
             log($"SLAT flow sampled ({steps} steps)");
         }
 
