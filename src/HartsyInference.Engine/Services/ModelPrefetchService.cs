@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
@@ -52,11 +53,21 @@ public sealed class ModelPrefetchService : IModelPrefetchService
         }
     }
 
-    /// <summary>Fetches the catalog files of a 3D model that are absent and fetchable, the primary file last; the files it cannot fetch come back as typed blockers, never as an exception.</summary>
+    /// <summary>Fetches the catalog files of a 3D model that are absent and fetchable, the primary file last. A file that cannot be fetched (gated, refused, unreachable, corrupt) comes back as a typed blocker and the rest are still fetched; only a cancellation throws.</summary>
     private static async Task<ModelPrefetchResult> PrefetchMeshAsync(ModelSpec spec, IProgress<AudioFetchProgress>? progress, CancellationToken cancel)
     {
+        using HuggingFaceClient client = new();
+        return await PrefetchMeshAsync(spec, progress, (asset, token) => ModelDownloader.EnsureAsync(client, asset, allowDownload: true, onProgress: null, token), cancel)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>The fetch itself, with the per-file download supplied so a test can stand in for the network.</summary>
+    internal static async Task<ModelPrefetchResult> PrefetchMeshAsync(
+        ModelSpec spec, IProgress<AudioFetchProgress>? progress, Func<ModelAsset, CancellationToken, Task> fetch, CancellationToken cancel)
+    {
         MeshAssetService assets = new();
-        MeshAssetStatus status = assets.GetStatus(spec);
+        MeshInventory inventory = assets.GetInventory(spec);
+        MeshAssetStatus status = inventory.Status;
         if (status.ModelBlocker is MeshAssetBlocker whole)
         {
             return new ModelPrefetchResult(false, $"'{status.ModelId}' cannot be pre-downloaded: {whole.Message}", []) { Blockers = [whole] };
@@ -76,31 +87,53 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             {
                 blockers.Add(new MeshAssetBlocker(info.Role, kind, info.Instructions ?? string.Empty));
             }
-            else if (i < entry.Assets.Count)
+            else if (inventory.Catalog[i] is ModelAsset asset)
             {
-                toFetch.Add(entry.Assets[i]);
+                toFetch.Add(asset);
             }
         }
         toFetch = [.. toFetch.Where(asset => asset != primary), .. toFetch.Where(asset => asset == primary)];
+        int fetched = 0;
         if (toFetch.Count > 0)
         {
             Logs.Info($"[Mesh][Prefetch] Fetching {toFetch.Count} file(s) for '{status.ModelId}'.");
-            using HuggingFaceClient client = new();
-            for (int i = 0; i < toFetch.Count; i++)
+            foreach (ModelAsset asset in toFetch)
             {
-                progress?.Report(new AudioFetchProgress(toFetch[i].FileName, i, toFetch.Count));
-                await ModelDownloader.EnsureAsync(client, toFetch[i], allowDownload: true, onProgress: null, cancel).ConfigureAwait(false);
+                progress?.Report(new AudioFetchProgress(asset.FileName, fetched, toFetch.Count));
+                try
+                {
+                    await fetch(asset, cancel).ConfigureAwait(false);
+                    fetched++;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidOperationException)
+                {
+                    Logs.Warning($"[Mesh][Prefetch] '{asset.RepoPath}' of '{status.ModelId}' was not fetched: {ex.Message}");
+                    blockers.Add(FetchFailure(asset, ex));
+                }
             }
-            progress?.Report(new AudioFetchProgress(toFetch[^1].FileName, toFetch.Count, toFetch.Count));
+            progress?.Report(new AudioFetchProgress(toFetch[^1].FileName, fetched, toFetch.Count));
         }
         string message = blockers.Count == 0
-            ? $"Fetched {toFetch.Count} file(s) for '{status.ModelId}'."
-            : $"Fetched {toFetch.Count} file(s) for '{status.ModelId}'; {blockers.Count} file(s) need your action: {string.Join("; ", blockers.Select(b => b.Role))}.";
+            ? $"Fetched {fetched} file(s) for '{status.ModelId}'."
+            : $"Fetched {fetched} of {toFetch.Count} file(s) for '{status.ModelId}'; {blockers.Count} file(s) need your action: {string.Join("; ", blockers.Select(b => b.Role))}.";
         string? primaryPath = primary is not null && ModelDownloader.TargetPath(primary) is string path && File.Exists(path) ? path : null;
-        return new ModelPrefetchResult(true, message, [.. entry.Assets.Select(ModelDownloader.TargetPath).Where(File.Exists)], primaryPath)
-        {
-            Blockers = blockers,
-        };
+        List<string> present = [.. inventory.Paths.Where(p => p is not null).Select(p => p!)];
+        present.AddRange(toFetch.Select(ModelDownloader.TargetPath).Where(File.Exists));
+        return new ModelPrefetchResult(true, message, [.. present.Distinct(StringComparer.OrdinalIgnoreCase)], primaryPath) { Blockers = blockers };
+    }
+
+    /// <summary>The blocker for a file whose download failed: a 401 or 403 means the repository is gated (or its terms are not accepted yet); anything else is a failed fetch.</summary>
+    internal static MeshAssetBlocker FetchFailure(ModelAsset asset, Exception error)
+    {
+        bool refused = error.Message.Contains("HTTP 401", StringComparison.Ordinal) || error.Message.Contains("HTTP 403", StringComparison.Ordinal)
+            || error is HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden };
+        return refused
+            ? new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.Gated, MeshAssetService.GatedInstructions(asset.Repo))
+            : new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Repo}/{asset.RepoPath} could not be fetched: {error.Message} Check the connection and try again.");
     }
 
     private static async Task<ModelPrefetchResult> PrefetchTtsAsync(AudioModelSelector selector,

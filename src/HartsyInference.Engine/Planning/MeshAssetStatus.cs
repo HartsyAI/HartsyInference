@@ -16,5 +16,6 @@ public sealed record MeshAssetStatus
     public bool Complete => Assets.Count > 0 && Assets.All(asset => !asset.Required || asset.Present);
 
     /// <summary>The absent files, required first.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public IEnumerable<MeshAssetInfo> Missing => Assets.Where(asset => !asset.Present).OrderByDescending(asset => asset.Required);
 }

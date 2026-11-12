@@ -27,11 +27,11 @@ public static class MeshEndpoints
             }
         });
 
-        app.MapGet("/v1/native/mesh/assets/{id}", IResult (string id, IInferenceEngine engine) =>
+        app.MapGet("/v1/native/mesh/assets/{id}", IResult (string id, string? modelPath, IInferenceEngine engine) =>
         {
             try
             {
-                return Results.Json(engine.MeshAssets.GetStatus(ModelResolver.Resolve(id, null, Modality.Mesh)));
+                return Results.Json(engine.MeshAssets.GetStatus(ModelResolver.Resolve(id, modelPath, Modality.Mesh)));
             }
             catch (NotSupportedException ex)
             {
@@ -48,6 +48,10 @@ public static class MeshEndpoints
                 ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Mesh);
                 ModelPrefetchResult result = await queue.EnqueueAsync(() => engine.ModelPrefetch.PrefetchAsync(spec, null, ct), ct);
                 return Results.Ok(new { result.Supported, result.Message, result.Blockers, Installed = engine.MeshAssets.GetStatus(spec).Complete });
+            }
+            catch (NotSupportedException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, ex.Message, "not_found_error");
             }
             catch (Exception ex)
             {

@@ -81,7 +81,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
     }
 
     private static string[] GatedRepos(CatalogEntry? catalog) =>
-        catalog is null ? [] : [.. catalog.Assets.Where(asset => asset.Role.Contains("gated", StringComparison.OrdinalIgnoreCase)).Select(asset => asset.Repo).Distinct()];
+        catalog is null ? [] : [.. catalog.Assets.Where(MeshAssetService.IsGated).Select(asset => asset.Repo).Distinct()];
 
     private static MeshPlanIssue Rejection(Exception error, MeshModelDescriptor descriptor)
     {
@@ -119,7 +119,9 @@ public sealed class MeshPlanningService : IMeshPlanningService
             {
                 Code = "mesh.model.not_installed",
                 Severity = MeshPlanIssueSeverity.Error,
-                Message = $"No checkpoint was found for '{spec.Requested}'; fetch its catalog files or supply the model path.",
+                Message = status.ModelBlocker is MeshAssetBlocker whole
+                    ? $"No checkpoint was found for '{spec.Requested}'. {whole.Message}"
+                    : $"No checkpoint was found for '{spec.Requested}'; fetch its catalog files or supply the model path.",
             });
         }
         foreach (MeshAssetInfo asset in status.Missing)
