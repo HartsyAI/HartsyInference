@@ -124,7 +124,7 @@ public sealed class MeshOperationTests
     }
 
     [Fact]
-    public void AMaterialStillUsedByAnUntouchedPrimitiveKeepsItsTextureAndTheOthersAreRenumbered()
+    public void AMaterialStillUsedByAPrimitiveWithoutUvsKeepsItsTextureAndTheOrphanedOneIsDropped()
     {
         // The small part has no UVs, so decimating it does not strip its (textured) material; the big part does lose its.
         Mesh small = Sphere(10, 12, centreX: 5f);
