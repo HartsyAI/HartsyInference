@@ -292,6 +292,60 @@ public sealed class MeshExportTests
     }
 
     [Fact]
+    public void MaterialNamesStayUniqueWhenASuffixedNameIsAlreadyTaken()
+    {
+        MeshDocument source = Sample();
+        MeshMaterial plain = new();
+        MeshDocument three = new()
+        {
+            Primitives = [source.Primitives[0]],
+            Materials = [plain with { Name = "x" }, plain with { Name = "x_2" }, plain with { Name = "x" }],
+        };
+
+        string mtl = Encoding.UTF8.GetString(new ObjExporter().Export(three, "m").Files[1].Data);
+
+        string[] names = [.. mtl.Split('\n').Where(l => l.StartsWith("newmtl ")).Select(l => l[7..])];
+        Assert.Equal(3, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void ObjNormalsAreNormalisedAndAZeroOneDropsThemWithANote()
+    {
+        MeshDocument scaled = ObjDocumentReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 5\nf 1//1 2//1 3//1\n");
+        MeshDocument zero = ObjDocumentReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 0\nf 1//1 2//1 3//1\n");
+
+        Assert.Equal([0f, 0f, 1f], scaled.Primitives.Single().Geometry.Normals!.Take(3));
+        Assert.Null(zero.Primitives.Single().Geometry.Normals);
+        Assert.Contains(zero.Notes, n => n.Contains("zero-length"));
+    }
+
+    [Fact]
+    public void ObjRecordsItDoesNotReadAreNotedAndAMaskedMaterialIsNotWrittenAsTransparent()
+    {
+        MeshDocument document = ObjDocumentReader.Parse("v 0 0 0 1 0 0\nv 1 0 0\nv 0 1 0\nl 1 2\nf 1 2 3\n");
+        MeshDocument masked = new()
+        {
+            Primitives = [new MeshPrimitive { Geometry = document.Primitives[0].Geometry, Material = 0 }],
+            Materials = [new MeshMaterial { BaseColorFactor = [1, 1, 1, 0.3f], AlphaMode = MeshAlphaMode.Mask }],
+        };
+
+        Assert.Contains(document.Notes, n => n.StartsWith("Vertex colours on v records"));
+        Assert.Contains(document.Notes, n => n.StartsWith("Line and point records"));
+        Assert.Contains("d 1\n", Encoding.UTF8.GetString(new ObjExporter().Export(masked, "m").Files[1].Data));
+    }
+
+    [Fact]
+    public void AnAttributeThatDoesNotMatchThePositionsIsDroppedWithANoteNotSilently()
+    {
+        byte[] glb = RawGlb("", """{"attributes":{"POSITION":0,"TEXCOORD_0":0}}""");
+
+        MeshDocument document = GlbReader.ParseDocument(glb);
+
+        Assert.Null(document.Primitives.Single().Geometry.Uvs);
+        Assert.Contains(document.Notes, n => n.StartsWith("UV coordinates (TEXCOORD_0) could not be read"));
+    }
+
+    [Fact]
     public void ADocumentFromAnObjWithoutNormalsExportsToGlbWithoutThem()
     {
         MeshDocument obj = ObjDocumentReader.Parse("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");

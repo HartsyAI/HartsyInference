@@ -54,7 +54,16 @@ public static partial class GlbReader
                 int image = Natural(source, "image index");
                 if (!images.TryGetValue(image, out MeshImage? loaded))
                 {
-                    loaded = ReadImage(root, bin, image, notes);
+                    try
+                    {
+                        loaded = ReadImage(root, bin, image, notes);
+                    }
+                    catch (HartsyInferenceException)
+                    {
+                        // Remembered, so another material that uses the same image does not read it and note the failure again.
+                        images[image] = null;
+                        throw;
+                    }
                     images[image] = loaded;
                 }
                 return loaded;

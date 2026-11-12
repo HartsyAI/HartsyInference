@@ -280,14 +280,16 @@ public static partial class GlbReader
         {
             if (!TryMember(attributes, "NORMAL", out JsonElement accessorIndex))
                 return null;
-            float[]? values = ReadFloats(Natural(accessorIndex, "accessor index"), 3, vertexCount);
-            if (values is null)
-                return null;
+            float[] values = ReadFloats(Natural(accessorIndex, "accessor index"), 3, vertexCount)
+                ?? throw new HartsyInferenceException("the accessor's count or type does not match the positions");
             Matrix4x4 normalMatrix = Matrix4x4.Invert(world, out Matrix4x4 inverse) ? Matrix4x4.Transpose(inverse) : world;
             for (int i = 0; i < vertexCount; i++)
             {
                 Vector3 n = Vector3.TransformNormal(new Vector3(values[i * 3], values[i * 3 + 1], values[i * 3 + 2]), normalMatrix);
-                n = n.LengthSquared() > 0 ? Vector3.Normalize(n) : n;
+                // A zero-length normal is invalid glTF and cannot be shaded, so the attribute is dropped with a note rather than written back.
+                if (!(n.LengthSquared() > 0))
+                    throw new HartsyInferenceException("a normal has zero length");
+                n = Vector3.Normalize(n);
                 values[i * 3] = n.X;
                 values[i * 3 + 1] = n.Y;
                 values[i * 3 + 2] = n.Z;
@@ -306,7 +308,8 @@ public static partial class GlbReader
                 }
                 return null;
             }
-            return ReadFloats(Natural(accessorIndex, "accessor index"), 2, vertexCount);
+            return ReadFloats(Natural(accessorIndex, "accessor index"), 2, vertexCount)
+                ?? throw new HartsyInferenceException("the accessor's count or type does not match the positions");
         }
 
         private float[]? ReadColours(JsonElement attributes, int vertexCount)
@@ -315,8 +318,9 @@ public static partial class GlbReader
                 return null;
             JsonElement accessor = Item(RequiredArray(root, "accessors"), Natural(accessorIndex, "accessor index"), "accessor");
             int components = StringMember(accessor, "type") == "VEC4" ? 4 : 3;
-            float[]? values = ReadFloats(Natural(accessorIndex, "accessor index"), components, vertexCount);
-            if (values is null || components == 3)
+            float[] values = ReadFloats(Natural(accessorIndex, "accessor index"), components, vertexCount)
+                ?? throw new HartsyInferenceException("the accessor's count or type does not match the positions");
+            if (components == 3)
                 return values;
             if (!_notedColour)
             {

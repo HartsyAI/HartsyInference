@@ -16,7 +16,7 @@ public static class ObjDocumentReader
         List<float> outPositions = [], outUvs = [], outNormals = [];
         List<int> indices = [];
         Dictionary<(int, int, int), int> unique = [];
-        bool anyUv = false, anyNormal = false, missingNormal = false, materials = false;
+        bool anyUv = false, anyNormal = false, missingNormal = false, materials = false, vertexColours = false, linesOrPoints = false;
         foreach (string line in text.Split('\n'))
         {
             // A '#' starts a comment anywhere on a line.
@@ -28,12 +28,19 @@ public static class ObjDocumentReader
             {
                 case "v":
                     positions.AddRange(Numbers(tokens, 3));
+                    vertexColours |= tokens.Length >= 7;
                     break;
                 case "vt":
                     uvs.AddRange(Numbers(tokens, 2));
                     break;
                 case "vn":
-                    normals.AddRange(Numbers(tokens, 3));
+                    // OBJ does not require unit normals; glTF does.
+                    float[] normal = Numbers(tokens, 3);
+                    float length = MathF.Sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+                    normals.AddRange(length > 0 ? [normal[0] / length, normal[1] / length, normal[2] / length] : normal);
+                    break;
+                case "l" or "p":
+                    linesOrPoints = true;
                     break;
                 case "f":
                     AddFace(tokens);
@@ -49,9 +56,13 @@ public static class ObjDocumentReader
         List<string> notes = [];
         if (materials)
             notes.Add("The OBJ names materials, which are not read (the MTL file is not part of the input).");
-        // A normal that is not a unit vector is invalid glTF, so normals are kept only when every corner has one.
+        if (vertexColours)
+            notes.Add("Vertex colours on v records (v x y z r g b) are not read.");
+        if (linesOrPoints)
+            notes.Add("Line and point records (l, p) are not read; only faces are.");
+        // A normal that is not a unit vector is invalid glTF, so normals are kept only when every corner has a usable one.
         if (anyNormal && missingNormal)
-            notes.Add("Some faces have no normals, so the normals were dropped.");
+            notes.Add("Some faces have no normals, or a zero-length one, so the normals were dropped.");
         Mesh mesh = new()
         {
             Vertices = [.. outPositions],
@@ -99,7 +110,9 @@ public static class ObjDocumentReader
             if (vn >= 0)
             {
                 anyNormal = true;
-                outNormals.AddRange(normals.GetRange(vn * 3, 3));
+                List<float> normal = normals.GetRange(vn * 3, 3);
+                missingNormal |= normal[0] == 0 && normal[1] == 0 && normal[2] == 0;
+                outNormals.AddRange(normal);
             }
             else
             {
