@@ -91,11 +91,10 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             noise = TorchCompatibleNoise.Randn(new TensorShape([1L, _config.LatentsDim, 1L, latentH, latentW]), seed);
             x = MiniMaxH3Latents.PackVideo(noise, _config);
 
-            (Tensor cos, Tensor sin) = MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(),
-                _config.AttentionHeadDim);
+            (Tensor cos, Tensor sin) = RopeTables(layout);
             try
             {
-                (Tensor stackedWeight, Tensor stackedBias) = _transformer.StackedVideoHead();
+                (Tensor stackedWeight, Tensor stackedBias) = StackedHead();
                 x = RunSteps(x, sigmas, (current, sigma, sigmaNext) => DenoiseStep(current, layout, encoded, cos, sin,
                     stackedWeight, stackedBias, sigma, sigmaNext), progress, cancel);
                 // TODO(gpu): live latent previews (LatentArchitecture.MiniMaxH3) are not wired yet; progress ticks are.
@@ -170,6 +169,16 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         return _encoder.Encode(_textBackend, PresentPrompt(_tokenizer, prompt), null);
     }
 
+    /// <summary>The checkpoint-derived config the pipeline runs with.</summary>
+    internal MiniMaxH3Config Config => _config;
+
+    /// <summary>The rotary tables for one packed layout, as <see cref="Generate"/> builds them once per request.</summary>
+    internal (Tensor Cos, Tensor Sin) RopeTables(MiniMaxH3PackedLayout layout) =>
+        MiniMaxH3Rope.BuildTables(layout.PositionIds, _transformer.RopeInvFreq(), _config.AttentionHeadDim);
+
+    /// <summary>The checkpoint's stacked video head, which <see cref="DenoiseStep"/> combines per step.</summary>
+    internal (Tensor Weight, Tensor Bias) StackedHead() => _transformer.StackedVideoHead();
+
     /// <summary>Runs the sampler's steps over <paramref name="sigmas"/>: one denoise call per adjacent sigma pair, in order.
     /// Cancellation is checked before each step, and each finished step reports one progress tick.</summary>
     internal static Tensor RunSteps(Tensor x, double[] sigmas, Func<Tensor, double, double, Tensor> denoise,
@@ -186,7 +195,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     }
 
     /// <summary>One sampler step: resolve the step's stacked head, run the image forward, and take the Euler step.</summary>
-    private Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
+    internal Tensor DenoiseStep(Tensor x, MiniMaxH3PackedLayout layout, MiniMaxH3TextEncoder.Result encoded,
         Tensor cos, Tensor sin, Tensor stackedWeight, Tensor stackedBias, double sigma, double sigmaNext)
     {
         // ComfyUI hands the DiT float32(sigma * 1000) and runs on t = 1 - that / 1000, so the same rounding is mirrored.
@@ -232,7 +241,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         }
     }
 
-    private ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
+    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
     {
         using Tensor latent = MiniMaxH3Latents.UnpackVideo(x, 1, latentH, latentW, _config);
         using Tensor frame = _decoder.Decode(_vaeBackend, latent);

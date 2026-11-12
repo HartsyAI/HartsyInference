@@ -79,7 +79,7 @@ public sealed class MiniMaxH3ImageRecipe : IArchitectureRecipe
 
     /// <summary>The 2D decoder config is detected from the image VAE's shapes; the constants come from the image
     /// baseline. TODO(gpu): the detection path has not been run on the real file.</summary>
-    private static MiniMaxH3VideoVaeDecoder LoadImageVae(string file, List<IDisposable> loaders)
+    internal static MiniMaxH3VideoVaeDecoder LoadImageVae(string file, List<IDisposable> loaders)
     {
         CheckpointSource source = CheckpointSource.Open(file);
         loaders.Add(source);

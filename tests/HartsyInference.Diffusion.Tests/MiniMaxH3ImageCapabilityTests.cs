@@ -196,6 +196,41 @@ public sealed class MiniMaxH3ImageCapabilityTests
         Assert.True(worst < 1e-5f, $"largest difference from torch.randn was {worst}");
     }
 
+    [Fact]
+    public void SameSeedRepeatsTheNoiseAndAnotherSeedDoesNot()
+    {
+        TensorShape shape = new([1L, 24L, 1L, 8L, 8L]);
+        using Tensor first = TorchCompatibleNoise.Randn(shape, seed: 42);
+        using Tensor again = TorchCompatibleNoise.Randn(shape, seed: 42);
+        using Tensor other = TorchCompatibleNoise.Randn(shape, seed: 43);
+
+        Assert.Equal(first.AsSpan<float>().ToArray(), again.AsSpan<float>().ToArray());
+        Assert.NotEqual(first.AsSpan<float>().ToArray(), other.AsSpan<float>().ToArray());
+    }
+
+    // ---- VRAM modes and chunking ------------------------------------------------------------------------------
+
+    [Fact]
+    public void TwoThousandFortyEightSquare_NeverChunksWhateverTheVram()
+    {
+        // 64 x 64 target tokens plus the prompt is far below the chunk threshold of 8192 rows, so it runs whole.
+        int rows = ResolveRowsFor(seqTokens: 4096 + 14, freeBytes: 1L << 30);
+
+        Assert.Equal(int.MaxValue, rows);
+    }
+
+    [Fact]
+    public void FourThousandNinetySixSquare_ChunksWhenVramIsShortAndRunsWholeWhenRoomy()
+    {
+        const int seq = 16384 + 6;
+
+        Assert.Equal(MiniMaxH3ChunkPolicy.DefaultChunkRows, ResolveRowsFor(seq, freeBytes: 4L << 30));
+        Assert.Equal(int.MaxValue, ResolveRowsFor(seq, freeBytes: 16L << 30));
+    }
+
+    private static int ResolveRowsFor(int seqTokens, long freeBytes) =>
+        MiniMaxH3ChunkPolicy.ResolveChunkRows(seqTokens, new MiniMaxH3Config(), DType.F32, freeBytes);
+
     // ---- Packed layout and rotary positions ---------------------------------------------------------------------
 
     [Fact]

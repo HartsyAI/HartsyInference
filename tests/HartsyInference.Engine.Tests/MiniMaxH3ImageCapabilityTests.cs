@@ -8,6 +8,7 @@ using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Recipes.Image;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -35,6 +36,19 @@ public sealed class MiniMaxH3ImageCapabilityTests
     {
         Assert.IsType<MiniMaxH3ImageRecipe>(RecipeRegistry.Resolve(familyId));
     }
+
+    [Fact]
+    public void CatalogOffersThreeImageBuildsEachWithItsReleasedTransformerHash()
+    {
+        // Hashes from the Comfy-Org repack (docs/Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md). The bf16 and w4a8 builds are
+        // catalogued but not on this machine, so only their entries are checked here.
+        Assert.Equal("83eb140f1ff95c068f8a6886e6d3f3d0d4ab2e07bb2fe6d2ef992a51146ee622", TransformerHash("minimax-h3-image"));
+        Assert.Equal("a767f5325db019588b3491a93d80288d336c826a7aeb87bec67675e554367222", TransformerHash("minimax-h3-image-bf16"));
+        Assert.Equal("517cc19b85348386f4df7c806dce80d839d0899e7cdaa3e1dbb09de964381dbb", TransformerHash("minimax-h3-image-w4a8"));
+    }
+
+    private static string? TransformerHash(string id) =>
+        ModelCatalog.Find(id)?.Assets.Single(a => a.Role == "transformer").Sha256;
 
     [Fact]
     public void TheVideoFamilyDoesNotResolveToTheImageRecipe()
