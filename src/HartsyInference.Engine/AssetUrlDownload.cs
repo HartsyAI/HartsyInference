@@ -8,12 +8,12 @@ internal static class AssetUrlDownload
 {
     private const int BufferSize = 81920;
 
-    /// <summary>The URL a mirror serves <paramref name="asset"/>'s repack at, or null when the asset lists none, <paramref name="baseUrl"/> is empty or not an absolute https URL, or the repack path leaves the mirror's folder.</summary>
+    /// <summary>The URL a mirror serves <paramref name="asset"/>'s repack at, or null when the asset lists none, <paramref name="baseUrl"/> is empty, not an absolute https URL or carries a query or fragment, or the repack path leaves the mirror's folder.</summary>
     internal static string? MirrorUrl(ModelAsset asset, string? baseUrl)
     {
         if (asset.Repack is null || string.IsNullOrWhiteSpace(baseUrl))
             return null;
-        if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out Uri? root) || root.Scheme != Uri.UriSchemeHttps)
+        if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out Uri? root) || root.Scheme != Uri.UriSchemeHttps || root.Query.Length > 0 || root.Fragment.Length > 0)
             return null;
         string[] segments = asset.Repack.MirrorPath.Split('/');
         if (segments.Any(s => s.Length == 0 || s is "." or ".." || s.Contains('\\')))

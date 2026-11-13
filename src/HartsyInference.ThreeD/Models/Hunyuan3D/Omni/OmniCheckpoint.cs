@@ -97,6 +97,9 @@ public sealed class OmniCheckpoint : IDisposable
         for (int i = 0; i < names.Length; i++)
         {
             SafeTensorDescriptor descriptor = loader.Descriptors[names[i]];
+            // The loader does not check a hand-placed file's offsets against its shapes, and the copy below trusts the shape.
+            if (descriptor.ByteLength != descriptor.DType.ComputeByteCount(descriptor.Shape.ElementCount))
+                throw new InvalidDataException($"'{path}' stores {descriptor.ByteLength} bytes for tensor '{descriptor.Name}', which its shape and dtype do not account for.");
             DType? narrowed = convert(new PytorchTensorDescriptor { Name = descriptor.Name, DType = descriptor.DType, Shape = descriptor.Shape });
             Tensor view = loader.GetTensor(names[i]);
             Tensor owned;

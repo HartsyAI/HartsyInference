@@ -97,12 +97,17 @@ public sealed class MeshAssetService : IMeshAssetService
         // For the two part models a path the caller names decides, found or not: their loaders read it and never the catalog folder.
         if (localPath is not null && id is MeshModelIds.P3Sam or MeshModelIds.XPart or MeshModelIds.Omni)
             return LoaderPath(asset, id, localPath);
+        // Pixal3D's loader reads NAF (the one URL-fetched file) from the folder it is given and nowhere else, so a path the caller names decides.
+        if (localPath is not null && asset.Url is not null && ModelFolderOf(localPath) is string named)
+        {
+            string beside = Path.Combine(named, asset.FileName);
+            return FirstExisting(RepackedCheckpoint.SiblingOf(beside)) ?? FirstExisting(beside);
+        }
         string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true) ?? ModelDownloader.FindRepacked(asset);
         if (found is not null)
             return found;
         string? folder = ModelFolderOf(localPath);
-        // A file fetched from a URL (NAF) may also sit beside the checkpoints of the folder the caller named.
-        if ((entry.LoadsFromFolder || asset.Url is not null) && folder is not null && Directory.Exists(folder))
+        if (entry.LoadsFromFolder && folder is not null && Directory.Exists(folder))
         {
             string inFolder = Path.Combine(folder, asset.FileName);
             if (File.Exists(inFolder))

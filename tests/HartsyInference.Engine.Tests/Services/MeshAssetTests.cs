@@ -398,10 +398,31 @@ public sealed class MeshAssetTests : IDisposable
 
         MeshAssetInfo naf = new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
         Assert.False(naf.Present);
+        // The loader reads NAF from the folder it is given only, so a copy in the catalog folder does not count for it.
+        Place(Path.Combine(_root, "3D", "pixal3d", "naf_release.pth"));
+        Assert.False(new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth")).Present);
         Place(Path.Combine(custom, "naf_release.pth"));
         MeshAssetInfo placed = new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
 
         Assert.True(placed.Present);
+    }
+
+    [Fact]
+    public async Task AMirrorFetchedRepackIsReportedAsThePrimaryPathAndAmongTheFilesOfAPrefetch()
+    {
+        PlaceCatalog("hunyuan3d-paint21", a => a.Repack is not null);
+        ModelAsset[] repacked = [.. ModelCatalog.Find("hunyuan3d-paint21")!.Assets.Where(a => a.Repack is not null)];
+
+        ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(Spec("hunyuan3d-paint21"), null, (asset, _) =>
+        {
+            Place(ModelDownloader.RepackedTargetPath(asset), 4);
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.Empty(result.Blockers);
+        Assert.Equal(ModelDownloader.RepackedTargetPath(ModelDownloader.PrimaryAsset(ModelCatalog.Find("hunyuan3d-paint21")!)!), result.PrimaryPath);
+        Assert.All(repacked, a => Assert.Contains(ModelDownloader.RepackedTargetPath(a), result.Files));
+        Assert.All(result.Files, f => Assert.True(File.Exists(f), f));
     }
 
     [Fact]

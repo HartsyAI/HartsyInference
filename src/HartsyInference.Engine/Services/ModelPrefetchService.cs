@@ -120,9 +120,9 @@ public sealed class ModelPrefetchService : IModelPrefetchService
         string message = blockers.Count == 0
             ? $"Fetched {fetched} file(s) for '{status.ModelId}'."
             : $"Fetched {fetched} of {toFetch.Count} file(s) for '{status.ModelId}'; {blockers.Count} file(s) need your action: {string.Join("; ", blockers.Select(b => b.Role))}.";
-        string? primaryPath = primary is not null && ModelDownloader.TargetPath(primary) is string path && File.Exists(path) ? path : null;
+        string? primaryPath = primary is not null && ModelDownloader.LocalPath(primary) is string path && File.Exists(path) ? path : null;
         List<string> present = [.. inventory.Paths.Where(p => p is not null).Select(p => p!)];
-        present.AddRange(toFetch.Select(ModelDownloader.TargetPath).Where(File.Exists));
+        present.AddRange(toFetch.Select(ModelDownloader.LocalPath).Where(File.Exists));
         return new ModelPrefetchResult(true, message, [.. present.Distinct(StringComparer.OrdinalIgnoreCase)], primaryPath) { Blockers = blockers };
     }
 

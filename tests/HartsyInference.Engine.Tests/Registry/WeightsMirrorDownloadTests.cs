@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.HuggingFace;
 using HartsyInference.Engine.Registry;
 using Xunit;
@@ -56,6 +57,36 @@ public sealed class WeightsMirrorDownloadTests : IDisposable
         Assert.False(File.Exists(ModelDownloader.TargetPath(asset)));
         Assert.Single(network.Requests);
         Assert.Empty(ModelDownloader.MissingAssets(new CatalogEntry { Id = "t", Modality = Modality.Mesh, DisplayName = "t", Architecture = "t", Status = ModelStatus.Structural, Assets = [asset] }));
+    }
+
+    [Fact]
+    public async Task AnInstallThatHoldsOnlyTheRepackOfThePrimaryResolvesToTheRepackNotToAPathThatDoesNotExist()
+    {
+        ModelAsset asset = PickleAsset();
+        CatalogEntry entry = new() { Id = "t", Modality = Modality.Mesh, DisplayName = "t", Architecture = "t", Status = ModelStatus.Structural, Assets = [asset] };
+        Assert.Equal(ModelDownloader.TargetPath(asset), ModelDownloader.PrimaryLocalPath(entry));
+        using HuggingFaceClient hf = new(null, new HttpClient(new StandInNetwork(_ => throw new InvalidOperationException("Hugging Face must not be asked"))));
+
+        await ModelDownloader.EnsureAsync(hf, asset, allowDownload: true, null, Client(new StandInNetwork(_ => Ok(Repack))), Mirror, CancellationToken.None);
+
+        string primary = ModelDownloader.PrimaryLocalPath(entry)!;
+        Assert.True(File.Exists(primary));
+        Assert.EndsWith("weights.safetensors", primary, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheResolverPointsAtTheRepackOfTheCatalogPrimaryWhenOnlyTheRepackIsInstalled()
+    {
+        CatalogEntry entry = ModelCatalog.Find("hunyuan3d-paint21")!;
+        ModelAsset primary = ModelDownloader.PrimaryAsset(entry)!;
+        string repack = ModelDownloader.RepackedTargetPath(primary);
+        Directory.CreateDirectory(Path.GetDirectoryName(repack)!);
+        File.WriteAllBytes(repack, Repack);
+
+        ModelSpec spec = ModelResolver.Resolve("hunyuan3d-paint21", null, Modality.Mesh);
+
+        Assert.Equal(Path.GetFullPath(repack), Path.GetFullPath(spec.LocalPath!));
+        Assert.Equal(Path.GetFullPath(repack), Path.GetFullPath(ModelDownloader.PrimaryLocalPath(entry)!));
     }
 
     [Fact]
@@ -170,6 +201,8 @@ public sealed class WeightsMirrorDownloadTests : IDisposable
     [InlineData("https://mirror.example/weights/", "a b/c.safetensors", "https://mirror.example/weights/a%20b/c.safetensors")]
     [InlineData("https://mirror.example", "x.safetensors", "https://mirror.example/x.safetensors")]
     [InlineData("http://mirror.example", "x.safetensors", null)]
+    [InlineData("https://mirror.example/w?sig=abc", "x.safetensors", null)]
+    [InlineData("https://mirror.example/w#frag", "x.safetensors", null)]
     [InlineData("https://mirror.example", "../x.safetensors", null)]
     [InlineData("https://mirror.example", "a//x.safetensors", null)]
     [InlineData("https://mirror.example", "a\\x.safetensors", null)]

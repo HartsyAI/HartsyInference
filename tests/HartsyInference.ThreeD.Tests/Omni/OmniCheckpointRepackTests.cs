@@ -83,6 +83,28 @@ public sealed class OmniCheckpointRepackTests : IDisposable
     }
 
     [Fact]
+    public void Load_RefusesAHandPlacedRepackWhoseStoredBytesDoNotMatchItsShape()
+    {
+        PlaceConfigs();
+        Write("cond_encoder/pytorch_model.safetensors", ("linear.0.weight", Filled(new TensorShape(1), 1f)));
+        Write("vae/pytorch_model.safetensors", ("sal.post_kl.weight", Filled(new TensorShape(1), 2f)));
+        // The header says a 2 x 2 F32 tensor and stores 8 bytes.
+        byte[] header = System.Text.Encoding.UTF8.GetBytes("""{"blocks.0.attn.weight":{"dtype":"F32","shape":[2,2],"data_offsets":[0,8]}}""");
+        string path = Path.Combine(_folder, "model", "pytorch_model.safetensors");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (FileStream file = File.Create(path))
+        {
+            file.Write(BitConverter.GetBytes((long)header.Length));
+            file.Write(header);
+            file.Write(new byte[8]);
+        }
+
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => OmniCheckpoint.Load(_folder, halfWeights: false));
+
+        Assert.Contains("blocks.0.attn.weight", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Load_NamesTheMissingFileWhenNeitherThePickleNorItsRepackIsThere()
     {
         PlaceConfigs();

@@ -85,7 +85,14 @@ public static class ModelDownloader
     /// <summary>The local path of the model's primary file (its transformer/checkpoint), or null when the entry has no
     /// assets. Used as the resolved <c>LocalPath</c> once the set is present.</summary>
     public static string? PrimaryLocalPath(CatalogEntry entry) =>
-        PrimaryAsset(entry) is ModelAsset primary ? TargetPath(primary) : null;
+        PrimaryAsset(entry) is ModelAsset primary ? LocalPath(primary) : null;
+
+    /// <summary>The file a loader reads for <paramref name="asset"/>: where it is on disk (<see cref="TargetPath"/>), else its repack beside that when the asset lists one and only the repack was fetched, else where a download would put it.</summary>
+    internal static string LocalPath(ModelAsset asset)
+    {
+        string target = TargetPath(asset);
+        return File.Exists(target) ? target : FindRepacked(asset) ?? target;
+    }
 
     /// <summary>The model's primary asset (its transformer/checkpoint), or null when the entry has no assets.</summary>
     internal static ModelAsset? PrimaryAsset(CatalogEntry entry) =>
@@ -173,7 +180,7 @@ public static class ModelDownloader
                     catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or IOException or ArgumentException
                         || (ex is OperationCanceledException && !ct.IsCancellationRequested))
                     {
-                        Logs.Warning($"[Download] The mirror did not give '{asset.RepoPath}' ({ex.GetType().Name}); fetching the upstream file instead.");
+                        Logs.Warning($"[Download] The mirror did not give '{asset.RepoPath}' ({ex.GetType().Name}: {ex.Message}); fetching the upstream file instead.");
                     }
                 }
                 if (asset.Url is not null)
