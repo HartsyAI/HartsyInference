@@ -109,7 +109,7 @@ internal static class OmniControlMapper
         {
             throw new NotSupportedException(control.Kind == MeshControlKind.Point
                 ? $"A Point control reads obj, glb or ply; got '{control.Geometry.Format}'."
-                : $"A Voxel control reads an obj or glb mesh with faces; got '{control.Geometry.Format}'.").ForField(nameof(MeshRequest.Control));
+                : $"A Voxel control reads an obj or glb mesh with faces; got '{control.Geometry.Format}'. Convert the file first (upstream's voxel demos are ply meshes).").ForField(nameof(MeshRequest.Control));
         }
         if (control.Geometry.Data.Length == 0)
             throw new ArgumentException($"The {control.Kind} control geometry is empty.", nameof(control)).ForField(nameof(MeshRequest.Control));

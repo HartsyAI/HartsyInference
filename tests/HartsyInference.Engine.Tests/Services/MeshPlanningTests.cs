@@ -358,6 +358,19 @@ public sealed class MeshPlanningTests
         Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("trellis2"), matterAvailable: false));
     }
 
+    [Theory]
+    [InlineData("hunyuan3d-part")]
+    [InlineData("hunyuan3d-xpart")]
+    public void ThePartModelsListTheSonataNonCommercialLicenceAsARestriction(string id)
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshModelDescriptor descriptor = engine.MeshPlanning.Describe(id);
+
+        Assert.Contains(descriptor.Licence.Restrictions, r => r.Contains("CC-BY-NC 4.0", StringComparison.Ordinal) && r.Contains("facebook/sonata", StringComparison.Ordinal));
+        Assert.Contains("CC-BY-NC 4.0", descriptor.Licence.Summary);
+    }
+
     [Fact]
     public void DescribeReturnsOneDescriptorPerDescribedModelWithItsGatedRepositories()
     {

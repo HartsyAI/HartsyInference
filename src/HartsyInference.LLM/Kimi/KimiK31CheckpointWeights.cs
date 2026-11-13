@@ -1,11 +1,13 @@
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.LLM.Kimi;
 
-/// <summary>Kimi K3.1 tensors read from a safetensors checkpoint directory through its <c>model.safetensors.index.json</c>. Each tensor is a
-/// borrowed view of its shard's mapping (the view keeps the mapping alive), in the dtype the checkpoint stores it; the loader converts to F32.</summary>
-public sealed class KimiK31CheckpointWeights : IKimiK31WeightSource, IDisposable
+/// <summary>Kimi K3.1 tensors read from a safetensors checkpoint directory through its <c>model.safetensors.index.json</c>. A whole tensor is a
+/// borrowed view of its shard's mapping (the view keeps the mapping alive), or a copy when its shard is pread-only; a row or column range
+/// is pread from the shard, so a rank reads only its share. Every tensor keeps the dtype the checkpoint stores; the loader converts.</summary>
+public sealed class KimiK31CheckpointWeights : IKimiK31WeightStore
 {
     private ShardedSafeTensorSet? _set;
 
@@ -19,7 +21,55 @@ public sealed class KimiK31CheckpointWeights : IKimiK31WeightSource, IDisposable
     public bool Has(string name) => Set.Inventory.ContainsKey(name);
 
     /// <inheritdoc/>
-    public Tensor Read(string name) => Set.GetTensor(name);
+    public Tensor Read(string name)
+    {
+        ShardedSafeTensorSet set = Set;
+        bool pread = set.Inventory.TryGetValue(name, out TensorLocation? location) && location.Shard.PreadOnly;
+        return pread ? set.ReadTensor(name) : set.GetTensor(name);
+    }
+
+    /// <inheritdoc/>
+    public unsafe Tensor ReadSlice(string name, int dim, long start, long count)
+    {
+        ShardedSafeTensorSet set = Set;
+        if (!set.Inventory.TryGetValue(name, out TensorLocation? location))
+            throw new KeyNotFoundException($"Tensor '{name}' is not in the checkpoint.");
+        TensorShape shape = location.Shape;
+        if ((uint)dim >= (uint)shape.Rank) throw new ArgumentOutOfRangeException(nameof(dim), dim, $"'{name}' has rank {shape.Rank}.");
+        if (dim == 1 && shape.Rank != 2) throw new ArgumentOutOfRangeException(nameof(dim), dim, "Column ranges are read for rank-2 tensors only.");
+        if (start < 0 || count < 1 || start + count > shape[dim])
+            throw new ArgumentOutOfRangeException(nameof(count), count, $"[{start}, {start + count}) lies outside '{name}' dimension {dim} of {shape[dim]}.");
+        SafeTensorDTypes.ThrowIfNotMaterialisable(location.DType, name, location.Shard.Path);
+
+        long[] dims = new long[shape.Rank];
+        for (int d = 0; d < dims.Length; d++) dims[d] = shape[d];
+        dims[dim] = count;
+        Tensor slice = new(new TensorShape(dims), location.DType);
+        try
+        {
+            IWeightByteSource source = set.GetByteSource(location.Shard);
+            if (dim == 0)
+            {
+                long rowBytes = location.ByteLength / shape[0];
+                source.ReadAt(location.FileOffset + start * rowBytes, new Span<byte>(slice.DataPointer, checked((int)(count * rowBytes))));
+                return slice;
+            }
+            long fullRowBytes = location.DType.ComputeByteCount(shape[1]);
+            long sliceRowBytes = location.DType.ComputeByteCount(count);
+            long startBytes = location.DType.ComputeByteCount(start);
+            for (long row = 0; row < shape[0]; row++)
+            {
+                byte* at = (byte*)slice.DataPointer + row * sliceRowBytes;
+                source.ReadAt(location.FileOffset + row * fullRowBytes + startBytes, new Span<byte>(at, checked((int)sliceRowBytes)));
+            }
+            return slice;
+        }
+        catch
+        {
+            slice.Dispose();
+            throw;
+        }
+    }
 
     private ShardedSafeTensorSet Set => _set ?? throw new ObjectDisposedException(nameof(KimiK31CheckpointWeights));
 
