@@ -91,89 +91,57 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         }
     }
 
-    /// <summary>The pipelines that have no run gate of their own: a run takes a count, and a disposal waits for the count to reach zero and holds new runs off meanwhile.</summary>
-    private static bool HasNoRunGate(string kind) => kind is "image" or "scene" or "rig" or "paint" or "part";
+    /// <summary>The pipelines that have no run gate of their own: a run takes a count under its pipeline's key, and a disposal waits for that pipeline's count to reach zero and holds new runs on it off meanwhile.</summary>
+    private static bool HasNoRunGate(string kind) => kind is ImageKind or SceneKind or RigKind or PaintKind or PartKind;
 
     /// <summary>Whether the model's runtime serialises its own runs (and so waits for one before it is disposed); every other model runs counted.</summary>
     private static bool RunsGated(string id, ModelSpec spec) =>
         id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Sam3dObjects || id == MeshModelIds.HairDeck || IsHairDeck(spec);
 
-    private readonly object _runLock = new();
-    private int _ungatedRuns;
-    private bool _disposing;
-    private TaskCompletionSource _reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private TaskCompletionSource? _drained;
+    private readonly MeshRunCounter _runs = new();
 
-    /// <summary>Runs one generation on a pipeline without a run gate, counted so that <see cref="Free"/> cannot dispose it under the run. While a disposal is waiting or running the run waits without holding a thread, and gives up when <paramref name="cancel"/> is cancelled.</summary>
-    internal async Task<MeshResult> RunCounted(Func<Task<MeshResult>> run, CancellationToken cancel = default)
+    /// <summary>Runs one generation counted under <paramref name="key"/> (<see cref="RunKeyOf"/>), so that <see cref="Free"/> of that pipeline cannot dispose it under the run and a free of another one does not wait for it. While a free of the key waits or runs, the run waits without holding a thread, and gives up when <paramref name="cancel"/> is cancelled.</summary>
+    internal Task<MeshResult> RunCounted(string? key, Func<Task<MeshResult>> run, CancellationToken cancel = default) => _runs.RunAsync(key, run, cancel);
+
+    /// <summary>The key the run of <paramref name="id"/> on <paramref name="spec"/> is counted under: the one <see cref="Free"/> counts its pipeline under, built from the same cache key the loader uses. Null when the run has no pipeline to protect: no checkpoint is named, or one the loader will refuse.</summary>
+    internal static string? RunKeyOf(string id, ModelSpec spec, MeshRequest request)
     {
-        while (true)
-        {
-            Task reopened;
-            lock (_runLock)
-            {
-                if (!_disposing)
-                {
-                    _ungatedRuns++;
-                    break;
-                }
-                reopened = _reopened.Task;
-            }
-            await reopened.WaitAsync(cancel).ConfigureAwait(false);
-        }
+        if (spec.LocalPath is null)
+            return null;
         try
         {
-            return await run().ConfigureAwait(false);
+            if (MeshModelIds.SceneMesh.Contains(id))
+                return MeshRunCounter.KeyOf(SceneKind, SceneKey(spec.LocalPath, SceneSource(request.ScenePrompt)));
+            if (MeshModelIds.RigMesh.Contains(id))
+                return MeshRunCounter.KeyOf(RigKind, spec.LocalPath);
+            if (MeshModelIds.PaintMesh.Contains(id))
+                return MeshRunCounter.KeyOf(PaintKind, PaintFolder(spec.LocalPath));
+            if (MeshModelIds.PartMesh.Contains(id))
+                return MeshRunCounter.KeyOf(PartKind, PartCheckpoint(spec.LocalPath));
+            if (MeshModelIds.XPartMesh.Contains(id))
+                return MeshRunCounter.KeyOf(XPartKind, XPartFolder(spec.LocalPath));
+            return MeshRunCounter.KeyOf(ImageKind, spec.LocalPath);
         }
-        finally
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            lock (_runLock)
-            {
-                if (--_ungatedRuns == 0)
-                    _drained?.TrySetResult();
-            }
+            return null;
         }
     }
 
-    /// <summary>Runs <paramref name="dispose"/> once no counted run is in progress, holding new ones off until it finishes. The caller's thread waits: the lifecycle calls it serves are synchronous.</summary>
-    private void WhenNoCountedRun(Action dispose)
-    {
-        TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        TaskCompletionSource reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        while (true)
-        {
-            Task? other = null;
-            lock (_runLock)
-            {
-                if (_disposing)
-                    other = _reopened.Task;
-                else
-                {
-                    _disposing = true;
-                    _reopened = reopened;
-                    _drained = drained;
-                    if (_ungatedRuns == 0)
-                        drained.TrySetResult();
-                    break;
-                }
-            }
-            other.Wait();
-        }
-        try
-        {
-            drained.Task.Wait();
-            dispose();
-        }
-        finally
-        {
-            lock (_runLock)
-            {
-                _disposing = false;
-                _drained = null;
-            }
-            reopened.TrySetResult();
-        }
-    }
+    private const string ImageKind = "image";
+    private const string SceneKind = "scene";
+    private const string RigKind = "rig";
+    private const string PaintKind = "paint";
+    private const string PartKind = "part";
+    private const string XPartKind = "xpart";
+
+    private static string SceneKey(string localPath, CoLa3DConfig.QuerySourceKind source) => $"{localPath}|{source}";
+
+    /// <summary>The decomposer variant a scene prompt selects, as <see cref="ToCoLa3DPrompt"/> would tell it, without copying the mask planes.</summary>
+    internal static CoLa3DConfig.QuerySourceKind SceneSource(SceneMeshPrompt? prompt) =>
+        prompt is null ? CoLa3DConfig.QuerySourceKind.Fixed
+        : prompt.Masks is not null ? CoLa3DConfig.QuerySourceKind.PromptMask
+        : CoLa3DConfig.QuerySourceKind.PromptPoint;
 
     /// <inheritdoc/>
     public IReadOnlyList<MeshLoadedModel> Loaded()
@@ -187,7 +155,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// <inheritdoc/>
     public int Free(string? name = null)
     {
-        List<(string Kind, string Name, IDisposable Item)> freed = [];
+        List<(string Kind, string Key, string Name, IDisposable Item)> freed = [];
         lock (_gate)
         {
             foreach ((string kind, string key, IDisposable item) in Resident().ToList())
@@ -195,15 +163,15 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 if (name is not null && !string.Equals(NameOf(key), name, StringComparison.OrdinalIgnoreCase))
                     continue;
                 RemoveResident(kind, key);
-                freed.Add((kind, NameOf(key), item));
+                freed.Add((kind, key, NameOf(key), item));
             }
         }
-        // A disposal waits for the run in progress, so it happens outside the lock that every load takes: the gated runtimes wait on their own gate, the others on the run count.
-        foreach ((string kind, string _, IDisposable item) in freed.Where(f => !HasNoRunGate(f.Kind)))
+        // A disposal waits for the run in progress, so it happens outside the lock that every load takes: the gated runtimes wait on their own gate, the others on the run count of their own pipeline.
+        foreach ((string _, string _, string _, IDisposable item) in freed.Where(f => !HasNoRunGate(f.Kind)))
             item.Dispose();
-        List<IDisposable> counted = [.. freed.Where(f => HasNoRunGate(f.Kind)).Select(f => f.Item)];
+        List<(string Kind, string Key, string Name, IDisposable Item)> counted = [.. freed.Where(f => HasNoRunGate(f.Kind))];
         if (counted.Count > 0)
-            WhenNoCountedRun(() => counted.ForEach(item => item.Dispose()));
+            _runs.WhenIdle(counted.Select(f => MeshRunCounter.KeyOf(f.Kind, f.Key)), () => counted.ForEach(f => f.Item.Dispose()));
         if (freed.Count > 0)
             Logs.Info($"[Mesh] Freed {freed.Count} resident 3D model(s): {string.Join(", ", freed.Select(f => $"{f.Kind} {f.Name}"))}.");
         return freed.Count;
@@ -211,11 +179,11 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
 
     private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
     {
-        foreach (KeyValuePair<string, LoadedMesh> e in _pipelines) yield return ("image", e.Key, e.Value.Pipeline);
-        foreach (KeyValuePair<string, CoLa3DPipeline> e in _scenePipelines) yield return ("scene", e.Key, e.Value);
-        foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return ("rig", e.Key, e.Value);
-        foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return ("paint", e.Key, e.Value);
-        foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return ("part", e.Key, e.Value);
+        foreach (KeyValuePair<string, LoadedMesh> e in _pipelines) yield return (ImageKind, e.Key, e.Value.Pipeline);
+        foreach (KeyValuePair<string, CoLa3DPipeline> e in _scenePipelines) yield return (SceneKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return (RigKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return (PaintKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return (PartKind, e.Key, e.Value);
         foreach (KeyValuePair<string, HairDeckRuntime> e in _hairDecks) yield return ("hairdeck", e.Key, e.Value);
         foreach (KeyValuePair<string, Trellis2Runtime> e in _trellis2) yield return ("trellis2", e.Key, e.Value);
         foreach (KeyValuePair<string, Pixal3DRuntime> e in _pixal3d) yield return ("pixal3d", e.Key, e.Value);
@@ -225,11 +193,11 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     {
         switch (kind)
         {
-            case "image": _pipelines.Remove(key); break;
-            case "scene": _scenePipelines.Remove(key); break;
-            case "rig": _rigPipelines.Remove(key); break;
-            case "paint": _paintPipelines.Remove(key); break;
-            case "part": _partPipelines.Remove(key); break;
+            case ImageKind: _pipelines.Remove(key); break;
+            case SceneKind: _scenePipelines.Remove(key); break;
+            case RigKind: _rigPipelines.Remove(key); break;
+            case PaintKind: _paintPipelines.Remove(key); break;
+            case PartKind: _partPipelines.Remove(key); break;
             case "hairdeck": _hairDecks.Remove(key); break;
             case "trellis2": _trellis2.Remove(key); break;
             default: _pixal3d.Remove(key); break;
@@ -267,7 +235,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         MeshRequestValidator.Validate(id, request, MatterAvailable());
-        return RunsGated(id, spec) ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(() => DispatchAsync(id, spec, request, progress, cancel), cancel);
+        return RunsGated(id, spec) ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(RunKeyOf(id, spec, request), () => DispatchAsync(id, spec, request, progress, cancel), cancel);
     }
 
     private Task<MeshResult> DispatchAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -1126,7 +1094,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             throw new FileNotFoundException(
                 $"No checkpoint found for 3D model '{spec.Requested}'. Supply its model directory as the local path.");
         }
-        string key = $"{spec.LocalPath}|{source}";
+        string key = SceneKey(spec.LocalPath, source);
         lock (_gate)
         {
             if (_scenePipelines.TryGetValue(key, out CoLa3DPipeline? cached))
@@ -1166,8 +1134,10 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         List<HairDeckRuntime> hairDecks;
         List<Trellis2Runtime> trellis2Runtimes;
         List<Pixal3DRuntime> pixal3dRuntimes;
+        List<string> countedKeys;
         lock (_gate)
         {
+            countedKeys = [.. Resident().Where(r => HasNoRunGate(r.Kind)).Select(r => MeshRunCounter.KeyOf(r.Kind, r.Key))];
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
             rigPipelines = _rigPipelines.Values.ToList();
@@ -1186,8 +1156,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             _trellis2.Clear();
             _pixal3d.Clear();
         }
-        // The pipelines without a run gate wait for the counted runs; the gated runtimes below wait on their own gate.
-        WhenNoCountedRun(() =>
+        // The pipelines without a run gate wait for the counted runs on them, and so does a run that holds no pipeline (X-Part loads its checkpoints for the run); the gated runtimes below wait on their own gate.
+        _runs.WhenIdle([.. countedKeys, .. _runs.ActiveKeys()], () =>
         {
             foreach (LoadedMesh loaded in pipelines)
                 loaded.Pipeline.Dispose();
