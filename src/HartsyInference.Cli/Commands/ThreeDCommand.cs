@@ -7,7 +7,7 @@ using Spectre.Console.Cli;
 
 namespace HartsyInference.Cli.Commands;
 
-/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, Pixal3D or SAM 3D Objects (an RGBA image or --mask in, splats out; shape-only, or textured with --texture for TRELLIS.2 and Pixal3D), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, a GLB with one coloured node per part from a mesh with Hunyuan3D-Part (P3-SAM), a GLB with every part regenerated as a complete shape with X-Part, or hair cards from an image with HairDeck.</summary>
+/// <summary>Generates 3D output from an input: a mesh (GLB) or Gaussian-splat cloud (PLY) from an image with TripoSR, Hunyuan3D, TRELLIS, TRELLIS.2, Pixal3D or SAM 3D Objects (an RGBA image or --mask in, splats out; shape-only, or textured with --texture for TRELLIS.2 and Pixal3D), one GLB mesh per decomposed object from a scene mesh with CoLa3D, a rigged GLB from a mesh with UniRig, a textured GLB from a mesh and a reference image with Hunyuan3D Paint, a GLB with one coloured node per part from a mesh with Hunyuan3D-Part (P3-SAM), a GLB with every part regenerated as a complete shape with X-Part, a GLB from an image and a control signal (a point cloud, voxels, a bounding box or a skeleton) with Hunyuan3D-Omni, or hair cards from an image with HairDeck.</summary>
 public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 {
     /// <summary>Options for <c>hartsy 3d</c>.</summary>
@@ -15,18 +15,33 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
     {
         /// <summary>Path to the input: a PNG image, or a .obj/.glb mesh for cola3d, unirig, hunyuan3d-part, hunyuan3d-xpart and the paint models.</summary>
         [CommandArgument(0, "<input>")]
-        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, trellis, trellis2, pixal3d, sam3d-objects) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-part, hunyuan3d-xpart, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
+        [Description("Input file: a PNG image (triposr, hunyuan3d and its -fast, -turbo and -mini builds, hunyuan3d-omni, trellis, trellis2, pixal3d, sam3d-objects) or a .obj/.glb mesh (cola3d, unirig, hunyuan3d-part, hunyuan3d-xpart, hunyuan3d-paint, hunyuan3d-paint21; the paint models also need --image). trellis2 uses the PNG alpha channel as the cutout when it has one.")]
         public string Input { get; init; } = "";
 
         /// <summary>Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects, cola3d, unirig, hunyuan3d-paint, hunyuan3d-paint21, hunyuan3d-part, hunyuan3d-xpart, or hairdeck.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out, or a GLB mesh with --mesh), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), or hairdeck.")]
+        [Description("Model id: triposr, hunyuan3d (also hunyuan3d-fast, hunyuan3d-turbo, hunyuan3d-mini), trellis, trellis2, pixal3d, sam3d-objects (image + mask in, Gaussian-splat PLY out, or a GLB mesh with --mesh), cola3d, unirig (mesh in, rigged GLB out), hunyuan3d-paint (2.0, albedo) or hunyuan3d-paint21 (2.1, PBR) (mesh and --image in, textured GLB out), hunyuan3d-part (P3-SAM: mesh in, GLB with one coloured node per part out, labels and boxes printed), hunyuan3d-xpart (X-Part: mesh in, GLB with every P3-SAM part generated again as a complete shape, one coloured node per part, boxes printed; --steps flow steps, default 50, --grid marching-cubes grid per part, default 256), hunyuan3d-omni (image in, a control signal with --control, GLB mesh out; --steps flow steps, default 50, --grid marching-cubes grid, default 384, guidance 4.5), or hairdeck.")]
         public string Model { get; init; } = "triposr";
 
         /// <summary>Reference image for the texturing models (hunyuan3d-paint, hunyuan3d-paint21).</summary>
         [CommandOption("--image")]
         [Description("Reference image (PNG) the texturing models paint the input mesh from (hunyuan3d-paint, hunyuan3d-paint21). With --grid it sets the texture size (default 2048) and --steps the sampler steps (default 30 for hunyuan3d-paint, 15 for hunyuan3d-paint21).")]
         public string? Image { get; init; }
+
+        /// <summary>hunyuan3d-omni: the control kind.</summary>
+        [CommandOption("--control")]
+        [Description("hunyuan3d-omni: the control signal beside the image: point (--control-file: obj, glb or a ply point cloud; its vertices are the points), voxel (--control-file: an obj or glb mesh with faces), bbox (--control-values: length,height,width, each in (0, 1]) or pose (--control-file: a bone file, or --control-values: six numbers per bone).")]
+        public string? Control { get; init; }
+
+        /// <summary>hunyuan3d-omni: geometry or bone file of the control.</summary>
+        [CommandOption("--control-file")]
+        [Description("hunyuan3d-omni: the file of a point, voxel or pose control (point: .obj, .glb or .ply; voxel: .obj or .glb; pose: a text file with six numbers per line).")]
+        public string? ControlFile { get; init; }
+
+        /// <summary>hunyuan3d-omni: the numbers of a bbox or pose control.</summary>
+        [CommandOption("--control-values")]
+        [Description("hunyuan3d-omni: the numbers of a bbox control (length,height,width) or a pose control (six numbers per bone), comma or space separated.")]
+        public string? ControlValues { get; init; }
 
         /// <summary>Object mask for sam3d-objects.</summary>
         [CommandOption("--mask")]
@@ -150,6 +165,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("image", settings.Image);
         if (settings.Mask is not null)
             parameters.Put("mask", settings.Mask);
+        if (settings.Control is not null)
+            parameters.Put("control", settings.Control);
+        if (settings.ControlFile is not null)
+            parameters.Put("control-file", settings.ControlFile);
+        if (settings.ControlValues is not null)
+            parameters.Put("control-values", settings.ControlValues);
         parameters.Put("grid", settings.Grid.ToString(CultureInfo.InvariantCulture));
         parameters.Put("steps", settings.Steps.ToString(CultureInfo.InvariantCulture));
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));

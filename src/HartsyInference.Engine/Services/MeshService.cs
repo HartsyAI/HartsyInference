@@ -10,6 +10,7 @@ using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
+using HartsyInference.ThreeD.Models.Hunyuan3D.Omni;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
@@ -33,6 +34,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private readonly Dictionary<string, HunyuanPaintLoader> _paintPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, P3SamPipeline> _partPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, XPartPipeline> _xpartPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Hunyuan3DOmniPipeline> _omniPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
@@ -91,7 +93,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>The pipelines that have no run gate of their own: a run takes a count, and a disposal waits for the count to reach zero and holds new runs off meanwhile.</summary>
-    private static bool HasNoRunGate(string kind) => kind is "image" or "scene" or "rig" or "paint" or "part";
+    private static bool HasNoRunGate(string kind) => kind is "image" or "scene" or "rig" or "paint" or "part" or "omni";
 
     /// <summary>Whether the model's runtime serialises its own runs (and so waits for one before it is disposed); every other model runs counted.</summary>
     private static bool RunsGated(string id, ModelSpec spec) =>
@@ -237,6 +239,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return ("rig", e.Key, e.Value);
         foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return ("paint", e.Key, e.Value);
         foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return ("part", e.Key, e.Value);
+        foreach (KeyValuePair<string, Hunyuan3DOmniPipeline> e in _omniPipelines) yield return ("omni", e.Key, e.Value);
         foreach (KeyValuePair<string, HairDeckRuntime> e in _hairDecks) yield return ("hairdeck", e.Key, e.Value);
         foreach (KeyValuePair<string, Trellis2Runtime> e in _trellis2) yield return ("trellis2", e.Key, e.Value);
         foreach (KeyValuePair<string, Pixal3DRuntime> e in _pixal3d) yield return ("pixal3d", e.Key, e.Value);
@@ -251,6 +254,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             case "rig": _rigPipelines.Remove(key); break;
             case "paint": _paintPipelines.Remove(key); break;
             case "part": _partPipelines.Remove(key); break;
+            case "omni": _omniPipelines.Remove(key); break;
             case "hairdeck": _hairDecks.Remove(key); break;
             case "trellis2": _trellis2.Remove(key); break;
             default: _pixal3d.Remove(key); break;
@@ -303,6 +307,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             return GeneratePartAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.XPartMesh.Contains(id))
             return GenerateXPartAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.OmniMesh.Contains(id))
+            return GenerateOmniAsync(spec, id, request, progress, cancel);
 
         if (IsHairDeck(spec))
         {
@@ -525,19 +531,95 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
 
     /// <summary>The folder an X-Part path means: the first of the path itself (or the folder of the file it names) and the folder above it that holds all four checkpoints; else the one that holds the most of them (the path may point at a
     /// file or a subfolder of an incomplete install). Shared by the loader and the asset status, so they cannot disagree about where the files are.</summary>
-    internal static (string Folder, bool Complete) XPartInstall(string localPath)
+    internal static (string Folder, bool Complete) XPartInstall(string localPath) => Install(XPartPipeline.Files, localPath);
+
+    /// <summary>The folder Hunyuan3D-Omni's files are in, as <see cref="XPartInstall"/> finds the X-Part ones.</summary>
+    internal static (string Folder, bool Complete) OmniInstall(string localPath) => Install(Hunyuan3DOmniPipeline.Files, localPath);
+
+    private static (string Folder, bool Complete) Install(IReadOnlyList<string> files, string localPath)
     {
         string folder = File.Exists(localPath) ? Path.GetDirectoryName(Path.GetFullPath(localPath))! : localPath;
         string? parent = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         string[] candidates = [.. new[] { folder, parent }.Where(c => c is not null).Select(c => c!)];
         foreach (string candidate in candidates)
         {
-            if (XPartPipeline.Files.All(file => File.Exists(Path.Combine(candidate, file))))
+            if (files.All(file => File.Exists(Path.Combine(candidate, file))))
             {
                 return (candidate, true);
             }
         }
-        return (candidates.MaxBy(c => XPartPipeline.Files.Count(file => File.Exists(Path.Combine(c, file))))!, false);
+        return (candidates.MaxBy(c => files.Count(file => File.Exists(Path.Combine(c, file))))!, false);
+    }
+
+    /// <summary>Hunyuan3D-Omni: the image (prepared like the other Hunyuan3D models when <see cref="MeshPreprocess.Auto"/> is set) and the control signal give a mesh, whose floating pieces are dropped as upstream's script does. The seed fixes the noise
+    /// and the surface samples of a voxel control; the guidance is the model's own 4.5.</summary>
+    private Task<MeshResult> GenerateOmniAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        int? seed = MeshSeed.ForSampler(request.Seed);
+        OmniControl control = OmniControlMapper.ToControl(request.Control!, seed ?? 1234);
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                ImageData image = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
+                Hunyuan3DOmniPipeline pipeline = GetOrLoadOmni(spec, id);
+                ImageTo3DRequest job = new()
+                {
+                    ImageRgb = image.Rgb,
+                    Width = image.Width,
+                    Height = image.Height,
+                    GridResolution = request.GridResolution,
+                    Steps = request.Steps,
+                    Seed = seed,
+                };
+                ThreeDResult result = pipeline.Generate(job, control, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
+                });
+                if (result.Mesh is not { TriangleCount: > 0 } mesh)
+                    throw new InvalidOperationException("Omni produced no geometry (try another image, control or seed).");
+                // Upstream's FloaterRemover drops components under 0.5 % of the faces; this is the shared repair with the same ratio taken over the area.
+                return new MeshResult { Data = GlbWriter.Write(ShapeMeshFinisher.Finish(mesh, clean: true, smallComponentAreaRatio: 5e-3)), Format = "glb" };
+            },
+            cancel);
+    }
+
+    /// <summary>Returns the cached Omni pipeline for the folder <paramref name="spec"/> names (its DiT, VAE and control encoder pickles and the DINOv2-large weights beside them).</summary>
+    private Hunyuan3DOmniPipeline GetOrLoadOmni(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding {string.Join(", ", Hunyuan3DOmniPipeline.Files)} as the local path.");
+        }
+        (string folder, bool complete) = OmniInstall(spec.LocalPath);
+        if (!complete)
+        {
+            string missing = string.Join(", ", Hunyuan3DOmniPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+            throw new FileNotFoundException($"'{spec.LocalPath}' is missing Omni files: {missing}.", Path.Combine(folder, Hunyuan3DOmniPipeline.Files[0]));
+        }
+        folder = Path.GetFullPath(folder);
+        lock (_gate)
+        {
+            if (_omniPipelines.TryGetValue(folder, out Hunyuan3DOmniPipeline? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                Hunyuan3DOmniPipeline pipeline = Hunyuan3DOmniPipeline.Load(_engine.Backend, folder, Path.Combine(folder, Hunyuan3DOmniPipeline.DinoFile), message => Logs.Info($"[Omni] {message}"));
+                _omniPipelines[folder] = pipeline;
+                return pipeline;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to load the '{id}' 3D pipeline from {folder}", ex);
+                throw;
+            }
+        }
     }
 
     /// <summary>Returns the cached P3-SAM pipeline for <paramref name="spec"/>: <c>p3sam.safetensors</c>, given directly or found in the folder it was given as.</summary>
@@ -1182,6 +1264,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         List<UniRigPipeline> rigPipelines;
         List<HunyuanPaintLoader> paintPipelines;
         List<P3SamPipeline> partPipelines;
+        List<Hunyuan3DOmniPipeline> omniPipelines;
         List<HairDeckRuntime> hairDecks;
         List<Trellis2Runtime> trellis2Runtimes;
         List<Pixal3DRuntime> pixal3dRuntimes;
@@ -1192,6 +1275,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             rigPipelines = _rigPipelines.Values.ToList();
             paintPipelines = _paintPipelines.Values.ToList();
             partPipelines = _partPipelines.Values.ToList();
+            omniPipelines = _omniPipelines.Values.ToList();
             _xpartPipelines.Clear(); // XPartPipeline holds no resources: each run loads and releases its checkpoints
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
@@ -1201,6 +1285,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             _rigPipelines.Clear();
             _paintPipelines.Clear();
             _partPipelines.Clear();
+            _omniPipelines.Clear();
             _hairDecks.Clear();
             _trellis2.Clear();
             _pixal3d.Clear();
@@ -1217,6 +1302,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             foreach (HunyuanPaintLoader loader in paintPipelines)
                 loader.Dispose();
             foreach (P3SamPipeline pipeline in partPipelines)
+                pipeline.Dispose();
+            foreach (Hunyuan3DOmniPipeline pipeline in omniPipelines)
                 pipeline.Dispose();
         });
         foreach (HairDeckRuntime runtime in hairDecks)

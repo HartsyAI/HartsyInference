@@ -43,7 +43,7 @@ public sealed class OmniConfigFileTests
         Assert.Equal(16, config.VaeDepth);
         Assert.Equal(1.0079887561230991f, config.VaeScaleFactor);
         Assert.Equal(50, config.NumInferenceSteps);
-        Assert.Equal(7.5f, config.GuidanceScale);
+        Assert.Equal(4.5f, config.GuidanceScale);
         Assert.Equal(384, config.GridResolution);
         Assert.Equal(1.01f, config.BoundingBox);
         Assert.Equal(0f, config.IsoLevel);

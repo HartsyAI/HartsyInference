@@ -163,6 +163,26 @@ public static class ModelCatalog
         // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
     ];
 
+    /// <summary>Hunyuan3D-Omni (<c>tencent/Hunyuan3D-Omni</c> at <c>70e803bf</c>): the DiT, the VAE and the control encoder (pickles, read by the safe parser only) with their configs, and DINOv2-large (<c>facebook/dinov2-large</c> at
+    /// <c>47b73eef</c>, Apache-2.0), which the Omni repository does not contain.</summary>
+    private static ModelAsset[] Hunyuan3DOmniAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "model/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "model/pytorch_model.bin",
+            Role = "transformer", Sha256 = "01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "vae/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "vae/pytorch_model.bin",
+            Role = "vae", Sha256 = "379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "cond_encoder/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "cond_encoder/pytorch_model.bin",
+            Role = "control encoder", Sha256 = "f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432" },
+        new() { Repo = "facebook/dinov2-large", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "dinov2-large/model.safetensors",
+            Role = "image encoder", Sha256 = "399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "config.json",
+            Role = "config", Sha256 = "efea7858ac17dd786ae41e512d877f4f3ff638bf6f64b8ad3eeb7cae62eb9eae" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "model/config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "model/config.json",
+            Role = "config", Sha256 = "c508943a4a85f56c285dd53c00d785569cbfae8261aff68a5547dc5e789053eb" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "vae/config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "vae/config.json",
+            Role = "config", Sha256 = "e895305a8a487ff4c42a69712c0c8c6fd1dac22ad29b29dcf8c8801f646e08e8" },
+    ];
+
     /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>
     private static ModelAsset[] Hunyuan3DFlashVdmVaeAssets =>
     [
@@ -2882,6 +2902,8 @@ public static class ModelCatalog
                 with { Assets = Hunyuan3DPaintAssets },
             E("hunyuan3d-paint21", d3, "Hunyuan3D-2.1 Paint (PBR texturing)", "SD 2.1 zero-SNR UNet + material, DINO and rotary multiview attention, back-projected", st, cli: true)
                 with { Assets = Hunyuan3DPaint21Assets },
+            E("hunyuan3d-omni", d3, "Hunyuan3D-Omni (controlled shape generation)", "Hunyuan3D-2.1 DiT with image plus point, voxel, bounding-box or pose control tokens, ShapeVAE decode", st, cli: true)
+                with { Assets = Hunyuan3DOmniAssets, LoadsFromFolder = true },
             E("hunyuan3d-part", d3, "Hunyuan3D-Part P3-SAM (part segmentation)", "Sonata (PTv3) encoder + prompt-conditioned mask and IoU heads, auto-mask labelling", st, cli: true)
                 with { Assets = Hunyuan3DPartAssets },
             E("hunyuan3d-xpart", d3, "Hunyuan3D-Part X-Part (part generation)", "P3-SAM boxes + Sonata/ShapeVAE conditioner + part flow DiT, a complete shape per part", st, cli: true)

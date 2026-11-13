@@ -843,6 +843,7 @@ public static class GenerationDispatch
             Vram = ParseVramOverrides(parameters),
             Image = paint ? LoadMeshImage(imagePath!) : scene ? null : WithMask(LoadMeshImage(prompt), parameters.GetStringOrNull("mask"), meshId),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            Control = LoadMeshControl(parameters),
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
@@ -1630,6 +1631,44 @@ public static class GenerationDispatch
             throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
         }
         return new ScenePoint(x, y, z);
+    }
+
+    /// <summary>The Hunyuan3D-Omni control from <c>--control</c>, <c>--control-file</c> and <c>--control-values</c>, or null when none is given (the engine then rejects a model that needs one, and any other model that was given one).</summary>
+    internal static MeshControl? LoadMeshControl(ParamState parameters)
+    {
+        string? kindText = parameters.GetStringOrNull("control"), file = parameters.GetStringOrNull("control-file"), values = parameters.GetStringOrNull("control-values");
+        if (kindText is null)
+        {
+            if (file is not null || values is not null)
+                throw new ArgumentException("--control-file and --control-values need --control point, voxel, bbox or pose.");
+            return null;
+        }
+        MeshControlKind kind = kindText.Trim().ToLowerInvariant() switch
+        {
+            "point" => MeshControlKind.Point,
+            "voxel" => MeshControlKind.Voxel,
+            "bbox" or "box" => MeshControlKind.BoundingBox,
+            "pose" => MeshControlKind.Pose,
+            _ => throw new ArgumentException($"Unknown control '{kindText}'. Expected point, voxel, bbox or pose."),
+        };
+        if (kind is MeshControlKind.Point or MeshControlKind.Voxel)
+        {
+            if (file is null || values is not null)
+                throw new ArgumentException($"A {kindText} control takes --control-file (not --control-values).");
+            string path = file.Trim().Trim('"');
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Control file not found: {path}");
+            string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+            return new MeshControl { Kind = kind, Geometry = new SceneMeshData { Data = File.ReadAllBytes(path), Format = format } };
+        }
+        if (file is not null && values is not null)
+            throw new ArgumentException($"A {kindText} control takes --control-file or --control-values, not both.");
+        string text = values ?? (file is not null ? File.ReadAllText(file.Trim().Trim('"')) : throw new ArgumentException($"A {kindText} control takes --control-values" + (kind == MeshControlKind.Pose ? " or --control-file." : ".")));
+        if (kind == MeshControlKind.BoundingBox && file is not null)
+            throw new ArgumentException("A bbox control takes --control-values (length,height,width).");
+        float[] numbers = [.. text.Split([',', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(n =>
+            float.TryParse(n, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : throw new ArgumentException($"'{n}' is not a number in the control."))];
+        return new MeshControl { Kind = kind, Values = numbers };
     }
 
     /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>

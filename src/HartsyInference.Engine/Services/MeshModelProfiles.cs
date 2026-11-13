@@ -110,6 +110,18 @@ internal static class MeshModelProfiles
                 new MeshCost { PeakVramGiB = 9.5, TypicalSeconds = 385, Basis = "RTX 3060, a 40,080-face bust split into 3 parts, grid 256, 50 steps: P3-SAM 66 s, conditioning 21 s, flow 140 s, decode 141 s." },
                 peak: _ => 9.5,
                 note: "P3-SAM splits the mesh into parts and each part is generated again as a complete shape; the boxes and face counts come back in MeshResult.Parts. Decimate a dense mesh to about 40,000 faces first. The setting numerics.xpartFastDecode (off) decodes the parts with FlashVDM: about 113 s for three parts instead of 141 s, on a finer grid (504 cells), approximating the dense field."),
+            Profile(MeshModelIds.Omni, MeshInputKind.ImageAndControl, MeshOutputKinds.Mesh,
+                [Steps("50", 0, 1000, "Euler steps of the flow; 0 takes 50 (49 evaluations, each with and without the image)."),
+                    Grid("384", null, 32, 512, "Marching-cubes grid per axis, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 384, upstream's script uses 512."),
+                    Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
+                new MeshLicence
+                {
+                    Summary = "Tencent Hunyuan 3D Omni Community License; DINOv2 is Apache-2.0",
+                    Restrictions = [.. HunyuanRestrictions, "A product built on it must name its real provider and state that Tencent is not affiliated with, sponsoring or endorsing it"],
+                },
+                new MeshCost { PeakVramGiB = 9.1, TypicalSeconds = 394, Basis = "RTX 3060, a bust photo and a 2,048-point control, 50 steps, guidance 7.5, grid 384: load 27 s, flow 132 s, decode and marching cubes 235 s; grid 256 took 285 s and peaked at 8.9 GB." },
+                peak: _ => 9.1,
+                note: "The image guides appearance and the control guides shape: give the image's foreground on white (Preprocess Auto does it) and a control in the model's own frame. Guidance is 4.5, the value upstream's script uses."),
             Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
                 new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
             Paint("hunyuan3d-paint21", "Tencent Hunyuan 3D 2.1 Community License", "PBR texture (base color, metallic, roughness).",
@@ -149,7 +161,7 @@ internal static class MeshModelProfiles
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
         Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, MeshField(id), PreprocessField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
 
     private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
     {
@@ -178,6 +190,10 @@ internal static class MeshModelProfiles
     private static MeshFieldSpec MeshField(string id) => id == MeshModelIds.Sam3dObjects
         ? Used(nameof(MeshRequest.Mesh), "false", null, null, null, "Return a triangle mesh (geometry-only GLB; the mesh decoder's vertex colours are noisy and not written) instead of splats; needs slat_decoder_mesh.safetensors beside the other checkpoints.")
         : Rejected(nameof(MeshRequest.Mesh));
+
+    private static MeshFieldSpec ControlField(string id) => id == MeshModelIds.Omni
+        ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per point), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
+        : Rejected(nameof(MeshRequest.Control));
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()
@@ -222,7 +238,7 @@ internal static class MeshModelProfiles
     {
         nameof(MeshRequest.Samples) => "1",
         nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) => "false",
-        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) => "unset",
+        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) => "unset",
         _ => "0",
     };
 

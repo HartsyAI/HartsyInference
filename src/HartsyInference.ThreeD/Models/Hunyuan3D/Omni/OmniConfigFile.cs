@@ -76,7 +76,7 @@ public static class OmniConfigFile
                 Int(dit, "depth", "model/config.json"), Int(dit, "num_moe_layers", "model/config.json"),
                 Int(dit, "num_experts", "model/config.json"), Int(dit, "moe_top_k", "model/config.json")),
             NumInferenceSteps = Int(run, "num_inference_steps", "config.json"),
-            GuidanceScale = 7.5f, // the default of Hunyuan3DOmniSiTFlowMatchingPipeline.__call__
+            GuidanceScale = 4.5f, // what upstream's inference.py passes for every control (the signature of Hunyuan3DOmniSiTFlowMatchingPipeline.__call__ defaults to 7.5)
             GridResolution = Int(run, "octree_resolution", "config.json"),
             BoundingBox = Float(run, "box_v", "config.json"),
             IsoLevel = Float(run, "mc_level", "config.json"),

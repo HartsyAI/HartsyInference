@@ -102,14 +102,14 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
         {
             "triposr" => TripoSrImageProcessor.Process(source.Rgb, source.Alpha, source.Width, source.Height),
             "trellis" => TrellisImageProcessor.Process(source.Rgb, source.Alpha, source.Width, source.Height),
-            _ when MeshModelIds.Hunyuan3D.Contains(id) => Hunyuan3DImageProcessor.Process(source.Rgb, source.Alpha, source.Width, source.Height),
+            _ when UsesHunyuan3DFraming(id) => Hunyuan3DImageProcessor.Process(source.Rgb, source.Alpha, source.Width, source.Height),
             _ => new PreparedImage(source.Rgb, source.Width, source.Height, source.Alpha),
         };
         notes.Add(id switch
         {
             "triposr" => "Foreground cropped, padded to a square at ratio 0.85 and composited on mid-gray.",
             "trellis" => "Foreground cropped to 1.2 times its larger side, resized to 518 px and premultiplied by alpha.",
-            _ when MeshModelIds.Hunyuan3D.Contains(id) => "Foreground recentred with a 15 % border on white at 512 px.",
+            _ when UsesHunyuan3DFraming(id) => "Foreground recentred with a 15 % border on white at 512 px.",
             _ => "The cutout is composited on white by the model.",
         });
         return new PreparedMeshImage
@@ -154,7 +154,10 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
 
     /// <summary>Whether <paramref name="id"/> takes an image the engine frames: the models that do not matte and frame their own input.</summary>
     internal static bool UsesPreparation(string id) =>
-        id == "triposr" || id == "trellis" || MeshModelIds.Hunyuan3D.Contains(id) || MeshModelIds.PaintMesh.Contains(id);
+        id == "triposr" || id == "trellis" || UsesHunyuan3DFraming(id) || MeshModelIds.PaintMesh.Contains(id);
+
+    /// <summary>The Hunyuan3D shape builds and Omni, which uses the same <c>ImageProcessorV2</c> (foreground recentred with a 15 % border on white at 512 px).</summary>
+    private static bool UsesHunyuan3DFraming(string id) => MeshModelIds.Hunyuan3D.Contains(id) || id == MeshModelIds.Omni;
 
     /// <summary>Whether the image carries a cutout to use: an alpha plane with some transparency. An RGBA image whose alpha is entirely opaque (every ordinary RGBA export of a photo) has no foreground to find, as in upstream TRELLIS (<c>np.all(alpha == 255)</c>), so it is matted; a plane that is nearly but not entirely opaque is taken as a cutout.</summary>
     internal static bool HasUsableAlpha(ImageData image) => image.HasAlpha && image.Alpha!.Any(a => a != 255);

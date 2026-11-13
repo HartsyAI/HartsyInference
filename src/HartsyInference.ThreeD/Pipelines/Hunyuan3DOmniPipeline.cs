@@ -19,6 +19,15 @@ public sealed record OmniControl(OmniControlKind Kind, float[] Rows);
 /// replaces only the DINO tokens by zeros and keeps the control and signal tokens in both branches (<c>Hunyuan3DOmniSiTFlowMatchingPipeline</c>).</summary>
 public sealed class Hunyuan3DOmniPipeline : ThreeDPipelineBase
 {
+    /// <summary>The files <see cref="Load"/> reads from the Omni folder (the DINOv2-large weights are a separate repository, placed in <c>dinov2-large/</c>).</summary>
+    public static readonly IReadOnlyList<string> Files =
+    [
+        "config.json", "model/config.json", "model/pytorch_model.bin", "vae/config.json", "vae/pytorch_model.bin", "cond_encoder/pytorch_model.bin", DinoFile,
+    ];
+
+    /// <summary>The DINOv2-large weights beside the Omni files (<c>facebook/dinov2-large</c>).</summary>
+    public const string DinoFile = "dinov2-large/model.safetensors";
+
     private readonly Hunyuan3DShapePipeline _shape;
     private readonly OmniControlEncoder _control;
     private readonly Hunyuan3DConfig _config;

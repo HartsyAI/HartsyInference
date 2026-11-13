@@ -21,6 +21,8 @@ internal static class MeshRequestValidator
         // An id the engine does not know fails as an unknown model below, not as a range error.
         if (MeshModelProfiles.Find(id) is not null)
             MeshSeed.Require(request);
+        if (request.Control is not null && !MeshModelIds.OmniMesh.Contains(id))
+            throw new NotSupportedException($"3D model '{id}' takes no control signal; Control applies to {MeshModelIds.Omni}.").ForField(nameof(MeshRequest.Control));
         if (request.Mesh && id != MeshModelIds.Sam3dObjects)
             throw new NotSupportedException($"3D model '{id}' takes no Mesh option; it applies to {MeshModelIds.Sam3dObjects}, which returns splats unless asked for a mesh.").ForField(nameof(MeshRequest.Mesh));
         if (id != MeshModelIds.Trellis2 && id != MeshModelIds.Pixal3D)
@@ -49,6 +51,11 @@ internal static class MeshRequestValidator
         if (MeshModelIds.XPartMesh.Contains(id))
         {
             ValidateXPart(id, request);
+            return;
+        }
+        if (MeshModelIds.OmniMesh.Contains(id))
+        {
+            ValidateOmni(id, request, matterAvailable);
             return;
         }
         if (id != MeshModelIds.HairDeck && !MeshModelIds.ImageToMesh.Contains(id))
@@ -183,6 +190,24 @@ internal static class MeshRequestValidator
             throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The X-Part flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
         if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
             throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The X-Part grid must be between 32 and 512 (0 takes the default of 256; upstream's is 512).").ForField(nameof(MeshRequest.GridResolution));
+    }
+
+    /// <summary>Omni takes an image and a control signal; Steps (0 takes 50) and GridResolution (0 takes 384, else 32 to 512) are real settings.</summary>
+    private static void ValidateOmni(string id, MeshRequest request, bool matterAvailable)
+    {
+        HairDeckRequestMapper.RejectForOtherModels(request, id);
+        if (request.Image is null)
+            throw new NotSupportedException($"3D model '{id}' needs an image; supply MeshRequest.Image.").ForField(nameof(MeshRequest.Image));
+        if (request.SceneMesh is not null)
+            throw new NotSupportedException($"3D model '{id}' takes its geometry in MeshRequest.Control, not SceneMesh.").ForField(nameof(MeshRequest.SceneMesh));
+        if (request.ScenePrompt is not null)
+            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.").ForField(nameof(MeshRequest.ScenePrompt));
+        RequireMatteForAuto(id, request, matterAvailable);
+        if (request.Steps is < 0 or > 1000)
+            throw new ArgumentOutOfRangeException(nameof(request), request.Steps, "The Omni flow steps must be between 1 and 1000 (0 takes the default of 50).").ForField(nameof(MeshRequest.Steps));
+        if (request.GridResolution != 0 && request.GridResolution is < 32 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(request), request.GridResolution, "The Omni grid must be between 32 and 512 (0 takes the default of 384).").ForField(nameof(MeshRequest.GridResolution));
+        OmniControlMapper.Validate(id, request.Control);
     }
 
     private static void ValidatePaint(string id, MeshRequest request, bool matterAvailable)
