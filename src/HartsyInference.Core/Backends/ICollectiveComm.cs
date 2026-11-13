@@ -19,6 +19,6 @@ public interface ICollectiveComm : IDisposable
 
     /// <summary>Variable-size all-to-all: rank i's <paramref name="sendBuffers"/>[i] holds, for each destination j in order,
     /// <c>elementCounts[i, j]</c> elements, and rank j's <paramref name="recvBuffers"/>[j] receives, for each source i in order,
-    /// <c>elementCounts[i, j]</c> elements. Buffers may hold more than their exchange uses; <see cref="AllToAllLayout"/> states the rules.</summary>
+    /// <c>elementCounts[i, j]</c> elements. Each receive buffer's elements past its exchange are zeroed on every transport; <see cref="AllToAllLayout"/> states the rules.</summary>
     void AllToAll(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] elementCounts);
 }
