@@ -96,6 +96,8 @@ public static class PbrMeshPostProcessor
         for (int i = 0; i < texels; i++)
             for (int k = 0; k < channels.Length; k++)
                 packed[i * channels.Length + k] = baked.Data[i * baked.Channels + channels[k]];
-        return Inpainter.Inpaint(packed, baked.Width, baked.Height, channels.Length, baked.Covered, radius);
+        // Bounded by the neighbours: on a sparse atlas (a million tiny charts, 6 to 20 % of the texels covered in places) the unbounded Telea gradient correction ran away across the wide gaps and filled
+        // them with black and white stripes (22 % black and 22 % white in the top 200 rows of a TRELLIS.2 bust atlas, none with the bound).
+        return Inpainter.Inpaint(packed, baked.Width, baked.Height, channels.Length, baked.Covered, radius, boundByNeighbours: true);
     }
 }
