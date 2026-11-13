@@ -259,7 +259,7 @@ public sealed class MeshLifecycleTests : IDisposable
     [InlineData("rig")]
     [InlineData("paint")]
     [InlineData("part")]
-    public async Task ARunAndAFreeThatNameTheCheckpointWithDifferentCasingMeet(string kind)
+    public async Task TheCounterComparesKeysIgnoringCaseForEveryKind(string kind)
     {
         MeshRunCounter counter = new();
         TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);

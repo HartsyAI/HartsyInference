@@ -15,6 +15,7 @@ public sealed class Trellis2LazyMatter : IForegroundMatter, IDisposable
     private readonly string _modelsRoot;
     private SafeTensorsLoader? _loader;
     private BiRefNetMatter? _matter;
+    private volatile string? _loadedFrom;
 
     /// <param name="modelsRoot">The models root the checkpoint is looked up under, through <see cref="Trellis2ModelFiles.FindMatterFile"/>.</param>
     public Trellis2LazyMatter(string modelsRoot)
@@ -22,6 +23,9 @@ public sealed class Trellis2LazyMatter : IForegroundMatter, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(modelsRoot);
         _modelsRoot = modelsRoot;
     }
+
+    /// <summary>The checkpoint the resident model was read from; null while nothing is loaded.</summary>
+    public string? LoadedFrom => _loadedFrom;
 
     /// <summary>Whether the checkpoint is installed right now, or already loaded.</summary>
     public bool IsAvailable => _matter is not null || Trellis2ModelFiles.FindMatterFile(_modelsRoot) is not null;
@@ -44,6 +48,7 @@ public sealed class Trellis2LazyMatter : IForegroundMatter, IDisposable
                 matter.LoadWeights(BiRefNetCheckpointConverter.Convert(loader.GetAllTensors()));
                 _loader = loader;
                 _matter = matter;
+                _loadedFrom = path;
             }
             catch
             {
@@ -57,6 +62,7 @@ public sealed class Trellis2LazyMatter : IForegroundMatter, IDisposable
 
     public void Dispose()
     {
+        _loadedFrom = null;
         _matter?.Dispose();
         _loader?.Dispose();
     }
