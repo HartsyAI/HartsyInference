@@ -122,7 +122,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 return MeshRunCounter.KeyOf(XPartKind, XPartFolder(spec.LocalPath));
             return MeshRunCounter.KeyOf(ImageKind, spec.LocalPath);
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
         {
             return null;
         }
@@ -302,7 +302,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     {
         SceneMeshData sceneMesh = request.SceneMesh!;
         CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : ToCoLa3DPrompt(request.ScenePrompt);
-        CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
+        CoLa3DConfig.QuerySourceKind source = SceneSource(request.ScenePrompt);
 
         return Task.Run(
             () =>

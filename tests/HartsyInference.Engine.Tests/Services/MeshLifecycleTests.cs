@@ -253,6 +253,62 @@ public sealed class MeshLifecycleTests : IDisposable
         await run;
     }
 
+    [Theory]
+    [InlineData("image")]
+    [InlineData("scene")]
+    [InlineData("rig")]
+    [InlineData("paint")]
+    [InlineData("part")]
+    public async Task ARunAndAFreeThatNameTheCheckpointWithDifferentCasingMeet(string kind)
+    {
+        MeshRunCounter counter = new();
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<MeshResult> run = counter.RunAsync(MeshRunCounter.KeyOf(kind, @"C:\Models\3D\UniRig|Fixed"), async () =>
+        {
+            started.SetResult();
+            await release.Task;
+            return Result();
+        });
+        await started.Task;
+        bool freed = false;
+
+        Task free = Task.Run(() => counter.WhenIdle([MeshRunCounter.KeyOf(kind, @"c:\models\3d\unirig|fixed")], () => freed = true));
+        await Task.Delay(300);
+
+        Assert.False(freed, "A free under another casing of the key did not wait for the run.");
+        release.SetResult();
+        await free.WaitAsync(TimeSpan.FromSeconds(10));
+        await run;
+        Assert.True(freed);
+    }
+
+    [Fact]
+    public async Task ARunKeyedUnderOneCasingOfARigFolderBlocksTheFreeOfThePipelineCachedUnderAnother()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshService mesh = (MeshService)engine.Mesh;
+        string folder = Rig("CasedRig");
+        Adopt(mesh, folder);
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<MeshResult> run = mesh.RunCounted(MeshService.RunKeyOf("unirig", Spec("unirig", folder.ToUpperInvariant()), new MeshRequest()), async () =>
+        {
+            started.SetResult();
+            await release.Task;
+            return Result();
+        });
+        await started.Task;
+
+        Task<int> free = Task.Run(() => engine.MeshLifecycle.Free("CasedRig"));
+        await Task.Delay(300);
+
+        Assert.False(free.IsCompleted, "Free disposed a pipeline while a run with a differently cased path was using it.");
+        release.SetResult();
+        Assert.Equal(1, await free.WaitAsync(TimeSpan.FromSeconds(10)));
+        await run;
+    }
+
     [Fact]
     public async Task ARunWithNoKeyIsNotCountedAndNeverWaits()
     {

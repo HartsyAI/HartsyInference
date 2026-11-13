@@ -4,7 +4,7 @@ namespace HartsyInference.Engine.Services;
 internal sealed class MeshRunCounter
 {
     private readonly object _lock = new();
-    private readonly Dictionary<string, Slot> _slots = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Slot> _slots = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The key a pipeline's runs are counted under: its kind and the key it is cached under.</summary>
     public static string KeyOf(string kind, string cacheKey) => $"{kind}:{cacheKey}";
@@ -62,7 +62,7 @@ internal sealed class MeshRunCounter
         try
         {
             // One order for every free, so two frees that share keys cannot each hold what the other waits for.
-            foreach (string key in keys.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            foreach (string key in keys.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase))
             {
                 TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 TaskCompletionSource reopened = new(TaskCreationOptions.RunContinuationsAsynchronously);
