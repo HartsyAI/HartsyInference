@@ -15,6 +15,11 @@ run, all to keep the dump safe, CPU-only and dependency-free:
 The fixture holds the inputs and these outputs (names are the tensor keys): `dino_proj`, `ref.<block>` (the features the reference stream
 writes), `out_full` (reference scale 1, DINO on) and `out_uncond` (reference scale 0, DINO off), each `[materials * views, 4, H, H]`,
 plus the VAE decode of `vae_latent`. Times are printed.
+
+`--encode-image <png>` adds the VAE ENCODE that the pipeline runs on the reference image and on the normal and position maps (`encode_images` of
+`hunyuanpaintpbr/pipeline.py`): `enc_image` (the picture resized to the view size and the first position map, `[2, 3, S, S]` in [0, 1]), `enc_mean` and
+`enc_std` (the posterior's mean and standard deviation times the scaling factor). Upstream draws `posterior.sample()`, that is `mean + std * noise`; the
+C# encoder returns the mean, so `enc_std` is also the size of the noise upstream adds.
 """
 import os
 
@@ -163,6 +168,7 @@ def main():
     parser.add_argument("--views", type=int, default=6)
     parser.add_argument("--timestep", type=float, default=500.0)
     parser.add_argument("--aux-only", action="store_true", help="skip the UNet; dump only the voxel indices and the VAE decode")
+    parser.add_argument("--encode-image", help="a picture to encode with the VAE (also dumps the posterior of the first position map)")
     args = parser.parse_args()
     torch.set_grad_enabled(False)
     torch.manual_seed(0)
@@ -240,6 +246,23 @@ def main():
     print(f"vae decode: {time.time() - start:.1f} s, scaling {vae.config.scaling_factor}")
     out["vae_latent"] = vae_latent
     out["vae_decoded"] = decoded
+    if args.encode_image:
+        import numpy as np
+        from PIL import Image
+
+        size = h * 8
+        picture = Image.open(args.encode_image).convert("RGB").resize((size, size), Image.BICUBIC)
+        reference = torch.from_numpy(np.asarray(picture, dtype=np.float32) / 255.0).permute(2, 0, 1)
+        batch = torch.stack([reference, pos_maps[0, 0]])
+        start = time.time()
+        posterior = vae.encode((batch - 0.5) * 2.0).latent_dist
+        scaling = vae.config.scaling_factor
+        std_s, mean_s = posterior.std * scaling, posterior.mean * scaling
+        ratios = [float(std_s[i].pow(2).mean().sqrt() / mean_s[i].pow(2).mean().sqrt()) for i in range(2)]
+        print(f"vae encode: {time.time() - start:.1f} s; RMS(std) / RMS(mean) of the scaled posterior: picture {ratios[0]:.2e}, position map {ratios[1]:.2e}")
+        out["enc_image"] = batch
+        out["enc_mean"] = posterior.mean * scaling
+        out["enc_std"] = posterior.std * scaling
     save_file({k: v.detach().float().contiguous() for k, v in out.items()}, args.out)
     print("wrote", args.out, {k: tuple(v.shape) for k, v in out.items() if not k.startswith("ref.")})
 
