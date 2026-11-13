@@ -25,6 +25,7 @@ MIN_FREE_MIB="${ERNIE_MIN_FREE_MIB:-24576}"
 TOKENS="${ERNIE_REAL_TOKENS:-1,2,3,4,5}"
 RUN_DIR="${ERNIE_RUN_DIR:-${PWD}/ernie55-run-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$(realpath -m "$RUN_DIR")"   # absolute: the test stage changes directory before it writes the log
+[[ -z "${ERNIE_CKPT_DIR:-}" ]] || ERNIE_CKPT_DIR="$(realpath -m "$ERNIE_CKPT_DIR")"   # the test runs from the repo root
 
 fail() {
     echo "FAILED: $*" >&2
@@ -146,25 +147,28 @@ stage_ptx_check() {
 stage_test() {
     require_ckpt
     require_cmd dotnet
-    require_cmd nvidia-smi
     ensure_run_dir
-    local device="${ERNIE_REAL_DEVICE:-cuda}" log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler
-    (
-        while true; do
-            nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
-            sleep 0.5
-        done
-    ) > "$vram" 2>/dev/null &
-    sampler=$!
-    # shellcheck disable=SC2064
-    trap "kill $sampler 2>/dev/null || true" EXIT
+    local device="${ERNIE_REAL_DEVICE:-cuda}" log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler=""
+    device="${device,,}"
+    if [[ "$device" == cuda ]]; then
+        require_cmd nvidia-smi
+        (
+            while true; do
+                nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
+                sleep 0.5
+            done
+        ) > "$vram" 2>/dev/null &
+        sampler=$!
+        # shellcheck disable=SC2064
+        trap "kill $sampler 2>/dev/null || true" EXIT
+    fi
 
     cd "$REPO_ROOT"
     local status=0
     ERNIE_REAL_DIR="$ERNIE_CKPT_DIR" ERNIE_REAL_DEVICE="$device" ERNIE_REAL_TOKENS="$TOKENS" \
         dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests" \
         --logger "console;verbosity=normal" 2>&1 | tee "$log" || status=$?
-    kill "$sampler" 2>/dev/null || true
+    [[ -z "$sampler" ]] || kill "$sampler" 2>/dev/null || true
     trap - EXIT
     [[ "$status" -eq 0 ]] || fail "dotnet test exited ${status}; see ${log}"
 
@@ -175,14 +179,15 @@ stage_test() {
     local timing
     timing="$(grep -m1 "^ERNIE real run on ${device}:" "$log" || true)"
     [[ -n "$timing" ]] || fail "no timing line from the forward; see ${log}"
-    local peak
-    peak="$(sort -n "$vram" | tail -1)"
     {
         echo "commit: $(git -C "$REPO_ROOT" rev-parse HEAD)"
-        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
-        nvidia-smi | grep -o 'CUDA Version: [0-9.]*' || true
+        echo "device: ${device}"
+        if [[ "$device" == cuda ]]; then
+            nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+            nvidia-smi | grep -o 'CUDA Version: [0-9.]*' || true
+            echo "peak VRAM used (MiB, sampled every 0.5 s): $(sort -n "$vram" | tail -1)"
+        fi
         echo "$timing"
-        echo "peak VRAM used (MiB, sampled every 0.5 s): ${peak:-unknown}"
     } | tee "${RUN_DIR}/summary.txt"
 }
 
