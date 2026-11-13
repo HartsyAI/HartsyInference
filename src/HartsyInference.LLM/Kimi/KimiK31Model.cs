@@ -393,7 +393,7 @@ public sealed class KimiK31Model : IDisposable
         Dictionary<string, Tensor> block = new(StringComparer.Ordinal);
         foreach (string key in new[] { "gate.weight", "gate.e_score_correction_bias", "pre_expert_proj.weight", "pre_expert_norm.weight", "post_expert_proj.weight" })
         {
-            if (lw.Moe!.TryGetValue($"{mlp}.{key}", out Tensor? whole)) block[$"{mlp}.{key}"] = KimiK31Sharding.Replica(whole, _owned);
+            if (lw.Moe!.TryGetValue($"{mlp}.{key}", out Tensor? whole)) block[$"{mlp}.{key}"] = KimiK31Sharding.Replica(whole, _owned, _ranks);
         }
         // An F32 checkpoint's experts are read where they are; a packed one arrives through LoadPackedExperts below.
         for (int g = first; g < first + perRank; g++)
@@ -520,7 +520,7 @@ public sealed class KimiK31Model : IDisposable
 
     // Routed experts run expert-parallel into the per-rank accumulators; each rank then adds its shared-expert partial, and one AllReduce
     // sums the lot.
-    private float[] MoeFfn(int layer, float[] x)
+    internal float[] MoeFfn(int layer, float[] x)
     {
         int d = _config.Hidden;
         Tensor[] inputs = new Tensor[_ranks];

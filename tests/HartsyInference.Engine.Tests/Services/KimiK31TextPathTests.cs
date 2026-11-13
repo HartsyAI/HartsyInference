@@ -116,6 +116,15 @@ public sealed class KimiK31TextPathTests : IDisposable
         Assert.Contains("multi-GPU", refused.Message);
     }
 
+    [Fact]
+    public void Tensor_parallel_degree_is_named_when_it_is_the_cause()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RefuseMultiGpuPlacement("cuda:0", shardDeviceCount: 0, tensorParallelDegree: 2));
+        Assert.Contains("tensor-parallel degree is 2", refused.Message);
+        Assert.DoesNotContain("names more than one device", refused.Message);
+    }
+
     [Theory]
     [InlineData("cpu")]
     [InlineData("cuda:0")]

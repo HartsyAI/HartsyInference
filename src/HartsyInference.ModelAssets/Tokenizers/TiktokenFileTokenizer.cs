@@ -12,7 +12,7 @@ public static class TiktokenFileTokenizer
     /// <param name="eosId">The end-of-sequence id, which must name one of <paramref name="specials"/>, or null.</param>
     /// <param name="stopIds">Extra ids that end generation.</param>
     /// <exception cref="FileNotFoundException">The rank file does not exist.</exception>
-    /// <exception cref="InvalidDataException">The ranks are not dense from zero, or a special id is duplicated or not given a literal.</exception>
+    /// <exception cref="InvalidDataException">The ranks are not dense from zero, or a special id is duplicated, unnamed or inside the ranks.</exception>
     public static GgufTokenizer Load(string tiktokenPath, string pattern, IReadOnlyList<(string Token, int Id)> specials,
         int? bosId = null, int? eosId = null, IReadOnlyList<int>? stopIds = null)
     {
@@ -21,7 +21,7 @@ public static class TiktokenFileTokenizer
         ArgumentNullException.ThrowIfNull(specials);
         if (!File.Exists(tiktokenPath))
             throw new FileNotFoundException("tiktoken rank file not found.", tiktokenPath);
-        ValidateSpecials(specials);
+        ValidateSpecials(specials, CountRanks(tiktokenPath));
         string? bos = LiteralOf(specials, bosId, nameof(bosId));
         string? eos = LiteralOf(specials, eosId, nameof(eosId));
 
@@ -54,7 +54,7 @@ public static class TiktokenFileTokenizer
         return result;
     }
 
-    private static void ValidateSpecials(IReadOnlyList<(string Token, int Id)> specials)
+    private static void ValidateSpecials(IReadOnlyList<(string Token, int Id)> specials, int rankCount)
     {
         HashSet<int> ids = [];
         HashSet<string> literals = new(StringComparer.Ordinal);
@@ -62,6 +62,8 @@ public static class TiktokenFileTokenizer
         {
             if (string.IsNullOrEmpty(token))
                 throw new InvalidDataException($"Special token id {id} has no literal.");
+            if (id < rankCount)
+                throw new InvalidDataException($"Special token id {id} falls inside the rank range [0, {rankCount}).");
             if (!ids.Add(id))
                 throw new InvalidDataException($"Special token id {id} is given twice.");
             if (!literals.Add(token))

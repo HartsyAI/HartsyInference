@@ -83,6 +83,14 @@ public sealed class TiktokenFileTokenizerTests : IDisposable
     }
 
     [Fact]
+    public void A_special_id_inside_the_rank_range_is_refused()
+    {
+        // The synthetic file has 259 ranks (0..258), so id 100 is a rank, not a special.
+        InvalidDataException refused = Assert.Throws<InvalidDataException>(() => Load([("<|inside|>", 100)]));
+        Assert.Contains("rank range", refused.Message);
+    }
+
+    [Fact]
     public void A_missing_rank_file_is_reported_by_path()
     {
         string path = Path.Combine(_root, "absent.tiktoken");
