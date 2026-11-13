@@ -398,6 +398,7 @@ no bug, any more than one bad seed was proof there was one.
   synchronous transfers (`CudaMemory`) run on the calling backend's stream for this reason, so look for a raw
   driver call on stream 0 or a context-wide sync. The owner falls back to eager and recaptures
   (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op in the step itself.
+- **`CUDA_ERROR_ILLEGAL_ADDRESS` (700) on the second generation of a loaded pipeline, with the context unusable afterwards** (every cleanup step then fails): a captured step graph is replaying against weights that were freed after the first generation and uploaded again elsewhere. Freeing weights does not invalidate the graph (an activation free does), so the denoiser must invalidate it before it frees its weights (`Hunyuan3DDit.InvalidateStepGraph`); a pipeline freed between runs never shows it.
 - **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
   was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
   capture whose owner never reached its end.
