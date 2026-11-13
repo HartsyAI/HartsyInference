@@ -85,19 +85,54 @@ public sealed class MeshBoundaryTests
         Assert.All(loops, l => Assert.True(l.Closed));
     }
 
-    [Fact]
-    public void Trace_WalkThatMeetsANonManifoldEdgeEndsAsAnOpenChain()
+    // Three triangles share edge 0-1 (a non-manifold edge); every other edge is a boundary edge, two per triangle, so three open chains of two edges.
+    private static readonly float[] FinVertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1];
+
+    [Theory]
+    [InlineData(0, 1, 2, 1, 0, 3, 0, 1, 4)]
+    [InlineData(2, 0, 1, 1, 0, 3, 0, 1, 4)]
+    [InlineData(1, 2, 0, 4, 0, 1, 3, 1, 0)]
+    [InlineData(0, 1, 4, 2, 0, 1, 1, 0, 3)]
+    public void Trace_ANonManifoldEdgeEndsEachChainWholeWhateverTheFaceOrderAndWinding(int a, int b, int c, int d, int e, int f, int g, int h, int i)
     {
-        // Three triangles share edge 0-1 (a non-manifold edge); every other edge is a boundary edge.
-        Mesh fins = new()
-        {
-            Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1],
-            Indices = [0, 1, 2, 1, 0, 3, 0, 1, 4],
-        };
+        Mesh fins = new() { Vertices = FinVertices, Indices = [a, b, c, d, e, f, g, h, i] };
 
         IReadOnlyList<BoundaryLoop> loops = MeshBoundary.Trace(fins);
 
-        Assert.Equal(6, loops.Sum(l => l.EdgeCount));
-        Assert.Contains(loops, l => !l.Closed);
+        Assert.Equal(3, loops.Count);
+        Assert.All(loops, l => Assert.False(l.Closed));
+        Assert.All(loops, l => Assert.Equal(2, l.EdgeCount));
+        Assert.All(loops, l => Assert.Equal(3, l.Vertices.Length));
+    }
+
+    [Fact]
+    public void Trace_ARoundHoleWalkedFromAnyStartGivesOneLoop()
+    {
+        // The same sphere hole with its faces in reverse order starts the walk at a different edge and must give the same single loop.
+        Mesh sphere = SyntheticMeshes.Icosphere(2);
+        List<int> around = [];
+        for (int f = 0; f < sphere.TriangleCount; f++)
+            if (sphere.Indices[f * 3] == 0 || sphere.Indices[f * 3 + 1] == 0 || sphere.Indices[f * 3 + 2] == 0) around.Add(f);
+        Mesh holed = WithoutFaces(sphere, [.. around]);
+        int[] reversed = new int[holed.Indices.Length];
+        for (int f = 0; f < holed.TriangleCount; f++)
+            Array.Copy(holed.Indices, f * 3, reversed, (holed.TriangleCount - 1 - f) * 3, 3);
+
+        BoundaryLoop loop = Assert.Single(MeshBoundary.Trace(new Mesh { Vertices = holed.Vertices, Indices = reversed }));
+
+        Assert.True(loop.Closed);
+        Assert.Equal(around.Count, loop.EdgeCount);
+    }
+
+    [Fact]
+    public void Trace_IgnoresAFaceThatRepeatsAVertex()
+    {
+        Mesh holed = WithoutFaces(Octahedron(), 0);
+        Mesh withDegenerate = new() { Vertices = holed.Vertices, Indices = [.. holed.Indices, 0, 0, 2] };
+
+        BoundaryLoop loop = Assert.Single(MeshBoundary.Trace(withDegenerate));
+
+        Assert.True(loop.Closed);
+        Assert.Equal(3, loop.EdgeCount);
     }
 }
