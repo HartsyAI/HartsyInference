@@ -291,7 +291,7 @@ static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string model
         Repack = new ManifestRepack
         {
             Path = item.Output.Replace('\\', '/'), Size = new FileInfo(output).Length, Sha256 = Sha256Of(output), TensorCount = summary.TensorCount,
-            TensorBytes = summary.TensorBytes, Dtypes = dtypes, Streamed = summary.Streamed, StorageRestarts = summary.StorageRestarts,
+            TensorBytes = summary.TensorBytes, Dtypes = dtypes, Streamed = summary.Streamed,
         },
         Verification = new ManifestVerification
         {

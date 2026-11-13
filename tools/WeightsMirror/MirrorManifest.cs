@@ -79,8 +79,6 @@ internal sealed class ManifestRepack
     public Dictionary<string, int> Dtypes { get; init; } = [];
 
     public bool Streamed { get; init; }
-
-    public int StorageRestarts { get; init; }
 }
 
 /// <summary>The comparison of the repack with its source, each read through its own loader.</summary>
