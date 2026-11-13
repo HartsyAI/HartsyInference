@@ -338,7 +338,8 @@ public sealed class KimiK31Model : IDisposable
     }
 
     // Rank r's share of every layer, from the rank's own weights: its vocabulary rows, its attention heads, its FFN columns and its routed
-    // experts. The weights are already cut to these shares, so nothing is sliced here.
+    // experts. The weights are already cut to these shares, so nothing is sliced here. With one rank the loader's tensors are borrowed
+    // in place and nothing is owned.
     private void BuildShard(RankShard s, int r, int maxPositions)
     {
         KimiK31Config c = _config;
@@ -379,7 +380,8 @@ public sealed class KimiK31Model : IDisposable
         }
     }
 
-    // Rank r's routed block: the router, latent projections and norms, the experts of its range (by global id) or their packed form.
+    // Rank r's routed block: the router, latent projections and norms (replicated, or borrowed in place with one rank), the experts of
+    // its range (by global id) or their packed form.
     private MoeFeedForward BuildMoeBlock(KimiK31LayerWeights lw, int r)
     {
         KimiK31Config c = _config;
