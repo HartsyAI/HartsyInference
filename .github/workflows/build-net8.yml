@@ -1,0 +1,28 @@
+name: Build net8.0
+
+# The libraries target net8.0 and net10.0 (Directory.Build.props) and publish-nuget.yml packs both. Day-to-day
+# builds and the other PR workflows only exercise net10.0, so a .NET 9+ only API (System.Threading.Lock, for
+# example) merges cleanly and breaks the publish run afterwards. This builds the libraries for net8.0 on each
+# pull request instead. Cli references every library except Voice, so those two builds cover the whole packed
+# set. Projects that target only net10.0 (API, tests, tools) are not built here.
+on:
+  pull_request:
+    paths: ['src/**', 'Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', '.github/workflows/build-net8.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  net8:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - run: dotnet build src/HartsyInference.Cli -f net8.0 -c Release
+      - run: dotnet build src/HartsyInference.Voice -f net8.0 -c Release

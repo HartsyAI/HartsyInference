@@ -20,7 +20,7 @@ public sealed class KimiVisionInput : IDisposable
     private readonly int _textHidden;
     private readonly bool _xtmlTemplate;
     private readonly Func<string, IKimiK31WeightStore> _openWeights;
-    private readonly Lock _gate = new();
+    private readonly object _gate = new();
     private bool _resolved;
     private KimiVisionRoute? _route;
     private string? _refusal;
