@@ -144,7 +144,7 @@ public sealed unsafe class Qwen3VlEncoder : IVlmImageEncoder
         int gh = H / patch, gw = Wd / patch, np = gh * gw;
         TokensPerImage = np / (m * m);
 
-        Tensor patches = QwenVlOps.Patchify(backend, pixelValues, gh, gw, m, patch);
+        Tensor patches = VisionPatchOps.Patchify(backend, pixelValues, gh, gw, m, patch);
 
         // 2. Patch embed (+ bias) → [np, hidden].
         Tensor embed = new(new TensorShape(np, hidden), DType.F32);
