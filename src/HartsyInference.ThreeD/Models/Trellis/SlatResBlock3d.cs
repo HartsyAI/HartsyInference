@@ -40,9 +40,10 @@ internal sealed unsafe class SlatResBlock3d
     /// <summary>Applies the res-block; <paramref name="up"/> is the paired downsample state, used only when this block upsamples.</summary>
     public SparseTensor Forward(IBackend backend, SparseTensor x, Tensor vec, ref DownState? down, (int[] idx, int[] coords, int res)? up)
     {
-        // updown FIRST (per reference).
-        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2, meanIncludeSelf: true); down = new DownState(idx, x.Coords, x.Resolution); x = d; }
-        else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(backend, x, uidx, ucoords, ures); }
+        // updown FIRST (per reference). The resampled input is this call's own, so it is freed below; the caller's input never is.
+        Tensor? ownedInput = null;
+        if (_downsample) { (SparseTensor d, int[] idx) = SparseOps.Downsample(backend, x, 2, meanIncludeSelf: true); down = new DownState(idx, x.Coords, x.Resolution); x = d; ownedInput = d.Feats; }
+        else if (_upsample) { (int[] uidx, int[] ucoords, int ures) = up!.Value; x = SparseOps.Upsample(backend, x, uidx, ucoords, ures); ownedInput = x.Feats; }
 
         // emb → scale,shift  (SiLU(vec) → Linear(2*out)).
         Tensor sil = new(vec.Shape, DType.F32); backend.Silu(sil, vec);
@@ -57,6 +58,7 @@ internal sealed unsafe class SlatResBlock3d
         SparseTensor hc = SparseOps.SubmanifoldConv3dSparse(backend, x.Replace(a1), _c1Slices, _c1B); a1.Dispose();   // → [.,outCh]
 
         Tensor h2 = new(new TensorShape(1, n, _outCh), DType.F32); backend.NormModulate(NormModulateCall.Rows(h2, SparseOps.As3D(hc.Feats), NormKind.LayerNorm, 1e-6f).WithModulation(ModulationSpec.Broadcast(SparseOps.As3D(hc.Feats), scale, shift, ScaleMode.OnePlus)));
+        hc.Feats.Dispose();
         Tensor a2 = new(h2.Shape, DType.F32); backend.Silu(a2, h2); h2.Dispose();
         SparseTensor conv2 = SparseOps.SubmanifoldConv3dSparse(backend, hc.Replace(a2), _c2Slices, _c2B); a2.Dispose();
         scale.Dispose(); shift.Dispose();
@@ -66,6 +68,9 @@ internal sealed unsafe class SlatResBlock3d
         if (_skipW is not null) { skipFeats = new(new TensorShape(1, n, _outCh), DType.F32); backend.Linear(skipFeats, x.Feats, _skipW, _skipB); }
         else skipFeats = x.Feats;
         Tensor outFeats = new(new TensorShape(1, n, _outCh), DType.F32); backend.Add(outFeats, conv2.Feats, skipFeats);
+        conv2.Feats.Dispose();
+        if (_skipW is not null) skipFeats.Dispose();
+        ownedInput?.Dispose();
         return conv2.Replace(outFeats);
     }
 }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -171,7 +172,11 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                 latents = SamFlowSampler.Sample(
                     Backend, noise, parameters,
                     (x, tModel, dModel, unconditional) => flow.Forward(Backend, x, tModel, unconditional ? zeros : cond, dModel),
-                    step => onStep?.Invoke("structure", step));
+                    step =>
+                    {
+                        onStep?.Invoke("structure", step);
+                        DeviceMemoryTrace.Record(Backend, "sam3d structure step", step);
+                    });
             }
             catch
             {
@@ -282,6 +287,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Sweep(cond);
             log($"SLAT condition {cond.Shape}");
 
+            DeviceMemoryTrace.Record(Backend, "sam3d slat before the flow weights load", $"{voxels} voxels");
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
             List<Tensor> narrowed = [];
             SlatFlowModel flow = new();
@@ -305,6 +311,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             {
                 SamSamplerParams parameters = SamSamplerParams.SlatDefault with { Steps = steps };
                 Backend.PreloadWeights(flow.EnumerateWeights());
+                DeviceMemoryTrace.Record(Backend, "sam3d slat flow weights uploaded");
                 sampled = SamFlowSampler.Sample(
                     Backend, noise, parameters,
                     (x, tModel, _, unconditional) =>
@@ -312,7 +319,11 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                         SparseTensor velocity = flow.Forward(Backend, new SparseTensor(x["slat"], coords, 64), tModel, unconditional ? zeros : cond);
                         return new Dictionary<string, Tensor> { ["slat"] = velocity.Feats };
                     },
-                    step => onStep?.Invoke("slat", step));
+                    step =>
+                    {
+                        onStep?.Invoke("slat", step);
+                        DeviceMemoryTrace.Record(Backend, "sam3d slat step", step);
+                    });
             }
             catch
             {

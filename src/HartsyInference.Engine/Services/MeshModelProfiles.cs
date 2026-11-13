@@ -109,7 +109,7 @@ internal static class MeshModelProfiles
                 },
                 new MeshCost { PeakVramGiB = 9.5, TypicalSeconds = 385, Basis = "RTX 3060, a 40,080-face bust split into 3 parts, grid 256, 50 steps: P3-SAM 66 s, conditioning 21 s, flow 140 s, decode 141 s." },
                 peak: _ => 9.5,
-                note: "P3-SAM splits the mesh into parts and each part is generated again as a complete shape; the boxes and face counts come back in MeshResult.Parts. Decimate a dense mesh to about 40,000 faces first."),
+                note: "P3-SAM splits the mesh into parts and each part is generated again as a complete shape; the boxes and face counts come back in MeshResult.Parts. Decimate a dense mesh to about 40,000 faces first. The setting numerics.xpartFastDecode (off) decodes the parts with FlashVDM: about 113 s for three parts instead of 141 s, on a finer grid (504 cells), approximating the dense field."),
             Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
                 new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
             Paint("hunyuan3d-paint21", "Tencent Hunyuan 3D 2.1 Community License", "PBR texture (base color, metallic, roughness).",
