@@ -33,8 +33,8 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
     {
     }
 
-    private Hunyuan3DShapePipeline(
-        IBackend backend, Dinov2VisionEncoder dino, IHunyuan3DDenoiser dit, Hunyuan3DShapeVae vae, Hunyuan3DConfig cfg, bool flashVdm)
+    internal Hunyuan3DShapePipeline(
+        IBackend backend, Dinov2VisionEncoder dino, IHunyuan3DDenoiser dit, Hunyuan3DShapeVae vae, Hunyuan3DConfig cfg, bool flashVdm = false)
         : base(backend)
     {
         _dino = dino;
@@ -131,7 +131,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         if (_cfg.ViewCount != 1)
             throw new NotSupportedException("This is a multiview checkpoint; give it views with GenerateMultiView.");
         return Sample(
-            () => EncodeViews([new Hunyuan3DViewImage(Hunyuan3DView.Front, request.ImageRgb, request.Width, request.Height)]),
+            () => new ConditionPair(EncodeViews([new Hunyuan3DViewImage(Hunyuan3DView.Front, request.ImageRgb, request.Width, request.Height)]), null),
             request.Seed, request.Steps, request.CfgScale, request.GridResolution, request.IsoLevel, onProgress);
     }
 
@@ -145,9 +145,23 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             throw new NotSupportedException("This checkpoint conditions on a single image; use Generate.");
         if (request.Views.Count == 0 || request.Views.Count > _cfg.ViewCount || request.Views.Select(v => v.View).Distinct().Count() != request.Views.Count)
             throw new ArgumentException($"Give 1 to {_cfg.ViewCount} views, each at most once.", nameof(request));
-        return Sample(() => EncodeViews(request.Views), request.Seed, request.Steps, request.CfgScale, request.GridResolution,
+        return Sample(() => new ConditionPair(EncodeViews(request.Views), null), request.Seed, request.Steps, request.CfgScale, request.GridResolution,
             request.IsoLevel, onProgress);
     }
+
+    /// <summary>The DINOv2 tokens of one image, <c>[1, tokens, condDim]</c>, for a pipeline that adds its own context tokens (Omni's control tokens). The caller disposes it.</summary>
+    internal Tensor EncodeImage(byte[] rgb, int width, int height) =>
+        EncodeViews([new Hunyuan3DViewImage(Hunyuan3DView.Front, rgb, width, height)]);
+
+    /// <summary>Samples a shape for a conditioning the caller built: the denoiser sees <see cref="ConditionPair.Cond"/>, and the unconditional branch of the guidance <see cref="ConditionPair.Uncond"/> (zeros of the conditioning's shape when null). Both are disposed here.</summary>
+    internal ThreeDResult SampleConditioned(Func<ConditionPair> encode, int? seed, int steps, float cfgScale, int gridResolution, float isoLevel, Action<GenerationProgress>? onProgress)
+    {
+        ThrowIfDisposed();
+        return Sample(encode, seed, steps, cfgScale, gridResolution, isoLevel, onProgress);
+    }
+
+    /// <summary>The conditioning of the two guidance branches.</summary>
+    internal sealed record ConditionPair(Tensor Cond, Tensor? Uncond);
 
     /// <summary>DINOv2 tokens of each view (plus the view embedding when the checkpoint is multiview), concatenated in view order into <c>[1, views * tokens, condDim]</c>.</summary>
     private Tensor EncodeViews(IReadOnlyList<Hunyuan3DViewImage> views)
@@ -193,9 +207,34 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         return joined;
     }
 
-    private ThreeDResult Sample(Func<Tensor> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
+    /// <summary>Checks that the field of a <paramref name="grid"/> request fits one array, before any weight loads: the dense decode holds <c>grid</c> points per axis, and FlashVDM the finest level <see cref="Hunyuan3DFlashVdm.Resolutions"/> gives plus one.</summary>
+    /// <param name="grid">The marching-cubes resolution; 0 takes the checkpoint's.</param>
+    /// <param name="flashVdm">Whether the pipeline decodes with FlashVDM (the turbo VAE).</param>
+    /// <exception cref="ArgumentOutOfRangeException">The field has more points than an array can hold, or FlashVDM has no level for the grid; the parameter is <c>grid</c>.</exception>
+    public static void ValidateGrid(int grid, bool flashVdm)
+    {
+        if (grid <= 0)
+            return;
+        if (flashVdm && grid < MinFlashVdmGrid)
+            throw new ArgumentOutOfRangeException("grid", grid, $"FlashVDM needs a grid of at least {MinFlashVdmGrid}.");
+        if (GridLimit.Fits(FieldAxis(grid, flashVdm)))
+            return;
+        // FlashVDM's finest level grows with the grid, so its largest grid lies above the largest axis; start the search past it.
+        int largest = Math.Min(grid, flashVdm ? 2 * GridLimit.LargestAxis : GridLimit.LargestAxis + 1);
+        while (largest > 1 && !GridLimit.Fits(FieldAxis(largest, flashVdm)))
+            largest--;
+        throw new ArgumentOutOfRangeException(
+            "grid", grid, $"A grid of {grid} needs a field too large for one array; the largest that fits one is {largest} (host memory runs out sooner).");
+    }
+
+    private const int MinFlashVdmGrid = 3;
+
+    private static long FieldAxis(int grid, bool flashVdm) => flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid;
+
+    private ThreeDResult Sample(Func<ConditionPair> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
         Action<GenerationProgress>? onProgress)
     {
+        ValidateGrid(requestGrid, _flashVdm);
         int seed = requestSeed ?? SeedGenerator.RandomSeed();
         int steps = requestSteps > 0 ? requestSteps : _cfg.NumInferenceSteps;
         float guidance = requestCfg > 0 ? requestCfg : _cfg.GuidanceScale;
@@ -205,11 +244,14 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         void Probe(string tag) { if (phase) { Backend.Sync(); Console.WriteLine($"[hy3d-phase] {tag}: {pw.ElapsedMilliseconds} ms"); pw.Restart(); } }
 
         // 1. Image(s) → DINOv2 conditioning tokens [1, seq, condDim].
-        Tensor cond = encode();
+        ConditionPair conditioning = encode();
+        Tensor cond = conditioning.Cond;
         Hunyuan3DDebugDump.Dump("cond", cond);
         Probe("dinov2-cond");
         // Zero (null) conditioning for CFG; guidance-distilled checkpoints take the guidance as an embedding instead.
-        Tensor? uncond = _cfg.GuidanceEmbed ? null : new(cond.Shape, DType.F32);
+        Tensor? uncond = _cfg.GuidanceEmbed ? null : conditioning.Uncond ?? new(cond.Shape, DType.F32);
+        if (_cfg.GuidanceEmbed)
+            conditioning.Uncond?.Dispose();
 
         // 2. Flow-match denoise the VecSet latent (hy3dgen FlowMatchEulerDiscreteScheduler, shift 1): ascending sigmas,
         //    prev = x + (sigma_next − sigma)·v, initial latent = pure noise.
@@ -248,6 +290,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
         }
         Backend.Sync();
+        _dit.InvalidateStepGraph(Backend);
         Backend.FreeWeights(_dit.EnumerateWeights());
         cond.Dispose();
         uncond?.Dispose();

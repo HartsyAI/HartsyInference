@@ -101,11 +101,20 @@ public sealed class MiniMaxH3ImageTransformerTests
     }
 
     [Fact]
-    public void ImageSigmasKeepTheCheckpointGridUnshifted()
+    public void ImageSigmasFollowComfyUiSimpleSchedulerAndLeaveTheGridAtSixSteps()
     {
         double[] grid = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0];
 
-        Assert.Equal(grid, MiniMaxH3Schedule.ImageSigmas(grid));
+        // ComfyUI 0.45.0, run on CPU: comfy_extras' H3 image sampling under the stock "simple" scheduler at 6 steps. The
+        // timesteps are 1000, 834, 667, 500, 334, 167, so four of the six sigmas sit off the grid points.
+        double[] comfy = [1.0, 0.9676535725593567, 0.8877084255218506, 0.75, 0.5336428284645081, 0.23261038959026337, 0.0];
+        double[] actual = MiniMaxH3Schedule.ImageSigmas(grid);
+
+        Assert.Equal(comfy.Length, actual.Length);
+        for (int i = 0; i < comfy.Length; i++)
+        {
+            Assert.Equal(comfy[i], actual[i], 6);
+        }
     }
 
     [Fact]

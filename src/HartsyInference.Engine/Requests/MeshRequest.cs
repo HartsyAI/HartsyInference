@@ -18,6 +18,9 @@ public sealed record MeshRequest
     /// <summary>Objects to extract from <see cref="SceneMesh"/>; null runs free queries. Scene models only.</summary>
     public SceneMeshPrompt? ScenePrompt { get; init; }
 
+    /// <summary>Hunyuan3D-Omni: the control signal that goes with <see cref="Image"/> (a point cloud, voxels, a bounding box or a skeleton). Required by that model and rejected by every other.</summary>
+    public MeshControl? Control { get; init; }
+
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
@@ -49,6 +52,18 @@ public sealed record MeshRequest
 
     /// <summary>TRELLIS.2 with <see cref="Texture"/>: baked texture edge in texels, 16 to 8192; 0 uses 2048. Other models reject a value.</summary>
     public int TextureSize { get; init; }
+
+    /// <summary>SAM 3D Objects: return a triangle mesh (a geometry-only GLB, from the mesh decoder and FlexiCubes at the 256 grid; the decoder's vertex colours are noisy, so they are not written) instead of Gaussian splats (a PLY). It needs <c>slat_decoder_mesh.safetensors</c> beside the other checkpoints. Other models reject it.</summary>
+    public bool Mesh { get; init; }
+
+    /// <summary>Input image preparation: <see cref="MeshPreprocess.None"/> (default) uses the image as given, <see cref="MeshPreprocess.Auto"/> mattes and frames it for the model. Models that prepare their own input ignore it.</summary>
+    public MeshPreprocess Preprocess { get; init; }
+
+    /// <summary>Also return <see cref="MeshResult.Preview"/>, a copy decimated to about this many triangles for a viewer; 0 (default) returns none. Glb results only.</summary>
+    public int PreviewTriangles { get; init; }
+
+    /// <summary>The frame to return a glb in: <see cref="MeshFrame.Native"/> (default) keeps the model's own, <see cref="MeshFrame.GltfYUpMetres"/> normalises it. Splat results are not changed.</summary>
+    public MeshFrame Frame { get; init; }
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }

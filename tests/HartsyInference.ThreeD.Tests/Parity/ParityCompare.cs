@@ -40,6 +40,23 @@ internal static class ParityCompare
         return new ParityResult(name, expected.Length, maxAbs, maxRel, failures, note);
     }
 
+    /// <summary>The relative L2 error <c>sqrt(sum (actual - expected)^2 / sum expected^2)</c> and the largest absolute difference of two arrays of the same length, for a loop whose accumulated error is judged as a whole.</summary>
+    internal static (double RelativeL2, double MaxAbs) RelativeL2(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
+    {
+        if (actual.Length != expected.Length)
+            throw new ArgumentException($"length {actual.Length} differs from reference {expected.Length}");
+        double squaredError = 0, squaredExpected = 0, maxAbs = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double d = Math.Abs((double)actual[i] - expected[i]);
+            squaredError += d * d;
+            squaredExpected += (double)expected[i] * expected[i];
+            maxAbs = Math.Max(maxAbs, d);
+        }
+
+        return (squaredExpected > 0 ? Math.Sqrt(squaredError / squaredExpected) : Math.Sqrt(squaredError), maxAbs);
+    }
+
     /// <summary>Matches each reference row to the actual row with the same coordinate quad. Returns, per reference row, the actual
     /// row index, or -1 when no actual row carries that coordinate. Fails when the two coordinate sets differ in size.</summary>
     internal static int[] MatchRows(int[] actualCoords, int[] expectedCoords)

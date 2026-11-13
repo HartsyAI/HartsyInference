@@ -398,6 +398,7 @@ no bug, any more than one bad seed was proof there was one.
   synchronous transfers (`CudaMemory`) run on the calling backend's stream for this reason, so look for a raw
   driver call on stream 0 or a context-wide sync. The owner falls back to eager and recaptures
   (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op in the step itself.
+- **`CUDA_ERROR_ILLEGAL_ADDRESS` (700) on the second generation of a loaded pipeline, with the context unusable afterwards** (every cleanup step then fails): a captured step graph is replaying against weights that were freed after the first generation and uploaded again elsewhere. Freeing weights does not invalidate the graph (an activation free does), so the denoiser must invalidate it before it frees its weights (`Hunyuan3DDit.InvalidateStepGraph`); a pipeline freed between runs never shows it.
 - **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
   was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
   capture whose owner never reached its end.
@@ -694,12 +695,10 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   `rope_decode_step` already reads). Regression tests deliberately pass a wrong/stale placeholder alongside
   the real devicePos value specifically to prove the placeholder is ignored, not merely that a plausible
   value happens to be correct by coincidence.
-- **`ConvTranspose1d`'s shipped shader has no `groups` field at all** — its inner loop sums over the full
-  `cIn` range assuming dense `[cIn, cOut, K]` weights, unlike `conv1d.comp.glsl` which does support
-  `groups`. Dispatching a depthwise (`groups>1`) call through it would silently read the wrong weight
-  slice. `VulkanBackend.ConvTranspose1d` now throws `NotSupportedException` for `groups != 1` instead of
-  producing wrong output; extending the shader for grouped transposed conv (needed for BigVGAN-style
-  anti-aliased upsampling) is open work.
+- **`ConvTranspose1d` on Vulkan rejected `groups != 1`.** The shader had no `groups` field, so depthwise upsamples
+  (BigVGAN-style, Kokoro's pool) and grouped Mimi or PocketTTS calls threw `NotSupportedException`. The shader now takes
+  `groups` with weight `[C_in, C_out/groups, K]`; the parity test is `VulkanConvTranspose1dParityTests`. If a grouped
+  call throws now, check its weight and channel shapes against that layout first.
 - **`SliceLastDim`, `ApplyRope`, `KvCacheAppend` had NO `VulkanBackend` override at all** — every call
   fell through to `IBackend`'s CPU-loop default, which reads `.DataPointer` directly. On a GPU-resident
   input that forces a full device sync + host readback (`GetD2hSyncCount`), and the next GPU op needing

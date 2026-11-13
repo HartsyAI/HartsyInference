@@ -28,6 +28,11 @@ public sealed record ImageResult
     /// hold their composite (straight-alpha "over", bottom first), recomputed by the service from these layers.</summary>
     public IReadOnlyList<ImageLayer>? Layers { get; init; }
 
+    /// <summary>Optional relative log depth per pixel, row-major like <see cref="Rgb"/>, length <see cref="Width"/> *
+    /// <see cref="Height"/>: nominally <c>[-1, 1]</c> (averaged estimates can overshoot slightly), near is low and sky is +1. Null unless the family estimates depth
+    /// (Iris-Z); render it with <c>IrisZDepth.Colourize</c> or <c>IrisZDepth.ToGray</c>.</summary>
+    public float[]? Depth { get; init; }
+
     /// <summary>The seed actually used (resolved from a random seed when the request asked for -1).</summary>
     public long Seed { get; init; }
 

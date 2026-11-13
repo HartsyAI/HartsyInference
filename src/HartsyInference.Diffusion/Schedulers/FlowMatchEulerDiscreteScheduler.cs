@@ -228,4 +228,20 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
 
         return new FlowMatchEulerDiscreteScheduler(shift, shiftTerminal);
     }
+
+    /// <summary>The step-count-dependent mu of BFL's FLUX.2 schedule (<c>compute_empirical_mu</c>; Lens and Iris-Z use it):
+    /// piecewise linear in the image token count up to 4300 tokens, one line above. The scheduler shift is <c>exp(mu)</c>.</summary>
+    public static float EmpiricalMu(int imageSeqLen, int numSteps)
+    {
+        const double a1 = 8.73809524e-05, b1 = 1.89833333;
+        const double a2 = 0.00016927, b2 = 0.45666666;
+        if (imageSeqLen > 4300)
+            return (float)(a2 * imageSeqLen + b2);
+
+        double m200 = a2 * imageSeqLen + b2;
+        double m10 = a1 * imageSeqLen + b1;
+        double a = (m200 - m10) / 190.0;
+        double b = m200 - 200.0 * a;
+        return (float)(a * numSteps + b);
+    }
 }

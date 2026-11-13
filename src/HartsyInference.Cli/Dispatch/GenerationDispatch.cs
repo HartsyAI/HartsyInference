@@ -117,7 +117,7 @@ public static class GenerationDispatch
             PreviewRgb = result.Rgb,
             PreviewWidth = result.Width,
             PreviewHeight = result.Height,
-            Companions = LayerCompanions(result),
+            Companions = Companions(result),
         };
         artifact.Meta["size"] = $"{result.Width}x{result.Height}";
         artifact.Meta["seed"] = result.Seed.ToString(CultureInfo.InvariantCulture);
@@ -129,9 +129,17 @@ public static class GenerationDispatch
 
     /// <summary>A layered result's layers as RGBA PNG companions <c>layer-00.png</c> (bottom) onward, written next to the
     /// composite; empty for a single-layer result.</summary>
-    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> LayerCompanions(ImageResult result) =>
-        result.Layers is not { Count: > 0 } layers ? []
+    /// <remarks>A result with depth beside its image (Iris-Z <c>rgbd</c>) adds <c>depth.png</c>, the colour-coded depth map.</remarks>
+    internal static IReadOnlyList<(string Suffix, byte[] Bytes)> Companions(ImageResult result)
+    {
+        List<(string Suffix, byte[] Bytes)> companions = result.Layers is not { Count: > 0 } layers ? []
             : layers.Select(l => ($"layer-{l.Index:D2}.png", PngEncoder.Encode(l.Rgb, l.Alpha, l.Width, l.Height))).ToList();
+        if (HartsyInference.Engine.Features.DepthImage.Companion(result) is { } depthRgb)
+        {
+            companions.Add(("depth.png", PngEncoder.Encode(depthRgb, null, result.Width, result.Height)));
+        }
+        return companions;
+    }
 
     /// <summary>The token ids of a <c>--scores-out</c> TSV, in order (its <c>token_id</c> column).</summary>
     private static int[] ReadScoredTokenIds(string path)
@@ -825,7 +833,7 @@ public static class GenerationDispatch
     {
         string meshId = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
         bool paint = MeshModelIds.PaintMesh.Contains(meshId);
-        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || paint;
+        bool scene = MeshModelIds.SceneMesh.Contains(meshId) || MeshModelIds.RigMesh.Contains(meshId) || MeshModelIds.PartMesh.Contains(meshId) || MeshModelIds.XPartMesh.Contains(meshId) || paint;
         string? imagePath = parameters.GetStringOrNull("image");
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
@@ -835,6 +843,7 @@ public static class GenerationDispatch
             Vram = ParseVramOverrides(parameters),
             Image = paint ? LoadMeshImage(imagePath!) : scene ? null : WithMask(LoadMeshImage(prompt), parameters.GetStringOrNull("mask"), meshId),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
+            Control = LoadMeshControl(parameters),
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
             GridResolution = parameters.GetInt("grid", 0),
@@ -846,6 +855,7 @@ public static class GenerationDispatch
             Chains = parameters.GetBool("no-chains", false) ? false : null,
             Texture = parameters.GetBool("texture", false),
             TextureSize = parameters.GetInt("texture-size", 0),
+            Mesh = parameters.GetBool("mesh", false),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -1401,6 +1411,33 @@ public static class GenerationDispatch
                 extra[key] = value;
             }
         }
+        (string Flag, string Key)[] irisStrings =
+        [
+            ("iris-task", HartsyInference.Engine.Features.RequestExtras.IrisZTask),
+            ("iris-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZDepthFormat),
+            ("iris-input-depth-format", HartsyInference.Engine.Features.RequestExtras.IrisZInputDepthFormat),
+            ("iris-joint-depth", HartsyInference.Engine.Features.RequestExtras.IrisZJointDepth),
+        ];
+        foreach ((string flag, string key) in irisStrings)
+        {
+            if (parameters.GetStringOrNull(flag) is { Length: > 0 } value)
+            {
+                extra[key] = value;
+            }
+        }
+        (string Flag, string Key)[] irisInts =
+        [
+            ("iris-resolution", HartsyInference.Engine.Features.RequestExtras.IrisZResolution),
+            ("iris-depth-steps", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSteps),
+            ("iris-depth-seeds", HartsyInference.Engine.Features.RequestExtras.IrisZDepthSeeds),
+        ];
+        foreach ((string flag, string key) in irisInts)
+        {
+            if (parameters.GetIntOrNull(flag) is { } value)
+            {
+                extra[key] = value;
+            }
+        }
         if (parameters.GetStringOrNull("reference-kv-cache") is { Length: > 0 } kvCache)
         {
             extra[HartsyInference.Engine.Features.RequestExtras.ReferenceKvCache] = kvCache;
@@ -1594,6 +1631,47 @@ public static class GenerationDispatch
             throw new ArgumentException($"Prompt point '{text}' must be three numbers as x,y,z.");
         }
         return new ScenePoint(x, y, z);
+    }
+
+    /// <summary>The Hunyuan3D-Omni control from <c>--control</c>, <c>--control-file</c> and <c>--control-values</c>, or null when none is given (the engine then rejects a model that needs one, and any other model that was given one).</summary>
+    internal static MeshControl? LoadMeshControl(ParamState parameters)
+    {
+        string? kindText = parameters.GetStringOrNull("control"), file = parameters.GetStringOrNull("control-file"), values = parameters.GetStringOrNull("control-values");
+        if (kindText is null)
+        {
+            if (file is not null || values is not null)
+                throw new ArgumentException("--control-file and --control-values need --control point, voxel, bbox or pose.");
+            return null;
+        }
+        MeshControlKind kind = kindText.Trim().ToLowerInvariant() switch
+        {
+            "point" => MeshControlKind.Point,
+            "voxel" => MeshControlKind.Voxel,
+            "bbox" or "box" => MeshControlKind.BoundingBox,
+            "pose" => MeshControlKind.Pose,
+            _ => throw new ArgumentException($"Unknown control '{kindText}'. Expected point, voxel, bbox or pose."),
+        };
+        if (kind is MeshControlKind.Point or MeshControlKind.Voxel)
+        {
+            if (file is null || values is not null)
+                throw new ArgumentException($"A {kindText} control takes --control-file (not --control-values).");
+            string path = file.Trim().Trim('"');
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"Control file not found: {path}");
+            string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+            return new MeshControl { Kind = kind, Geometry = new SceneMeshData { Data = File.ReadAllBytes(path), Format = format } };
+        }
+        if (kind == MeshControlKind.BoundingBox && file is not null)
+            throw new ArgumentException("A bbox control takes --control-values (length,height,width), not a file.");
+        if (file is not null && values is not null)
+            throw new ArgumentException($"A {kindText} control takes --control-file or --control-values, not both.");
+        string? posePath = file?.Trim().Trim('"');
+        if (posePath is not null && !File.Exists(posePath))
+            throw new FileNotFoundException($"Control file not found: {posePath}");
+        string text = values ?? (posePath is not null ? File.ReadAllText(posePath) : throw new ArgumentException($"A {kindText} control takes --control-values" + (kind == MeshControlKind.Pose ? " or --control-file." : ".")));
+        float[] numbers = [.. text.Split([',', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(n =>
+            float.TryParse(n, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : throw new ArgumentException($"'{n}' is not a number in the control."))];
+        return new MeshControl { Kind = kind, Values = numbers };
     }
 
     /// <summary>Reads a scene mesh (obj or glb) for the cola3d route; the format comes from its extension.</summary>

@@ -106,6 +106,8 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<VisionService> _vision;
     private readonly Lazy<RestoreService> _restore;
     private readonly Lazy<MeshService> _mesh;
+    private readonly Lazy<MeshPlanningService> _meshPlanning;
+    private readonly Lazy<MeshPreparationService> _meshPreparation;
     private readonly Lazy<WorldService> _world;
     private readonly Lazy<EmbeddingService> _embeddings;
     private readonly Lazy<DecisionService> _decisions;
@@ -131,6 +133,8 @@ public sealed class InferenceEngine : IInferenceEngine
         _vision = new Lazy<VisionService>(() => new VisionService(this));
         _restore = new Lazy<RestoreService>(() => new RestoreService(this));
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
+        _meshPreparation = new Lazy<MeshPreparationService>(() => new MeshPreparationService(this));
+        _meshPlanning = new Lazy<MeshPlanningService>(() => new MeshPlanningService(_memoryEstimation.Value, MeshAssets));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
         _decisions = new Lazy<DecisionService>(() => new DecisionService(this));
@@ -222,6 +226,32 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IMeshService Mesh => _mesh.Value;
+
+    /// <inheritdoc/>
+    public IMeshPlanningService MeshPlanning => _meshPlanning.Value;
+
+    /// <inheritdoc/>
+    public IMeshAssetService MeshAssets { get; } = new MeshAssetService();
+
+    /// <inheritdoc/>
+    public IMeshPreparationService MeshPreparation => _meshPreparation.Value;
+
+    /// <inheritdoc/>
+    public IMeshConversionService MeshConversion { get; } = new MeshConversionService();
+
+    /// <inheritdoc/>
+    public IMeshOperationService MeshOperations { get; } = new MeshOperationService();
+
+    /// <inheritdoc/>
+    public IMeshThumbnailService MeshThumbnails { get; } = new MeshThumbnailService();
+
+    /// <inheritdoc/>
+    public IMeshLifecycleService MeshLifecycle => _mesh.Value;
+
+    internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
+
+    /// <summary>The preparation service when it exists; listing or freeing memory does not create it.</summary>
+    internal MeshPreparationService? MeshPreparationIfCreated => _meshPreparation.IsValueCreated ? _meshPreparation.Value : null;
 
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
@@ -1170,9 +1200,10 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public void FreeMemory()
     {
-        // A free between jobs never waits on a request and never disposes a pipeline one holds. While any pipeline is leased, the
+        // A free between jobs never waits on a recipe request and never disposes a pipeline one holds. While any pipeline is leased, the
         // free is skipped and logged; the next free after that request finishes releases everything. The device release below
-        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory.
+        // keeps its own timed gate, so a job that outlasts that wait keeps its device memory. The 3D service is the exception: it
+        // waits for its own running generations before it disposes their pipelines (see MeshService.Free).
         EvictedPipelines taken;
         lock (_pipelineCacheLock)
         {
@@ -1216,8 +1247,11 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_restore.IsValueCreated)
             ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
         // A restore placed on another device keeps its weights and its device context in that service; the teardown below disposes them.
+        // The mesh service first: a TRELLIS.2 or Pixal3D run it waits for can still load the shared matting model, which the preparation service releases after.
         if (_mesh.IsValueCreated)
             ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
+        if (_meshPreparation.IsValueCreated)
+            ReleaseLogged("the mesh image preparation", _meshPreparation.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
             ReleaseLogged("the world service", _world.Value.Dispose, ref failures);
         // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released

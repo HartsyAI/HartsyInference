@@ -11,13 +11,12 @@ internal static class Trellis2RequestMapper
     public static Trellis2Options ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The TRELLIS.2 seed must be at most {int.MaxValue}.");
+        MeshSeed.Require(request);
         return new Trellis2Options
         {
             Grid = request.GridResolution,
             Steps = request.Steps,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
+            Seed = MeshSeed.ForSampler(request.Seed),
             Texture = request.Texture,
             TextureSize = request.TextureSize,
         };
@@ -30,6 +29,6 @@ internal static class Trellis2RequestMapper
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.Texture || request.TextureSize != 0)
-            throw new NotSupportedException($"'{modelId}' has no texture output; Texture and TextureSize apply to trellis2 and {MeshModelIds.Pixal3D}.");
+            throw new NotSupportedException($"'{modelId}' has no texture output; Texture and TextureSize apply to trellis2 and {MeshModelIds.Pixal3D}.").ForField(request.Texture ? nameof(MeshRequest.Texture) : nameof(MeshRequest.TextureSize));
     }
 }

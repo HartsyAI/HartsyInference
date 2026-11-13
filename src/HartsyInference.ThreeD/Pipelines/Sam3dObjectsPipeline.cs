@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -43,6 +44,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     public static bool HasWeights(string modelDirectory) =>
         Directory.Exists(modelDirectory) && new[] { "ss_generator", "ss_decoder", "slat_generator", "slat_decoder_gs" }.All(stem => Find(modelDirectory, stem) is not null);
 
+    /// <summary>Whether <paramref name="modelDirectory"/> holds the mesh decoder (<c>slat_decoder_mesh</c>, <c>.safetensors</c> or <c>.ckpt</c>).</summary>
+    public static bool HasMeshDecoder(string modelDirectory) => Directory.Exists(modelDirectory) && Find(modelDirectory, "slat_decoder_mesh") is not null;
+
     /// <summary>True when MoGe's weights are present, so a request without a pointmap can be served (<c>moge_vitl.safetensors</c> only: the upstream pickle nests its state dict under <c>model</c> and is not read; its config JSON is optional).</summary>
     public static bool HasMoge(string modelDirectory) => Directory.Exists(modelDirectory) && File.Exists(Path.Combine(modelDirectory, MogeFile));
 
@@ -72,8 +76,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         if (voxels == 0)
             return new Sam3dObjectsResult { Splats = null, Pose = pose, Voxels = 0, Seed = seed };
 
-        GaussianSplatCloud cloud = SlatStage(prepared, coords, request.SlatSteps, seed, Log, onStep);
-        return new Sam3dObjectsResult { Splats = cloud, Pose = pose, Voxels = voxels, Seed = seed };
+        (GaussianSplatCloud? cloud, SamMeshResult? mesh) = SlatStage(prepared, coords, request.SlatSteps, seed, request.Mesh, Log, onStep);
+        return new Sam3dObjectsResult { Splats = cloud, Mesh = mesh, Pose = pose, Voxels = voxels, Seed = seed };
     }
 
     /// <summary>The planar float image (0 to 1) and the mask (alpha over 255, so 0 to 1 with soft edges kept) of the request.</summary>
@@ -144,8 +148,19 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
 
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
             List<Tensor> narrowed = [];
-            Dictionary<string, Tensor> narrowedWeights = SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed);
-            SamMotFlow flow = new(SamMotFlowConfig.Released, narrowedWeights);
+            Dictionary<string, Tensor> narrowedWeights;
+            SamMotFlow flow;
+            try
+            {
+                narrowedWeights = SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed);
+                flow = new(SamMotFlowConfig.Released, narrowedWeights);
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, [], narrowed, () => Sweep(), error => log($"cleanup after a failed flow load also failed: {error.Message}"));
+                throw;
+            }
+
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = [];
             try
@@ -157,7 +172,16 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                 latents = SamFlowSampler.Sample(
                     Backend, noise, parameters,
                     (x, tModel, dModel, unconditional) => flow.Forward(Backend, x, tModel, unconditional ? zeros : cond, dModel),
-                    step => onStep?.Invoke("structure", step));
+                    step =>
+                    {
+                        onStep?.Invoke("structure", step);
+                        DeviceMemoryTrace.Record(Backend, "sam3d structure step", step);
+                    });
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, narrowedWeights.Values, narrowed, () => Sweep(), error => log($"cleanup after a failed flow also failed: {error.Message}"));
+                throw;
             }
             finally
             {
@@ -165,11 +189,8 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flowWeights.Values);
-            Backend.FreeWeights(narrowed);
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
-            Sweep([.. latents.Values]);
+            Tensor[] sampledLatents = [.. latents.Values];
+            SamFlowWeights.Release(Backend, narrowedWeights.Values, narrowed, () => Sweep(sampledLatents));
             log($"structure flow sampled ({request.StructureSteps} steps)");
         }
 
@@ -253,7 +274,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
     }
 
     /// <summary>SLAT condition and flow over the voxels, de-normalisation and the Gaussian decode.</summary>
-    private GaussianSplatCloud SlatStage(SamPrepared prepared, int[] coords, int steps, int seed, Action<string> log, Action<string, int>? onStep)
+    private (GaussianSplatCloud? Cloud, SamMeshResult? Mesh) SlatStage(SamPrepared prepared, int[] coords, int steps, int seed, bool mesh, Action<string> log, Action<string, int>? onStep)
     {
         int voxels = coords.Length / 4;
         Tensor latent;
@@ -266,10 +287,20 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Sweep(cond);
             log($"SLAT condition {cond.Shape}");
 
+            DeviceMemoryTrace.Record(Backend, "sam3d slat before the flow weights load", $"{voxels} voxels");
             Dictionary<string, Tensor> flowWeights = SamMotFlow.Select(checkpoint.Section(SamCheckpointSection.Generator));
             List<Tensor> narrowed = [];
             SlatFlowModel flow = new();
-            flow.LoadWeights(SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed));
+            try
+            {
+                flow.LoadWeights(SamFlowWeights.Narrow(flowWeights, FlowLinearDType, narrowed));
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, [], narrowed, () => Sweep(), error => log($"cleanup after a failed flow load also failed: {error.Message}"));
+                throw;
+            }
+
             using Tensor zeros = Zeros(cond.Shape);
             Dictionary<string, Tensor> noise = new()
             {
@@ -280,6 +311,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             {
                 SamSamplerParams parameters = SamSamplerParams.SlatDefault with { Steps = steps };
                 Backend.PreloadWeights(flow.EnumerateWeights());
+                DeviceMemoryTrace.Record(Backend, "sam3d slat flow weights uploaded");
                 sampled = SamFlowSampler.Sample(
                     Backend, noise, parameters,
                     (x, tModel, _, unconditional) =>
@@ -287,7 +319,16 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                         SparseTensor velocity = flow.Forward(Backend, new SparseTensor(x["slat"], coords, 64), tModel, unconditional ? zeros : cond);
                         return new Dictionary<string, Tensor> { ["slat"] = velocity.Feats };
                     },
-                    step => onStep?.Invoke("slat", step));
+                    step =>
+                    {
+                        onStep?.Invoke("slat", step);
+                        DeviceMemoryTrace.Record(Backend, "sam3d slat step", step);
+                    });
+            }
+            catch
+            {
+                SamFlowWeights.ReleaseAfterFailure(Backend, flow.EnumerateWeights(), narrowed, () => Sweep(), error => log($"cleanup after a failed flow also failed: {error.Message}"));
+                throw;
             }
             finally
             {
@@ -295,11 +336,9 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
                     tensor.Dispose();
             }
 
-            Backend.FreeWeights(flow.EnumerateWeights());
-            foreach (Tensor tensor in narrowed)
-                tensor.Dispose();
             latent = sampled["slat"];
-            Sweep(latent);
+            Tensor sampledLatent = latent;
+            SamFlowWeights.Release(Backend, flow.EnumerateWeights(), narrowed, () => Sweep(sampledLatent));
             log($"SLAT flow sampled ({steps} steps)");
         }
 
@@ -308,6 +347,43 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
         {
             SparseTensor slat = new(latent, coords, 64);
             TrellisSlatSampler.Denormalize(slat, mean, std);
+        }
+
+        if (mesh)
+        {
+            try
+            {
+                using SamCheckpoint meshCheckpoint = OpenCheckpoint("slat_decoder_mesh");
+                SlatMeshDecoder meshDecoder = new();
+                meshDecoder.LoadWeights(meshCheckpoint.Section(SamCheckpointSection.Root));
+                Backend.PreloadWeights(meshDecoder.EnumerateWeights());
+                SparseTensor head;
+                try
+                {
+                    head = meshDecoder.Forward(Backend, new SparseTensor(latent, coords, 64));
+                    Backend.Sync();
+                }
+                finally
+                {
+                    Backend.FreeWeights(meshDecoder.EnumerateWeights());
+                }
+
+                try
+                {
+                    log($"mesh decoder features {head.Feats.Shape} on the {head.Resolution}-grid");
+                    SamMeshResult extracted = SamSparseFeatures2Mesh.Extract(head.Coords, head.Feats.AsReadOnlySpan<float>().ToArray(), SamFlexiCubesData.Tables, head.Resolution);
+                    log($"mesh extracted: {extracted.VertexCount} vertices, {extracted.FaceCount} triangles");
+                    return (null, extracted);
+                }
+                finally
+                {
+                    head.Feats.Dispose();
+                }
+            }
+            finally
+            {
+                latent.Dispose();
+            }
         }
 
         try
@@ -320,7 +396,7 @@ public sealed class Sam3dObjectsPipeline : ThreeDPipelineBase
             Backend.FreeWeights(decoder.EnumerateWeights());
             GaussianSplatCloud cloud = TrellisGaussianRepresentation.Build(gs, rotationScale: 0.1f);   // slat_decoder_gs.yaml: lr 0.1 for _rotation
             log($"Gaussians decoded ({voxels} voxels)");
-            return cloud;
+            return (cloud, null);
         }
         finally
         {

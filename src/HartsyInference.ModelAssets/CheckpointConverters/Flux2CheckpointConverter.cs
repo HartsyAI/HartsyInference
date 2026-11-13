@@ -8,6 +8,9 @@ namespace HartsyInference.ModelAssets.CheckpointConverters;
 /// <param name="mlpInner">Per-block MLP inner dimension (= hiddenSize × mlp_ratio). 9216 for Klein 4B (ratio 3.0), etc.</param>
 public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
 {
+    /// <summary>Iris-Z's modality embedding <c>[modalities, hidden]</c>; the key is the same before and after conversion.</summary>
+    public const string ModalityEmbeddingKey = "modality_in.weight";
+
     /// <summary>Result of converting a single-file Flux.2 checkpoint.</summary>
     public sealed class ConvertedWeights
     {
@@ -100,6 +103,12 @@ public sealed class Flux2CheckpointConverter(int hiddenSize, int mlpInner)
         if (bflKey.StartsWith("single_blocks.", StringComparison.Ordinal))
         {
             ConvertSingleBlock(bflKey["single_blocks.".Length..], tensor, output);
+            return;
+        }
+        if (bflKey == ModalityEmbeddingKey)
+        {
+            // Iris-Z's modality embedding has no diffusers name; it keeps its own.
+            output[bflKey] = tensor;
             return;
         }
         // Unknown keys are silently dropped (allows the same checkpoint to carry text-encoder

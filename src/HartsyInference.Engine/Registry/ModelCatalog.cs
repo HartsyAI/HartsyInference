@@ -22,6 +22,26 @@ public static class ModelCatalog
     private static CatalogEntry E(string id, Modality modality, string name, string arch, ModelStatus status, bool cli = false) =>
         new CatalogEntry { Id = id, Modality = modality, DisplayName = name, Architecture = arch, Status = status, CliDrivable = cli };
 
+    /// <summary>One transformer shard of an Iris-Z build (<paramref name="size"/> is <c>small</c> or <c>big</c>), kept in the
+    /// release's own folder layout so the index beside it resolves the set.</summary>
+    private static ModelAsset IrisZShard(string size, int index, int count, string sha256) => new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = $"Iris-Z-{size}/transformer-{index:D5}-of-{count:D5}.safetensors",
+        TargetSubdir = $"Stable-Diffusion/IrisZ/Iris-Z-{size}",
+        Role = "transformer",
+        Sha256 = sha256,
+    };
+
+    /// <summary>The shard index of an Iris-Z build.</summary>
+    private static ModelAsset IrisZIndex(string size) => new ModelAsset
+    {
+        Repo = "speridlabs/iris-z",
+        RepoPath = $"Iris-Z-{size}/transformer.safetensors.index.json",
+        TargetSubdir = $"Stable-Diffusion/IrisZ/Iris-Z-{size}",
+        Role = "config",
+    };
+
     /// <summary>Oasis's one-shot rollout runs 10 DDIM steps per frame when a request names none. Its other world options keep
     /// the <see cref="WorldCapabilities"/> defaults: any backend, 24 fps, 16 frames, no camera input.</summary>
     private static WorldCapabilities OasisWorld => new WorldCapabilities { DefaultSteps = 10, LiveControls = OasisControlScheme.Instance };
@@ -117,6 +137,20 @@ public static class ModelCatalog
             Role = "transformer", Sha256 = "eb76550cfbe06f154c6e9b17167ccfc28222bb4a216ec7b12ac2bf7d762de38c" },
     ];
 
+    /// <summary>Hunyuan3D-Part X-Part (<c>tencent/Hunyuan3D-Part</c> at <c>67717446</c>): the P3-SAM file above plus the part DiT (BF16, 6.6 GB), the ShapeVAE (BF16) and the conditioner (BF16 and
+    /// F32 Sonata). Same Tencent 3D-Part Community License.</summary>
+    private static ModelAsset[] Hunyuan3DXPartAssets =>
+    [
+        // The part DiT is the one transformer, so it is the entry's primary asset; the P3-SAM copy (same path and hash as hunyuan3d-part's) takes another role.
+        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "model/model.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "model/model.safetensors",
+            Role = "transformer", Sha256 = "4ca47998e1357432302d7de0ec85f7e4076b8e64037935f033b881e2fd9973e0" },
+        .. Hunyuan3DPartAssets.Select(a => a with { Role = "segmenter" }),
+        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "conditioner/conditioner.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "conditioner/conditioner.safetensors",
+            Role = "conditioner", Sha256 = "730518ae5f2b6af51db12137ed0dc0ac791ee04d927cf8e4f2043db9c8218251" },
+        new() { Repo = "tencent/Hunyuan3D-Part", RepoPath = "shapevae/shapevae.safetensors", TargetSubdir = "3D/hunyuan3d-part", TargetName = "shapevae/shapevae.safetensors",
+            Role = "vae", Sha256 = "3d46179a603c529c42ce8c1eac6d56667700b1f16626e4bc5bc319c99a4f3b88" },
+    ];
+
     /// <summary>Hunyuan3D Paint 2.1 (<c>tencent/Hunyuan3D-2.1</c> at <c>0b946776</c>): the PBR UNet and VAE (pickles, read by the safe parser only), DINOv2-giant and Real-ESRGAN x4plus.</summary>
     private static ModelAsset[] Hunyuan3DPaint21Assets =>
     [
@@ -126,8 +160,27 @@ public static class ModelCatalog
             TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc" },
         new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
             Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
-        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", Role = "upscaler",
-            Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
+        // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
+    ];
+
+    /// <summary>Hunyuan3D-Omni (<c>tencent/Hunyuan3D-Omni</c> at <c>70e803bf</c>): the DiT, the VAE and the control encoder (pickles, read by the safe parser only) with their configs, and DINOv2-large (<c>facebook/dinov2-large</c> at
+    /// <c>47b73eef</c>, Apache-2.0), which the Omni repository does not contain.</summary>
+    private static ModelAsset[] Hunyuan3DOmniAssets =>
+    [
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "model/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "model/pytorch_model.bin",
+            Role = "transformer", Sha256 = "01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "vae/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "vae/pytorch_model.bin",
+            Role = "vae", Sha256 = "379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "cond_encoder/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "cond_encoder/pytorch_model.bin",
+            Role = "control encoder", Sha256 = "f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432" },
+        new() { Repo = "facebook/dinov2-large", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "dinov2-large/model.safetensors",
+            Role = "image encoder", Sha256 = "399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "config.json",
+            Role = "config", Sha256 = "efea7858ac17dd786ae41e512d877f4f3ff638bf6f64b8ad3eeb7cae62eb9eae" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "model/config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "model/config.json",
+            Role = "config", Sha256 = "c508943a4a85f56c285dd53c00d785569cbfae8261aff68a5547dc5e789053eb" },
+        new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "vae/config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "vae/config.json",
+            Role = "config", Sha256 = "e895305a8a487ff4c42a69712c0c8c6fd1dac22ad29b29dcf8c8801f646e08e8" },
     ];
 
     /// <summary>The turbo VAE FlashVDM decodes with (<see cref="Hunyuan3DFlashVdmVaeRole"/>), shared by every build that decodes with FlashVDM.</summary>
@@ -351,7 +404,7 @@ public static class ModelCatalog
     {
         Id = "sam3d-objects", Modality = Modality.Mesh, DisplayName = "SAM 3D Objects (image + mask to Gaussian splats; SAM License)",
         Architecture = "MoT shortcut-flow structure generator (DINOv2-L x2 + pointmap), TRELLIS sparse SLAT flow, Gaussian decoder, MoGe pointmap",
-        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "apozz/sam-3d-objects-safetensors",
+        Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "apozz/sam-3d-objects-safetensors", LoadsFromFolder = true,
         Assets = new ModelAsset[]
         {
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "ss_generator.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "structure generator (with both DINOv2 towers)",
@@ -362,6 +415,8 @@ public static class ModelCatalog
                 Sha256 = "ee0c1601f3259f61cb22030bad839a3fe30a95b5f78bc9451babdbd8836fd06d" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_decoder_gs.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "Gaussian decoder",
                 Sha256 = "48a3dc3271f56efe9c8b1e601d0350d9ab7914fec0e635048682aa8f7c9e86be" },
+            new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "slat_decoder_mesh.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "mesh decoder (the mesh output)",
+                Sha256 = "51f27a1c7a7892eff9576cf73bb888a255d4a184a76a9bfd9675f0d9ba464f5a" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl.safetensors", TargetSubdir = "3D/sam3d-objects", Role = "MoGe pointmap model",
                 Sha256 = "dbdf89d1f7651b9213a507923b4f100fed87489bb7425fda7f7d430bcb31d8a9" },
             new() { Repo = "apozz/sam-3d-objects-safetensors", RepoPath = "moge_vitl_config.json", TargetSubdir = "3D/sam3d-objects", Role = "MoGe config",
@@ -1081,6 +1136,54 @@ public static class ModelCatalog
                         TargetSubdir = "Stable-Diffusion/Flux2", Role = "transformer",
                         Sha256 = "ec3d4e733a771f61c052fb4856c48b336c55eaf2c65487c2a1faeb9bbda7a343" },
                     SideModels.Qwen3_4B,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Iris-Z-small (speridlabs/iris-z): FLUX.2 Klein base 9B fine-tuned to generate images and depth, served by
+                // Flux2Recipe's iris-z-small variant. Licence: FLUX non-commercial. Built and unit-tested; no real-weight run yet.
+                Id = "iris-z-small", Modality = img, DisplayName = "Iris-Z-small", Architecture = "FLUX.2 DiT with a depth grid, flow-matching",
+                Status = vp,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    IrisZShard("small", 1, 4, "4b1fec0714cad8e0a76b2512b91fd21b7937879f80be11dc518817a8dfcbae2b"),
+                    IrisZShard("small", 2, 4, "b402401fcf7dbe5e26d55d7a52abf72291636ed0be6b0f61fb95c0c085ffd2b1"),
+                    IrisZShard("small", 3, 4, "148f4d1d65765f02ad0e2f4a1157ed3c749d798d5c789d10272c69fb2d55a7a1"),
+                    IrisZShard("small", 4, 4, "5b93e5f0069dff96a5ffa23cdee666ad220fa8ef06d22142aaa54e5bfae51064"),
+                    IrisZIndex("small"),
+                    SideModels.IrisZSmallEmptyPrompt,
+                    SideModels.Qwen3_8B_Fp4Mixed,
+                    SideModels.Flux2Vae,
+                },
+            },
+            new CatalogEntry
+            {
+                // Iris-Z-big (speridlabs/iris-z): FLUX.2 Dev without its guidance embedding, fine-tuned the same way; 64 GB of
+                // BF16 shards. Licence: FLUX non-commercial. Built only: nothing here has run it, and it has no quantized build.
+                Id = "iris-z-big", Modality = img, DisplayName = "Iris-Z-big", Architecture = "FLUX.2 DiT with a depth grid, flow-matching",
+                Status = st,
+                CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    IrisZShard("big", 1, 14, "0aa1e4829170757e562e90c24e9459fce4b64660cf9851187e4fb0b4304dd5bc"),
+                    IrisZShard("big", 2, 14, "20cd14a01c2bb3fa4767d8a98896d9cc3c2d796d3038e9f3ff826ad656a50272"),
+                    IrisZShard("big", 3, 14, "a5dcdaa9cee58c9f3cd770a59f8aa03dd001898f26fd86257be00031bd5e6c6b"),
+                    IrisZShard("big", 4, 14, "cb1a366403f756835f361e4d48010917152e14aea9c437b356c7849dedac7def"),
+                    IrisZShard("big", 5, 14, "4dc2e4393cf2c565786d8ba3ad6074e0857fe860b7a72e1eab0514f358cb021e"),
+                    IrisZShard("big", 6, 14, "a23bed96506b68314983ad42fd53310748b95569a163c7fb98f71b1d32725c3f"),
+                    IrisZShard("big", 7, 14, "62b0257177a62706879ce03c5d659f069b874543c5488eddc37465914af4d85b"),
+                    IrisZShard("big", 8, 14, "b22e7bb0c024e128db863573f367284d493aaadb0b20ae1a21cc08a608f9c5da"),
+                    IrisZShard("big", 9, 14, "1ab1e350bc51356bce7ce1a6971d07f927a84e6ae8053ba963f4770477f88dd5"),
+                    IrisZShard("big", 10, 14, "41173d42e6bdc6c41bc28354cdf774b3d12ae6296d52a7f4e6c993317a97f720"),
+                    IrisZShard("big", 11, 14, "e93a598dd6c0351cf7a9153530f610ea780ace4a012a00f77b32a715580c2d7e"),
+                    IrisZShard("big", 12, 14, "c3a1d10ec62125bbbedc34b96775334a60c4836191ec235a668247e7097bca51"),
+                    IrisZShard("big", 13, 14, "ed89962d45d5f67c93948e024694acc8711b6c5ca95955b5f5f0f6f4c7249ff0"),
+                    IrisZShard("big", 14, 14, "1bab9a78674130c8e7b07f478a1d8adf42f7f0add5dbd92d917de09d27691077"),
+                    IrisZIndex("big"),
+                    SideModels.IrisZBigEmptyPrompt,
+                    SideModels.MistralSmallFlux2,
                     SideModels.Flux2Vae,
                 },
             },
@@ -2799,8 +2902,12 @@ public static class ModelCatalog
                 with { Assets = Hunyuan3DPaintAssets },
             E("hunyuan3d-paint21", d3, "Hunyuan3D-2.1 Paint (PBR texturing)", "SD 2.1 zero-SNR UNet + material, DINO and rotary multiview attention, back-projected", st, cli: true)
                 with { Assets = Hunyuan3DPaint21Assets },
+            E("hunyuan3d-omni", d3, "Hunyuan3D-Omni (controlled shape generation)", "Hunyuan3D-2.1 DiT with image plus point, voxel, bounding-box or pose control tokens, ShapeVAE decode", st, cli: true)
+                with { Assets = Hunyuan3DOmniAssets, LoadsFromFolder = true },
             E("hunyuan3d-part", d3, "Hunyuan3D-Part P3-SAM (part segmentation)", "Sonata (PTv3) encoder + prompt-conditioned mask and IoU heads, auto-mask labelling", st, cli: true)
                 with { Assets = Hunyuan3DPartAssets },
+            E("hunyuan3d-xpart", d3, "Hunyuan3D-Part X-Part (part generation)", "P3-SAM boxes + Sonata/ShapeVAE conditioner + part flow DiT, a complete shape per part", st, cli: true)
+                with { Assets = Hunyuan3DXPartAssets, LoadsFromFolder = true },
             E("trellis", d3, "TRELLIS (image-large)", "2-stage rectified flow + Gaussian splat", st, cli: true),
             E("cola3d", d3, "CoLa3D (scene decomposition)", "Utonia + TRELLIS.2 shape VAE + CoLa3D decomposer", st, cli: true),
             E("unirig", d3, "UniRig (auto-rigging)", "Michelangelo encoder + OPT skeleton decoder + point-transformer skinning", st, cli: true),

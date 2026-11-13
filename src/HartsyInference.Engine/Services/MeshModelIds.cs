@@ -3,6 +3,12 @@ namespace HartsyInference.Engine.Services;
 /// <summary>Catalog ids of the 3D models with a wired pipeline, grouped by the input they take.</summary>
 public static class MeshModelIds
 {
+    /// <summary>HairDeck: image to hair cards; it has its own request options and is not part of <see cref="ImageToMesh"/>.</summary>
+    public const string HairDeck = "hairdeck";
+
+    /// <summary>TRELLIS.2: image to mesh, shape-only or textured.</summary>
+    public const string Trellis2 = "trellis2";
+
     /// <summary>Pixal3D: image to mesh, shape-only or textured, with projected DINOv3 features.</summary>
     public const string Pixal3D = "pixal3d";
 
@@ -27,8 +33,27 @@ public static class MeshModelIds
 
     /// <summary>Part-segmentation models (Hunyuan3D-Part P3-SAM): their request carries <see cref="Requests.MeshRequest.SceneMesh"/>, and the result is a GLB with one
     /// coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
-    public static readonly IReadOnlyList<string> PartMesh = ["hunyuan3d-part"];
+    public static readonly IReadOnlyList<string> PartMesh = [P3Sam];
+
+    /// <summary>The id of Hunyuan3D-Part P3-SAM.</summary>
+    public const string P3Sam = "hunyuan3d-part";
+
+    /// <summary>The id of Hunyuan3D-Part X-Part.</summary>
+    public const string XPart = "hunyuan3d-xpart";
+
+    /// <summary>Part-generation models (Hunyuan3D-Part X-Part): the request carries <see cref="Requests.MeshRequest.SceneMesh"/>, P3-SAM splits it into parts and every part is generated again as a
+    /// complete shape; the result is a GLB with one coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
+    public static readonly IReadOnlyList<string> XPartMesh = [XPart];
+
+    /// <summary>The id of Hunyuan3D-Omni.</summary>
+    public const string Omni = "hunyuan3d-omni";
+
+    /// <summary>Controlled shape generation (Hunyuan3D-Omni): the request carries <see cref="Requests.MeshRequest.Image"/> and <see cref="Requests.MeshRequest.Control"/>.</summary>
+    public static readonly IReadOnlyList<string> OmniMesh = [Omni];
 
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
-    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh];
+    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh, .. XPartMesh, .. OmniMesh];
+
+    /// <summary><see cref="All"/> and <see cref="HairDeck"/>: every id a host can describe and plan.</summary>
+    public static readonly IReadOnlyList<string> Described = [.. All, HairDeck];
 }

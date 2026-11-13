@@ -2,6 +2,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
@@ -9,6 +10,7 @@ using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.CoLa3D;
 using HartsyInference.ThreeD.Models.HairDeck;
 using HartsyInference.ThreeD.Models.HairDeck.Preprocessing;
+using HartsyInference.ThreeD.Models.Hunyuan3D.Omni;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 using HartsyInference.ThreeD.Pipelines;
 using HartsyInference.ThreeD.Pipelines.Requests;
@@ -19,10 +21,11 @@ namespace HartsyInference.Engine.Services;
 /// (CoLa3D) turns a triangle scene into one GLB mesh per decomposed object, and the rigging model (UniRig) turns a triangle mesh into a
 /// rigged GLB. Loaded pipelines are cached per checkpoint for the
 /// life of the service, and a model id without a branch here is rejected before anything loads.</summary>
-public sealed class MeshService : IMeshService, IDisposable
+public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposable
 {
-    private const string HairDeckId = "hairdeck";
-    private const string Trellis2Id = "trellis2";
+    private static readonly string EngineVersion = typeof(MeshService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
+        ?? typeof(MeshService).Assembly.GetName().Version?.ToString() ?? "unknown";
 
     private readonly InferenceEngine _engine;
     private readonly Dictionary<string, LoadedMesh> _pipelines = new(StringComparer.OrdinalIgnoreCase);
@@ -30,6 +33,8 @@ public sealed class MeshService : IMeshService, IDisposable
     private readonly Dictionary<string, UniRigPipeline> _rigPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HunyuanPaintLoader> _paintPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, P3SamPipeline> _partPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, XPartPipeline> _xpartPipelines = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Hunyuan3DOmniPipeline> _omniPipelines = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HairDeckRuntime> _hairDecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Trellis2Runtime> _trellis2 = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Pixal3DRuntime> _pixal3d = new(StringComparer.OrdinalIgnoreCase);
@@ -41,14 +46,228 @@ public sealed class MeshService : IMeshService, IDisposable
     internal MeshService(InferenceEngine engine) => _engine = engine;
 
     /// <inheritdoc/>
-    public Task<MeshResult> GenerateAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
+    public async Task<MeshResult> GenerateAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
-        string id = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
-        if (id != Trellis2Id && id != MeshModelIds.Pixal3D)
-            Trellis2RequestMapper.RejectForOtherModels(request, id);
-        Pixal3DRequestMapper.RejectForOtherModels(request, id);
+        string id = IdOf(spec);
+        MeshSettingsUsed settings = SettingsOf(id, request);
+        MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? request with { Seed = seed } : request;
+        MeshResult raw = await WithOutOfVramRetry(
+            () => GenerateRawAsync(id, spec, effective, progress, cancel),
+            () =>
+            {
+                progress?.Report(MeshProgress.Plain(0, 0, "Retrying after out of memory"));
+                FreeAfterOutOfVram();
+            }).ConfigureAwait(false);
+        return await Task.Run(() => MeshResultFinisher.Finish(id, request, raw, settings, cancel), cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Runs <paramref name="run"/>; when it fails for lack of device memory, calls <paramref name="free"/> and runs it once more. The retry re-resolves its pipeline, which is why it can live here: the failed run's cached pipeline was freed, so nothing believes weights it no longer has are resident. A second failure, any other failure and a cancellation propagate.</summary>
+    internal static async Task<MeshResult> WithOutOfVramRetry(Func<Task<MeshResult>> run, Action free)
+    {
+        try
+        {
+            return await run().ConfigureAwait(false);
+        }
+        catch (Exception ex) when (InferenceEngine.IsOutOfVram(ex))
+        {
+            Logs.Warning($"[Mesh] A generation ran out of VRAM; freeing the loaded 3D models and retrying once: {ex.Message}");
+            free();
+            return await run().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Gives back what the 3D side holds: its resident pipelines and the matting model (<see cref="Free"/> frees both), then the driver pool's cached-but-free blocks. It does not sweep the backend's weight and activation caches, which the engine's cached image and video pipelines still believe are resident (a sweep under them returns garbage, see <c>InferenceEngine.GenerateWithVramCleanup</c>).</summary>
+    private void FreeAfterOutOfVram()
+    {
+        Free();
+        try
+        {
+            _engine.Backend.TrimMemoryPool();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logs.Error("[Mesh] Trimming the device pool after an out-of-memory failure failed; the retry may fail too.", ex);
+        }
+    }
+
+    /// <summary>The pipelines that have no run gate of their own: a run takes a count under its pipeline's key, and a disposal waits for that pipeline's count to reach zero and holds new runs on it off meanwhile.</summary>
+    private static bool HasNoRunGate(string kind) => kind is ImageKind or SceneKind or RigKind or PaintKind or PartKind or OmniKind;
+
+    /// <summary>Whether the model's runtime serialises its own runs (and so waits for one before it is disposed); every other model runs counted.</summary>
+    private static bool RunsGated(string id, ModelSpec spec) =>
+        id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || id == MeshModelIds.Sam3dObjects || id == MeshModelIds.HairDeck || IsHairDeck(spec);
+
+    private readonly MeshRunCounter _runs = new();
+
+    /// <summary>Runs one generation counted under <paramref name="key"/> (<see cref="RunKeyOf"/>), so that <see cref="Free"/> of that pipeline cannot dispose it under the run and a free of another one does not wait for it. While a free of the key waits or runs, the run waits without holding a thread, and gives up when <paramref name="cancel"/> is cancelled.</summary>
+    internal Task<MeshResult> RunCounted(string? key, Func<Task<MeshResult>> run, CancellationToken cancel = default) => _runs.RunAsync(key, run, cancel);
+
+    /// <summary>The key the run of <paramref name="id"/> on <paramref name="spec"/> is counted under: the one <see cref="Free"/> counts its pipeline under, built from the same cache key the loader uses. Null when the run has no pipeline to protect: no checkpoint is named, or one the loader will refuse.</summary>
+    internal static string? RunKeyOf(string id, ModelSpec spec, MeshRequest request)
+    {
+        if (spec.LocalPath is null)
+            return null;
+        try
+        {
+            if (MeshModelIds.SceneMesh.Contains(id))
+                return MeshRunCounter.KeyOf(SceneKind, SceneKey(spec.LocalPath, SceneSource(request.ScenePrompt)));
+            if (MeshModelIds.RigMesh.Contains(id))
+                return MeshRunCounter.KeyOf(RigKind, spec.LocalPath);
+            if (MeshModelIds.PaintMesh.Contains(id))
+                return MeshRunCounter.KeyOf(PaintKind, PaintFolder(spec.LocalPath));
+            if (MeshModelIds.PartMesh.Contains(id))
+                return MeshRunCounter.KeyOf(PartKind, PartCheckpoint(spec.LocalPath));
+            if (MeshModelIds.XPartMesh.Contains(id))
+                return MeshRunCounter.KeyOf(XPartKind, XPartFolder(spec.LocalPath));
+            if (MeshModelIds.OmniMesh.Contains(id))
+                return MeshRunCounter.KeyOf(OmniKind, Path.GetFullPath(OmniInstall(spec.LocalPath).Folder));
+            return MeshRunCounter.KeyOf(ImageKind, spec.LocalPath);
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private const string ImageKind = "image";
+    private const string SceneKind = "scene";
+    private const string RigKind = "rig";
+    private const string PaintKind = "paint";
+    private const string PartKind = "part";
+    private const string XPartKind = "xpart";
+    private const string OmniKind = "omni";
+
+    private static string SceneKey(string localPath, CoLa3DConfig.QuerySourceKind source) => $"{localPath}|{source}";
+
+    /// <summary>The decomposer variant a scene prompt selects, as <see cref="ToCoLa3DPrompt"/> would tell it, without copying the mask planes.</summary>
+    internal static CoLa3DConfig.QuerySourceKind SceneSource(SceneMeshPrompt? prompt) =>
+        prompt is null ? CoLa3DConfig.QuerySourceKind.Fixed
+        : prompt.Masks is not null ? CoLa3DConfig.QuerySourceKind.PromptMask
+        : CoLa3DConfig.QuerySourceKind.PromptPoint;
+
+    /// <inheritdoc/>
+    public IReadOnlyList<MeshLoadedModel> Loaded()
+    {
+        List<MeshLoadedModel> loaded;
+        lock (_gate)
+        {
+            loaded = [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
+        }
+        if (_engine.MeshPreparationIfCreated?.MatterLoadedFrom is { } matter)
+            loaded.Add(new MeshLoadedModel(MatterKind, NameOf(matter)));
+        return loaded;
+    }
+
+    /// <inheritdoc/>
+    public int Free(string? name = null)
+    {
+        List<(string Kind, string Key, string Name, IDisposable Item)> freed = [];
+        lock (_gate)
+        {
+            foreach ((string kind, string key, IDisposable item) in Resident().ToList())
+            {
+                if (name is not null && !string.Equals(NameOf(key), name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                RemoveResident(kind, key);
+                freed.Add((kind, key, NameOf(key), item));
+            }
+        }
+        // A disposal waits for the run in progress, so it happens outside the lock that every load takes: the gated runtimes wait on their own gate, the others on the run count of their own pipeline.
+        foreach ((string _, string _, string _, IDisposable item) in freed.Where(f => !HasNoRunGate(f.Kind)))
+            item.Dispose();
+        List<(string Kind, string Key, string Name, IDisposable Item)> counted = [.. freed.Where(f => HasNoRunGate(f.Kind))];
+        if (counted.Count > 0)
+            _runs.WhenIdle(counted.Select(f => MeshRunCounter.KeyOf(f.Kind, f.Key)), () => counted.ForEach(f => f.Item.Dispose()));
+        List<string> freedNames = [.. freed.Select(f => $"{f.Kind} {f.Name}")];
+        if (FreeMatter(name) is { } matterName)
+            freedNames.Add($"{MatterKind} {matterName}");
+        if (freedNames.Count > 0)
+            Logs.Info($"[Mesh] Freed {freedNames.Count} resident 3D model(s): {string.Join(", ", freedNames)}.");
+        return freedNames.Count;
+    }
+
+    /// <summary>The kind the shared matting model is listed under.</summary>
+    internal const string MatterKind = "matting";
+
+    /// <summary>Releases the shared matting model when it is resident and <paramref name="name"/> is null or names it; returns the name it was listed under, else null.</summary>
+    private string? FreeMatter(string? name)
+    {
+        string? path = _engine.MeshPreparationIfCreated?.MatterLoadedFrom;
+        if (path is null)
+            return null;
+        string listed = NameOf(path);
+        if (name is not null && !string.Equals(listed, name, StringComparison.OrdinalIgnoreCase))
+            return null;
+        return _engine.MeshPreparationIfCreated?.ReleaseMatter() == true ? listed : null;
+    }
+
+    private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
+    {
+        foreach (KeyValuePair<string, LoadedMesh> e in _pipelines) yield return (ImageKind, e.Key, e.Value.Pipeline);
+        foreach (KeyValuePair<string, CoLa3DPipeline> e in _scenePipelines) yield return (SceneKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, UniRigPipeline> e in _rigPipelines) yield return (RigKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, HunyuanPaintLoader> e in _paintPipelines) yield return (PaintKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, P3SamPipeline> e in _partPipelines) yield return (PartKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, Hunyuan3DOmniPipeline> e in _omniPipelines) yield return (OmniKind, e.Key, e.Value);
+        foreach (KeyValuePair<string, HairDeckRuntime> e in _hairDecks) yield return ("hairdeck", e.Key, e.Value);
+        foreach (KeyValuePair<string, Trellis2Runtime> e in _trellis2) yield return ("trellis2", e.Key, e.Value);
+        foreach (KeyValuePair<string, Pixal3DRuntime> e in _pixal3d) yield return ("pixal3d", e.Key, e.Value);
+    }
+
+    private void RemoveResident(string kind, string key)
+    {
+        switch (kind)
+        {
+            case ImageKind: _pipelines.Remove(key); break;
+            case SceneKind: _scenePipelines.Remove(key); break;
+            case RigKind: _rigPipelines.Remove(key); break;
+            case PaintKind: _paintPipelines.Remove(key); break;
+            case PartKind: _partPipelines.Remove(key); break;
+            case OmniKind: _omniPipelines.Remove(key); break;
+            case "hairdeck": _hairDecks.Remove(key); break;
+            case "trellis2": _trellis2.Remove(key); break;
+            default: _pixal3d.Remove(key); break;
+        }
+    }
+
+    /// <summary>The key a pipeline is cached under as a name that holds no absolute path: relative to the models root when under it, else the last segment. A scene key carries its variant after a bar and keeps it.</summary>
+    private static string NameOf(string key)
+    {
+        string[] parts = key.Split('|');
+        string root = RepoPaths.ModelsRoot();
+        string path = parts[0];
+        string name = path.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            ? Path.GetRelativePath(root, path).Replace('\\', '/')
+            : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return parts.Length > 1 ? name + "|" + parts[1] : name;
+    }
+
+    /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
+    internal static MeshSettingsUsed SettingsOf(string id, MeshRequest request)
+    {
+        if (MeshModelProfiles.Find(id) is null)
+            return new MeshSettingsUsed { ModelId = id, EngineVersion = EngineVersion };
+        MeshModelDescriptor descriptor = MeshPlanningService.DescriptorOf(id);
+        Dictionary<string, ResolvedParameter> parameters = new(MeshPlanningService.Settings(request, descriptor));
+        long? seed = null;
+        if (descriptor.Fields[nameof(MeshRequest.Seed)].Access == MeshFieldAccess.Used)
+        {
+            seed = MeshSeed.Resolve(request.Seed);
+            parameters[nameof(MeshRequest.Seed)] = ParameterProvenance.Seed(request.Seed, seed.Value);
+        }
+        return new MeshSettingsUsed { ModelId = id, Seed = seed, Parameters = parameters, EngineVersion = EngineVersion };
+    }
+
+    private Task<MeshResult> GenerateRawAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        MeshRequestValidator.Validate(id, request, MatterAvailable());
+        return RunsGated(id, spec) ? DispatchAsync(id, spec, request, progress, cancel) : RunCounted(RunKeyOf(id, spec, request), () => DispatchAsync(id, spec, request, progress, cancel), cancel);
+    }
+
+    private Task<MeshResult> DispatchAsync(string id, ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
         if (MeshModelIds.SceneMesh.Contains(id))
             return GenerateSceneAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.RigMesh.Contains(id))
@@ -57,20 +276,16 @@ public sealed class MeshService : IMeshService, IDisposable
             return GeneratePaintAsync(spec, id, request, progress, cancel);
         if (MeshModelIds.PartMesh.Contains(id))
             return GeneratePartAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.XPartMesh.Contains(id))
+            return GenerateXPartAsync(spec, id, request, progress, cancel);
+        if (MeshModelIds.OmniMesh.Contains(id))
+            return GenerateOmniAsync(spec, id, request, progress, cancel);
 
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to scene models (cola3d).");
-        if (request.Image is null)
-        {
-            throw new NotSupportedException(
-                "Text-to-3D has no wired pipeline; supply MeshRequest.Image for image-to-3D (TripoSR / Hunyuan3D).");
-        }
         if (IsHairDeck(spec))
         {
-            return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, cancel), Format = "glb" }, cancel);
+            return Task.Run(() => new MeshResult { Data = GenerateHairDeck(spec, request, progress, cancel), Format = "glb" }, cancel);
         }
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (id == Trellis2Id)
+        if (id == MeshModelIds.Trellis2)
             return GenerateTrellis2Async(spec, request, progress, cancel);
         if (id == MeshModelIds.Pixal3D)
             return GeneratePixal3DAsync(spec, request, progress, cancel);
@@ -80,20 +295,24 @@ public sealed class MeshService : IMeshService, IDisposable
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
+                // Matting first, so on a cold start the matting forward pass does not overlap the shape model's first load; the matting weights stay resident afterwards.
+                ImageData image = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
                 LoadedMesh loaded = GetOrLoad(spec, id);
                 ImageTo3DRequest job = new ImageTo3DRequest
                 {
-                    ImageRgb = request.Image.Rgb,
-                    Width = request.Image.Width,
-                    Height = request.Image.Height,
+                    ImageRgb = image.Rgb,
+                    Width = image.Width,
+                    Height = image.Height,
                     GridResolution = request.GridResolution,
                     Steps = request.Steps,
-                    Seed = request.Seed < 0 ? null : (int)request.Seed,
+                    Seed = MeshSeed.ForSampler(request.Seed),
                 };
                 ThreeDResult result = loaded.Generate(job, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 });
                 if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
@@ -111,19 +330,9 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>Scene decomposition: one GLB holding a mesh node per object.</summary>
     private Task<MeshResult> GenerateSceneAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' decomposes a triangle scene; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a scene mesh, not an image; leave MeshRequest.Image empty.");
-        SceneMeshData sceneMesh = request.SceneMesh;
+        SceneMeshData sceneMesh = request.SceneMesh!;
         CoLa3DPrompt? prompt = request.ScenePrompt is null ? null : ToCoLa3DPrompt(request.ScenePrompt);
-        CoLa3DConfig.QuerySourceKind source = prompt?.Kind ?? CoLa3DConfig.QuerySourceKind.Fixed;
-        // Rejects the request before the checkpoint loads; the pipeline checks it again on Generate.
-        CoLa3DPipeline.ValidateRequest(CoLa3DConfig.ForQuerySource(source), request.GridResolution, prompt);
+        CoLa3DConfig.QuerySourceKind source = SceneSource(request.ScenePrompt);
 
         return Task.Run(
             () =>
@@ -134,7 +343,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 CoLa3DResult result = pipeline.Generate(scene, request.GridResolution, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, prompt);
                 if (result.Objects.Count == 0)
                     throw new InvalidOperationException("The scene decomposed into no object geometry (try a finer grid).");
@@ -146,19 +355,7 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <summary>Rigging: one GLB holding the input mesh, a generated skeleton and per-vertex skin weights.</summary>
     private Task<MeshResult> GenerateRiggedAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' rigs a triangle mesh; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Steps != 0 || request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
         UniRigPipeline.ValidateMesh(input);
 
         return Task.Run(
@@ -166,10 +363,10 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 UniRigPipeline pipeline = GetOrLoadRig(spec, id);
-                UniRigResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, p =>
+                UniRigResult result = pipeline.Generate(input, MeshSeed.ForSampler(request.Seed), p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
                 return new MeshResult { Data = result.Glb, Format = "glb" };
             },
@@ -208,21 +405,7 @@ public sealed class MeshService : IMeshService, IDisposable
     /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the surface sampling; the point and prompt counts are the upstream ones (100,000 and 400).</summary>
     private Task<MeshResult> GeneratePartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' segments a triangle mesh into parts; supply MeshRequest.SceneMesh as obj or glb.");
-        }
-        if (request.Image is not null)
-            throw new NotSupportedException($"3D model '{id}' takes a mesh, not an image; leave MeshRequest.Image empty.");
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Steps != 0 || request.GridResolution != 0)
-            throw new NotSupportedException($"3D model '{id}' has no steps or grid setting; leave Steps and GridResolution at 0.");
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The P3-SAM seed must be at most {int.MaxValue}.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
         P3SamPipeline.ValidateMesh(input);
 
         return Task.Run(
@@ -230,15 +413,184 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 cancel.ThrowIfCancellationRequested();
                 P3SamPipeline pipeline = GetOrLoadPart(spec, id);
-                P3SamResult result = pipeline.Generate(input, request.Seed < 0 ? null : (int)request.Seed, onProgress: p =>
+                P3SamResult result = pipeline.Generate(input, MeshSeed.ForSampler(request.Seed), onProgress: p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel: cancel);
                 MeshPart[] parts = [.. result.PartIds.Select((partId, i) => new MeshPart(partId, result.Boxes[i], result.FaceCounts[i]))];
                 return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
             },
             cancel);
+    }
+
+    /// <summary>X-Part: P3-SAM splits the mesh into parts and every part is generated again as a complete shape. One GLB with a coloured node per part, the parts' boxes and face counts in
+    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (negative: 42), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
+    /// <see cref="MeshRequest.GridResolution"/> the marching-cubes grid of each part (0: 256).</summary>
+    private Task<MeshResult> GenerateXPartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
+        P3SamPipeline.ValidateMesh(input);
+
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                XPartPipeline pipeline = GetOrLoadXPart(spec, id);
+                XPartOptions options = XPartOptionsFor(request, EngineKnobs.XPartFastDecode.Value);
+                XPartResult result = pipeline.Generate(input, options, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                }, cancel);
+                // The id is the part's position in the output (X-Part regenerates the parts, so P3-SAM's labels do not apply to them).
+                MeshPart[] parts = [.. result.Parts.Select((part, i) => new MeshPart(i, result.Boxes[i], part.TriangleCount))];
+                return new MeshResult { Data = result.Glb, Format = "glb", Parts = parts };
+            },
+            cancel);
+    }
+
+    /// <summary>The X-Part settings of a validated request: the seed (42 when unset), the flow steps (50) and the grid of each part (256), and whether the parts are decoded with FlashVDM (<c>numerics.xpartFastDecode</c>).</summary>
+    internal static XPartOptions XPartOptionsFor(MeshRequest request, bool fastDecode) => new()
+    {
+        Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
+        Steps = request.Steps == 0 ? 50 : request.Steps,
+        GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
+        FastDecode = fastDecode,
+    };
+
+    /// <summary>Returns the cached X-Part pipeline for <paramref name="spec"/>: the folder holding the four checkpoints (each stage loads its file when it runs).</summary>
+    private XPartPipeline GetOrLoadXPart(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding {string.Join(", ", XPartPipeline.Files)} as the local path.");
+        }
+        string folder = XPartFolder(spec.LocalPath);
+        lock (_gate)
+        {
+            if (_xpartPipelines.TryGetValue(folder, out XPartPipeline? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                XPartPipeline pipeline = new(_engine.Backend, folder);
+                _xpartPipelines[folder] = pipeline;
+                return pipeline;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to prepare the '{id}' 3D pipeline from {spec.LocalPath}", ex);
+                throw;
+            }
+        }
+    }
+
+    // The folder holding p3sam/, conditioner/, model/ and shapevae/: the path itself, or the folder above the file or subfolder a path points at.
+    internal static string XPartFolder(string localPath)
+    {
+        (string folder, bool complete) = XPartInstall(localPath);
+        if (complete)
+        {
+            return Path.GetFullPath(folder);
+        }
+        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(folder, XPartPipeline.Files[0]));
+    }
+
+    /// <summary>The folder an X-Part path means: the first of the path itself (or the folder of the file it names) and the folder above it that holds all four checkpoints; else the one that holds the most of them (the path may point at a
+    /// file or a subfolder of an incomplete install). Shared by the loader and the asset status, so they cannot disagree about where the files are.</summary>
+    internal static (string Folder, bool Complete) XPartInstall(string localPath) => Install(XPartPipeline.Files, localPath);
+
+    /// <summary>The folder Hunyuan3D-Omni's files are in, as <see cref="XPartInstall"/> finds the X-Part ones.</summary>
+    internal static (string Folder, bool Complete) OmniInstall(string localPath) => Install(Hunyuan3DOmniPipeline.Files, localPath);
+
+    private static (string Folder, bool Complete) Install(IReadOnlyList<string> files, string localPath)
+    {
+        string folder = File.Exists(localPath) ? Path.GetDirectoryName(Path.GetFullPath(localPath))! : localPath;
+        string? parent = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        string[] candidates = [.. new[] { folder, parent }.Where(c => c is not null).Select(c => c!)];
+        foreach (string candidate in candidates)
+        {
+            if (files.All(file => File.Exists(Path.Combine(candidate, file))))
+            {
+                return (candidate, true);
+            }
+        }
+        return (candidates.MaxBy(c => files.Count(file => File.Exists(Path.Combine(c, file))))!, false);
+    }
+
+    /// <summary>Hunyuan3D-Omni: the image (prepared like the other Hunyuan3D models when <see cref="MeshPreprocess.Auto"/> is set) and the control signal give a mesh, whose floating pieces are dropped as upstream's script does. The seed fixes the noise
+    /// and the surface samples of a voxel control; the guidance is the model's own 4.5.</summary>
+    private Task<MeshResult> GenerateOmniAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
+    {
+        int? seed = MeshSeed.ForSampler(request.Seed);
+        OmniControl control = OmniControlMapper.ToControl(request.Control!, seed ?? 1234);
+        return Task.Run(
+            () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                ImageData image = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
+                Hunyuan3DOmniPipeline pipeline = GetOrLoadOmni(spec, id);
+                ImageTo3DRequest job = new()
+                {
+                    ImageRgb = image.Rgb,
+                    Width = image.Width,
+                    Height = image.Height,
+                    GridResolution = request.GridResolution,
+                    Steps = request.Steps,
+                    Seed = seed,
+                };
+                ThreeDResult result = pipeline.Generate(job, control, p =>
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
+                });
+                if (result.Mesh is not { TriangleCount: > 0 } mesh)
+                    throw new InvalidOperationException("Omni produced no geometry (try another image, control or seed).");
+                // Upstream's FloaterRemover drops components under 0.5 % of the faces; this is the shared repair with the same ratio taken over the area.
+                return new MeshResult { Data = GlbWriter.Write(ShapeMeshFinisher.Finish(mesh, clean: true, smallComponentAreaRatio: 5e-3)), Format = "glb" };
+            },
+            cancel);
+    }
+
+    /// <summary>Returns the cached Omni pipeline for the folder <paramref name="spec"/> names (its DiT, VAE and control encoder pickles and the DINOv2-large weights beside them).</summary>
+    private Hunyuan3DOmniPipeline GetOrLoadOmni(ModelSpec spec, string id)
+    {
+        if (spec.LocalPath is null)
+        {
+            throw new FileNotFoundException(
+                $"No checkpoint found for 3D model '{spec.Requested}'. Download its catalog assets or supply the folder holding {string.Join(", ", Hunyuan3DOmniPipeline.Files)} as the local path.");
+        }
+        (string folder, bool complete) = OmniInstall(spec.LocalPath);
+        if (!complete)
+        {
+            string missing = string.Join(", ", Hunyuan3DOmniPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+            throw new FileNotFoundException($"'{spec.LocalPath}' is missing Omni files: {missing}.", Path.Combine(folder, Hunyuan3DOmniPipeline.Files[0]));
+        }
+        folder = Path.GetFullPath(folder);
+        lock (_gate)
+        {
+            if (_omniPipelines.TryGetValue(folder, out Hunyuan3DOmniPipeline? cached))
+            {
+                return cached;
+            }
+            try
+            {
+                Hunyuan3DOmniPipeline pipeline = Hunyuan3DOmniPipeline.Load(_engine.Backend, folder, Path.Combine(folder, Hunyuan3DOmniPipeline.DinoFile), message => Logs.Info($"[Omni] {message}"));
+                _omniPipelines[folder] = pipeline;
+                return pipeline;
+            }
+            catch (Exception ex)
+            {
+                Logs.Error($"Failed to load the '{id}' 3D pipeline from {folder}", ex);
+                throw;
+            }
+        }
     }
 
     /// <summary>Returns the cached P3-SAM pipeline for <paramref name="spec"/>: <c>p3sam.safetensors</c>, given directly or found in the folder it was given as.</summary>
@@ -291,37 +643,27 @@ public sealed class MeshService : IMeshService, IDisposable
     /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        HairDeckRequestMapper.RejectForOtherModels(request, id);
-        if (request.SceneMesh is null || request.Image is null)
-        {
-            throw new NotSupportedException(
-                $"3D model '{id}' textures a triangle mesh from a reference image; supply MeshRequest.SceneMesh (obj or glb) and MeshRequest.Image.");
-        }
-        if (request.ScenePrompt is not null)
-            throw new NotSupportedException($"3D model '{id}' takes no scene prompt; ScenePrompt applies to cola3d.");
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Paint seed must be at most {int.MaxValue}.");
-        if (request.Steps < 0 || request.GridResolution < 0)
-            throw new ArgumentOutOfRangeException(nameof(request), "Steps and GridResolution must not be negative.");
-        Mesh input = SceneMeshReader.Read(request.SceneMesh.Data, request.SceneMesh.Format);
-        ImageData reference = request.Image;
-        byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
+        Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
         HunyuanPaintOptions options = new()
         {
             Steps = request.Steps == 0 ? null : request.Steps,
             TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
+            Seed = MeshSeed.ForSampler(request.Seed),
         };
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
+                ImageData reference = request.Image!;
+                if (request.Preprocess == MeshPreprocess.Auto)
+                    reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
+                byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
                 ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
                 return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb" };
             },
@@ -342,7 +684,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Returns the cached Paint pipeline for <paramref name="spec"/>: the folder holding <c>unet/</c> and <c>vae/</c> (and, for 2.1, <c>dino/model.safetensors</c>
-    /// and <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
+    /// and, when <c>numerics.paintUpscaleViews</c> is on, <c>RealESRGAN_x4plus.pth</c>); the tensors of the checkpoint decide the generation.</summary>
     private HunyuanPaintLoader GetOrLoadPaint(ModelSpec spec, string id)
     {
         if (spec.LocalPath is null)
@@ -360,8 +702,13 @@ public sealed class MeshService : IMeshService, IDisposable
             try
             {
                 string? dino = FindPaintDino(folder);
-                string upscaler = Path.Combine(folder, "RealESRGAN_x4plus.pth");
-                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, File.Exists(upscaler) ? upscaler : null);
+                bool upscale = EngineKnobs.PaintUpscaleViews.Value;
+                string? upscaler = PaintUpscaler(folder, upscale);
+                if (upscale && upscaler is null)
+                {
+                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
+                }
+                HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
                 _paintPipelines[folder] = loader;
                 return loader;
             }
@@ -373,8 +720,16 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
+    /// <summary>The Real-ESRGAN checkpoint the Paint 2.1 views are upscaled with: only when the <c>numerics.paintUpscaleViews</c> knob is on and <c>RealESRGAN_x4plus.pth</c> is in
+    /// <paramref name="folder"/>; otherwise <c>null</c> and the views are baked as generated.</summary>
+    internal static string? PaintUpscaler(string folder, bool enabled)
+    {
+        string path = Path.Combine(folder, "RealESRGAN_x4plus.pth");
+        return enabled && File.Exists(path) ? path : null;
+    }
+
     // DINOv2-giant for Paint 2.1: the standalone dino/model.safetensors, else the F16 copy inside an installed Hunyuan3D shape checkpoint (same tensor names).
-    private static string? FindPaintDino(string folder)
+    internal static string? FindPaintDino(string folder)
     {
         string own = Path.Combine(folder, "dino", "model.safetensors");
         if (File.Exists(own))
@@ -420,17 +775,12 @@ public sealed class MeshService : IMeshService, IDisposable
         ImageData source = request.Image!;
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
         Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
-        if (!request.Texture && request.TextureSize != 0)
-            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only TRELLIS.2 mesh.");
-        string modelsRoot = RepoPaths.ModelsRoot();
-        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
-        Trellis2ImageTo3DPipeline.ValidateRequest(options, image, Trellis2Runtime.MatterAvailable(modelsRoot));
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                Trellis2Runtime runtime = GetOrLoadTrellis2(spec, modelsRoot);
+                Trellis2Runtime runtime = GetOrLoadTrellis2(spec);
                 // One run at a time per loaded model; a queued request gives up when its own cancellation fires.
                 runtime.Gate.Wait(cancel);
                 try
@@ -440,7 +790,7 @@ public sealed class MeshService : IMeshService, IDisposable
                     Action<GenerationProgress> report = p =>
                     {
                         cancel.ThrowIfCancellationRequested();
-                        progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                        progress?.Report(MeshProgress.Map(MeshModelIds.Trellis2, options.Texture, options.Grid, p));
                     };
                     if (options.Texture)
                     {
@@ -466,22 +816,17 @@ public sealed class MeshService : IMeshService, IDisposable
     {
         ImageData source = request.Image!;
         Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
-        if (!request.Texture && request.TextureSize != 0)
-            throw new NotSupportedException("TextureSize needs Texture; leave it at 0 for a shape-only Pixal3D mesh.");
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
-        string modelsRoot = RepoPaths.ModelsRoot();
-        // The runtime's matter makes this same lookup when it is first needed, so a checkpoint installed later is honoured.
-        Pixal3DImageTo3DPipeline.ValidateRequest(options, image, Pixal3DRuntime.MatterAvailable(modelsRoot));
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                Pixal3DRuntime runtime = GetOrLoadPixal3D(spec, modelsRoot);
+                Pixal3DRuntime runtime = GetOrLoadPixal3D(spec);
                 void Report(GenerationProgress p)
                 {
                     cancel.ThrowIfCancellationRequested();
-                    progress?.Report(new StepPreview { Step = p.Step, TotalSteps = p.TotalSteps });
+                    progress?.Report(MeshProgress.Map(MeshModelIds.Pixal3D, options.Texture, options.Grid, p));
                 }
 
                 return RunGated(
@@ -501,12 +846,13 @@ public sealed class MeshService : IMeshService, IDisposable
     /// </summary>
     private Task<MeshResult> GenerateSam3dAsync(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
-        Sam3dObjectsRequestMapper.Validate(request);
         string directory = spec.LocalPath ?? throw new FileNotFoundException("No checkpoint folder found for 'sam3d-objects'. Download the catalog assets or supply the model directory as the local path.");
         if (!Sam3dObjectsPipeline.HasWeights(directory))
             throw new FileNotFoundException($"'{directory}' lacks SAM 3D checkpoints: ss_generator, ss_decoder, slat_generator and slat_decoder_gs (.safetensors or .ckpt) must all be there.");
         if (!Sam3dObjectsPipeline.HasMoge(directory))
             throw new FileNotFoundException($"'{directory}' lacks moge_vitl.safetensors, which estimates the scene's pointmap.");
+        if (request.Mesh && !Sam3dObjectsPipeline.HasMeshDecoder(directory))
+            throw new FileNotFoundException($"'{directory}' lacks slat_decoder_mesh.safetensors, which the mesh output needs.");
         Sam3dObjectsRequest job = Sam3dObjectsRequestMapper.ToRequest(request);
         int total = job.StructureSteps + job.SlatSteps;
         // The service outlives Dispose (the engine calls it to free memory and on a backend switch and keeps the instance), so a request is rejected only when a disposal happened after it was queued.
@@ -528,8 +874,18 @@ public sealed class MeshService : IMeshService, IDisposable
                         (stage, step) =>
                         {
                             cancel.ThrowIfCancellationRequested();
-                            progress?.Report(new StepPreview { Step = stage == "structure" ? step : job.StructureSteps + step, TotalSteps = total });
+                            progress?.Report(MeshProgress.Plain(stage == "structure" ? step : job.StructureSteps + step, total, stage == "structure" ? "Structure flow" : "SLAT flow", step, stage == "structure" ? job.StructureSteps : job.SlatSteps, stage == "structure" ? 1 : 2, 2));
                         });
+                    if (result.Mesh is { FaceCount: > 0 } meshResult)
+                    {
+                        Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, mesh {meshResult.VertexCount} vertices and {meshResult.FaceCount} triangles from {result.Voxels} voxels");
+                        return new MeshResult { Data = GlbWriter.Write(Sam3dObjectsMesh.Finish(Sam3dObjectsMesh.ToMesh(meshResult))), Format = "glb" };
+                    }
+
+                    if (result.Voxels == 0)
+                        throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
+                    if (request.Mesh)
+                        throw new InvalidOperationException("SAM 3D's mesh extraction found no surface for this mask (try splats, or a larger or cleaner mask).");
                     if (result.Splats is not { Count: > 0 } splats)
                         throw new InvalidOperationException("SAM 3D found no occupied voxel for this mask (try a larger or cleaner mask).");
                     Logs.Info($"[sam3d-objects] pose t=({result.Pose.TranslationX:F3}, {result.Pose.TranslationY:F3}, {result.Pose.TranslationZ:F3}) scale {result.Pose.ScaleX:F3}, {splats.Count} splats from {result.Voxels} voxels");
@@ -561,7 +917,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Loads (or returns the cached) Pixal3D pipeline for <paramref name="spec"/>.</summary>
-    private Pixal3DRuntime GetOrLoadPixal3D(ModelSpec spec, string modelsRoot)
+    private Pixal3DRuntime GetOrLoadPixal3D(ModelSpec spec)
     {
         if (spec.LocalPath is null)
         {
@@ -574,7 +930,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 return cached;
             try
             {
-                Pixal3DRuntime runtime = Pixal3DRuntime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                Pixal3DRuntime runtime = Pixal3DRuntime.Load(_engine.Backend, spec.LocalPath, _engine.MeshPreparationInternal.SharedMatter);
                 _pixal3d[spec.LocalPath] = runtime;
                 return runtime;
             }
@@ -587,7 +943,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Loads (or returns the cached) TRELLIS.2 pipeline for <paramref name="spec"/>.</summary>
-    private Trellis2Runtime GetOrLoadTrellis2(ModelSpec spec, string modelsRoot)
+    private Trellis2Runtime GetOrLoadTrellis2(ModelSpec spec)
     {
         if (spec.LocalPath is null)
         {
@@ -600,7 +956,7 @@ public sealed class MeshService : IMeshService, IDisposable
                 return cached;
             try
             {
-                Trellis2Runtime runtime = Trellis2Runtime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                Trellis2Runtime runtime = Trellis2Runtime.Load(_engine.Backend, spec.LocalPath, _engine.MeshPreparationInternal.SharedMatter);
                 _trellis2[spec.LocalPath] = runtime;
                 return runtime;
             }
@@ -612,11 +968,18 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
+    /// <summary>The lower-case catalog id a spec names.</summary>
+    internal static string IdOf(ModelSpec spec) => (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).ToLowerInvariant();
+
+    /// <summary>Whether the BiRefNet matting checkpoint that mattes images without alpha is installed right now.</summary>
+    internal static bool MatterAvailable() =>
+        Trellis2Runtime.MatterAvailable(RepoPaths.ModelsRoot());
+
     private static bool IsHairDeck(ModelSpec spec) =>
-        string.Equals(spec.Catalog?.Id, HairDeckId, StringComparison.OrdinalIgnoreCase);
+        IdOf(spec) == MeshModelIds.HairDeck;
 
     /// <summary>One HairDeck request: the preprocessing of the image, then the image model; the GLB carries the chains when they were made.</summary>
-    private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, CancellationToken cancel)
+    private byte[] GenerateHairDeck(ModelSpec spec, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         HairDeckOptions options = HairDeckRequestMapper.ToOptions(request);
         HairDeckRuntime runtime = GetOrLoadHairDeck(spec);
@@ -629,7 +992,7 @@ public sealed class MeshService : IMeshService, IDisposable
             {
                 throw new ModelUnloadedException("The HairDeck model was unloaded while this request was queued; retry the request.");
             }
-            return RunHairDeck(runtime, options, request, cancel);
+            return RunHairDeck(runtime, options, request, progress, cancel);
         }
         finally
         {
@@ -637,12 +1000,16 @@ public sealed class MeshService : IMeshService, IDisposable
         }
     }
 
-    private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, CancellationToken cancel)
+    private byte[] RunHairDeck(HairDeckRuntime runtime, HairDeckOptions options, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         HairDeckSourceImage source = HairDeckSourceImage.Create(request.Image!.Rgb, request.Image.Alpha, request.Image.Width, request.Image.Height);
         // A request cancelled while it queued for the gate must not start SAM 3 and BiRefNet.
         cancel.ThrowIfCancellationRequested();
-        HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source);
+        int chainSteps = options.Chains ? HairDeckCore.ChainSteps : 0;
+        int total = 2 + options.Steps + chainSteps;
+        int stages = options.Chains ? 4 : 3;
+        HairDeckPreprocessResult prep = runtime.Preprocessor.Process(source, cancel, name =>
+            progress?.Report(MeshProgress.Plain(name == HairDeckPreprocessor.SegmentStage ? 0 : 1, total, name, 0, 1, name == HairDeckPreprocessor.SegmentStage ? 1 : 2, stages)));
         foreach (string note in prep.Notes)
         {
             // input_alpha only records that the input's alpha was applied as a mask; it does not degrade the result.
@@ -657,7 +1024,9 @@ public sealed class MeshService : IMeshService, IDisposable
         }
 
         cancel.ThrowIfCancellationRequested();
-        HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel);
+        HairDeckResult result = runtime.Model.Generate(prep.Input, options, cancel, (stage, done, count) =>
+            progress?.Report(MeshProgress.Plain(
+                2 + (stage == HairDeckCore.CardStage ? 0 : options.Steps) + done, total, stage, done, count, stage == HairDeckCore.CardStage ? 3 : 4, stages)));
         if (!result.HasCards)
         {
             throw new InvalidOperationException("No hair cards were generated for this image. Try another seed or another image.");
@@ -719,7 +1088,7 @@ public sealed class MeshService : IMeshService, IDisposable
             if (!MeshModelIds.ImageToMesh.Contains(id))
             {
                 throw new NotSupportedException(
-                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.All.Append(HairDeckId))}.");
+                    $"3D model '{id}' has no wired image pipeline; supported: {string.Join(", ", MeshModelIds.Described)}.");
             }
             try
             {
@@ -769,7 +1138,7 @@ public sealed class MeshService : IMeshService, IDisposable
     }
 
     /// <summary>Converts the wire prompt to the pipeline's prompt, checking that exactly one kind is given.</summary>
-    private static CoLa3DPrompt ToCoLa3DPrompt(SceneMeshPrompt prompt)
+    internal static CoLa3DPrompt ToCoLa3DPrompt(SceneMeshPrompt prompt)
     {
         if ((prompt.Masks is null) == (prompt.Points is null))
             throw new ArgumentException("A scene prompt gives masks or points, not both and not neither.", nameof(prompt));
@@ -829,7 +1198,7 @@ public sealed class MeshService : IMeshService, IDisposable
             throw new FileNotFoundException(
                 $"No checkpoint found for 3D model '{spec.Requested}'. Supply its model directory as the local path.");
         }
-        string key = $"{spec.LocalPath}|{source}";
+        string key = SceneKey(spec.LocalPath, source);
         lock (_gate)
         {
             if (_scenePipelines.TryGetValue(key, out CoLa3DPipeline? cached))
@@ -866,16 +1235,21 @@ public sealed class MeshService : IMeshService, IDisposable
         List<UniRigPipeline> rigPipelines;
         List<HunyuanPaintLoader> paintPipelines;
         List<P3SamPipeline> partPipelines;
+        List<Hunyuan3DOmniPipeline> omniPipelines;
         List<HairDeckRuntime> hairDecks;
         List<Trellis2Runtime> trellis2Runtimes;
         List<Pixal3DRuntime> pixal3dRuntimes;
+        List<string> countedKeys;
         lock (_gate)
         {
+            countedKeys = [.. Resident().Where(r => HasNoRunGate(r.Kind)).Select(r => MeshRunCounter.KeyOf(r.Kind, r.Key))];
             pipelines = _pipelines.Values.ToList();
             scenePipelines = _scenePipelines.Values.ToList();
             rigPipelines = _rigPipelines.Values.ToList();
             paintPipelines = _paintPipelines.Values.ToList();
             partPipelines = _partPipelines.Values.ToList();
+            omniPipelines = _omniPipelines.Values.ToList();
+            _xpartPipelines.Clear(); // XPartPipeline holds no resources: each run loads and releases its checkpoints
             hairDecks = _hairDecks.Values.ToList();
             trellis2Runtimes = _trellis2.Values.ToList();
             pixal3dRuntimes = _pixal3d.Values.ToList();
@@ -884,30 +1258,27 @@ public sealed class MeshService : IMeshService, IDisposable
             _rigPipelines.Clear();
             _paintPipelines.Clear();
             _partPipelines.Clear();
+            _omniPipelines.Clear();
             _hairDecks.Clear();
             _trellis2.Clear();
             _pixal3d.Clear();
         }
-        foreach (LoadedMesh loaded in pipelines)
+        // The pipelines without a run gate wait for the counted runs on them, and so does a run that holds no pipeline (X-Part loads its checkpoints for the run); the gated runtimes below wait on their own gate.
+        _runs.WhenIdle([.. countedKeys, .. _runs.ActiveKeys()], () =>
         {
-            loaded.Pipeline.Dispose();
-        }
-        foreach (CoLa3DPipeline pipeline in scenePipelines)
-        {
-            pipeline.Dispose();
-        }
-        foreach (UniRigPipeline pipeline in rigPipelines)
-        {
-            pipeline.Dispose();
-        }
-        foreach (HunyuanPaintLoader loader in paintPipelines)
-        {
-            loader.Dispose();
-        }
-        foreach (P3SamPipeline pipeline in partPipelines)
-        {
-            pipeline.Dispose();
-        }
+            foreach (LoadedMesh loaded in pipelines)
+                loaded.Pipeline.Dispose();
+            foreach (CoLa3DPipeline pipeline in scenePipelines)
+                pipeline.Dispose();
+            foreach (UniRigPipeline pipeline in rigPipelines)
+                pipeline.Dispose();
+            foreach (HunyuanPaintLoader loader in paintPipelines)
+                loader.Dispose();
+            foreach (P3SamPipeline pipeline in partPipelines)
+                pipeline.Dispose();
+            foreach (Hunyuan3DOmniPipeline pipeline in omniPipelines)
+                pipeline.Dispose();
+        });
         foreach (HairDeckRuntime runtime in hairDecks)
         {
             runtime.Dispose();

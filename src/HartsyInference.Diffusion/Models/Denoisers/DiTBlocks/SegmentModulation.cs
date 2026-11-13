@@ -60,6 +60,16 @@ public sealed class SegmentModulation : IDisposable
         return output;
     }
 
+    /// <summary>Returns <c>LayerNorm(x)·(1 + scale[g]) + shift[g]</c> per token, F32.</summary>
+    public Tensor NormAffine(IBackend backend, Tensor x, float eps)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        RequireRows(x);
+        using Tensor normed = new(x.Shape, DType.F32);
+        backend.LayerNormNoAffine(normed, x, eps);
+        return Affine(backend, normed);
+    }
+
     /// <summary>Returns <c>residual + gate[g]·value</c> per token, F32.</summary>
     public Tensor GatedResidual(IBackend backend, Tensor residual, Tensor value)
     {

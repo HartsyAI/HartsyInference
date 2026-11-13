@@ -11,13 +11,12 @@ public static class Pixal3DRequestMapper
     public static Pixal3DOptions ToOptions(MeshRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Seed > int.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), request.Seed, $"The Pixal3D seed must be at most {int.MaxValue}.");
+        MeshSeed.Require(request);
         return new Pixal3DOptions
         {
             Grid = request.GridResolution,
             Steps = request.Steps,
-            Seed = request.Seed < 0 ? null : (int)request.Seed,
+            Seed = MeshSeed.ForSampler(request.Seed),
             FovRadians = request.FieldOfViewRadians,
             Texture = request.Texture,
             TextureSize = request.TextureSize,
@@ -30,6 +29,6 @@ public static class Pixal3DRequestMapper
     {
         ArgumentNullException.ThrowIfNull(request);
         if (request.FieldOfViewRadians is not null && !string.Equals(modelId, MeshModelIds.Pixal3D, StringComparison.OrdinalIgnoreCase))
-            throw new NotSupportedException($"3D model '{modelId}' takes no field of view; FieldOfViewRadians applies to {MeshModelIds.Pixal3D}.");
+            throw new NotSupportedException($"3D model '{modelId}' takes no field of view; FieldOfViewRadians applies to {MeshModelIds.Pixal3D}.").ForField(nameof(MeshRequest.FieldOfViewRadians));
     }
 }
