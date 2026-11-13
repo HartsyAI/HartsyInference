@@ -135,20 +135,24 @@ of each vertex's texel, averaged on a 512 grid, 379,483 voxels), not the origina
 | Decimation target | Texture | Faces | Charts | Faces per chart | Atlas covered by UV triangles | Post-process time | GLB size |
 |---|---|---|---|---|---|---|---|
 | 1,000,000 | 2048 | 999,969 | 44,752 | 22 | 20.0 % | 38 s | 40.1 MB |
-| 500,000 | 2048 | 499,840 | 29,968 | 16 | 20.3 % | 33 s | 24.1 MB |
+| 500,000 | 2048 | 499,840 | 29,968 | 17 | 20.3 % | 33 s | 24.1 MB |
 | 200,000 | 2048 | 199,788 | 27,751 | 7 | 20.1 % | 32 s | 14.5 MB |
 | 1,000,000 | 4096 | 999,969 | 44,752 | 22 | 22.6 % | 97 s | 51.2 MB |
-| 500,000 | 4096 | 499,840 | 29,968 | 16 | 22.8 % | 102 s | 35.1 MB |
+| 500,000 | 4096 | 499,840 | 29,968 | 17 | 22.8 % | 102 s | 35.1 MB |
 | 200,000 | 4096 | 199,788 | 27,751 | 7 | 22.4 % | 100 s | 25.3 MB |
 
-- **The atlas is about 80 % padding whatever the target.** Coverage stays at 20 to 23 % because the packer keeps a gutter of 4 texels around every one of 28,000 to 45,000 small charts; a coarser mesh does not
-  make the charts bigger, it makes their faces bigger (about 0.8 covered texel per face at 1 M faces, 1.7 at 500 k, 4.2 at 200 k). Doubling the texture side (4096) adds 2.4 points of coverage, triples the time
-  and adds 11 to 12 MB to the GLB.
-- **A 1 M-face mesh has less than one texel per face**, so the texture cannot carry per-face detail and the baked colour at that density shows as blotches (rendered front views of all six runs: 1 M faces at either
-  size shows pale blotches on the forehead and hair that 500 k and 200 k do not; 4096 over 2048 adds little at any target). The look comparison is a proxy (see above) and a single subject.
-- **Proposed default for textured output, not applied:** 500,000 faces and a 2048 texture, which is the value upstream's own app starts at, gives a 40 % smaller GLB than the current default with no loss in
-  these renders; 4096 stays an explicit choice. Changing the default needs the same comparison on a run with the real attribute volume (one GPU run of TRELLIS.2 at 512).
-- The saved render sheet of the six runs is `trellis2-atlas-defaults-compare.png` in the GPU block results folder.
+- **About 80 % of the atlas stays uncovered whatever the target.** Coverage is 20 to 23 % at every target, so it is not a face-count effect. The cost is the space between charts: the unwrapper makes
+  28,000 to 45,000 small charts (a coarser mesh leaves their count almost flat, 29,968 at 500 k against 27,751 at 200 k, while the faces per chart fall from 17 to 7), each with a gutter (4 texels, 1 for
+  charts under 8 texels, halved when the packed scale falls under 0.2 of ideal), and above 1,000 charts the shelf packer also loses space at the end of every shelf. The split between gutters and packing loss
+  was not measured; going to 4096 halves the gutters' share yet adds only 2.3 to 2.6 points, which suggests the gutter is not the main cost. The lever may be fewer, larger charts, not the texture size. The
+  texture side doubled (4096) takes about 2.6 times as long at 1 M faces and about 3.1 times at 500 k and 200 k, and adds about 11 MB to the GLB.
+- **The 1 M-face results show blotches, at both sizes; the cause is open.** In the front-view renders of all six runs, 1 M faces at 2048 and at 4096 shows pale blotches on the forehead and hair that 500 k and 200 k do
+  not; 4096 over 2048 adds little at any target. The covered texels per face do not explain it (0.84 at 1 M and 2048, 1.7 at 500 k and 2048, 3.8 at 1 M and 4096: the 4096 run has twice the density of the clean 500 k run
+  and still blotches). Two candidates: the 1 M row barely decimates its input (1,007,560 faces in, 999,969 out), so it keeps the raw mesh and its sliver faces, and the volume is a stand-in rebuilt from that
+  mesh's own atlas, which may reproduce the atlas's artefacts. The run with the real attribute volume settles it. The look comparison is a single subject.
+- **Proposed default for textured output, not applied:** 500,000 faces and a 2048 texture, which is the value upstream's own app starts at, gives a 40 % smaller GLB than the current default and cleaner renders in
+  this test; 4096 stays an explicit choice. Changing the default needs the same comparison on a run with the real attribute volume (one GPU run of TRELLIS.2 at 512).
+- The saved render sheet of the six runs is `trellis2-atlas-defaults-compare.png` in the shared notes folder of the Hunyuan3D session group (`hunyuan-gpu-block-results`, outside the repository). Upstream's defaults were read from the `main` branch of `microsoft/TRELLIS.2` on 2026-11-13 (no commit pinned).
 
 ## Closing slits and gaps (`HoleFiller`)
 
