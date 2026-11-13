@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace HartsyInference.Engine;
 
-/// <summary>Downloads one file from a plain https URL (a weights mirror, a GitHub release asset) with the same staging and hash check the Hugging Face path has: the bytes go to a <c>.tmp</c> file, are hashed against the pinned SHA-256 and only then moved into place.
+/// <summary>Downloads one file from a plain https URL (a weights mirror, a GitHub release asset; a local mirror may use http) with the same staging and hash check the Hugging Face path has: the bytes go to a <c>.tmp</c> file, are hashed against the pinned SHA-256 and only then moved into place.
 /// The client it is given must carry no credentials: a Hugging Face token never goes to another host.</summary>
 internal static class AssetUrlDownload
 {
@@ -13,7 +13,7 @@ internal static class AssetUrlDownload
     {
         if (asset.Repack is null || string.IsNullOrWhiteSpace(baseUrl))
             return null;
-        if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out Uri? root) || root.Scheme != Uri.UriSchemeHttps || root.Query.Length > 0 || root.Fragment.Length > 0)
+        if (!Uri.TryCreate(baseUrl.Trim(), UriKind.Absolute, out Uri? root) || !IsAllowed(root) || root.Query.Length > 0 || root.Fragment.Length > 0)
             return null;
         string[] segments = asset.Repack.MirrorPath.Split('/');
         if (segments.Any(s => s.Length == 0 || s is "." or ".." || s.Contains('\\')))
@@ -27,7 +27,7 @@ internal static class AssetUrlDownload
     /// <exception cref="InvalidOperationException">The bytes did not match the pinned hash.</exception>
     internal static async Task DownloadAsync(HttpClient http, string url, string label, string destination, IProgress<double>? progress, string? sha256, CancellationToken ct)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) || uri.Scheme != Uri.UriSchemeHttps)
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) || !IsAllowed(uri))
             throw new ArgumentException($"'{label}' must be fetched from an https URL.", nameof(url));
         if (string.IsNullOrWhiteSpace(sha256))
             throw new ArgumentException($"'{label}' is fetched from a URL and needs a pinned sha256.", nameof(sha256));
@@ -69,6 +69,9 @@ internal static class AssetUrlDownload
         }
         File.Move(temp, destination, overwrite: true);
     }
+
+    /// <summary>https, or plain http to this machine (<c>localhost</c>, <c>127.0.0.1</c>, <c>[::1]</c>) so a local mirror can be tried without a certificate.</summary>
+    internal static bool IsAllowed(Uri uri) => uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
 
     private static void TryDelete(string path)
     {

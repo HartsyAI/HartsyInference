@@ -18,7 +18,7 @@ public static partial class EngineKnobs
 
     /// <summary>Base URL of a weights mirror (for example HartsyWeb) that hosts safetensors repacks of pickle-only checkpoints; empty (the default) disables it.</summary>
     public static readonly Knob<string?> WeightsMirrorUrl =
-        Str("paths.weightsMirrorUrl", null, KnobScope.Runtime, KnobDomain.Paths, "Base https URL of a weights mirror that hosts safetensors repacks of pickle-only 3D checkpoints. A catalog file that lists a repack is asked for there first and falls back to its upstream file on any failure (a dropped connection is not resumed: the fallback starts the upstream download over). A base URL with a query is ignored. Empty disables the mirror.");
+        Str("paths.weightsMirrorUrl", null, KnobScope.Runtime, KnobDomain.Paths, "Base https URL (or http on this machine, to try a local mirror) of a weights mirror that hosts safetensors repacks of pickle-only 3D checkpoints. A catalog file that lists a repack is asked for there first and falls back to its upstream file on any failure (a dropped connection is not resumed: the fallback starts the upstream download over). A base URL with a query is ignored. Empty disables the mirror.");
 
     /// <summary>Lets the first call that needs cuDNN download the NVIDIA cuDNN 9 redist into the per-user cache when none is installed.</summary>
     public static readonly Knob<bool> CudnnAutofetch =
