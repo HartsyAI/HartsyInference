@@ -41,7 +41,7 @@ internal static class Hunyuan3DFlashVdm
         return levels;
     }
 
-    internal static ScalarField3D Decode(QueryGroup query, int octreeResolution, float bound, float mcLevel, int miniGridNum = 4)
+    internal static ScalarField3D Decode(QueryGroup query, int octreeResolution, float bound, float mcLevel, int miniGridNum = 4, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(query);
         int[] levels = Resolutions(octreeResolution, miniGridNum);
@@ -66,6 +66,7 @@ internal static class Hunyuan3DFlashVdm
                                 coords[w++] = axis[a * m + i]; coords[w++] = axis[b * m + j]; coords[w++] = axis[c * m + k];
                             }
 
+                    cancel.ThrowIfCancellationRequested();
                     query(coords, m * m * m, 100, logits);
                     int r = 0;
                     for (int i = 0; i < m; i++)
@@ -118,6 +119,7 @@ internal static class Hunyuan3DFlashVdm
                     gc[t * 3] = px[members[t] * 3]; gc[t * 3 + 1] = px[members[t] * 3 + 1]; gc[t * 3 + 2] = px[members[t] * 3 + 2];
                 }
 
+                cancel.ThrowIfCancellationRequested();
                 query(gc, members.Length, 50, gl);
                 for (int t = 0; t < members.Length; t++)
                     nextLogits[flat[members[t]]] = gl[t];

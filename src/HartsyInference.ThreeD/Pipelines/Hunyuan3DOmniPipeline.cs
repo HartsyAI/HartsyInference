@@ -96,12 +96,13 @@ public sealed class Hunyuan3DOmniPipeline : ThreeDPipelineBase
     }
 
     /// <summary>Generates a mesh from one image and one control signal.</summary>
-    public ThreeDResult Generate(ImageTo3DRequest request, OmniControl control, Action<GenerationProgress>? onProgress = null)
+    public ThreeDResult Generate(ImageTo3DRequest request, OmniControl control, Action<GenerationProgress>? onProgress = null, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(control);
-        return _shape.SampleConditioned(() => Condition(request, control), request.Seed, request.Steps, request.CfgScale, request.GridResolution, request.IsoLevel, onProgress);
+        cancel.ThrowIfCancellationRequested();
+        return _shape.SampleConditioned(() => Condition(request, control), request.Seed, request.Steps, request.CfgScale, request.GridResolution, request.IsoLevel, onProgress, cancel);
     }
 
     private Hunyuan3DShapePipeline.ConditionPair Condition(ImageTo3DRequest request, OmniControl control)

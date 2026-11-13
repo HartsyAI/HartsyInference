@@ -313,7 +313,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
-                });
+                }, cancel);
                 if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
@@ -549,7 +549,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
-                });
+                }, cancel);
                 if (result.Mesh is not { TriangleCount: > 0 } mesh)
                     throw new InvalidOperationException("Omni produced no geometry (try another image, control or seed).");
                 // Upstream's FloaterRemover drops components under 0.5 % of the faces; this is the shared repair with the same ratio taken over the area.
@@ -1097,17 +1097,17 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 {
                     Hunyuan3DShapePipeline hunyuan = Hunyuan3DShapePipeline.LoadFromPath(
                         _engine.Backend, spec.LocalPath, flashVdmVaeDir: FlashVdmVaeDirectory(spec));
-                    loaded = new LoadedMesh(hunyuan, hunyuan.Generate);
+                    loaded = new LoadedMesh(hunyuan, (image, report, token) => hunyuan.Generate(image, report, token));
                 }
                 else if (id == "trellis")
                 {
                     TrellisImageTo3DPipeline trellis = TrellisImageTo3DPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
-                    loaded = new LoadedMesh(trellis, trellis.Generate);
+                    loaded = new LoadedMesh(trellis, (image, report, _) => trellis.Generate(image, report));
                 }
                 else if (id == "triposr")
                 {
                     TripoSrPipeline triposr = TripoSrPipeline.LoadFromPath(_engine.Backend, spec.LocalPath);
-                    loaded = new LoadedMesh(triposr, triposr.Generate);
+                    loaded = new LoadedMesh(triposr, (image, report, _) => triposr.Generate(image, report));
                 }
                 else
                 {
@@ -1297,7 +1297,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private sealed class LoadedMesh
     {
         /// <summary>Wraps <paramref name="pipeline"/> with its <paramref name="generate"/> entry point.</summary>
-        public LoadedMesh(IDisposable pipeline, Func<ImageTo3DRequest, Action<GenerationProgress>?, ThreeDResult> generate)
+        public LoadedMesh(IDisposable pipeline, Func<ImageTo3DRequest, Action<GenerationProgress>?, CancellationToken, ThreeDResult> generate)
         {
             Pipeline = pipeline;
             Generate = generate;
@@ -1306,7 +1306,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         /// <summary>The loaded pipeline, owned by the service.</summary>
         public IDisposable Pipeline { get; }
 
-        /// <summary>Runs one image-to-mesh request.</summary>
-        public Func<ImageTo3DRequest, Action<GenerationProgress>?, ThreeDResult> Generate { get; }
+        /// <summary>Runs one image-to-mesh request; the token reaches the pipelines that can stop inside a stage (Hunyuan3D), the others stop through the progress callback.</summary>
+        public Func<ImageTo3DRequest, Action<GenerationProgress>?, CancellationToken, ThreeDResult> Generate { get; }
     }
 }
