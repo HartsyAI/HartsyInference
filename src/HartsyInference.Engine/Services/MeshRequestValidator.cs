@@ -87,6 +87,10 @@ internal static class MeshRequestValidator
         {
             Sam3dObjectsRequestMapper.Validate(request);
         }
+        else if (id == "triposr")
+        {
+            TagPipelineErrors(() => TripoSrPipeline.ValidateGrid(request.GridResolution));
+        }
         else if (MeshModelIds.Hunyuan3D.Contains(id))
         {
             TagPipelineErrors(() => Hunyuan3DShapePipeline.ValidateGrid(request.GridResolution, UsesFlashVdm(id)));

@@ -217,25 +217,18 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             return;
         if (flashVdm && grid < MinFlashVdmGrid)
             throw new ArgumentOutOfRangeException("grid", grid, $"FlashVDM needs a grid of at least {MinFlashVdmGrid}.");
-        if (FieldPoints(grid, flashVdm) <= Array.MaxLength)
+        if (GridLimit.Fits(FieldAxis(grid, flashVdm)))
             return;
-        int largest = Math.Min(grid, MaxAxis);
-        while (largest > 1 && FieldPoints(largest, flashVdm) > Array.MaxLength)
+        int largest = Math.Min(grid, GridLimit.MaxAxis);
+        while (largest > 1 && !GridLimit.Fits(FieldAxis(largest, flashVdm)))
             largest--;
         throw new ArgumentOutOfRangeException(
             "grid", grid, $"A grid of {grid} needs a field too large for one array; the largest that fits one is {largest} (host memory runs out sooner).");
     }
 
-    // The cube root of Array.MaxLength, rounded up: an axis beyond it cannot fit, and capping there keeps the cube inside a long.
-    private const int MaxAxis = 1291;
     private const int MinFlashVdmGrid = 3;
 
-    private static long FieldPoints(int grid, bool flashVdm)
-    {
-        long axis = flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid;
-        axis = Math.Min(axis, MaxAxis + 1L);
-        return axis * axis * axis;
-    }
+    private static long FieldAxis(int grid, bool flashVdm) => flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid;
 
     private ThreeDResult Sample(Func<ConditionPair> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
         Action<GenerationProgress>? onProgress)
