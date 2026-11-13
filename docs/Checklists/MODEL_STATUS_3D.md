@@ -30,8 +30,9 @@ but fails the gate in quality, parity or contract. *Not usable*: no end-to-end r
 | **Not usable** | TRELLIS v1 mesh and radiance-field decoders | **TRELLIS v1:** the decoders are not ported. |
 
 Cross-cutting items that gate every tier: the engine P0 features (preflight, asset status, input preparation, viewer-ready output,
-progress and cancellation) have synthetic tests only, with no real-GPU checks yet; the pickle-to-safetensors repack and hosting
-for the models that ship pickles has not started; and the version bump with one changelog line per model happens once, in the
+progress and cancellation) have synthetic tests only, with no real-GPU checks yet; the pickle-only checkpoints are repacked to
+safetensors and verified (staged outside the repository, [hosting steps](../../tools/WeightsMirror/README.md)), the catalog can list
+a mirror repack with the upstream file as the fallback, and nothing is uploaded or fetched from a mirror yet; and the version bump with one changelog line per model happens once, in the
 last PR of the series.
 
 ## Verified end-to-end (✅)

@@ -100,22 +100,32 @@ Caveats on three rows:
 | `tencent/Hunyuan3D-Omni` `model/pytorch_model_ema.bin` (12.2 GB) | Unused by the engine. |
 | TripoSR, TRELLIS (v1) | No catalog assets and no local files: nothing to inventory. |
 
-## Verification the repack must pass
+## Repack run and the checks it passed (2026-11-12)
 
-For each hosted file the repack run records, in a manifest beside the output: source repository, revision and path, source size and
-sha256, the repacked size and sha256, tensor count, the licence and its text file, the date and the tool build. The repacked file
-must equal its source tensor for tensor: the same names in the same order, the same shapes and dtypes, and bitwise equal values,
-each side read through its own loader (the safe-subset pickle reader and the safetensors loader). The run never executes a pickle.
+`tools/WeightsMirror` repacked the ten files of the table above into a staging folder outside the repository and outside `Models/`
+(28,696,874,440 B against 31,614,514,895 B of pickles), after hashing each local pickle to its upstream pin. It records in
+`manifest.json`: source repository, revision and path, source size and sha256, the repacked size and sha256, tensor count and dtypes,
+the licence with its text files and what a host owes, the verification and the date. The run never executes a pickle.
+
+Each repack equals its source tensor for tensor (names in the same order, shapes, dtypes, bitwise values). The safetensors side was
+read through the safetensors loader. The pickle side was read through the whole-file safe-subset reader for the eight sources up to
+5 GB and the tensor-by-tensor reader (the one that wrote the repack) for the two largest, and 9 of 10 were also compared through
+PyTorch (`torch.load(weights_only=True, mmap=True)`); PyTorch refuses the UniRig skin checkpoint, which holds non-tensor Lightning
+objects, so that one has the whole-file reader check only. The 2.1 shape DiT also equals the repack that already sat beside its
+pickle in `Models/`. The UniRig skin repack is a third of its pickle's size because the pickle reader exposes only the state tensors.
+
+The steps to upload, the licence files still to be fetched and the terms a host accepts are in
+[tools/WeightsMirror/README.md](../../tools/WeightsMirror/README.md). Nothing is uploaded.
 
 ## Open decisions
 
 1. **Territory.** Self-hosting the 25.8 GB of Tencent files needs an EU, UK and South Korea block on HartsyWeb. If the user does
    not want that, host only UniRig (and NAF) and leave the Tencent pickles linked: the 3D loaders read them in place through the
    safe parser (no 3D path calls `PickleCheckpointRepacker`; its callers are audio), which is today's behaviour.
-2. **Consumer-side work.** Uploading is not the whole job. `ModelAsset` has one `Repo`/`RepoPath`/`Sha256` and no mirror or fallback
-   field, and a hosted repack is a `.safetensors` with a different name and hash than the upstream pickle. Each hosted row needs a
-   catalog field for a mirror URL with its own hash (upstream kept as the fallback), and loaders that accept either format for the
-   same asset. A GitHub release asset (NAF) needs a fetch the catalog does not have.
+2. **Consumer-side work (done, #871).** `ModelAsset.Repack` lists a mirror path and the repack's own hash, the upstream file stays the
+   fallback, the mirror is off until `paths.weightsMirrorUrl` is set, and the Omni, UniRig and NAF loaders (Paint 2.1's already did)
+   read a repack beside the pickle. NAF is fetched from its GitHub release by `ModelAsset.Url`. What remains: UniRig and the 2.1 shape
+   model have no catalog assets, so their repacks are read when placed but nothing fetches them or asks the mirror for them.
 3. **Trim or cast.** Omni's DiT as F16 (6.1 GB) and the unused halves of the Omni VAE (the loader reads only the decoder) would cut
    the download. Not done: it changes dtypes or drops tensors.
 4. **NAF's and UniRig's licences.** NAF: host it under the repository's Apache-2.0 or keep it a GitHub-only fetch. UniRig: whether the
