@@ -68,6 +68,9 @@ public static class InteractivePrompt
 
         AnsiConsole.Markup($"[{CliTheme.Accent}]{Markup.Escape(question)}[/] [{CliTheme.Muted}]{(defaultYes ? "[[Y/n]]" : "[[y/N]]")}: [/]");
         string? line = Console.ReadLine()?.Trim();
+        // The end of input (a closed or redirected stdin) is no answer: it takes the default, which every download prompt sets to "no".
+        if (line is null)
+            Console.WriteLine();
         if (string.IsNullOrEmpty(line))
             return defaultYes;
         return line.StartsWith('y') || line.StartsWith('Y');

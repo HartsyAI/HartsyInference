@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Services;
 using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
@@ -63,6 +64,9 @@ public static class ModelAcquisition
         IReadOnlyList<ModelAsset> missing = ModelDownloader.MissingAssets(cat, spec.LocalPath)
             .Where(a => spec.LocalPath is null || a.Role != "transformer")
             .ToList();
+        // A 3D model's loader looks in more places than the catalog folder (the DINOv2 copy inside a Hunyuan3D shape checkpoint, the folder named as the model path): ask only about what it would not find.
+        if (spec.Modality == Modality.Mesh && missing.Count > 0)
+            missing = NarrowToWhatTheMeshLoaderNeeds(spec, missing);
         if (missing.Count == 0)
         {
             string? present = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);
@@ -90,6 +94,20 @@ public static class ModelAcquisition
         string? primary = isFolderFamily ? null : ModelDownloader.PrimaryLocalPath(cat);
         AnsiConsole.MarkupLine("[green]✓ model files ready.[/]");
         return primary is not null ? spec with { LocalPath = primary } : spec;
+    }
+
+    /// <summary><paramref name="missing"/> without the files the 3D model's own loader finds elsewhere, so the prompt never lists a file the run does not need.</summary>
+    private static IReadOnlyList<ModelAsset> NarrowToWhatTheMeshLoaderNeeds(ModelSpec spec, IReadOnlyList<ModelAsset> missing)
+    {
+        try
+        {
+            HashSet<ModelAsset> needed = [.. new MeshAssetService().MissingAssets(spec)];
+            return [.. missing.Where(needed.Contains)];
+        }
+        catch (NotSupportedException)
+        {
+            return missing; // the inventory throws only for a model id without a wired pipeline: the catalog list stands
+        }
     }
 
     /// <summary>True when this catalog entry's files live under <see cref="AudioModelCache"/> rather than the <c>Models/&lt;subdir&gt;</c> tree.</summary>
