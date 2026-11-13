@@ -46,11 +46,11 @@ public sealed class KimiK31GenerationModel : IGenerationModel
         if (options.MaxSequenceTokens > _maxTokens)
             throw new ArgumentOutOfRangeException(nameof(options), options.MaxSequenceTokens, $"The model was loaded for sequences of up to {_maxTokens} tokens.");
         int capacity = options.MaxSequenceTokens;
-        SequenceCache cache = new(new KimiK31State(Config, capacity));
+        SequenceCache cache = new(new KimiK31State(Config, capacity, Model.Ranks));
         int dim = Config.Hidden;
         return new HostReplaySequenceState(capacity, dim,
             (ids, hidden) => ForwardTokens(ids, hidden, cache),
-            () => cache.Reset(Config, capacity),
+            () => cache.Reset(Config, capacity, Model.Ranks),
             cache.Dispose);
     }
 
@@ -164,10 +164,10 @@ public sealed class KimiK31GenerationModel : IGenerationModel
 
         public KimiK31State State => _disposed ? throw new ObjectDisposedException(nameof(SequenceCache)) : _state;
 
-        public void Reset(KimiK31Config config, int capacity)
+        public void Reset(KimiK31Config config, int capacity, int ranks)
         {
             _state.Dispose();
-            _state = new KimiK31State(config, capacity);
+            _state = new KimiK31State(config, capacity, ranks);
         }
 
         public void Dispose()

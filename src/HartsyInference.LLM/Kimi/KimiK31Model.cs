@@ -175,6 +175,7 @@ public sealed class KimiK31Model : IDisposable
     private readonly ICollectiveComm? _comm;
     private readonly KimiK31Config _config;
     private readonly KimiK31Weights _weights;
+    private readonly IReadOnlyList<KimiK31Weights> _rankWeights;
     private readonly int _ranks;
     private readonly KdaSettings _kdaSettings;
     private readonly RankShard[] _shards;
@@ -185,31 +186,53 @@ public sealed class KimiK31Model : IDisposable
     /// <summary>Builds the single-backend decoder. It borrows <paramref name="weights"/>, which the caller keeps alive and disposes.
     /// <paramref name="maxPositions"/> sizes the identity rotary tables the NoPE attention reads.</summary>
     public KimiK31Model(IBackend backend, KimiK31Config config, KimiK31Weights weights, int maxPositions)
-        : this(new[] { backend ?? throw new ArgumentNullException(nameof(backend)) }, null, config, weights, maxPositions)
+        : this([backend ?? throw new ArgumentNullException(nameof(backend))], null, config,
+            new KimiK31Sharding.RankWeightSet([weights ?? throw new ArgumentNullException(nameof(weights))], []), maxPositions)
     {
     }
 
-    /// <summary>Builds the decoder sharded over the placement's ranks. A rank count the dimensions do not divide is refused by name.</summary>
+    /// <summary>Builds the decoder sharded over the placement's ranks, cutting every rank's share out of <paramref name="weights"/> in memory.
+    /// A rank count the dimensions do not divide is refused by name.</summary>
     /// <param name="placement">One backend per rank and the communicator over them.</param>
     /// <param name="maxPositions">Sizes the identity rotary tables the NoPE attention reads.</param>
     public KimiK31Model(TpPlacement placement, KimiK31Config config, KimiK31Weights weights, int maxPositions)
-        : this(RankBackendsOf(placement), placement.Comm, config, weights, maxPositions)
+        : this(RankBackendsOf(placement), placement.Comm, config, KimiK31Sharding.Slice(config, weights, placement.Degree), maxPositions)
+    {
+    }
+
+    /// <summary>Builds the decoder over the placement's ranks from each rank's own weights, as <see cref="KimiK31WeightLoader"/> loads them.
+    /// The model does not dispose <paramref name="rankWeights"/>; their owner does, after the model.</summary>
+    /// <param name="rankWeights">One entry per rank, in rank order, each holding only that rank's share.</param>
+    public KimiK31Model(TpPlacement placement, KimiK31Config config, IReadOnlyList<KimiK31Weights> rankWeights, int maxPositions)
+        : this(RankBackendsOf(placement), placement.Comm, config, new KimiK31Sharding.RankWeightSet(rankWeights ?? throw new ArgumentNullException(nameof(rankWeights)), []), maxPositions)
     {
     }
 
     private static IReadOnlyList<IBackend> RankBackendsOf(TpPlacement placement) =>
         (placement ?? throw new ArgumentNullException(nameof(placement))).RankBackends;
 
-    private KimiK31Model(IReadOnlyList<IBackend> backends, ICollectiveComm? comm, KimiK31Config config, KimiK31Weights weights, int maxPositions)
+    /// <summary>Tensor-parallel ranks the decoder runs on; a sequence state must be split the same way.</summary>
+    public int Ranks => _ranks;
+
+    private KimiK31Model(IReadOnlyList<IBackend> backends, ICollectiveComm? comm, KimiK31Config config, KimiK31Sharding.RankWeightSet set, int maxPositions)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
-        _weights = weights ?? throw new ArgumentNullException(nameof(weights));
         ArgumentNullException.ThrowIfNull(backends);
-        if (weights.Layers.Count != config.Layers) throw new ArgumentException($"Expected {config.Layers} layers, got {weights.Layers.Count}.", nameof(weights));
+        ArgumentNullException.ThrowIfNull(set);
         _ranks = backends.Count;
         KimiK31Sharding.Require(config, _ranks);
+        if (set.Ranks.Count != _ranks) throw new ArgumentException($"Expected weights for {_ranks} ranks, got {set.Ranks.Count}.", nameof(set));
+        foreach (KimiK31Weights rankWeights in set.Ranks)
+        {
+            ArgumentNullException.ThrowIfNull(rankWeights, nameof(set));
+            if (rankWeights.Layers.Count != config.Layers)
+                throw new ArgumentException($"Expected {config.Layers} layers, got {rankWeights.Layers.Count}.", nameof(set));
+        }
         if (_ranks > 1 && (comm is null || comm.RankCount != _ranks))
             throw new ArgumentException($"A Kimi K3.1 decoder over {_ranks} ranks needs a communicator spanning every rank.", nameof(comm));
+        _rankWeights = set.Ranks;
+        _weights = set.Ranks[0];
+        _owned.AddRange(set.Owned);
         _backends = backends;
         _comm = comm;
         _kdaSettings = KimiK31Sharding.KdaSettingsFor(config, _ranks);
@@ -314,76 +337,59 @@ public sealed class KimiK31Model : IDisposable
         return logits;
     }
 
-    // Rank r's share of every layer, the vocabulary rows and the expert range. With one rank the loader's tensors are borrowed in place and nothing is owned.
+    // Rank r's share of every layer, from the rank's own weights: its vocabulary rows, its attention heads, its FFN columns and its routed
+    // experts. The weights are already cut to these shares, so nothing is sliced here. With one rank the loader's tensors are borrowed
+    // in place and nothing is owned.
     private void BuildShard(RankShard s, int r, int maxPositions)
     {
         KimiK31Config c = _config;
+        KimiK31Weights rw = _rankWeights[r];
         IBackend backend = _backends[r];
-        s.Embedding = KimiK31Sharding.VocabShard(_weights.Embedding, r, _ranks, _owned, "embed_tokens");
-        s.Head = KimiK31Sharding.VocabShard(_weights.LmHead, r, _ranks, _owned, "lm_head");
+        long perRankVocab = c.Vocab / _ranks;
+        if (rw.Embedding.Shape[0] != perRankVocab || rw.LmHead.Shape[0] != perRankVocab)
+            throw new ArgumentException($"Rank {r} holds {rw.Embedding.Shape[0]} vocabulary rows; the decoder needs {perRankVocab}.", "rankWeights");
+        s.Embedding = rw.Embedding;
+        s.Head = rw.LmHead;
         for (int i = 0; i < c.Layers; i++)
         {
-            KimiK31LayerWeights lw = _weights.Layers[i];
+            KimiK31LayerWeights lw = rw.Layers[i];
             if (c.IsMla(i))
             {
-                DsaAttentionWeights mla = lw.Mla ?? throw new ArgumentException($"Layer {i} is MLA but has no MLA weights.", nameof(_weights));
-                s.Mla[i] = new DsaAttention(backend, KimiK31Sharding.MlaSettingsFor(c, _ranks), KimiK31Sharding.MlaShard(mla, r, _ranks, _owned),
+                DsaAttentionWeights mla = lw.Mla ?? throw new ArgumentException($"Layer {i} is MLA but has no MLA weights.", "rankWeights");
+                s.Mla[i] = new DsaAttention(backend, KimiK31Sharding.MlaSettingsFor(c, _ranks), mla,
                     new IdentityRopeRows(c.QkRopeDim / 2, maxPositions), new IdentityRopeRows(1, maxPositions));
             }
             else
             {
-                KdaWeights kda = lw.Kda ?? throw new ArgumentException($"Layer {i} is KDA but has no KDA weights.", nameof(_weights));
-                s.Kda[i] = KimiK31Sharding.KdaShard(kda, c, r, _ranks, _owned);
+                s.Kda[i] = lw.Kda ?? throw new ArgumentException($"Layer {i} is KDA but has no KDA weights.", "rankWeights");
             }
             if (c.IsDense(i))
             {
                 if (lw.DenseGate is null || lw.DenseUp is null || lw.DenseDown is null)
-                    throw new ArgumentException($"Layer {i} is dense but has no dense FFN weights.", nameof(_weights));
-                (Tensor gate, Tensor up, Tensor down) = KimiK31Sharding.FfnShard(lw.DenseGate, lw.DenseUp, lw.DenseDown, r, _ranks, _owned, $"layer{i}.dense");
-                s.Ffn[i] = new FfnWeights(gate, up, down);
+                    throw new ArgumentException($"Layer {i} is dense but has no dense FFN weights.", "rankWeights");
+                s.Ffn[i] = new FfnWeights(lw.DenseGate, lw.DenseUp, lw.DenseDown);
                 continue;
             }
-            if (lw.Moe is null) throw new ArgumentException($"Layer {i} is MoE but has no MoE weights.", nameof(_weights));
+            if (lw.Moe is null) throw new ArgumentException($"Layer {i} is MoE but has no MoE weights.", "rankWeights");
             if (c.SharedExperts > 0)
             {
                 string shared = lw.MoePrefix + ".mlp.shared_expert.";
-                (Tensor gate, Tensor up, Tensor down) = KimiK31Sharding.FfnShard(
-                    lw.Moe[shared + "gate_proj.weight"], lw.Moe[shared + "up_proj.weight"], lw.Moe[shared + "down_proj.weight"], r, _ranks, _owned, $"layer{i}.shared");
-                s.Shared[i] = new FfnWeights(gate, up, down);
+                s.Shared[i] = new FfnWeights(lw.Moe[shared + "gate_proj.weight"], lw.Moe[shared + "up_proj.weight"], lw.Moe[shared + "down_proj.weight"]);
             }
             s.Moe[i] = BuildMoeBlock(lw, r);
         }
     }
 
-    // Rank r's routed block: the router, latent projections and norms (replicated, or borrowed in place with one rank); the experts of its range by reference.
+    // Rank r's routed block: the router, latent projections and norms (replicated, or borrowed in place with one rank), the experts of
+    // its range (by global id) or their packed form.
     private MoeFeedForward BuildMoeBlock(KimiK31LayerWeights lw, int r)
     {
         KimiK31Config c = _config;
-        string mlp = lw.MoePrefix + ".mlp";
         int perRank = KimiK31Sharding.ExpertsPerRank(c, _ranks), first = r * perRank;
-        Dictionary<string, Tensor> block = new(StringComparer.Ordinal);
-        foreach (string key in new[] { "gate.weight", "gate.e_score_correction_bias", "pre_expert_proj.weight", "pre_expert_norm.weight", "post_expert_proj.weight" })
-        {
-            if (lw.Moe!.TryGetValue($"{mlp}.{key}", out Tensor? whole)) block[$"{mlp}.{key}"] = KimiK31Sharding.Replica(whole, _owned, _ranks);
-        }
-        // An F32 checkpoint's experts are read where they are; a packed one arrives through LoadPackedExperts below.
-        for (int g = first; g < first + perRank; g++)
-        {
-            foreach (string proj in new[] { "gate_proj", "up_proj", "down_proj" })
-            {
-                string key = $"{mlp}.experts.{g}.{proj}.weight";
-                if (lw.Moe!.TryGetValue(key, out Tensor? expert)) block[key] = expert;
-            }
-        }
         MoeFeedForward moe = new(KimiK31Sharding.BlockSettings(c), c.Hidden, lowVram: false);
         moe.ShardExperts(first, perRank);
-        moe.LoadWeights(block, lw.MoePrefix);
-        if (lw.PackedExperts is not null)
-        {
-            List<PackedMxfp4Expert> local = new(perRank);
-            for (int g = first; g < first + perRank; g++) local.Add(lw.PackedExperts[g]);
-            moe.LoadPackedExperts(local);
-        }
+        moe.LoadWeights(lw.Moe!, lw.MoePrefix);
+        if (lw.PackedExperts is not null) moe.LoadPackedExperts(lw.PackedExperts);
         return moe;
     }
 
