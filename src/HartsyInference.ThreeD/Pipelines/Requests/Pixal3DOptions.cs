@@ -31,6 +31,10 @@ public sealed record Pixal3DOptions
     /// The textured path always repairs through its post-processor. Boundary edges along larger openings remain either way.</summary>
     public bool CleanMesh { get; init; } = true;
 
+    /// <summary>With <see cref="CleanMesh"/>, also close the thin slits and gaps the repair leaves: every boundary loop that triangulates with no new edge longer than
+    /// <see cref="Geometry.Ops.ShapeMeshFinisher.DefaultOpeningWidthRatio"/> of the bounding-box diagonal (<see cref="Geometry.Ops.HoleFiller"/>); wider openings stay open. Off by default.</summary>
+    public bool CloseOpenings { get; init; }
+
     /// <summary>Upstream <c>mesh_scale</c>: the object's frame relative to the unit grid; must be positive.</summary>
     public double MeshScale { get; init; } = 1.0;
 }

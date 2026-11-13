@@ -355,7 +355,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
             if (!textured)
             {
-                mesh = ShapeMeshFinisher.Finish(mesh, options.CleanMesh);
+                mesh = ShapeMeshFinisher.Finish(
+                    mesh, options.CleanMesh, openingWidthRatio: options.CloseOpenings ? ShapeMeshFinisher.DefaultOpeningWidthRatio : 0);
                 ToExportFrame(mesh);
                 Stage();
                 return new Pixal3DOutput(mesh, null);
