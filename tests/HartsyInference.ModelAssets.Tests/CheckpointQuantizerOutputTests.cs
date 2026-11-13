@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Quant;
@@ -105,6 +106,27 @@ public sealed class CheckpointQuantizerOutputTests : IDisposable
         CheckpointQuantizer.Quantize(Job(source, output, QuantizationTargetKind.Fp8Scaled));
 
         Assert.Empty(CheckpointHeader.Read(output).Metadata);
+    }
+
+    [Fact]
+    public void GgufCopyIsLabelledByItsPresetAndKeepsTheIdentity()
+    {
+        string source = WriteSource(Identity());
+        string output = Path.Combine(_dir, "out", "q8.gguf");
+
+        CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = source,
+            OutputPath = output,
+            Architecture = "flux",
+            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0, "Q8_0"),
+        });
+
+        CheckpointHeader header = CheckpointHeader.Read(output);
+        Assert.Equal("Q8_0", header.Metadata["hartsy.quant"]);
+        Assert.Equal("Iris-Z-small (Q8_0)", header.Metadata["modelspec.title"]);
+        Assert.Equal("iris-z-small", header.Metadata["modelspec.architecture"]);
+        Assert.Equal("other", header.Metadata["modelspec.license"]);
     }
 
     [Fact]

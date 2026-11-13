@@ -36,7 +36,9 @@ public enum QuantizationTargetKind
 /// <summary>The output format for a <see cref="QuantizationJob"/>.</summary>
 /// <param name="Kind">Container to write.</param>
 /// <param name="Policy">Per-tensor precision rules; required for <see cref="QuantizationTargetKind.Gguf"/>.</param>
-public sealed record QuantizationTarget(QuantizationTargetKind Kind, GgufQuantPolicy? Policy = null);
+/// <param name="Preset">The preset's name, such as <c>Q4_K_M</c>, which labels the output. A policy is a set of rules and does not
+/// carry its name, so a GGUF written without one is labelled by its backbone dtype.</param>
+public sealed record QuantizationTarget(QuantizationTargetKind Kind, GgufQuantPolicy? Policy = null, string? Preset = null);
 
 /// <summary>One offline quantization request. Precision is an argument here rather than a knob on purpose: knob
 /// domains are Numerics/Vram/Diagnostics/Paths, and "what precision is this file" is none of those.</summary>
@@ -433,7 +435,7 @@ public static class CheckpointQuantizer
     /// <summary>What a quantized copy is labelled as in its metadata: the GGUF preset, or the format name.</summary>
     private static string QuantLabel(QuantizationTarget target) => target.Kind switch
     {
-        QuantizationTargetKind.Gguf => target.Policy!.ToString(),
+        QuantizationTargetKind.Gguf => target.Preset ?? target.Policy!.BackboneDType.Name,
         QuantizationTargetKind.Fp8Scaled => "fp8-scaled",
         QuantizationTargetKind.Int8ConvRot => "int8-convrot",
         _ => "nvfp4",
