@@ -231,7 +231,10 @@ public sealed class PaintBakeParityTests(ITestOutputHelper output)
             return;
         if (!f.Archive.Has("normal0"))
         {
-            output.WriteLine("SKIPPED: the fixture has no geometry maps (regenerate it with the current dump_paint_bake.py).");
+            const string reason = "the fixture has no geometry maps (regenerate it with the current dump_paint_bake.py)";
+            if (Environment.GetEnvironmentVariable(ParityFixtures.RequireWeightsVariable) == "1")
+                throw new InvalidOperationException($"{ParityFixtures.RequireWeightsVariable}=1 but {reason}.");
+            output.WriteLine($"SKIPPED: {reason}.");
             return;
         }
 
