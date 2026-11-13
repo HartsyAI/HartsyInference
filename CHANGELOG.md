@@ -41,6 +41,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)
   matches the CPU on CUDA and Vulkan. The real index maps every key, and the multimax matches the reference. `Ernie5RealCheckpointTests` runs
   on `ERNIE_REAL_DIR` (skipped otherwise), and `docs/Checklists/ERNIE55_REAL_WEIGHTS.md` is the runbook. The indexer ReLU stays unverified.
+- **Added: ERNIE-5.5 one-pod run runbook and `scripts/ernie55_pod_run.sh`, which checks the pinned checkpoint and the GPU before the real-weight test.**
+  The synthetic checkpoint writer can emit the sharded index layout that the real checkpoint ships.
 
 - **Added: `hartsy 3d -m pixal3d`, Pixal3D shape-only image to mesh (🔧, parity pending).** `Pixal3DImageTo3DPipeline` runs the cascade with the
   projection-mode flows: DINOv3 tokens split into global tokens and a patch map sampled at each voxel's projected position (NAF-upsampled for the
