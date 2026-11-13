@@ -150,6 +150,60 @@ of each vertex's texel, averaged on a 512 grid, 379,483 voxels), not the origina
   these renders; 4096 stays an explicit choice. Changing the default needs the same comparison on a run with the real attribute volume (one GPU run of TRELLIS.2 at 512).
 - The saved render sheet of the six runs is `trellis2-atlas-defaults-compare.png` in the GPU block results folder.
 
+## Closing slits and gaps (`HoleFiller`)
+
+An opt-in step after the perimeter fill (`MeshCleanOptions.HoleFillMaxWidth`, default 0 = off, so the default output is unchanged). It traces the boundary with `MeshBoundary`, cuts walks that pass a pinch vertex
+into simple cycles, and triangulates each cycle by ear clipping without adding a vertex. Ears are ranked by roundness (a sliver along one side of a slit comes last, so the clipping zips across the slit), with a
+small penalty for a long new edge and a large one for an ear that folds against the surrounding surface; an ear whose new edge already exists in the mesh is skipped (it would give that edge a third face). A cycle is
+filled only when no new edge is longer than the width limit, tried at 1/16, 1/8, 1/4, 1/2 and the full limit so a long edge allowed early does not strand the rest of the loop; a triangle hole counts its own edges.
+That is what separates a slit from an opening: a slit of any length zips shut across its width, a cut base or a mouth needs edges as long as itself and stays open. Orientation is unified first, because the patches take
+their winding from the faces around the hole.
+
+Wiring: `ShapeMeshFinisher.Finish(mesh, openingWidthRatio:)` (share of the bounding-box diagonal; `DefaultOpeningWidthRatio` is 0.1), `Trellis2Options.CloseOpenings` and `Pixal3DOptions.CloseOpenings` (off by default),
+and `fill-holes` takes a `maxWidth` share of the diagonal besides `maxPerimeter` (0 by default). `HoleFiller.Fill` reports what it filled and what stayed open (too wide, unclosable, walks that end at a non-manifold edge).
+
+Measured on the saved meshes of the section above (CPU, welded counts as `MeshStatistics` takes them; the counts repeat exactly between runs, the times are from a shared, loaded machine and vary up to twofold, for example 2.3 and 5.8 s for the SAM 3D bust):
+
+| Mesh, finisher | Boundary edges, by index | Non-manifold, by index | Welded boundary / non-manifold | Triangles | Time |
+|---|---|---|---|---|---|
+| Bust 512 raw | 18,889 | 30,844 | 18,889 / 30,844 | 1,487,440 | |
+| Bust 512, defaults | 30,198 | 0 | 9,611 / 19,708 | 1,485,720 | 1.6 s |
+| Bust 512, width 0.1 | 0 | 0 | 0 / 22,407 | 1,510,876 | 3.2 s |
+| Mug 512 raw | 41,231 | 7,249 | 41,231 / 7,249 | 2,528,776 | |
+| Mug 512, defaults | 46,678 | 0 | 38,243 / 7,146 | 2,530,286 | 2.6 s |
+| Mug 512, width 0.1 | 0 | 0 | 0 / 7,466 | 2,575,874 | 8.3 s |
+| Mug 1024 raw | 160,408 | 43,097 | 160,408 / 43,097 | 11,070,214 | |
+| Mug 1024, defaults | 204,558 | 0 | 156,336 / 42,378 | 11,067,728 | 21.8 s |
+| Mug 1024, width 0.1 | 92,464 (10 loops) | 0 | 66,429 / 42,796 | 11,179,432 | 27.4 s |
+| SAM 3D bust, saved after `Sam3dObjectsMesh.Finish` | 466 | 0 | 466 / 0 | 676,758 | |
+| SAM 3D bust, width 0.1 (area ratio 1e-3 as in the engine) | 0 | 0 | 0 / 0 | 677,202 | 2.3 s (1.1 s without) |
+
+- The by-index count is the topology of the mesh as stored; the welded one is what `MeshStatistics.Measure` returns. Width 0.1 leaves the SAM 3D bust with no boundary and no non-manifold edge by either count, so that mesh is closed
+  in the full sense (it has four components). The TRELLIS.2 meshes are closed by index only: the non-manifold repair splits vertices, two sheets that touch along an edge keep sharing positions, and welding
+  merges them again (the welded non-manifold column). That count is the geometry, not a leftover of the fill, and only a change of geometry (the upstream remesh) removes it.
+- The width limit decides the result, not time: on the mug at 512, ratios 0.05, 0.1 and 0.2 leave 432, 0 and 0 boundary edges; on the bust 0.03 already leaves 0. On the 1024 mug width 0.1 leaves ten loops, 7 of them
+  patches and 3 of them 3D openings, the largest of 48,566 and 21,736 edges (a spread of about 290 by 260 by 135 voxels), and one on the grid face: those are real openings in the decoded shape, and
+  they stay open. Width 0.2 leaves 74,768 edges.
+- Winding: counting edges whose two faces run the same way, the defaults leave 3,373 (bust), 2,254 (mug 512) and 5,987 (mug 1024), which unification cannot fix because the repaired surface is not orientable there; the fill
+  adds to it (to 8,197, 6,448 and 12,488), since its patches meet those same places. The SAM 3D bust has none. Boundary and non-manifold counts do not depend on it. Nothing tests a patch against the surface around it or another patch: on a curled slit, ear clipping a non-planar loop can overlap its neighbours (only the fold penalty steers away), a likely part of the rise (not checked).
+- The slits and terraces of the mug are filled with flat strips of triangles, so the patches are as rough as the surface around them; nothing fairs or relaxes them. Rendered with the engine's thumbnail renderer, the bust's
+  dark specks in the hair are gone; on the mug most white streaks along the inner wall are closed, but one at the rim stays see-through (probably faces running the wrong way, the winding limit above; not checked). Greedy local flipping of faces with two disagreeing edges did not reduce the count (it settles at about 7,400 on the bust), so the disagreement is structural.
+- Tried and not kept: joining all faces of a non-manifold edge in pairs (wound consistently, most coplanar) instead of one pair. It lowered the by-index boundary of the defaults only from 30,198 to 26,778 on the bust, raised the welded
+  non-manifold count, and gained nothing once the fill ran.
+
+### Feasibility of the narrow-band dual-contouring remesh (not implemented)
+
+Upstream's `to_glb` runs `remesh_narrow_band_dc` only with `remesh=True`; its default is the standard path above. Read from CuMesh `remeshing.py`: a sparse grid is refined from 32 up to the grid resolution, keeping a voxel while the
+unsigned distance at its centre (`bvh.unsigned_distance`) is under 0.87 of the cell; the distance is shifted by `eps = band * voxel` (band 1) and the zero set is dual-contoured (`simple_dual_contour`, source not read), with one quad per
+crossing edge through the four voxels around it (the offsets and the split rule of `DualGridMesher`, so that code could be reused) and quads with a missing neighbour dropped; `project_back` blends each vertex toward the closest point of the original.
+There is no flood fill and no sign: the result is the offset surface at distance `eps`, a closed shell about two voxels thick around the original, and a hole wider than `2 * eps` stays a hole through the shell.
+
+Cost here, measured with `TriangleBvh` on the finished 512 bust (1,485,720 faces, 8 threads, a loaded machine): build 3.6 s, 1.56 million exact distance queries per second within 1.5 voxels of the surface. The band holds one to three
+times as many voxels as the surface has (736,637 at 512 for the bust, 5,596,157 for the 1024 mug), so an estimated few million to fifteen million queries (2 to 10 s at the rate above) plus a voxel hash (estimated at 40 bytes a voxel: 100 MB at 512, 700 MB at 1024); the estimates are not measured. It is bounded and testable
+(a sphere must come out closed with the volume of the offset ball), so cost is not the reason it is left out. The reasons are what it produces: twice the faces and a shell displaced by a voxel on each side, or, projected back, two coincident
+sheets that weld to non-manifold edges again, so the welded count would not be the thing it fixes; and the by-index closure above already reaches no boundary and no non-manifold edge on three of the four meshes. It is the next step only if a consumer needs
+position-welded manifold geometry; a single-layer alternative (flood fill from the grid's outside through voxels farther than a gap tolerance from the surface, then contour the solid) is a separate design that changes topology.
+
 ## Known limits against cumesh and xatlas
 
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the

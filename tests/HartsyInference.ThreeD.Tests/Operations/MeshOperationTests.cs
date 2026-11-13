@@ -205,6 +205,23 @@ public sealed class MeshOperationTests
     }
 
     [Fact]
+    public void FillHolesByWidthClosesAnOpeningThePerimeterLimitRefusesAndLeavesAWideOneOpen()
+    {
+        Mesh open = new()
+        {
+            Vertices = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1],
+            Indices = [0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3],
+        };
+        MeshDocument box = new() { Primitives = [new MeshPrimitive { Geometry = open }] };
+
+        MeshOperationRun byWidth = Run(box, "fill-holes", ("maxPerimeter", 0), ("maxWidth", 1));
+        MeshOperationRun tooNarrow = Run(box, "fill-holes", ("maxPerimeter", 0), ("maxWidth", 0.3));
+
+        Assert.Equal(open.TriangleCount + 2, byWidth.Document.TriangleCount);
+        Assert.Equal(open.TriangleCount, tooNarrow.Document.TriangleCount);
+    }
+
+    [Fact]
     public void FillHolesDropsTheTexturesOfAPrimitiveItFilledAndSaysSo()
     {
         Mesh whole = Sphere(12, 16);

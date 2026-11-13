@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 public static class MeshCleaner
 {
     /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, small components by face count, non-manifold, small
-    /// components by area, holes, orientation.</summary>
+    /// components by area, holes (perimeter, then width), orientation.</summary>
     public static Mesh Clean(Mesh mesh, MeshCleanOptions? options = null)
     {
         Validate(mesh);
@@ -22,6 +22,11 @@ public static class MeshCleaner
         if (options.RepairNonManifoldEdges) m = RepairNonManifoldEdges(m);
         if (options.SmallComponentAreaRatio > 0) m = RemoveSmallComponents(m, options.SmallComponentAreaRatio);
         if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
+        if (options.HoleFillMaxWidth > 0)
+        {
+            // The patches take their winding from the faces around the hole, so those must agree first (unless the caller turned the winding step off).
+            m = HoleFiller.Fill(options.UnifyOrientation ? UnifyOrientation(m, orientOutward: false) : m, options.HoleFillMaxWidth).Mesh;
+        }
         if (options.UnifyOrientation) m = UnifyOrientation(m, options.OrientOutward);
         return m;
     }
