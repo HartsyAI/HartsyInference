@@ -16,6 +16,9 @@ public static class HoleFiller
 {
     private const double ReflexPenalty = 10;
 
+    // A longer limit lets an early ear take a long edge and strand the rest of the loop, so a loop is tried at 1/16, 1/8, 1/4, 1/2 and the full limit, narrowest first.
+    private const int WidthTiers = 5;
+
     /// <summary>Closes every boundary loop of <paramref name="mesh"/> whose triangulation needs no new edge longer than <paramref name="maxWidth"/> (mesh units). The patches wind opposite to the loop's faces, so a
     /// consistently wound mesh stays consistent. A pass can free loops the one before refused (its new edges exist now), so passes repeat up to <paramref name="maxPasses"/> while they add triangles;
     /// the open counts are those of the last pass, taken before it filled.</summary>
@@ -61,9 +64,14 @@ public static class HoleFiller
             }
             foreach (int[] cycle in walk.SimpleCycles())
             {
-                patch.Clear();
-                patchEdges.Clear();
-                Outcome outcome = Triangulate(mesh, table, cycle, added, maxWidth, patch, patchEdges);
+                Outcome outcome = Outcome.TooWide;
+                for (double limit = maxWidth / (1 << (WidthTiers - 1)); outcome == Outcome.TooWide; limit *= 2)
+                {
+                    patch.Clear();
+                    patchEdges.Clear();
+                    outcome = Triangulate(mesh, table, cycle, added, Math.Min(limit, maxWidth), patch, patchEdges);
+                    if (limit >= maxWidth) break;
+                }
                 if (outcome == Outcome.Closed && cycle.Length == 3
                     && (faces ??= FaceSet(mesh.Indices)).Contains(Sorted(cycle[0], cycle[1], cycle[2])))
                     outcome = Outcome.Unclosable;
@@ -155,7 +163,8 @@ public static class HoleFiller
             double squares = Vector3d.Dot(ab, ab) + Vector3d.Dot(bc, bc) + Vector3d.Dot(ac, ac);
             double roundness = squares > 0 ? 2 * Math.Sqrt(3) * cross.Length / squares : 0;
             bool folds = Vector3d.Dot(cross, normal[a] + normal[i] + normal[c]) < 0;
-            queue.Enqueue((i, stamp[i]), (folds ? ReflexPenalty : 0) + 1 - roundness);
+            double reach = maxWidth > 0 ? Math.Min(1, Math.Sqrt(Vector3d.Dot(ac, ac)) / maxWidth) : 0;
+            queue.Enqueue((i, stamp[i]), (folds ? ReflexPenalty : 0) + 1 - roundness + reach);
         }
     }
 
