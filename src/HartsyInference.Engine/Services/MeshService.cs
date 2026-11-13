@@ -552,7 +552,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 }, cancel);
                 if (result.Mesh is not { TriangleCount: > 0 } mesh)
                     throw new InvalidOperationException("Omni produced no geometry (try another image, control or seed).");
-                // Upstream's FloaterRemover drops the components with fewer than 0.5 % of the largest component's faces; the shared repair runs that rule (before its own steps) and, unlike upstream, then repairs non-manifold edges, closes small holes and unifies the winding.
+                // Upstream's FloaterRemover drops the components under 0.5 % of the largest component's faces (truncated, edge-connected); the shared repair runs that rule after welding equal vertices (upstream works on the raw index buffer, which only differs if the extraction emits coincident but unshared vertices) and, unlike upstream, then repairs non-manifold edges, closes small holes and unifies the winding.
                 return new MeshResult { Data = GlbWriter.Write(ShapeMeshFinisher.Finish(mesh, clean: true, smallComponentAreaRatio: 0, smallComponentFaceRatio: 5e-3)), Format = "glb" };
             },
             cancel);

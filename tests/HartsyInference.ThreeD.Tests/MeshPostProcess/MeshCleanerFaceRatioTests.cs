@@ -47,6 +47,35 @@ public sealed class MeshCleanerFaceRatioTests
     }
 
     [Fact]
+    public void TheThresholdIsTruncatedLikeMeshLabs_FiveFacesStayUnderALargestOf1100()
+    {
+        // MeshLab: uint th = largest * 0.005f; a component stays at size >= th. 1,100 * 0.005 = 5.5 truncates to 5.
+        Mesh result = MeshCleaner.RemoveSmallComponentsByFaceCount(Pieces(1100, 4, 5), 0.005);
+
+        Assert.Equal(1100 + 5, result.TriangleCount);
+        // 2,000 * 0.005 = 10: nine faces go, ten stay.
+        Assert.Equal(2000 + 10, MeshCleaner.RemoveSmallComponentsByFaceCount(Pieces(2000, 9, 10), 0.005).TriangleCount);
+    }
+
+    [Fact]
+    public void ThreeFacesOnOneEdgeAreOnePieceSoTheRuleMustRunBeforeTheNonManifoldSplit()
+    {
+        // Three triangles sharing the edge (0, 1), a non-manifold edge: MeshLab's face-face ring joins them into one component of 3 faces.
+        Mesh fin = new()
+        {
+            Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 1],
+            Indices = [0, 1, 2, 0, 1, 3, 0, 1, 4],
+        };
+        List<float> vertices = [.. fin.Vertices];
+        List<int> indices = [.. fin.Indices];
+        AddStrip(vertices, indices, 4, 50f);
+        Mesh mesh = new() { Vertices = [.. vertices], Indices = [.. indices] };
+
+        // largest 4 faces, ratio 0.75: threshold 3, so the 3-face fin stays only if its three faces count as one component (as separate faces they would be 1 each and go).
+        Assert.Equal(7, MeshCleaner.RemoveSmallComponentsByFaceCount(mesh, 0.75).TriangleCount);
+    }
+
+    [Fact]
     public void TheLargestAlwaysStaysAndARatioOfZeroKeepsEverything()
     {
         Mesh mesh = Pieces(10, 3);
@@ -54,6 +83,7 @@ public sealed class MeshCleanerFaceRatioTests
         Assert.Equal(13, MeshCleaner.RemoveSmallComponentsByFaceCount(mesh, 0).TriangleCount);
         Assert.Equal(10, MeshCleaner.RemoveSmallComponentsByFaceCount(mesh, 1).TriangleCount);
         Assert.Throws<ArgumentOutOfRangeException>(() => MeshCleaner.RemoveSmallComponentsByFaceCount(mesh, -0.1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => MeshCleaner.RemoveSmallComponentsByFaceCount(mesh, 2)); // would remove the largest component too
     }
 
     [Fact]
