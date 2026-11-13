@@ -63,13 +63,20 @@ public sealed class HunyuanPaintPipeline
         Validate(options);
         int size = options.ViewResolution;
         _stage.Restart();
+        List<string> warnings = [];
         if (mesh.Uvs is null)
         {
             // Charts grow across shared vertices only: a mesh whose vertices are split along every face (a triangle soup, or a decimated mesh with duplicated seam vertices)
             // unwraps into thousands of one-face charts, an atlas that is mostly padding and a bake that is mostly inpainting. Merge them first.
             mesh = WeldForUnwrap(mesh);
-            mesh = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken).Mesh;
-            Stage("uv unwrap");
+            UvUnwrapResult unwrapped = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken);
+            mesh = unwrapped.Mesh;
+            Stage($"uv unwrap ({unwrapped.ChartCount} charts)");
+            if (PaintInputAudit.TornMeshWarning(faceCount: mesh.TriangleCount, chartCount: unwrapped.ChartCount) is { } torn)
+            {
+                StageLog?.Invoke(torn);
+                warnings.Add(torn);
+            }
         }
 
         PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
@@ -84,7 +91,7 @@ public sealed class HunyuanPaintPipeline
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
         PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, cancellationToken);
         Stage("bake");
-        return baked;
+        return warnings.Count == 0 ? baked : baked with { Warnings = warnings };
     }
 
     /// <summary>Merges vertices at the same position (exact match) and drops degenerate and duplicate faces and unreferenced vertices, and does nothing else to the surface (no hole filling,
