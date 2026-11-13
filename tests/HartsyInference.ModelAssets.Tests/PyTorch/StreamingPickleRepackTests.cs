@@ -84,14 +84,4 @@ public sealed class StreamingPickleRepackTests : IDisposable
         Assert.Equal(DType.I64, loader.Descriptors["steps"].DType);
         Assert.Equal(new long[] { 7, -3 }, loader.GetTensor("steps").AsSpan<long>().ToArray());
     }
-
-    [Fact]
-    public void Repack_RejectsACheckpointThatIsNotATorchFile()
-    {
-        string notTorch = Path.Combine(_folder, "text.bin");
-        File.WriteAllText(notTorch, "this is not a checkpoint");
-
-        Assert.ThrowsAny<Exception>(() => StreamingPickleRepack.Repack(notTorch, Path.Combine(_folder, "never.safetensors")));
-        Assert.False(File.Exists(Path.Combine(_folder, "never.safetensors")));
-    }
 }

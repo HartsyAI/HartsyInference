@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Security.Cryptography;
 using HartsyInference.ModelAssets.PyTorch;
@@ -10,13 +11,21 @@ WeightsMirror - repack pickle checkpoints to safetensors for hosting, and prove 
   The pickle is read only by the safe-subset reader (nothing in it is executed), one tensor at a time. The output keeps the
   source's tensor names, order, shapes, dtypes and bytes. Sources are only read; nothing is written next to them.
 
+  This is not CheckpointRepacker. That tool stamps model identity metadata, merges, casts and quantizes, and loads a whole
+  pickle; this one stages a byte-faithful repack of a file that will be hosted, one tensor at a time, and records the proof.
+
 USAGE
   WeightsMirror inspect <checkpoint> [--recursive]
-      Lists tensor count, bytes, dtypes and how often a tensor-by-tensor read would have to restart a storage entry.
-  WeightsMirror run --plan <mirror-plan.json> --models-root <dir> --staging <dir> [--only id,id] [--force]
+      Lists tensor count, storage entries, dtypes with their bytes, the first tensors and the top-level key names.
+  WeightsMirror run --plan <mirror-plan.json> --models-root <dir> --staging <dir> [--only id,id] [--force] [--whole-below <bytes>]
       For each plan item: hash the local pickle against the upstream pin, repack it into <staging>/<output>, verify the repack
       tensor for tensor, hash it, and record everything in <staging>/manifest.json. The staging folder must be outside the
-      models root and outside the repository.
+      models root and outside the repository. A source up to --whole-below bytes (default 2 GiB) is verified through the
+      whole-file pickle reader, which does not share the byte-reading code of the tensor-by-tensor reader that wrote the repack.
+  WeightsMirror verify --plan <mirror-plan.json> --models-root <dir> --staging <dir> [--only id,id] [--whole-below <bytes>]
+      Verifies already staged repacks against their sources again, without repacking, and updates the manifest.
+  WeightsMirror annotate --staging <dir> --ids id,id --text <what was checked>
+      Records a check made outside this tool (for example a comparison through another loader) on those manifest entries.
   WeightsMirror check --staging <dir>
       Re-hash every file the manifest lists and compare sizes and sha256.
 """;
@@ -50,7 +59,9 @@ for (int i = 1; i < args.Length; i++)
 return args[0] switch
 {
     "inspect" => positionals.Count == 1 ? Inspect(positionals[0], options.ContainsKey("--recursive")) : Fail("inspect takes one checkpoint path."),
-    "run" => Run(options),
+    "run" => Run(options, repack: true),
+    "verify" => Run(options, repack: false),
+    "annotate" => Annotate(options),
     "check" => Check(options),
     _ => Fail($"Unknown command '{args[0]}'."),
 };
@@ -109,12 +120,17 @@ static string? RepoRootOf(string start)
     return null;
 }
 
-static int Run(Dictionary<string, string> options)
+static int Run(Dictionary<string, string> options, bool repack)
 {
     if (!options.TryGetValue("--plan", out string? planPath) || !options.TryGetValue("--models-root", out string? modelsRoot)
         || !options.TryGetValue("--staging", out string? staging))
     {
-        return Fail("run needs --plan, --models-root and --staging.");
+        return Fail("This command needs --plan, --models-root and --staging.");
+    }
+    long wholeBelow = 2L << 30;
+    if (options.TryGetValue("--whole-below", out string? limit) && !long.TryParse(limit, CultureInfo.InvariantCulture, out wholeBelow))
+    {
+        return Fail("--whole-below takes a byte count.");
     }
     string staged = Path.GetFullPath(staging);
     if (IsUnder(staged, modelsRoot) || IsUnder(modelsRoot, staged))
@@ -143,21 +159,75 @@ static int Run(Dictionary<string, string> options)
     {
         try
         {
-            MirrorManifestItem done = RunItem(plan, item, modelsRoot, staged, tool, options.ContainsKey("--force"));
+            MirrorManifestItem done = repack
+                ? RunItem(plan, item, modelsRoot, staged, tool, options.ContainsKey("--force"), wholeBelow)
+                : VerifyItem(item, modelsRoot, staged, manifest, wholeBelow);
             manifest.Items = [.. manifest.Items.Where(m => m.Id != item.Id), done];
             manifest.Save(manifestPath);
             Console.WriteLine($"[{item.Id}] ok: {done.Repack.Size:N0} bytes, sha256 {done.Repack.Sha256}");
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or NotSupportedException or UnauthorizedAccessException)
+        // One failed item must not stop the rest: any error here is that item's. A failed repack leaves no valid file, so the manifest stops listing it.
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             failures++;
             Console.Error.WriteLine($"[{item.Id}] FAILED: {ex.Message}");
+            if (repack && manifest.Items.RemoveAll(m => m.Id == item.Id) > 0)
+            {
+                manifest.Save(manifestPath);
+            }
         }
     }
     return failures == 0 ? 0 : 1;
 }
 
-static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string modelsRoot, string staged, string tool, bool force)
+static string MethodOf(bool wholeSource) => wholeSource
+    ? "names and order, shapes, dtypes and bytes: the pickle through the whole-file safe-subset reader (not the tensor-by-tensor reader that wrote the repack), the repack through the safetensors loader"
+    : "names and order, shapes, dtypes and bytes: the pickle through the tensor-by-tensor safe-subset reader (the one that wrote the repack), the repack through the safetensors loader";
+
+static MirrorManifestItem VerifyItem(MirrorItem item, string modelsRoot, string staged, MirrorManifest manifest, long wholeBelow)
+{
+    MirrorManifestItem existing = manifest.Items.FirstOrDefault(m => m.Id == item.Id) ?? throw new InvalidDataException("The manifest has no entry for it; run it first.");
+    string source = Path.GetFullPath(Path.Combine(modelsRoot, item.LocalSource));
+    string output = Path.GetFullPath(Path.Combine(staged, item.Output));
+    bool whole = new FileInfo(source).Length <= wholeBelow;
+    Console.WriteLine($"[{item.Id}] verifying against the source ({(whole ? "whole-file reader" : "tensor-by-tensor reader")})");
+    PickleRepackVerification verification = StreamingPickleRepack.Verify(source, output, item.Recursive, whole);
+    if (!verification.Equal)
+    {
+        throw new InvalidDataException($"The repack differs from its source: {string.Join("; ", verification.Differences)}");
+    }
+    return new MirrorManifestItem
+    {
+        Id = existing.Id, Model = existing.Model, DateUtc = existing.DateUtc, Tool = existing.Tool, Source = existing.Source, Repack = existing.Repack, License = existing.License, Notes = existing.Notes,
+        Verification = new ManifestVerification
+        {
+            Equal = true, TensorsCompared = verification.TensorCount, Method = MethodOf(whole), ExternalChecks = existing.Verification.ExternalChecks,
+        },
+    };
+}
+
+static int Annotate(Dictionary<string, string> options)
+{
+    if (!options.TryGetValue("--staging", out string? staging) || !options.TryGetValue("--ids", out string? ids) || !options.TryGetValue("--text", out string? text))
+    {
+        return Fail("annotate needs --staging, --ids and --text.");
+    }
+    string path = Path.Combine(staging, "manifest.json");
+    MirrorManifest manifest = MirrorManifest.LoadOrNew(path);
+    HashSet<string> wanted = [.. ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+    if (wanted.Except(manifest.Items.Select(i => i.Id)).FirstOrDefault() is string unknown)
+    {
+        return Fail($"The manifest has no entry '{unknown}'.");
+    }
+    foreach (MirrorManifestItem item in manifest.Items.Where(i => wanted.Contains(i.Id)))
+    {
+        item.Verification.ExternalChecks.Add(text);
+    }
+    manifest.Save(path);
+    return 0;
+}
+
+static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string modelsRoot, string staged, string tool, bool force, long wholeBelow)
 {
     string source = Path.GetFullPath(Path.Combine(modelsRoot, item.LocalSource));
     if (!File.Exists(source))
@@ -195,8 +265,9 @@ static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string model
     };
     Console.WriteLine($"[{item.Id}] repacking");
     PickleRepackSummary summary = StreamingPickleRepack.Repack(source, output, item.Recursive, metadata);
-    Console.WriteLine($"[{item.Id}] verifying {summary.TensorCount} tensors against the source");
-    PickleRepackVerification verification = StreamingPickleRepack.Verify(source, output, item.Recursive);
+    bool whole = size <= wholeBelow;
+    Console.WriteLine($"[{item.Id}] verifying {summary.TensorCount} tensors against the source ({(whole ? "whole-file reader" : "tensor-by-tensor reader")})");
+    PickleRepackVerification verification = StreamingPickleRepack.Verify(source, output, item.Recursive, whole);
     if (!verification.Equal)
     {
         File.Delete(output);
@@ -210,7 +281,7 @@ static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string model
     {
         Id = item.Id,
         Model = item.Model,
-        DateUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+        DateUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
         Tool = tool,
         Source = new ManifestSource
         {
@@ -224,8 +295,7 @@ static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string model
         },
         Verification = new ManifestVerification
         {
-            Equal = true, TensorsCompared = verification.TensorCount,
-            Method = "names and order, shapes, dtypes and bytes: the pickle through the safe-subset reader, the repack through the safetensors loader",
+            Equal = true, TensorsCompared = verification.TensorCount, Method = MethodOf(whole),
         },
         License = new ManifestLicense
         {

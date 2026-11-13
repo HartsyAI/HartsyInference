@@ -91,6 +91,9 @@ internal sealed class ManifestVerification
     public int TensorsCompared { get; init; }
 
     public string Method { get; init; } = "";
+
+    /// <summary>Checks made outside this tool, recorded with <c>annotate</c>.</summary>
+    public List<string> ExternalChecks { get; init; } = [];
 }
 
 /// <summary>The licence that travels with the file.</summary>

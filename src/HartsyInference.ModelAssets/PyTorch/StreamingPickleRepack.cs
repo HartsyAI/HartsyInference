@@ -24,15 +24,12 @@ public static class StreamingPickleRepack
         {
             Directory.CreateDirectory(directory);
         }
-        using PytorchPickleLoader loader = new();
-        try
-        {
-            loader.OpenLazy(sourcePath, recursiveFlatten);
-        }
-        catch (NotSupportedException)
+        if (!PytorchPickleLoader.IsZipCheckpoint(sourcePath))
         {
             return RepackWhole(sourcePath, outputPath, recursiveFlatten, metadata);
         }
+        using PytorchPickleLoader loader = new();
+        loader.OpenLazy(sourcePath, recursiveFlatten);
         if (loader.Descriptors.Count == 0)
         {
             throw new InvalidDataException($"Checkpoint '{sourcePath}' holds no tensors.");
@@ -46,35 +43,29 @@ public static class StreamingPickleRepack
             bytes += descriptor.DType.ComputeByteCount(descriptor.Shape.ElementCount);
         }
         SafeTensorsStreamWriter.Write(outputPath, entries, metadata);
-        return new PickleRepackSummary(entries.Count, bytes, true, CountStorageRestarts(loader.Descriptors.Values));
+        return new PickleRepackSummary(entries.Count, bytes, true, CountStorageRereads(loader.Descriptors.Values));
     }
 
-    /// <summary>Compares every tensor of <paramref name="sourcePath"/> with the same-named tensor of <paramref name="repackedPath"/>, each read through its own loader. A name, order, shape, dtype or byte difference is a finding, not an exception.</summary>
-    public static unsafe PickleRepackVerification Verify(string sourcePath, string repackedPath, bool recursiveFlatten = false)
+    /// <summary>Compares every tensor of <paramref name="sourcePath"/> with the same-named tensor of <paramref name="repackedPath"/>. A name, order, shape, dtype or byte difference is a finding, not an exception.
+    /// By default the source is read tensor by tensor, as <see cref="Repack"/> reads it, so a fault in that reader would show on both sides; <paramref name="wholeSource"/> reads it through the whole-file path
+    /// (<see cref="PytorchPickleLoader.Load"/>, its own byte-reading code, at the cost of holding the tensors in memory), which a reader fault on the lazy path cannot hide behind.</summary>
+    public static PickleRepackVerification Verify(string sourcePath, string repackedPath, bool recursiveFlatten = false, bool wholeSource = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(sourcePath);
         ArgumentException.ThrowIfNullOrEmpty(repackedPath);
         List<string> differences = [];
         using PytorchPickleLoader pickle = new();
-        Func<string, Tensor> read;
-        List<string> names;
-        Func<string, (DType DType, TensorShape Shape)> describe;
         Dictionary<string, Tensor>? whole = null;
-        try
-        {
-            pickle.OpenLazy(sourcePath, recursiveFlatten);
-            names = [.. pickle.Descriptors.Keys];
-            describe = key => (pickle.Descriptors[key].DType, pickle.Descriptors[key].Shape);
-            read = key => pickle.ReadTensor(key);
-        }
-        catch (NotSupportedException)
+        if (wholeSource || !PytorchPickleLoader.IsZipCheckpoint(sourcePath))
         {
             pickle.Load(sourcePath, recursiveFlatten);
             whole = pickle.GetAllTensors();
-            names = [.. whole.Keys];
-            describe = key => (whole[key].DType, whole[key].Shape);
-            read = key => whole[key];
         }
+        else
+        {
+            pickle.OpenLazy(sourcePath, recursiveFlatten);
+        }
+        List<string> names = [.. whole is null ? pickle.Descriptors.Keys : whole.Keys];
         using SafeTensorsLoader repacked = new();
         repacked.Load(repackedPath);
         List<string> repackedNames = [.. repacked.Descriptors.Keys];
@@ -90,13 +81,14 @@ public static class StreamingPickleRepack
                 Report(differences, $"'{name}' is missing from the repack");
                 continue;
             }
-            (DType dtype, TensorShape shape) = describe(name);
+            DType dtype = whole is null ? pickle.Descriptors[name].DType : whole[name].DType;
+            TensorShape shape = whole is null ? pickle.Descriptors[name].Shape : whole[name].Shape;
             if (dtype != target.DType || !shape.Equals(target.Shape))
             {
                 Report(differences, $"'{name}' is {dtype.Name} {shape} in the source and {target.DType.Name} {target.Shape} in the repack");
                 continue;
             }
-            Tensor source = read(name);
+            Tensor source = whole is null ? pickle.ReadTensor(name) : whole[name];
             try
             {
                 if (!SameBytes(source, repacked.GetTensor(name), dtype.ComputeByteCount(shape.ElementCount)))
@@ -130,10 +122,11 @@ public static class StreamingPickleRepack
         return new PickleRepackSummary(tensors.Count, bytes, false, 0);
     }
 
-    // Mirrors the lazy reader's cursor: it keeps one storage entry open and reopens it when the next tensor is another entry or lies behind it.
-    private static int CountStorageRestarts(IEnumerable<PytorchTensorDescriptor> descriptors)
+    // Mirrors the lazy reader's cursor, which keeps one storage entry open: a read costs a second pass when its entry was opened before and the cursor is on another entry or already past the tensor.
+    private static int CountStorageRereads(IEnumerable<PytorchTensorDescriptor> descriptors)
     {
-        int restarts = 0;
+        int rereads = 0;
+        HashSet<string> opened = new(StringComparer.Ordinal);
         string? key = null;
         long position = 0;
         foreach (PytorchTensorDescriptor descriptor in descriptors)
@@ -141,12 +134,15 @@ public static class StreamingPickleRepack
             long start = descriptor.StorageByteOffset;
             if (key != descriptor.StorageKey || position > start)
             {
-                restarts++;
+                if (!opened.Add(descriptor.StorageKey) || key == descriptor.StorageKey)
+                {
+                    rereads++;
+                }
                 key = descriptor.StorageKey;
             }
             position = start + descriptor.DType.ComputeByteCount(descriptor.Shape.ElementCount);
         }
-        return restarts;
+        return rereads;
     }
 
     private static unsafe bool SameBytes(Tensor left, Tensor right, long byteCount)
