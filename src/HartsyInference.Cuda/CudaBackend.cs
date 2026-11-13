@@ -5268,6 +5268,49 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Device NVFP4 to BF16 dequant of a single-expert bank (see <see cref="IBackend.TryDequantNvfp4ToBf16"/>). Uploads the
+    /// packed bytes and block scales for this call only, then runs the kernel that resident NVFP4 weights unpack through. The
+    /// encoder's relative L2 against ComfyUI is unchanged from the host path; bit-for-bit equality is not checked.</summary>
+    public unsafe bool TryDequantNvfp4ToBf16(Tensor packed, Tensor blockScale, Tensor globalScale, Tensor destination)
+    {
+        using NvtxRange _nvtxProf = NvtxRange.Push("TryDequantNvfp4ToBf16");
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        if (_kernels is null || !_kernels.HasNvfp4Kernels) return false;
+        long outDim = packed.Shape[1];
+        long inHalf = packed.Shape[2];
+        if (destination.DType != DType.BF16 || destination.Shape.Rank != 2 || destination.Shape[0] != outDim
+            || destination.Shape[1] != inHalf * 2)
+        {
+            throw new ArgumentException($"Destination must be BF16 [{outDim}, {inHalf * 2}]; got {destination.DType} {destination.Shape}.",
+                nameof(destination));
+        }
+        ulong pWeight = 0, pScales = 0, pOut = 0;
+        bool cachedOutput = false;
+        try
+        {
+            // The banks are long-lived weights: keep them out of auto-promotion so the encoder does not hold them resident.
+            GpuTransferHelper.ExcludeFromAutoPromotion(packed);
+            GpuTransferHelper.ExcludeFromAutoPromotion(blockScale);
+            pWeight = GpuTransferHelper.CopyToDevice(packed);
+            pScales = GpuTransferHelper.CopyToDevice(blockScale);
+            nuint outBytes = GpuTransferHelper.ByteSize(destination);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            float global = ((float*)globalScale.DataPointer)[0];
+            _kernels.LaunchNvfp4Dequant(pOut, pWeight, pScales, (int)outDim, (int)inHalf, (int)blockScale.Shape[2],
+                blockScale.Fp8ScaleFactor, global, _stream.Handle, outBf16: true);
+            GpuTransferHelper.CacheActivation(destination, pOut, outBytes);
+            cachedOutput = true;
+            return true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pScales);
+            GpuTransferHelper.FreeDevice(pWeight);
+        }
+    }
+
     /// <summary>GPU cast FP16 or BF16 → FP32 via PTX kernel.</summary>
     public void CastToF32(Tensor output, Tensor input)
     {
