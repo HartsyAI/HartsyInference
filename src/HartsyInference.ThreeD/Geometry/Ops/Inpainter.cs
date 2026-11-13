@@ -22,6 +22,8 @@ public static class Inpainter
         ArgumentNullException.ThrowIfNull(known);
         if (width <= 0 || height <= 0 || channels <= 0 || radius <= 0)
             throw new ArgumentOutOfRangeException(nameof(radius), "Dimensions, channels and radius must be positive.");
+        if (boundByNeighbours && channels > 16)
+            throw new ArgumentOutOfRangeException(nameof(channels), "Bounding by the neighbours takes at most 16 channels.");
         int n = width * height;
         if (data.Length != n * channels || known.Length != n)
             throw new ArgumentException("Data and mask do not match the image shape.");
@@ -164,10 +166,13 @@ public static class Inpainter
         double[]? big = channels > 16 ? new double[channels] : null;
         Span<double> sum = big ?? acc;
         sum[..channels].Clear();
-        bool bound = boundByNeighbours && channels <= 16;
+        bool bound = boundByNeighbours;
         Span<float> low = stackalloc float[16], high = stackalloc float[16];
-        low.Fill(float.MaxValue);
-        high.Fill(float.MinValue);
+        if (bound)
+        {
+            low.Fill(float.MaxValue);
+            high.Fill(float.MinValue);
+        }
 
         double wsum = 0;
         int r2 = radius * radius;

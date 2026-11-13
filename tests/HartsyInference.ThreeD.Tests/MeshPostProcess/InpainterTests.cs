@@ -159,7 +159,10 @@ public sealed class InpainterTests
 
         // Without the bound some filled value leaves [0.2, 0.9] (the known range); with it none does, and known texels are unchanged.
         Assert.Contains(free, v => v < 0.199f || v > 0.901f);
-        Assert.All(bounded, v => Assert.InRange(v, 0.199f, 0.901f));
+        // The bound is per channel: channel c of the known pattern lies in [0.2 + 0.05 c, 0.8 + 0.05 c].
+        for (int i = 0; i < bounded.Length; i++)
+            Assert.InRange(bounded[i], 0.2f + 0.05f * (i % 3) - 1e-4f, 0.8f + 0.05f * (i % 3) + 1e-4f);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Inpainter.Inpaint(new float[side * side * 17], side, side, 17, known, 3, boundByNeighbours: true));
         for (int i = 0; i < known.Length; i++)
             if (known[i])
                 for (int c = 0; c < 3; c++)
