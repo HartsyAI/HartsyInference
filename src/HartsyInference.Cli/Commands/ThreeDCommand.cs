@@ -146,7 +146,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         if (spec.LocalPath is null)
         {
             // A catalog entry with files can be fetched with `hartsy pull <id>` (the 3D commands do not prompt for a download); a model with none (CoLa3D, UniRig) can only be pointed at a folder.
-            string hint = spec.Catalog is { Assets.Count: > 0 } entry ? $", or download its catalog assets with [/][#2ea5e0]hartsy pull {entry.Id}[/][red]" : string.Empty;
+            string hint = spec.Catalog is { Assets.Count: > 0 } entry ? $", or download its catalog assets with [/][#2ea5e0]hartsy pull {Markup.Escape(entry.Id)}[/][red]" : string.Empty;
             AnsiConsole.MarkupLine($"[red]A model is required via[/] [#2ea5e0]--model-path[/][red]{hint}.[/]");
             return 1;
         }
