@@ -154,10 +154,10 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         EncodeViews([new Hunyuan3DViewImage(Hunyuan3DView.Front, rgb, width, height)]);
 
     /// <summary>Samples a shape for a conditioning the caller built: the denoiser sees <see cref="ConditionPair.Cond"/>, and the unconditional branch of the guidance <see cref="ConditionPair.Uncond"/> (zeros of the conditioning's shape when null). Both are disposed here.</summary>
-    internal ThreeDResult SampleConditioned(Func<ConditionPair> encode, int? seed, int steps, float cfgScale, int gridResolution, float isoLevel, Action<GenerationProgress>? onProgress)
+    internal ThreeDResult SampleConditioned(Func<ConditionPair> encode, int? seed, int steps, float cfgScale, int gridResolution, float isoLevel, Action<GenerationProgress>? onProgress, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
-        return Sample(encode, seed, steps, cfgScale, gridResolution, isoLevel, onProgress);
+        return Sample(encode, seed, steps, cfgScale, gridResolution, isoLevel, onProgress, cancel);
     }
 
     /// <summary>The conditioning of the two guidance branches.</summary>
@@ -238,7 +238,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
     }
 
     private ThreeDResult Sample(Func<ConditionPair> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
-        Action<GenerationProgress>? onProgress)
+        Action<GenerationProgress>? onProgress, CancellationToken cancel = default)
     {
         ValidateGrid(requestGrid, _flashVdm);
         int seed = requestSeed ?? SeedGenerator.RandomSeed();
@@ -264,41 +264,55 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         float[] sigmas = Hunyuan3DFlowSchedule.Sigmas(steps, _cfg.Scheduler, _cfg.PcmTimesteps);
 
         Tensor latents = SeedGenerator.CreateNoise(new TensorShape(1, _cfg.LatentTokens, _cfg.LatentChannels), seed);
-        Backend.PreloadWeights(_dit.EnumerateWeights());
         int evaluations = 0;
-        for (int k = 0; k < steps; k++)
+        try
         {
-            float dt = sigmas[k + 1] - sigmas[k];
-            if (dt == 0f)
+            Backend.PreloadWeights(_dit.EnumerateWeights());
+            for (int k = 0; k < steps; k++)
             {
-                // The last step has zero width, so its velocity cannot change the latent.
+                cancel.ThrowIfCancellationRequested();
+                float dt = sigmas[k + 1] - sigmas[k];
+                if (dt == 0f)
+                {
+                    // The last step has zero width, so its velocity cannot change the latent.
+                    onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
+                    continue;
+                }
+                float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
+                evaluations++;
+                if (uncond is null)
+                {
+                    Tensor velocity = _dit.Forward(Backend, latents, cond, t, guidance);
+                    Backend.GuidedEulerStep(latents, velocity, velocity, GuidedEulerSpec.Lerp(1f, dt));
+                    velocity.Dispose();
+                    onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
+                    continue;
+                }
+                Tensor vCond = _dit.Forward(Backend, latents, cond, t);
+                Tensor vUncond = _dit.Forward(Backend, latents, uncond, t);
+                // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
+                // Keeps `latents` on the GPU across the whole loop — no per-step D2H drain of the two velocities (the
+                // graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
+                Backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.Lerp(guidance, dt));
+                vCond.Dispose();
+                vUncond.Dispose();
                 onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
-                continue;
             }
-            float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
-            evaluations++;
-            if (uncond is null)
-            {
-                Tensor velocity = _dit.Forward(Backend, latents, cond, t, guidance);
-                Backend.GuidedEulerStep(latents, velocity, velocity, GuidedEulerSpec.Lerp(1f, dt));
-                velocity.Dispose();
-                onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
-                continue;
-            }
-            Tensor vCond = _dit.Forward(Backend, latents, cond, t);
-            Tensor vUncond = _dit.Forward(Backend, latents, uncond, t);
-            // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
-            // Keeps `latents` on the GPU across the whole loop — no per-step D2H drain of the two velocities (the
-            // graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
-            Backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.Lerp(guidance, dt));
-            vCond.Dispose();
-            vUncond.Dispose();
-            onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
+            Backend.Sync();
         }
-        Backend.Sync();
-        Backend.FreeWeights(_dit.EnumerateWeights());
-        cond.Dispose();
-        uncond?.Dispose();
+        catch
+        {
+            // A cancelled or failed run frees what it holds: the denoiser's device weights, the conditioning and the latents.
+            try { Backend.Sync(); } catch (Exception) { /* the cleanup below still runs */ }
+            latents.Dispose();
+            throw;
+        }
+        finally
+        {
+            Backend.FreeWeights(_dit.EnumerateWeights());
+            cond.Dispose();
+            uncond?.Dispose();
+        }
         Probe($"dit-loop ({evaluations} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");
 
         // 3. Scale the denoised latent (latents /= scale_factor), then ShapeVAE decode → occupancy → mesh.
@@ -307,13 +321,20 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         latents.Dispose();
         latents = scaled;
 
-        Backend.PreloadWeights(_vae.EnumerateWeights());
         float iso = requestIso != 0f ? requestIso : _cfg.IsoLevel;
-        ScalarField3D field = _flashVdm
-            ? _vae.DecodeFlashVdm(Backend, latents, gridRes, _cfg.BoundingBox, -iso)   // upstream passes mc_level here, which centres the band at logit -mc_level
-            : _vae.Decode(Backend, latents, gridRes, _cfg.BoundingBox);
-        Backend.FreeWeights(_vae.EnumerateWeights());
-        latents.Dispose();
+        ScalarField3D field;
+        try
+        {
+            Backend.PreloadWeights(_vae.EnumerateWeights());
+            field = _flashVdm
+                ? _vae.DecodeFlashVdm(Backend, latents, gridRes, _cfg.BoundingBox, -iso, cancel)   // upstream passes mc_level here, which centres the band at logit -mc_level
+                : _vae.Decode(Backend, latents, gridRes, _cfg.BoundingBox, cancel: cancel);
+        }
+        finally
+        {
+            Backend.FreeWeights(_vae.EnumerateWeights());
+            latents.Dispose();
+        }
         Probe($"vae-decode ({gridRes}^3)");
 
         Mesh mesh = Hunyuan3DSurface.Extract(field, iso);

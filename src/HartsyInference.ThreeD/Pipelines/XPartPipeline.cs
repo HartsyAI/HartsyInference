@@ -176,8 +176,8 @@ public sealed class XPartPipeline
                 using Tensor scaled = new(one.Shape, DType.F32);
                 _backend.Scale(scaled, one, 1f / VaeScaleFactor);
                 ScalarField3D field = options.FastDecode
-                    ? vae.DecodeFlashVdm(_backend, scaled, options.GridResolution, options.BoxExtent, -options.Level)
-                    : vae.Decode(_backend, scaled, options.GridResolution, options.BoxExtent);
+                    ? vae.DecodeFlashVdm(_backend, scaled, options.GridResolution, options.BoxExtent, -options.Level, cancel)
+                    : vae.Decode(_backend, scaled, options.GridResolution, options.BoxExtent, cancel: cancel);
                 Mesh part = Hunyuan3DSurface.Extract(field, options.Level);
                 result[k] = new Mesh { Vertices = XPartSampling.Denormalize(part.Vertices, center, scale), Indices = part.Indices };
                 Advance();

@@ -549,7 +549,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
-                });
+                }, cancel);
                 if (result.Mesh is not { TriangleCount: > 0 } mesh)
                     throw new InvalidOperationException("Omni produced no geometry (try another image, control or seed).");
                 // Upstream's FloaterRemover drops components under 0.5 % of the faces; this is the shared repair with the same ratio taken over the area.
