@@ -101,12 +101,12 @@ public static class ModelAcquisition
     {
         try
         {
-            HashSet<ModelAsset> needed = [.. new MeshAssetService().MissingRequiredAssets(spec)];
+            HashSet<ModelAsset> needed = [.. new MeshAssetService().MissingAssets(spec)];
             return [.. missing.Where(needed.Contains)];
         }
         catch (NotSupportedException)
         {
-            return missing; // a catalog 3D model without a wired pipeline: the catalog list stands
+            return missing; // the inventory throws only for a model id without a wired pipeline: the catalog list stands
         }
     }
 

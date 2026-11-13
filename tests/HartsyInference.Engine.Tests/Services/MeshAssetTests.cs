@@ -55,14 +55,26 @@ public sealed class MeshAssetTests : IDisposable
         MeshAssetService service = new();
 
         // Without the DINOv2 file anywhere, it is the one file a download has to fetch, and the status says the same.
-        ModelAsset dino = Assert.Single(service.MissingRequiredAssets(Spec("hunyuan3d-paint21")));
+        ModelAsset dino = Assert.Single(service.MissingAssets(Spec("hunyuan3d-paint21")));
         Assert.Equal("facebook/dinov2-giant", dino.Repo);
         Assert.False(service.GetStatus(Spec("hunyuan3d-paint21")).Complete);
 
         // The F16 copy inside an installed Hunyuan3D shape checkpoint is what the loader reads, so nothing is missing.
         Place(Path.Combine(_root, "3D", "hunyuan3d2", "hunyuan3d-dit-v2-0", "model.fp16.safetensors"));
-        Assert.Empty(service.MissingRequiredAssets(Spec("hunyuan3d-paint21")));
+        Assert.Empty(service.MissingAssets(Spec("hunyuan3d-paint21")));
         Assert.True(service.GetStatus(Spec("hunyuan3d-paint21")).Complete);
+    }
+
+    [Fact]
+    public void MissingAssetsKeepsTheOptionalFilesAFeatureNeeds()
+    {
+        // The Pixal3D texture files are optional (only --texture reads them): they stay on the list, so the prompt can still offer them.
+        PlaceCatalog("pixal3d", skip: MeshAssetService.IsOptional);
+
+        IReadOnlyList<ModelAsset> missing = new MeshAssetService().MissingAssets(Spec("pixal3d"));
+
+        Assert.NotEmpty(missing);
+        Assert.All(missing, asset => Assert.True(MeshAssetService.IsOptional(asset), asset.Role));
     }
 
     [Fact]
