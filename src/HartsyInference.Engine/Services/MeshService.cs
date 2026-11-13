@@ -425,7 +425,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>X-Part: P3-SAM splits the mesh into parts and every part is generated again as a complete shape. One GLB with a coloured node per part, the parts' boxes and face counts in
-    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (negative: 42), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
+    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (a negative seed is resolved to a random draw before the run, so 42 is only the fallback of a caller that bypasses <see cref="GenerateAsync"/>; pass a seed for a repeatable split), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
     /// <see cref="MeshRequest.GridResolution"/> the marching-cubes grid of each part (0: 256).</summary>
     private Task<MeshResult> GenerateXPartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
@@ -450,7 +450,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             cancel);
     }
 
-    /// <summary>The X-Part settings of a validated request: the seed (42 when unset), the flow steps (50) and the grid of each part (256), and whether the parts are decoded with FlashVDM (<c>numerics.xpartFastDecode</c>).</summary>
+    /// <summary>The X-Part settings of a validated request: the seed (42 only when the request reaches here still negative, which <see cref="GenerateAsync"/> prevents by drawing one), the flow steps (50) and the grid of each part (256), and whether the parts are decoded with FlashVDM (<c>numerics.xpartFastDecode</c>).</summary>
     internal static XPartOptions XPartOptionsFor(MeshRequest request, bool fastDecode) => new()
     {
         Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
