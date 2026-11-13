@@ -28,6 +28,9 @@ public sealed unsafe class MoonViTEncoder : IVlmImageEncoder
         TokensPerImage = side * side;
     }
 
+    /// <summary>The tower's tensors, which the encoder owns; exposed so tests can check their release.</summary>
+    internal KimiVisionWeights Weights => _weights;
+
     /// <summary>Tokens for <see cref="ImageSize"/>; other sizes emit a count set by their grid.</summary>
     public int TokensPerImage { get; }
 

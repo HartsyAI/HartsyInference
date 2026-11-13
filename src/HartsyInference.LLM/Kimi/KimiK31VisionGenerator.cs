@@ -15,21 +15,20 @@ public sealed class KimiK31VisionGenerator
 {
     private readonly KimiK31GenerationModel _generation;
     private readonly ILlmTokenizer _tokenizer;
-    private readonly KimiVisionInput _vision;
+    private readonly KimiVisionRoute _route;
 
     /// <param name="generation">The loaded decoder.</param>
     /// <param name="tokenizer">The checkpoint's tokenizer, for the stop ids and the decode.</param>
-    /// <param name="vision">The checkpoint's image inputs; they must be accepted.</param>
+    /// <param name="vision">The checkpoint's image inputs. Loads the vision tower on the first call, if it has not been loaded yet.</param>
     /// <exception cref="NotSupportedException">The checkpoint refuses images; the message gives the reason.</exception>
     public KimiK31VisionGenerator(KimiK31GenerationModel generation, ILlmTokenizer tokenizer, KimiVisionInput vision)
     {
         ArgumentNullException.ThrowIfNull(generation);
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(vision);
-        if (!vision.Accepts) throw new NotSupportedException($"Kimi K3.1 image input is not supported: {vision.Refusal}");
+        _route = vision.Route();
         _generation = generation;
         _tokenizer = tokenizer;
-        _vision = vision;
     }
 
     /// <summary>Samples a reply of at most <paramref name="maxTokens"/> tokens to <paramref name="promptIds"/> and <paramref name="images"/>, in
@@ -73,7 +72,7 @@ public sealed class KimiK31VisionGenerator
         ArgumentNullException.ThrowIfNull(promptIds);
         ArgumentNullException.ThrowIfNull(images);
         KimiK31Config config = _generation.DecoderConfig;
-        int hidden = config.Hidden, padId = _vision.PadId!.Value;
+        int hidden = config.Hidden, padId = _route.PadId;
         List<Tensor> features = [];
         try
         {
@@ -114,8 +113,8 @@ public sealed class KimiK31VisionGenerator
     private Tensor Encode(RawRgbFrame image)
     {
         image.Validate();
-        using Tensor pixels = KimiImagePreprocessor.Preprocess(image.Rgb.Span, image.Width, image.Height, _vision.Image!);
-        return _vision.Encoder!.Encode(_generation.OutputBackend, pixels);
+        using Tensor pixels = KimiImagePreprocessor.Preprocess(image.Rgb.Span, image.Width, image.Height, _route.Image);
+        return _route.Encoder.Encode(_generation.OutputBackend, pixels);
     }
 
     // Each media pad becomes as many pads as its image has vision tokens, in order; the splice then writes one feature row per pad.

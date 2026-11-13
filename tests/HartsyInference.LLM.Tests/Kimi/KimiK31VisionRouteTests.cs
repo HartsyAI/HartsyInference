@@ -151,10 +151,10 @@ public sealed class KimiK31VisionRouteTests : IDisposable
 
         using KimiVisionInput vision = KimiVisionInput.Load(dir, Tokenizer(dir), textHidden: 16, xtmlTemplate: true);
 
-        Assert.True(vision.Accepts, vision.Refusal);
-        Assert.NotNull(vision.Encoder);
-        Assert.Equal(MediaPadId, vision.PadId);
-        Assert.Equal(2, vision.Image!.PatchSize);
+        KimiVisionRoute route = vision.Route();
+        Assert.NotNull(route.Encoder);
+        Assert.Equal(MediaPadId, route.PadId);
+        Assert.Equal(2, route.Image.PatchSize);
     }
 
     [Fact]
@@ -165,10 +165,9 @@ public sealed class KimiK31VisionRouteTests : IDisposable
 
         using KimiVisionInput vision = KimiVisionInput.Load(dir, Tokenizer(dir), textHidden: 16, xtmlTemplate: true);
 
-        Assert.False(vision.Accepts);
-        Assert.Null(vision.Encoder);
-        Assert.Contains("media_placeholder_token_id", vision.Refusal, StringComparison.Ordinal);
-        Assert.Contains("vision tower cannot take images", vision.Refusal, StringComparison.Ordinal);
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => vision.Route());
+        Assert.Contains("media_placeholder_token_id", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("vision tower cannot take images", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -179,8 +178,8 @@ public sealed class KimiK31VisionRouteTests : IDisposable
 
         using KimiVisionInput vision = KimiVisionInput.Load(dir, Tokenizer(dir), textHidden: 16, xtmlTemplate: true);
 
-        Assert.False(vision.Accepts);
-        Assert.Contains("projector emits 6", vision.Refusal, StringComparison.Ordinal);
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => vision.Route());
+        Assert.Contains("projector emits 6", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]

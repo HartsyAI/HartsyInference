@@ -7,12 +7,12 @@ namespace HartsyInference.Engine.Services;
 /// placement, because the route does not build the sharded decoder (verified on CPU virtual ranks only).</summary>
 internal static class KimiK31Refusals
 {
-    /// <summary>Refuses an image on a Kimi K3.1 slot whose checkpoint did not load a vision tower, so the image would be dropped silently otherwise.</summary>
+    /// <summary>Loads a Kimi K3.1 vision tower on the first image request, and refuses by name when the checkpoint cannot take
+    /// images, so the image is never dropped silently. A text request never loads the tower.</summary>
     /// <exception cref="NotSupportedException">The slot holds a Kimi K3.1 model that refuses images, and the request carries one.</exception>
     internal static void RefuseImage(IHostReferenceTextModel? model, bool hasImage)
     {
-        if (hasImage && model is KimiK31TextModel kimi && !kimi.Vision.Accepts)
-            throw new NotSupportedException($"Kimi K3.1 image input is not supported: {kimi.Vision.Refusal}.");
+        if (hasImage && model is KimiK31TextModel kimi) kimi.Vision.Route();
     }
 
     /// <summary>Refuses any Kimi K3.1 request that spreads the model over more than one device, rather than loading it on one.</summary>

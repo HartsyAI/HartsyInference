@@ -45,6 +45,9 @@ public sealed class KimiVisionWeights : IDisposable
     /// <summary>The projector's post RMS norm <c>[TextHidden]</c>.</summary>
     public Tensor ProjectorNorm { get; }
 
+    /// <summary>Every tensor this object owns, empty once disposed.</summary>
+    internal IReadOnlyList<Tensor> OwnedTensors => _owned;
+
     /// <inheritdoc/>
     public void Dispose()
     {

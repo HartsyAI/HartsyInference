@@ -7,11 +7,11 @@ namespace HartsyInference.LLM.Kimi;
 /// are views into. Dispose it to release the model and the mappings.</summary>
 public sealed class KimiK31Checkpoint : IDisposable
 {
-    private KimiK31CheckpointWeights? _weights;
+    private IKimiK31WeightStore? _weights;
     private KimiK31Model? _model;
     private IReadOnlyList<Tensor> _owned = [];
 
-    private KimiK31Checkpoint(KimiK31Config config, KimiK31CheckpointWeights weights, KimiK31Model model)
+    private KimiK31Checkpoint(KimiK31Config config, IKimiK31WeightStore weights, KimiK31Model model)
     {
         Config = config;
         _weights = weights;
@@ -28,11 +28,17 @@ public sealed class KimiK31Checkpoint : IDisposable
     /// <paramref name="maxPositions"/> sizes the positional tables the attention layers read.</summary>
     /// <exception cref="System.IO.InvalidDataException">The config or a tensor does not match the Kimi K3.1 decoder.</exception>
     /// <exception cref="NotSupportedException">The decoder cannot run a tensor the checkpoint stores in a format it does not support.</exception>
-    public static KimiK31Checkpoint Load(string directory, IBackend backend, int maxPositions)
+    public static KimiK31Checkpoint Load(string directory, IBackend backend, int maxPositions) =>
+        Load(directory, backend, maxPositions, KimiK31CheckpointWeights.Open);
+
+    /// <summary>Loads like <see cref="Load(string, IBackend, int)"/>, reading the tensors from the store
+    /// <paramref name="openWeights"/> opens.</summary>
+    internal static KimiK31Checkpoint Load(string directory, IBackend backend, int maxPositions, Func<string, IKimiK31WeightStore> openWeights)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
+        ArgumentNullException.ThrowIfNull(openWeights);
         KimiK31Config config = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));
-        KimiK31CheckpointWeights weights = KimiK31CheckpointWeights.Open(directory);
+        IKimiK31WeightStore weights = openWeights(directory);
         KimiK31Weights? loaded = null;
         try
         {
