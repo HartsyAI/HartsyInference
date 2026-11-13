@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 using HartsyInference.ThreeD.Tests.MeshPostProcess;
@@ -11,11 +12,7 @@ namespace HartsyInference.ThreeD.Tests.Paint;
 /// finiteness and bake coverage, not image quality or parity with upstream.</summary>
 public sealed unsafe class HunyuanPaintPipelineTests
 {
-    [Theory]
-    [Trait("Category", "SyntheticSmoke")]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Generate_OnATinyNetworkProducesAFiniteBakedMaterial(bool v21)
+    private static HunyuanPaintPipeline TinyPipeline(CpuBackend backend, bool v21)
     {
         HunyuanPaintConfig cfg = HunyuanPaintTestWeights.TinyConfig(v21) with { CameraClasses = v21 ? 0 : 49 };
         HunyuanPaintUnet unet = new(cfg, generating: true), reference = new(cfg, generating: false);
@@ -25,21 +22,64 @@ public sealed unsafe class HunyuanPaintPipelineTests
         Dictionary<string, Tensor> tokens = [];
         foreach (string name in v21 ? new[] { "learned_text_clip_albedo", "learned_text_clip_mr", "learned_text_clip_ref" } : new[] { "learned_text_clip_gen", "learned_text_clip_ref" })
             tokens[name] = HunyuanPaintUnetTests.Random(name.Length, 1, cfg.TextTokens, cfg.CrossAttentionDim);
-        using CpuBackend backend = new();
-        HunyuanPaintPipeline pipeline = new(backend, cfg, unet, reference, HunyuanPaintPromptTokens.FromWeights(tokens, cfg), new PoolingCodec(),
+        return new(backend, cfg, unet, reference, HunyuanPaintPromptTokens.FromWeights(tokens, cfg), new PoolingCodec(),
             v21 ? new RandomConditioner(cfg.CrossAttentionDim) : null);
+    }
+
+    private static readonly HunyuanPaintOptions TinyOptions = new() { ViewResolution = 64, RenderResolution = 128, TextureSize = 32, Steps = 2, MaxViews = 6, Seed = 1 };
+
+    private static byte[] GreyReference()
+    {
         byte[] reference64 = new byte[64 * 64 * 3];
         Array.Fill(reference64, (byte)180);
+        return reference64;
+    }
 
-        HunyuanPaintOptions options = new() { ViewResolution = 64, RenderResolution = 128, TextureSize = 32, Steps = 2, MaxViews = 6, Seed = 1 };
+    [Theory]
+    [Trait("Category", "SyntheticSmoke")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Generate_OnATinyNetworkProducesAFiniteBakedMaterial(bool v21)
+    {
+        using CpuBackend backend = new();
+        HunyuanPaintPipeline pipeline = TinyPipeline(backend, v21);
+
         List<int> steps = [];
-        PbrPostProcessResult result = pipeline.Generate(SyntheticMeshes.Icosphere(1), reference64, 64, 64, options, p => steps.Add(p.Step));
+        PbrPostProcessResult result = pipeline.Generate(SyntheticMeshes.Icosphere(1), GreyReference(), 64, 64, TinyOptions, p => steps.Add(p.Step));
 
         Assert.Equal([1, 2], steps);
         Assert.Equal(32, result.Material.BaseColor.Width);
         Assert.Equal(3, result.Material.BaseColor.Channels);
         Assert.True(result.CoveredTexels > 0, "no texel was painted");
         Assert.NotEmpty(result.Mesh.Uvs!);
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    [Trait("Category", "SyntheticSmoke")]
+    public void Generate_OnAMeshTornIntoSeparateTrianglesWarnsAboutTheConfettiAndSaysWhatToDo()
+    {
+        // 300 triangles that share nothing: the unwrapper can only make one chart per triangle.
+        const int pieces = 300;
+        float[] vertices = new float[pieces * 9];
+        int[] indices = new int[pieces * 3];
+        for (int i = 0; i < pieces; i++)
+        {
+            double angle = i * 0.61803398875 * 2 * Math.PI, z = i / (double)pieces * 1.8 - 0.9, r = Math.Sqrt(Math.Max(0, 1 - z * z));
+            float x = (float)(r * Math.Cos(angle)), y = (float)(r * Math.Sin(angle));
+            float[] corner = [x, y, (float)z, x + 0.03f, y, (float)z, x, y + 0.03f, (float)z + 0.01f];
+            corner.CopyTo(vertices, i * 9);
+            for (int k = 0; k < 3; k++)
+                indices[i * 3 + k] = i * 3 + k;
+        }
+
+        using CpuBackend backend = new();
+        PbrPostProcessResult result = TinyPipeline(backend, v21: true).Generate(new Mesh { Vertices = vertices, Indices = indices }, GreyReference(), 64, 64, TinyOptions with { TextureSize = 256 });
+
+        string warning = Assert.Single(result.Warnings);
+        Assert.Contains("300 charts", warning);
+        Assert.Contains("remove-small-components", warning);
+        Assert.Contains("decimate", warning);
     }
 
     [Fact]

@@ -665,7 +665,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
-                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb" };
+                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb", Warnings = result.Warnings };
             },
             cancel);
     }

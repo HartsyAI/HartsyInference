@@ -887,6 +887,15 @@ public static class GenerationDispatch
                     Console.WriteLine(DescribePart(part));
             }
         }
+        if (result.Warnings.Count > 0)
+        {
+            artifact.Meta["warnings"] = string.Join(" ", result.Warnings);
+            if (!quiet)
+            {
+                foreach (string warning in result.Warnings)
+                    Console.WriteLine($"warning: {warning}");
+            }
+        }
         return artifact;
     }
 
