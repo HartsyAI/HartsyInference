@@ -73,6 +73,7 @@ public sealed unsafe class HunyuanPaintPipelineTests
                 indices[i * 3 + k] = i * 3 + k;
         }
 
+        // 256 px, not the 32 of the other tests: 300 charts do not pack into 32 px ("Atlas packing failed").
         using CpuBackend backend = new();
         PbrPostProcessResult result = TinyPipeline(backend, v21: true).Generate(new Mesh { Vertices = vertices, Indices = indices }, GreyReference(), 64, 64, TinyOptions with { TextureSize = 256 });
 

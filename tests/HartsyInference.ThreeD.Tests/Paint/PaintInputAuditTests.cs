@@ -1,3 +1,4 @@
+using System.Globalization;
 using HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 
 namespace HartsyInference.ThreeD.Tests.Paint;
@@ -30,6 +31,23 @@ public sealed class PaintInputAuditTests
     [InlineData(1_199, 100)] // just under 12 faces per chart
     [InlineData(300, 300)]
     public void ImplausibleUnwrapsWarn(int faces, int charts) => Assert.NotNull(PaintInputAudit.TornMeshWarning(faces, charts));
+
+    [Fact]
+    public void TheTextDoesNotDependOnTheCulture()
+    {
+        CultureInfo before = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+            string? warning = PaintInputAudit.TornMeshWarning(38_613, 10_453);
+
+            Assert.Contains("10,453 charts of 3.7 faces", warning);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = before;
+        }
+    }
 
     [Fact]
     public void TheBoundaryIs12FacesPerChart() => Assert.Null(PaintInputAudit.TornMeshWarning(1_200, 100));

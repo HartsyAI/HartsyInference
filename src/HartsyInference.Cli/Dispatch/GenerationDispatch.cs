@@ -889,7 +889,7 @@ public static class GenerationDispatch
         }
         if (result.Warnings.Count > 0)
         {
-            artifact.Meta["warnings"] = string.Join(" ", result.Warnings);
+            artifact.Meta["warnings"] = string.Join("; ", result.Warnings);
             if (!quiet)
             {
                 foreach (string warning in result.Warnings)

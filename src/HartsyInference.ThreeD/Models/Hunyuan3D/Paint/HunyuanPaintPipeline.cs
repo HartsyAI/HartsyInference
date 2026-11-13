@@ -72,7 +72,7 @@ public sealed class HunyuanPaintPipeline
             UvUnwrapResult unwrapped = UvUnwrapper.Unwrap(mesh, new UvUnwrapOptions { TextureSize = options.TextureSize }, cancellationToken);
             mesh = unwrapped.Mesh;
             Stage($"uv unwrap ({unwrapped.ChartCount} charts)");
-            if (PaintInputAudit.TornMeshWarning(unwrapped, mesh.TriangleCount) is { } torn)
+            if (PaintInputAudit.TornMeshWarning(faceCount: mesh.TriangleCount, chartCount: unwrapped.ChartCount) is { } torn)
             {
                 StageLog?.Invoke(torn);
                 warnings.Add(torn);
