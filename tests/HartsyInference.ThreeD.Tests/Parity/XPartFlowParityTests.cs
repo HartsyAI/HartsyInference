@@ -49,28 +49,19 @@ public sealed class XPartFlowParityTests(ITestOutputHelper output)
             given.Add(t);
             Tensor v = new(x.Shape, DType.F32);
             ReadOnlySpan<float> input = x.AsSpan<float>();
-            Span<float> output = v.AsSpan<float>();
+            Span<float> values = v.AsSpan<float>();
             for (int i = 0; i < input.Length; i++)
-                output[i] = -0.5f * input[i] + 0.3f * MathF.Sin(3f * t) + 0.1f * MathF.Cos(7f * input[i]);
+                values[i] = -0.5f * input[i] + 0.3f * MathF.Sin(3f * t) + 0.1f * MathF.Cos(7f * input[i]);
             return v;
         });
 
         // The scheduler runs a model forward at every timestep, including the last one whose step has no width; the loop skips that forward.
         Assert.Equal(referenceTimesteps.Length - 1, given.Count);
         double timestepError = given.Zip(referenceTimesteps, (a, b) => Math.Abs(a - b)).Max();
-        double worst = 0, sumSquares = 0, sumReference = 0;
-        ReadOnlySpan<float> actual = result.AsSpan<float>();
-        for (int i = 0; i < expected.Length; i++)
-        {
-            double d = Math.Abs(actual[i] - expected[i]);
-            worst = Math.Max(worst, d);
-            sumSquares += d * d;
-            sumReference += (double)expected[i] * expected[i];
-        }
-
-        double relative = Math.Sqrt(sumSquares / sumReference);
+        Assert.Equal(expected.Length, result.ElementCount);
+        (double relative, double worst) = ParityCompare.RelativeL2(result.AsSpan<float>(), expected);
         output.WriteLine($"{steps} steps: timestep given to the model differs by at most {timestepError:E1}; final latents largest absolute difference {worst:E2}, relative L2 {relative:E2}");
         Assert.True(timestepError < 1e-6);
-        Assert.True(relative < 1e-5, $"relative L2 {relative}");
+        Assert.True(relative < 1e-7, $"relative L2 {relative}");
     }
 }

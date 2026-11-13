@@ -12,10 +12,11 @@ The fixture holds, for 50 steps and for 7 steps, the `noise` (parts x 1024 x 64)
 """
 import argparse
 import importlib.util
+import inspect
+import logging
 import os
 import sys
 import types
-from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -42,8 +43,6 @@ class BaseOutput:
 
 def register_to_config(init):
     def wrapped(self, *args, **kwargs):
-        import inspect
-
         names = list(inspect.signature(init).parameters)[1:]
         values = dict(zip(names, args))
         values.update(kwargs)
@@ -54,7 +53,7 @@ def register_to_config(init):
     return wrapped
 
 
-def retrieve_timesteps(scheduler, num_inference_steps, device, sigmas):
+def retrieve_timesteps(scheduler, count, device, sigmas):
     # The sigmas branch of retrieve_timesteps in partformer_pipeline.py.
     scheduler.set_timesteps(sigmas=sigmas, device=device)
     return scheduler.timesteps, len(scheduler.timesteps)
@@ -64,10 +63,10 @@ def velocity(x, timestep):
     return -0.5 * x + 0.3 * torch.sin(3 * timestep) + 0.1 * torch.cos(7 * x)
 
 
-def run(scheduler_module, steps, noise):
+def run(scheduler_module, count, noise):
     scheduler = scheduler_module.FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000)
-    sigmas = np.linspace(0, 1, steps)
-    timesteps, steps = retrieve_timesteps(scheduler, steps, "cpu", sigmas)
+    sigmas = np.linspace(0, 1, count)
+    timesteps, count = retrieve_timesteps(scheduler, count, "cpu", sigmas)
     latents = noise.clone()
     given = []
     for t in timesteps:
@@ -86,7 +85,6 @@ def main():
     args = parser.parse_args()
     stub("diffusers"), stub("diffusers.configuration_utils", ConfigMixin=ConfigMixin, register_to_config=register_to_config)
     stub("diffusers.schedulers"), stub("diffusers.schedulers.scheduling_utils", SchedulerMixin=SchedulerMixin)
-    import logging
     stub("diffusers.utils", BaseOutput=BaseOutput, logging=types.SimpleNamespace(get_logger=lambda name: logging.getLogger(name)))
 
     path = os.path.join(args.upstream, "models", "diffusion", "schedulers.py")

@@ -217,7 +217,7 @@ public sealed class XPartPipeline
     }
 
     /// <summary>The Euler steps of the flow (<c>FlowMatchEulerDiscreteScheduler.step</c> of X-Part's scheduler): <c>x += (sigma[k + 1] - sigma[k]) * v(x, sigma[k])</c> for every step. The schedule ends 1, 1, so the last step has no
-    /// width and its forward, which would be scaled by zero, is skipped. Takes ownership of <paramref name="latents"/> and returns the integrated tensor (a new one, the input is disposed).</summary>
+    /// width and its forward, which would be scaled by zero, is skipped. Takes ownership of <paramref name="latents"/> and returns the integrated tensor: a new one when a step has width (the input is disposed), the input itself when none has; the caller disposes the result only.</summary>
     internal static Tensor Integrate(IBackend backend, Tensor latents, float[] sigmas, Func<Tensor, float, Tensor> velocity, Action? advance = null, CancellationToken cancel = default)
     {
         try
