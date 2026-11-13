@@ -8,11 +8,11 @@ timeout, a region block). The mirror is off until `paths.weightsMirrorUrl` names
 
 ## The staging folder
 
-The staging folder also holds `upload-checklist.md` (per model: title, description, licence summary, tags, hashes and sizes, for entering the files in a web UI by hand) and
-`covers/` (one image per model). They are written for the maintainer's upload and are not part of the repository.
-
 A folder outside the repository and outside `Models/` (`<staging>` below; the repack run made it on the maintainer's desktop). Layout: `<model id>/<the pickle's path with the extension .safetensors>`, which is
 the `MirrorPath` the catalog lists for the file, plus `manifest.json` (sources, revisions, hashes, tensor counts, verification and licence of every file).
+
+It also holds `upload-checklist.md` (per model: title, description, licence summary, tags, hashes and sizes, for entering the files in a web UI by hand) and
+`covers/` (one image per model). They are written for the maintainer's upload and are not part of the repository.
 
 | Path under the mirror base | Bytes | sha256 | Licence | A catalog asset lists it |
 |---|---|---|---|---|
@@ -49,7 +49,7 @@ change nothing until a catalog entry downloads them. The full set is 28,696,874,
    | `LICENSE` (UniRig) | `https://raw.githubusercontent.com/VAST-AI-Research/UniRig/cf7622f2be1de5ae315478ed8d21681b95dc9ff3/LICENSE` | 1,124 | `a20d482774136ee1858d92964e896031598902b4` |
 
    `... -- licenses --staging <staging>` compares each file's git blob SHA-1 with the one above, lists what is missing, and records each verified file's SHA-256 and the
-   date in `manifest.json` next to its source URL (it ends with `All 8 licence files are in place`; a later run fails if a file's SHA-256 changed).
+   time it was first verified in `manifest.json` next to its source URL, for the upload record (it ends with `All 8 licence files are in place`; a rerun of `run` keeps the record).
    The two GitHub files are pinned to the last commit that changed them, so their blob hashes are reproducible.
 4. **The terms are decided** (next section).
 
