@@ -179,6 +179,9 @@ Measured on the saved meshes of the section above (CPU, welded counts as `MeshSt
 | Mug 1024 raw | 160,408 | 43,097 | 160,408 / 43,097 | 11,070,214 | |
 | Mug 1024, defaults | 204,558 | 0 | 156,336 / 42,378 | 11,067,728 | 21.8 s |
 | Mug 1024, width 0.1 | 92,464 (10 loops) | 0 | 66,429 / 42,796 | 11,179,432 | 27.4 s |
+| Pixal3D bust 1024 raw (a real run, below) | 124,853 | 891,942 | 124,853 / 891,942 | 6,237,152 | |
+| Pixal3D bust 1024, defaults | 995,170 | 0 | 76,651 / 785,313 | 6,241,216 | 7.3 s |
+| Pixal3D bust 1024, width 0.1 | 340,960 (5 loops) | 0 | 28,080 / 872,800 | 6,881,564 | 25.0 s |
 | SAM 3D bust, saved after `Sam3dObjectsMesh.Finish` | 466 | 0 | 466 / 0 | 676,758 | |
 | SAM 3D bust, width 0.1 (area ratio 1e-3 as in the engine) | 0 | 0 | 0 / 0 | 677,202 | 2.3 s (1.1 s without) |
 
@@ -188,10 +191,19 @@ Measured on the saved meshes of the section above (CPU, welded counts as `MeshSt
 - The width limit decides the result, not time: on the mug at 512, ratios 0.05, 0.1 and 0.2 leave 432, 0 and 0 boundary edges; on the bust 0.03 already leaves 0. On the 1024 mug width 0.1 leaves ten loops, 7 of them
   patches and 3 of them 3D openings, the largest of 48,566 and 21,736 edges (a spread of about 290 by 260 by 135 voxels), and one on the grid face: those are real openings in the decoded shape, and
   they stay open. Width 0.2 leaves 74,768 edges.
-- Winding: counting edges whose two faces run the same way, the defaults leave 3,373 (bust), 2,254 (mug 512) and 5,987 (mug 1024), which unification cannot fix because the repaired surface is not orientable there; the fill
-  adds to it (to 8,197, 6,448 and 12,488), since its patches meet those same places. The SAM 3D bust has none. Boundary and non-manifold counts do not depend on it. Nothing tests a patch against the surface around it or another patch: on a curled slit, ear clipping a non-planar loop can overlap its neighbours (only the fold penalty steers away), a likely part of the rise (not checked).
+- Pixal3D bust 1024 is a real run (2026-11-13, RTX 3060, seed 1, `CleanMesh = false`, 42 steps, 266 s from start to the written GLB, whole-card `memory.used` peak 10,471 MiB with about 2 GB
+  of it other processes) on a stand-in image, the SAM 3D session's `bust35_rgba.png`, not the image behind the earlier Pixal3D bust figures; the output is a 2.6 M vertex, 6.2 M triangle mesh with 891,942 non-manifold edges. The defaults turn
+  those into 995,170 boundary edges by index; width 0.1 closes 654,210 of them and leaves five loops, three of 223,418, 84,914 and 23,828 edges that spread 130 to 145 voxels (3D openings), all away from the grid faces. The raw mesh was written
+  in the export frame, after the winding unification of the `CleanMesh = false` path. Nothing was drawn for it.
+- Winding: counting edges whose two faces run the same way, the defaults leave 3,373 (bust), 2,254 (mug 512), 5,987 (mug 1024) and 121,725 (Pixal3D bust); width 0.1 raises them to 8,197, 6,448, 12,488 and 248,384. The SAM 3D bust has none.
+  Boundary and non-manifold counts do not depend on it. Traced on the 512 meshes: the rise is not the patches. Of the 8,197 disagreements on the bust 6,820 are between two original faces, 780 between an original face and a patch and 597 between two patches
+  (mug: 6,038, 226 and 184); a patch takes its winding from the faces around its hole, and every loop lies inside one edge-connected component (the repair leaves no pinch vertices), so a patch cannot disagree with a consistently wound
+  neighbourhood (tests: capped sphere, slit grid, pinched octahedron, mixed winding through `Clean`, all consistent). The disagreements are the repaired surface itself: 3,202 of the bust's 3,373 are between nearly coplanar faces, so a seam of twisted
+  joins that the flood places wherever its fronts meet; adding patches joins more of the surface and moves and lengthens those seams. Local search does not remove them (flipping faces with two disagreeing edges one at a time: 8,197 to 6,790), a
+  flatness-first flood (smoothest continuations first) halves the bust (3,373 to 1,031, 8,197 to 4,168) but makes the mug worse (2,254 to 7,558), and joining the faces of a non-manifold edge in smooth pairs lowers the defaults only from 3,373 to 2,923,
+  so none was kept. Faces on a seam are back faces from one side: that is the see-through streak at the mug's rim. Removing them needs the repair to produce an orientable surface, which per-edge vertex splitting does not guarantee.
 - The slits and terraces of the mug are filled with flat strips of triangles, so the patches are as rough as the surface around them; nothing fairs or relaxes them. Rendered with the engine's thumbnail renderer, the bust's
-  dark specks in the hair are gone; on the mug most white streaks along the inner wall are closed, but one at the rim stays see-through (probably faces running the wrong way, the winding limit above; not checked). Greedy local flipping of faces with two disagreeing edges did not reduce the count (it settles at about 7,400 on the bust), so the disagreement is structural.
+  dark specks in the hair are gone; on the mug most white streaks along the inner wall are closed, but one at the rim stays see-through (a seam of faces wound against their neighbours, the winding bullet above; the exact faces of that streak were not identified).
 - Tried and not kept: joining all faces of a non-manifold edge in pairs (wound consistently, most coplanar) instead of one pair. It lowered the by-index boundary of the defaults only from 30,198 to 26,778 on the bust, raised the welded
   non-manifold count, and gained nothing once the fill ran.
 
