@@ -21,6 +21,10 @@ public sealed record HunyuanPaintOptions
     /// <summary>Seed of the initial noise; null picks a random one (it does not reproduce Python's noise).</summary>
     public int? Seed { get; init; }
 
+    /// <summary>The initial latents of each material (<c>views * 4 * (view / 8)^2</c> values, already scaled by the sampler's initial noise scale), instead of noise drawn from <see cref="Seed"/>:
+    /// how a comparison with Python's pipeline injects the same start.</summary>
+    internal float[][]? InitialLatents { get; init; }
+
     /// <summary>Side at which geometry maps are rendered and generated views are baked.</summary>
     public int RenderResolution { get; init; } = 2048;
 
