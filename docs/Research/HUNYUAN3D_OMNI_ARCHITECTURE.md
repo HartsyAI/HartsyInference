@@ -76,7 +76,7 @@ Code: `Models/Hunyuan3D/Omni` (`OmniControlEncoder`, `OmniConfigFile`, `OmniChec
 - **DINOv2-large:** the Omni repository does not contain it (upstream fetches `facebook/dinov2-large`). `facebook/dinov2-large` @ `47b73eef`, `model.safetensors` (1,217,522,888 B, sha256 `399fba97...c92e23`, apache-2.0, not gated) was downloaded on 2026-11-12 with the owner's approval into `3D/hunyuan3d-omni/dinov2-large`; all 439 of its tensors equal the Hunyuan3D-2.1 checkpoint's `conditioner.main_image_encoder.model.*` after F16 rounding (no difference), so either file works as the source.
 - **Context:** `OmniContext.Build` gives the conditional context `[DINO | control | 10 signal]` and the unconditional one with the DINO part zeroed; the pipeline's sampler takes both, 2-way guidance as in 2.1 (the schedule is the same: 50 time points on `linspace(0, 1)`, 49 Euler steps; the SiT transport samples the ODE on the same grid, `shift_scale` is used only in training).
 - **Parity:** the full DiT forward against upstream's `HunYuanDiTPlain` in float32 on the CPU, on the real weights: velocity relative L2 2.6e-5, blocks 2.9e-5 to 1.1e-4, see `PARITY_VERIFICATION.md`. Python takes 71 s per forward, the C# CPU backend 46 minutes.
-- **Not done:** a run through the engine and CLI on the GPU, the other control kinds on a GPU, the DINO image path against `Dinov2Model`, the Omni VAE decode against upstream, the zero-DINO guidance branch against the Python value in the fixture (the GPU run used guidance 7.5, so the branch ran, but it was not compared).
+- **Not done:** the voxel control on a GPU, the Omni VAE decode against upstream, the zero-DINO guidance branch against the Python value in the fixture (the GPU run used guidance 7.5, so the branch ran, but it was not compared).
 
 ### Engine and CLI
 
@@ -85,6 +85,18 @@ Code: `Models/Hunyuan3D/Omni` (`OmniControlEncoder`, `OmniConfigFile`, `OmniChec
 The control is `MeshRequest.Control` (`MeshControl`: kind, geometry or values), built as upstream's `inference.py` builds it (`OmniControlInputs`): **point**: the vertices of an obj, glb or ply point cloud, centred and scaled to a longest side of 1.96, one token per point; **voxel**: an obj or glb mesh with faces, turned by -90 degrees about x, scaled to 2 x 0.9999, 81,920 area-weighted samples with the request seed, quantised to 16 per axis; **bbox**: length, height and width in (0, 1]; **pose**: six numbers per bone. CLI: `hartsy 3d <image.png> -m hunyuan3d-omni --control point --control-file points.ply`, `--control bbox --control-values 0.8,0.64,1`, `--control pose --control-file bones.txt`. Only the request checks, the control mapping and the catalog are covered by tests; no request has been run through the engine on a GPU.
 
 **Guidance follows upstream's published script, not the pipeline signature:** 4.5 (`inference.py` passes it for every control; `Hunyuan3DOmniSiTFlowMatchingPipeline.__call__` defaults to 7.5). The other settings differ from the script: its octree is 512 and its seed 1234, the engine's default grid is the config's 384 and the seed is random (1234 only seeds a voxel control's surface samples when no seed is given), and the floaters are removed with the shared repair. The first GPU run below used guidance 7.5 and a 2,048-point control sampled from the same bust, so it shows that the pipeline runs and obeys a control, not that it reproduces upstream's demos.
+
+### Runs through the CLI (2026-11-12, RTX 3060, origin/main `3c38d3cd7`)
+
+`hartsy 3d <image> -m hunyuan3d-omni --control ...` with the upstream demo inputs and the engine defaults (guidance 4.5, grid 384, mc_level 0, shared repair with small floating pieces dropped), one process at a time, exit 0 each:
+
+| Control | Input | Total | Peak (card total, desktop 0.96 GB) | Mesh |
+|---|---|---|---|---|
+| bbox 0.8, 0.64, 1 | `demos/bbox/furniture0.png` | 307 s (load 13 s, DiT 2.04 s per step) | 7.8 GB | 1,088,924 faces, watertight, 1 component, extent ratios 0.816 / 0.660 / 1 |
+| point (2,048 points) | `demos/point/imgs/008.png`, `plys/008.ply` | 315 s | 7.8 GB | 970,268 faces, watertight, 1 component; control points on average 0.016 from the surface (p90 0.030, longest side 2) |
+| pose (51 bones) | `demos/pose/263.png`, `a_pose_bone.txt` | 310 s | 8.2 GB | 216,408 faces, watertight, 1 component; joint x-extent 1.252 against 1.256 for the mesh, 96 of 102 joint points inside the mesh box |
+
+Rendered looks, judged by eye: a sofa group with the requested proportions, a stone cottage with brick and roof detail, a standing figure in the A-pose with its arms out; surfaces are clean. The CLI is 22 % faster than the pipeline run below at the same grid (394 s). The DINOv2-large encoder matches `transformers` to 2.3e-6 relative L2 and its preprocessing matches torchvision to 1.6e-7. Not run: the voxel control.
 
 ### First real run (2026-11-12, RTX 3060)
 
