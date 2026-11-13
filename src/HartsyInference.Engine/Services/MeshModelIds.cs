@@ -33,11 +33,17 @@ public static class MeshModelIds
 
     /// <summary>Part-segmentation models (Hunyuan3D-Part P3-SAM): their request carries <see cref="Requests.MeshRequest.SceneMesh"/>, and the result is a GLB with one
     /// coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
-    public static readonly IReadOnlyList<string> PartMesh = ["hunyuan3d-part"];
+    public static readonly IReadOnlyList<string> PartMesh = [P3Sam];
+
+    /// <summary>The id of Hunyuan3D-Part P3-SAM.</summary>
+    public const string P3Sam = "hunyuan3d-part";
+
+    /// <summary>The id of Hunyuan3D-Part X-Part.</summary>
+    public const string XPart = "hunyuan3d-xpart";
 
     /// <summary>Part-generation models (Hunyuan3D-Part X-Part): the request carries <see cref="Requests.MeshRequest.SceneMesh"/>, P3-SAM splits it into parts and every part is generated again as a
     /// complete shape; the result is a GLB with one coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
-    public static readonly IReadOnlyList<string> XPartMesh = ["hunyuan3d-xpart"];
+    public static readonly IReadOnlyList<string> XPartMesh = [XPart];
 
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
     public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh, .. XPartMesh];

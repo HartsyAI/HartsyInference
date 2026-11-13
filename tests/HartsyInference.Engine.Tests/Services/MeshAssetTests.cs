@@ -65,7 +65,37 @@ public sealed class MeshAssetTests : IDisposable
         File.Delete(Path.Combine(install, "conditioner", "conditioner.safetensors"));
         MeshAssetStatus partial = new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart", install));
         Assert.False(partial.Complete);
-        Assert.Equal(["conditioner/conditioner.safetensors"], partial.Missing.Select(a => a.RelativePath[(a.RelativePath.IndexOf('/', 3) + 1)..]));
+        Assert.Single(partial.Missing, a => a.RelativePath.EndsWith("conditioner/conditioner.safetensors", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnIncompleteNamedInstallIsReportedAsTheLoaderSeesItEvenWhenTheCatalogFolderIsComplete()
+    {
+        PlaceCatalog("hunyuan3d-xpart");
+        string install = Path.Combine(_root, "elsewhere", "xpart");
+        Place(Path.Combine(install, "model", "model.safetensors"));
+
+        MeshAssetStatus status = new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart", install));
+
+        Assert.False(status.Complete);
+        Assert.Equal(3, status.Missing.Count());
+    }
+
+    [Fact]
+    public void XPartInstall_PicksTheFolderWithAllFourFilesElseTheOneHoldingTheMost()
+    {
+        string install = Path.Combine(_root, "x", "xpart");
+        Place(Path.Combine(install, "p3sam", "p3sam.safetensors"));
+        Place(Path.Combine(install, "conditioner", "conditioner.safetensors"));
+        Place(Path.Combine(install, "model", "model.safetensors"));
+
+        // Naming install/model: that folder holds none of the four, the folder above holds three; neither is complete and the parent holds the most.
+        (string folder, bool complete) = MeshService.XPartInstall(Path.Combine(install, "model"));
+        Assert.False(complete);
+        Assert.Equal(install, folder);
+
+        Place(Path.Combine(install, "shapevae", "shapevae.safetensors"));
+        Assert.True(MeshService.XPartInstall(Path.Combine(install, "model")).Complete);
     }
 
     [Fact]
