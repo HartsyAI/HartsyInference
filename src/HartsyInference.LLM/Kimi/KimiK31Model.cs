@@ -345,7 +345,7 @@ public sealed class KimiK31Model : IDisposable
         return logits;
     }
 
-    // Rank r's share of every layer, the vocabulary rows and the expert range. Each rank's tensors are owned by the model.
+    // Rank r's share of every layer, the vocabulary rows and the expert range. With one rank the loader's tensors are borrowed in place and nothing is owned.
     private void BuildShard(RankShard s, int r, int maxPositions)
     {
         KimiK31Config c = _config;
@@ -386,7 +386,7 @@ public sealed class KimiK31Model : IDisposable
         }
     }
 
-    // Rank r's routed block: the router, latent projections and norms as the rank's own replicas; the experts of its range by reference.
+    // Rank r's routed block: the router, latent projections and norms (replicated, or borrowed in place with one rank); the experts of its range by reference.
     private MoeFeedForward BuildMoeBlock(KimiK31LayerWeights lw, int r)
     {
         KimiK31Config c = _config;

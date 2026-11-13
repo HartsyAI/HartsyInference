@@ -4,7 +4,8 @@ namespace HartsyInference.Core.Backends;
 
 /// <summary>Validation and offsets for <see cref="ICollectiveComm.AllToAll"/>, shared by every transport so they agree on the layout.
 /// Send buffer <c>i</c> is laid out destination-major: its chunk for rank j starts at <see cref="SendOffset"/>. Receive buffer <c>j</c> is
-/// laid out source-major: its chunk from rank i starts at <see cref="RecvOffset"/>.</summary>
+/// laid out source-major: its chunk from rank i starts at <see cref="RecvOffset"/>. A send buffer must not be the receive buffer it
+/// exchanges into: the transports zero each receive buffer before copying, so an overlapping send buffer would be wiped.</summary>
 public static class AllToAllLayout
 {
     /// <summary>Checks the rank count, the counts matrix and every buffer against it. Each buffer needs at least one element, so an
