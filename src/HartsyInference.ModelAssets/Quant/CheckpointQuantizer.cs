@@ -112,7 +112,7 @@ public static class CheckpointQuantizer
 
         // Both targets stream now: each tensor is widened, quantized and its wide copy freed before the next one
         // is touched, so the peak is one tensor plus the output rather than the whole checkpoint as F32.
-        RefuseIfWorkingSetWontFit(source, job.SourcePath);
+        RefuseIfWorkingSetWontFit(source, job);
 
         List<Tensor> owned = new();
         try
@@ -203,8 +203,9 @@ public static class CheckpointQuantizer
     /// <para>Measured from real element counts rather than the file size, because a block-quantized tensor is
     /// several times its own stored size once widened. Passing is a necessary condition, not a guarantee: another
     /// process can take the memory between this check and the allocation.</para></summary>
-    private static void RefuseIfWorkingSetWontFit(CheckpointSource source, string sourcePath)
+    private static void RefuseIfWorkingSetWontFit(CheckpointSource source, QuantizationJob job)
     {
+        string sourcePath = job.SourcePath;
         long widestTensorBytes = 0;
         foreach (KeyValuePair<string, Tensor> kv in source.Weights)
         {
@@ -214,9 +215,9 @@ public static class CheckpointQuantizer
                 widestTensorBytes = bytes;
             }
         }
-        // The output roughly tracks the source on disk — a quantized target is smaller, a dense one comparable —
-        // and it is the term that dominates now that the F32 intermediate is one tensor rather than all of them.
-        long needed = widestTensorBytes + new FileInfo(sourcePath).Length;
+        // The output is what the writers hold, sized from the target's storage. The source is mapped, not held, so its file
+        // size is not this run's memory: a 64 GB BF16 source makes an fp8 output of about 33 GB.
+        long needed = widestTensorBytes + EstimateOutputBytes(source, job.Target);
         long available = AvailableMemoryBytes();
         if (available <= 0 || needed <= available)
         {
@@ -227,6 +228,34 @@ public static class CheckpointQuantizer
             + $"the finished file plus its widest tensor as F32 ({widestTensorBytes / (1024L * 1024)} MiB) — but "
             + $"only about {available / (1024L * 1024 * 1024)} GiB is free. Close what else is running, or "
             + "quantize from a smaller source.");
+    }
+
+    /// <summary>The bytes the output occupies in memory before it is written, from each tensor's element count and the storage
+    /// the target gives it, under the same eligibility rules the writers apply. An upper bound: the writers hold the whole
+    /// output until <c>Save</c> or <c>Flush</c>.</summary>
+    internal static long EstimateOutputBytes(CheckpointSource source, QuantizationTarget target)
+    {
+        double total = 0;
+        foreach (KeyValuePair<string, Tensor> kv in source.Weights)
+        {
+            string key = kv.Key;
+            Tensor tensor = kv.Value;
+            long elements = tensor.ElementCount;
+            bool linear = key.EndsWith(".weight", StringComparison.Ordinal) && tensor.Shape.Rank == 2 && elements >= (1L << 20);
+            total += target.Kind switch
+            {
+                // fp8: one byte per weight and a scalar scale; everything else is narrowed to BF16.
+                QuantizationTargetKind.Fp8Scaled => linear ? elements + 4.0 : elements * 2.0,
+                // int8: one byte per weight and one scale per row; everything else is held as F32.
+                QuantizationTargetKind.Int8ConvRot => IsInt8Eligible(key, tensor) ? elements + 4.0 * tensor.Shape[0] : elements * 4.0,
+                // NVFP4: half a byte per weight, one E4M3 scale per 16, and an F32 tensor scale; everything else is BF16.
+                QuantizationTargetKind.Nvfp4 => IsNvfp4Eligible(key, tensor) ? elements / 2.0 + elements / 16.0 + 4.0 : elements * 2.0,
+                // GGUF: Q8_0 is the widest block quant (34 bytes per 32 values), so it bounds the K-quant presets too. Tensors the
+                // policy keeps at F16 are 2 bytes; the policy's keep-dense rules cover the small ones, so this stays an upper bound.
+                _ => (linear ? 1.0625 : 2.0) * elements,
+            };
+        }
+        return (long)total;
     }
 
     /// <summary>Memory this process could actually get, not what the machine has.

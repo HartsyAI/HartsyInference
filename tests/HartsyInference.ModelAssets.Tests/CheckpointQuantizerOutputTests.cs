@@ -109,6 +109,19 @@ public sealed class CheckpointQuantizerOutputTests : IDisposable
     }
 
     [Fact]
+    public void OutputEstimateFollowsTheTargetsStorageAndNotTheSourceFile()
+    {
+        string source = WriteSource(Identity());
+        using CheckpointSource opened = CheckpointSource.Open(source);
+
+        Assert.Equal(1058820, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Fp8Scaled)));
+        Assert.Equal(1073152, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Int8ConvRot)));
+        Assert.Equal(600068, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Nvfp4)));
+        Assert.Equal(1124352, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0, "Q8_0")));
+        Assert.True(CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Fp8Scaled)) < new FileInfo(source).Length);
+    }
+
+    [Fact]
     public void GgufCopyIsLabelledByItsPresetAndKeepsTheIdentity()
     {
         string source = WriteSource(Identity());
