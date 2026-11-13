@@ -186,7 +186,7 @@ internal static class MeshModelProfiles
             Access = MeshFieldAccess.Used,
             Default = nameof(MeshPreprocess.None),
             Values = [nameof(MeshPreprocess.None), nameof(MeshPreprocess.Auto)],
-            Note = "Auto mattes an image without a usable alpha plane (BiRefNet, loaded before the model and kept until memory is freed, not counted in the peak) and applies this model's framing; None uses the image as given.",
+            Note = "Auto mattes an image without a usable alpha plane (BiRefNet, loaded before the model and kept until memory is freed; counted in the peak of a model that has one) and applies this model's framing; None uses the image as given.",
         }
         : Ignored(nameof(MeshRequest.Preprocess), "The model mattes and frames its own input, or takes no image.");
 

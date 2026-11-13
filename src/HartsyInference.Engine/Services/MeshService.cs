@@ -76,11 +76,10 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         }
     }
 
-    /// <summary>Gives back what the 3D side holds: its resident pipelines and the matting model, then the driver pool's cached-but-free blocks. It does not sweep the backend's weight and activation caches, which the engine's cached image and video pipelines still believe are resident (a sweep under them returns garbage, see <c>InferenceEngine.GenerateWithVramCleanup</c>).</summary>
+    /// <summary>Gives back what the 3D side holds: its resident pipelines and the matting model (<see cref="Free"/> frees both), then the driver pool's cached-but-free blocks. It does not sweep the backend's weight and activation caches, which the engine's cached image and video pipelines still believe are resident (a sweep under them returns garbage, see <c>InferenceEngine.GenerateWithVramCleanup</c>).</summary>
     private void FreeAfterOutOfVram()
     {
         Free();
-        _engine.MeshPreparationInternal.Dispose();
         try
         {
             _engine.Backend.TrimMemoryPool();
@@ -178,10 +177,14 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// <inheritdoc/>
     public IReadOnlyList<MeshLoadedModel> Loaded()
     {
+        List<MeshLoadedModel> loaded;
         lock (_gate)
         {
-            return [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
+            loaded = [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
         }
+        if (_engine.MeshPreparationInternal.MatterLoadedFrom is { } matter)
+            loaded.Add(new MeshLoadedModel(MatterKind, NameOf(matter)));
+        return loaded;
     }
 
     /// <inheritdoc/>
@@ -204,9 +207,27 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         List<IDisposable> counted = [.. freed.Where(f => HasNoRunGate(f.Kind)).Select(f => f.Item)];
         if (counted.Count > 0)
             WhenNoCountedRun(() => counted.ForEach(item => item.Dispose()));
-        if (freed.Count > 0)
-            Logs.Info($"[Mesh] Freed {freed.Count} resident 3D model(s): {string.Join(", ", freed.Select(f => $"{f.Kind} {f.Name}"))}.");
-        return freed.Count;
+        List<string> freedNames = [.. freed.Select(f => $"{f.Kind} {f.Name}")];
+        if (FreeMatter(name) is { } matterName)
+            freedNames.Add($"{MatterKind} {matterName}");
+        if (freedNames.Count > 0)
+            Logs.Info($"[Mesh] Freed {freedNames.Count} resident 3D model(s): {string.Join(", ", freedNames)}.");
+        return freedNames.Count;
+    }
+
+    /// <summary>The kind the shared matting model is listed under.</summary>
+    internal const string MatterKind = "matting";
+
+    /// <summary>Releases the shared matting model when it is resident and <paramref name="name"/> is null or names it; returns the name it was listed under, else null.</summary>
+    private string? FreeMatter(string? name)
+    {
+        string? path = _engine.MeshPreparationInternal.MatterLoadedFrom;
+        if (path is null)
+            return null;
+        string listed = NameOf(path);
+        if (name is not null && !string.Equals(listed, name, StringComparison.OrdinalIgnoreCase))
+            return null;
+        return _engine.MeshPreparationInternal.ReleaseMatter() ? listed : null;
     }
 
     private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
@@ -701,13 +722,12 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         ImageData source = request.Image!;
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
         Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
-        string modelsRoot = RepoPaths.ModelsRoot();
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                Trellis2Runtime runtime = GetOrLoadTrellis2(spec, modelsRoot);
+                Trellis2Runtime runtime = GetOrLoadTrellis2(spec);
                 // One run at a time per loaded model; a queued request gives up when its own cancellation fires.
                 runtime.Gate.Wait(cancel);
                 try
@@ -744,13 +764,12 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         ImageData source = request.Image!;
         Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
         Trellis2InputImage image = new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
-        string modelsRoot = RepoPaths.ModelsRoot();
 
         return Task.Run(
             () =>
             {
                 cancel.ThrowIfCancellationRequested();
-                Pixal3DRuntime runtime = GetOrLoadPixal3D(spec, modelsRoot);
+                Pixal3DRuntime runtime = GetOrLoadPixal3D(spec);
                 void Report(GenerationProgress p)
                 {
                     cancel.ThrowIfCancellationRequested();
@@ -845,7 +864,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>Loads (or returns the cached) Pixal3D pipeline for <paramref name="spec"/>.</summary>
-    private Pixal3DRuntime GetOrLoadPixal3D(ModelSpec spec, string modelsRoot)
+    private Pixal3DRuntime GetOrLoadPixal3D(ModelSpec spec)
     {
         if (spec.LocalPath is null)
         {
@@ -858,7 +877,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 return cached;
             try
             {
-                Pixal3DRuntime runtime = Pixal3DRuntime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                Pixal3DRuntime runtime = Pixal3DRuntime.Load(_engine.Backend, spec.LocalPath, _engine.MeshPreparationInternal.SharedMatter);
                 _pixal3d[spec.LocalPath] = runtime;
                 return runtime;
             }
@@ -871,7 +890,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>Loads (or returns the cached) TRELLIS.2 pipeline for <paramref name="spec"/>.</summary>
-    private Trellis2Runtime GetOrLoadTrellis2(ModelSpec spec, string modelsRoot)
+    private Trellis2Runtime GetOrLoadTrellis2(ModelSpec spec)
     {
         if (spec.LocalPath is null)
         {
@@ -884,7 +903,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 return cached;
             try
             {
-                Trellis2Runtime runtime = Trellis2Runtime.Load(_engine.Backend, spec.LocalPath, modelsRoot);
+                Trellis2Runtime runtime = Trellis2Runtime.Load(_engine.Backend, spec.LocalPath, _engine.MeshPreparationInternal.SharedMatter);
                 _trellis2[spec.LocalPath] = runtime;
                 return runtime;
             }
