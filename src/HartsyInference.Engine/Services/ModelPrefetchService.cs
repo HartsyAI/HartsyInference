@@ -120,9 +120,9 @@ public sealed class ModelPrefetchService : IModelPrefetchService
         string message = blockers.Count == 0
             ? $"Fetched {fetched} file(s) for '{status.ModelId}'."
             : $"Fetched {fetched} of {toFetch.Count} file(s) for '{status.ModelId}'; {blockers.Count} file(s) need your action: {string.Join("; ", blockers.Select(b => b.Role))}.";
-        string? primaryPath = primary is not null && ModelDownloader.TargetPath(primary) is string path && File.Exists(path) ? path : null;
+        string? primaryPath = primary is not null && ModelDownloader.LocalPath(primary) is string path && File.Exists(path) ? path : null;
         List<string> present = [.. inventory.Paths.Where(p => p is not null).Select(p => p!)];
-        present.AddRange(toFetch.Select(ModelDownloader.TargetPath).Where(File.Exists));
+        present.AddRange(toFetch.Select(ModelDownloader.LocalPath).Where(File.Exists));
         return new ModelPrefetchResult(true, message, [.. present.Distinct(StringComparer.OrdinalIgnoreCase)], primaryPath) { Blockers = blockers };
     }
 
@@ -131,7 +131,8 @@ public sealed class ModelPrefetchService : IModelPrefetchService
     {
         bool refused = error.Message.Contains("HTTP 401", StringComparison.Ordinal) || error.Message.Contains("HTTP 403", StringComparison.Ordinal)
             || error is HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden };
-        if (refused)
+        // A file fetched from a URL (a release asset) is not behind a Hugging Face gate: a refusal there is a failed fetch.
+        if (refused && asset.Url is null)
         {
             return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.Gated, MeshAssetService.GatedInstructions(asset.Repo));
         }
@@ -143,7 +144,7 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             OperationCanceledException => "the server did not answer in time",
             _ => "the server could not be reached or refused the request",
         };
-        return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Repo}/{asset.RepoPath} was not fetched: {reason}. Check the connection and the disk, then fetch again.");
+        return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Url ?? $"{asset.Repo}/{asset.RepoPath}"} was not fetched: {reason}. Check the connection and the disk, then fetch again.");
     }
 
     private static async Task<ModelPrefetchResult> PrefetchTtsAsync(AudioModelSelector selector,

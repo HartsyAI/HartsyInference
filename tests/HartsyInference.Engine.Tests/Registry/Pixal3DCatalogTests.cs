@@ -20,11 +20,21 @@ public sealed class Pixal3DCatalogTests
         Assert.True(entry.CliDrivable);
         Assert.Equal(ModelStatus.Structural, entry.Status);
         Assert.All(entry.Assets, asset => Assert.Matches(Sha256, asset.Sha256 ?? string.Empty));
-        // pipeline.json, three flows with their configs, the two decoders, and the optional texture flow with its config and decoder.
-        Assert.Equal(12, entry.Assets.Count(a => a.TargetSubdir == "3D/pixal3d"));
+        // pipeline.json, three flows with their configs, the two decoders, the optional texture flow with its config and decoder, and NAF.
+        Assert.Equal(13, entry.Assets.Count(a => a.TargetSubdir == "3D/pixal3d"));
         Assert.Contains(entry.Assets, a => a.RepoPath == "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors" && a.Repo == "TencentARC/Pixal3D");
-        // NAF is a GitHub release asset the catalog cannot fetch, so no entry may pretend to carry it.
-        Assert.DoesNotContain(entry.Assets, a => a.RepoPath.Contains("naf", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Entry_FetchesNafFromItsGitHubReleaseWithThePinnedHashAndListsItsMirrorRepack()
+    {
+        ModelAsset naf = Assert.Single(ModelCatalog.Find("pixal3d")!.Assets, a => a.FileName == "naf_release.pth");
+
+        Assert.Equal("https://github.com/valeoai/NAF/releases/download/model/naf_release.pth", naf.Url);
+        Assert.Equal("c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f", naf.Sha256);
+        Assert.Equal("3D/pixal3d", naf.TargetSubdir);
+        Assert.Equal("pixal3d/naf_release.safetensors", naf.Repack!.MirrorPath);
+        Assert.False(MeshAssetService.IsOptional(naf));
     }
 
     [Fact]

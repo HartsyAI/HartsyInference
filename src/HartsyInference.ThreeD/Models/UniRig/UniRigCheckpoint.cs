@@ -12,9 +12,9 @@ public sealed class UniRigCheckpoint : IDisposable
 {
     private const string EnvelopePrefix = "state_dict.model.";
 
-    private readonly PytorchPickleLoader? _loader;
+    private readonly AnyFormatCheckpointLoader? _loader;
 
-    private UniRigCheckpoint(PytorchPickleLoader? loader, IReadOnlyDictionary<string, Tensor> tensors)
+    private UniRigCheckpoint(AnyFormatCheckpointLoader? loader, IReadOnlyDictionary<string, Tensor> tensors)
     {
         _loader = loader;
         Tensors = tensors;
@@ -23,14 +23,14 @@ public sealed class UniRigCheckpoint : IDisposable
     /// <summary>Tensors by upstream module path, e.g. <c>mesh_encoder.encoder.input_proj.weight</c>.</summary>
     public IReadOnlyDictionary<string, Tensor> Tensors { get; }
 
-    /// <summary>Reads <paramref name="path"/>, requiring every tensor to be F32 (BatchNorm step counters are skipped) under the <c>state_dict.model.</c> envelope.</summary>
+    /// <summary>Reads <paramref name="path"/>, or its safetensors repack when one sits beside it, requiring every tensor to be F32 (BatchNorm step counters are skipped) under the <c>state_dict.model.</c> envelope.</summary>
     public static UniRigCheckpoint Load(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
-        PytorchPickleLoader loader = new();
+        AnyFormatCheckpointLoader loader = new();
         try
         {
-            loader.Load(path, recursiveFlatten: true);
+            loader.Load(RepackedCheckpoint.Resolve(path), recursiveFlatten: true);
             Dictionary<string, Tensor> raw = loader.GetAllTensors();
             Dictionary<string, Tensor> tensors = new(raw.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, Tensor> pair in raw)

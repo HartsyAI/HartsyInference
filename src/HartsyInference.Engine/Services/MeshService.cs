@@ -4,6 +4,7 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Geometry.Ops;
 using HartsyInference.ThreeD.Io;
@@ -514,12 +515,12 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         string[] candidates = [.. new[] { folder, parent }.Where(c => c is not null).Select(c => c!)];
         foreach (string candidate in candidates)
         {
-            if (files.All(file => File.Exists(Path.Combine(candidate, file))))
+            if (files.All(file => RepackedCheckpoint.Exists(Path.Combine(candidate, file))))
             {
                 return (candidate, true);
             }
         }
-        return (candidates.MaxBy(c => files.Count(file => File.Exists(Path.Combine(c, file))))!, false);
+        return (candidates.MaxBy(c => files.Count(file => RepackedCheckpoint.Exists(Path.Combine(c, file))))!, false);
     }
 
     /// <summary>Hunyuan3D-Omni: the image (prepared like the other Hunyuan3D models when <see cref="MeshPreprocess.Auto"/> is set) and the control signal give a mesh, whose floating pieces are dropped as upstream's script does. The seed fixes the noise
@@ -569,7 +570,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         (string folder, bool complete) = OmniInstall(spec.LocalPath);
         if (!complete)
         {
-            string missing = string.Join(", ", Hunyuan3DOmniPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+            string missing = string.Join(", ", Hunyuan3DOmniPipeline.Files.Where(file => !RepackedCheckpoint.Exists(Path.Combine(folder, file))));
             throw new FileNotFoundException($"'{spec.LocalPath}' is missing Omni files: {missing}.", Path.Combine(folder, Hunyuan3DOmniPipeline.Files[0]));
         }
         folder = Path.GetFullPath(folder);
@@ -922,7 +923,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         if (spec.LocalPath is null)
         {
             throw new FileNotFoundException(
-                "No checkpoint found for 'pixal3d'. Download the catalog assets (and place naf_release.pth beside them) or supply the model directory as the local path.");
+                "No checkpoint found for 'pixal3d'. Download the catalog assets (naf_release.pth included) or supply the model directory as the local path.");
         }
         lock (_gate)
         {

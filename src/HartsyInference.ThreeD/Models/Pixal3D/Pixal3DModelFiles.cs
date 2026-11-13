@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ThreeD.Models.TrellisV2;
 
 namespace HartsyInference.ThreeD.Models.Pixal3D;
@@ -8,7 +9,7 @@ namespace HartsyInference.ThreeD.Models.Pixal3D;
 /// TRELLIS.2 file too and is looked up like the shape decoder; texture needs it and the texture flow.</summary>
 public sealed record Pixal3DModelFiles
 {
-    /// <summary>The released NAF upsampler weights (<c>valeoai/NAF</c>, release <c>model</c>).</summary>
+    /// <summary>The released NAF upsampler weights (<c>valeoai/NAF</c>, release <c>model</c>); a safetensors repack beside it (<c>naf_release.safetensors</c>) is read in preference.</summary>
     public const string NafFile = "naf_release.pth";
 
     /// <summary>Folder of a TRELLIS.2 install, where the shared decoders may already sit.</summary>
@@ -61,7 +62,7 @@ public sealed record Pixal3DModelFiles
                     return candidate;
             }
 
-            missing.Add($"{name} (looked in: {string.Join("; ", candidates.Select(Path.GetDirectoryName))})");
+            missing.Add($"{name} (looked in: {string.Join("; ", candidates.Select(Path.GetDirectoryName).Distinct())})");
             return string.Empty;
         }
 
@@ -71,7 +72,7 @@ public sealed record Pixal3DModelFiles
             StructureFlow = Find(Trellis2ModelFiles.StructureFlowFile, Path.Combine(dir, Trellis2ModelFiles.StructureFlowFile)),
             ShapeFlow512 = Find(Trellis2ModelFiles.ShapeFlow512File, Path.Combine(dir, Trellis2ModelFiles.ShapeFlow512File)),
             ShapeFlow1024 = Find(Trellis2ModelFiles.ShapeFlow1024File, Path.Combine(dir, Trellis2ModelFiles.ShapeFlow1024File)),
-            Naf = Find(NafFile, Path.Combine(dir, NafFile)),
+            Naf = Find(NafFile, RepackedCheckpoint.SiblingOf(Path.Combine(dir, NafFile)), Path.Combine(dir, NafFile)),
             StructureDecoder = Find(
                 Trellis2ModelFiles.StructureDecoderFile,
                 Path.Combine(dir, Trellis2ModelFiles.StructureDecoderFile),

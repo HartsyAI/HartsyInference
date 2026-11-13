@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.PyTorch;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ThreeD.Models.Hunyuan3D.Omni;
 
@@ -57,8 +58,14 @@ public sealed class OmniCheckpoint : IDisposable
 
     private void ReadInto(string path, Dictionary<string, Tensor> target, Func<string, bool> include, Func<PytorchTensorDescriptor, DType?> convert, Action<int, int>? onProgress)
     {
-        if (!File.Exists(path))
+        if (!RepackedCheckpoint.Exists(path))
             throw new FileNotFoundException($"The Hunyuan3D-Omni folder lacks {Path.GetFileName(Path.GetDirectoryName(path))}/{Path.GetFileName(path)}.", path);
+        string repacked = RepackedCheckpoint.Resolve(path);
+        if (repacked != path)
+        {
+            ReadRepackInto(repacked, target, include, convert, onProgress);
+            return;
+        }
         PytorchPickleLoader loader = new();
         _loaders.Add(loader);
         loader.OpenLazy(path);
@@ -77,6 +84,39 @@ public sealed class OmniCheckpoint : IDisposable
         // Nothing reads the pickles again: release the file.
         loader.Dispose();
         _loaders.Remove(loader);
+    }
+
+    // The same tensors under the same names as the pickle, so the caller's filter and conversion apply unchanged; each is copied (or narrowed) out of the mapping as it is read.
+    private unsafe void ReadRepackInto(string path, Dictionary<string, Tensor> target, Func<string, bool> include, Func<PytorchTensorDescriptor, DType?> convert, Action<int, int>? onProgress)
+    {
+        using SafeTensorsLoader loader = new();
+        loader.Load(path);
+        string[] names = [.. loader.Descriptors.Values.Where(d => include(d.Name)).OrderBy(d => d.DataOffset).Select(d => d.Name)];
+        if (names.Length == 0)
+            throw new InvalidDataException($"'{path}' holds none of the expected tensors.");
+        for (int i = 0; i < names.Length; i++)
+        {
+            SafeTensorDescriptor descriptor = loader.Descriptors[names[i]];
+            // The loader does not check a hand-placed file's offsets against its shapes, and the copy below trusts the shape.
+            if (descriptor.ByteLength != descriptor.DType.ComputeByteCount(descriptor.Shape.ElementCount))
+                throw new InvalidDataException($"'{path}' stores {descriptor.ByteLength} bytes for tensor '{descriptor.Name}', which its shape and dtype do not account for.");
+            DType? narrowed = convert(new PytorchTensorDescriptor { Name = descriptor.Name, DType = descriptor.DType, Shape = descriptor.Shape });
+            Tensor view = loader.GetTensor(names[i]);
+            Tensor owned;
+            if (narrowed is null || narrowed == descriptor.DType)
+            {
+                owned = new Tensor(descriptor.Shape, descriptor.DType);
+                long bytes = descriptor.DType.ComputeByteCount(descriptor.Shape.ElementCount);
+                Buffer.MemoryCopy((void*)view.DataPointer, (void*)owned.DataPointer, bytes, bytes);
+            }
+            else
+            {
+                owned = view.CastTo(narrowed.Value);
+            }
+            _owned.Add(owned);
+            target[names[i]] = owned;
+            onProgress?.Invoke(i + 1, names.Length);
+        }
     }
 
     /// <inheritdoc/>

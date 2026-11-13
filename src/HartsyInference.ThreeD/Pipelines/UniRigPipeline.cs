@@ -2,6 +2,7 @@ using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ThreeD.Geometry;
 using HartsyInference.ThreeD.Io;
 using HartsyInference.ThreeD.Models.UniRig;
@@ -41,7 +42,7 @@ public sealed class UniRigPipeline : ThreeDPipelineBase
         _skinPath = Path.Combine(modelDirectory, SkinCheckpoint);
         foreach (string path in new[] { _skeletonPath, _skinPath })
         {
-            if (!File.Exists(path))
+            if (!RepackedCheckpoint.Exists(path))
             {
                 throw new FileNotFoundException($"UniRig checkpoint not found: {path}. Expected the VAST-AI/UniRig layout under '{modelDirectory}'.");
             }

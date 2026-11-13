@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.IO;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine.HuggingFace;
+using HartsyInference.ModelAssets.PyTorch;
 
 namespace HartsyInference.Engine;
 
@@ -39,6 +41,18 @@ public static class ModelDownloader
         return found;
     }
 
+    /// <summary>The safetensors repack of an asset that lists one, when it is on disk beside where the pickle goes (same name, extension <c>.safetensors</c>); null for an asset with no repack or whose repack is not there.</summary>
+    internal static string? FindRepacked(ModelAsset asset)
+    {
+        if (asset.Repack is null)
+            return null;
+        ModelAsset repacked = asset with { TargetName = Path.ChangeExtension(asset.FileName, RepackedCheckpoint.Extension), LegacyTargetNames = [] };
+        return FindExisting(repacked, ignoreCase: false) ?? FindExisting(repacked, ignoreCase: true);
+    }
+
+    /// <summary>Where a repack of an asset is saved: beside <see cref="TargetPath"/>.</summary>
+    internal static string RepackedTargetPath(ModelAsset asset) => RepackedCheckpoint.SiblingOf(TargetPath(asset));
+
     /// <summary>The file under each spelling of the asset's folder, in the order <see cref="ModelFolders.Spellings"/> gives.</summary>
     private static string? ExistingInFolders(string root, string targetSubdir, string fileName, bool ignoreCase)
     {
@@ -64,14 +78,21 @@ public static class ModelDownloader
     {
         string? folder = entry.LoadsFromFolder && checkpointFolder is not null && Directory.Exists(checkpointFolder) ? checkpointFolder : null;
         return entry.Assets
-            .Where(a => !(folder is not null && File.Exists(Path.Combine(folder, a.FileName))) && !File.Exists(TargetPath(a)))
+            .Where(a => !(folder is not null && File.Exists(Path.Combine(folder, a.FileName))) && !File.Exists(TargetPath(a)) && FindRepacked(a) is null)
             .ToList();
     }
 
     /// <summary>The local path of the model's primary file (its transformer/checkpoint), or null when the entry has no
     /// assets. Used as the resolved <c>LocalPath</c> once the set is present.</summary>
     public static string? PrimaryLocalPath(CatalogEntry entry) =>
-        PrimaryAsset(entry) is ModelAsset primary ? TargetPath(primary) : null;
+        PrimaryAsset(entry) is ModelAsset primary ? LocalPath(primary) : null;
+
+    /// <summary>The file a loader reads for <paramref name="asset"/>: where it is on disk (<see cref="TargetPath"/>), else its repack beside that when the asset lists one and only the repack was fetched, else where a download would put it.</summary>
+    internal static string LocalPath(ModelAsset asset)
+    {
+        string target = TargetPath(asset);
+        return File.Exists(target) ? target : FindRepacked(asset) ?? target;
+    }
 
     /// <summary>The model's primary asset (its transformer/checkpoint), or null when the entry has no assets.</summary>
     internal static ModelAsset? PrimaryAsset(CatalogEntry entry) =>
@@ -103,8 +124,14 @@ public static class ModelDownloader
         return TargetPath(asset);
     }
 
-    /// <summary>Ensures a single <paramref name="asset"/> is present, downloading it if needed under a per-target lock.</summary>
-    public static async Task EnsureAsync(HuggingFaceClient client, ModelAsset asset, bool allowDownload, Action<ModelAsset, double>? onProgress, CancellationToken ct)
+    /// <summary>Ensures a single <paramref name="asset"/> is present, downloading it if needed under a per-target lock. An asset that lists a repack is satisfied by the repack, and fetches it from the mirror
+    /// (<c>paths.weightsMirrorUrl</c>) before its upstream file; an asset with a <see cref="ModelAsset.Url"/> is fetched from that URL.</summary>
+    public static Task EnsureAsync(HuggingFaceClient client, ModelAsset asset, bool allowDownload, Action<ModelAsset, double>? onProgress, CancellationToken ct) =>
+        EnsureAsync(client, asset, allowDownload, onProgress, null, EngineKnobs.WeightsMirrorUrl.Value, ct);
+
+    /// <summary>The fetch itself, with the HTTP client for mirror and URL downloads and the mirror's base URL supplied so a test can stand in for the network. A null <paramref name="assetHttp"/> makes a client without credentials when one is needed.</summary>
+    internal static async Task EnsureAsync(HuggingFaceClient client, ModelAsset asset, bool allowDownload, Action<ModelAsset, double>? onProgress,
+        HttpClient? assetHttp, string? mirrorBase, CancellationToken ct)
     {
         string target = TargetPath(asset);
         SemaphoreSlim gate = _gates.GetOrAdd(target, _ => new SemaphoreSlim(1, 1));
@@ -112,7 +139,7 @@ public static class ModelDownloader
         try
         {
             // Re-check under the lock: a concurrent request may have finished the download while we waited.
-            if (File.Exists(target))
+            if (File.Exists(target) || FindRepacked(asset) is not null)
                 return;
             string audioRoot = Audio.AudioModelRoot.Location();
             // Ignoring case: on Windows and macOS the target keeps the catalog's Audio/ spelling for the same folder.
@@ -137,10 +164,41 @@ public static class ModelDownloader
             }
 
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));
-            await client.DownloadFileAsync(asset.Repo, asset.RepoPath, target, progress, asset.Sha256, ct).ConfigureAwait(false);
+            HttpClient? owned = null;
+            try
+            {
+                if (AssetUrlDownload.MirrorUrl(asset, mirrorBase) is string mirrorUrl)
+                {
+                    HttpClient http = assetHttp ?? (owned = NewAssetClient());
+                    string repacked = RepackedTargetPath(asset);
+                    try
+                    {
+                        await AssetUrlDownload.DownloadAsync(http, mirrorUrl, $"{asset.Repo}/{asset.RepoPath} (mirror repack)", repacked, progress, asset.Repack!.Sha256, ct).ConfigureAwait(false);
+                        await Planning.VideoCheckpointHashCache.RecordVerifiedSha256Async(repacked, asset.Repack.Sha256).ConfigureAwait(false);
+                        return;
+                    }
+                    catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or IOException or ArgumentException
+                        || (ex is OperationCanceledException && !ct.IsCancellationRequested))
+                    {
+                        Logs.Warning($"[Download] The mirror did not give '{asset.RepoPath}' ({ex.GetType().Name}: {ex.Message}); fetching the upstream file instead.");
+                    }
+                }
+                if (asset.Url is not null)
+                {
+                    await AssetUrlDownload.DownloadAsync(assetHttp ?? (owned = NewAssetClient()), asset.Url, $"{asset.Repo}/{asset.RepoPath}", target, progress, asset.Sha256, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    await client.DownloadFileAsync(asset.Repo, asset.RepoPath, target, progress, asset.Sha256, ct).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                owned?.Dispose();
+            }
             if (!string.IsNullOrWhiteSpace(asset.Sha256))
             {
-                // DownloadFileAsync has already streamed and verified these exact bytes. Persisting that result here
+                // The download has already streamed and verified these exact bytes. Persisting that result here
                 // keeps the first profile-aware request from reading a multi-gigabyte checkpoint a second time.
                 await Planning.VideoCheckpointHashCache.RecordVerifiedSha256Async(target, asset.Sha256)
                     .ConfigureAwait(false);
@@ -150,6 +208,14 @@ public static class ModelDownloader
         {
             gate.Release();
         }
+    }
+
+    /// <summary>An HTTP client for mirror and release-asset downloads. It carries no credentials: the Hugging Face token is not sent to another host.</summary>
+    private static HttpClient NewAssetClient()
+    {
+        HttpClient http = new();
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HartsyInference/1.0");
+        return http;
     }
 
     /// <summary>The variant of <paramref name="entry"/> named <paramref name="variantId"/> (case-insensitive).</summary>
