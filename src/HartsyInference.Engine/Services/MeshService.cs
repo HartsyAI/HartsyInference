@@ -425,7 +425,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>X-Part: P3-SAM splits the mesh into parts and every part is generated again as a complete shape. One GLB with a coloured node per part, the parts' boxes and face counts in
-    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (a negative seed is resolved to a random draw before the run, so 42 is only the fallback of a caller that bypasses <see cref="GenerateAsync"/>; pass a seed for a repeatable split), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
+    /// <see cref="MeshResult.Parts"/>. <see cref="MeshRequest.Seed"/> fixes the samples and the noise (negative: a random draw made in <see cref="GenerateAsync"/>; 42 only if a caller bypasses it), <see cref="MeshRequest.Steps"/> the flow steps (0: 50) and
     /// <see cref="MeshRequest.GridResolution"/> the marching-cubes grid of each part (0: 256).</summary>
     private Task<MeshResult> GenerateXPartAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
