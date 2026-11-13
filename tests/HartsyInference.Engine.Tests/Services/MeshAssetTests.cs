@@ -48,6 +48,79 @@ public sealed class MeshAssetTests : IDisposable
     }
 
     [Fact]
+    public void XPartStatusFollowsTheFolderTheLoaderIsGiven_FileByFile()
+    {
+        string install = Path.Combine(_root, "elsewhere", "xpart");
+        foreach (string file in new[] { "p3sam/p3sam.safetensors", "model/model.safetensors", "conditioner/conditioner.safetensors", "shapevae/shapevae.safetensors" })
+            Place(Path.Combine(install, file));
+
+        // The folder itself, and a file inside it (the loader goes up to the folder that holds the subfolders).
+        foreach (string given in new[] { install, Path.Combine(install, "model", "model.safetensors") })
+        {
+            MeshAssetStatus status = new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart", given));
+            Assert.True(status.Complete, given);
+            Assert.Equal(4, status.Assets.Count);
+        }
+
+        File.Delete(Path.Combine(install, "conditioner", "conditioner.safetensors"));
+        MeshAssetStatus partial = new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart", install));
+        Assert.False(partial.Complete);
+        Assert.Single(partial.Missing, a => a.RelativePath.EndsWith("conditioner/conditioner.safetensors", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnIncompleteNamedInstallIsReportedAsTheLoaderSeesItEvenWhenTheCatalogFolderIsComplete()
+    {
+        PlaceCatalog("hunyuan3d-xpart");
+        string install = Path.Combine(_root, "elsewhere", "xpart");
+        Place(Path.Combine(install, "model", "model.safetensors"));
+
+        MeshAssetStatus status = new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart", install));
+
+        Assert.False(status.Complete);
+        Assert.Equal(3, status.Missing.Count());
+    }
+
+    [Fact]
+    public void XPartInstall_PicksTheFolderWithAllFourFilesElseTheOneHoldingTheMost()
+    {
+        string install = Path.Combine(_root, "x", "xpart");
+        Place(Path.Combine(install, "p3sam", "p3sam.safetensors"));
+        Place(Path.Combine(install, "conditioner", "conditioner.safetensors"));
+        Place(Path.Combine(install, "model", "model.safetensors"));
+
+        // Naming install/model: that folder holds none of the four, the folder above holds three; neither is complete and the parent holds the most.
+        (string folder, bool complete) = MeshService.XPartInstall(Path.Combine(install, "model"));
+        Assert.False(complete);
+        Assert.Equal(install, folder);
+
+        Place(Path.Combine(install, "shapevae", "shapevae.safetensors"));
+        Assert.True(MeshService.XPartInstall(Path.Combine(install, "model")).Complete);
+    }
+
+    [Fact]
+    public void XPartCatalogLayoutIsCompleteWithoutAPath()
+    {
+        PlaceCatalog("hunyuan3d-xpart");
+
+        Assert.True(new MeshAssetService().GetStatus(Spec("hunyuan3d-xpart")).Complete);
+    }
+
+    [Fact]
+    public void P3SamStatusFollowsTheCheckpointFileOrFolderTheLoaderIsGiven()
+    {
+        string custom = Path.Combine(_root, "elsewhere", "custom-name.safetensors");
+        Place(custom);
+        string folder = Path.Combine(_root, "elsewhere2");
+        Place(Path.Combine(folder, "p3sam", "p3sam.safetensors"));
+
+        Assert.False(new MeshAssetService().GetStatus(Spec("hunyuan3d-part")).Complete);
+        Assert.True(new MeshAssetService().GetStatus(Spec("hunyuan3d-part", custom)).Complete);
+        Assert.True(new MeshAssetService().GetStatus(Spec("hunyuan3d-part", folder)).Complete);
+        Assert.False(new MeshAssetService().GetStatus(Spec("hunyuan3d-part", Path.Combine(_root, "empty"))).Complete);
+    }
+
+    [Fact]
     public void AnEmptyRootReportsEveryCatalogFileMissingAndIncomplete()
     {
         MeshAssetStatus status = new MeshAssetService().GetStatus(Spec("hunyuan3d"));

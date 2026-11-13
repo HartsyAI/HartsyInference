@@ -439,12 +439,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             {
                 cancel.ThrowIfCancellationRequested();
                 XPartPipeline pipeline = GetOrLoadXPart(spec, id);
-                XPartOptions options = new()
-                {
-                    Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
-                    Steps = request.Steps == 0 ? 50 : request.Steps,
-                    GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
-                };
+                XPartOptions options = XPartOptionsFor(request, EngineKnobs.XPartFastDecode.Value);
                 XPartResult result = pipeline.Generate(input, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
@@ -456,6 +451,15 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             },
             cancel);
     }
+
+    /// <summary>The X-Part settings of a validated request: the seed (42 when unset), the flow steps (50) and the grid of each part (256), and whether the parts are decoded with FlashVDM (<c>numerics.xpartFastDecode</c>).</summary>
+    internal static XPartOptions XPartOptionsFor(MeshRequest request, bool fastDecode) => new()
+    {
+        Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
+        Steps = request.Steps == 0 ? 50 : request.Steps,
+        GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
+        FastDecode = fastDecode,
+    };
 
     /// <summary>Returns the cached X-Part pipeline for <paramref name="spec"/>: the folder holding the four checkpoints (each stage loads its file when it runs).</summary>
     private XPartPipeline GetOrLoadXPart(ModelSpec spec, string id)
@@ -489,19 +493,30 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     // The folder holding p3sam/, conditioner/, model/ and shapevae/: the path itself, or the folder above the file or subfolder a path points at.
     internal static string XPartFolder(string localPath)
     {
+        (string folder, bool complete) = XPartInstall(localPath);
+        if (complete)
+        {
+            return Path.GetFullPath(folder);
+        }
+        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(folder, file))));
+        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(folder, XPartPipeline.Files[0]));
+    }
+
+    /// <summary>The folder an X-Part path means: the first of the path itself (or the folder of the file it names) and the folder above it that holds all four checkpoints; else the one that holds the most of them (the path may point at a
+    /// file or a subfolder of an incomplete install). Shared by the loader and the asset status, so they cannot disagree about where the files are.</summary>
+    internal static (string Folder, bool Complete) XPartInstall(string localPath)
+    {
         string folder = File.Exists(localPath) ? Path.GetDirectoryName(Path.GetFullPath(localPath))! : localPath;
         string? parent = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        foreach (string? candidate in new[] { folder, parent })
+        string[] candidates = [.. new[] { folder, parent }.Where(c => c is not null).Select(c => c!)];
+        foreach (string candidate in candidates)
         {
-            if (candidate is not null && XPartPipeline.Files.All(file => File.Exists(Path.Combine(candidate, file))))
+            if (XPartPipeline.Files.All(file => File.Exists(Path.Combine(candidate, file))))
             {
-                return Path.GetFullPath(candidate);
+                return (candidate, true);
             }
         }
-        // Name what is missing from the candidate that holds the most of the files (the path may point at a file or a subfolder of the install).
-        string best = new[] { folder, parent }.Where(c => c is not null).Select(c => c!).MaxBy(c => XPartPipeline.Files.Count(file => File.Exists(Path.Combine(c, file))))!;
-        string missing = string.Join(", ", XPartPipeline.Files.Where(file => !File.Exists(Path.Combine(best, file))));
-        throw new FileNotFoundException($"'{localPath}' is missing X-Part checkpoints: {missing}.", Path.Combine(best, XPartPipeline.Files[0]));
+        return (candidates.MaxBy(c => XPartPipeline.Files.Count(file => File.Exists(Path.Combine(c, file))))!, false);
     }
 
     /// <summary>Returns the cached P3-SAM pipeline for <paramref name="spec"/>: <c>p3sam.safetensors</c>, given directly or found in the folder it was given as.</summary>

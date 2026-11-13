@@ -105,6 +105,9 @@ public sealed class MeshAssetService : IMeshAssetService
     /// <summary>The path the loader will read <paramref name="asset"/> from, or null: the catalog path, a legacy name, the model folder the caller named, or a folder the loader also searches.</summary>
     internal static string? Locate(ModelAsset asset, string id, CatalogEntry entry, string? localPath, string root)
     {
+        // For the two part models a path the caller names decides, found or not: their loaders read it and never the catalog folder.
+        if (localPath is not null && id is MeshModelIds.P3Sam or MeshModelIds.XPart)
+            return LoaderPath(asset, id, localPath);
         string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
         if (found is not null)
             return found;
@@ -120,6 +123,30 @@ public sealed class MeshAssetService : IMeshAssetService
                 return ckpt;
         }
         return Alternative(asset, id, root);
+    }
+
+    /// <summary>Where the P3-SAM and X-Part loaders read <paramref name="asset"/> from when the caller names a path: P3-SAM takes the checkpoint file or the folder holding it (itself or in <c>p3sam/</c>), X-Part the folder with
+    /// the four checkpoint subfolders or a file or subfolder inside it. The status then agrees with what a run would load, file by file.</summary>
+    private static string? LoaderPath(ModelAsset asset, string id, string? localPath)
+    {
+        if (localPath is null)
+            return null;
+        if (id == MeshModelIds.P3Sam)
+        {
+            try
+            {
+                return MeshService.PartCheckpoint(localPath);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+        }
+        if (id != MeshModelIds.XPart)
+            return null;
+        // The folder the loader would use, then each file in it: a file found in another folder is not one the loader reads.
+        string file = Path.Combine(MeshService.XPartInstall(localPath).Folder, asset.FileName);
+        return File.Exists(file) ? file : null;
     }
 
     /// <summary>Where a loader also looks for a shared file: the shape VAE folder beside the TRELLIS.2 flows, a DINOv3 folder at the root, the DINOv2 copy inside a Hunyuan3D shape checkpoint.</summary>
