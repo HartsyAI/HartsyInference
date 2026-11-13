@@ -142,9 +142,109 @@ public sealed class MeshPreparationTests
     public void WithoutTheMatteAnImageWithoutAlphaIsRefused()
         => Assert.Throws<NotSupportedException>(() => Run("hunyuan3d", Plain(), new BlockMatter(available: false)));
 
+    /// <summary>A matter that calls the middle half of any image foreground.</summary>
+    private sealed class CentreMatter(bool available = true) : IForegroundMatter
+    {
+        public bool IsAvailable => available;
+
+        public int Calls { get; private set; }
+
+        public float[] Alpha(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height)
+        {
+            Calls++;
+            float[] alpha = new float[width * height];
+            for (int y = height / 4; y < height * 3 / 4; y++)
+            {
+                for (int x = width / 4; x < width * 3 / 4; x++)
+                    alpha[y * width + x] = 1f;
+            }
+            return alpha;
+        }
+    }
+
+    private static ImageData Photo(int width, int height) => new()
+    {
+        Rgb = [.. Enumerable.Range(0, width * height * 3).Select(i => (byte)(i * 7 % 251))],
+        Width = width,
+        Height = height,
+    };
+
+    private static PreparedMeshImage RunOwnCrop(string id, ImageData image, IForegroundMatter matter)
+    {
+        using InferenceEngine engine = new("cpu");
+        return MeshPreparationService.Prepare(id, image, matter, engine.Backend, CancellationToken.None);
+    }
+
+    [Theory]
+    [InlineData("trellis2", 1.0)]
+    [InlineData("pixal3d", 1.1)]
+    public void TheOwnCropOfTheModelIsTheImageAndTheMatteTheCutout(string id, double cropScale)
+    {
+        ImageData photo = Photo(64, 64);
+        CentreMatter matter = new();
+
+        PreparedMeshImage result = RunOwnCrop(id, photo, matter);
+
+        using InferenceEngine engine = new("cpu");
+        Trellis2PreparedImage pipelineCrop = Trellis2ImagePreprocessor.Prepare(
+            engine.Backend, new() { Rgb = photo.Rgb, Width = 64, Height = 64 }, new CentreMatter(), cropScale);
+        Assert.Equal(pipelineCrop.Rgb, result.Image.Rgb);
+        Assert.Equal((pipelineCrop.Width, pipelineCrop.Height), (result.Image.Width, result.Image.Height));
+        Assert.False(result.Image.HasAlpha);
+        Assert.True(result.Matted);
+        Assert.Equal(1, matter.Calls);
+        Assert.Equal(photo.Rgb, result.Cutout!.Rgb);
+        Assert.Equal(255, result.Cutout.Alpha![32 * 64 + 32]);
+        Assert.Equal(0, result.Cutout.Alpha[0]);
+        Assert.Contains("BiRefNet matted it", result.Notes[0]);
+    }
+
+    [Fact]
+    public void Pixal3DWidensTheCropAndTrellis2DoesNot()
+    {
+        ImageData photo = Photo(64, 64);
+
+        PreparedMeshImage trellis = RunOwnCrop("trellis2", photo, new CentreMatter());
+        PreparedMeshImage pixal = RunOwnCrop("pixal3d", photo, new CentreMatter());
+
+        Assert.True(pixal.Image.Width > trellis.Image.Width);
+    }
+
+    [Fact]
+    public void AnImageWithAlphaIsCroppedWithItsOwnAlphaAndNotMatted()
+    {
+        ImageData photo = Photo(64, 64);
+        ImageData cutout = photo with { Alpha = [.. Enumerable.Range(0, 64 * 64).Select(i => i % 64 is >= 16 and < 48 && i / 64 is >= 16 and < 48 ? (byte)255 : (byte)0)] };
+        CentreMatter matter = new();
+
+        PreparedMeshImage result = RunOwnCrop("trellis2", cutout, matter);
+
+        Assert.Equal(0, matter.Calls);
+        Assert.False(result.Matted);
+        Assert.Equal(cutout.Alpha, result.Cutout!.Alpha);
+        Assert.DoesNotContain(result.Notes, n => n.Contains("BiRefNet"));
+    }
+
+    [Fact]
+    public void ALargeImageIsShrunkToThePipelinesLongEdgeAndTheCutoutSaysSo()
+    {
+        ImageData photo = Photo(2048, 1024);
+        CentreMatter matter = new();
+
+        PreparedMeshImage result = RunOwnCrop("trellis2", photo, matter);
+
+        Assert.Equal((1024, 512), (result.Cutout!.Width, result.Cutout.Height));
+        Assert.Equal(1024 * 512, result.Cutout.Alpha!.Length);
+        Assert.Contains(result.Notes, n => n.Contains("1024 x 512"));
+    }
+
     [Theory]
     [InlineData("trellis2")]
     [InlineData("pixal3d")]
+    public void WithoutTheMatteAndWithoutAlphaTheOwnCropIsRefused(string id)
+        => Assert.Throws<NotSupportedException>(() => RunOwnCrop(id, Photo(64, 64), new CentreMatter(available: false)));
+
+    [Theory]
     [InlineData("hairdeck")]
     [InlineData("sam3d-objects")]
     public void ModelsThatPrepareTheirOwnInputGetTheImageBackUnchanged(string id)
