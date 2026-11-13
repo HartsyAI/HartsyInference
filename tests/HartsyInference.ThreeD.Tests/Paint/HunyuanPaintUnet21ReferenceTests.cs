@@ -273,11 +273,7 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         using SafeTensorsLoader fixtureLoader = new();
         fixtureLoader.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_AUX")!);
         Dictionary<string, Tensor> fixture = fixtureLoader.GetAllTensors();
-        if (!fixture.ContainsKey("enc_mean"))
-        {
-            output.WriteLine("SKIPPED: the fixture has no enc_mean (made without --encode-image)");
-            return;
-        }
+        Assert.True(fixture.ContainsKey("enc_mean"), "the fixture has no enc_mean: regenerate it with dump_paint21_unet.py --aux-only --encode-image <png>");
 
         using PytorchPickleLoader pickle = new();
         pickle.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_VAE")!);
@@ -291,16 +287,23 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         using Tensor image = new(source.Shape, DType.F32);
         float* src = (float*)source.DataPointer, dst = (float*)image.DataPointer;
         for (long i = 0; i < count; i++)
-            dst[i] = (src[i] - 0.5f) * 2f; // the pipeline's encode_images: [0, 1] to [-1, 1]
+            dst[i] = (src[i] - 0.5f) * 2f; // upstream's encode_images maps [0, 1] to [-1, 1] the same way; this test does not run the pipeline's own picture-to-tensor conversion
         System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
         using Tensor encoded = encoder.Encode(backend, image);
         output.WriteLine($"vae encode: {watch.Elapsed.TotalSeconds:F1} s");
 
         float[] expectedMean = ToArray(fixture["enc_mean"]), std = ToArray(fixture["enc_std"]);
         Report("vae encode (posterior mean x 0.18215)", ToArray(encoded), expectedMean);
-        double noise = Math.Sqrt(std.Sum(v => (double)v * v) / std.Length), signal = Math.Sqrt(expectedMean.Sum(v => (double)v * v) / expectedMean.Length);
-        output.WriteLine($"upstream's sampling noise: RMS {noise:E2} against a latent RMS of {signal:E2} (ratio {noise / signal:E2})");
-        Assert.True(noise / signal < 0.01, "the noise upstream adds to the reference latents is no longer negligible against this repository's mean");
+        // Per image (the picture, then the position map), because a white-background map is nearly constant: RMS(std) / RMS(mean) of each half of the batch.
+        int half = std.Length / 2;
+        for (int image2 = 0; image2 < 2; image2++)
+        {
+            double noise = Math.Sqrt(std.Skip(image2 * half).Take(half).Sum(v => (double)v * v) / half);
+            double signal = Math.Sqrt(expectedMean.Skip(image2 * half).Take(half).Sum(v => (double)v * v) / half);
+            output.WriteLine($"upstream's sampling noise, {(image2 == 0 ? "picture" : "position map")}: RMS {noise:E2} against a latent RMS of {signal:E2} (ratio {noise / signal:E2})");
+            Assert.True(noise / signal < 0.01, $"the noise upstream adds to the {(image2 == 0 ? "picture" : "position map")} latents is not negligible against the mean this repository's encoder returns (a property of upstream's weights and the fixture)");
+        }
+
         AssertGpuBound();
     }
 }

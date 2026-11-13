@@ -257,7 +257,9 @@ def main():
         start = time.time()
         posterior = vae.encode((batch - 0.5) * 2.0).latent_dist
         scaling = vae.config.scaling_factor
-        print(f"vae encode: {time.time() - start:.1f} s; posterior std / |mean| (scaled) = {(posterior.std * scaling).abs().mean() / (posterior.mean * scaling).abs().mean():.4f}")
+        std_s, mean_s = posterior.std * scaling, posterior.mean * scaling
+        ratios = [float(std_s[i].pow(2).mean().sqrt() / mean_s[i].pow(2).mean().sqrt()) for i in range(2)]
+        print(f"vae encode: {time.time() - start:.1f} s; RMS(std) / RMS(mean) of the scaled posterior: picture {ratios[0]:.2e}, position map {ratios[1]:.2e}")
         out["enc_image"] = batch
         out["enc_mean"] = posterior.mean * scaling
         out["enc_std"] = posterior.std * scaling
