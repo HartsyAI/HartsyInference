@@ -2,6 +2,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Registry;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ThreeD.Models.TrellisV2;
 
 namespace HartsyInference.Engine.Services;
@@ -10,16 +11,6 @@ namespace HartsyInference.Engine.Services;
 public sealed class MeshAssetService : IMeshAssetService
 {
     private const string NoFilesMessage = "This model has no downloadable files in the catalog. Place its checkpoint folder on disk and pass it as the model path.";
-
-    /// <summary>Files no catalog entry can fetch, by model id: the file's catalog-relative path, its role and what the user does.</summary>
-    private static readonly Dictionary<string, (string Role, string RelativePath, string Instructions)[]> ManualFiles = new(StringComparer.OrdinalIgnoreCase)
-    {
-        [MeshModelIds.Pixal3D] =
-        [
-            ("NAF upsampler (manual)", "3D/pixal3d/naf_release.pth",
-                "Download the 'model' asset of the valeoai/NAF GitHub release (naf_release.pth, 2,664,431 bytes) and place it beside the model's other files: in 3D/pixal3d for the catalog install, or in the folder you pass as the model path."),
-        ],
-    };
 
     /// <inheritdoc/>
     public MeshAssetStatus GetStatus(ModelSpec spec) => GetInventory(spec).Status;
@@ -88,25 +79,6 @@ public sealed class MeshAssetService : IMeshAssetService
             catalog.Add(asset);
             paths.Add(path);
         }
-        if (ManualFiles.TryGetValue(id, out (string Role, string RelativePath, string Instructions)[]? manual))
-        {
-            foreach ((string role, string relative, string instructions) in manual)
-            {
-                string? path = FindManual(relative, spec.LocalPath, root);
-                assets.Add(new MeshAssetInfo
-                {
-                    Role = role,
-                    RelativePath = relative,
-                    Required = true,
-                    Present = path is not null,
-                    SizeBytes = path is null ? null : new FileInfo(path).Length,
-                    Blocker = path is null ? MeshAssetBlockerKind.ManualPlacement : null,
-                    Instructions = path is null ? instructions : null,
-                });
-                catalog.Add(null);
-                paths.Add(path);
-            }
-        }
         return new MeshInventory(new MeshAssetStatus { ModelId = id, Assets = assets }, catalog, paths);
     }
 
@@ -125,15 +97,19 @@ public sealed class MeshAssetService : IMeshAssetService
         // For the two part models a path the caller names decides, found or not: their loaders read it and never the catalog folder.
         if (localPath is not null && id is MeshModelIds.P3Sam or MeshModelIds.XPart or MeshModelIds.Omni)
             return LoaderPath(asset, id, localPath);
-        string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
+        string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true) ?? ModelDownloader.FindRepacked(asset);
         if (found is not null)
             return found;
         string? folder = ModelFolderOf(localPath);
-        if (entry.LoadsFromFolder && folder is not null && Directory.Exists(folder))
+        // A file fetched from a URL (NAF) may also sit beside the checkpoints of the folder the caller named.
+        if ((entry.LoadsFromFolder || asset.Url is not null) && folder is not null && Directory.Exists(folder))
         {
             string inFolder = Path.Combine(folder, asset.FileName);
             if (File.Exists(inFolder))
                 return inFolder;
+            string repackedInFolder = RepackedCheckpoint.SiblingOf(inFolder);
+            if (asset.Repack is not null && File.Exists(repackedInFolder))
+                return repackedInFolder;
             // SAM 3D accepts Meta's pickled .ckpt in place of the safetensors conversion.
             string ckpt = Path.Combine(folder, Path.ChangeExtension(asset.FileName, ".ckpt"));
             if (id == MeshModelIds.Sam3dObjects && File.Exists(ckpt))
@@ -164,7 +140,7 @@ public sealed class MeshAssetService : IMeshAssetService
         // The folder the loader would use, then each file in it: a file found in another folder is not one the loader reads.
         string folder = (id == MeshModelIds.XPart ? MeshService.XPartInstall(localPath) : MeshService.OmniInstall(localPath)).Folder;
         string file = Path.Combine(folder, asset.FileName);
-        return File.Exists(file) ? file : null;
+        return RepackedCheckpoint.Exists(file) ? RepackedCheckpoint.Resolve(file) : null;
     }
 
     /// <summary>Where a loader also looks for a shared file: the shape VAE folder beside the TRELLIS.2 flows, a DINOv3 folder at the root, the DINOv2 copy inside a Hunyuan3D shape checkpoint.</summary>
@@ -180,16 +156,6 @@ public sealed class MeshAssetService : IMeshAssetService
         if (id == "hunyuan3d-paint21" && asset.TargetName?.StartsWith("dino", StringComparison.OrdinalIgnoreCase) == true)
             return MeshService.FindPaintDino(Path.Combine(root, ModelFolders.MapSubdir(asset.TargetSubdir)));
         return null;
-    }
-
-    /// <summary>A file placed by hand is looked up where the loader reads it: beside the checkpoints of the model folder the caller named, else in the catalog folder.</summary>
-    private static string? FindManual(string relative, string? localPath, string root)
-    {
-        string name = Path.GetFileName(relative);
-        string? folder = ModelFolderOf(localPath);
-        if (folder is not null)
-            return FirstExisting(Path.Combine(folder, name));
-        return FirstExisting(Path.Combine(root, ModelFolders.MapSubdir(Path.GetDirectoryName(relative) ?? ""), name));
     }
 
     private static string? ModelFolderOf(string? localPath) => localPath is null ? null : File.Exists(localPath) ? Path.GetDirectoryName(localPath) : localPath;

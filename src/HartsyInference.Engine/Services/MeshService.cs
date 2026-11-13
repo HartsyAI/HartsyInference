@@ -923,7 +923,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         if (spec.LocalPath is null)
         {
             throw new FileNotFoundException(
-                "No checkpoint found for 'pixal3d'. Download the catalog assets (and place naf_release.pth beside them) or supply the model directory as the local path.");
+                "No checkpoint found for 'pixal3d'. Download the catalog assets (naf_release.pth included) or supply the model directory as the local path.");
         }
         lock (_gate)
         {

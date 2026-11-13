@@ -198,9 +198,9 @@ public sealed class MeshAssetTests : IDisposable
     }
 
     [Fact]
-    public void AGatedFileNeedsATokenAndPixal3DsNafFileNeedsManualPlacement()
+    public void AGatedFileNeedsATokenAndPixal3DsNafFileIsAFetchableCatalogFileWithNoBlocker()
     {
-        PlaceCatalog("pixal3d", a => a.Role.Contains("gated"));
+        PlaceCatalog("pixal3d", a => a.Role.Contains("gated") || a.Url is not null);
 
         MeshAssetInfo dino = new MeshAssetService().GetStatus(Spec("pixal3d")).Assets.Single(a => a.Gated);
         MeshAssetInfo naf = new MeshAssetService().GetStatus(Spec("pixal3d")).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
@@ -208,7 +208,8 @@ public sealed class MeshAssetTests : IDisposable
         Assert.False(dino.Present);
         Assert.Equal(MeshAssetBlockerKind.Gated, dino.Blocker);
         Assert.Contains("HF_TOKEN", dino.Instructions);
-        Assert.Equal(MeshAssetBlockerKind.ManualPlacement, naf.Blocker);
+        Assert.False(naf.Present);
+        Assert.Null(naf.Blocker);
         Assert.True(naf.Required);
 
         Environment.SetEnvironmentVariable("HF_TOKEN", "hf_test");
@@ -277,16 +278,54 @@ public sealed class MeshAssetTests : IDisposable
     [Fact]
     public async Task PrefetchFetchesNothingWhenEverythingFetchableIsPresentAndReturnsTheBlockersInstead()
     {
-        PlaceCatalog("pixal3d");
+        PlaceCatalog("pixal3d", a => a.Role.Contains("gated"));
         using InferenceEngine engine = new("cpu");
 
         ModelPrefetchResult result = await engine.ModelPrefetch.PrefetchAsync(Spec("pixal3d"));
 
         Assert.True(result.Supported);
         MeshAssetBlocker blocker = Assert.Single(result.Blockers);
-        Assert.Equal(MeshAssetBlockerKind.ManualPlacement, blocker.Kind);
-        Assert.Contains("NAF", blocker.Role);
+        Assert.Equal(MeshAssetBlockerKind.Gated, blocker.Kind);
         Assert.NotNull(result.PrimaryPath);
+    }
+
+    [Fact]
+    public async Task AReleaseAssetThatCannotBeFetchedIsAFetchFailedBlockerNamingItsUrlNotAGatedOne()
+    {
+        Environment.SetEnvironmentVariable("HF_TOKEN", "hf_test");
+        PlaceCatalog("pixal3d", a => a.Url is not null);
+
+        ModelPrefetchResult result = await ModelPrefetchService.PrefetchMeshAsync(Spec("pixal3d"), null,
+            (_, _) => throw new HttpRequestException("rate limited", null, System.Net.HttpStatusCode.Forbidden), CancellationToken.None);
+
+        MeshAssetBlocker blocker = Assert.Single(result.Blockers);
+        Assert.Equal(MeshAssetBlockerKind.FetchFailed, blocker.Kind);
+        Assert.Contains("https://github.com/valeoai/NAF/releases/download/model/naf_release.pth", blocker.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARepackBesideWhereThePickleGoesCountsAsThePresentFileAndIsTheOneTheStatusSizes()
+    {
+        PlaceCatalog(MeshModelIds.Omni, a => a.Repack is not null);
+        foreach (ModelAsset asset in ModelCatalog.Find(MeshModelIds.Omni)!.Assets.Where(a => a.Repack is not null))
+            Place(ModelDownloader.RepackedTargetPath(asset), 5);
+
+        MeshAssetStatus status = new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni));
+
+        Assert.True(status.Complete);
+        Assert.All(status.Assets.Where(a => a.RelativePath.EndsWith(".bin", StringComparison.Ordinal)), a => Assert.Equal(5, a.SizeBytes));
+        Assert.Empty(new MeshAssetService().MissingAssets(Spec(MeshModelIds.Omni)));
+    }
+
+    [Fact]
+    public void AFolderTheCallerNamesCountsARepackOfAnOmniFileToo()
+    {
+        string install = Path.Combine(_root, "elsewhere", "omni");
+        foreach (string file in Hunyuan3DOmniPipeline.Files.Where(f => f != Hunyuan3DOmniPipeline.DinoFile))
+            Place(file.EndsWith(".bin", StringComparison.Ordinal) ? Path.ChangeExtension(Path.Combine(install, file), ".safetensors") : Path.Combine(install, file));
+        Place(Path.Combine(install, "dinov2-large", "model.safetensors"));
+
+        Assert.True(new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni, install)).Complete);
     }
 
     /// <summary>pixal3d with everything placed except the gated encoder and the primary file, and a token set so both are fetchable.</summary>
@@ -352,11 +391,10 @@ public sealed class MeshAssetTests : IDisposable
     }
 
     [Fact]
-    public void TheManualFileIsLookedUpBesideTheModelFolderTheCallerNamed()
+    public void TheReleaseAssetIsLookedUpBesideTheModelFolderTheCallerNamed()
     {
         string custom = Path.Combine(_root, "elsewhere");
-        PlaceCatalog("pixal3d");
-        Place(Path.Combine(_root, "3D", "pixal3d", "naf_release.pth"));
+        PlaceCatalog("pixal3d", a => a.Url is not null);
 
         MeshAssetInfo naf = new MeshAssetService().GetStatus(Spec("pixal3d", custom)).Assets.Single(a => a.RelativePath.EndsWith("naf_release.pth"));
         Assert.False(naf.Present);

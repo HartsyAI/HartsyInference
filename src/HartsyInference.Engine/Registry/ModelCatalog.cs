@@ -155,9 +155,11 @@ public static class ModelCatalog
     private static ModelAsset[] Hunyuan3DPaint21Assets =>
     [
         new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
-            TargetName = "unet/diffusion_pytorch_model.bin", Role = "transformer", Sha256 = "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8" },
+            TargetName = "unet/diffusion_pytorch_model.bin", Role = "transformer", Sha256 = "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8",
+            Repack = new AssetRepack { MirrorPath = "hunyuan3d-paint21/unet/diffusion_pytorch_model.safetensors", Sha256 = "01736c5f5800528fd8487bcf01f541d29e86b6be04ff57800b7dd3f9206075a8" } },
         new() { Repo = "tencent/Hunyuan3D-2.1", RepoPath = "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-paint21",
-            TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc" },
+            TargetName = "vae/diffusion_pytorch_model.bin", Role = "vae", Sha256 = "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc",
+            Repack = new AssetRepack { MirrorPath = "hunyuan3d-paint21/vae/diffusion_pytorch_model.safetensors", Sha256 = "ed31a6bcc917e4da1b694281b7242f1246ffb5adba47eb81133d1bbae7a7ac3b" } },
         new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
             Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
         // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
@@ -168,11 +170,14 @@ public static class ModelCatalog
     private static ModelAsset[] Hunyuan3DOmniAssets =>
     [
         new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "model/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "model/pytorch_model.bin",
-            Role = "transformer", Sha256 = "01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24" },
+            Role = "transformer", Sha256 = "01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24",
+            Repack = new AssetRepack { MirrorPath = "hunyuan3d-omni/model/pytorch_model.safetensors", Sha256 = "1418d6af744d0f4a55a6b161c6f10f231dd9adf199c1267852b14ac09d720fcd" } },
         new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "vae/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "vae/pytorch_model.bin",
-            Role = "vae", Sha256 = "379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340" },
+            Role = "vae", Sha256 = "379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340",
+            Repack = new AssetRepack { MirrorPath = "hunyuan3d-omni/vae/pytorch_model.safetensors", Sha256 = "53c96d1691201da7d72823f3f4415500a6b7f32e7a5f48235d6192245145f5f6" } },
         new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "cond_encoder/pytorch_model.bin", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "cond_encoder/pytorch_model.bin",
-            Role = "control encoder", Sha256 = "f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432" },
+            Role = "control encoder", Sha256 = "f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432",
+            Repack = new AssetRepack { MirrorPath = "hunyuan3d-omni/cond_encoder/pytorch_model.safetensors", Sha256 = "a119c75aaca803e7567e8bcd06e32fe173ba5b582cd2c36ecddb001cae2bde03" } },
         new() { Repo = "facebook/dinov2-large", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "dinov2-large/model.safetensors",
             Role = "image encoder", Sha256 = "399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23" },
         new() { Repo = "tencent/Hunyuan3D-Omni", RepoPath = "config.json", TargetSubdir = "3D/hunyuan3d-omni", TargetName = "config.json",
@@ -354,11 +359,11 @@ public static class ModelCatalog
     /// for <c>--texture</c>), the DINOv3 encoder shared with TRELLIS.2 and an optional BiRefNet matting checkpoint. The hashes pin revision
     /// b0cb2e1b794cab9aa0ac38a95d794a4d9337437f (an asset carries no revision field, so a changed file fails the hash check); the safetensors hashes are the repository's LFS oids, the small files' hashes were computed from the downloaded
     /// bytes. NAF (<c>naf_release.pth</c>, valeoai/NAF release <c>model</c>, 2664431 bytes, sha256 c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f)
-    /// is a GitHub release asset the catalog cannot fetch: place it in <c>3D/pixal3d</c>. Multi-view and MoGe are not part of this entry.
+    /// is a GitHub release asset, fetched by its URL with the pinned hash (a repack on the weights mirror is tried first). Multi-view and MoGe are not part of this entry.
     /// Licences: Pixal3D code and weights MIT; DINOv3 under the DINOv3 License (Meta, custom, gated); BiRefNet-matting MIT; the NAF weights' licence is not stated.</summary>
     private static CatalogEntry Pixal3D() => new CatalogEntry
     {
-        Id = "pixal3d", Modality = Modality.Mesh, DisplayName = "Pixal3D (image to mesh, textured with --texture; naf_release.pth placed by hand)",
+        Id = "pixal3d", Modality = Modality.Mesh, DisplayName = "Pixal3D (image to mesh, textured with --texture)",
         Architecture = "TRELLIS.2 cascade with view-aligned projected DINOv3 features (NAF-upsampled), 1.3B projection-mode flows, shape VAE with dual-grid meshing",
         Status = ModelStatus.Structural, CliDrivable = true, HuggingFaceRepo = "TencentARC/Pixal3D",
         Assets = new ModelAsset[]
@@ -387,6 +392,9 @@ public static class ModelCatalog
                 Role = "texture flow 1024 config", Sha256 = "f18455729d08d2ce7ef809f947ffa47f6f468b3bcf8a86473e8c326e80128ac2" },
             new() { Repo = "TencentARC/Pixal3D", RepoPath = "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors", TargetSubdir = "3D/pixal3d",
                 Role = "texture decoder (optional, for --texture)", Sha256 = "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c" },
+            new() { Repo = "valeoai/NAF", RepoPath = "releases/download/model/naf_release.pth", TargetSubdir = "3D/pixal3d", Role = "NAF upsampler",
+                Url = "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth", Sha256 = "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f",
+                Repack = new AssetRepack { MirrorPath = "pixal3d/naf_release.safetensors", Sha256 = "383095c45e08e5d8025251254f068d6cd3215722f54df5389944afb0b2c1fba2" } },
             new() { Repo = "facebook/dinov3-vitl16-pretrain-lvd1689m", RepoPath = "model.safetensors", TargetSubdir = "Vision/Dinov3",
                 Role = "encoder (gated)", Sha256 = "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179" },
             new() { Repo = "ZhengPeng7/BiRefNet-matting", RepoPath = "model.safetensors", TargetSubdir = "Vision/BiRefNet-matting",

@@ -131,7 +131,8 @@ public sealed class ModelPrefetchService : IModelPrefetchService
     {
         bool refused = error.Message.Contains("HTTP 401", StringComparison.Ordinal) || error.Message.Contains("HTTP 403", StringComparison.Ordinal)
             || error is HttpRequestException { StatusCode: System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden };
-        if (refused)
+        // A file fetched from a URL (a release asset) is not behind a Hugging Face gate: a refusal there is a failed fetch.
+        if (refused && asset.Url is null)
         {
             return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.Gated, MeshAssetService.GatedInstructions(asset.Repo));
         }
@@ -143,7 +144,7 @@ public sealed class ModelPrefetchService : IModelPrefetchService
             OperationCanceledException => "the server did not answer in time",
             _ => "the server could not be reached or refused the request",
         };
-        return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Repo}/{asset.RepoPath} was not fetched: {reason}. Check the connection and the disk, then fetch again.");
+        return new MeshAssetBlocker(asset.Role, MeshAssetBlockerKind.FetchFailed, $"{asset.Url ?? $"{asset.Repo}/{asset.RepoPath}"} was not fetched: {reason}. Check the connection and the disk, then fetch again.");
     }
 
     private static async Task<ModelPrefetchResult> PrefetchTtsAsync(AudioModelSelector selector,
