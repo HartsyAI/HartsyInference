@@ -16,6 +16,7 @@ public sealed class ExpertParallelMoeTests
     private const string Prefix = "L0";
 
     [Theory]
+    [InlineData(1, 7)]
     [InlineData(2, 7)]
     [InlineData(4, 7)]
     [InlineData(4, 2)]

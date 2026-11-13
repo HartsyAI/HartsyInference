@@ -87,10 +87,13 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
         try
         {
             // a mismatch would make the model read the wrong embeddings, so refuse rather than guess
+            string tokenizerFile = useTiktoken ? KimiK31Tokenizer.TiktokenFile : "tokenizer.json";
             if (configBos is { } bos && tokenizer.BosId != bos)
-                throw new HartsyInferenceException($"tokenizer.json puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
+                throw new HartsyInferenceException(
+                    $"{tokenizerFile} puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
             if (configEos is { } eos && tokenizer.EosId != eos)
-                throw new HartsyInferenceException($"tokenizer.json puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
+                throw new HartsyInferenceException(
+                    $"{tokenizerFile} puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
             return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, rankBackends[0], maxSequenceTokens), tokenizer, template);
         }
         catch

@@ -133,6 +133,24 @@ public sealed class KimiK31TextPathTests : IDisposable
     }
 
     [Fact]
+    public void Tensor_parallel_degree_is_named_when_it_is_the_cause()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0", [], tensorParallelDegree: 2, shardRatios: null, PlacementConfig));
+        Assert.Contains("tensor-parallel degree is 2", refused.Message);
+        Assert.DoesNotContain("names more than one device", refused.Message);
+    }
+
+    [Theory]
+    [InlineData("cpu")]
+    [InlineData("cuda:0")]
+    [InlineData("vulkan:1")]
+    public void A_single_device_request_is_not_refused(string deviceKey)
+    {
+        KimiK31Refusals.RequireRunnablePlacement(deviceKey, [], tensorParallelDegree: 1, shardRatios: null, PlacementConfig);
+    }
+
+    [Fact]
     public void A_composite_naming_one_device_is_refused_by_name()
     {
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>

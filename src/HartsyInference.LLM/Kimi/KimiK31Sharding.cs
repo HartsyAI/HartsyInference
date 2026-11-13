@@ -9,7 +9,8 @@ namespace HartsyInference.LLM.Kimi;
 /// <summary>Rank-local shapes and slices of a Kimi K3.1 decoder. Attention heads (KDA and MLA), the dense and shared FFN intermediates
 /// and the vocabulary split across ranks; the routed experts split into contiguous ranges (expert parallelism). The DSA indexer, the latent
 /// projections, the router and the norms are replicated on every rank. The loader reads each rank's share from the checkpoint directly;
-/// <see cref="Slice"/> cuts the same shares out of a whole decoder held in memory.</summary>
+/// <see cref="Slice"/> cuts the same shares out of a whole decoder held in memory. With one rank the source tensors are used as they are and
+/// nothing is owned; with more, every slice and replica is a host F32 copy the caller owns.</summary>
 public static class KimiK31Sharding
 {
     /// <summary>Refuses a rank count the decoder's dimensions do not split across.</summary>
@@ -56,6 +57,7 @@ public static class KimiK31Sharding
     /// projection, its bias, the beta and output gate projections split by head; the output projection split along its input.</summary>
     internal static KdaWeights KdaShard(KdaWeights f, KimiK31Config c, int rank, int ranks, List<Tensor> owned)
     {
+        if (ranks == 1) return f;
         long key = c.KeyDim, perRank = c.KeyDim / ranks, offset = rank * perRank;
         Tensor qkv = Track(owned, Stack([
             RowRange(f.QkvProj, offset, perRank), RowRange(f.QkvProj, key + offset, perRank), RowRange(f.QkvProj, 2 * key + offset, perRank)]));
@@ -64,12 +66,12 @@ public static class KimiK31Sharding
         return new KdaWeights(
             QkvProj: qkv,
             ConvTaps: taps,
-            ForgetDown: Replica(f.ForgetDown, owned),
+            ForgetDown: Replica(f.ForgetDown, owned, ranks),
             ForgetUp: Track(owned, TensorParallelTransformer.SliceOutRows(f.ForgetUp, rank, ranks, "kda.forget_up")),
             ForgetBias: Track(owned, TensorParallelTransformer.SliceOutRows(f.ForgetBias, rank, ranks, "kda.forget_bias")),
             BetaProj: Track(owned, TensorParallelTransformer.SliceOutRows(f.BetaProj, rank, ranks, "kda.beta_proj")),
             OutGateProj: Track(owned, TensorParallelTransformer.SliceOutRows(f.OutGateProj, rank, ranks, "kda.g_proj")),
-            OutNorm: Replica(f.OutNorm, owned),
+            OutNorm: Replica(f.OutNorm, owned, ranks),
             OutProj: Track(owned, TensorParallelTransformer.SliceInCols(f.OutProj, rank, ranks, "kda.o_proj")));
     }
 
@@ -77,24 +79,25 @@ public static class KimiK31Sharding
     /// along its input; the latent down projections, norms and the DSA indexer replicated.</summary>
     internal static DsaAttentionWeights MlaShard(DsaAttentionWeights f, int rank, int ranks, List<Tensor> owned)
     {
+        if (ranks == 1) return f;
         DsaIndexerWeights ix = f.Indexer;
         return new DsaAttentionWeights
         {
-            QA = Replica(f.QA, owned),
-            KvA = Replica(f.KvA, owned),
-            QANorm = Replica(f.QANorm, owned),
-            KvANorm = Replica(f.KvANorm, owned),
+            QA = Replica(f.QA, owned, ranks),
+            KvA = Replica(f.KvA, owned, ranks),
+            QANorm = Replica(f.QANorm, owned, ranks),
+            KvANorm = Replica(f.KvANorm, owned, ranks),
             QB = Track(owned, TensorParallelTransformer.SliceOutRows(f.QB, rank, ranks, "mla.q_b_proj")),
             KvB = Track(owned, TensorParallelTransformer.SliceOutRows(f.KvB, rank, ranks, "mla.kv_b_proj")),
             WoB = Track(owned, TensorParallelTransformer.SliceInCols(f.WoB, rank, ranks, "mla.o_proj")),
             OGate = f.OGate is null ? null : Track(owned, TensorParallelTransformer.SliceOutRows(f.OGate, rank, ranks, "mla.g_proj")),
             Indexer = new DsaIndexerWeights
             {
-                WqB = Replica(ix.WqB, owned),
-                Wk = Replica(ix.Wk, owned),
-                KeyNormWeight = Replica(ix.KeyNormWeight, owned),
-                KeyNormBias = ix.KeyNormBias is null ? null : Replica(ix.KeyNormBias, owned),
-                WeightsProj = Replica(ix.WeightsProj, owned),
+                WqB = Replica(ix.WqB, owned, ranks),
+                Wk = Replica(ix.Wk, owned, ranks),
+                KeyNormWeight = Replica(ix.KeyNormWeight, owned, ranks),
+                KeyNormBias = ix.KeyNormBias is null ? null : Replica(ix.KeyNormBias, owned, ranks),
+                WeightsProj = Replica(ix.WeightsProj, owned, ranks),
             },
         };
     }
@@ -102,15 +105,21 @@ public static class KimiK31Sharding
     /// <summary>A gated FFN's gate, up and down projections split along the intermediate: gate and up by output rows, down by input columns.</summary>
     internal static (Tensor Gate, Tensor Up, Tensor Down) FfnShard(Tensor gate, Tensor up, Tensor down, int rank, int ranks, List<Tensor> owned, string name)
     {
+        if (ranks == 1) return (gate, up, down);
         return (
             Track(owned, TensorParallelTransformer.SliceOutRows(gate, rank, ranks, $"{name}.gate")),
             Track(owned, TensorParallelTransformer.SliceOutRows(up, rank, ranks, $"{name}.up")),
             Track(owned, TensorParallelTransformer.SliceInCols(down, rank, ranks, $"{name}.down")));
     }
 
-    /// <summary>A copy of a host F32 tensor, owned by the caller, so each rank holds its own replica.</summary>
-    internal static Tensor Replica(Tensor w, List<Tensor> owned)
+    /// <summary>Rank <paramref name="rank"/>'s rows of a vocabulary-major table: embedding or lm_head. One rank reads the table in place.</summary>
+    internal static Tensor VocabShard(Tensor table, int rank, int ranks, List<Tensor> owned, string name) =>
+        ranks == 1 ? table : Track(owned, TensorParallelTransformer.SliceOutRows(table, rank, ranks, name));
+
+    /// <summary>A copy of a host F32 tensor, owned by the caller, so each rank holds its own replica. One rank reads the source in place.</summary>
+    internal static Tensor Replica(Tensor w, List<Tensor> owned, int ranks)
     {
+        if (ranks == 1) return w;
         Tensor copy = new(w.Shape, DType.F32);
         w.AsReadOnlySpan<float>().CopyTo(copy.AsSpan<float>());
         return Track(owned, copy);
@@ -195,7 +204,7 @@ public static class KimiK31Sharding
         Dictionary<string, Tensor> block = new(StringComparer.Ordinal);
         foreach (string key in new[] { "gate.weight", "gate.e_score_correction_bias", "pre_expert_proj.weight", "pre_expert_norm.weight", "post_expert_proj.weight" })
         {
-            if (whole.TryGetValue($"{mlp}.{key}", out Tensor? replicated)) block[$"{mlp}.{key}"] = Replica(replicated, owned);
+            if (whole.TryGetValue($"{mlp}.{key}", out Tensor? replicated)) block[$"{mlp}.{key}"] = Replica(replicated, owned, ranks);
         }
         if (c.SharedExperts > 0)
         {
@@ -225,9 +234,6 @@ public static class KimiK31Sharding
         for (int e = first; e < first + perRank; e++) local.Add(all[e]);
         return local;
     }
-
-    private static Tensor VocabShard(Tensor table, int rank, int ranks, List<Tensor> owned, string name) =>
-        Track(owned, TensorParallelTransformer.SliceOutRows(table, rank, ranks, name));
 
     private static Tensor Track(List<Tensor> owned, Tensor t)
     {

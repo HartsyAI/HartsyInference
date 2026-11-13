@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Transformer;
 using Xunit;
@@ -77,6 +78,34 @@ public sealed class KimiK31ShardedForwardTests
         using KimiK31Model model = Sharded(weights, 2);
         using KimiK31State state = new(Config, capacity: 16);
         Assert.Throws<ArgumentException>(() => model.ForwardToken(1, state));
+    }
+
+    [Fact]
+    public void SingleRankShards_ReferenceTheSourceTensors_AndOwnNothing()
+    {
+        // One rank holds the whole model, so no slice or replica is copied; the loader's tensors are the only F32 copies.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        List<Tensor> owned = [];
+
+        Assert.Same(weights.Embedding, KimiK31Sharding.VocabShard(weights.Embedding, 0, 1, owned, "embed_tokens"));
+        Assert.Same(weights.FinalNorm, KimiK31Sharding.Replica(weights.FinalNorm, owned, 1));
+        Assert.Same(weights.Layers[0].Kda!.OutProj, KimiK31Sharding.KdaShard(weights.Layers[0].Kda!, Config, 0, 1, owned).OutProj);
+        Assert.Same(weights.Layers[1].Mla!.QB, KimiK31Sharding.MlaShard(weights.Layers[1].Mla!, 0, 1, owned).QB);
+        KimiK31LayerWeights dense = weights.Layers[0];
+        (Tensor gate, _, _) = KimiK31Sharding.FfnShard(dense.DenseGate!, dense.DenseUp!, dense.DenseDown!, 0, 1, owned, "dense");
+        Assert.Same(dense.DenseGate, gate);
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void SingleRankModel_DoesNotOwnTheWeightsItReadsInPlace()
+    {
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        KimiK31Model model = new(new CpuBackend(), Config, weights, maxPositions: 16);
+        model.Dispose();
+
+        // Disposing the model must not release the tensors the caller (the loader) still owns.
+        Assert.Equal(Config.Vocab * Config.Hidden, weights.LmHead.AsReadOnlySpan<float>().Length);
     }
 
     private static float[] RunSingle(KimiK31Weights weights)

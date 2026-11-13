@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Transformer.Dsa;
 using HartsyInference.LLM.Transformer.Kda;
 using Xunit;
@@ -55,6 +56,29 @@ public sealed class KimiK31ModelTests
         bool differs = false;
         for (int i = 0; i < a.Length; i++) differs |= MathF.Abs(a[i] - b[i]) > 1e-5f;
         Assert.True(differs, "the second token's logits did not depend on the second token");
+    }
+
+    [Fact]
+    public void SingleRankMoeLayer_WithRoutedAndSharedExperts_MatchesMoeFeedForward()
+    {
+        // Layer 1 is an MLA layer with a MoE block, past the dense first layer.
+        KimiK31Weights weights = RandomWeights(new Random(9));
+        KimiK31LayerWeights layer = weights.Layers[1];
+        Random rng = new(31);
+        float[] x = new float[Config.Hidden];
+        for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
+        using KimiK31Model model = new(new CpuBackend(), Config, weights, maxPositions: 16);
+
+        float[] actual = model.MoeFfn(1, x);
+
+        MoeFeedForward reference = new(KimiK31Model.MoeSettings(Config), Config.Hidden, lowVram: false);
+        reference.LoadWeights(layer.Moe!, layer.MoePrefix);
+        using Tensor input = new(new TensorShape(1, 1, Config.Hidden), DType.F32);
+        x.CopyTo(input.AsSpan<float>());
+        using Tensor expected = reference.Forward(new CpuBackend(), input, 1);
+        ReadOnlySpan<float> want = expected.AsReadOnlySpan<float>();
+        Assert.Equal(want.Length, actual.Length);
+        for (int i = 0; i < actual.Length; i++) Assert.Equal(want[i], actual[i], 1e-4f);
     }
 
     private static float[] Run(KimiK31Weights weights, int[] tokens)

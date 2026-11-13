@@ -493,7 +493,7 @@ public sealed class KimiK31Model : IDisposable
 
     // Routed experts run expert-parallel into the per-rank accumulators; each rank then adds its shared-expert partial, and one AllReduce
     // sums the lot.
-    private float[] MoeFfn(int layer, float[] x)
+    internal float[] MoeFfn(int layer, float[] x)
     {
         int d = _config.Hidden;
         Tensor[] inputs = new Tensor[_ranks];
