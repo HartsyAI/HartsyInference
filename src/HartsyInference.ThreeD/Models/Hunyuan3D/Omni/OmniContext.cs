@@ -13,6 +13,8 @@ internal static class OmniContext
         ArgumentNullException.ThrowIfNull(backend);
         if (image.Shape.Rank != 3 || controlTokens.Shape.Rank != 3 || image.Shape[0] != 1 || controlTokens.Shape[0] != 1 || image.Shape[2] != controlTokens.Shape[2])
             throw new ArgumentException($"The image tokens {image.Shape} and the control tokens {controlTokens.Shape} must be [1, tokens, width] with the same width.");
+        if (image.DType != DType.F32 || controlTokens.DType != DType.F32)
+            throw new ArgumentException($"The image tokens ({image.DType}) and the control tokens ({controlTokens.DType}) must be F32.");
         TensorShape shape = new(1, image.Shape[1] + controlTokens.Shape[1], image.Shape[2]);
         Tensor cond = new(shape, DType.F32);
         Tensor? uncond = null;

@@ -36,6 +36,8 @@ public sealed class PytorchPickleLoader : IDisposable
     public void Load(string filePath, bool recursiveFlatten = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (_lazyZip is not null)
+            throw new InvalidOperationException("This loader already holds a checkpoint.");
         FilePath = filePath;
 
         // Sniff the container: "PK\x03\x04" = modern torch.save ZIP; 0x80 = a raw pickle stream (legacy pre-2019
@@ -109,7 +111,7 @@ public sealed class PytorchPickleLoader : IDisposable
     /// <summary>Reads one tensor of a checkpoint opened with <see cref="OpenLazy"/> into new memory the caller owns, converted to <paramref name="convertTo"/> when given. At most the tensor and its converted copy are alive at once.
     /// <para>A ZIP entry cannot be seeked, so reading a tensor means reading the entry up to it. Some checkpoints keep every tensor as a view of one storage entry (Hunyuan3D-Omni's DiT: a single 12 GB entry): the loader keeps the
     /// entry open between calls and continues from where the last tensor ended, so reading the tensors in ascending (<see cref="PytorchTensorDescriptor.StorageKey"/>, <see cref="PytorchTensorDescriptor.StorageByteOffset"/>) order
-    /// is one pass over the file; a tensor behind the cursor restarts the entry from its beginning.</para></summary>
+    /// is one pass over the file; a tensor behind the cursor, or a second tensor at the same offset (an alias), restarts the entry from its beginning, which for a 12 GB entry costs a full read.</para></summary>
     public unsafe Tensor ReadTensor(string name, DType? convertTo = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);

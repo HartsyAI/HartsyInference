@@ -118,6 +118,8 @@ public sealed class OmniDitParityTests(ITestOutputHelper output)
         Tensor f32 = TensorCasts.EnsureF32(tensor);
         float[] values = new float[tensor.ElementCount];
         new ReadOnlySpan<float>((float*)f32.DataPointer, values.Length).CopyTo(values);
+        if (!ReferenceEquals(f32, tensor))
+            f32.Dispose();
         return values;
     }
 }

@@ -36,7 +36,7 @@ public sealed class Hunyuan3DOmniPipeline : ThreeDPipelineBase
     }
 
     /// <summary>Loads the pipeline from a <c>tencent/Hunyuan3D-Omni</c> folder. The DINOv2-large weights are not in that repository (upstream fetches <c>facebook/dinov2-large</c>), so they come from <paramref name="dinoWeights"/>:
-    /// a safetensors file with the HF layout or a Hunyuan3D-2.1 shape checkpoint (<c>conditioner.main_image_encoder.model.*</c>).</summary>
+    /// a safetensors file with the HF layout (<c>facebook/dinov2-large</c>) or a safetensors repack of the Hunyuan3D-2.1 shape checkpoint (<c>conditioner.main_image_encoder.model.*</c>; the released pickle is not read).</summary>
     /// <param name="log">Receives a line per loading stage.</param>
     public static Hunyuan3DOmniPipeline Load(IBackend backend, string folder, string dinoWeights, Action<string>? log = null)
     {

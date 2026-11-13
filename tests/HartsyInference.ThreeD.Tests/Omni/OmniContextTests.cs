@@ -42,5 +42,7 @@ public sealed class OmniContextTests
 
         Assert.Throws<ArgumentException>(() => OmniContext.Build(backend, image, wide));
         Assert.Throws<ArgumentException>(() => OmniContext.Build(backend, batched, image));
+        using Tensor half = new(image.Shape, DType.F16);
+        Assert.Throws<ArgumentException>(() => OmniContext.Build(backend, half, image));
     }
 }

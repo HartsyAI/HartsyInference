@@ -86,6 +86,7 @@ public sealed class PickleLazyReadTests : IDisposable
         lazy.OpenLazy(_path);
         Assert.Throws<KeyNotFoundException>(() => lazy.ReadTensor("missing"));
         Assert.Throws<InvalidOperationException>(() => lazy.OpenLazy(_path));
+        Assert.Throws<InvalidOperationException>(() => lazy.Load(_path));
 
         using PytorchPickleLoader whole = new();
         whole.Load(_path);

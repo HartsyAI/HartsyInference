@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Omni;
 /// Hunyuan3D-2.1 shape stack runs: the Omni DiT is <c>HunYuanDiTPlain</c> with the 2.1 key set and shapes, its VAE is the 2.1 decoder with its own values and scale factor.</summary>
 public static class OmniConfigFile
 {
-    /// <summary>The DINO and control tokens ahead of the DiT's cross-attention: 1 + 37 x 37 from DINOv2-large at 518 px.</summary>
+    /// <summary>The DINO tokens at the start of the DiT's cross-attention context: 1 + 37 x 37 from DINOv2-large at 518 px. The control tokens and the 10 signal tokens follow them.</summary>
     public const int ImageTokens = 1370;
 
     /// <summary>Reads the three config files under <paramref name="folder"/>.</summary>
