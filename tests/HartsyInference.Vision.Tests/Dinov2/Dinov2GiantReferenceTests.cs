@@ -8,7 +8,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Vision.Tests.Dinov2;
 
 /// <summary>Integration lane: the DINOv2-giant encoder against Hugging Face <c>transformers</c> on the CPU. Set <c>HARTSY_DINOV2_GIANT</c> (a Hunyuan3D shape checkpoint that bundles the
-/// F16 weights, <c>conditioner.main_image_encoder.model.*</c>) and <c>HARTSY_DINOV2_GIANT_REF</c> (the fixture of <c>tests/python-reference/dump_dinov2_giant.py</c>).</summary>
+/// F16 weights, <c>conditioner.main_image_encoder.model.*</c>) and <c>HARTSY_DINOV2_GIANT_REF</c> (the fixture of <c>tests/python-reference/dump_dinov2_giant.py</c>). The large variant (Hunyuan3D-2.1, Omni) reads <c>HARTSY_DINOV2_LARGE</c> (<c>facebook/dinov2-large/model.safetensors</c>) and <c>HARTSY_DINOV2_LARGE_REF</c> (the same script with <c>--variant large</c>).</summary>
 [Trait("Category", "Integration")]
 public sealed class Dinov2GiantReferenceTests(ITestOutputHelper output)
 {
@@ -56,5 +56,42 @@ public sealed class Dinov2GiantReferenceTests(ITestOutputHelper output)
         Compare("last_hidden_state", Values(normed), Values(fixture["last_hidden_state"]), 1e-4);
         using Tensor prenorm = encoder.Encode(backend, fixture["pixels"], applyFinalNorm: false);
         Compare("prenorm (hidden[-1])", Values(prenorm), Values(fixture["prenorm"]), 1e-4);
+    }
+
+    [RealWeightsFact("HARTSY_DINOV2_LARGE", "HARTSY_DINOV2_LARGE_REF")]
+    public void Large_MatchesTransformersOnTheCpu()
+    {
+        using SafeTensorsLoader loader = new(), refLoader = new();
+        loader.Load(Environment.GetEnvironmentVariable("HARTSY_DINOV2_LARGE")!);
+        refLoader.Load(Environment.GetEnvironmentVariable("HARTSY_DINOV2_LARGE_REF")!);
+        Dictionary<string, Tensor> fixture = refLoader.GetAllTensors();
+        Dinov2VisionEncoder encoder = new(Dinov2Preset.Large);
+        encoder.LoadWeights(loader.GetAllTensors());
+        using CpuBackend backend = new();
+        Stopwatch watch = Stopwatch.StartNew();
+        using Tensor normed = encoder.Encode(backend, fixture["pixels"]);
+        output.WriteLine($"forward with the final norm: {watch.Elapsed.TotalSeconds:F1} s, {normed.Shape}");
+        Assert.Equal(new TensorShape(1, 1370, 1024), normed.Shape);
+        Compare("last_hidden_state", Values(normed), Values(fixture["last_hidden_state"]), 1e-4);
+        using Tensor prenorm = encoder.Encode(backend, fixture["pixels"], applyFinalNorm: false);
+        Compare("prenorm (hidden[-1])", Values(prenorm), Values(fixture["prenorm"]), 1e-4);
+    }
+
+    [RealWeightsFact("HARTSY_DINOV2_LARGE_REF")]
+    public void Preprocessing_MatchesTorchvisionResizeCropAndNormalizeOfA512Image()
+    {
+        using SafeTensorsLoader refLoader = new();
+        refLoader.Load(Environment.GetEnvironmentVariable("HARTSY_DINOV2_LARGE_REF")!);
+        Dictionary<string, Tensor> fixture = refLoader.GetAllTensors();
+        Tensor image = fixture["image_u8"];
+        byte[] rgb = new byte[image.ElementCount];
+        unsafe
+        {
+            new ReadOnlySpan<byte>((byte*)image.DataPointer, rgb.Length).CopyTo(rgb);
+        }
+
+        using Tensor ours = new Dinov2ImagePreprocessor(518).Preprocess(rgb, 512, 512);
+
+        Compare("preprocessed pixels", Values(ours), Values(fixture["pixels_preprocessed"]), 1e-3);
     }
 }
