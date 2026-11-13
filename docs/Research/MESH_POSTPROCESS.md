@@ -95,13 +95,13 @@ The numbers below come from a throwaway probe outside the repository over saved 
 second principal spread is under 0.35 voxel or 12% of the first, a patch when the third is under 0.5 voxel or 10% of the second, else a 3D opening. "By index" is the mesh as a
 GLB stores it; "welded" merges vertices at the same position, so the copies made by the non-manifold repair read as one vertex again.
 
-| Raw mesher output | Vertices / triangles | Boundary edges | Non-manifold edges | Sliver | Slit | Patch | 3D opening |
+| Raw mesher output | Vertices / triangles | Boundary edges | Non-manifold edges | Sliver (edges) | Slit (edges) | Patch (edges) | 3D opening (edges) |
 |---|---|---|---|---|---|---|---|
-| Bust 512 | 736,637 / 1,487,440 | 18,889 (7,564 walks) | 30,844 | 18,693 | 48 | 134 | 14 |
-| Mug 512 | 1,282,266 / 2,528,776 | 41,231 (5,094 walks) | 7,249 | 8,412 | 24,687 | 7,814 | 318 |
-| Mug 1024 | 5,596,157 / 11,070,214 | 160,408 (21,798 walks) | 43,097 | 24,452 | 100,132 | 32,717 | 3,107 |
+| Bust 512 | 736,637 / 1,487,440 | 18,889 (5,664 walks: 1,700 closed, 3,964 open) | 30,844 | 18,607 | 44 | 224 | 14 |
+| Mug 512 | 1,282,266 / 2,528,776 | 41,231 (1,119 walks: 630 closed, 489 open) | 7,249 | 4,299 | 27,748 | 8,756 | 428 |
+| Mug 1024 | 5,596,157 / 11,070,214 | 160,408 (1,294 walks: 346 closed, 948 open) | 43,097 | 4,011 | 105,308 | 44,244 | 6,845 |
 
-| After `Clean` defaults (by index) | Boundary edges | Loops | Sliver | Slit | Patch | 3D opening | Welded boundary / non-manifold | Time |
+| After `Clean` defaults (by index) | Boundary edges | Loops | Sliver (edges) | Slit (edges) | Patch (edges) | 3D opening (edges) | Welded boundary / non-manifold | Time |
 |---|---|---|---|---|---|---|---|---|
 | Bust 512 | 30,198 | 2,521, all closed | 16,274 | 264 | 7,424 | 6,236 | 9,611 / 19,708 | 1.4 s |
 | Mug 512 | 46,678 | 545, all closed | 1,842 | 34,686 | 9,442 | 708 | 38,243 / 7,146 | 2.5 s |
@@ -111,11 +111,11 @@ GLB stores it; "welded" merges vertices at the same position, so the copies made
   or dropped: the bust has 743,727 flagged grid edges and 7 of their quads are dropped for a missing corner voxel (14 of 18,889 boundary edges touch one); the mug at
   512 has 1,268,526 and 4,138 (5,820 of 41,231 boundary edges, 14.1%). No non-manifold edge touches a dropped quad. The rest are voxel faces with an odd number of flagged
   edges (a boundary edge) or three or four (a non-manifold one): the network predicts each edge's flag on its own, so the flags are not the crossings of one sign field.
-  Nothing is cut by a narrow band (the mesher has none); at 512 no loop lies on the faces of the grid cube, at 1024 the mug has 193 walks (1,431 edges) that do, where it touches the grid limit.
-- **Raw bust boundaries are all tiny**: no walk is longer than 64 edges, and 7,546 of 7,564 walks span at most 3 voxels. They read as open chains because
-  the non-manifold edges stop the walks. Pinch vertices, where walks meet: 2,491 on the bust, 21,495 on the 1024 mug.
-- **The mug's openings are slits and strips**: the body is a stack of flat terraces and the gaps run along the steps. The longest walk at 1024 has 5,102 edges and
-  spreads 242 voxels along one axis and 125 along the other, while 100,132 of its raw boundary edges are on slits only a few voxels wide; a perimeter limit cannot tell
+  Nothing is cut by a narrow band (the mesher has none); at 512 no loop lies on the faces of the grid cube, at 1024 the mug has 3 walks (1,351 edges) that do, where it touches the grid limit.
+- **Raw bust boundaries are all tiny**: no walk is longer than 64 edges, and 5,639 of 5,664 walks span at most 3 voxels. They read as open chains because
+  the non-manifold edges stop the walks. Pinch vertices, where walks meet: 616 on the bust, 101 on the 512 mug and 1,004 on the 1024 mug.
+- **The mug's openings are slits and strips**: the body is a stack of flat terraces and the gaps run along the steps. The longest walk at 1024 has 6,816 edges and
+  spreads 243 voxels along one axis and 144 along the other, while 105,308 of its raw boundary edges are on slits only a few voxels wide; a perimeter limit cannot tell
   a long thin slit from a real opening.
 - **The default repair makes the by-index count worse**: the non-manifold repair cuts every surplus face loose along its edge, so the bust goes from 18,889 to 30,198
   boundary edges and the 1024 mug from 160,408 to 204,558. What it removes (non-manifold edges to 0) it turns into boundary. Of the 30,198, about 10,000 sit on 61 loops
