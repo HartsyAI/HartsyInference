@@ -4,14 +4,15 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 /// each loop is the boundary of one fan of faces, so loops that only share a vertex stay separate instead of merging into one figure-eight.</summary>
 public static class MeshBoundary
 {
-    /// <summary>Returns every boundary loop of <paramref name="mesh"/> by vertex index, in the order of their first edge. A walk that meets an edge
-    /// with more than two faces ends there as an open chain. Faces must not repeat a vertex.</summary>
+    /// <summary>Returns every boundary loop of <paramref name="mesh"/> by vertex index, in the order of the lowest half-edge slot of each. A chain that meets an edge
+    /// with more than two faces ends there and comes out whole, from its head to its end, whichever face order the mesh has. Faces that repeat a vertex are ignored.</summary>
     public static IReadOnlyList<BoundaryLoop> Trace(Mesh mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         int vertexCount = mesh.VertexCount;
         int[] indices = mesh.Indices;
-        EdgeTable table = EdgeTable.Build(indices, vertexCount);
+        bool[]? alive = LiveFaces(indices);
+        EdgeTable table = EdgeTable.Build(indices, vertexCount, alive);
         List<int> starts = [];
         for (int s = 0; s < table.Count;)
         {
@@ -22,18 +23,16 @@ public static class MeshBoundary
         if (starts.Count == 0) return [];
         starts.Sort();
 
-        (int[] first, int[] faces) = VertexFaces(indices, vertexCount);
+        (int[] first, int[] faces) = VertexFaces(indices, vertexCount, alive);
         bool[] visited = new bool[indices.Length];
         List<BoundaryLoop> loops = [];
         List<int> vertices = [];
-        foreach (int start in starts)
+        foreach (int origin in starts)
         {
-            if (visited[start]) continue;
+            if (visited[origin]) continue;
+            (int start, int u, int v, int face) = Head(indices, first, faces, origin, starts.Count);
             visited[start] = true;
             vertices.Clear();
-            int u = indices[start];
-            int v = indices[NextCorner(start)];
-            int face = start / 3;
             vertices.Add(u);
             bool closed;
             while (true)
@@ -64,6 +63,23 @@ public static class MeshBoundary
             loops.Add(new BoundaryLoop([.. vertices], closed, Length(mesh.Vertices, vertices, closed)));
         }
         return loops;
+    }
+
+    // Walks backwards from the edge in slot `origin` to the first edge of its chain; a closed loop gives `origin` itself.
+    private static (int Slot, int From, int To, int Face) Head(int[] indices, int[] first, int[] faces, int origin, int limit)
+    {
+        int slot = origin, from = indices[origin], to = indices[NextCorner(origin)], face = origin / 3;
+        for (int step = 0; step <= limit; step++)
+        {
+            if (!TryNextEdge(indices, first, faces, face, to, from, out int previousFace, out int previousFrom, out int previousSlot)
+                || previousSlot == origin)
+                break;
+            to = from;
+            from = previousFrom;
+            face = previousFace;
+            slot = previousSlot;
+        }
+        return slot == origin ? (origin, indices[origin], indices[NextCorner(origin)], origin / 3) : (slot, from, to, face);
     }
 
     // From the boundary edge (u, v) of `face`, turns around v through the faces of its fan until the next boundary edge.
@@ -97,15 +113,31 @@ public static class MeshBoundary
         return false;
     }
 
-    private static (int[] First, int[] Faces) VertexFaces(int[] indices, int vertexCount)
+    // Null when every face has three distinct vertices.
+    private static bool[]? LiveFaces(int[] indices)
+    {
+        bool[]? alive = null;
+        for (int f = 0; f < indices.Length / 3; f++)
+        {
+            int a = indices[f * 3], b = indices[f * 3 + 1], c = indices[f * 3 + 2];
+            if (a != b && b != c && a != c) continue;
+            alive ??= Enumerable.Repeat(true, indices.Length / 3).ToArray();
+            alive[f] = false;
+        }
+        return alive;
+    }
+
+    private static (int[] First, int[] Faces) VertexFaces(int[] indices, int vertexCount, bool[]? alive)
     {
         int[] first = new int[vertexCount + 1];
-        foreach (int i in indices) first[i + 1]++;
+        for (int c = 0; c < indices.Length; c++)
+            if (alive is null || alive[c / 3]) first[indices[c] + 1]++;
         for (int i = 0; i < vertexCount; i++) first[i + 1] += first[i];
-        int[] faces = new int[indices.Length];
+        int[] faces = new int[first[vertexCount]];
         int[] fill = new int[vertexCount];
         for (int c = 0; c < indices.Length; c++)
         {
+            if (alive is not null && !alive[c / 3]) continue;
             int v = indices[c];
             faces[first[v] + fill[v]++] = c / 3;
         }

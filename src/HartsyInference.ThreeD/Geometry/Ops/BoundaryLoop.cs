@@ -15,7 +15,7 @@ public sealed class BoundaryLoop
     /// <summary>Start vertex of each edge in walking order; a closed loop's last edge returns to the first vertex, an open chain's last vertex is its end.</summary>
     public int[] Vertices { get; }
 
-    /// <summary>The walk came back to its first edge; false when it ended at a non-manifold edge.</summary>
+    /// <summary>The walk came back to its first edge; false when it ended at a non-manifold edge (or, on a mesh whose faces disagree so far that no fan can be walked, at an edge it had already used).</summary>
     public bool Closed { get; }
 
     /// <summary>Sum of the edge lengths in mesh units.</summary>
