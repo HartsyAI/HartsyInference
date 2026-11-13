@@ -1661,11 +1661,14 @@ public static class GenerationDispatch
             string format = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
             return new MeshControl { Kind = kind, Geometry = new SceneMeshData { Data = File.ReadAllBytes(path), Format = format } };
         }
+        if (kind == MeshControlKind.BoundingBox && file is not null)
+            throw new ArgumentException("A bbox control takes --control-values (length,height,width), not a file.");
         if (file is not null && values is not null)
             throw new ArgumentException($"A {kindText} control takes --control-file or --control-values, not both.");
-        string text = values ?? (file is not null ? File.ReadAllText(file.Trim().Trim('"')) : throw new ArgumentException($"A {kindText} control takes --control-values" + (kind == MeshControlKind.Pose ? " or --control-file." : ".")));
-        if (kind == MeshControlKind.BoundingBox && file is not null)
-            throw new ArgumentException("A bbox control takes --control-values (length,height,width).");
+        string? posePath = file?.Trim().Trim('"');
+        if (posePath is not null && !File.Exists(posePath))
+            throw new FileNotFoundException($"Control file not found: {posePath}");
+        string text = values ?? (posePath is not null ? File.ReadAllText(posePath) : throw new ArgumentException($"A {kindText} control takes --control-values" + (kind == MeshControlKind.Pose ? " or --control-file." : ".")));
         float[] numbers = [.. text.Split([',', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Select(n =>
             float.TryParse(n, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : throw new ArgumentException($"'{n}' is not a number in the control."))];
         return new MeshControl { Kind = kind, Values = numbers };

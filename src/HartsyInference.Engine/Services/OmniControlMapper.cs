@@ -40,7 +40,14 @@ internal static class OmniControlMapper
             case MeshControlKind.Point:
             {
                 SceneMeshData geometry = control.Geometry!;
-                return new OmniControl(OmniControlKind.Point, OmniControlInputs.Point(PointVertices(geometry)));
+                try
+                {
+                    return new OmniControl(OmniControlKind.Point, OmniControlInputs.Point(PointVertices(geometry), seed));
+                }
+                catch (Exception error) when (error is HartsyInference.Core.Exceptions.HartsyInferenceException or ArgumentException or InvalidDataException)
+                {
+                    throw new NotSupportedException($"A Point control needs vertices it can read: {error.Message}", error).ForField(nameof(MeshRequest.Control));
+                }
             }
             case MeshControlKind.Voxel:
             {

@@ -27,6 +27,30 @@ public sealed class OmniControlInputsTests
     }
 
     [Fact]
+    public void Point_MergesIdenticalPointsAndSubsamplesADenseCloudDeterministicallyInItsOriginalOrder()
+    {
+        float[] withDuplicates = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0];
+        Assert.Equal(3 * 6, OmniControlInputs.Point(withDuplicates).Length);
+
+        int count = OmniControlInputs.MaxPoints + 500;
+        float[] dense = new float[count * 3];
+        for (int i = 0; i < count; i++)
+        {
+            dense[i * 3] = i;
+            dense[i * 3 + 1] = i % 7;
+            dense[i * 3 + 2] = i % 13;
+        }
+
+        float[] rows = OmniControlInputs.Point(dense, seed: 5);
+
+        Assert.Equal(OmniControlInputs.MaxPoints * 6, rows.Length);
+        Assert.Equal(rows, OmniControlInputs.Point(dense, seed: 5));
+        Assert.NotEqual(rows, OmniControlInputs.Point(dense, seed: 6));
+        float[] x = [.. Enumerable.Range(0, OmniControlInputs.MaxPoints).Select(r => rows[r * 6])];
+        Assert.Equal(x.Order(), x); // the kept points stay in their original order
+    }
+
+    [Fact]
     public void Voxel_TurnsTheMeshUprightThenQuantisesTheSurfaceSamplesToSixteenCubed()
     {
         float[] rows = OmniControlInputs.Voxel(Box, BoxFaces, seed: 1);

@@ -192,7 +192,7 @@ internal static class MeshModelProfiles
         : Rejected(nameof(MeshRequest.Mesh));
 
     private static MeshFieldSpec ControlField(string id) => id == MeshModelIds.Omni
-        ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per point), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
+        ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per distinct point, at most 8,192: a denser cloud is subsampled with the seed), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
         : Rejected(nameof(MeshRequest.Control));
 
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)

@@ -136,6 +136,36 @@ public sealed class MeshOmniTests
     }
 
     [Fact]
+    public void AMalformedPointFileIsReportedAsAnUnusableControlNamingTheField()
+    {
+        MeshControl Point(string format, byte[] data) => new() { Kind = MeshControlKind.Point, Geometry = new SceneMeshData { Data = data, Format = format } };
+
+        foreach (MeshControl control in new[]
+        {
+            Point("ply", Encoding.ASCII.GetBytes("not a ply")),
+            Point("obj", Encoding.ASCII.GetBytes("v 1 2 x\n")),
+            Point("obj", Encoding.ASCII.GetBytes("v 1 1 1\n")),
+            Point("glb", [1, 2, 3, 4]),
+        })
+        {
+            NotSupportedException error = Assert.Throws<NotSupportedException>(() => OmniControlMapper.ToControl(control, 1));
+            Assert.Equal(nameof(MeshRequest.Control), MeshFieldTag.FieldOf(error));
+        }
+    }
+
+    [Fact]
+    public void APointControlRoundTripsThroughObjAndPlyWithTheSameRows()
+    {
+        string obj = "v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n";
+        string ply = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n2 0 0\n0 1 0\n";
+
+        float[] fromObj = OmniControlMapper.ToControl(new MeshControl { Kind = MeshControlKind.Point, Geometry = Obj(obj) }, 1).Rows;
+        float[] fromPly = OmniControlMapper.ToControl(new MeshControl { Kind = MeshControlKind.Point, Geometry = new SceneMeshData { Data = Encoding.ASCII.GetBytes(ply), Format = "ply" } }, 1).Rows;
+
+        Assert.Equal(fromObj, fromPly);
+    }
+
+    [Fact]
     public void TheProfileDescribesTheControlAsRequiredAndOnlyOmniAcceptsIt()
     {
         Assert.Equal(MeshFieldAccess.Used, MeshModelProfiles.Find(MeshModelIds.Omni)!.Fields.Single(f => f.Name == nameof(MeshRequest.Control)).Access);

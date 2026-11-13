@@ -15,11 +15,40 @@ public static class OmniControlInputs
     /// <summary>Surface samples a voxel control is built from (<c>mesh.sample(81920)</c>).</summary>
     public const int VoxelSamples = 81920;
 
-    /// <summary>The point control: <paramref name="vertices"/> (<c>3 * n</c> values, a mesh's or a point cloud's) centred on their bounding box and scaled so the longest side is <c>1.96</c>; one row, hence one token, per point.</summary>
-    public static float[] Point(ReadOnlySpan<float> vertices)
+    /// <summary>Most points a point control keeps: each one is a token in every cross-attention of the DiT (upstream's demos use 2,048), so a denser cloud is subsampled.</summary>
+    public const int MaxPoints = 8192;
+
+    /// <summary>The point control: <paramref name="vertices"/> (<c>3 * n</c> values, a mesh's or a point cloud's) centred on their bounding box and scaled so the longest side is <c>1.96</c>, with identical points merged (trimesh
+    /// merges the duplicate vertices of a loaded mesh) and, above <see cref="MaxPoints"/>, a subset of that many points picked with <paramref name="seed"/>, in their original order; one row, hence one token, per point.</summary>
+    public static float[] Point(ReadOnlySpan<float> vertices, int seed = 0)
     {
         Require(vertices);
-        return OmniControlEncoder.PointRows(Normalise(vertices, PointScale));
+        float[] normalised = Normalise(vertices, PointScale);
+        HashSet<(float, float, float)> seen = [];
+        List<int> kept = [];
+        for (int i = 0; i < normalised.Length; i += 3)
+        {
+            if (seen.Add((normalised[i], normalised[i + 1], normalised[i + 2])))
+                kept.Add(i);
+        }
+
+        if (kept.Count > MaxPoints)
+        {
+            Random random = new(seed);
+            int[] order = [.. Enumerable.Range(0, kept.Count)];
+            for (int i = 0; i < MaxPoints; i++)
+            {
+                int j = i + random.Next(order.Length - i);
+                (order[i], order[j]) = (order[j], order[i]);
+            }
+
+            kept = [.. order.Take(MaxPoints).Order().Select(k => kept[k])];
+        }
+
+        float[] points = new float[kept.Count * 3];
+        for (int k = 0; k < kept.Count; k++)
+            Array.Copy(normalised, kept[k], points, k * 3, 3);
+        return OmniControlEncoder.PointRows(points);
     }
 
     /// <summary>The voxel control: the mesh is turned by -90 degrees about x (<c>(x, y, z)</c> becomes <c>(x, z, -y)</c>, upstream's rotation for its voxel files), centred and scaled to <c>2 * 0.9999</c> on the longest side,
