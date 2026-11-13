@@ -4,10 +4,10 @@ Reproduces, for each control kind, what `inference.py` of a checkout of Tencent-
 file before the pipeline hands it to the encoder, with the script's own `normalize_mesh` (copied from the source text) and trimesh:
 
 * point: `trimesh.load(<ply>)`, `normalize_mesh(mesh, scale=0.98)`, `mesh.vertices`;
-* voxel: `trimesh.load(<mesh>)`, a rotation of -90 degrees about x, `normalize_mesh(mesh)` (scale 0.9999), `mesh.sample(81920)` (numpy's global RNG, seeded 0 here), then the
-  occupied voxel centres of the encoder's `generate_voxel` at resolution 16;
+* voxel: `trimesh.load(<mesh>)`, a rotation of -90 degrees about x, `normalize_mesh(mesh)` (scale 0.9999), `mesh.sample(81920)` (trimesh's `sample_surface` with seed 0 here), then the
+  occupied voxel centres of the encoder's `generate_voxel` at resolution 16 (the transcription of `dump_omni_control.py`, which is the one copy of it);
 * pose: `np.loadtxt(<bone .txt>)`, one bone per row of six values;
-* bbox: the three numbers of `demos/bbox/data.json`.
+* bbox: the first three numbers of `demos/bbox/data.json`.
 
 The encoder then repeats three values to six (`rows.repeat(1, 1, 2)`), which `dump_omni_control.py` covers, so this fixture stops at the values the encoder receives.
 
@@ -17,10 +17,15 @@ Fixture keys: `point.raw` (the file's vertices), `point.normalised` (what upstre
 (the occupied voxel centres upstream's sample gives, sorted by linear index); `pose.raw` (the bone file); `bbox.values`.
 """
 import argparse
+import importlib.util
+import json
 import os
 
 import numpy as np
+import torch
 import trimesh
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def normalize_mesh(mesh, scale=0.9999):
@@ -34,16 +39,11 @@ def normalize_mesh(mesh, scale=0.9999):
 
 
 def voxel_centres(points, resolution=16):
-    """OmniEncoder.generate_voxel: the occupied cells' centres in ascending linear-index order."""
-    norm = (points + 1) / 2
-    cells = np.clip(np.floor(norm * resolution).astype(np.int64), 0, resolution - 1)
-    linear = cells[:, 0] + cells[:, 1] * resolution + cells[:, 2] * resolution * resolution
-    unique = np.unique(linear)
-    z = unique // (resolution * resolution)
-    y = (unique % (resolution * resolution)) // resolution
-    x = unique % resolution
-    size = 2.0 / resolution
-    return (np.stack([x, y, z], axis=1) * size + size / 2 - 1).astype(np.float32)
+    """The occupied cells' centres in ascending linear-index order, by `generate_voxel` of dump_omni_control.py (a transcription of OmniEncoder.generate_voxel)."""
+    spec = importlib.util.spec_from_file_location("dump_omni_control", os.path.join(HERE, "dump_omni_control.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.generate_voxel(torch.from_numpy(points).unsqueeze(0), resolution)[0].numpy().astype(np.float32)
 
 
 def main():
@@ -63,12 +63,11 @@ def main():
     out["voxel.faces"] = np.asarray(mesh.faces, dtype=np.int32)
     mesh.apply_transform(trimesh.transformations.rotation_matrix(angle=np.radians(-90), direction=[1, 0, 0]))
     mesh = normalize_mesh(mesh)
-    np.random.seed(0)
-    surface = mesh.sample(81920)
+    surface, _ = trimesh.sample.sample_surface(mesh, 81920, seed=0)
     out["voxel.centres"] = voxel_centres(surface.astype(np.float32))
 
     out["pose.raw"] = np.loadtxt(os.path.join(demos, "pose", "a_pose_bone.txt")).astype(np.float32)
-    out["bbox.values"] = np.array([0.8, 0.64, 1.0], dtype=np.float32)
+    out["bbox.values"] = np.array(json.load(open(os.path.join(demos, "bbox", "data.json")))["bbox"][0], dtype=np.float32)
     np.savez(args.out, **out)
     print("wrote", args.out, {k: v.shape for k, v in out.items()})
 
