@@ -3,19 +3,6 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.PyTorch;
 
-/// <summary>What <see cref="StreamingPickleRepack.Repack"/> wrote.</summary>
-/// <param name="TensorCount">Tensors written.</param>
-/// <param name="TensorBytes">Bytes of tensor data written.</param>
-/// <param name="Streamed">False when the checkpoint was a legacy (non-ZIP) pickle that had to be read whole.</param>
-/// <param name="StorageRestarts">Times a tensor-by-tensor read had to reopen a storage entry from its start, which for one huge entry is a full pass each.</param>
-public readonly record struct PickleRepackSummary(int TensorCount, long TensorBytes, bool Streamed, int StorageRestarts);
-
-/// <summary>The outcome of <see cref="StreamingPickleRepack.Verify"/>: whether every tensor of a pickle is in a safetensors file unchanged.</summary>
-/// <param name="Equal">True when names, order, shapes, dtypes and bytes all agree.</param>
-/// <param name="TensorCount">Tensors compared.</param>
-/// <param name="Differences">The first differences found, at most <see cref="StreamingPickleRepack.MaxReportedDifferences"/>.</param>
-public readonly record struct PickleRepackVerification(bool Equal, int TensorCount, IReadOnlyList<string> Differences);
-
 /// <summary>Repacks a pickle checkpoint into safetensors one tensor at a time, so the checkpoint's size does not bound host memory, and checks the result against its source.
 /// Only the safe-subset pickle reader parses the source: nothing in it is executed. Names, their order, shapes, dtypes and bytes are carried over unchanged.</summary>
 public static class StreamingPickleRepack
