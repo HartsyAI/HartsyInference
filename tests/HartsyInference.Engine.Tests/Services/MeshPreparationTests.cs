@@ -238,6 +238,37 @@ public sealed class MeshPreparationTests
         Assert.Contains(result.Notes, n => n.Contains("1024 x 512"));
     }
 
+    [Fact]
+    public void ALargeImageWithAlphaKeepsItsShrunkAlphaAsTheCutoutAndIsNotMatted()
+    {
+        ImageData photo = Photo(2048, 1024) with { Alpha = [.. Enumerable.Range(0, 2048 * 1024).Select(i => i % 2048 is >= 512 and < 1536 && i / 2048 is >= 256 and < 768 ? (byte)255 : (byte)0)] };
+        CentreMatter matter = new();
+
+        PreparedMeshImage result = RunOwnCrop("trellis2", photo, matter);
+
+        Assert.Equal(0, matter.Calls);
+        Assert.False(result.Matted);
+        Assert.Equal((1024, 512), (result.Cutout!.Width, result.Cutout.Height));
+        Assert.Equal(255, result.Cutout.Alpha![256 * 1024 + 512]);
+        Assert.Equal(0, result.Cutout.Alpha[0]);
+    }
+
+    [Theory]
+    [InlineData("trellis2")]
+    [InlineData("pixal3d")]
+    public void ACutoutSentBackIsNotMattedAgainAndGivesTheSameCrop(string id)
+    {
+        CentreMatter matter = new();
+        PreparedMeshImage first = RunOwnCrop(id, Photo(64, 64), matter);
+
+        PreparedMeshImage second = RunOwnCrop(id, first.Cutout!, matter);
+
+        Assert.Equal(1, matter.Calls);
+        Assert.False(second.Matted);
+        Assert.Equal(first.Image.Rgb, second.Image.Rgb);
+        Assert.Equal((first.Image.Width, first.Image.Height), (second.Image.Width, second.Image.Height));
+    }
+
     [Theory]
     [InlineData("trellis2")]
     [InlineData("pixal3d")]
