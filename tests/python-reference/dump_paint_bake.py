@@ -14,7 +14,7 @@ Things that differ from a normal run, all to keep the dump CPU-only and dependen
     python -I dump_paint_bake.py --upstream <checkout>/hy3dpaint --in <the input directory> --out <fixture.npz>
 
 The input directory (`tex` is the texture size, `res` the view resolution) holds `verts.f32` (N x 3), `uvs.f32` (N x 2), `idx.i32` (F x 3), `view<k>.f32` (R x R x 3, row 0 first), `meta.json` (texture size, resolution, the views' elevation, azimuth and weight).
-The fixture holds the inputs (`verts`, `uvs`, `idx`, `views` as elevation, azimuth and weight, `image<k>`, `texture_size` as texture size and render resolution) and, per view, the texture-space `color<k>`, `cos<k>` and `boundary<k>` (kept for a later comparison of the edge mask) of `back_project`, the merged `merged` texture and `painted` mask of `fast_bake_texture` (cosines raised to the
+The fixture holds the inputs (`verts`, `uvs`, `idx`, `views` as elevation, azimuth and weight, `image<k>`, `texture_size` as texture size and render resolution) and, per view, the geometry maps `normal<k>` and `position<k>` (`render_normal` with `use_abs_coor`, `render_position`), the texture-space `color<k>`, `cos<k>` and `boundary<k>` (kept for a later comparison of the edge mask) of `back_project`, the merged `merged` texture and `painted` mask of `fast_bake_texture` (cosines raised to the
 power 4 and scaled by the view weight, as `bake_texture` does), the texel positions `tex_position` and `tex_grid`, and `canny` (1 when real OpenCV was used).
 """
 import argparse
@@ -220,6 +220,11 @@ def main():
         textures.append(texture)
         cos_maps.append(weighted)
         print(f"view {k} (elev {view['elev']}, azim {view['azim']}): {(cos_map > 0).sum().item()} painted texels, {time.time() - t0:.0f} s", flush=True)
+    # The geometry maps the UNet is conditioned on: world-space normals (use_abs_coor, as textureGenPipeline asks for them) and positions, floats in [0, 1] before the pipeline's conversion to 8 bits.
+    for k, view in enumerate(meta["views"]):
+        with torch.no_grad():
+            out[f"normal{k}"] = render.render_normal(view["elev"], view["azim"], use_abs_coor=True, return_type="th").numpy()
+            out[f"position{k}"] = render.render_position(view["elev"], view["azim"], return_type="th").numpy()
     merged, trust = render.fast_bake_texture(textures, cos_maps)
     out["merged"], out["painted"] = merged.numpy(), trust.numpy().astype(np.float32)
     np.savez(args.out, **out)
