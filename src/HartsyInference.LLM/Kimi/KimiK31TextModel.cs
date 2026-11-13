@@ -107,6 +107,11 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
         }
     }
 
+    /// <summary>Whether <paramref name="directory"/> loads with the built-in XTML template, the one that renders image placeholders: a tiktoken checkpoint
+    /// with no <c>chat_template.jinja</c>. Mirrors the template choice in Load, from the files alone.</summary>
+    internal static bool UsesXtmlTemplate(string directory) =>
+        !File.Exists(Path.Combine(directory, "tokenizer.json")) && !File.Exists(Path.Combine(directory, "chat_template.jinja"));
+
     /// <summary>The top-level <c>bos_token_id</c> and <c>eos_token_id</c> of <c>config.json</c>, each null when absent.</summary>
     private static (int? Bos, int? Eos) ReadSpecialIds(string configPath)
     {

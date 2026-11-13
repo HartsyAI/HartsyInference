@@ -1,6 +1,7 @@
 using System.Text.Json;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.Multimodal;
+using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Kimi.Vision;
@@ -65,6 +66,28 @@ public sealed class KimiVisionInput : IDisposable
         return new KimiVisionInput(directory, tokenizer, textHidden, xtmlTemplate, openWeights);
     }
 
+    /// <summary>Why the checkpoint in <paramref name="directory"/> cannot take images, judged from its files alone: the chat template kind, the config,
+    /// the processor config and the tower's tensor headers. No weight is read and no tokenizer is built, so the tokenizer's media literals are checked
+    /// only when <see cref="Route"/> loads. Null when the files say it can take images.</summary>
+    public static string? RefusalFromFiles(string directory)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(directory);
+        try
+        {
+            if (!KimiK31TextModel.UsesXtmlTemplate(directory))
+                throw Refuse("the chat template is not the XTML template, which renders the image placeholders");
+            int textHidden = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(directory, "config.json"))).Hidden;
+            (_, KimiVisionConfig vision, _) = ReadGeometry(directory, textHidden);
+            using ShardedSafeTensorSet index = ShardedSafeTensorSet.OpenIndex(directory);
+            return KimiVisionWeightLoader.Refusal(vision, index.Inventory) is { } missing ? $"the vision tower cannot take images: {missing}" : null;
+        }
+        catch (Exception ex) when (ex is KeyNotFoundException or InvalidDataException or InvalidOperationException or NotSupportedException
+            or ArgumentException or FormatException or JsonException or IOException or HartsyInferenceException)
+        {
+            return $"the vision tower cannot take images: {ex.Message}";
+        }
+    }
+
     /// <summary>The image route. The first call loads the tower; later calls return the same route.</summary>
     /// <exception cref="NotSupportedException">The checkpoint cannot take images; the message gives the reason.</exception>
     /// <exception cref="ObjectDisposedException">This input has been disposed.</exception>
@@ -112,29 +135,13 @@ public sealed class KimiVisionInput : IDisposable
     private KimiVisionRoute Build()
     {
         if (!_xtmlTemplate) throw Refuse("the chat template is not the XTML template, which renders the image placeholders");
-        using JsonDocument config = JsonDocument.Parse(File.ReadAllText(Path.Combine(_directory, "config.json")));
-        JsonElement root = config.RootElement;
-        if (!root.TryGetProperty("media_placeholder_token_id", out JsonElement padValue) || !padValue.TryGetInt32(out int configPad))
-            throw Refuse("config.json names no media_placeholder_token_id");
+        (int configPad, KimiVisionConfig vision, KimiImageSpec spec) = ReadGeometry(_directory, _textHidden);
         foreach (string literal in new[] { MediaBegin, MediaContent, MediaPad, MediaEnd })
         {
             if (_tokenizer.SpecialId(literal) is null) throw Refuse($"the tokenizer has no '{literal}' token");
         }
         int padId = _tokenizer.SpecialId(MediaPad)!.Value;
         if (padId != configPad) throw Refuse($"the tokenizer's '{MediaPad}' is {padId}, but config.json names {configPad}");
-        if (!root.TryGetProperty("vision_config", out JsonElement visionJson)) throw Refuse("config.json has no vision_config");
-        KimiVisionConfig vision = ReadVisionConfig(visionJson);
-        if (vision.TextHidden != _textHidden)
-            throw Refuse($"the projector emits {vision.TextHidden} values, but the decoder's hidden width is {_textHidden}");
-
-        string preprocessorPath = Path.Combine(_directory, "preprocessor_config.json");
-        if (!File.Exists(preprocessorPath)) throw Refuse("preprocessor_config.json is missing");
-        using JsonDocument preprocessor = JsonDocument.Parse(File.ReadAllText(preprocessorPath));
-        if (!preprocessor.RootElement.TryGetProperty("media_proc_cfg", out JsonElement cfg))
-            throw Refuse("preprocessor_config.json has no media_proc_cfg");
-        KimiImageSpec spec = KimiImageSpec.Read(cfg);
-        if (spec.PatchSize != vision.PatchSize || spec.MergeKernelSize != vision.MergeSize)
-            throw Refuse("the processor's patch and merge sizes differ from the vision tower's");
 
         using IKimiK31WeightStore source = _openWeights(_directory);
         KimiVisionWeights weights = KimiVisionWeightLoader.Load(vision, source);
@@ -149,6 +156,30 @@ public sealed class KimiVisionInput : IDisposable
             throw;
         }
         return new KimiVisionRoute(encoder, spec, padId);
+    }
+
+    // The file checks the route and the capability probe share: the media pad id, the tower's width against the decoder's, and the processor's
+    // patch and merge sizes. Each refusal names its reason.
+    private static (int ConfigPad, KimiVisionConfig Vision, KimiImageSpec Spec) ReadGeometry(string directory, int textHidden)
+    {
+        using JsonDocument config = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "config.json")));
+        JsonElement root = config.RootElement;
+        if (!root.TryGetProperty("media_placeholder_token_id", out JsonElement padValue) || !padValue.TryGetInt32(out int configPad))
+            throw Refuse("config.json names no media_placeholder_token_id");
+        if (!root.TryGetProperty("vision_config", out JsonElement visionJson)) throw Refuse("config.json has no vision_config");
+        KimiVisionConfig vision = ReadVisionConfig(visionJson);
+        if (vision.TextHidden != textHidden)
+            throw Refuse($"the projector emits {vision.TextHidden} values, but the decoder's hidden width is {textHidden}");
+
+        string preprocessorPath = Path.Combine(directory, "preprocessor_config.json");
+        if (!File.Exists(preprocessorPath)) throw Refuse("preprocessor_config.json is missing");
+        using JsonDocument preprocessor = JsonDocument.Parse(File.ReadAllText(preprocessorPath));
+        if (!preprocessor.RootElement.TryGetProperty("media_proc_cfg", out JsonElement cfg))
+            throw Refuse("preprocessor_config.json has no media_proc_cfg");
+        KimiImageSpec spec = KimiImageSpec.Read(cfg);
+        if (spec.PatchSize != vision.PatchSize || spec.MergeKernelSize != vision.MergeSize)
+            throw Refuse("the processor's patch and merge sizes differ from the vision tower's");
+        return (configPad, vision, spec);
     }
 
     // Every field the tower reads from vision_config. The rotary base, the norm epsilon and the image side are not stored there, so they keep the

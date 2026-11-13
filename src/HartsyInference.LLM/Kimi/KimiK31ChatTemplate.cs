@@ -150,6 +150,8 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
         if (message.Blocks is not { Count: > 0 } blocks) return;
         foreach (ContentBlock block in blocks)
         {
+            if (block is ImageBlock && message.Role != "user")
+                throw new NotSupportedException($"Kimi K3.1 renders image blocks on user turns only, not on '{message.Role}' turns.");
             if (block is ImageBlock { Width: null } or ImageBlock { Height: null })
                 throw new NotSupportedException("Kimi K3.1 image blocks need the image's pixel size to render its media placeholder.");
             if (block is not (TextBlock or ImageBlock))

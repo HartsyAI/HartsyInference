@@ -26,6 +26,19 @@ public sealed class KimiK31ImageTemplateTests
         Assert.Equal(placeholder, KimiVisionInput.MediaPrompt(28, 20));
     }
 
+    [Theory]
+    [InlineData("system")]
+    [InlineData("assistant")]
+    public void Image_block_on_a_system_or_assistant_turn_is_refused_by_name(string role)
+    {
+        ChatMessage turn = new(role, "hi") { Blocks = [new ImageBlock(0) { Width = 28, Height = 20 }, new TextBlock("hi")] };
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => KimiK31ChatTemplate.RenderText([turn], thinking: false, addGenerationPrompt: false));
+
+        Assert.Contains("user turns only", refused.Message, StringComparison.Ordinal);
+        Assert.Contains($"'{role}'", refused.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Image_block_without_a_size_is_refused_by_name()
     {
