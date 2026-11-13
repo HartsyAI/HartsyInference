@@ -266,6 +266,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         }
         Backend.Sync();
         Backend.FreeWeights(_dit.EnumerateWeights());
+        _dit.ReleaseStepGraph(Backend);
         cond.Dispose();
         uncond?.Dispose();
         Probe($"dit-loop ({evaluations} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");

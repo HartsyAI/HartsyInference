@@ -223,6 +223,19 @@ public sealed unsafe class Hunyuan3DDit : IHunyuan3DDenoiser
         return velocity;
     }
 
+    /// <summary>Drops the captured step graph. The graph holds the device addresses of the block weights, so it is stale once they are freed and uploaded again; the next forward captures a new one.</summary>
+    public void ReleaseStepGraph(IBackend backend)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (ReferenceEquals(backend.StepGraphOwner, this))
+        {
+            backend.StepGraphReset();
+            backend.StepGraphOwner = null;
+        }
+        _graphSig = long.MinValue;
+        _graphSigCalls = 0;
+    }
+
     /// <summary>Runs the block loop over the fixed input buffers and lands the velocity in a stable, non-graph-owned buffer so replay's output survives the graph-memory auto-free.</summary>
     private void RunBlocksIntoFixed(IBackend backend, int n, int scond)
     {
