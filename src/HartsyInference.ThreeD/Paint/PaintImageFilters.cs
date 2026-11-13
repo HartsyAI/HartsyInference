@@ -12,6 +12,8 @@ public static class PaintImageFilters
     {
         if (gray.Length != width * height)
             throw new ArgumentException("Image size does not match the dimensions.", nameof(gray));
+        if (low > high)
+            (low, high) = (high, low); // cv2.Canny swaps the thresholds the same way
         int[] dx = new int[gray.Length], dy = new int[gray.Length], magnitude = new int[gray.Length];
         Parallel.For(0, height, y =>
         {

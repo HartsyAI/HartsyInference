@@ -171,7 +171,12 @@ public sealed class PaintBakeParityTests(ITestOutputHelper output)
         Assert.True(agreeing.Failures <= Math.Max(9, agreeing.Count / 1000), $"{agreeing.Name}: {agreeing.Failures} of {agreeing.Count} outside tolerance, largest {agreeing.MaxAbs}");
         Assert.True(onlyOurs <= 20, $"{onlyOurs} texels are painted only here");
         if (realCanny)
-            Assert.True(onlyReference <= 0.01 * f.Texels.Length, $"{onlyReference} texels are painted only upstream");
+        {
+            // Measured: 1. A wrong edge mask moves thousands of texels (the missing non-maximum suppression cost 2,093 in one view).
+            Assert.True(onlyReference <= 10, $"{onlyReference} texels are painted only upstream");
+            ParityResult everything = ParityCompare.Compare("merged, all texels painted in both", actual.ToArray(), expected.ToArray());
+            Assert.True(everything.Failures <= Math.Max(30, everything.Count / 2000), $"{everything.Failures} of {everything.Count} merged values are outside tolerance");
+        }
     }
 
     private void CompareView(int view, PaintViewBake bake, float[] cosine, float[] color, bool realCanny)
@@ -206,7 +211,7 @@ public sealed class PaintBakeParityTests(ITestOutputHelper output)
         Assert.True(weights.Failures <= Math.Max(3, weights.Count / 1000), $"{weights.Name}: {weights.Failures} of {weights.Count} outside tolerance, largest {weights.MaxAbs}");
         Assert.True(onlyOurs <= 5, $"view {view}: {onlyOurs} texels are painted only here");
         if (realCanny)
-            Assert.True(onlyReference <= 0.01 * cosine.Length, $"view {view}: {onlyReference} texels are painted only upstream");
+            Assert.True(onlyReference <= 10, $"view {view}: {onlyReference} texels are painted only upstream"); // measured: 0 to 2
     }
 
     // Reads the texture-space array at the covered texels, in the surface's order.

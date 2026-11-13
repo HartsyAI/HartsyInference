@@ -37,6 +37,14 @@ public sealed class PaintCannyTests
         "0000000000000000110000000000000000000000000110000000000000000000000000110000000000000000000000000010000000000000";
 
     [Fact]
+    public void Edges_SwapThresholdsGivenInTheWrongOrderAsOpenCvDoes()
+    {
+        byte[] gray = [.. Image.Split(',').Select(byte.Parse)];
+
+        Assert.Equal(PaintImageFilters.Edges(gray, 28, 28, 30, 80), PaintImageFilters.Edges(gray, 28, 28, 80, 30));
+    }
+
+    [Fact]
     public void Edges_AreTheOnesOpenCvCannyFindsInAnImageWithEveryGradientDirectionAndABorderEdge()
     {
         byte[] gray = [.. Image.Split(',').Select(byte.Parse)];
