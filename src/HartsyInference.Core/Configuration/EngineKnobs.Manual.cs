@@ -65,6 +65,11 @@ public static partial class EngineKnobs
         Bool("numerics.paintUpscaleViews", false, KnobScope.Construction, KnobDomain.Numerics,
             "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking; off by default (232 s extra on a 12 GB card, no visible gain).");
 
+    /// <summary>Decodes each X-Part part with the hierarchical FlashVDM decoder instead of the dense grid. Off by default: upstream decodes densely, FlashVDM approximates that field (0.4 to 0.7 percent of the part's extent on the test bust).</summary>
+    public static readonly Knob<bool> XPartFastDecode =
+        Bool("numerics.xpartFastDecode", false, KnobScope.Runtime, KnobDomain.Numerics,
+            "Decodes each X-Part part with the hierarchical FlashVDM decoder (about 113 s for three parts at its finest grid of 504 cells, against 141 s for a dense 256 grid); approximates upstream's dense field and can leave small openings in thin parts; off by default.");
+
     /// <summary>Forces the HeartCodec scalar-decode chunk length in frames; unset uses the model's ChunkFrames.</summary>
     public static readonly Knob<int?> HeartcodecScalarChunk =
         IntOverride("vram.heartcodecScalarChunk", KnobScope.Runtime, KnobDomain.Vram,
