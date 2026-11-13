@@ -152,14 +152,30 @@ public sealed class KimiK31TextPathTests : IDisposable
         Assert.Contains("tool schemas are not rendered", refused.Message, StringComparison.Ordinal);
     }
 
+    // 2 heads, 4 experts and a 20-row vocabulary split across 2 ranks but not across 3.
+    private static readonly KimiK31Config PlacementConfig = new()
+    {
+        Hidden = 16, Vocab = 20, Layers = 2, DenseLayers = 0, DenseIntermediate = 24, Heads = 2, KdaHeadDim = 8, KdaForgetRank = 4,
+        FullAttentionLayers = new HashSet<int>(), QLoraRank = 8, KvLoraRank = 6, QkNopeDim = 4, QkRopeDim = 4, VDim = 4,
+        IndexHeads = 2, IndexHeadDim = 8, IndexTopK = 16, Experts = 4, ExpertsPerToken = 2, MoeIntermediate = 8, SharedExperts = 1, LatentSize = 8,
+    };
+
     [Theory]
-    [InlineData("cuda:0+cuda:1", 0, 1)]
-    [InlineData("cuda:0", 2, 1)]
-    [InlineData("cuda:0", 0, 2)]
-    public void Multi_gpu_placement_is_refused_by_name(string deviceKey, int shardDevices, int tensorParallelDegree)
+    [InlineData("cpu", new string[0], 1)]
+    [InlineData("cuda:0", new string[0], 1)]
+    [InlineData("vulkan:1", new string[0], 1)]
+    [InlineData("cuda:0+cuda:1", new[] { "cuda:0", "cuda:1" }, 1)]
+    [InlineData("cuda:0+cuda:1", new[] { "cuda:0", "cuda:1" }, 2)]
+    public void A_placement_the_route_runs_is_not_refused(string deviceKey, string[] rankDevices, int tensorParallelDegree)
+    {
+        KimiK31Refusals.RequireRunnablePlacement(deviceKey, rankDevices, tensorParallelDegree, shardRatios: null, PlacementConfig);
+    }
+
+    [Fact]
+    public void A_request_naming_one_device_for_a_tensor_parallel_engine_is_refused_by_name()
     {
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
-            KimiK31Refusals.RefuseMultiGpuPlacement(deviceKey, shardDevices, tensorParallelDegree));
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0", [], tensorParallelDegree: 2, shardRatios: null, PlacementConfig));
         Assert.Contains("multi-GPU", refused.Message);
     }
 
@@ -167,7 +183,7 @@ public sealed class KimiK31TextPathTests : IDisposable
     public void Tensor_parallel_degree_is_named_when_it_is_the_cause()
     {
         NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
-            KimiK31Refusals.RefuseMultiGpuPlacement("cuda:0", shardDeviceCount: 0, tensorParallelDegree: 2));
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0", [], tensorParallelDegree: 2, shardRatios: null, PlacementConfig));
         Assert.Contains("tensor-parallel degree is 2", refused.Message);
         Assert.DoesNotContain("names more than one device", refused.Message);
     }
@@ -178,7 +194,65 @@ public sealed class KimiK31TextPathTests : IDisposable
     [InlineData("vulkan:1")]
     public void A_single_device_request_is_not_refused(string deviceKey)
     {
-        KimiK31Refusals.RefuseMultiGpuPlacement(deviceKey, shardDeviceCount: 0, tensorParallelDegree: 1);
+        KimiK31Refusals.RequireRunnablePlacement(deviceKey, [], tensorParallelDegree: 1, shardRatios: null, PlacementConfig);
+    }
+
+    [Fact]
+    public void A_composite_naming_one_device_is_refused_by_name()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0+", ["cuda:0"], tensorParallelDegree: 1, shardRatios: null, PlacementConfig));
+        Assert.Contains("multi-GPU", refused.Message);
+    }
+
+    [Fact]
+    public void A_composite_listing_a_device_twice_is_refused_by_name()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0+cuda:0", ["cuda:0", "cuda:0"], tensorParallelDegree: 1, shardRatios: null, PlacementConfig));
+        Assert.Contains("more than once", refused.Message);
+    }
+
+    [Theory]
+    [InlineData("cuda:0+cuda", "cuda:0", "cuda")]
+    [InlineData("cuda+CUDA:0", "cuda", "CUDA:0")]
+    public void A_composite_naming_one_cuda_device_under_two_spellings_is_refused_by_name(string deviceKey, string first, string second)
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement(deviceKey, [first, second], tensorParallelDegree: 1, shardRatios: null, PlacementConfig));
+        Assert.Contains("more than once", refused.Message);
+    }
+
+    [Fact]
+    public void A_request_naming_no_composite_says_it_names_one_device()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0", [], tensorParallelDegree: 2, shardRatios: null, PlacementConfig));
+        Assert.Contains("names one device", refused.Message);
+    }
+
+    [Fact]
+    public void A_tensor_parallel_degree_that_differs_from_the_devices_is_refused_by_name()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0+cuda:1", ["cuda:0", "cuda:1"], tensorParallelDegree: 4, shardRatios: null, PlacementConfig));
+        Assert.Contains("tensor-parallel degree", refused.Message);
+    }
+
+    [Fact]
+    public void A_rank_count_the_decoder_does_not_split_across_is_refused_by_name()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0+cuda:1+cuda:2", ["cuda:0", "cuda:1", "cuda:2"], tensorParallelDegree: 1, shardRatios: null, PlacementConfig));
+        Assert.Contains("multi-GPU", refused.Message);
+    }
+
+    [Fact]
+    public void Uneven_shard_ratios_are_refused_by_name()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0+cuda:1", ["cuda:0", "cuda:1"], tensorParallelDegree: 1, shardRatios: [0.25f, 0.75f], PlacementConfig));
+        Assert.Contains("ShardRatios", refused.Message);
     }
 
     [Fact]

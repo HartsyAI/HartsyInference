@@ -48,6 +48,23 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     internal static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens, Func<string, IKimiK31WeightStore> openWeights)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        return Load([backend], null, directory, maxSequenceTokens, openWeights);
+    }
+
+    /// <summary>Loads <paramref name="directory"/> sharded over <paramref name="rankBackends"/>, one backend per rank, with <paramref name="comm"/>
+    /// the collective over them. Each rank loads only its share; the result owns the backends' decoder but not the backends.</summary>
+    /// <exception cref="ArgumentException">The rank backends are empty, or the config does not split across them.</exception>
+    /// <exception cref="HartsyInferenceException">As <see cref="Load(IBackend, string, int)"/>.</exception>
+    public static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens) =>
+        Load(rankBackends, comm, directory, maxSequenceTokens, KimiK31CheckpointWeights.Open);
+
+    /// <summary>Loads like <see cref="Load(IReadOnlyList{IBackend}, ICollectiveComm?, string, int)"/>, reading the checkpoint's tensors from the stores
+    /// <paramref name="openWeights"/> opens.</summary>
+    internal static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens,
+        Func<string, IKimiK31WeightStore> openWeights)
+    {
+        ArgumentNullException.ThrowIfNull(rankBackends);
+        if (rankBackends.Count == 0) throw new ArgumentException("A Kimi K3.1 load needs at least one rank backend.", nameof(rankBackends));
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ArgumentNullException.ThrowIfNull(openWeights);
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
@@ -83,7 +100,7 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{(useTiktoken ? tiktokenPath : tokenizerPath)}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
-        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, backend, maxSequenceTokens, openWeights);
+        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, rankBackends, comm, maxSequenceTokens, openWeights);
         KimiVisionInput? vision = null;
         try
         {
@@ -97,7 +114,7 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
                     $"{tokenizerFile} puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
             // Reads no vision tensor: the tower loads on the first image request, so a text load never depends on it.
             vision = KimiVisionInput.Load(directory, tokenizer, checkpoint.Config.Hidden, template is KimiK31ChatTemplate, openWeights);
-            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, backend, maxSequenceTokens), tokenizer, template, vision);
+            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, rankBackends[0], maxSequenceTokens), tokenizer, template, vision);
         }
         catch
         {
@@ -110,7 +127,8 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     /// <summary>Whether <paramref name="directory"/> loads with the built-in XTML template, the one that renders image placeholders: a tiktoken checkpoint
     /// with no <c>chat_template.jinja</c>. Mirrors the template choice in Load, from the files alone.</summary>
     internal static bool UsesXtmlTemplate(string directory) =>
-        !File.Exists(Path.Combine(directory, "tokenizer.json")) && !File.Exists(Path.Combine(directory, "chat_template.jinja"));
+        !File.Exists(Path.Combine(directory, "tokenizer.json")) && !File.Exists(Path.Combine(directory, "chat_template.jinja"))
+        && File.Exists(Path.Combine(directory, KimiK31Tokenizer.TiktokenFile));
 
     /// <summary>The top-level <c>bos_token_id</c> and <c>eos_token_id</c> of <c>config.json</c>, each null when absent.</summary>
     private static (int? Bos, int? Eos) ReadSpecialIds(string configPath)

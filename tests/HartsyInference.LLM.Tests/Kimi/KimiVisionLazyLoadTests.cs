@@ -190,8 +190,8 @@ public sealed class KimiVisionLazyLoadTests : IDisposable
         File.Move(Path.Combine(scratch, "model.safetensors"), Path.Combine(dir, TowerShard));
         Directory.Delete(scratch, recursive: true);
 
-        Dictionary<string, string> weightMap = KimiSyntheticCheckpoint.TensorNames()
-            .ToDictionary(t => t.Name, _ => "model.safetensors", StringComparer.Ordinal);
+        Dictionary<string, string> weightMap = KimiSyntheticCheckpoint.Specs(KimiSyntheticCheckpoint.DefaultConfig, packedExperts: false, bf16Dense: false)
+            .ToDictionary(t => t.Name, _ => "model-00001-of-00001.safetensors", StringComparer.Ordinal);
         foreach ((string tensor, _) in KimiVisionSyntheticCheckpoint.TensorNames(written)) weightMap[tensor] = TowerShard;
         File.WriteAllText(Path.Combine(dir, "model.safetensors.index.json"),
             JsonSerializer.Serialize(new Dictionary<string, object> { ["weight_map"] = weightMap }));
@@ -206,7 +206,7 @@ public sealed class KimiVisionLazyLoadTests : IDisposable
             + $"\"vt_intermediate_size\": {t.MlpDim}, \"vt_num_hidden_layers\": {t.Layers}, \"patch_size\": {t.PatchSize}, "
             + $"\"merge_kernel_size\": [{t.MergeSize}, {t.MergeSize}], \"init_pos_emb_height\": {PublishedGrid}, "
             + $"\"init_pos_emb_width\": {PublishedGrid}, \"text_hidden_size\": {t.TextHidden}, \"projector_ln_eps\": 1e-05}}, ";
-        return KimiSyntheticCheckpoint.ConfigJson().Insert(1, vision);
+        return KimiSyntheticCheckpoint.ConfigJson(KimiSyntheticCheckpoint.DefaultConfig).Insert(1, vision);
     }
 
     // The fixture's named specials, plus the four media literals with the pad at its published id.
@@ -241,6 +241,8 @@ public sealed class KimiVisionLazyLoadTests : IDisposable
             reads.Add(name);
             return inner.Read(name);
         }
+
+        public Tensor ReadSlice(string name, int dim, long start, long count) => inner.ReadSlice(name, dim, start, count);
 
         public void Dispose() => inner.Dispose();
     }

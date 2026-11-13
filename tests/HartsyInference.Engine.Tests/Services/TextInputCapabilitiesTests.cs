@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.LLM.Tests.Kimi.Vision;
 using HartsyInference.ModelAssets.Gguf;
@@ -69,6 +70,7 @@ public sealed class TextInputCapabilitiesTests : IDisposable
             + $"\"merge_kernel_size\": [{asked.MergeSize}, {asked.MergeSize}], \"init_pos_emb_height\": {asked.InitPosGrid}, "
             + $"\"init_pos_emb_width\": {asked.InitPosGrid}, \"text_hidden_size\": {asked.TextHidden}, \"projector_ln_eps\": 1e-05}}");
         File.WriteAllText(Path.Combine(dir, "config.json"), config.ToJsonString());
+        File.WriteAllText(Path.Combine(dir, KimiK31Tokenizer.TiktokenFile), "");
         File.WriteAllText(Path.Combine(dir, "preprocessor_config.json"),
             "{\"media_proc_cfg\": {\"in_patch_limit\": 65536, \"patch_size\": 2, \"image_mean\": [0.5, 0.5, 0.5], \"image_std\": [0.5, 0.5, 0.5], "
             + "\"merge_kernel_size\": 2, \"fixed_output_tokens\": null, \"patch_limit_on_one_side\": 512}}");
@@ -94,6 +96,14 @@ public sealed class TextInputCapabilitiesTests : IDisposable
         string dir = WriteKimiFolder("kimi-jinja");
         File.WriteAllText(Path.Combine(dir, "chat_template.jinja"), "{{ messages }}");
         Assert.Equal(TextInputCapabilities.None, TextService.InputCapabilities(dir));
+    }
+
+    [Fact]
+    public void AKimiFolderWithNoTokenizerFileTakesNoImages()
+    {
+        string dir = WriteKimiFolder("kimi-no-tokenizer");
+        File.Delete(Path.Combine(dir, KimiK31Tokenizer.TiktokenFile));
+        Assert.False(TextService.InputCapabilities(dir).Images);
     }
 
     [Fact]

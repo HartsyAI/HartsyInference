@@ -55,6 +55,19 @@ internal static class HfTextDirectoryLoader
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
+    /// <summary>Loads a Kimi K3.1 directory sharded over <paramref name="rankBackends"/>, one backend per rank; <paramref name="comm"/> is the collective
+    /// over them and is required with two or more ranks.</summary>
+    internal static IHostReferenceTextModel LoadKimiK31Sharded(HfCheckpointInfo info, IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm)
+    {
+        RequireSupported(info);
+        if (!IsKimiK31(info)) throw new ArgumentException($"'{info.ModelType}' is not a Kimi K3.1 checkpoint.", nameof(info));
+        return KimiK31TextModel.Load(rankBackends, comm, info.Root, MaxSequenceTokens);
+    }
+
+    /// <summary>The decoder config of a Kimi K3.1 checkpoint directory, read before any weight is loaded.</summary>
+    internal static KimiK31Config ReadKimiK31Config(HfCheckpointInfo info) =>
+        KimiK31HfConfig.Parse(System.IO.File.ReadAllText(System.IO.Path.Combine(info.Root, "config.json")));
+
     /// <summary>Whether <paramref name="info"/> is a family that carries its own state (LFM3, Spark-X) rather than DeepSeek-V4.1.</summary>
     internal static bool IsStatefulFamily(HfCheckpointInfo info) => SsmLanguageModel.IsHuggingFaceFamily(info.ModelType);
 
