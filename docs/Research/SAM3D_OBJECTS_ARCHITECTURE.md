@@ -512,6 +512,8 @@ Traced against `decoder_gs.py` and `gaussian_model.py`: the layout (`_xyz`, `_fe
 
 ## Open items
 
+- **Native access violation at the SLAT weight load (open, next diagnostic named).** `AccessViolationException` in `Tensor.ConvertRange` from `SparseOps.ConvWeightSlices` called by `SlatFlowModel.LoadWeights` (the F32 to F16 cast of a checkpoint conv weight, serial path, under 2^20 elements), 2 of 5 GPU runs of one 640 x 480 input; not reproduced by 60 CPU-only reloads of the real checkpoint with forced GC (the loader hands out owned copies and releases its map at once, so the mapped-file lifetime is not the cause). The next diagnostic needs a GPU run with a native crash dump (Windows Error Reporting `LocalDumps` for the process, a system setting the user must enable, or a debugger attached with first-chance access violations breaking) to see the faulting address and whether the source or the destination pointer is bad; also log the tensor's `OwnsMemory` and pointer in the failing call. Reading all 526 flow weights first passed once (n=1) and is not a guard. Do not conclude a cause from the leak fix: the crash happened with it too.
+
 - Settled by reading the checkpoints (see "Checkpoints read"): per-block `adaLN_modulation`, stored dtypes, key prefixes, safe extraction of the `state_dict`, and that the DINO and pointmap embedder weights are in the checkpoints.
 - The licence of `Ruicheng/moge-vitl` and the MoGe checkpoint's files (the MoGe source was read as MIT-licensed, the weights' licence was not).
 - How the structure generator behaves with the pointmap tokens zeroed (object-only mode).
