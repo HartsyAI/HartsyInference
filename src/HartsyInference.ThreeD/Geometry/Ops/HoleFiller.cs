@@ -1,6 +1,6 @@
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
-/// <summary>What <see cref="HoleFiller.Fill"/> did. Every simple boundary cycle ends up filled, too wide, or one the triangulation could not close; the last two are what is still open.</summary>
+/// <summary>What <see cref="HoleFiller.Fill"/> did. Every simple boundary cycle of three or more vertices ends up filled, too wide, or one the triangulation could not close; the last two are what is still open.</summary>
 /// <param name="Mesh">The mesh with the fills added (the input itself when nothing was added).</param>
 /// <param name="Filled">Cycles closed.</param>
 /// <param name="TooWide">Cycles left open because their triangulation needs an edge longer than the limit.</param>
@@ -16,12 +16,13 @@ public static class HoleFiller
 {
     private const double ReflexPenalty = 10;
 
-    // A longer limit lets an early ear take a long edge and strand the rest of the loop, so a loop is tried at 1/16, 1/8, 1/4, 1/2 and the full limit, narrowest first.
+    // A longer limit lets an early ear take a long edge and strand the rest of the loop, so a loop is tried at 1/16, 1/8, 1/4, 1/2 and the full limit, narrowest first,
+    // and a tier that fails for any reason hands over to the next (the ear order depends on the limit).
     private const int WidthTiers = 5;
 
     /// <summary>Closes every boundary loop of <paramref name="mesh"/> whose triangulation needs no new edge longer than <paramref name="maxWidth"/> (mesh units). The patches wind opposite to the loop's faces, so a
     /// consistently wound mesh stays consistent. A pass can free loops the one before refused (its new edges exist now), so passes repeat up to <paramref name="maxPasses"/> while they add triangles;
-    /// the open counts are those of the last pass, taken before it filled.</summary>
+    /// the open counts are those of the last pass, taken before it filled. The result shares <paramref name="mesh"/>'s vertex array.</summary>
     public static HoleFillResult Fill(Mesh mesh, double maxWidth, int maxPasses = 4)
     {
         ArgumentNullException.ThrowIfNull(mesh);
@@ -64,13 +65,14 @@ public static class HoleFiller
             }
             foreach (int[] cycle in walk.SimpleCycles())
             {
-                Outcome outcome = Outcome.TooWide;
-                for (double limit = maxWidth / (1 << (WidthTiers - 1)); outcome == Outcome.TooWide; limit *= 2)
+                Outcome outcome = Outcome.Unclosable;
+                Vector3d[] normal = SurfaceNormals(mesh, table, cycle);
+                int tiers = maxWidth > 0 ? WidthTiers : 1;
+                for (int tier = 0; tier < tiers && outcome != Outcome.Closed; tier++)
                 {
                     patch.Clear();
                     patchEdges.Clear();
-                    outcome = Triangulate(mesh, table, cycle, added, Math.Min(limit, maxWidth), patch, patchEdges);
-                    if (limit >= maxWidth) break;
+                    outcome = Triangulate(mesh, table, cycle, normal, added, maxWidth / (1 << (tiers - 1 - tier)), patch, patchEdges);
                 }
                 if (outcome == Outcome.Closed && cycle.Length == 3
                     && (faces ??= FaceSet(mesh.Indices)).Contains(Sorted(cycle[0], cycle[1], cycle[2])))
@@ -107,7 +109,7 @@ public static class HoleFiller
     // and an ear that folds against the surrounding surface comes after every other. An ear whose new edge already exists in the mesh or in an earlier patch is skipped,
     // since a face on it would give that edge a third face; one whose new edge is over the width limit is skipped until its neighbours change.
     private static Outcome Triangulate(
-        Mesh mesh, EdgeTable table, int[] loop, HashSet<long> added, double maxWidth, List<int> triangles, HashSet<long> newEdges)
+        Mesh mesh, EdgeTable table, int[] loop, Vector3d[] normal, HashSet<long> added, double maxWidth, List<int> triangles, HashSet<long> newEdges)
     {
         float[] v = mesh.Vertices;
         int vertexCount = mesh.VertexCount;
@@ -118,7 +120,6 @@ public static class HoleFiller
             prev[i] = (i + n - 1) % n;
             next[i] = (i + 1) % n;
         }
-        Vector3d[] normal = SurfaceNormals(mesh, table, loop);
         PriorityQueue<(int Ear, int Stamp), double> queue = new();
         for (int i = 0; i < n; i++) Enqueue(i);
         bool[] gone = new bool[n];

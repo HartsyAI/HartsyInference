@@ -24,8 +24,8 @@ public static class MeshCleaner
         if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
         if (options.HoleFillMaxWidth > 0)
         {
-            // The patches take their winding from the faces around the hole, so those must agree first.
-            m = HoleFiller.Fill(UnifyOrientation(m, orientOutward: false), options.HoleFillMaxWidth).Mesh;
+            // The patches take their winding from the faces around the hole, so those must agree first (unless the caller turned the winding step off).
+            m = HoleFiller.Fill(options.UnifyOrientation ? UnifyOrientation(m, orientOutward: false) : m, options.HoleFillMaxWidth).Mesh;
         }
         if (options.UnifyOrientation) m = UnifyOrientation(m, options.OrientOutward);
         return m;

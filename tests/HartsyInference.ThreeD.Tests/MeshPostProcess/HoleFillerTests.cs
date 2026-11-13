@@ -163,6 +163,23 @@ public sealed class HoleFillerTests
     }
 
     [Fact]
+    public void Clean_ClosesACappedSphereWhoseFacesAreWoundBothWaysWithOneConsistentWinding()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2);
+        Mesh capped = WithoutFaces(sphere, f => CentroidY(sphere, f) > 0.5f);
+        int[] mixed = (int[])capped.Indices.Clone();
+        for (int f = 0; f < mixed.Length / 3; f += 3) (mixed[f * 3 + 1], mixed[f * 3 + 2]) = (mixed[f * 3 + 2], mixed[f * 3 + 1]);
+        Mesh inconsistent = new() { Vertices = capped.Vertices, Indices = mixed };
+        Assert.False(SyntheticMeshes.Topology(inconsistent).ConsistentWinding);
+
+        Mesh closed = MeshCleaner.Clean(inconsistent, new MeshCleanOptions { HoleFillMaxPerimeter = 0, HoleFillMaxWidth = 3 });
+
+        Assert.True(SyntheticMeshes.IsClosedManifold(closed));
+        Assert.True(SyntheticMeshes.Topology(closed).ConsistentWinding);
+        Assert.True(SyntheticMeshes.SignedVolume(closed) > 0);
+    }
+
+    [Fact]
     public void Fill_RejectsANegativeWidth()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => HoleFiller.Fill(SyntheticMeshes.Icosphere(1), -1));

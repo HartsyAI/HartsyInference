@@ -135,7 +135,7 @@ their winding from the faces around the hole.
 Wiring: `ShapeMeshFinisher.Finish(mesh, openingWidthRatio:)` (share of the bounding-box diagonal; `DefaultOpeningWidthRatio` is 0.1), `Trellis2Options.CloseOpenings` and `Pixal3DOptions.CloseOpenings` (off by default),
 and `fill-holes` takes a `maxWidth` share of the diagonal besides `maxPerimeter` (0 by default). `HoleFiller.Fill` reports what it filled and what stayed open (too wide, unclosable, walks that end at a non-manifold edge).
 
-Measured on the saved meshes of the section above (CPU, one run each, welded counts as `MeshStatistics` takes them):
+Measured on the saved meshes of the section above (CPU, welded counts as `MeshStatistics` takes them; the counts repeat exactly between runs, the times are from a shared, loaded machine and vary up to twofold, for example 2.3 and 5.8 s for the SAM 3D bust):
 
 | Mesh, finisher | Boundary edges, by index | Non-manifold, by index | Welded boundary / non-manifold | Triangles | Time |
 |---|---|---|---|---|---|
@@ -158,7 +158,7 @@ Measured on the saved meshes of the section above (CPU, one run each, welded cou
   patches and 3 of them 3D openings, the largest of 48,566 and 21,736 edges (a spread of about 290 by 260 by 135 voxels), and one on the grid face: those are real openings in the decoded shape, and
   they stay open. Width 0.2 leaves 74,768 edges.
 - Winding: counting edges whose two faces run the same way, the defaults leave 3,373 (bust), 2,254 (mug 512) and 5,987 (mug 1024), which unification cannot fix because the repaired surface is not orientable there; the fill
-  adds to it (to 8,197, 6,448 and 12,488), since its patches meet those same places. The SAM 3D bust has none. Boundary and non-manifold counts do not depend on it.
+  adds to it (to 8,197, 6,448 and 12,488), since its patches meet those same places. The SAM 3D bust has none. Boundary and non-manifold counts do not depend on it. Nothing tests a patch against the surface around it or another patch: on a curled slit, ear clipping a non-planar loop can overlap its neighbours (only the fold penalty steers away), a likely part of the rise (not checked).
 - The slits and terraces of the mug are filled with flat strips of triangles, so the patches are as rough as the surface around them; nothing fairs or relaxes them. Rendered with the engine's thumbnail renderer, the bust's
   dark specks in the hair are gone; on the mug most white streaks along the inner wall are closed, but one at the rim stays see-through (probably faces running the wrong way, the winding limit above; not checked). Greedy local flipping of faces with two disagreeing edges did not reduce the count (it settles at about 7,400 on the bust), so the disagreement is structural.
 - Tried and not kept: joining all faces of a non-manifold edge in pairs (wound consistently, most coplanar) instead of one pair. It lowered the by-index boundary of the defaults only from 30,198 to 26,778 on the bust, raised the welded

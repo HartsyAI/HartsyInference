@@ -33,7 +33,11 @@ public sealed class FillHolesOperation : IMeshOperation
             double diagonal = PrimitiveEdit.Diagonal(welded.Positions);
             Mesh filled = MeshCleaner.FillHoles(weldedMesh, share * diagonal);
             if (widthShare > 0)
-                filled = HoleFiller.Fill(MeshCleaner.UnifyOrientation(filled, orientOutward: false), widthShare * diagonal).Mesh;
+            {
+                // The patches take their winding from the faces around the hole; the winding is only touched when a patch is added.
+                HoleFillResult byWidth = HoleFiller.Fill(MeshCleaner.UnifyOrientation(filled, orientOutward: false), widthShare * diagonal);
+                if (byWidth.TrianglesAdded > 0) filled = byWidth.Mesh;
+            }
             if (filled.TriangleCount == weldedMesh.TriangleCount)
                 return (primitive, null);
             if (g.Normals is not null)
