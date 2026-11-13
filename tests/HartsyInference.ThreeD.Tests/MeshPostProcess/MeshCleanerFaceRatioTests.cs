@@ -102,8 +102,8 @@ public sealed class MeshCleanerFaceRatioTests
         List<int> indices = [.. bowTie.Indices];
         AddStrip(vertices, indices, 3, 50f);
         Mesh withStrip = new() { Vertices = [.. vertices], Indices = [.. indices] };
-        // largest 3 faces: a component needs at least 2 faces at a ratio of 0.5, so both single triangles go.
-        Assert.Equal(3, MeshCleaner.RemoveSmallComponentsByFaceCount(withStrip, 0.5).TriangleCount);
+        // largest 3 faces, ratio 0.75: the threshold is (uint)2.25 = 2, so both single triangles go (they would stay if they counted as one 2-face component).
+        Assert.Equal(3, MeshCleaner.RemoveSmallComponentsByFaceCount(withStrip, 0.75).TriangleCount);
     }
 
     [Fact]
