@@ -111,6 +111,17 @@ public sealed class MergeCommandTests : IDisposable
     }
 
     [Fact]
+    public void MalformedIndexIsAnErrorExitNotAStackTrace()
+    {
+        string index = Path.Combine(_dir, "broken.safetensors.index.json");
+        File.WriteAllText(index, "{ not json");
+        string output = Path.Combine(_dir, "out", "merged.safetensors");
+
+        Assert.Equal(1, Run("merge", index, "-o", output));
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
     public void MalformedMetaIsAUsageErrorAndWritesNothing()
     {
         WriteShards();

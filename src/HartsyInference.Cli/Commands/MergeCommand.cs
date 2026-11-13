@@ -122,7 +122,8 @@ public sealed class MergeCommand : Command<MergeCommand.Settings>
                 Overwrite = settings.Overwrite,
             });
         }
-        catch (Exception ex) when (ex is HartsyInferenceException or InvalidDataException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is HartsyInferenceException or InvalidDataException or IOException or UnauthorizedAccessException
+            or System.Text.Json.JsonException or ArgumentException)
         {
             AnsiConsole.MarkupLine($"[red]Error:[/] {Markup.Escape(ex.Message)}");
             return 1;

@@ -77,6 +77,10 @@ public static class SafeTensorsMergeService
             throw new HartsyInferenceException($"The output must end in .safetensors: {job.OutputPath}");
         if (job.CastTo is { } target && !SafeTensorsMerger.IsCastable(target))
             throw new HartsyInferenceException($"Cannot cast to {target.Name}; use bf16, fp16 or fp32.");
+        // The merge computes this digest from the payload it writes. A value supplied here would disable that fill and fail the
+        // read-back after the whole write, so it is refused before anything is written.
+        if (job.Metadata is not null && job.Metadata.TryGetValue(ArtifactMetadata.HashKey, out string? suppliedDigest) && !string.IsNullOrEmpty(suppliedDigest))
+            throw new HartsyInferenceException($"{ArtifactMetadata.HashKey} is the digest the merge computes; leave it out of the metadata.");
         if (File.Exists(job.OutputPath) && !job.Overwrite)
             throw new HartsyInferenceException($"'{job.OutputPath}' already exists. Pass --overwrite to replace it.");
 
@@ -86,8 +90,9 @@ public static class SafeTensorsMergeService
         {
             // Checked before any folder is read: an output inside a folder input would be listed as a shard, and a previous
             // merge's file there fails to parse as one, which hides the real problem behind a header error.
+            // Compared without case: on a case-insensitive file system D:\Models and d:\models are the same folder.
             if (Directory.Exists(input)
-                && string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)), outputFolder, StringComparison.Ordinal))
+                && string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input)), outputFolder, StringComparison.OrdinalIgnoreCase))
             {
                 throw new HartsyInferenceException(
                     $"'{job.OutputPath}' sits in the input folder, where it would be read back as a shard. Write the merge to another folder.");
@@ -104,7 +109,7 @@ public static class SafeTensorsMergeService
                 tensors.AddRange(inputTensors);
                 loaders.AddRange(inputLoaders);
             }
-            if (loaders.Any(loader => string.Equals(Path.GetFullPath(loader.FilePath), outputFull, StringComparison.Ordinal)))
+            if (loaders.Any(loader => string.Equals(Path.GetFullPath(loader.FilePath), outputFull, StringComparison.OrdinalIgnoreCase)))
                 throw new HartsyInferenceException($"'{job.OutputPath}' is one of the inputs. Write the merge to another path.");
 
             IReadOnlyList<string> sources = loaders.Select(loader => loader.FilePath).ToList();

@@ -230,6 +230,24 @@ public sealed class SafeTensorsMergeServiceTests : IDisposable
     }
 
     [Fact]
+    public void SuppliedDigestIsRefusedBeforeAnythingIsWritten()
+    {
+        WriteShard("model-00001-of-00001.safetensors", ("head.weight", Values(1f, 16), 2, 8));
+        string output = Path.Combine(_dir, "out", "merged.safetensors");
+
+        HartsyInferenceException refused = Assert.Throws<HartsyInferenceException>(() =>
+            SafeTensorsMergeService.Merge(new SafeTensorsMergeJob
+            {
+                InputPaths = [_dir],
+                OutputPath = output,
+                Metadata = new Dictionary<string, string> { [ArtifactMetadata.HashKey] = "0x" + new string('1', 64) },
+            }));
+
+        Assert.Contains("computes", refused.Message);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
     public void NoInputIsRefused()
     {
         Assert.Throws<HartsyInferenceException>(() =>
