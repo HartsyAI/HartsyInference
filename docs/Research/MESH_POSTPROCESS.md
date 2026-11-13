@@ -164,6 +164,19 @@ Measured on the saved meshes of the section above (CPU, one run each, welded cou
 - Tried and not kept: joining all faces of a non-manifold edge in pairs (wound consistently, most coplanar) instead of one pair. It lowered the by-index boundary of the defaults only from 30,198 to 26,778 on the bust, raised the welded
   non-manifold count, and gained nothing once the fill ran.
 
+### Feasibility of the narrow-band dual-contouring remesh (not implemented)
+
+Upstream's `to_glb` runs `remesh_narrow_band_dc` only with `remesh=True`; its default is the standard path above. Read from CuMesh `remeshing.py`: a sparse grid is refined from 32 up to the grid resolution, keeping a voxel while the
+unsigned distance at its centre (`bvh.unsigned_distance`) is under 0.87 of the cell; the distance is shifted by `eps = band * voxel` (band 1) and the zero set is dual-contoured (`simple_dual_contour`, source not read), with one quad per
+crossing edge through the four voxels around it (the offsets and the split rule of `DualGridMesher`, so that code could be reused) and quads with a missing neighbour dropped; `project_back` blends each vertex toward the closest point of the original.
+There is no flood fill and no sign: the result is the offset surface at distance `eps`, a closed shell about two voxels thick around the original, and a hole wider than `2 * eps` stays a hole through the shell.
+
+Cost here, measured with `TriangleBvh` on the finished 512 bust (1,485,720 faces, 8 threads, a loaded machine): build 3.6 s, 1.56 million exact distance queries per second within 1.5 voxels of the surface. The band holds one to three
+times as many voxels as the surface has (736,637 at 512 for the bust, 5,596,157 for the 1024 mug), so an estimated few million to fifteen million queries (2 to 10 s at the rate above) plus a voxel hash (estimated at 40 bytes a voxel: 100 MB at 512, 700 MB at 1024); the estimates are not measured. It is bounded and testable
+(a sphere must come out closed with the volume of the offset ball), so cost is not the reason it is left out. The reasons are what it produces: twice the faces and a shell displaced by a voxel on each side, or, projected back, two coincident
+sheets that weld to non-manifold edges again, so the welded count would not be the thing it fixes; and the by-index closure above already reaches no boundary and no non-manifold edge on three of the four meshes. It is the next step only if a consumer needs
+position-welded manifold geometry; a single-layer alternative (flood fill from the grid's outside through voxels farther than a gap tolerance from the surface, then contour the solid) is a separate design that changes topology.
+
 ## Known limits against cumesh and xatlas
 
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the
