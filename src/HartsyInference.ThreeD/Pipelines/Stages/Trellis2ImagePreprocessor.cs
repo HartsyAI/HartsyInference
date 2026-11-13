@@ -26,6 +26,10 @@ public static class Trellis2ImagePreprocessor
     /// <summary>As <see cref="Prepare(IBackend, Trellis2InputImage, IForegroundMatter?)"/> with the crop square widened by
     /// <paramref name="cropScale"/> (upstream's <c>int(size * scale)</c>): 1.0 for TRELLIS.2, 1.1 for Pixal3D.</summary>
     public static Trellis2PreparedImage Prepare(IBackend backend, Trellis2InputImage image, IForegroundMatter? matter, double cropScale)
+        => PrepareWithCutout(backend, image, matter, cropScale).Crop;
+
+    /// <summary>As <see cref="Prepare(IBackend, Trellis2InputImage, IForegroundMatter?, double)"/>, also returning the cutout the crop was taken from.</summary>
+    public static Trellis2PreparedCutout PrepareWithCutout(IBackend backend, Trellis2InputImage image, IForegroundMatter? matter, double cropScale)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(image);
@@ -53,9 +57,10 @@ public static class Trellis2ImagePreprocessor
             height = newHeight;
         }
 
+        bool matted = alpha is null;
         if (alpha is null)
             alpha = ToBytes(matter!.Alpha(backend, rgb, width, height), width * height);
-        return Crop(rgb, alpha, width, height, cropScale);
+        return new Trellis2PreparedCutout(Crop(rgb, alpha, width, height, cropScale), rgb, alpha, width, height, matted);
     }
 
     /// <summary>Crops the square around the foreground and premultiplies RGB by alpha, as upstream does after matting.</summary>
