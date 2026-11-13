@@ -11,4 +11,7 @@ internal interface IHunyuan3DDenoiser
 
     /// <summary>Every weight tensor, for preloading to and freeing from the device.</summary>
     IEnumerable<Tensor> EnumerateWeights();
+
+    /// <summary>Drops anything captured against the weights' device addresses; called when the weights are freed, since a later upload puts them elsewhere.</summary>
+    void InvalidateStepGraph(IBackend backend) { }
 }
