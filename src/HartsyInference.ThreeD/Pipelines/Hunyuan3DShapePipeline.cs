@@ -309,6 +309,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         }
         finally
         {
+            _dit.InvalidateStepGraph(Backend);   // before the weights go: a captured step graph holds their addresses
             Backend.FreeWeights(_dit.EnumerateWeights());
             cond.Dispose();
             uncond?.Dispose();
