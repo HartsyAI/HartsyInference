@@ -25,6 +25,10 @@ public sealed record MeshCleanOptions
     /// <summary>Fill boundary loops up to this perimeter; 0 disables.</summary>
     public double HoleFillMaxPerimeter { get; init; } = 3e-2;
 
+    /// <summary>After the perimeter fill, close the boundary loops that <see cref="HoleFiller"/> can triangulate with no new edge longer than this; 0 disables.
+    /// A thin slit is closed whatever its length, a wide opening such as a cut base or a mouth is not.</summary>
+    public double HoleFillMaxWidth { get; init; }
+
     /// <summary>Make neighboring faces agree on winding.</summary>
     public bool UnifyOrientation { get; init; } = true;
 

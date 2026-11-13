@@ -357,7 +357,8 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
             if (!textured)
             {
-                mesh = ShapeMeshFinisher.Finish(mesh, options.CleanMesh);
+                mesh = ShapeMeshFinisher.Finish(
+                    mesh, options.CleanMesh, openingWidthRatio: options.CloseOpenings ? ShapeMeshFinisher.DefaultOpeningWidthRatio : 0);
                 ToYUp(mesh);
                 done++;
                 Report();

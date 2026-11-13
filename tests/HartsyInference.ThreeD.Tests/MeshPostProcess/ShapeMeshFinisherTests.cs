@@ -69,6 +69,30 @@ public sealed class ShapeMeshFinisherTests
     }
 
     [Fact]
+    public void Finish_WithAnOpeningWidthClosesTheOpeningTheDefaultLeavesOpen()
+    {
+        // The unit tetrahedron missing a face: a triangle of side 1.4 against a bounding-box diagonal of 1.7.
+        Mesh open = new()
+        {
+            Vertices = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+            Indices = [0, 2, 1, 0, 1, 3, 0, 3, 2],
+        };
+
+        Mesh closed = ShapeMeshFinisher.Finish(open, openingWidthRatio: 1);
+        Mesh stillOpen = ShapeMeshFinisher.Finish(open, openingWidthRatio: ShapeMeshFinisher.DefaultOpeningWidthRatio);
+
+        Assert.True(SyntheticMeshes.IsClosedManifold(closed));
+        Assert.True(SignedVolume(closed) > 0);
+        Assert.True(SyntheticMeshes.Topology(stillOpen).Boundary > 0);
+    }
+
+    [Fact]
+    public void Finish_RejectsANegativeOpeningWidth()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => ShapeMeshFinisher.Finish(Dirty(), openingWidthRatio: -0.1));
+    }
+
+    [Fact]
     public void Finish_WithCleaningOffOnlyUnifiesTheWindingAndKeepsTheFaces()
     {
         Mesh dirty = Dirty();
