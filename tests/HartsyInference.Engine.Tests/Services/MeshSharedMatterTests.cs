@@ -18,6 +18,8 @@ public sealed class MeshSharedMatterTests
 
         public int Disposals { get; private set; }
 
+        public Action? OnDispose { get; set; }
+
         public bool IsAvailable => true;
 
         public float[] Alpha(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height)
@@ -31,6 +33,7 @@ public sealed class MeshSharedMatterTests
 
         public void Dispose()
         {
+            OnDispose?.Invoke();
             Disposals++;
             LoadedFrom = null;
         }
@@ -51,7 +54,9 @@ public sealed class MeshSharedMatterTests
             return matter;
         });
         FieldInfo field = typeof(InferenceEngine).GetField("_meshPreparation", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        field.SetValue(engine, new Lazy<MeshPreparationService>(() => service));
+        Lazy<MeshPreparationService> lazy = new(() => service);
+        field.SetValue(engine, lazy);
+        Assert.Same(service, lazy.Value);
         return (engine, service, created);
     }
 
@@ -135,6 +140,37 @@ public sealed class MeshSharedMatterTests
             Assert.Equal(1, engine.MeshLifecycle.Free());
             Assert.Null(service.MatterLoadedFrom);
         }
+    }
+
+    [Fact]
+    public void FreeingMemoryReleasesTheMeshServiceBeforeTheMatterSoARunInFlightCannotReloadIt()
+    {
+        (InferenceEngine engine, MeshPreparationService service, List<FakeMatter> created) = EngineWithFakeMatter();
+        using (engine)
+        {
+            MeshService mesh = (MeshService)engine.Mesh;
+            FieldInfo disposals = typeof(MeshService).GetField("_disposals", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            service.SharedMatter.Alpha(engine.Backend, new byte[4 * 4 * 3], 4, 4);
+            int meshDisposalsWhenTheMatterWentDown = -1;
+            created[0].OnDispose = () => meshDisposalsWhenTheMatterWentDown = (int)disposals.GetValue(mesh)!;
+
+            engine.FreeMemory();
+
+            Assert.Equal(1, created[0].Disposals);
+            Assert.Equal(1, meshDisposalsWhenTheMatterWentDown);
+        }
+    }
+
+    [Fact]
+    public void ListingAndFreeingModelsDoNotCreateThePreparationService()
+    {
+        using InferenceEngine engine = new("cpu");
+        FieldInfo field = typeof(InferenceEngine).GetField("_meshPreparation", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        Assert.Empty(engine.MeshLifecycle.Loaded());
+        Assert.Equal(0, engine.MeshLifecycle.Free());
+
+        Assert.False(((Lazy<MeshPreparationService>)field.GetValue(engine)!).IsValueCreated);
     }
 
     [Fact]

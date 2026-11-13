@@ -7,7 +7,7 @@ namespace HartsyInference.Engine.Planning.Memory;
 /// <summary>The device memory of a 3D request, from the peaks recorded for it. A model with no recorded peak has no estimate: the engine claims nothing it did not measure.</summary>
 internal static class MeshMemoryProfile
 {
-    /// <summary>The matting checkpoint's weights (the F32 file the catalog pins). The model stays resident beside the shape model from the first matte until the 3D side is freed; its activations are not recorded.</summary>
+    /// <summary>The matting checkpoint's weights (the F32 file the catalog pins). The model stays resident beside the shape model from the first matte until the 3D side is freed; its activations are not recorded. It is added for a request that mattes its image; a model an earlier request left resident is not counted (the estimate does not read engine state).</summary>
     public const long MatterWeightBytes = 884_878_856;
 
     /// <summary>The recorded whole-card peak of <paramref name="request"/> on <paramref name="id"/> as a one-stage estimate, plus the matting model when the request mattes its image, or null when no peak was recorded.</summary>

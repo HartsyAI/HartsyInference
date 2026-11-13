@@ -182,7 +182,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         {
             loaded = [.. Resident().Select(entry => new MeshLoadedModel(entry.Kind, NameOf(entry.Key)))];
         }
-        if (_engine.MeshPreparationInternal.MatterLoadedFrom is { } matter)
+        if (_engine.MeshPreparationIfCreated?.MatterLoadedFrom is { } matter)
             loaded.Add(new MeshLoadedModel(MatterKind, NameOf(matter)));
         return loaded;
     }
@@ -221,13 +221,13 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// <summary>Releases the shared matting model when it is resident and <paramref name="name"/> is null or names it; returns the name it was listed under, else null.</summary>
     private string? FreeMatter(string? name)
     {
-        string? path = _engine.MeshPreparationInternal.MatterLoadedFrom;
+        string? path = _engine.MeshPreparationIfCreated?.MatterLoadedFrom;
         if (path is null)
             return null;
         string listed = NameOf(path);
         if (name is not null && !string.Equals(listed, name, StringComparison.OrdinalIgnoreCase))
             return null;
-        return _engine.MeshPreparationInternal.ReleaseMatter() ? listed : null;
+        return _engine.MeshPreparationIfCreated?.ReleaseMatter() == true ? listed : null;
     }
 
     private IEnumerable<(string Kind, string Key, IDisposable Item)> Resident()
