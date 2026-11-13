@@ -8,6 +8,8 @@ namespace HartsyInference.ModelAssets.SafeTensors;
 /// next, so the size of the file does not bound host memory the way <see cref="SafeTensorsWriter.Save"/> does.</summary>
 public static unsafe class SafeTensorsStreamWriter
 {
+    private const int WriteChunkBytes = 1 << 28;
+
     /// <summary>One tensor to write. <paramref name="Materialize"/> returns the tensor's bytes; <c>Owned</c> says whether the writer
     /// releases it after writing (a conversion) or leaves it alone (a source view).</summary>
     public readonly record struct Entry(string Name, DType DType, TensorShape Shape, Func<(Tensor Tensor, bool Owned)> Materialize);
@@ -85,7 +87,10 @@ public static unsafe class SafeTensorsStreamWriter
                             throw new InvalidOperationException(
                                 $"Tensor '{entry.Name}' materialized as {tensor.DType} ({available} bytes), expected {entry.DType} ({bytes} bytes).");
                         }
-                        file.Write(new ReadOnlySpan<byte>((void*)tensor.DataPointer, checked((int)bytes)));
+                        for (long written = 0; written < bytes; written += WriteChunkBytes)
+                        {
+                            file.Write(new ReadOnlySpan<byte>((byte*)tensor.DataPointer + written, (int)Math.Min(WriteChunkBytes, bytes - written)));
+                        }
                     }
                     finally
                     {
@@ -107,8 +112,7 @@ public static unsafe class SafeTensorsStreamWriter
         }
     }
 
-    private static string SafeTensorName(DType dtype) => dtype == DType.F32 ? "F32"
-        : dtype == DType.BF16 ? "BF16"
-        : dtype == DType.F16 ? "F16"
-        : throw new NotSupportedException($"Streaming safetensors writer does not support {dtype}.");
+    private static string SafeTensorName(DType dtype) => dtype.IsQuantized
+        ? throw new NotSupportedException($"Streaming safetensors writer does not support {dtype}.")
+        : dtype.Name;
 }
