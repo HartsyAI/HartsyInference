@@ -216,34 +216,25 @@ public sealed class XPartPipeline
         return (objectContext, partContext);
     }
 
-    // The flow-matching Euler loop over all parts at once: sample += (sigma_next - sigma) * velocity, from sigma 0 (noise) to 1.
-    private Tensor Denoise(int parts, int[] ids, Tensor objectContext, Tensor partContext, XPartOptions options, Action advance, CancellationToken cancel)
+    /// <summary>The Euler steps of the flow (<c>FlowMatchEulerDiscreteScheduler.step</c> of X-Part's scheduler): <c>x += (sigma[k + 1] - sigma[k]) * v(x, sigma[k])</c> for every step. The schedule ends 1, 1, so the last step has no
+    /// width and its forward, which would be scaled by zero, is skipped. Takes ownership of <paramref name="latents"/> and returns the integrated tensor (a new one, the input is disposed).</summary>
+    internal static Tensor Integrate(IBackend backend, Tensor latents, float[] sigmas, Func<Tensor, float, Tensor> velocity, Action? advance = null, CancellationToken cancel = default)
     {
-        float[] sigmas = Hunyuan3DFlowSchedule.Sigmas(options.Steps);
-        using SafeTensorsLoader loader = new();
-        loader.Load(Path.Combine(_folder, "model", "model.safetensors"));
-        using XPartDit dit = new();
-        // BF16 matrices become F16 on a device backend (6.6 GB instead of 13 GB), as for the 2.1 shape DiT; the CPU keeps F32.
-        dit.LoadWeights(loader.GetAllTensors(), halfWeights: _backend.Device != DeviceKind.Cpu);
-        Tensor? latents = null;
         try
         {
-            latents = new Tensor(new TensorShape(parts, LatentTokens, LatentChannels), DType.F32);
-            XPartSampling.Gaussian(latents.ElementCount, options.Seed).CopyTo(latents.AsSpan<float>());
-            for (int step = 0; step < options.Steps; step++)
+            for (int step = 0; step < sigmas.Length - 1; step++)
             {
                 cancel.ThrowIfCancellationRequested();
                 float dt = sigmas[step + 1] - sigmas[step];
-                // The schedule ends 1, 1: the last step has no width, so the forward that would be scaled by zero is skipped.
                 if (dt != 0)
                 {
-                    using Tensor velocity = dit.Forward(_backend, latents, Hunyuan3DFlowSchedule.DitTimestep(sigmas[step]), objectContext, partContext, ids);
+                    using Tensor v = velocity(latents, Hunyuan3DFlowSchedule.DitTimestep(sigmas[step]));
                     using Tensor delta = new(latents.Shape, DType.F32);
-                    _backend.Scale(delta, velocity, dt);
+                    backend.Scale(delta, v, dt);
                     Tensor next = new(latents.Shape, DType.F32);
                     try
                     {
-                        _backend.Add(next, latents, delta);
+                        backend.Add(next, latents, delta);
                     }
                     catch
                     {
@@ -255,16 +246,31 @@ public sealed class XPartPipeline
                     latents = next;
                 }
 
-                advance();
+                advance?.Invoke();
             }
 
             return latents;
         }
         catch
         {
-            latents?.Dispose();
+            latents.Dispose();
             throw;
         }
+    }
+
+    // The flow-matching Euler loop over all parts at once: sample += (sigma_next - sigma) * velocity, from sigma 0 (noise) to 1.
+    private Tensor Denoise(int parts, int[] ids, Tensor objectContext, Tensor partContext, XPartOptions options, Action advance, CancellationToken cancel)
+    {
+        float[] sigmas = Hunyuan3DFlowSchedule.Sigmas(options.Steps);
+        using SafeTensorsLoader loader = new();
+        loader.Load(Path.Combine(_folder, "model", "model.safetensors"));
+        using XPartDit dit = new();
+        // BF16 matrices become F16 on a device backend (6.6 GB instead of 13 GB), as for the 2.1 shape DiT; the CPU keeps F32.
+        dit.LoadWeights(loader.GetAllTensors(), halfWeights: _backend.Device != DeviceKind.Cpu);
+        Tensor latents = new(new TensorShape(parts, LatentTokens, LatentChannels), DType.F32);
+        XPartSampling.Gaussian(latents.ElementCount, options.Seed).CopyTo(latents.AsSpan<float>());
+        // Integrate owns the latents from here and disposes them if a step fails.
+        return Integrate(_backend, latents, sigmas, (x, t) => dit.Forward(_backend, x, t, objectContext, partContext, ids), advance, cancel);
     }
 
     // The release's ShapeVAE: 16 decoder blocks of width 1024 and 16 heads, 8 Fourier frequencies, scale factor 1.0039506.
