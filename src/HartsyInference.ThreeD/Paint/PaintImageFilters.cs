@@ -1,29 +1,59 @@
 namespace HartsyInference.ThreeD.Paint;
 
-/// <summary>Binary image filters the bake needs: a Canny-style edge detector and square dilation.</summary>
+/// <summary>Binary image filters the bake needs: OpenCV's Canny edge detector and square dilation.</summary>
 public static class PaintImageFilters
 {
-    /// <summary>Sobel L1 gradient magnitude with hysteresis thresholds (<c>cv2.Canny</c>'s default norm and 3x3 aperture) on an 8-bit image.
-    /// Non-maximum suppression is omitted, so edges are up to a pixel thicker; the caller dilates them anyway.</summary>
+    private const int CannyShift = 15, Tg22 = 13573; // tan(22.5 degrees) in 15-bit fixed point, as in OpenCV
+
+    /// <summary><c>cv2.Canny(gray, low, high)</c> with its defaults (3x3 Sobel, L1 gradient magnitude) on an 8-bit image, as OpenCV's <c>canny.cpp</c> computes it: Sobel with a replicated border, the magnitude <c>|dx| + |dy|</c>,
+    /// non-maximum suppression along the gradient direction chosen with the fixed-point tangent of 22.5 and 67.5 degrees (candidates need a magnitude above <paramref name="low"/>, zero outside the image), then hysteresis: a candidate is an
+    /// edge when an 8-connected chain of candidates joins it to one above <paramref name="high"/>.</summary>
     public static bool[] Edges(byte[] gray, int width, int height, int low, int high)
     {
         if (gray.Length != width * height)
             throw new ArgumentException("Image size does not match the dimensions.", nameof(gray));
-        int[] magnitude = new int[gray.Length];
-        Parallel.For(1, height - 1, y =>
+        int[] dx = new int[gray.Length], dy = new int[gray.Length], magnitude = new int[gray.Length];
+        Parallel.For(0, height, y =>
         {
-            for (int x = 1; x < width - 1; x++)
+            int up = Math.Max(y - 1, 0) * width, mid = y * width, down = Math.Min(y + 1, height - 1) * width;
+            for (int x = 0; x < width; x++)
             {
-                int i = y * width + x;
-                int gx = gray[i - width + 1] + 2 * gray[i + 1] + gray[i + width + 1] - gray[i - width - 1] - 2 * gray[i - 1] - gray[i + width - 1];
-                int gy = gray[i + width - 1] + 2 * gray[i + width] + gray[i + width + 1] - gray[i - width - 1] - 2 * gray[i - width] - gray[i - width + 1];
+                int left = Math.Max(x - 1, 0), right = Math.Min(x + 1, width - 1);
+                int gx = gray[up + right] + 2 * gray[mid + right] + gray[down + right] - gray[up + left] - 2 * gray[mid + left] - gray[down + left];
+                int gy = gray[down + left] + 2 * gray[down + x] + gray[down + right] - gray[up + left] - 2 * gray[up + x] - gray[up + right];
+                int i = mid + x;
+                dx[i] = gx;
+                dy[i] = gy;
                 magnitude[i] = Math.Abs(gx) + Math.Abs(gy);
             }
         });
+
+        int Mag(int x, int y) => (uint)x >= (uint)width || (uint)y >= (uint)height ? 0 : magnitude[y * width + x];
+        bool[] candidate = new bool[gray.Length];
+        Parallel.For(0, height, y =>
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int i = y * width + x, m = magnitude[i];
+                if (m <= low)
+                    continue;
+                int xs = dx[i], ys = dy[i], ax = Math.Abs(xs), ay = Math.Abs(ys) << CannyShift, tg22x = ax * Tg22;
+                if (ay < tg22x)
+                    candidate[i] = m > Mag(x - 1, y) && m >= Mag(x + 1, y);
+                else if (ay > tg22x + (ax << (CannyShift + 1)))
+                    candidate[i] = m > Mag(x, y - 1) && m >= Mag(x, y + 1);
+                else
+                {
+                    int s = (xs ^ ys) < 0 ? -1 : 1;
+                    candidate[i] = m > Mag(x - s, y - 1) && m > Mag(x + s, y + 1);
+                }
+            }
+        });
+
         bool[] edge = new bool[gray.Length];
         Stack<int> pending = new();
-        for (int i = 0; i < magnitude.Length; i++)
-            if (magnitude[i] > high)
+        for (int i = 0; i < candidate.Length; i++)
+            if (candidate[i] && magnitude[i] > high)
             {
                 edge[i] = true;
                 pending.Push(i);
@@ -32,14 +62,11 @@ public static class PaintImageFilters
         {
             int i = pending.Pop();
             int x = i % width, y = i / width;
-            for (int dy = -1; dy <= 1; dy++)
-                for (int dx = -1; dx <= 1; dx++)
+            for (int ny = Math.Max(y - 1, 0); ny <= Math.Min(y + 1, height - 1); ny++)
+                for (int nx = Math.Max(x - 1, 0); nx <= Math.Min(x + 1, width - 1); nx++)
                 {
-                    int nx = x + dx, ny = y + dy;
-                    if ((uint)nx >= (uint)width || (uint)ny >= (uint)height)
-                        continue;
                     int j = ny * width + nx;
-                    if (!edge[j] && magnitude[j] > low)
+                    if (candidate[j] && !edge[j])
                     {
                         edge[j] = true;
                         pending.Push(j);
