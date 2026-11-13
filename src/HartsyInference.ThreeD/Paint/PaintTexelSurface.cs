@@ -29,6 +29,18 @@ public sealed class PaintTexelSurface
     /// <summary>Number of covered texels.</summary>
     public int Count => Texels.Length;
 
+    /// <summary>A surface from texels and positions that are already known (a reference dump); <paramref name="texels"/> are linear indices <c>y * width + x</c> and <paramref name="positions"/> three floats each.</summary>
+    internal static PaintTexelSurface FromTexels(int width, int height, int[] texels, float[] positions)
+    {
+        ArgumentNullException.ThrowIfNull(texels);
+        ArgumentNullException.ThrowIfNull(positions);
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), "The texture needs a positive size.");
+        if (positions.Length != texels.Length * 3 || texels.Any(t => t < 0 || t >= (long)width * height) || texels.Distinct().Count() != texels.Length)
+            throw new ArgumentException("The texels must be distinct, lie in the texture and have one position each.");
+        return new PaintTexelSurface(width, height, texels, positions);
+    }
+
     /// <summary>Rasterizes the frame's triangles in UV space (one UV pair per vertex of <paramref name="uvs"/>) and interpolates positions.</summary>
     public static PaintTexelSurface Create(PaintMeshFrame frame, ReadOnlySpan<float> uvs, int width, int height, CancellationToken cancellationToken = default)
     {
