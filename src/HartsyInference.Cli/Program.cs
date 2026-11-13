@@ -170,6 +170,9 @@ public static class Program
             config.AddCommand<QuantizeCommand>("quantize")
                 .WithDescription("Write a quantized GGUF copy of a checkpoint. Offline — the engine never quantizes at load.")
                 .WithExample("quantize", "--model-path", "/models/flux2-klein.safetensors", "-o", "/models/klein-Q8_0.gguf", "--quant", "Q8_0");
+            config.AddCommand<MergeCommand>("merge")
+                .WithDescription("Merge sharded safetensors (a folder, an index.json or one file) into one .safetensors file, streaming tensor by tensor.")
+                .WithExample("merge", "/models/IrisZ/Iris-Z-small/transformer-*.safetensors", "-o", "/models/IrisZ/Iris-Z-small-merged.safetensors", "--model", "iris-z-small");
         });
 
         // Without this the run always fails: StrictParsing above refuses any option no command declares, and no

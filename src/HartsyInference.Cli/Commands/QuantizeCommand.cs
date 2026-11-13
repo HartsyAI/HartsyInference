@@ -33,7 +33,7 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
 
         /// <summary>Output container and scheme.</summary>
         [CommandOption("--format")]
-        [Description("Output format: gguf, fp8-scaled or int8-convrot.")]
+        [Description("Output format: gguf, fp8-scaled, int8-convrot or nvfp4.")]
         public string Format { get; init; } = "gguf";
 
         /// <summary>Value for the output's <c>general.architecture</c>, which is how a reader picks a key mapper.</summary>
@@ -53,6 +53,7 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
         ["gguf"] = QuantizationTargetKind.Gguf,
         ["fp8-scaled"] = QuantizationTargetKind.Fp8Scaled,
         ["int8-convrot"] = QuantizationTargetKind.Int8ConvRot,
+        ["nvfp4"] = QuantizationTargetKind.Nvfp4,
     };
 
     /// <summary>Named presets, matched case-insensitively so <c>q4_k_m</c> works as well as <c>Q4_K_M</c>.</summary>
