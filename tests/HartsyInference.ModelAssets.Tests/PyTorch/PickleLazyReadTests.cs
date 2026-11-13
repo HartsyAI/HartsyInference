@@ -7,7 +7,7 @@ namespace HartsyInference.ModelAssets.Tests.PyTorch;
 public sealed class PickleLazyReadTests : IDisposable
 {
     // torch.save({"a.weight": tensor([[1, 2.5, -3], [0.1, 65519, 1e-8]]), "b": a transposed view of [4, 5, 6, 7] (stride (1, 2))}), written by torch 2.x.
-    private const string Checkpoint =
+    internal const string Checkpoint =
         "UEsDBAAACAgAAAAAAAAAAAAAAAAAAAAAAAAQABIAYXJjaGl2ZS9kYXRhLnBrbEZCDgBaWlpaWlpaWlpaWlpaWoACfXEAKFgIAAAAYS53ZWlnaHRxAWN0b3Jj" +
         "aC5fdXRpbHMKX3JlYnVpbGRfdGVuc29yX3YyCnECKChYBwAAAHN0b3JhZ2VxA2N0b3JjaApGbG9hdFN0b3JhZ2UKcQRYAQAAADBxBVgDAAAAY3B1cQZLBnRx" +
         "B1FLAEsCSwOGcQhLA0sBhnEJiWNjb2xsZWN0aW9ucwpPcmRlcmVkRGljdApxCilScQt0cQxScQ1YAQAAAGJxDmgCKChoA2gEWAEAAAAxcQ9oBksEdHEQUUsA" +

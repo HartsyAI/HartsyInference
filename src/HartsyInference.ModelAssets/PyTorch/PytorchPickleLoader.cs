@@ -16,6 +16,14 @@ public sealed class PytorchPickleLoader : IDisposable
     private Dictionary<string, PickleTensor>? _lazyMetas;
     private int _disposed;
 
+    /// <summary>Whether <paramref name="filePath"/> starts like a modern (ZIP) <c>torch.save</c> file, the only format <see cref="OpenLazy"/> reads.</summary>
+    public static bool IsZipCheckpoint(string filePath)
+    {
+        Span<byte> magic = stackalloc byte[2];
+        using FileStream stream = File.OpenRead(filePath);
+        return stream.Read(magic) == 2 && magic[0] == 0x50 && magic[1] == 0x4b;
+    }
+
     /// <summary>Tensor name → metadata (shape/dtype) parsed from the pickle.</summary>
     public IReadOnlyDictionary<string, PytorchTensorDescriptor> Descriptors { get; private set; }
         = new Dictionary<string, PytorchTensorDescriptor>();
