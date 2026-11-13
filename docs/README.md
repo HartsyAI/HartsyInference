@@ -25,6 +25,7 @@ git preserves removed history.
 | Pixal3D: source spike, TRELLIS.2 reuse map, projection conditioning, NAF, licence, weights inventory | [Research/PIXAL3D_ARCHITECTURE.md](Research/PIXAL3D_ARCHITECTURE.md) |
 | Hunyuan3D-Omni (control encoder on the 2.1 shape model): pins, weights, licence, reuse map | [Research/HUNYUAN3D_OMNI_ARCHITECTURE.md](Research/HUNYUAN3D_OMNI_ARCHITECTURE.md) |
 | 3D weights inventory: which files are linked, repacked and self-hosted, with the licence terms that bind a host | [Research/WEIGHTS_HOSTING_3D.md](Research/WEIGHTS_HOSTING_3D.md) |
+| Hosting the repacked 3D weights: the upload set with hashes, the licence files, the checks and the steps | [../tools/WeightsMirror/README.md](../tools/WeightsMirror/README.md) |
 | Mesh post-processing and PBR baking toolkit: algorithms, conventions, limits against cumesh and xatlas | [Research/MESH_POSTPROCESS.md](Research/MESH_POSTPROCESS.md) |
 | What a 3D host needs from the engine: today's mesh contract, the additive API proposal | [Research/HARTSY3D_ENGINE_PREREQS.md](Research/HARTSY3D_ENGINE_PREREQS.md) |
 | MiniMax-H3-Image architecture: header facts, ComfyUI reference constants, plan corrections, open items | [Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md](Research/MINIMAX_H3_IMAGE_ARCHITECTURE.md) |

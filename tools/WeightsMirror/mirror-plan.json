@@ -26,7 +26,7 @@
       "spdx": "MIT",
       "hostObligations": "Keep the MIT copyright and licence notice with the files and credit the Articulation-XL2.0 dataset (CC BY 4.0). The Michelangelo source in the UniRig code carries a GPL-3.0 header; whether that reaches the weights is not settled.",
       "textFiles": [
-        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/VAST-AI-Research/UniRig/main/LICENSE", "size": 1124, "gitBlobSha1": "a20d482774136ee1858d92964e896031598902b4" }
+        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/VAST-AI-Research/UniRig/cf7622f2be1de5ae315478ed8d21681b95dc9ff3/LICENSE", "size": 1124, "gitBlobSha1": "a20d482774136ee1858d92964e896031598902b4" }
       ]
     },
     {
@@ -35,7 +35,7 @@
       "spdx": "Apache-2.0",
       "hostObligations": "Keep the Apache-2.0 licence text and notices with the file. The release asset itself carries no licence statement.",
       "textFiles": [
-        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/valeoai/NAF/main/LICENSE", "size": 11357, "gitBlobSha1": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835" }
+        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/valeoai/NAF/4a73dfbe8851d44a7c62a6c6aba2a59fd9ebcf87/LICENSE", "size": 11357, "gitBlobSha1": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835" }
       ]
     }
   ],
