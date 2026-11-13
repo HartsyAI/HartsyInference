@@ -9,12 +9,13 @@ public static class ShapeMeshFinisher
 {
     /// <summary>Returns the mesh to export: repaired with <see cref="MeshCleaner.Clean"/> when <paramref name="clean"/> is set, otherwise
     /// the winding unified only, then smooth vertex normals. The input is not modified when it is repaired. <paramref name="smallComponentAreaRatio"/> is
-    /// <see cref="MeshCleanOptions.SmallComponentAreaRatio"/>: a model whose extraction leaves larger floating pieces raises it.</summary>
-    public static Mesh Finish(Mesh mesh, bool clean = true, double smallComponentAreaRatio = 1e-5)
+    /// <see cref="MeshCleanOptions.SmallComponentAreaRatio"/>: a model whose extraction leaves larger floating pieces raises it. <paramref name="smallComponentFaceRatio"/> is
+    /// <see cref="MeshCleanOptions.SmallComponentFaceRatio"/>, the rule of a model whose upstream removes floaters by face count (the Hunyuan3D shape models).</summary>
+    public static Mesh Finish(Mesh mesh, bool clean = true, double smallComponentAreaRatio = 1e-5, double smallComponentFaceRatio = 0)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         if (clean)
-            return MeshOps.ComputeVertexNormals(MeshCleaner.Clean(mesh, new MeshCleanOptions { SmallComponentAreaRatio = smallComponentAreaRatio }));
+            return MeshOps.ComputeVertexNormals(MeshCleaner.Clean(mesh, new MeshCleanOptions { SmallComponentAreaRatio = smallComponentAreaRatio, SmallComponentFaceRatio = smallComponentFaceRatio }));
         FaceOrientation.Unify(mesh);
         return MeshOps.ComputeVertexNormals(mesh);
     }

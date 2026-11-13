@@ -22,6 +22,11 @@ public sealed record MeshCleanOptions
     /// <summary>Remove vertex-connected components whose area is below this fraction of the total area; 0 disables.</summary>
     public double SmallComponentAreaRatio { get; init; } = 1e-5;
 
+    /// <summary>Remove edge-connected components with fewer faces than this fraction (between 0 and 1) of the largest component's face count, truncated as MeshLab truncates it; 0 disables. This is
+    /// pymeshlab's <c>compute_selection_by_small_disconnected_components_per_face(nbfaceratio)</c>, which <c>hy3dshape/postprocessors.py</c> (<c>remove_floater</c>) calls with 0.005; the engine applies it
+    /// to Hunyuan3D-Omni so far (the 2.x shape models ship the same post-processor, their engine path does not use the rule yet). It runs before <see cref="SmallComponentAreaRatio"/>.</summary>
+    public double SmallComponentFaceRatio { get; init; }
+
     /// <summary>Fill boundary loops up to this perimeter; 0 disables.</summary>
     public double HoleFillMaxPerimeter { get; init; } = 3e-2;
 
