@@ -11,7 +11,8 @@
 #
 # Environment: ERNIE_CKPT_DIR (checkpoint folder, required by verify and test), ERNIE_RUN_DIR (logs, default ./ernie55-run-<time>),
 # ERNIE_MIN_FREE_MIB (default 24576), ERNIE_REAL_TOKENS (default 1,2,3,4,5), ERNIE_VERIFY (size or sha256; default size),
-# ERNIE_REAL_DEVICE (default cuda; cpu is for rehearsing this script on a small synthetic checkpoint, not for the real run).
+# ERNIE_REAL_DEVICE (default cuda; cpu rehearses the test stage on a small synthetic checkpoint, not the real run; vulkan runs
+# the test without a VRAM sample, since only cuda is sampled).
 # Every stage stops the script on its first failure.
 set -euo pipefail
 
@@ -25,6 +26,7 @@ MIN_FREE_MIB="${ERNIE_MIN_FREE_MIB:-24576}"
 TOKENS="${ERNIE_REAL_TOKENS:-1,2,3,4,5}"
 RUN_DIR="${ERNIE_RUN_DIR:-${PWD}/ernie55-run-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$(realpath -m "$RUN_DIR")"   # absolute: the test stage changes directory before it writes the log
+[[ -z "${ERNIE_CKPT_DIR:-}" ]] || ERNIE_CKPT_DIR="$(realpath -m "$ERNIE_CKPT_DIR")"   # the test runs from the repo root
 
 fail() {
     echo "FAILED: $*" >&2
@@ -93,7 +95,7 @@ stage_verify() {
             echo "size mismatch: ${path} is ${actual}, the pin says ${size}"
             mismatched=$((mismatched + 1))
         fi
-    done < "$MANIFEST"
+    done < <(tr -d '\r' < "$MANIFEST")
     [[ "$missing" -eq 0 ]] || fail "${missing} file(s) missing"
     [[ "$mismatched" -eq 0 ]] || fail "${mismatched} file(s) differ in size"
     [[ "$sum" -eq "$EXPECTED_BYTES" ]] || fail "manifest sums to ${sum}, expected ${EXPECTED_BYTES}"
@@ -109,7 +111,7 @@ stage_verify() {
     if [[ "${ERNIE_VERIFY:-size}" == "sha256" ]]; then
         local list="${RUN_DIR}/sha256.list"
         ensure_run_dir
-        awk '$1 != "-" && $1 !~ /^#/ { print $1 "  " $3 }' "$MANIFEST" > "$list"
+        tr -d '\r' < "$MANIFEST" | awk '$1 != "-" && $1 !~ /^#/ { print $1 "  " $3 }' > "$list"
         (cd "$ERNIE_CKPT_DIR" && sha256sum -c --quiet "$list") || fail "sha256 mismatch"
         echo "sha256 ok: $(wc -l < "$list") files"
     else
@@ -146,25 +148,28 @@ stage_ptx_check() {
 stage_test() {
     require_ckpt
     require_cmd dotnet
-    require_cmd nvidia-smi
     ensure_run_dir
-    local device="${ERNIE_REAL_DEVICE:-cuda}" log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler
-    (
-        while true; do
-            nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
-            sleep 0.5
-        done
-    ) > "$vram" 2>/dev/null &
-    sampler=$!
-    # shellcheck disable=SC2064
-    trap "kill $sampler 2>/dev/null || true" EXIT
+    local device="${ERNIE_REAL_DEVICE:-cuda}" log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler=""
+    device="${device,,}"
+    if [[ "$device" == cuda ]]; then
+        require_cmd nvidia-smi
+        (
+            while true; do
+                nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
+                sleep 0.5
+            done
+        ) > "$vram" 2>/dev/null &
+        sampler=$!
+        # shellcheck disable=SC2064
+        trap "kill $sampler 2>/dev/null || true" EXIT
+    fi
 
     cd "$REPO_ROOT"
     local status=0
     ERNIE_REAL_DIR="$ERNIE_CKPT_DIR" ERNIE_REAL_DEVICE="$device" ERNIE_REAL_TOKENS="$TOKENS" \
         dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests" \
         --logger "console;verbosity=normal" 2>&1 | tee "$log" || status=$?
-    kill "$sampler" 2>/dev/null || true
+    [[ -z "$sampler" ]] || kill "$sampler" 2>/dev/null || true
     trap - EXIT
     [[ "$status" -eq 0 ]] || fail "dotnet test exited ${status}; see ${log}"
 
@@ -175,14 +180,17 @@ stage_test() {
     local timing
     timing="$(grep -m1 "^ERNIE real run on ${device}:" "$log" || true)"
     [[ -n "$timing" ]] || fail "no timing line from the forward; see ${log}"
-    local peak
-    peak="$(sort -n "$vram" | tail -1)"
     {
         echo "commit: $(git -C "$REPO_ROOT" rev-parse HEAD)"
-        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
-        nvidia-smi | grep -o 'CUDA Version: [0-9.]*' || true
+        echo "device: ${device}"
+        if [[ "$device" == cuda ]]; then
+            nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+            nvidia-smi | grep -o 'CUDA Version: [0-9.]*' || true
+            local peak
+            peak="$(sort -n "$vram" | tail -1)"
+            echo "peak VRAM used (MiB, sampled every 0.5 s): ${peak:-unknown}"
+        fi
         echo "$timing"
-        echo "peak VRAM used (MiB, sampled every 0.5 s): ${peak:-unknown}"
     } | tee "${RUN_DIR}/summary.txt"
 }
 
