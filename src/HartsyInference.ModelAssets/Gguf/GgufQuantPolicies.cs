@@ -94,6 +94,8 @@ public sealed record GgufQuantPolicy
         if (lower.Contains("position_embd", StringComparison.Ordinal)) return true;
         if (lower.Contains("pos_embed", StringComparison.Ordinal)) return true;
         if (lower.Contains("register_tokens", StringComparison.Ordinal)) return true;
+        // Iris-Z's modality table: a 4-row lookup added to each token, read densely by the FLUX.2 transformer, not a projection.
+        if (lower.Contains("modality_in", StringComparison.Ordinal)) return true;
         return false;
     }
 
