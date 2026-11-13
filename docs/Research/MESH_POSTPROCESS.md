@@ -156,6 +156,11 @@ of each vertex's texel, averaged on a 512 grid, 379,483 voxels), not the origina
 
 ## Closing slits and gaps (`HoleFiller`)
 
+State of the shape-only finisher, plainly: the default finisher turns non-manifold edges into boundary edges. It splits vertices, so each split leaves boundary edges by index (Pixal3D bust 1024: 891,942
+non-manifold edges become 995,170 boundary edges; welded by position the non-manifold count is still 785,313). That bust is the worst case measured; on the mugs the change is small (512: 41,231 to 46,678). Only upstream's
+dual-contouring remesh (`remesh_narrow_band_dc`) would remove it, and it is not ported. `HoleFiller` and `CloseOpenings` below close most of those cuts and slits, but by index only: on that bust width 0.1 takes the boundary
+from 995,170 to 340,960 while the welded non-manifold count rises from 785,313 to 872,800 and the time from 7.3 to 25 s, so they are off by default and stay off.
+
 An opt-in step after the perimeter fill (`MeshCleanOptions.HoleFillMaxWidth`, default 0 = off, so the default output is unchanged). It traces the boundary with `MeshBoundary`, cuts walks that pass a pinch vertex
 into simple cycles, and triangulates each cycle by ear clipping without adding a vertex. Ears are ranked by roundness (a sliver along one side of a slit comes last, so the clipping zips across the slit), with a
 small penalty for a long new edge and a large one for an ear that folds against the surrounding surface; an ear whose new edge already exists in the mesh is skipped (it would give that edge a third face). A cycle is
