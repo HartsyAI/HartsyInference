@@ -78,7 +78,7 @@ Times on the CPU (i7-9700K): this repository, features for 6000 points 12.5 s (5
 
 Findings: (1) upstream's `PointTransformerV3.__init__` builds its `GridPooling` layers without `shuffle_orders`, so they keep the default `True` and permute the serialisation orders at random on every pooling, at inference too: upstream's features from stage 1 on differ from run to run (about 10 % RMS between two runs of the unmodified code). The oracle pins it off; this repository always uses the fixed order sequence, which is one of the outputs upstream can produce. (2) `GridSample` in the `train` mode picks a random point per voxel; the oracle and this repository's `First` pick agree on the voxel selection, the random pick is not reproducible against Python.
 
-Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, the farthest-point prompts (`fpsample` versus `SurfaceSampler`), a whole run on a real mesh, the GPU. The Sonata weights licence is not stated by the model card (the pickle `sonata.pth` and the Sonata repository were not read); this file is distributed under the Tencent licence above, but Sonata's own terms are unverified.
+Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, the farthest-point prompts (`fpsample` versus `SurfaceSampler`), a whole run on a real mesh, the GPU. This file is distributed under the Tencent licence above; the Sonata backbone's own terms (CC-BY-NC 4.0 weights) are in the Dependencies paragraph at the top.
 
 ## GPU run and TF32 (2026-11-12, RTX 3060)
 

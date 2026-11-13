@@ -7,7 +7,9 @@ namespace HartsyInference.Engine.Services;
 internal static class MeshModelProfiles
 {
     private const string Hunyuan2Terms = "Tencent Hunyuan 3D 2.0 Community License";
-    private const string SonataNonCommercial = "The Sonata backbone weights (facebook/sonata) are released under CC-BY-NC 4.0, restricted by the non-commercial terms of datasets such as HM3D and ArkitScenes (github.com/facebookresearch/sonata); whether the fine-tuned P3-SAM checkpoint inherits that is not settled by either licence text, so treat the Sonata-derived part as non-commercial unless the licensors say otherwise";
+    private const string SonataNonCommercial = "The Sonata backbone weights (facebook/sonata) are released under CC-BY-NC 4.0 (non-commercial), restricted by the non-commercial terms of datasets such as HM3D and ArkitScenes (github.com/facebookresearch/sonata)";
+
+    private const string SonataInheritance = "Whether the fine-tuned Hunyuan3D-Part checkpoints (P3-SAM, and the Sonata copy inside X-Part's conditioner) inherit the Sonata terms is not settled by either licence text: treat the Sonata-derived part as non-commercial unless the licensors say otherwise";
 
     private static readonly string[] HunyuanRestrictions =
     [
@@ -93,8 +95,8 @@ internal static class MeshModelProfiles
                     Seed("Seeds the surface sampling."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
                 {
-                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0",
-                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial],
+                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0 (non-commercial)",
+                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial, SonataInheritance],
                 },
                 new MeshCost { PeakVramGiB = 4.7, TypicalSeconds = 53, Basis = "RTX 3060 through the CLI on a 1.0 M-face bust, peak 4.7." },
                 peak: _ => 4.7,
@@ -106,8 +108,8 @@ internal static class MeshModelProfiles
                     Seed("Fixes the surface samples, the part ids and the noise; a negative value draws a random seed."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
                 {
-                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0",
-                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial],
+                    Summary = "Tencent Hunyuan 3D-Part Community License; its Sonata backbone comes from facebook/sonata, whose weights are CC-BY-NC 4.0 (non-commercial)",
+                    Restrictions = [.. HunyuanRestrictions, SonataNonCommercial, SonataInheritance],
                 },
                 new MeshCost { PeakVramGiB = 9.5, TypicalSeconds = 385, Basis = "RTX 3060, a 40,080-face bust split into 3 parts, grid 256, 50 steps: P3-SAM 66 s, conditioning 21 s, flow 140 s, decode 141 s." },
                 peak: _ => 9.5,
