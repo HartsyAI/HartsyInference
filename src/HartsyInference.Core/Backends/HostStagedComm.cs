@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -83,6 +84,11 @@ public sealed unsafe class HostStagedComm : ICollectiveComm
     {
         AllToAllLayout.Validate(_ranks, sendBuffers, recvBuffers, elementCounts);
         int size = sendBuffers[0].DType.SizeInBytes;
+        for (int dst = 0; dst < _ranks; dst++)
+        {
+            // Zeroed like the device path, so a receive buffer's tail past the exchange is the same on every transport.
+            NativeMemory.Clear(recvBuffers[dst].DataPointer, (nuint)(recvBuffers[dst].ElementCount * size));
+        }
         for (int src = 0; src < _ranks; src++)
         {
             byte* srcHost = (byte*)sendBuffers[src].DataPointer;

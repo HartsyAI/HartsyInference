@@ -129,10 +129,11 @@ The doc previously said `A_log` is per key channel. That is wrong. Evidence:
 - `KimiKDAFp32Params` declares `A_log` as `torch.empty(num_heads)` (`model.py:1224`), and the decay is
   `a_log.view(num_heads, 1).exp()` (`model.py:159`), i.e. one decay per head broadcast over that head's 128 channels.
 
-Consequence for the engine: `KimiK31WeightLoader.cs:103-106` reads 128 entries and uses `aLogHead[ch % KdaHeadDim]`, which
-indexes by channel-within-head and pulls the zero padding in for channels 96 to 127 of each head. It should read the first
-96 entries and use `aLog[ch] = aLogHead[ch / KdaHeadDim]`. See the engine findings below. Only layer 1 was byte-checked; the
-padding pattern for other layers is inferred from NeMo's adapter, not measured.
+Loader: `KimiK31WeightLoader` reads one value per head, `aLog[ch] = aLogHead[ch / KdaHeadDim]`. It accepts two shapes:
+`[Heads]`, and the stored `[KdaHeadDim]` form whose entries past `Heads` must be zero. The tail is checked at load time, so
+the padding reading is verified on every load rather than assumed: a nonzero padding entry is refused, and the error names
+its index and value. Any other shape is refused by name. Only layer 1 was byte-checked; the padding pattern for other layers
+is inferred from NeMo's adapter, and the load-time tail check is what confirms it for each layer that loads.
 
 ### KDA recurrence
 
@@ -324,7 +325,7 @@ need their own PR with decoder-level tests.
 | 1c | AttnRes RMSNorm eps | Verified for NeMo (1e-5 from config); paper silent | NeMo `model.py:1839-1844`; `config.json` |
 | 1d | Block-count convention (12 transformer layers vs `block_size // 2` in the paper listing) | NeMo convention adopted (8 entries, matches "≈ 8" in the paper). Not confirmed on weights | NeMo `model.py:1932`, `attn_res_triton.py:70-71`; `5-exp.tex`, `code.tex` line 34 |
 | 2 | KDA gate formula with `gate_lower_bound` -5 | Verified: `g = -5 · sigmoid(exp(A_log) · (f + dt_bias))` | NeMo `model.py:137-162`; `config.json` `linear_attn_config.gate_lower_bound` |
-| 2a | A_log shape and semantics | Resolved: per head, 96 used plus 32 zero padding (layer 1 byte-checked). The engine is wrong (finding 3) | Shard 2 header and bytes; NeMo `state_dict_adapter.py:362-383`, `model.py:1224, 159` |
+| 2a | A_log shape and semantics | Resolved: per head, 96 used plus 32 zero padding (layer 1 byte-checked). The engine reads it per head with a load-time tail check (finding 3) | Shard 2 header and bytes; NeMo `state_dict_adapter.py:362-383`, `model.py:1224, 159` |
 | 2b | KdaForgetRank | Verified: 128 = `head_dim`, not a config key | NeMo `model.py:1312`; shard header `f_a_proj` [128, 7168] |
 | 2c | RMSNorm eps | Verified: 1e-5 (config); 1e-6 is only a Python default | `config.json` `rms_norm_eps`; NeMo `model.py:343, 1325`; `configuration_kimi_k3.py:22` |
 | 2d | Output gate after the norm | Verified | NeMo `model.py:1552-1556`; FLA `fused_norm_gate.py` lines 101-104 |

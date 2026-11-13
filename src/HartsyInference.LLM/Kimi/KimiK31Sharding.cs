@@ -131,7 +131,7 @@ public static class KimiK31Sharding
         long rowElements = w.ElementCount / w.Shape[0];
         TensorShape shape = w.Shape.Rank == 1 ? new TensorShape(count) : new TensorShape(count, w.Shape[1]);
         Tensor slice = new(shape, DType.F32);
-        w.AsReadOnlySpan<float>().Slice((int)(start * rowElements), (int)(count * rowElements)).CopyTo(slice.AsSpan<float>());
+        w.AsReadOnlySpan<float>().Slice(checked((int)(start * rowElements)), checked((int)(count * rowElements))).CopyTo(slice.AsSpan<float>());
         return slice;
     }
 
@@ -146,8 +146,9 @@ public static class KimiK31Sharding
         int at = 0;
         foreach (Tensor p in parts)
         {
-            p.AsReadOnlySpan<float>().CopyTo(dst.Slice(at, (int)p.ElementCount));
-            at += (int)p.ElementCount;
+            int count = checked((int)p.ElementCount);
+            p.AsReadOnlySpan<float>().CopyTo(dst.Slice(at, count));
+            at = checked(at + count);
             p.Dispose();
         }
         return all;

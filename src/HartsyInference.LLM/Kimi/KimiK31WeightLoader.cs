@@ -116,7 +116,7 @@ public sealed class KimiK31WeightLoader
 
         // A_log holds one value per head; every key channel of a head takes that head's value. The fold is per channel, so this
         // rank folds only its own channels.
-        float[] aLogHead = HostLeading(p + "A_log", _c.Heads);
+        float[] aLogHead = HostPerHead(p + "A_log", _c.Heads, _c.KdaHeadDim);
         float[] aLog = new float[keyRank];
         for (int ch = 0; ch < keyRank; ch++) aLog[ch] = aLogHead[(firstChannel + ch) / _c.KdaHeadDim];
         (float[] up, float[] bias) = KdaLayer.FoldForgetGate(
@@ -304,6 +304,32 @@ public sealed class KimiK31WeightLoader
             if (f.Shape.Rank != 1 || f.Shape[0] < n)
                 throw new InvalidDataException($"Tensor '{name}' must be a vector of at least {n} values, got {f.Shape}.");
             return f.AsReadOnlySpan<float>().Slice(0, n).ToArray();
+        }
+        finally
+        {
+            f.Dispose();
+        }
+    }
+
+    // One value per head. Exactly `heads` values, or the stored `headDim` form whose entries past `heads` must all be zero.
+    private float[] HostPerHead(string name, int heads, int headDim)
+    {
+        Tensor f = ToF32(_src.Read(name));
+        try
+        {
+            long len = f.Shape.Rank == 1 ? f.Shape[0] : -1;
+            bool padded = len == headDim && headDim > heads;
+            if (len != heads && !padded)
+                throw new InvalidDataException(
+                    $"Tensor '{name}' has shape {f.Shape}; A_log is read as one value per head, [{heads}], or stored padded to [{headDim}] "
+                    + "with zeros past the heads. Any other shape is refused.");
+            float[] values = f.AsReadOnlySpan<float>().ToArray();
+            for (int i = heads; i < values.Length; i++)
+                if (values[i] != 0f)
+                    throw new InvalidDataException(
+                        $"Tensor '{name}' has shape {f.Shape}, but padding entry {i} is {values[i]}, not zero. The padded form is accepted only "
+                        + "with a zero tail (docs/Research/KIMI_K31_ARCHITECTURE.md, A_log).");
+            return values[..heads];
         }
         finally
         {
