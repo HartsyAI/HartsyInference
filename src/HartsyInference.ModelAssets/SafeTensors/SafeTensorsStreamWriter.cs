@@ -107,8 +107,7 @@ public static unsafe class SafeTensorsStreamWriter
         }
     }
 
-    private static string SafeTensorName(DType dtype) => dtype == DType.F32 ? "F32"
-        : dtype == DType.BF16 ? "BF16"
-        : dtype == DType.F16 ? "F16"
-        : throw new NotSupportedException($"Streaming safetensors writer does not support {dtype}.");
+    private static string SafeTensorName(DType dtype) => dtype.IsQuantized
+        ? throw new NotSupportedException($"Streaming safetensors writer does not support {dtype}.")
+        : dtype.Name;
 }
