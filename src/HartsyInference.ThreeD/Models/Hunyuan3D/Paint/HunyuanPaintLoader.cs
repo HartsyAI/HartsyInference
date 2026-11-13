@@ -30,7 +30,10 @@ public sealed class HunyuanPaintLoader : IDisposable
 
     /// <summary>Loads the pipeline. <paramref name="dinoPath"/> (a <c>model.safetensors</c> of <c>facebook/dinov2-giant</c> or its folder) is required for 2.1;
     /// <paramref name="upscalerPath"/> (Real-ESRGAN x4plus) is optional and used for 2.1 only.</summary>
-    public static HunyuanPaintLoader Load(IBackend backend, string folder, string? dinoPath = null, string? upscalerPath = null)
+    public static HunyuanPaintLoader Load(IBackend backend, string folder, string? dinoPath = null, string? upscalerPath = null) => Load(backend, folder, dinoPath, upscalerPath, null);
+
+    /// <summary>As <see cref="Load(IBackend, string, string?, string?)"/>, with <paramref name="conditioner"/> standing in for the DINO encoder (a comparison with Python's pipeline feeds it the tokens Python used).</summary>
+    internal static HunyuanPaintLoader Load(IBackend backend, string folder, string? dinoPath, string? upscalerPath, IPaintConditioner? conditioner)
     {
         ArgumentNullException.ThrowIfNull(backend);
         List<IDisposable> owners = [];
@@ -54,9 +57,8 @@ public sealed class HunyuanPaintLoader : IDisposable
             VaeDecoder decoder = new(vaeConfig);
             decoder.LoadWeights(vaeWeights);
 
-            IPaintConditioner? conditioner = null;
             Func<byte[], int, (byte[] Rgb, int Size)>? upscale = null;
-            if (config.UseDino)
+            if (config.UseDino && conditioner is null)
             {
                 if (dinoPath is null)
                     throw new FileNotFoundException("Paint 2.1 conditions on DINOv2-giant; supply the facebook/dinov2-giant model.safetensors (or its folder).");

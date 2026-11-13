@@ -170,7 +170,7 @@ public sealed class HunyuanPaintPipeline
     }
 
     // Returns the generated views, material-major: [material][view] as square RGB bytes at the view resolution.
-    private byte[][] Diffuse(IReadOnlyList<PaintViewCandidate> views, byte[][] normalMaps, byte[][] positionMaps, ReadOnlySpan<byte> referenceRgb, int referenceWidth,
+    internal byte[][] Diffuse(IReadOnlyList<PaintViewCandidate> views, byte[][] normalMaps, byte[][] positionMaps, ReadOnlySpan<byte> referenceRgb, int referenceWidth,
         int referenceHeight, HunyuanPaintOptions o, Action<GenerationProgress>? progress, CancellationToken cancellationToken)
     {
         int n = views.Count, size = o.ViewResolution, latent = size / 8, materials = _config.MaterialCount;
@@ -217,6 +217,14 @@ public sealed class HunyuanPaintPipeline
             float[][] latents = new float[materials][];
             for (int m = 0; m < materials; m++)
             {
+                if (o.InitialLatents is { } injected)
+                {
+                    if (injected.Length != materials || injected[m].Length != perMaterial)
+                        throw new ArgumentException($"InitialLatents needs {materials} arrays of {perMaterial} values.", nameof(o));
+                    latents[m] = (float[])injected[m].Clone();
+                    continue;
+                }
+
                 latents[m] = new float[perMaterial];
                 for (long i = 0; i < perMaterial; i++)
                     latents[m][i] = (float)(Gaussian(random) * sampler.InitialNoiseScale);
