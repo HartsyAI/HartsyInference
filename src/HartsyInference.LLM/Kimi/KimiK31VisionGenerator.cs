@@ -101,7 +101,7 @@ public sealed class KimiK31VisionGenerator
             _generation.Decoder.EmbedTokens(lookup, embeds.AsSpan<float>());
             VisionTokenSplice.Apply(embeds, ids, padId, features);
 
-            KimiK31State state = new(config, capacity);
+            KimiK31State state = new(config, capacity, _generation.Decoder.Ranks);
             try
             {
                 ReadOnlySpan<float> rows = embeds.AsReadOnlySpan<float>();
