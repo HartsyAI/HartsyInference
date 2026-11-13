@@ -148,6 +148,8 @@ internal static class KimiSyntheticCheckpoint
             float[] values = new float[count];
             for (int i = 0; i < values.Length; i++) values[i] = (float)(rng.NextDouble() * 0.2 - 0.1);
             if (name.EndsWith("norm.weight", StringComparison.Ordinal)) Array.Fill(values, 1f);
+            // The stored A_log is [KdaHeadDim] with zero padding past the heads, as the checkpoint stores it.
+            if (name.EndsWith("A_log", StringComparison.Ordinal)) for (int i = Heads; i < values.Length; i++) values[i] = 0f;
             long bytes = count * 4;
             header[name] = new Dictionary<string, object>
             {

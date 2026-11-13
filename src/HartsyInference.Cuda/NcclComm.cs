@@ -131,8 +131,10 @@ public sealed unsafe class NcclComm : ICollectiveComm
         {
             _backends[i].BindAmbient();
             src[i] = GpuTransferHelper.CopyToDevice(sendBuffers[i]);
-            // Every receive buffer is a fresh output sized to its whole tensor, so the device view matches the host view.
-            dst[i] = GpuTransferHelper.AllocateDevice((nuint)(recvBuffers[i].ElementCount * dtype.SizeInBytes));
+            // Each receive buffer is a fresh output sized to its whole tensor, zeroed past the exchange like the host transport.
+            nuint recvBytes = (nuint)(recvBuffers[i].ElementCount * dtype.SizeInBytes);
+            dst[i] = GpuTransferHelper.AllocateDevice(recvBytes);
+            CudaDriverApi.cuMemsetD8Async(dst[i], 0, recvBytes, _backends[i].Stream.Handle).ThrowOnError();
         }
         NcclApi.Check(NcclApi.ncclGroupStart(), "GroupStart");
         for (int i = 0; i < RankCount; i++)
