@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Models;
@@ -154,7 +156,7 @@ public static class CheckpointQuantizer
         using GgufWriter writer = new(job.OutputPath);
         writer.SetMetadata("general.architecture", architecture);
         writer.SetMetadata("general.name", $"{architecture} (HartsyInference quantized)");
-        foreach ((string key, string value) in CarriedIdentity(source, QuantLabel(job.Target)))
+        foreach ((string key, string value) in CarriedIdentity(source, job, QuantLabel(job.Target)))
         {
             writer.SetMetadata(key, value);
         }
@@ -250,12 +252,23 @@ public static class CheckpointQuantizer
                 QuantizationTargetKind.Int8ConvRot => IsInt8Eligible(key, tensor) ? elements + 4.0 * tensor.Shape[0] : elements * 4.0,
                 // NVFP4: half a byte per weight, one E4M3 scale per 16, and an F32 tensor scale; everything else is BF16.
                 QuantizationTargetKind.Nvfp4 => IsNvfp4Eligible(key, tensor) ? elements / 2.0 + elements / 16.0 + 4.0 : elements * 2.0,
-                // GGUF: Q8_0 is the widest block quant (34 bytes per 32 values), so it bounds the K-quant presets too. Tensors the
-                // policy keeps at F16 are 2 bytes; the policy's keep-dense rules cover the small ones, so this stays an upper bound.
-                _ => (linear ? 1.0625 : 2.0) * elements,
+                // GGUF: each tensor takes the storage the writer's own routing gives it.
+                _ => GgufBytes(target.Policy!, key, tensor),
             };
         }
         return (long)total;
+    }
+
+    /// <summary>The bytes one tensor takes in a GGUF preset, from the routing the writer uses: F16 for the tensors the policy keeps,
+    /// 4 bytes for F32, and a block quant's size otherwise (at most 34 bytes per 32 values, Q8_0).</summary>
+    private static double GgufBytes(GgufQuantPolicy policy, string key, Tensor tensor)
+    {
+        DType target = policy.ResolveTargetDType(key, tensor);
+        if (target.IsQuantized)
+        {
+            return 1.0625 * tensor.ElementCount;
+        }
+        return (target == DType.F32 ? 4.0 : 2.0) * tensor.ElementCount;
     }
 
     /// <summary>Memory this process could actually get, not what the machine has.
@@ -392,7 +405,7 @@ public static class CheckpointQuantizer
             output[kv.Key] = kv.Value;
             FreeWideCopy(scratch, output, outputCountBefore, owned);
         }
-        Dictionary<string, string> metadata = CarriedIdentity(source, QuantLabel(job.Target));
+        Dictionary<string, string> metadata = CarriedIdentity(source, job, QuantLabel(job.Target));
         if (metadata.Count > 0)
         {
             // The digest describes the payload being written, not the source's, so it is recomputed over the same tensors.
@@ -470,17 +483,28 @@ public static class CheckpointQuantizer
         _ => "nvfp4",
     };
 
-    /// <summary>A title without its trailing <c>(precision)</c> qualifier, which the merge writes from the stored dtype.</summary>
+    /// <summary>A title without its trailing <c>(precision)</c> qualifier. Only a label the merge or a quantize writes is stripped,
+    /// so a name that carries its own parenthetical, such as <c>Lance (Image)</c>, keeps it.</summary>
     private static string WithoutPrecision(string title)
     {
         int open = title.LastIndexOf(" (", StringComparison.Ordinal);
-        return open > 0 && title.EndsWith(')') ? title[..open] : title;
+        if (open <= 0 || !title.EndsWith(')'))
+        {
+            return title;
+        }
+        return IsPrecisionLabel(title[(open + 2)..^1]) ? title[..open] : title;
     }
+
+    private static readonly Regex GgufPresetLabel = new(@"^Q\d_(0|K)(_[MS])?$", RegexOptions.CultureInvariant);
+
+    /// <summary>Whether a parenthetical in a title is a precision or quant label rather than part of the name.</summary>
+    private static bool IsPrecisionLabel(string label) =>
+        label is "bf16" or "fp16" or "fp32" or "mixed" or "fp8-scaled" or "int8-convrot" or "nvfp4" || GgufPresetLabel.IsMatch(label);
 
     /// <summary>The source's identity for a quantized copy, so SwarmUI still classifies it under the same class and keeps
     /// its license flag. Only a safetensors source carries one: a GGUF's own keys describe its container. The payload
     /// digest and any layout marker describe the source's bytes, so they are left out for the caller to set.</summary>
-    private static Dictionary<string, string> CarriedIdentity(CheckpointSource source, string label)
+    private static Dictionary<string, string> CarriedIdentity(CheckpointSource source, QuantizationJob job, string label)
     {
         Dictionary<string, string> metadata = new(StringComparer.Ordinal);
         if (source.Format != ModelFormat.SafeTensors)
@@ -501,7 +525,20 @@ public static class CheckpointQuantizer
             {
                 metadata["modelspec.title"] = $"{WithoutPrecision(title)} ({label})";
             }
+            // The copy's own provenance: its label, the writer, the date, and the input it was made from. What the input
+            // recorded about its own source moves to hartsy.parent_*, so the chain back to the checkpoint survives.
+            foreach (string inherited in new[] { "hartsy.source_file", "hartsy.source_sha256" })
+            {
+                if (metadata.Remove(inherited, out string? inheritedValue))
+                {
+                    metadata[inherited.Replace("hartsy.source_", "hartsy.parent_source_", StringComparison.Ordinal)] = inheritedValue;
+                }
+            }
+            metadata["hartsy.source_file"] = Path.GetFileName(job.SourcePath);
+            metadata["hartsy.converter"] = "HartsyInference.CheckpointQuantizer";
+            metadata["hartsy.precision"] = label;
             metadata["hartsy.quant"] = label;
+            metadata["modelspec.date"] = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         }
         return metadata;
     }

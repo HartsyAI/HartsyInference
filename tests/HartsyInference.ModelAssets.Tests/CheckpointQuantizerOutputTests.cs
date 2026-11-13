@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
@@ -117,8 +118,53 @@ public sealed class CheckpointQuantizerOutputTests : IDisposable
         Assert.Equal(1058820, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Fp8Scaled)));
         Assert.Equal(1073152, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Int8ConvRot)));
         Assert.Equal(600068, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Nvfp4)));
-        Assert.Equal(1124352, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0, "Q8_0")));
+        Assert.Equal(1120512, CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0, "Q8_0")));
         Assert.True(CheckpointQuantizer.EstimateOutputBytes(opened, new QuantizationTarget(QuantizationTargetKind.Fp8Scaled)) < new FileInfo(source).Length);
+    }
+
+    [Fact]
+    public void QuantizedCopyRecordsItsOwnLineageAndWriter()
+    {
+        Dictionary<string, string> inherited = new(StringComparer.Ordinal)
+        {
+            ["modelspec.architecture"] = "iris-z-small",
+            ["modelspec.license"] = "FLUX Non-Commercial License",
+            ["modelspec.title"] = "Iris-Z-small (bf16)",
+            ["modelspec.hash_sha256"] = "0x" + new string('0', 64),
+            ["hartsy.precision"] = "bf16",
+            ["hartsy.converter"] = "HartsyInference.SafeTensorsMergeService",
+            ["hartsy.source_file"] = "transformer-00001-of-00004.safetensors,transformer-00002-of-00004.safetensors",
+            ["hartsy.source_sha256"] = "251dbeb527e896fff1714cedd678a8f28bd30ba0654431270748875b8c3a466a",
+        };
+        string source = WriteSource(inherited);
+        string output = Path.Combine(_dir, "out", "fp8.safetensors");
+
+        CheckpointQuantizer.Quantize(Job(source, output, QuantizationTargetKind.Fp8Scaled));
+
+        IReadOnlyDictionary<string, string> meta = CheckpointHeader.Read(output).Metadata;
+        Assert.Equal("fp8-scaled", meta["hartsy.precision"]);
+        Assert.Equal("HartsyInference.CheckpointQuantizer", meta["hartsy.converter"]);
+        Assert.Equal("source.safetensors", meta["hartsy.source_file"]);
+        Assert.Equal("transformer-00001-of-00004.safetensors,transformer-00002-of-00004.safetensors", meta["hartsy.parent_source_file"]);
+        Assert.Equal("251dbeb527e896fff1714cedd678a8f28bd30ba0654431270748875b8c3a466a", meta["hartsy.parent_source_sha256"]);
+        Assert.False(meta.ContainsKey("hartsy.source_sha256"));
+        Assert.Equal(DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), meta["modelspec.date"]);
+    }
+
+    [Fact]
+    public void TitleKeepsItsOwnParenthesisAndTakesTheQuantLabel()
+    {
+        string source = WriteSource(new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["modelspec.architecture"] = "lance",
+            ["modelspec.title"] = "Lance (Image)",
+            ["modelspec.hash_sha256"] = "0x" + new string('0', 64),
+        });
+        string output = Path.Combine(_dir, "out", "fp8.safetensors");
+
+        CheckpointQuantizer.Quantize(Job(source, output, QuantizationTargetKind.Fp8Scaled));
+
+        Assert.Equal("Lance (Image) (fp8-scaled)", CheckpointHeader.Read(output).Metadata["modelspec.title"]);
     }
 
     [Fact]
