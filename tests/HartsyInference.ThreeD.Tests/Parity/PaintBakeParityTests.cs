@@ -225,6 +225,50 @@ public sealed class PaintBakeParityTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void NormalAndPositionMapsMatchUpstreamRendersOfTheSameViews()
+    {
+        if (!TryLoad(out Loaded f))
+            return;
+        if (!f.Archive.Has("normal0"))
+        {
+            const string reason = "the fixture has no geometry maps (regenerate it with the current dump_paint_bake.py)";
+            if (Environment.GetEnvironmentVariable(ParityFixtures.RequireWeightsVariable) == "1")
+                throw new InvalidOperationException($"{ParityFixtures.RequireWeightsVariable}=1 but {reason}.");
+            output.WriteLine($"SKIPPED: {reason}.");
+            return;
+        }
+
+        PaintViewRenderer renderer = new(PaintMeshFrame.Create(f.Mesh));
+        for (int v = 0; v < f.Views.Length / 3; v++)
+        {
+            foreach ((string name, byte[] bytes) in new[]
+            {
+                ("normal", renderer.RenderNormalMap(f.Views[v * 3], f.Views[v * 3 + 1], f.Resolution)),
+                ("position", renderer.RenderPositionMap(f.Views[v * 3], f.Views[v * 3 + 1], f.Resolution)),
+            })
+            {
+                float[] reference = f.Archive.Get($"{name}{v}").ToFloat32();
+                Assert.Equal(reference.Length, bytes.Length);
+                int different = 0, large = 0, worst = 0;
+                for (int i = 0; i < bytes.Length; i++)
+                {
+                    int expected = Math.Clamp((int)(reference[i] * 255f), 0, 255), difference = Math.Abs(expected - bytes[i]);
+                    if (difference > 0)
+                        different++;
+                    if (difference > 2)
+                        large++;
+                    worst = Math.Max(worst, difference);
+                }
+
+                output.WriteLine($"view {v} {name} map: {different} of {bytes.Length} values differ ({100.0 * different / bytes.Length:F4} %), {large} by more than 2 of 255 (largest {worst})");
+                // A value moves by a level where float rounding crosses a quantisation step; a pixel on the edge between two faces can resolve to the neighbour in one rasterizer and not the other (a float tie),
+                // which moves its three values a lot. A different convention or pixel assignment would move thousands.
+                Assert.True(different <= bytes.Length / 1000 && large <= bytes.Length / 5000, $"view {v} {name}: {different} values differ, {large} by more than 2");
+            }
+        }
+    }
+
+    [Fact]
     public void UvCoverageAgreesWithUpstreamUpToItsHalfTexelConvention()
     {
         if (!TryLoad(out Loaded f))

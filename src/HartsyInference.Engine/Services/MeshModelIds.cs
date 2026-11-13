@@ -45,8 +45,14 @@ public static class MeshModelIds
     /// complete shape; the result is a GLB with one coloured node per part plus <see cref="Requests.MeshResult.Parts"/>.</summary>
     public static readonly IReadOnlyList<string> XPartMesh = [XPart];
 
+    /// <summary>The id of Hunyuan3D-Omni.</summary>
+    public const string Omni = "hunyuan3d-omni";
+
+    /// <summary>Controlled shape generation (Hunyuan3D-Omni): the request carries <see cref="Requests.MeshRequest.Image"/> and <see cref="Requests.MeshRequest.Control"/>.</summary>
+    public static readonly IReadOnlyList<string> OmniMesh = [Omni];
+
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
-    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh, .. XPartMesh];
+    public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh, .. XPartMesh, .. OmniMesh];
 
     /// <summary><see cref="All"/> and <see cref="HairDeck"/>: every id a host can describe and plan.</summary>
     public static readonly IReadOnlyList<string> Described = [.. All, HairDeck];

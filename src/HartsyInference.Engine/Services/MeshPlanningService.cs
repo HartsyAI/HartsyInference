@@ -155,6 +155,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.PreviewTriangles) => request.PreviewTriangles != 0,
         nameof(MeshRequest.Frame) => request.Frame != MeshFrame.Native,
         nameof(MeshRequest.Mesh) => request.Mesh,
+        nameof(MeshRequest.Control) => request.Control is not null,
         _ => false,
     };
 
@@ -189,6 +190,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.PreviewTriangles) => request.PreviewTriangles.ToString(System.Globalization.CultureInfo.InvariantCulture),
         nameof(MeshRequest.Frame) => request.Frame.ToString(),
         nameof(MeshRequest.Mesh) => request.Mesh.ToString().ToLowerInvariant(),
+        nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
         _ => null,
     };
 }

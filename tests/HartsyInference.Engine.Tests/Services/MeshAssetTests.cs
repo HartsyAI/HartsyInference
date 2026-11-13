@@ -3,6 +3,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Services;
+using HartsyInference.ThreeD.Pipelines;
 
 namespace HartsyInference.Engine.Tests.Services;
 
@@ -96,6 +97,30 @@ public sealed class MeshAssetTests : IDisposable
 
         Place(Path.Combine(install, "shapevae", "shapevae.safetensors"));
         Assert.True(MeshService.XPartInstall(Path.Combine(install, "model")).Complete);
+    }
+
+    [Fact]
+    public void OmniStatusFollowsTheFolderTheLoaderIsGivenAndNeedsTheDinoFileBesideTheOthers()
+    {
+        string install = Path.Combine(_root, "elsewhere", "omni");
+        foreach (string file in Hunyuan3DOmniPipeline.Files.Where(f => f != Hunyuan3DOmniPipeline.DinoFile))
+            Place(Path.Combine(install, file));
+
+        MeshAssetStatus withoutDino = new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni, install));
+        Assert.False(withoutDino.Complete);
+        Assert.Single(withoutDino.Missing, a => a.RelativePath.EndsWith("dinov2-large/model.safetensors", StringComparison.Ordinal));
+
+        Place(Path.Combine(install, "dinov2-large", "model.safetensors"));
+        Assert.True(new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni, install)).Complete);
+        Assert.True(new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni, Path.Combine(install, "model", "pytorch_model.bin"))).Complete);
+    }
+
+    [Fact]
+    public void OmniCatalogLayoutIsCompleteWithoutAPath()
+    {
+        PlaceCatalog(MeshModelIds.Omni);
+
+        Assert.True(new MeshAssetService().GetStatus(Spec(MeshModelIds.Omni)).Complete);
     }
 
     [Fact]

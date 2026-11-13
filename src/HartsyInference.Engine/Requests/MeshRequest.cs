@@ -18,6 +18,9 @@ public sealed record MeshRequest
     /// <summary>Objects to extract from <see cref="SceneMesh"/>; null runs free queries. Scene models only.</summary>
     public SceneMeshPrompt? ScenePrompt { get; init; }
 
+    /// <summary>Hunyuan3D-Omni: the control signal that goes with <see cref="Image"/> (a point cloud, voxels, a bounding box or a skeleton). Required by that model and rejected by every other.</summary>
+    public MeshControl? Control { get; init; }
+
     /// <summary>Number of generation steps; 0 uses the model default.</summary>
     public int Steps { get; init; }
 
