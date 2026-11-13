@@ -61,7 +61,7 @@ public sealed record GgufQuantPolicy
     {
         BackboneDType = DType.Q4_K,
         HighFidelityDType = DType.Q6_K,
-        IsHighFidelity = IsAttentionVOrOutputProj,
+        IsHighFidelity = IsHighFidelityProjection,
         ShouldKeepF16 = DefaultKeepF16,
     };
 
@@ -70,7 +70,7 @@ public sealed record GgufQuantPolicy
     {
         BackboneDType = DType.Q5_K,
         HighFidelityDType = DType.Q6_K,
-        IsHighFidelity = IsAttentionVOrOutputProj,
+        IsHighFidelity = IsHighFidelityProjection,
         ShouldKeepF16 = DefaultKeepF16,
     };
 
@@ -96,6 +96,23 @@ public sealed record GgufQuantPolicy
         if (lower.Contains("register_tokens", StringComparison.Ordinal)) return true;
         // Iris-Z's modality table: a 4-row lookup added to each token, read densely by the FLUX.2 transformer, not a projection.
         if (lower.Contains("modality_in", StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    /// <summary>The tensors the `_M` presets give the high-fidelity type: the value and output-side projections of the diffusers
+    /// naming, and the output-side projections of the BFL naming that FLUX.2 and Iris-Z use.</summary>
+    private static bool IsHighFidelityProjection(string name) => IsAttentionVOrOutputProj(name) || IsBflOutputSideProjection(name);
+
+    /// <summary>BFL-named output-side projections: the final layer (llama.cpp's output head), the MLP down projections of the
+    /// double blocks, and the single blocks' <c>linear2</c>, which fuses attention output with the MLP down projection.
+    /// The fused <c>qkv</c> carries V and cannot be split here, so it stays at the backbone quant.</summary>
+    private static bool IsBflOutputSideProjection(string name)
+    {
+        string lower = name.ToLowerInvariant();
+        if (lower.EndsWith("final_layer.linear.weight", StringComparison.Ordinal)) return true;
+        if (lower.EndsWith(".img_mlp.2.weight", StringComparison.Ordinal)) return true;
+        if (lower.EndsWith(".txt_mlp.2.weight", StringComparison.Ordinal)) return true;
+        if (lower.Contains("single_blocks.", StringComparison.Ordinal) && lower.EndsWith(".linear2.weight", StringComparison.Ordinal)) return true;
         return false;
     }
 
