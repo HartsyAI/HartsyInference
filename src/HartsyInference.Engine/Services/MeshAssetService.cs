@@ -106,7 +106,7 @@ public sealed class MeshAssetService : IMeshAssetService
     internal static string? Locate(ModelAsset asset, string id, CatalogEntry entry, string? localPath, string root)
     {
         // For the two part models a path the caller names decides, found or not: their loaders read it and never the catalog folder.
-        if (localPath is not null && id is MeshModelIds.P3Sam or MeshModelIds.XPart)
+        if (localPath is not null && id is MeshModelIds.P3Sam or MeshModelIds.XPart or MeshModelIds.Omni)
             return LoaderPath(asset, id, localPath);
         string? found = ModelDownloader.FindExisting(asset, ignoreCase: false) ?? ModelDownloader.FindExisting(asset, ignoreCase: true);
         if (found is not null)
@@ -142,10 +142,11 @@ public sealed class MeshAssetService : IMeshAssetService
                 return null;
             }
         }
-        if (id != MeshModelIds.XPart)
+        if (id is not (MeshModelIds.XPart or MeshModelIds.Omni))
             return null;
         // The folder the loader would use, then each file in it: a file found in another folder is not one the loader reads.
-        string file = Path.Combine(MeshService.XPartInstall(localPath).Folder, asset.FileName);
+        string folder = (id == MeshModelIds.XPart ? MeshService.XPartInstall(localPath) : MeshService.OmniInstall(localPath)).Folder;
+        string file = Path.Combine(folder, asset.FileName);
         return File.Exists(file) ? file : null;
     }
 

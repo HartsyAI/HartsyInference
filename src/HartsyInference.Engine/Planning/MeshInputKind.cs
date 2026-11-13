@@ -14,4 +14,7 @@ public enum MeshInputKind
 
     /// <summary>A triangle mesh (obj or glb) and a reference image.</summary>
     SceneMeshAndImage,
+
+    /// <summary>One image and a control signal: a point cloud, voxels, a bounding box or a skeleton.</summary>
+    ImageAndControl,
 }

@@ -11,7 +11,7 @@ internal sealed record MeshModelProfile
     [
         nameof(MeshRequest.Steps), nameof(MeshRequest.GridResolution), nameof(MeshRequest.FieldOfViewRadians), nameof(MeshRequest.Seed),
         nameof(MeshRequest.Samples), nameof(MeshRequest.Colors), nameof(MeshRequest.Chains), nameof(MeshRequest.Rigged),
-        nameof(MeshRequest.Texture), nameof(MeshRequest.TextureSize), nameof(MeshRequest.Mesh), nameof(MeshRequest.Preprocess), nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame),
+        nameof(MeshRequest.Texture), nameof(MeshRequest.TextureSize), nameof(MeshRequest.Mesh), nameof(MeshRequest.Preprocess), nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame), nameof(MeshRequest.Control),
     ];
 
     /// <summary>The catalog id.</summary>

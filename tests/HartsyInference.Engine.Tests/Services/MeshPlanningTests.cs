@@ -32,6 +32,8 @@ public sealed class MeshPlanningTests
 
     private static SceneMeshData Scene() => new() { Data = System.Text.Encoding.ASCII.GetBytes("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"), Format = "obj" };
 
+    private static MeshControl Box() => new() { Kind = MeshControlKind.BoundingBox, Values = [0.5f, 0.5f, 0.5f] };
+
     /// <summary>The smallest request the model accepts, built from what its profile says it takes.</summary>
     private static MeshRequest Valid(string id)
     {
@@ -40,6 +42,7 @@ public sealed class MeshPlanningTests
         {
             Image = input is MeshInputKind.SceneMesh ? null : Image(),
             SceneMesh = input is MeshInputKind.SceneMesh or MeshInputKind.SceneMeshAndImage ? Scene() : null,
+            Control = input is MeshInputKind.ImageAndControl ? Box() : null,
         };
     }
 
@@ -63,6 +66,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Texture) => request with { Texture = true },
         nameof(MeshRequest.TextureSize) => request with { TextureSize = 512 },
         nameof(MeshRequest.Mesh) => request with { Mesh = true },
+        nameof(MeshRequest.Control) => request with { Control = Box() },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
