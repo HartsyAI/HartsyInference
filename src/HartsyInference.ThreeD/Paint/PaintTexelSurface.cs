@@ -34,8 +34,10 @@ public sealed class PaintTexelSurface
     {
         ArgumentNullException.ThrowIfNull(texels);
         ArgumentNullException.ThrowIfNull(positions);
-        if (positions.Length != texels.Length * 3 || texels.Any(t => t < 0 || t >= (long)width * height))
-            throw new ArgumentException("The texels must lie in the texture and have one position each.");
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), "The texture needs a positive size.");
+        if (positions.Length != texels.Length * 3 || texels.Any(t => t < 0 || t >= (long)width * height) || texels.Distinct().Count() != texels.Length)
+            throw new ArgumentException("The texels must be distinct, lie in the texture and have one position each.");
         return new PaintTexelSurface(width, height, texels, positions);
     }
 

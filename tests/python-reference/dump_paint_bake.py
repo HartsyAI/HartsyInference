@@ -1,7 +1,7 @@
 """Reference values for the Hunyuan3D-Paint 2.1 bake: upstream's own `MeshRender.back_project` and `fast_bake_texture` on the CPU.
 
 Runs `hy3dpaint/DifferentiableRenderer/MeshRender.py` and `camera_utils.py` of a checkout of Tencent-Hunyuan/Hunyuan3D-2.1 (pinned in docs/Research/HUNYUAN3D_PAINT_ARCHITECTURE.md) on a UV-mapped mesh
-and six view images written by the C# side (`bakecmp`, see below), with the default configuration of the 2.1 pipeline (orthographic camera at distance 1.45, `back_sample` bake, `face` shader).
+and six view images written by the C# side (`PaintBakeParityTests.WriteInputsForTheOracle`: set `HARTSY_PAINT_BAKE_INPUT_DIR`, `HARTSY_PAINT_BAKE_MESH` and `HARTSY_PAINT_BAKE_REF`), with the default configuration of the 2.1 pipeline (orthographic camera at distance 1.45, `back_sample` bake, `face` shader).
 Things that differ from a normal run, all to keep the dump CPU-only and dependency-light:
 
 * `custom_rasterizer` (a CUDA extension) is replaced by a transcription of its kernel (`rasterizer.cpp` / `rasterizer_gpu.cu` of the same commit, whose CPU and GPU versions run the same algorithm,
@@ -11,10 +11,10 @@ Things that differ from a normal run, all to keep the dump CPU-only and dependen
 * `bpy` and the C++ inpainting extension are not loaded (upstream wraps both imports in try/except); `cv2` is the real OpenCV when it can be imported (needed for `Canny`, which makes the edge mask), else
   a numpy stand-in whose result is NOT comparable and is recorded in the fixture as `canny = 0`.
 
-    python -I dump_paint_bake.py --upstream <checkout>/hy3dpaint --in <dir written by bakecmp> --out <fixture.npz>
+    python -I dump_paint_bake.py --upstream <checkout>/hy3dpaint --in <the input directory> --out <fixture.npz>
 
-The input directory holds `verts.f32` (N x 3), `uvs.f32` (N x 2), `idx.i32` (F x 3), `view<k>.f32` (R x R x 3, row 0 first), `meta.json` (texture size, resolution, the views' elevation, azimuth and weight).
-The fixture holds the inputs (`verts`, `uvs`, `idx`, `views` as elevation, azimuth and weight, `image<k>`, `texture_size` as texture size and render resolution) and, per view, the texture-space `color<k>`, `cos<k>` and `boundary<k>` of `back_project`, the merged `merged` texture and `painted` mask of `fast_bake_texture` (cosines raised to the
+The input directory (`tex` is the texture size, `res` the view resolution) holds `verts.f32` (N x 3), `uvs.f32` (N x 2), `idx.i32` (F x 3), `view<k>.f32` (R x R x 3, row 0 first), `meta.json` (texture size, resolution, the views' elevation, azimuth and weight).
+The fixture holds the inputs (`verts`, `uvs`, `idx`, `views` as elevation, azimuth and weight, `image<k>`, `texture_size` as texture size and render resolution) and, per view, the texture-space `color<k>`, `cos<k>` and `boundary<k>` (kept for a later comparison of the edge mask) of `back_project`, the merged `merged` texture and `painted` mask of `fast_bake_texture` (cosines raised to the
 power 4 and scaled by the view weight, as `bake_texture` does), the texel positions `tex_position` and `tex_grid`, and `canny` (1 when real OpenCV was used).
 """
 import argparse
@@ -143,7 +143,7 @@ def mean_vertex_normals(vertex_count, faces, face_normals):
 
 
 def numpy_canny(image, low, high):
-    """A stand-in for cv2.Canny (3x3 Sobel, L1 norm, non-maximum suppression, hysteresis); not OpenCV's, so results that depend on it are not comparable."""
+    """A stand-in for cv2.Canny: 3x3 Sobel, L1 magnitude, double threshold with hysteresis, and no non-maximum suppression, so its edges are thicker than OpenCV's; results that depend on it are not comparable."""
     img = image.reshape(image.shape[0], image.shape[1]).astype(np.float32)
     p = np.pad(img, 1, mode="edge")
     gx = (p[:-2, 2:] + 2 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2 * p[1:-1, :-2] + p[2:, :-2])
@@ -196,7 +196,7 @@ def main():
     mesh_render = load_module(os.path.join(renderer_dir, "MeshRender.py"), "DifferentiableRenderer.MeshRender", "DifferentiableRenderer")
 
     meta = json.load(open(os.path.join(args.inp, "meta.json")))
-    tex, res = meta["texture_size"] if "texture_size" in meta else meta["tex"], meta["res"]
+    tex, res = meta["tex"], meta["res"]
     verts = np.fromfile(os.path.join(args.inp, "verts.f32"), dtype=np.float32).reshape(-1, 3)
     uvs = np.fromfile(os.path.join(args.inp, "uvs.f32"), dtype=np.float32).reshape(-1, 2)
     idx = np.fromfile(os.path.join(args.inp, "idx.i32"), dtype=np.int32).reshape(-1, 3)
