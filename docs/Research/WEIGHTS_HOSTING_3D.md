@@ -6,8 +6,8 @@ tags), the local `Models/3D` tree (sizes only, read-only), the GitHub release AP
 
 ## Policy applied
 
-[`PickleCheckpointRepacker`](../../src/HartsyInference.ModelAssets/PyTorch/PickleCheckpointRepacker.cs) states the mirror-vs-link
-policy; this inventory applies it:
+[`PickleCheckpointRepacker`](../../src/HartsyInference.ModelAssets/PyTorch/PickleCheckpointRepacker.cs) states a four-rule
+mirror-vs-link policy; this inventory applies it and extends it with the licence condition in rule 3 and the do-not-host rule 5:
 
 1. **link** when upstream is already safetensors (or a format the engine reads natively) and reasonably sized;
 2. **link** to a trustworthy third-party safetensors re-upload with a verifiable hash in preference to a repack of our own;
@@ -35,27 +35,28 @@ hosted file carries one.
 **What self-hosting a Tencent file therefore commits HartsyWeb to:** serve it only to the Territory (block the EU, UK and South
 Korea at the edge), ship the licence, the `Notice` and a change notice beside it, pass the Acceptable Use Policy on in its terms,
 and accept the 1M-user clause. The hosted Tencent set is 25.8 GB; the other hosted files (UniRig, NAF) carry no territory limit.
-Linking to Hugging Face needs none of this, which is why only pickle-only files are hosted.
+Linking to Hugging Face avoids the distribution terms (3, 3a, 3b, 3d, 5a), which is why only pickle-only files are hosted. A service that
+runs these models still carries 3e, 4 and 5b/5c whichever way the bytes arrive.
 
 ## Decision table
 
-Sizes are bytes. "Repo @ revision" is the Hugging Face revision the sizes and hashes were read at. The original sha256 of a local
+Sizes are bytes. "Repo @ revision" is the Hugging Face revision the sizes and hashes were read at; the hashes are the LFS oids of the tree API and equal the catalog's pins where the catalog lists the file. The original sha256 of a local
 pickle is recorded by the repack run (see [Verification](#verification-the-repack-must-pass)); sizes of the local files equal the upstream sizes in every row below.
 
 ### Repack and host (pickle-only upstream)
 
 | Id | Model | Upstream file | Size | Upstream sha256 | Licence | Local copy | Why host |
 |---|---|---|---|---|---|---|---|
-| `paint21-unet` | Hunyuan3D Paint 2.1 | `tencent/Hunyuan3D-2.1` @ `0b946776` `hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin` | 3,925,293,863 | `675a1b5c…5b8` | Tencent 3D 2.1 | yes | only a pickle upstream |
-| `paint21-vae` | Hunyuan3D Paint 2.1 | same repo `hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin` | 334,707,217 | `1b4889b6…ddc` | Tencent 3D 2.1 | yes | only a pickle upstream (the 2.0 VAE safetensors is a different, 167 MB file) |
-| `omni-dit` | Hunyuan3D-Omni | `tencent/Hunyuan3D-Omni` @ `70e803bf` `model/pytorch_model.bin` | 12,203,119,470 | `01c95e5f…a24` | Tencent 3D Omni | yes | only a pickle upstream; F32 |
-| `omni-vae` | Hunyuan3D-Omni | same repo `vae/pytorch_model.bin` | 1,311,145,138 | `379995ca…340` | Tencent 3D Omni | yes | only a pickle upstream |
-| `omni-cond` | Hunyuan3D-Omni | same repo `cond_encoder/pytorch_model.bin` | 464,828 | `f3f308e7…432` (catalog) | Tencent 3D Omni | yes | only a pickle upstream |
-| `shape21-dit` | Hunyuan3D-2.1 shape (no catalog id yet) | `tencent/Hunyuan3D-2.1` @ `0b946776` `hunyuan3d-dit-v2-1/model.fp16.ckpt` | 7,366,389,768 | `6b519fc7…03f5e` | Tencent 3D 2.1 | yes (a repack already sits beside it) | only a pickle upstream; the bundle holds `model.*`, `conditioner.*`, `vae.*` |
-| `shape21-vae` | Hunyuan3D-2.1 shape | same repo `hunyuan3d-vae-v2-1/model.fp16.ckpt` | 655,648,152 | `5cbe97f2…288a` | Tencent 3D 2.1 | yes | only a pickle upstream |
-| `unirig-skeleton` | UniRig | `VAST-AI/UniRig` @ `36842e2b` `skeleton/articulation-xl_quantization_256/model.ckpt` | 1,439,617,174 | `d8cf9b42…0f4` | MIT (model card); see caveat | yes | only a pickle upstream (Lightning `.ckpt`) |
-| `unirig-skin` | UniRig | same repo `skin/articulation-xl/model.ckpt` | 4,375,464,854 | `9d40cf42…c33` | MIT (model card); see caveat | yes | only a pickle upstream (Lightning `.ckpt`) |
-| `naf` | Pixal3D (NAF upsampler) | `github.com/valeoai/NAF` release `model`, asset `naf_release.pth` (published 2025-11-24) | 2,664,431 | `c096c1ab…c98f` (the GitHub asset digest equals the catalog's pinned value) | repository Apache-2.0; the asset states none | yes | a pickle, and a GitHub release asset the catalog cannot fetch today |
+| `paint21-unet` | Hunyuan3D Paint 2.1 | `tencent/Hunyuan3D-2.1` @ `0b946776` `hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin` | 3,925,293,863 | `675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8` | Tencent 3D 2.1 | yes | only a pickle upstream |
+| `paint21-vae` | Hunyuan3D Paint 2.1 | same repo `hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin` | 334,707,217 | `1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc` | Tencent 3D 2.1 | yes | only a pickle upstream (the 2.0 VAE safetensors is a different, 167 MB file) |
+| `omni-dit` | Hunyuan3D-Omni | `tencent/Hunyuan3D-Omni` @ `70e803bf` `model/pytorch_model.bin` | 12,203,119,470 | `01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24` | Tencent 3D Omni | yes | only a pickle upstream; F32 |
+| `omni-vae` | Hunyuan3D-Omni | same repo `vae/pytorch_model.bin` | 1,311,145,138 | `379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340` | Tencent 3D Omni | yes | only a pickle upstream |
+| `omni-cond` | Hunyuan3D-Omni | same repo `cond_encoder/pytorch_model.bin` | 464,828 | `f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432` (not LFS; the catalog's hash) | Tencent 3D Omni | yes | only a pickle upstream |
+| `shape21-dit` | Hunyuan3D-2.1 shape (no catalog id yet) | `tencent/Hunyuan3D-2.1` @ `0b946776` `hunyuan3d-dit-v2-1/model.fp16.ckpt` | 7,366,389,768 | `6b519fc7242f78e9b5f47ea4d55668fe3d944a2d27332f4ca68d29a6ff603f5e` | Tencent 3D 2.1 | yes (a repack already sits beside it) | only a pickle upstream; the bundle holds `model.*`, `conditioner.*`, `vae.*` |
+| `shape21-vae` | Hunyuan3D-2.1 shape | same repo `hunyuan3d-vae-v2-1/model.fp16.ckpt` | 655,648,152 | `5cbe97f25e6e7abd4bccc80ab07524ec0c86d24118486a9ba49bb5dfb070288a` | Tencent 3D 2.1 | yes | only a pickle upstream |
+| `unirig-skeleton` | UniRig | `VAST-AI/UniRig` @ `36842e2b` `skeleton/articulation-xl_quantization_256/model.ckpt` | 1,439,617,174 | `d8cf9b42d56e7bc316d293597ecf8c4c39a8631cdd44a261ecf388242fabd0f4` | MIT (model card); see caveat | yes | only a pickle upstream (Lightning `.ckpt`) |
+| `unirig-skin` | UniRig | same repo `skin/articulation-xl/model.ckpt` | 4,375,464,854 | `9d40cf42fb9d4c10d8b373d9f4f557c6fbbc5ebacae7ae6b3dce5a0d8a18bc33` | MIT (model card); see caveat | yes | only a pickle upstream (Lightning `.ckpt`) |
+| `naf` | Pixal3D (NAF upsampler) | `github.com/valeoai/NAF` release `model`, asset `naf_release.pth` (published 2025-11-24) | 2,664,431 | `c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f` (the GitHub asset digest equals the catalog's pinned value) | repository Apache-2.0; the asset states none | yes | a pickle, and a GitHub release asset the catalog cannot fetch today |
 
 Host-set total if every row goes up: 31,614,514,895 B (31.6 GB): 25,796,768,436 B Tencent, 5,815,082,028 B UniRig, 2,664,431 B NAF.
 
@@ -76,12 +77,12 @@ Caveats on three rows:
 |---|---|---|---|
 | TRELLIS.2 | flows, decoders (`ckpts/*.safetensors`, 0.15 to 2.6 GB) | `microsoft/TRELLIS.2-4B` @ `af44b45f`, `microsoft/TRELLIS-image-large` @ `25e0d31f` | MIT |
 | Pixal3D | three projection flows, texture flow, decoders (up to 5.5 GB each) | `TencentARC/Pixal3D` @ `b0cb2e1b` | MIT |
-| Hunyuan3D-2, Fast, Turbo, mini, 2mv, FlashVDM VAE | `*/model.fp16.safetensors` (3.8 to 4.9 GB, 0.4 GB) | `tencent/Hunyuan3D-2` @ `9cd649ba`, `-2mini`, `-2mv` | Tencent 3D 2.0 |
+| Hunyuan3D-2, Fast, Turbo, mini, 2mv, FlashVDM VAE | `*/model.fp16.safetensors` (3.8 to 4.9 GB, 0.4 GB) | `tencent/Hunyuan3D-2` @ `9cd649ba`, `tencent/Hunyuan3D-2mini` @ `f90a0f7d`, `tencent/Hunyuan3D-2mv` @ `3a761b53` | Tencent 3D 2.0 |
 | Hunyuan3D Paint 2.0 | UNet (3.66 GB) and VAE (167 MB) safetensors | `tencent/Hunyuan3D-2` @ `9cd649ba` | Tencent 3D 2.0 |
 | Hunyuan3D-Part (P3-SAM, X-Part) | `p3sam`, `model`, `conditioner`, `shapevae` safetensors (0.45 to 6.6 GB) | `tencent/Hunyuan3D-Part` @ `67717446` | Tencent 3D-Part |
 | SAM 3D Objects | the generators, decoders, MoGe, DINOv2 | `apozz/sam-3d-objects-safetensors` @ `cbb995af`: third-party conversion, sha256 pinned in the catalog (policy rule 2). Meta's own `facebook/sam-3d-objects` is gated pickle | SAM License (carry `SAM3D_LICENSE`) |
 | HairDeck | image, colour, chain, card VAE models | `hyz317/HairDeck` @ `7d2e07c5` | Apache-2.0 |
-| DINOv2-large / giant (Omni, Paint 2.1) | `model.safetensors` | `facebook/dinov2-large`, `facebook/dinov2-giant` | Apache-2.0 |
+| DINOv2-large / giant (Omni, Paint 2.1) | `model.safetensors` | `facebook/dinov2-large` @ `47b73eef` (the catalog's pin), `facebook/dinov2-giant` (no revision pinned here) | Apache-2.0 |
 | BiRefNet-matting | `model.safetensors` (885 MB) | `ZhengPeng7/BiRefNet-matting` @ `eccde0a8` | MIT |
 | Sonata (inside P3-SAM and the X-Part conditioner) | already bundled in the Part safetensors | `facebook/sonata` also lists `model.safetensors`; its weights licence is unstated | unverified |
 
@@ -109,7 +110,13 @@ each side read through its own loader (the safe-subset pickle reader and the saf
 ## Open decisions
 
 1. **Territory.** Self-hosting the 25.8 GB of Tencent files needs an EU, UK and South Korea block on HartsyWeb. If the user does
-   not want that, host only UniRig (and NAF) and leave the Tencent pickles linked and repacked locally on first use.
-2. **Trim or cast.** Omni's DiT as F16 (6.1 GB) and the unused halves of the Omni VAE (the loader reads only the decoder) would cut
+   not want that, host only UniRig (and NAF) and leave the Tencent pickles linked: the 3D loaders read them in place through the
+   safe parser (no 3D path calls `PickleCheckpointRepacker`; its callers are audio), which is today's behaviour.
+2. **Consumer-side work.** Uploading is not the whole job. `ModelAsset` has one `Repo`/`RepoPath`/`Sha256` and no mirror or fallback
+   field, and a hosted repack is a `.safetensors` with a different name and hash than the upstream pickle. Each hosted row needs a
+   catalog field for a mirror URL with its own hash (upstream kept as the fallback), and loaders that accept either format for the
+   same asset. A GitHub release asset (NAF) needs a fetch the catalog does not have.
+3. **Trim or cast.** Omni's DiT as F16 (6.1 GB) and the unused halves of the Omni VAE (the loader reads only the decoder) would cut
    the download. Not done: it changes dtypes or drops tensors.
-3. **NAF's licence.** Host it under the repository's Apache-2.0 or keep it a GitHub-only fetch.
+4. **NAF's and UniRig's licences.** NAF: host it under the repository's Apache-2.0 or keep it a GitHub-only fetch. UniRig: whether the
+   GPL-3.0 header on its Michelangelo code reaches the weights is unsettled (see the caveat above); host under the published MIT or link.
