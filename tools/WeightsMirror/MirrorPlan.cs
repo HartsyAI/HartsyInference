@@ -43,6 +43,12 @@ internal sealed class MirrorLicenseFile
     public long Size { get; init; }
 
     public string GitBlobSha1 { get; init; } = "";
+
+    /// <summary>SHA-256 of the copy placed in the staging folder, recorded by the <c>licenses</c> command once the file matches <see cref="GitBlobSha1"/>.</summary>
+    public string Sha256 { get; set; } = "";
+
+    /// <summary>When the copy was first verified, UTC.</summary>
+    public string VerifiedUtc { get; set; } = "";
 }
 
 /// <summary>One pickle to repack.</summary>

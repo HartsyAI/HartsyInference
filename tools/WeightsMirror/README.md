@@ -11,6 +11,9 @@ timeout, a region block). The mirror is off until `paths.weightsMirrorUrl` names
 A folder outside the repository and outside `Models/` (`<staging>` below; the repack run made it on the maintainer's desktop). Layout: `<model id>/<the pickle's path with the extension .safetensors>`, which is
 the `MirrorPath` the catalog lists for the file, plus `manifest.json` (sources, revisions, hashes, tensor counts, verification and licence of every file).
 
+It also holds `upload-checklist.md` (per model: title, description, licence summary, tags, hashes and sizes, for entering the files in a web UI by hand) and
+`covers/` (one image per model). They are written for the maintainer's upload and are not part of the repository.
+
 | Path under the mirror base | Bytes | sha256 | Licence | A catalog asset lists it |
 |---|---|---|---|---|
 | `hunyuan3d-paint21/unet/diffusion_pytorch_model.safetensors` | 3,924,737,656 | `01736c5f5800528fd8487bcf01f541d29e86b6be04ff57800b7dd3f9206075a8` | Tencent 3D 2.1 | yes |
@@ -33,8 +36,8 @@ change nothing until a catalog entry downloads them. The full set is 28,696,874,
 2. **The change notices are written.** `... -- notices --staging <staging>` writes `<model id>/CHANGES.txt` (what was converted, from which revision, that the tensor values
    are unchanged): the Tencent licences require a prominent notice on a modified file (3b).
 3. **The licence texts are beside the files.** The Tencent licences also need a copy of the licence and a `Notice` file with every distribution (3a, 3d); MIT and Apache-2.0
-   need their text. They are not in the staging folder, because fetching them needs the owner's approval (6 files, 80,701 bytes). Save each under
-   `<staging>/<model id>/<file name>` (the 2.1 files go into both `hunyuan3d-paint21` and `hunyuan3d-21`):
+   need their text. The six files (80,701 bytes) were fetched with the owner's approval on 2026-11-13 and sit under
+   `<staging>/<model id>/<file name>` (the 2.1 files in both `hunyuan3d-paint21` and `hunyuan3d-21`). To redo it, fetch each from its source:
 
    | File | Source | Bytes | git blob SHA-1 |
    |---|---|---|---|
@@ -45,7 +48,8 @@ change nothing until a catalog entry downloads them. The full set is 28,696,874,
    | `LICENSE` (NAF) | `https://raw.githubusercontent.com/valeoai/NAF/4a73dfbe8851d44a7c62a6c6aba2a59fd9ebcf87/LICENSE` | 11,357 | `7a4a3ea2424c09fbe48d455aed1eaa94d9124835` |
    | `LICENSE` (UniRig) | `https://raw.githubusercontent.com/VAST-AI-Research/UniRig/cf7622f2be1de5ae315478ed8d21681b95dc9ff3/LICENSE` | 1,124 | `a20d482774136ee1858d92964e896031598902b4` |
 
-   Then `... -- licenses --staging <staging>` compares each file's git blob SHA-1 with the one above and lists what is missing (it ends with `All 8 licence files are in place`).
+   `... -- licenses --staging <staging>` compares each file's git blob SHA-1 with the one above, lists what is missing, and records each verified file's SHA-256 and the
+   time it was first verified in `manifest.json` next to its source URL, for the upload record (it ends with `All 8 licence files are in place`; a rerun of `run` keeps the record).
    The two GitHub files are pinned to the last commit that changed them, so their blob hashes are reproducible.
 4. **The terms are decided** (next section).
 

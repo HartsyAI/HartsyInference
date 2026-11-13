@@ -167,7 +167,7 @@ static int Run(Dictionary<string, string> options, bool repack)
         try
         {
             MirrorManifestItem done = repack
-                ? RunItem(plan, item, modelsRoot, staged, tool, options.ContainsKey("--force"), wholeBelow)
+                ? RunItem(plan, item, modelsRoot, staged, tool, options.ContainsKey("--force"), wholeBelow, manifest.Items.FirstOrDefault(m => m.Id == item.Id)?.License.TextFiles)
                 : VerifyItem(item, modelsRoot, staged, manifest, wholeBelow);
             manifest.Items = [.. manifest.Items.Where(m => m.Id != item.Id), done];
             manifest.Save(manifestPath);
@@ -234,7 +234,8 @@ static int Annotate(Dictionary<string, string> options)
     return 0;
 }
 
-static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string modelsRoot, string staged, string tool, bool force, long wholeBelow)
+static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string modelsRoot, string staged, string tool, bool force, long wholeBelow,
+    IReadOnlyList<MirrorLicenseFile>? recordedTexts)
 {
     string source = Path.GetFullPath(Path.Combine(modelsRoot, item.LocalSource));
     if (!File.Exists(source))
@@ -306,7 +307,16 @@ static MirrorManifestItem RunItem(MirrorPlan plan, MirrorItem item, string model
         },
         License = new ManifestLicense
         {
-            Id = license.Id, Name = license.Name, Spdx = license.Spdx, HostObligations = license.HostObligations, TextFiles = license.TextFiles,
+            Id = license.Id, Name = license.Name, Spdx = license.Spdx, HostObligations = license.HostObligations,
+            // Copies, not the plan's objects, carrying over the hash and time the licenses command already recorded for a text file.
+            TextFiles = [.. license.TextFiles.Select(f =>
+            {
+                MirrorLicenseFile? known = recordedTexts?.FirstOrDefault(r => r.Name == f.Name && r.GitBlobSha1 == f.GitBlobSha1);
+                return new MirrorLicenseFile
+                {
+                    Name = f.Name, Url = f.Url, Size = f.Size, GitBlobSha1 = f.GitBlobSha1, Sha256 = known?.Sha256 ?? "", VerifiedUtc = known?.VerifiedUtc ?? "",
+                };
+            })],
         },
         Notes = item.Notes,
     };
@@ -398,6 +408,7 @@ static int Licenses(Dictionary<string, string> options)
     }
     int bad = 0;
     int total = 0;
+    bool changed = false;
     foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal).OrderBy(g => g.Key, StringComparer.Ordinal))
     {
         // Every licence of the model's files counts, so a folder that mixed licences would need all their texts.
@@ -414,15 +425,42 @@ static int Licenses(Dictionary<string, string> options)
             byte[] content = File.ReadAllBytes(path);
             byte[] header = System.Text.Encoding.ASCII.GetBytes($"blob {content.Length}\0");
             string blob = Convert.ToHexString(SHA1.HashData([.. header, .. content])).ToLowerInvariant();
-            bool ok = string.Equals(blob, file.GitBlobSha1, StringComparison.OrdinalIgnoreCase);
-            bad += ok ? 0 : 1;
-            Console.WriteLine($"[{model.Key}] {(ok ? "ok" : "MISMATCH (git blob " + blob + ")")} {file.Name}");
+            string sha = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+            List<MirrorLicenseFile> copies = [.. model.SelectMany(i => i.License.TextFiles).Where(f => f.Name == file.Name && f.GitBlobSha1 == file.GitBlobSha1)];
+            string? problem = null;
+            if (!string.Equals(blob, file.GitBlobSha1, StringComparison.OrdinalIgnoreCase))
+            {
+                problem = $"git blob {blob}, expected {file.GitBlobSha1}";
+            }
+            else if (copies.FirstOrDefault(c => c.Sha256.Length > 0 && !string.Equals(c.Sha256, sha, StringComparison.OrdinalIgnoreCase)) is MirrorLicenseFile recorded)
+            {
+                problem = $"recorded sha256 {recorded.Sha256}";
+            }
+            if (problem is not null)
+            {
+                bad++;
+                Console.WriteLine($"[{model.Key}] MISMATCH ({problem}) {file.Name}  {content.Length:N0} bytes  sha256 {sha}");
+                continue;
+            }
+            foreach (MirrorLicenseFile copy in copies.Where(c => c.Sha256.Length == 0))
+            {
+                // The first verified copy fixes the hash and the time.
+                copy.Sha256 = sha;
+                copy.VerifiedUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+                changed = true;
+            }
+            Console.WriteLine($"[{model.Key}] ok {file.Name}  {content.Length:N0} bytes  sha256 {sha}  from {file.Url}");
         }
         if (!File.Exists(Path.Combine(staging, model.Key, "CHANGES.txt")))
         {
             bad++;
             Console.WriteLine($"[{model.Key}] MISSING CHANGES.txt  run the notices command");
         }
+    }
+    // A run that found a problem records nothing: the hashes it would save are not known to be of the right files.
+    if (changed && bad == 0)
+    {
+        manifest.Save(Path.Combine(staging, "manifest.json"));
     }
     Console.WriteLine(bad == 0 ? $"All {total} licence files are in place." : $"{bad} licence or notice file(s) missing or different.");
     return bad == 0 ? 0 : 1;
