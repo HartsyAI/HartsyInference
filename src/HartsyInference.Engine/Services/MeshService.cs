@@ -439,12 +439,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             {
                 cancel.ThrowIfCancellationRequested();
                 XPartPipeline pipeline = GetOrLoadXPart(spec, id);
-                XPartOptions options = new()
-                {
-                    Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
-                    Steps = request.Steps == 0 ? 50 : request.Steps,
-                    GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
-                };
+                XPartOptions options = XPartOptionsFor(request, EngineKnobs.XPartFastDecode.Value);
                 XPartResult result = pipeline.Generate(input, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
@@ -456,6 +451,15 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             },
             cancel);
     }
+
+    /// <summary>The X-Part settings of a validated request: the seed (42 when unset), the flow steps (50) and the grid of each part (256), and whether the parts are decoded with FlashVDM (<c>numerics.xpartFastDecode</c>).</summary>
+    internal static XPartOptions XPartOptionsFor(MeshRequest request, bool fastDecode) => new()
+    {
+        Seed = MeshSeed.ForSampler(request.Seed) ?? 42,
+        Steps = request.Steps == 0 ? 50 : request.Steps,
+        GridResolution = request.GridResolution == 0 ? 256 : request.GridResolution,
+        FastDecode = fastDecode,
+    };
 
     /// <summary>Returns the cached X-Part pipeline for <paramref name="spec"/>: the folder holding the four checkpoints (each stage loads its file when it runs).</summary>
     private XPartPipeline GetOrLoadXPart(ModelSpec spec, string id)

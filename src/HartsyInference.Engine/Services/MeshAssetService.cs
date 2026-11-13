@@ -119,7 +119,36 @@ public sealed class MeshAssetService : IMeshAssetService
             if (id == MeshModelIds.Sam3dObjects && File.Exists(ckpt))
                 return ckpt;
         }
-        return Alternative(asset, id, root);
+        return LoaderPath(asset, id, localPath) ?? Alternative(asset, id, root);
+    }
+
+    /// <summary>Where the P3-SAM and X-Part loaders read <paramref name="asset"/> from when the caller names a path: P3-SAM takes the checkpoint file or the folder holding it (itself or in <c>p3sam/</c>), X-Part the folder with
+    /// the four checkpoint subfolders or a file or subfolder inside it. The status then agrees with what a run would load, file by file.</summary>
+    private static string? LoaderPath(ModelAsset asset, string id, string? localPath)
+    {
+        if (localPath is null)
+            return null;
+        if (id == "hunyuan3d-part")
+        {
+            try
+            {
+                return MeshService.PartCheckpoint(localPath);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+        }
+        if (id != "hunyuan3d-xpart")
+            return null;
+        string folder = File.Exists(localPath) ? Path.GetDirectoryName(Path.GetFullPath(localPath))! : localPath;
+        string? parent = Path.GetDirectoryName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        foreach (string? candidate in new[] { folder, parent })
+        {
+            if (candidate is not null && File.Exists(Path.Combine(candidate, asset.FileName)))
+                return Path.Combine(candidate, asset.FileName);
+        }
+        return null;
     }
 
     /// <summary>Where a loader also looks for a shared file: the shape VAE folder beside the TRELLIS.2 flows, a DINOv3 folder at the root, the DINOv2 copy inside a Hunyuan3D shape checkpoint.</summary>
