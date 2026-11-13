@@ -12,10 +12,12 @@ public static class ShapeMeshFinisher
 
     /// <summary>Returns the mesh to export: repaired with <see cref="MeshCleaner.Clean"/> when <paramref name="clean"/> is set, otherwise
     /// the winding unified only, then smooth vertex normals. The input is not modified when it is repaired. <paramref name="smallComponentAreaRatio"/> is
-    /// <see cref="MeshCleanOptions.SmallComponentAreaRatio"/>: a model whose extraction leaves larger floating pieces raises it. A positive
+    /// <see cref="MeshCleanOptions.SmallComponentAreaRatio"/>: a model whose extraction leaves larger floating pieces raises it. <paramref name="smallComponentFaceRatio"/> is
+    /// <see cref="MeshCleanOptions.SmallComponentFaceRatio"/>, the rule of a model whose upstream removes floaters by face count (the Hunyuan3D shape models). A positive
     /// <paramref name="openingWidthRatio"/> (<see cref="DefaultOpeningWidthRatio"/>) also closes the boundary loops that triangulate with no new edge longer than that
     /// share of the bounding-box diagonal (<see cref="MeshCleanOptions.HoleFillMaxWidth"/>); it has no effect without <paramref name="clean"/>.</summary>
-    public static Mesh Finish(Mesh mesh, bool clean = true, double smallComponentAreaRatio = 1e-5, double openingWidthRatio = 0)
+    public static Mesh Finish(
+        Mesh mesh, bool clean = true, double smallComponentAreaRatio = 1e-5, double smallComponentFaceRatio = 0, double openingWidthRatio = 0)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         if (!(openingWidthRatio >= 0))
@@ -25,6 +27,7 @@ public static class ShapeMeshFinisher
             MeshCleanOptions options = new()
             {
                 SmallComponentAreaRatio = smallComponentAreaRatio,
+                SmallComponentFaceRatio = smallComponentFaceRatio,
                 HoleFillMaxWidth = openingWidthRatio * Diagonal(mesh),
             };
             return MeshOps.ComputeVertexNormals(MeshCleaner.Clean(mesh, options));

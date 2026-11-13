@@ -20,6 +20,8 @@ using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Multimodal;
@@ -522,6 +524,7 @@ public sealed partial class TextService : ITextService, IDisposable
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
+                    : image is not null && slot.HostReference is KimiK31TextModel kimi ? RunKimiVision(kimi, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
@@ -915,6 +918,12 @@ public sealed partial class TextService : ITextService, IDisposable
         HfTextDirectoryLoader.RequireSupported(checkpoint);
         if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
+        // Before the unload, so a refused placement leaves the slot's model in place; only a load that will happen reads the config.
+        if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
+        {
+            KimiK31Refusals.RequireRunnablePlacement(deviceKey, ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree,
+                _engine.Placement.ShardRatios, HfTextDirectoryLoader.ReadKimiK31Config(checkpoint));
+        }
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -924,6 +933,11 @@ public sealed partial class TextService : ITextService, IDisposable
         if (string.Equals(checkpoint.ModelType, MiniMaxM3HfConfigReader.ModelType, StringComparison.Ordinal))
         {
             LoadMiniMaxM3Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
+        if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
+        {
+            LoadKimiK31Directory(slot, deviceKey, checkpoint, path);
             return;
         }
         // after the unload, so the memory of a model this load replaces counts as free
@@ -957,8 +971,8 @@ public sealed partial class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
-    /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
-    private IBackend ReplaceWithHostBackend(TextDeviceSlot slot, string deviceKey, string modelName)
+    /// <summary>Disposes the slot's stage and primary backends and clears its placement, before a load builds its own backend.</summary>
+    private static void DisposeSlotBackends(TextDeviceSlot slot)
     {
         if (slot.ExtraStageBackends is not null)
         {
@@ -976,9 +990,56 @@ public sealed partial class TextService : ITextService, IDisposable
             slot.Backend = null;
         }
         slot.Placement = null;
+    }
+
+    /// <summary>Drops the slot's backends and placement and returns a fresh CPU backend, for a model whose weights live on the host whatever device was asked for.</summary>
+    private IBackend ReplaceWithHostBackend(TextDeviceSlot slot, string deviceKey, string modelName)
+    {
+        DisposeSlotBackends(slot);
         if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
             Logs.Warning($"[TextService] {modelName} runs on the host only; '{deviceKey}' is ignored and the model loads on the CPU.");
         return CreateBackendFor("cpu");
+    }
+
+    /// <summary>Loads a Kimi K3.1 directory onto the devices the request names. One device loads the whole decoder; two or more (a request-level
+    /// composite or the engine's shard devices) shard it, one rank per device, over the collective those devices support. A device that cannot be
+    /// created throws; the load never falls back to fewer devices or to the CPU. Requests take the pipeline route, which gates the device they name,
+    /// because the decoder has no batched decode.</summary>
+    private void LoadKimiK31Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        string[] rankDevices = ResolveShardDevices(deviceKey);
+        bool sharded = rankDevices.Length >= 2;
+        List<IBackend> backends = [];
+        ICollectiveComm? comm = null;
+        try
+        {
+            foreach (string device in sharded ? rankDevices : new[] { deviceKey }) backends.Add(CreateBackendFor(device));
+            comm = sharded ? CollectiveComm.Create(backends) : null;
+            slot.HostReference = sharded
+                ? HfTextDirectoryLoader.LoadKimiK31Sharded(checkpoint, backends, comm)
+                : HfTextDirectoryLoader.LoadHostReference(checkpoint, backends[0]);
+        }
+        catch
+        {
+            comm?.Dispose();
+            foreach (IBackend backend in backends) backend.Dispose();
+            throw;
+        }
+        slot.TpComm = comm;
+        slot.Backend = backends[0];
+        slot.ExtraStageBackends = backends.Skip(1).ToList();
+        slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
+        slot.Scheduler = null;
+        slot.ResidencyPlan = null;
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning("[TextService] Kimi K3.1 has no host memory guard yet; each rank's share is read at load and is not checked against free RAM.");
+        Logs.Info(sharded
+            ? $"[TextService] Loaded Kimi K3.1 '{name}' sharded over {rankDevices.Length} ranks ({string.Join(" + ", rankDevices)}) on the {comm!.Transport} collective."
+            : $"[TextService] Loaded Kimi K3.1 '{name}' on {deviceKey}.");
     }
 
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
@@ -1893,7 +1954,8 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <summary>What the model at <paramref name="localPath"/> takes besides text, from its file or folder alone (nothing is loaded and
     /// no device is touched). A GGUF is read by its header; a Hugging Face checkpoint folder by its <c>config.json</c>. A MOSS-VL
     /// model (<c>moss_vl</c>) takes images, video and live sessions with no sidecar; any other GGUF takes images when a sidecar
-    /// <c>mmproj</c> sits beside it (<see cref="FindMmproj"/>). A missing, unreadable or unknown path is
+    /// <c>mmproj</c> sits beside it (<see cref="FindMmproj"/>). A Kimi K3.1 folder takes images when its vision tower checks out from its files
+    /// (<see cref="KimiVisionInput.RefusalFromFiles"/>). A missing, unreadable or unknown path is
     /// <see cref="TextInputCapabilities.None"/>; this never throws.</summary>
     public static TextInputCapabilities InputCapabilities(string? localPath)
     {
@@ -1903,9 +1965,13 @@ public sealed partial class TextService : ITextService, IDisposable
         {
             if (Directory.Exists(localPath))
             {
-                return HfCheckpointDirectory.TryProbe(localPath)?.ModelType == LLM.Models.MossVl.MossVlConfig.ModelType
-                    ? new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true)
-                    : TextInputCapabilities.None;
+                HfCheckpointInfo? folder = HfCheckpointDirectory.TryProbe(localPath);
+                if (folder?.ModelType == LLM.Models.MossVl.MossVlConfig.ModelType)
+                    return new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true);
+                // A Kimi K3.1 folder takes images when its files would let the vision route load (the same checks, no tower load).
+                if (folder is not null && HfTextDirectoryLoader.IsKimiK31(folder) && KimiVisionInput.RefusalFromFiles(localPath) is null)
+                    return new TextInputCapabilities(Images: true, Video: false, RealtimeSession: false);
+                return TextInputCapabilities.None;
             }
             if (!File.Exists(localPath) || !localPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
                 return TextInputCapabilities.None;

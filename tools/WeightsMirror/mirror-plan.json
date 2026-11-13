@@ -1,0 +1,127 @@
+{
+  "licenses": [
+    {
+      "id": "tencent-hunyuan-3d-2.1",
+      "name": "Tencent Hunyuan 3D 2.1 Community License Agreement (release 2025-06-13)",
+      "spdx": "LicenseRef-tencent-hunyuan-community",
+      "hostObligations": "Serve only inside the Territory, the world excluding the European Union, the United Kingdom and South Korea (1l, 3, 5c). Ship the licence text (3a), a Notice file (3d) and a notice that the files were converted from pickle to safetensors with the tensor values unchanged (3b). Pass the Acceptable Use Policy on (5a). A service built on the Works names its real provider and states that Tencent is not affiliated (3e). More than 1 million monthly active users needs a licence from Tencent (4). Output may not be used to improve another AI model (5b).",
+      "textFiles": [
+        { "name": "LICENSE", "url": "https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/LICENSE", "size": 17915, "gitBlobSha1": "d875bf81e661c42846be26b83417ea31bfc4d3a7" },
+        { "name": "Notice.txt", "url": "https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/Notice.txt", "size": 16644, "gitBlobSha1": "bd3dea50102cdd5628a7a803c5d0c68a522a29ff" }
+      ]
+    },
+    {
+      "id": "tencent-hunyuan-3d-omni",
+      "name": "Tencent Hunyuan 3D Omni Community License Agreement (release 2025-09-26)",
+      "spdx": "LicenseRef-tencent-hunyuan-community",
+      "hostObligations": "Serve only inside the Territory, the world excluding the European Union, the United Kingdom and South Korea (1l, 3, 5c). Ship the licence text (3a), a Notice file (3d) and a notice that the files were converted from pickle to safetensors with the tensor values unchanged (3b). Pass the Acceptable Use Policy on (5a). A service built on the Works names its real provider and states that Tencent is not affiliated (3e). More than 1 million monthly active users needs a licence from Tencent (4). Output may not be used to improve another AI model (5b).",
+      "textFiles": [
+        { "name": "License.txt", "url": "https://huggingface.co/tencent/Hunyuan3D-Omni/raw/70e803bfb4e127d534049d8ab8c8cb511780d485/License.txt", "size": 16966, "gitBlobSha1": "5674ec7220abe6787d0f3c7e56945b4e7bb7715f" },
+        { "name": "Notice.txt", "url": "https://huggingface.co/tencent/Hunyuan3D-Omni/raw/70e803bfb4e127d534049d8ab8c8cb511780d485/Notice.txt", "size": 16695, "gitBlobSha1": "cbecd5c4252c0c7d66872de370467184181bb1c6" }
+      ]
+    },
+    {
+      "id": "mit-unirig",
+      "name": "MIT (UniRig code and Hugging Face model card); the training dataset Seed3D/Articulation-XL2.0 is CC BY 4.0",
+      "spdx": "MIT",
+      "hostObligations": "Keep the MIT copyright and licence notice with the files and credit the Articulation-XL2.0 dataset (CC BY 4.0). The Michelangelo source in the UniRig code carries a GPL-3.0 header; whether that reaches the weights is not settled.",
+      "textFiles": [
+        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/VAST-AI-Research/UniRig/main/LICENSE", "size": 1124, "gitBlobSha1": "a20d482774136ee1858d92964e896031598902b4" }
+      ]
+    },
+    {
+      "id": "apache-naf",
+      "name": "Apache-2.0 (valeoai/NAF repository); the release asset states no licence of its own",
+      "spdx": "Apache-2.0",
+      "hostObligations": "Keep the Apache-2.0 licence text and notices with the file. The release asset itself carries no licence statement.",
+      "textFiles": [
+        { "name": "LICENSE", "url": "https://raw.githubusercontent.com/valeoai/NAF/main/LICENSE", "size": 11357, "gitBlobSha1": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835" }
+      ]
+    }
+  ],
+  "items": [
+    {
+      "id": "paint21-unet", "model": "hunyuan3d-paint21",
+      "sourceRepo": "tencent/Hunyuan3D-2.1", "sourcePath": "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin", "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-2.1/resolve/0b94677654c57bb9a6b6845cd7b704ccf551d327/hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin",
+      "sourceSize": 3925293863, "sourceSha256": "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8",
+      "localSource": "3D/hunyuan3d-paint21/unet/diffusion_pytorch_model.bin", "output": "hunyuan3d-paint21/unet/diffusion_pytorch_model.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-2.1"
+    },
+    {
+      "id": "paint21-vae", "model": "hunyuan3d-paint21",
+      "sourceRepo": "tencent/Hunyuan3D-2.1", "sourcePath": "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin", "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-2.1/resolve/0b94677654c57bb9a6b6845cd7b704ccf551d327/hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin",
+      "sourceSize": 334707217, "sourceSha256": "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc",
+      "localSource": "3D/hunyuan3d-paint21/vae/diffusion_pytorch_model.bin", "output": "hunyuan3d-paint21/vae/diffusion_pytorch_model.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-2.1"
+    },
+    {
+      "id": "omni-dit", "model": "hunyuan3d-omni",
+      "sourceRepo": "tencent/Hunyuan3D-Omni", "sourcePath": "model/pytorch_model.bin", "revision": "70e803bfb4e127d534049d8ab8c8cb511780d485",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-Omni/resolve/70e803bfb4e127d534049d8ab8c8cb511780d485/model/pytorch_model.bin",
+      "sourceSize": 12203119470, "sourceSha256": "01c95e5f2588e324ebc05268231c92b3b1d9e83e5163723100ac958226c12a24",
+      "localSource": "3D/hunyuan3d-omni/model/pytorch_model.bin", "output": "hunyuan3d-omni/model/pytorch_model.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-omni"
+    },
+    {
+      "id": "omni-vae", "model": "hunyuan3d-omni",
+      "sourceRepo": "tencent/Hunyuan3D-Omni", "sourcePath": "vae/pytorch_model.bin", "revision": "70e803bfb4e127d534049d8ab8c8cb511780d485",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-Omni/resolve/70e803bfb4e127d534049d8ab8c8cb511780d485/vae/pytorch_model.bin",
+      "sourceSize": 1311145138, "sourceSha256": "379995ca170d8a899019125f389ba8692b2e35625ff64ddc3fdaa8c9302ac340",
+      "localSource": "3D/hunyuan3d-omni/vae/pytorch_model.bin", "output": "hunyuan3d-omni/vae/pytorch_model.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-omni"
+    },
+    {
+      "id": "omni-cond", "model": "hunyuan3d-omni",
+      "sourceRepo": "tencent/Hunyuan3D-Omni", "sourcePath": "cond_encoder/pytorch_model.bin", "revision": "70e803bfb4e127d534049d8ab8c8cb511780d485",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-Omni/resolve/70e803bfb4e127d534049d8ab8c8cb511780d485/cond_encoder/pytorch_model.bin",
+      "sourceSize": 464828, "sourceSha256": "f3f308e73153000ed566e985e2b1e38e9b40c12e23b7e6ecf89ce3ea1699c432",
+      "localSource": "3D/hunyuan3d-omni/cond_encoder/pytorch_model.bin", "output": "hunyuan3d-omni/cond_encoder/pytorch_model.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-omni"
+    },
+    {
+      "id": "shape21-dit", "model": "hunyuan3d-21",
+      "sourceRepo": "tencent/Hunyuan3D-2.1", "sourcePath": "hunyuan3d-dit-v2-1/model.fp16.ckpt", "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-2.1/resolve/0b94677654c57bb9a6b6845cd7b704ccf551d327/hunyuan3d-dit-v2-1/model.fp16.ckpt",
+      "sourceSize": 7366389768, "sourceSha256": "6b519fc7242f78e9b5f47ea4d55668fe3d944a2d27332f4ca68d29a6ff603f5e",
+      "localSource": "3D/hunyuan3d-21/dit/model.fp16.ckpt", "output": "hunyuan3d-21/dit/model.fp16.safetensors",
+      "recursive": true, "license": "tencent-hunyuan-3d-2.1",
+      "notes": "The bundle holds model.*, conditioner.* and vae.* keys (a root that is a dict of state dicts, so read recursively). The 2.1 shape model has no catalog id yet."
+    },
+    {
+      "id": "shape21-vae", "model": "hunyuan3d-21",
+      "sourceRepo": "tencent/Hunyuan3D-2.1", "sourcePath": "hunyuan3d-vae-v2-1/model.fp16.ckpt", "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "sourceUrl": "https://huggingface.co/tencent/Hunyuan3D-2.1/resolve/0b94677654c57bb9a6b6845cd7b704ccf551d327/hunyuan3d-vae-v2-1/model.fp16.ckpt",
+      "sourceSize": 655648152, "sourceSha256": "5cbe97f25e6e7abd4bccc80ab07524ec0c86d24118486a9ba49bb5dfb070288a",
+      "localSource": "3D/hunyuan3d-21/vae/model.fp16.ckpt", "output": "hunyuan3d-21/vae/model.fp16.safetensors",
+      "recursive": false, "license": "tencent-hunyuan-3d-2.1",
+      "notes": "The 2.1 shape model has no catalog id yet."
+    },
+    {
+      "id": "unirig-skeleton", "model": "unirig",
+      "sourceRepo": "VAST-AI/UniRig", "sourcePath": "skeleton/articulation-xl_quantization_256/model.ckpt", "revision": "36842e2b5947e9e60f89275b83208c8e74071c63",
+      "sourceUrl": "https://huggingface.co/VAST-AI/UniRig/resolve/36842e2b5947e9e60f89275b83208c8e74071c63/skeleton/articulation-xl_quantization_256/model.ckpt",
+      "sourceSize": 1439617174, "sourceSha256": "d8cf9b42d56e7bc316d293597ecf8c4c39a8631cdd44a261ecf388242fabd0f4",
+      "localSource": "3D/unirig/skeleton/articulation-xl_quantization_256/model.ckpt", "output": "unirig/skeleton/articulation-xl_quantization_256/model.safetensors",
+      "recursive": true, "license": "mit-unirig"
+    },
+    {
+      "id": "unirig-skin", "model": "unirig",
+      "sourceRepo": "VAST-AI/UniRig", "sourcePath": "skin/articulation-xl/model.ckpt", "revision": "36842e2b5947e9e60f89275b83208c8e74071c63",
+      "sourceUrl": "https://huggingface.co/VAST-AI/UniRig/resolve/36842e2b5947e9e60f89275b83208c8e74071c63/skin/articulation-xl/model.ckpt",
+      "sourceSize": 4375464854, "sourceSha256": "9d40cf42fb9d4c10d8b373d9f4f557c6fbbc5ebacae7ae6b3dce5a0d8a18bc33",
+      "localSource": "3D/unirig/skin/articulation-xl/model.ckpt", "output": "unirig/skin/articulation-xl/model.safetensors",
+      "recursive": true, "license": "mit-unirig",
+      "notes": "A Lightning checkpoint: the pickle reader exposes 1,164 tensors in 1,161 of the file's 4,621 storage entries (1.46 GB of its 4.37 GB); the other entries, most likely optimizer state, are not reachable as tensors, so the repack is about a third of the pickle's size. Every tensor the engine loads is kept."
+    },
+    {
+      "id": "naf", "model": "pixal3d",
+      "sourceRepo": "valeoai/NAF", "sourcePath": "release model: naf_release.pth", "revision": "release tag model (published 2025-11-24)",
+      "sourceUrl": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
+      "sourceSize": 2664431, "sourceSha256": "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f",
+      "localSource": "3D/pixal3d/naf_release.pth", "output": "pixal3d/naf_release.safetensors",
+      "recursive": false, "license": "apache-naf"
+    }
+  ]
+}
