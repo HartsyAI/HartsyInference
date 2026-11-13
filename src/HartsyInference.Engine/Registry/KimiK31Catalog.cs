@@ -9,8 +9,8 @@ internal static class KimiK31Catalog
     /// <summary>Builds the entry. It has no <see cref="CatalogEntry.Assets"/>, so the CLI never offers the ~1.5 TB download for it.</summary>
     internal static CatalogEntry Build() => new()
     {
-        // The text decoder is wired to the Text path and has no real-weight run, hence Structural and not CLI-drivable. The repo ships no
-        // tokenizer.json, so the Text path refuses the checkpoint by name until one is supplied.
+        // The text decoder is wired to the Text path and has no real-weight run, hence Structural and not CLI-drivable. The Text path
+        // loads the repo's tiktoken.model, since the repo ships no tokenizer.json.
         Id = Id, Modality = Modality.Text, DisplayName = "Kimi K3.1 Pro",
         Architecture = "93 layers: KDA linear attention and NoPE MLA with DSA indexer (24 full layers), dense layer 0, "
             + "latent SiTU MoE (896 routed, 16 active, 2 shared), attention residuals; vision tower not run",

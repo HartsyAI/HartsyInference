@@ -22,7 +22,12 @@ internal static class KimiK31Refusals
     /// <exception cref="NotSupportedException">The request asks for more than one device.</exception>
     internal static void RefuseMultiGpuPlacement(string deviceKey, int shardDeviceCount, int tensorParallelDegree)
     {
-        if (deviceKey.Contains('+', StringComparison.Ordinal) || shardDeviceCount >= 2 || tensorParallelDegree > 1)
+        if (tensorParallelDegree > 1)
+        {
+            throw new NotSupportedException($"Kimi K3.1 multi-GPU placement is not supported yet; the engine's tensor-parallel degree is "
+                + $"{tensorParallelDegree}. Set it to 1 to load the model on a single device.");
+        }
+        if (deviceKey.Contains('+', StringComparison.Ordinal) || shardDeviceCount >= 2)
         {
             throw new NotSupportedException($"Kimi K3.1 multi-GPU placement is not supported yet; the request for '{deviceKey}' "
                 + "names more than one device. Load it on a single device.");
