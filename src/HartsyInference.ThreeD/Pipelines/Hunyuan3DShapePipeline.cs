@@ -219,7 +219,8 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             throw new ArgumentOutOfRangeException("grid", grid, $"FlashVDM needs a grid of at least {MinFlashVdmGrid}.");
         if (GridLimit.Fits(FieldAxis(grid, flashVdm)))
             return;
-        int largest = Math.Min(grid, GridLimit.MaxAxis);
+        // FlashVDM's finest level grows with the grid, so its largest grid lies above the largest axis; start the search past it.
+        int largest = Math.Min(grid, flashVdm ? 2 * GridLimit.LargestAxis : GridLimit.LargestAxis + 1);
         while (largest > 1 && !GridLimit.Fits(FieldAxis(largest, flashVdm)))
             largest--;
         throw new ArgumentOutOfRangeException(

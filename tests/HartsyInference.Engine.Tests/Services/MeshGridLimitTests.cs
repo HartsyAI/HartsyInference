@@ -50,6 +50,18 @@ public sealed class MeshGridLimitTests
         Assert.Equal(nameof(MeshRequest.GridResolution), MeshFieldTag.FieldOf(error));
     }
 
+    [Theory]
+    [InlineData("hunyuan3d-turbo", 1327)]
+    [InlineData("hunyuan3d", 1290)]
+    public void TheMessageNamesTheLargestGridOfThatDecode(string id, int largest)
+    {
+        MeshRequestValidator.Validate(id, Request(largest), matterAvailable: false);
+
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate(id, Request(int.MaxValue), matterAvailable: false));
+
+        Assert.Contains($"largest that fits one is {largest}", error.Message);
+    }
+
     [Fact]
     public void TripoSrsDensityCubeHasTheSameLimitAndIsRefusedBeforeAnythingLoads()
     {
