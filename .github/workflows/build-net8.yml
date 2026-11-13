@@ -1,0 +1,27 @@
+name: Build net8.0
+
+# The libraries target net8.0 and net10.0 (Directory.Build.props) and publish-nuget.yml packs both. Day-to-day
+# builds and the other PR workflows only exercise net10.0, so a .NET 9+ only API (System.Threading.Lock, for
+# example) merges cleanly and breaks the publish run afterwards. This runs the publish job's own pack step on each
+# pull request instead, so both target frameworks and the Meta nuspec are covered and no project list has to be
+# kept in sync. Nothing is pushed.
+on:
+  pull_request:
+    paths: ['src/**', 'Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props', '.github/workflows/build-net8.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  net8:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - run: dotnet pack HartsyInference.sln -c Release -o "$RUNNER_TEMP/packages"
