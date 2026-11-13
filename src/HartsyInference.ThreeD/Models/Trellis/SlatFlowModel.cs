@@ -47,7 +47,14 @@ public sealed unsafe class SlatFlowModel
 
         DownState? down = null;
         List<Tensor> skips = new();
-        foreach (SlatResBlock3d b in _inBlocks) { h = b.Forward(backend, h, vec, ref down, null); skips.Add(h.Feats); }
+        foreach (SlatResBlock3d b in _inBlocks)
+        {
+            SparseTensor previous = h;
+            h = b.Forward(backend, h, vec, ref down, null);
+            // The first block's input is the input layer's output, read nowhere else; later inputs are the previous block's output, kept as a skip.
+            if (skips.Count == 0) previous.Feats.Dispose();
+            skips.Add(h.Feats);
+        }
 
         // APE on the (downsampled) coords, added to feats. The APE is a pure function of the voxel geometry, which is
         // constant across all sampler steps (the sampler threads the SAME SparseTensor, mutating only feats in-place),
@@ -73,6 +80,7 @@ public sealed unsafe class SlatFlowModel
             cur = nf;
         }
         h = h.Replace(cur);
+        hAdd.Dispose();   // the first block's input, which the loop above leaves alone
 
         (int[] idx, int[] coords, int res) up = (down!.Value.Idx, down.Value.PreCoords, down.Value.PreResolution);
         for (int j = 0; j < _outBlocks.Length; j++)
@@ -81,11 +89,16 @@ public sealed unsafe class SlatFlowModel
             int n = h.Count, c1 = h.Channels, c2 = (int)skip.Shape[skip.Shape.Rank - 1];
             Tensor cat = new(new TensorShape(1, n, c1 + c2), DType.F32);
             backend.Concat(cat, [SparseOps.As3D(h.Feats), SparseOps.As3D(skip)], 2);
+            Tensor consumed = h.Feats;
             h = _outBlocks[j].Forward(backend, h.Replace(cat), vec, ref down, _outBlocks[j] == _outBlocks[0] ? up : null);
+            cat.Dispose();
+            consumed.Dispose();
         }
+        foreach (Tensor skip in skips) skip.Dispose();
 
         int fc = h.Channels;   // 128 after the out-blocks (out_layer maps 128 → 8)
         Tensor normed = new(new TensorShape(1, h.Count, fc), DType.F32); backend.LayerNormNoAffine(normed, SparseOps.As3D(h.Feats), 1e-5f);
+        h.Feats.Dispose();
         Tensor outFeats = SparseLinear(backend, normed, _outW!, _outB!); normed.Dispose();
         vec.Dispose();
         return h.Replace(outFeats);
