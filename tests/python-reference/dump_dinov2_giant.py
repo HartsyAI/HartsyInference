@@ -11,7 +11,7 @@ input through it:
 
     python dump_dinov2_giant.py --variant large --weights <dinov2-large/model.safetensors> --out <fixture.safetensors>
 
-Fixture keys: `image_u8` [512, 512, 3] (uint8) and `pixels_preprocessed` [1, 3, 518, 518] (torchvision's resize, crop and normalisation of it, the Hunyuan3D-2.1 and Omni path), `pixels` [1, 3, 518, 518], `last_hidden_state` [1, 1370, 1536] (after the final LayerNorm) and `prenorm` [1, 1370, width] (the last block's output, `hidden_states[-1]`).
+Fixture keys: `image_u8` [512, 512, 3] (uint8) and `pixels_preprocessed` [1, 3, 518, 518] (torchvision's resize, crop and normalisation of it, the Hunyuan3D-2.1 and Omni path), `pixels` [1, 3, 518, 518], `last_hidden_state` [1, 1370, width] (after the final LayerNorm) and `prenorm` [1, 1370, width] (the last block's output, `hidden_states[-1]`).
 """
 import argparse
 import time

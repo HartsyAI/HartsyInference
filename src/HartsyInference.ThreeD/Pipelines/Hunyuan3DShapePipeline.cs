@@ -122,9 +122,9 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         _ownedLoaders.Clear();
     }
 
-    /// <summary>Generates a mesh from a single conditioning image.</summary>
+    /// <summary>Generates a mesh from a single conditioning image; <paramref name="cancel"/> stops the denoising loop between steps and the VAE decode between chunks.</summary>
     /// <exception cref="NotSupportedException">The checkpoint is a multiview build; use <see cref="GenerateMultiView"/>.</exception>
-    public ThreeDResult Generate(ImageTo3DRequest request, Action<GenerationProgress>? onProgress = null)
+    public ThreeDResult Generate(ImageTo3DRequest request, Action<GenerationProgress>? onProgress = null, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
@@ -132,12 +132,12 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
             throw new NotSupportedException("This is a multiview checkpoint; give it views with GenerateMultiView.");
         return Sample(
             () => new ConditionPair(EncodeViews([new Hunyuan3DViewImage(Hunyuan3DView.Front, request.ImageRgb, request.Width, request.Height)]), null),
-            request.Seed, request.Steps, request.CfgScale, request.GridResolution, request.IsoLevel, onProgress);
+            request.Seed, request.Steps, request.CfgScale, request.GridResolution, request.IsoLevel, onProgress, cancel);
     }
 
-    /// <summary>Generates a mesh from one to four views of an object with a multiview (<c>2mv</c>) checkpoint.</summary>
+    /// <summary>Generates a mesh from one to four views of an object with a multiview (<c>2mv</c>) checkpoint; <paramref name="cancel"/> as in <see cref="Generate"/>.</summary>
     /// <exception cref="NotSupportedException">The checkpoint conditions on a single image.</exception>
-    public ThreeDResult GenerateMultiView(Hunyuan3DMultiViewRequest request, Action<GenerationProgress>? onProgress = null)
+    public ThreeDResult GenerateMultiView(Hunyuan3DMultiViewRequest request, Action<GenerationProgress>? onProgress = null, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(request);
@@ -146,7 +146,7 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         if (request.Views.Count == 0 || request.Views.Count > _cfg.ViewCount || request.Views.Select(v => v.View).Distinct().Count() != request.Views.Count)
             throw new ArgumentException($"Give 1 to {_cfg.ViewCount} views, each at most once.", nameof(request));
         return Sample(() => new ConditionPair(EncodeViews(request.Views), null), request.Seed, request.Steps, request.CfgScale, request.GridResolution,
-            request.IsoLevel, onProgress);
+            request.IsoLevel, onProgress, cancel);
     }
 
     /// <summary>The DINOv2 tokens of one image, <c>[1, tokens, condDim]</c>, for a pipeline that adds its own context tokens (Omni's control tokens). The caller disposes it.</summary>
@@ -309,10 +309,11 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         }
         finally
         {
-            _dit.InvalidateStepGraph(Backend);   // before the weights go: a captured step graph holds their addresses
-            Backend.FreeWeights(_dit.EnumerateWeights());
+            // The conditioning goes first so a failure while freeing the weights cannot leak it (or hide the original error with a leak behind it).
             cond.Dispose();
             uncond?.Dispose();
+            _dit.InvalidateStepGraph(Backend);   // before the weights go: a captured step graph holds their addresses
+            Backend.FreeWeights(_dit.EnumerateWeights());
         }
         Probe($"dit-loop ({evaluations} evals x{(_cfg.GuidanceEmbed ? 1 : 2)})");
 
