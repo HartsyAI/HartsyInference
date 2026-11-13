@@ -14,10 +14,44 @@ namespace HartsyInference.Engine.Services;
 public sealed class MeshPreparationService : IMeshPreparationService, IDisposable
 {
     private readonly InferenceEngine _engine;
+    private readonly Func<ISharedMatter> _createMatter;
     private readonly object _gate = new();
-    private Trellis2LazyMatter? _matter;
+    private readonly SerializedMatter _shared;
+    private ISharedMatter? _matter;
 
-    internal MeshPreparationService(InferenceEngine engine) => _engine = engine;
+    internal MeshPreparationService(InferenceEngine engine)
+        : this(engine, static () => new SharedBiRefNetMatter(new Trellis2LazyMatter(RepoPaths.ModelsRoot())))
+    {
+    }
+
+    /// <param name="createMatter">Builds the matting model on first use, and again after it was released; a test stands in for the checkpoint.</param>
+    internal MeshPreparationService(InferenceEngine engine, Func<ISharedMatter> createMatter)
+    {
+        _engine = engine;
+        _createMatter = createMatter;
+        _shared = new SerializedMatter(this);
+    }
+
+    /// <summary>The one matting model: the pipelines that matte their own input (TRELLIS.2, Pixal3D) take it too, so the checkpoint is never resident twice. It loads on first use, runs one image at a time, and is released by <see cref="ReleaseMatter"/>.</summary>
+    internal IForegroundMatter SharedMatter => _shared;
+
+    /// <summary>The checkpoint the resident matting model was read from; null while none is resident. Does not wait for a matte in progress.</summary>
+    internal string? MatterLoadedFrom => Volatile.Read(ref _matter)?.LoadedFrom;
+
+    /// <summary>Releases the matting model, waiting for a matte in progress, and says whether one was resident. The next matte loads it again.</summary>
+    internal bool ReleaseMatter()
+    {
+        lock (_gate)
+        {
+            ISharedMatter? matter = _matter;
+            _matter = null;
+            if (matter is null)
+                return false;
+            bool resident = matter.LoadedFrom is not null;
+            matter.Dispose();
+            return resident;
+        }
+    }
 
     /// <inheritdoc/>
     public Task<PreparedMeshImage> PrepareImageAsync(ModelSpec spec, ImageData image, CancellationToken cancel = default)
@@ -125,17 +159,10 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
     /// <summary>Whether the image carries a cutout to use: an alpha plane with some transparency. An RGBA image whose alpha is entirely opaque (every ordinary RGBA export of a photo) has no foreground to find, as in upstream TRELLIS (<c>np.all(alpha == 255)</c>), so it is matted; a plane that is nearly but not entirely opaque is taken as a cutout.</summary>
     internal static bool HasUsableAlpha(ImageData image) => image.HasAlpha && image.Alpha!.Any(a => a != 255);
 
-    private IForegroundMatter Matter() => new SerializedMatter(this);
+    private IForegroundMatter Matter() => _shared;
 
     /// <summary>Releases the matting model, waiting for a matte in progress.</summary>
-    public void Dispose()
-    {
-        lock (_gate)
-        {
-            _matter?.Dispose();
-            _matter = null;
-        }
-    }
+    public void Dispose() => ReleaseMatter();
 
     /// <summary>The service's one matting model behind the service's lock: it loads once, runs one image at a time, and cannot be released under a run.</summary>
     private sealed class SerializedMatter(MeshPreparationService owner) : IForegroundMatter
@@ -145,14 +172,14 @@ public sealed class MeshPreparationService : IMeshPreparationService, IDisposabl
             get
             {
                 lock (owner._gate)
-                    return (owner._matter ??= new Trellis2LazyMatter(RepoPaths.ModelsRoot())).IsAvailable;
+                    return (owner._matter ??= owner._createMatter()).IsAvailable;
             }
         }
 
         public float[] Alpha(IBackend backend, ReadOnlySpan<byte> rgb, int width, int height)
         {
             lock (owner._gate)
-                return (owner._matter ??= new Trellis2LazyMatter(RepoPaths.ModelsRoot())).Alpha(backend, rgb, width, height);
+                return (owner._matter ??= owner._createMatter()).Alpha(backend, rgb, width, height);
         }
     }
 }

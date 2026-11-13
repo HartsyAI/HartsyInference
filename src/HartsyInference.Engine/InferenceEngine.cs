@@ -250,6 +250,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     internal MeshPreparationService MeshPreparationInternal => _meshPreparation.Value;
 
+    /// <summary>The preparation service when it exists; listing or freeing memory does not create it.</summary>
+    internal MeshPreparationService? MeshPreparationIfCreated => _meshPreparation.IsValueCreated ? _meshPreparation.Value : null;
+
     /// <inheritdoc/>
     public IWorldService World => _world.Value;
 
@@ -1244,10 +1247,11 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_restore.IsValueCreated)
             ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
         // A restore placed on another device keeps its weights and its device context in that service; the teardown below disposes them.
-        if (_meshPreparation.IsValueCreated)
-            ReleaseLogged("the mesh image preparation", _meshPreparation.Value.Dispose, ref failures);
+        // The mesh service first: a TRELLIS.2 or Pixal3D run it waits for can still load the shared matting model, which the preparation service releases after.
         if (_mesh.IsValueCreated)
             ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
+        if (_meshPreparation.IsValueCreated)
+            ReleaseLogged("the mesh image preparation", _meshPreparation.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
             ReleaseLogged("the world service", _world.Value.Dispose, ref failures);
         // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released
