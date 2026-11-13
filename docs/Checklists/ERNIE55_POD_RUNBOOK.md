@@ -149,6 +149,9 @@ dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Erni
 The whole sequence is `scripts/ernie55_pod_run.sh all`, which runs preflight, verify, gpu-check, ptx-check and test in that
 order, and never the download. It writes the log, a 0.5 s VRAM sample and `summary.txt` to `ERNIE_RUN_DIR`.
 
+Only `test` can be rehearsed without a GPU (`ERNIE_REAL_DEVICE=cpu scripts/ernie55_pod_run.sh test`, on a synthetic checkpoint). `all`
+runs `gpu-check` and `ptx-check`, which need the GPU.
+
 **Expected output**
 
 - `verify`: `sizes ok: 130 manifest files, 288448161526 bytes, 128 shards`.

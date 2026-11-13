@@ -11,7 +11,8 @@
 #
 # Environment: ERNIE_CKPT_DIR (checkpoint folder, required by verify and test), ERNIE_RUN_DIR (logs, default ./ernie55-run-<time>),
 # ERNIE_MIN_FREE_MIB (default 24576), ERNIE_REAL_TOKENS (default 1,2,3,4,5), ERNIE_VERIFY (size or sha256; default size),
-# ERNIE_REAL_DEVICE (default cuda; cpu is for rehearsing this script on a small synthetic checkpoint, not for the real run).
+# ERNIE_REAL_DEVICE (default cuda; cpu rehearses the test stage on a small synthetic checkpoint, not the real run; vulkan runs
+# the test without a VRAM sample, since only cuda is sampled).
 # Every stage stops the script on its first failure.
 set -euo pipefail
 
@@ -185,7 +186,9 @@ stage_test() {
         if [[ "$device" == cuda ]]; then
             nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
             nvidia-smi | grep -o 'CUDA Version: [0-9.]*' || true
-            echo "peak VRAM used (MiB, sampled every 0.5 s): $(sort -n "$vram" | tail -1)"
+            local peak
+            peak="$(sort -n "$vram" | tail -1)"
+            echo "peak VRAM used (MiB, sampled every 0.5 s): ${peak:-unknown}"
         fi
         echo "$timing"
     } | tee "${RUN_DIR}/summary.txt"
