@@ -78,7 +78,7 @@ public static class ModelResolver
         // per-modality guess below ("Image"/"Video"). Prefer the authoritative asset path when it's actually on
         // disk; only fall through to the guess for catalog-less entries or ones with no defined Assets.
         if (catalog is { Assets.Count: > 0 } && ModelDownloader.PrimaryAsset(catalog) is ModelAsset asset
-            && ModelDownloader.FindExisting(asset, ignoreCase) is string primary)
+            && (ModelDownloader.FindExisting(asset, ignoreCase) ?? ModelDownloader.FindRepacked(asset)) is string primary)
         {
             return Path.GetFullPath(primary);
         }

@@ -49,6 +49,34 @@ public sealed class Pixal3DModelFilesTests
     }
 
     [Fact]
+    public void Resolve_ReadsNafFromItsSafetensorsRepackInPreferenceToThePickleAndWithoutIt()
+    {
+        string models = Directory.CreateTempSubdirectory("pixal3d-files-").FullName;
+        try
+        {
+            string folder = Path.Combine(models, "3D", "pixal3d");
+            foreach (string name in new[]
+            {
+                Trellis2ModelFiles.PipelineFile, Trellis2ModelFiles.StructureFlowFile, Trellis2ModelFiles.ShapeFlow512File,
+                Trellis2ModelFiles.ShapeFlow1024File, Trellis2ModelFiles.StructureDecoderFile, Trellis2ModelFiles.ShapeDecoderFile,
+            })
+                Touch(folder, name);
+            Touch(models, "DINOv3", Trellis2ModelFiles.DinoFile);
+            string repack = Touch(folder, "naf_release.safetensors");
+
+            Assert.Equal(repack, Pixal3DModelFiles.Resolve(folder).Naf);
+            Touch(folder, Pixal3DModelFiles.NafFile);
+            Assert.Equal(repack, Pixal3DModelFiles.Resolve(folder).Naf);
+            File.Delete(repack);
+            Assert.Equal(Path.Combine(folder, Pixal3DModelFiles.NafFile), Pixal3DModelFiles.Resolve(folder).Naf);
+        }
+        finally
+        {
+            Directory.Delete(models, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Resolve_PrefersADecoderInsideThePixal3DFolder()
     {
         string models = Directory.CreateTempSubdirectory("pixal3d-files-").FullName;

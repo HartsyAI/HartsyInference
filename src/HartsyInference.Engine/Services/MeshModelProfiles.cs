@@ -54,7 +54,7 @@ internal static class MeshModelProfiles
                 new MeshLicence { Summary = "MIT (Pixal3D); DINOv3 under the DINOv3 License; the NAF weights' licence is not stated" },
                 new MeshCost { PeakVramGiB = 9.3, TypicalSeconds = 386, Basis = "RTX 3060, 1024 cascade, shape-only, 12 steps per flow, one image (a bust); 1536 peaks at 11.6." },
                 peak: request => request.GridResolution == 1536 ? 11.6 : 9.3,
-                note: "naf_release.pth must be placed in the model folder by hand; needs the foreground cut out like TRELLIS.2."),
+                note: "naf_release.pth is fetched from the NAF release with the other files (or place it, or its safetensors repack, in the model folder); needs the foreground cut out like TRELLIS.2."),
             Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats | MeshOutputKinds.Mesh,
                 [Steps("25", 0, null, "Steps of the structure flow and of the SLAT flow."), Rejected(nameof(MeshRequest.GridResolution)),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
