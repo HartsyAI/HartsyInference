@@ -64,6 +64,11 @@ hf download baidu/ERNIE-5.5-Flash-Base --revision 028544b2ffceea189b2d8768ed2b9d
   --local-dir "$CKPT" --include "*.json" --include "*.safetensors"
 ```
 
+The repeated `--include` works in `hf` 2.4.0: a `--dry-run` with the same flags listed both the JSON files and the shards. Another
+`hf` version may treat a repeated flag differently, so run `hf download … --dry-run` with the same flags first and check that the
+listing has the shards and the JSON files before the 288 GB transfer. The script's `download` stage runs `verify` afterward, which
+would also catch a missing index or config, but only after the transfer.
+
 The tree API answered without a token when this runbook was written. If `hf` asks for a login, export `HF_TOKEN` for this
 session only, and never commit it or paste it into a log. The script wraps this command as `scripts/ernie55_pod_run.sh download`,
 which then runs the verification below.
@@ -130,6 +135,9 @@ Expected: `GPU free: <name>, <MiB> MiB free, no compute process`. Any other outp
 `nvidia-smi --query-gpu=name,memory.free --format=csv` (one row) and `nvidia-smi --query-compute-apps=pid,process_name --format=csv`
 (no rows).
 
+Most rented pods do not show processes from other containers in `--query-compute-apps`, so an empty list there is weak evidence.
+The free-MiB reading is the check that matters; the process list only catches processes in the same container.
+
 ## 7. The test
 
 ```bash
@@ -147,8 +155,9 @@ order, and never the download. It writes the log, a 0.5 s VRAM sample and `summa
 - `gpu-check`: `GPU free: ...`.
 - `ptx-check`: `ptx ok: ISA 9.0 throughout; targets: ...`.
 - Test: `Real_IndexMapsEveryKey` passed and `Real_PrefillAndDecode_ProduceFiniteLogits` passed. The timing line is
-  `ERNIE real run on cuda: load <s>, prefill 5 tokens <s>, decode 1 token <s>, argmax after prefill <id>.` The summary line is
-  `Failed: 0, Passed: 2, Skipped: 0`.
+  `ERNIE real run on cuda: load <s>, prefill 5 tokens <s>, decode 1 token <s>, argmax after prefill <id>.` The verbosity=normal
+  summary is `Total tests: 2`, then `Passed: 2`, with no `Failed:` or `Skipped:` line. (The minimal-verbosity line
+  `Failed: 0, Passed: 2, Skipped: 0` is not printed at this verbosity.)
 - **A run that did not validate:** any `SKIPPED` line, fewer than 2 passed, or no timing line. The script treats each as a
   failure. Under the repository's rules a run like that is reported as not run.
 

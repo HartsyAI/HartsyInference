@@ -10,7 +10,8 @@
 #   scripts/ernie55_pod_run.sh all          # preflight, verify, gpu-check, ptx-check, test (never download)
 #
 # Environment: ERNIE_CKPT_DIR (checkpoint folder, required by verify and test), ERNIE_RUN_DIR (logs, default ./ernie55-run-<time>),
-# ERNIE_MIN_FREE_MIB (default 24576), ERNIE_REAL_TOKENS (default 1,2,3,4,5), ERNIE_VERIFY (size or sha256; default size).
+# ERNIE_MIN_FREE_MIB (default 24576), ERNIE_REAL_TOKENS (default 1,2,3,4,5), ERNIE_VERIFY (size or sha256; default size),
+# ERNIE_REAL_DEVICE (default cuda; cpu is for rehearsing this script on a small synthetic checkpoint, not for the real run).
 # Every stage stops the script on its first failure.
 set -euo pipefail
 
@@ -23,6 +24,7 @@ EXPECTED_BYTES=288448161526   # 128 shards + index + config.json; the manifest l
 MIN_FREE_MIB="${ERNIE_MIN_FREE_MIB:-24576}"
 TOKENS="${ERNIE_REAL_TOKENS:-1,2,3,4,5}"
 RUN_DIR="${ERNIE_RUN_DIR:-${PWD}/ernie55-run-$(date +%Y%m%d-%H%M%S)}"
+RUN_DIR="$(realpath -m "$RUN_DIR")"   # absolute: the test stage changes directory before it writes the log
 
 fail() {
     echo "FAILED: $*" >&2
@@ -64,9 +66,10 @@ stage_preflight() {
 
 stage_download() {
     [[ "${ERNIE_CONFIRM_LICENSE:-}" == "1" ]] || fail "download needs ERNIE_CONFIRM_LICENSE=1 after the license is confirmed (runbook section 3)"
-    require_ckpt
+    [[ -n "${ERNIE_CKPT_DIR:-}" ]] || fail "set ERNIE_CKPT_DIR to the checkpoint folder"
     require_cmd hf
     mkdir -p "$ERNIE_CKPT_DIR"
+    require_ckpt
     hf download "$REPO_ID" --revision "$REVISION" --local-dir "$ERNIE_CKPT_DIR" --include "*.json" --include "*.safetensors"
     stage_verify
 }
@@ -104,7 +107,7 @@ stage_verify() {
     echo "sizes ok: ${listed} manifest files, ${total} bytes, ${shards} shards"
 
     if [[ "${ERNIE_VERIFY:-size}" == "sha256" ]]; then
-        local list="${RUN_DIR:-${TMPDIR:-/tmp}}/sha256.list"
+        local list="${RUN_DIR}/sha256.list"
         ensure_run_dir
         awk '$1 != "-" && $1 !~ /^#/ { print $1 "  " $3 }' "$MANIFEST" > "$list"
         (cd "$ERNIE_CKPT_DIR" && sha256sum -c --quiet "$list") || fail "sha256 mismatch"
@@ -122,6 +125,7 @@ stage_gpu_check() {
     [[ "$count" -eq 1 ]] || fail "${count} GPUs visible; the runbook is one GPU"
     name="${rows%%,*}"
     free_mib="$(printf '%s\n' "$rows" | awk -F', ' '{ print $2 }')"
+    [[ "$free_mib" =~ ^[0-9]+$ ]] || fail "could not read free VRAM on ${name} (got '${free_mib}')"
     [[ "$free_mib" -ge "$MIN_FREE_MIB" ]] || fail "${free_mib} MiB free on ${name}; need ${MIN_FREE_MIB} MiB"
     local apps
     apps="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader)"
@@ -144,7 +148,7 @@ stage_test() {
     require_cmd dotnet
     require_cmd nvidia-smi
     ensure_run_dir
-    local log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler
+    local device="${ERNIE_REAL_DEVICE:-cuda}" log="${RUN_DIR}/ernie55_real_test.log" vram="${RUN_DIR}/vram_mib.log" sampler
     (
         while true; do
             nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
@@ -157,17 +161,19 @@ stage_test() {
 
     cd "$REPO_ROOT"
     local status=0
-    ERNIE_REAL_DIR="$ERNIE_CKPT_DIR" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_TOKENS="$TOKENS" \
+    ERNIE_REAL_DIR="$ERNIE_CKPT_DIR" ERNIE_REAL_DEVICE="$device" ERNIE_REAL_TOKENS="$TOKENS" \
         dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests" \
         --logger "console;verbosity=normal" 2>&1 | tee "$log" || status=$?
     kill "$sampler" 2>/dev/null || true
     trap - EXIT
     [[ "$status" -eq 0 ]] || fail "dotnet test exited ${status}; see ${log}"
 
-    # A skipped fact validated nothing: require both facts to pass, none skipped.
-    grep -qE 'Failed: +0, +Passed: +2, +Skipped: +0,' "$log" || fail "the harness did not report 2 passed, 0 skipped, 0 failed; see ${log}"
+    # A skipped fact validated nothing: require both facts to pass, none skipped. verbosity=normal prints the summary as
+    # "Total tests: N", then "Passed: N" and any "Failed:" or "Skipped:" line; the minimal-verbosity "Failed: 0, Passed: 2" line is not printed.
+    grep -qE '^Total tests: 2$' "$log" && grep -qE '^ +Passed: 2$' "$log" && ! grep -qE '^ +(Failed|Skipped): ' "$log" \
+        || fail "the harness did not report 2 passed, 0 skipped, 0 failed; see ${log}"
     local timing
-    timing="$(grep -m1 '^ERNIE real run on cuda:' "$log" || true)"
+    timing="$(grep -m1 "^ERNIE real run on ${device}:" "$log" || true)"
     [[ -n "$timing" ]] || fail "no timing line from the forward; see ${log}"
     local peak
     peak="$(sort -n "$vram" | tail -1)"
