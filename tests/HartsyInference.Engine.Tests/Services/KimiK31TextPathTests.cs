@@ -2,6 +2,9 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
@@ -94,15 +97,59 @@ public sealed class KimiK31TextPathTests : IDisposable
     }
 
     [Fact]
-    public void Checkpoint_with_a_vision_tower_loads_text_only_and_refuses_image_input_by_name()
+    public async Task Checkpoint_with_a_jinja_template_refuses_images_by_name_as_not_xtml()
     {
-        HfCheckpointInfo info = Probe(WriteCheckpoint("vision", withVision: true));
-        using CpuBackend backend = new();
-        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(info, backend);
+        string dir = WriteCheckpoint("jinja");
 
-        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => KimiK31Refusals.RefuseImage(model, hasImage: true));
-        Assert.Contains("vision", refused.Message, StringComparison.OrdinalIgnoreCase);
-        KimiK31Refusals.RefuseImage(model, hasImage: false);
+        NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(() => GenerateAsync(dir, WithImage(maxTokens: 2)));
+        Assert.Contains("the chat template is not the XTML template", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Checkpoint_with_a_loadable_tower_takes_an_image_and_replies_within_the_budget()
+    {
+        string dir = WriteVisionCheckpoint("vision");
+
+        TextResult result = await GenerateAsync(dir, WithImage(maxTokens: 4));
+
+        Assert.InRange(result.CompletionTokens, 0, 4);
+        // The reply stops at a stop id, or it has used its whole budget and reports Length.
+        Assert.Equal(result.CompletionTokens == 4 ? StopReason.Length : StopReason.Stop, result.Stop);
+    }
+
+    [Fact]
+    public async Task An_image_on_an_earlier_turn_is_refused_by_name()
+    {
+        string dir = WriteVisionCheckpoint("earlier");
+        TextRequest request = Request(
+            new TextMessage { Role = TextRole.User, Content = "first", Images = [Image()] },
+            new TextMessage { Role = TextRole.Assistant, Content = "ok" },
+            new TextMessage { Role = TextRole.User, Content = "second" });
+
+        NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(() => GenerateAsync(dir, request));
+        Assert.Contains("on the last user turn only", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_image_with_alpha_is_refused_by_name()
+    {
+        string dir = WriteVisionCheckpoint("alpha");
+
+        NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(() => GenerateAsync(dir, WithImage(maxTokens: 2, alpha: true)));
+        Assert.Contains("alpha channel", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Tool_schemas_with_an_image_are_refused_by_name()
+    {
+        string dir = WriteVisionCheckpoint("tools");
+        TextRequest request = WithImage(maxTokens: 2) with
+        {
+            Tools = [new ToolDefinition { Name = "lookup", Description = "Looks a thing up." }],
+        };
+
+        NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(() => GenerateAsync(dir, request));
+        Assert.Contains("tool schemas are not rendered", refused.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -224,11 +271,44 @@ public sealed class KimiK31TextPathTests : IDisposable
     private IHostReferenceTextModel Load(IBackend backend, string name) =>
         HfTextDirectoryLoader.LoadHostReference(Probe(WriteCheckpoint(name)), backend);
 
-    private string WriteCheckpoint(string name, bool withVision = false)
+    private string WriteCheckpoint(string name)
     {
         string dir = Path.Combine(_root, name);
-        KimiSyntheticCheckpoint.Write(dir, withVision: withVision);
+        KimiSyntheticCheckpoint.Write(dir);
         return dir;
+    }
+
+    private string WriteVisionCheckpoint(string name)
+    {
+        string dir = Path.Combine(_root, name);
+        KimiVisionCheckpoint.Write(dir);
+        return dir;
+    }
+
+    // The engine route end to end: the directory is loaded as the request's model on the CPU, and the request runs through RunKimiVision.
+    private static async Task<TextResult> GenerateAsync(string directory, TextRequest request)
+    {
+        using InferenceEngine engine = new("cpu");
+        ModelSpec spec = new() { Requested = directory, Modality = Modality.Text, LocalPath = directory };
+        return await engine.Text.GenerateAsync(spec, request);
+    }
+
+    private static TextRequest WithImage(int maxTokens, bool alpha = false) => Request(
+        new TextMessage { Role = TextRole.User, Content = "What is this?", Images = [Image(alpha)] }) with { MaxTokens = maxTokens };
+
+    private static TextRequest Request(params TextMessage[] messages) => new()
+    {
+        Messages = messages,
+        Device = "cpu",
+        Temperature = 0,
+    };
+
+    // A deterministic 8x6 RGB frame, the size the LLM tests use.
+    private static ImageData Image(bool alpha = false)
+    {
+        byte[] rgb = new byte[8 * 6 * 3];
+        for (int i = 0; i < rgb.Length; i++) rgb[i] = (byte)((i * 31) % 256);
+        return new ImageData { Rgb = rgb, Width = 8, Height = 6, Alpha = alpha ? Enumerable.Repeat((byte)255, 8 * 6).ToArray() : null };
     }
 
     private static HfCheckpointInfo Probe(string dir) =>

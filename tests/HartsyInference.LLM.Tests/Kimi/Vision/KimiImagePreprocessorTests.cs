@@ -33,6 +33,16 @@ public sealed class KimiImagePreprocessorTests
     }
 
     [Fact]
+    public void A_side_limit_that_is_not_a_whole_number_of_merge_blocks_is_refused_by_name()
+    {
+        // 9 patches of 14 pixels per side, with 2-patch merge blocks: a 126-pixel side pads to 140, which is 10 patches, one past the limit.
+        KimiImageSpec spec = Published with { PatchLimitOnOneSide = 9 };
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => KimiImagePreprocessor.Resize(1000, 1000, spec));
+        Assert.Contains("merge blocks", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Preprocess_resizes_normalizes_and_pads_with_black_before_normalization()
     {
         byte[] rgb = new byte[4 * 2 * 3];

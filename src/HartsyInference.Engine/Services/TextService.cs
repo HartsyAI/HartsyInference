@@ -519,7 +519,6 @@ public sealed partial class TextService : ITextService, IDisposable
             try
             {
                 ImageData? image = LastImage(request);
-                KimiK31Refusals.RefuseImage(slot.HostReference, image is not null);
                 if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 if (slot.MossVl is null) RequireNoVideo(request);

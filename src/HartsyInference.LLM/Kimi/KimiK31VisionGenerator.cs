@@ -35,11 +35,13 @@ public sealed class KimiK31VisionGenerator
     /// placeholder order. Stops at a stop id, which is not returned.</summary>
     /// <exception cref="ArgumentException">The prompt's media pads do not match the images, or an image is malformed.</exception>
     /// <exception cref="HartsyInferenceException">The spliced prompt and the reply do not fit the loaded context.</exception>
-    public (string Text, int Tokens) Generate(int[] promptIds, IReadOnlyList<RawRgbFrame> images, SamplingOptions sampling, int maxTokens)
+    /// <exception cref="OperationCanceledException"><paramref name="cancel"/> is set; checked per image, per prefill row and per sampled token.</exception>
+    public KimiK31VisionReply Generate(int[] promptIds, IReadOnlyList<RawRgbFrame> images, SamplingOptions sampling, int maxTokens,
+        CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(sampling);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxTokens, 1);
-        Prefilled prefilled = Prefill(promptIds, images, maxTokens);
+        Prefilled prefilled = Prefill(promptIds, images, maxTokens, cancel);
         using KimiK31State state = prefilled.State;
         KimiK31Model decoder = _generation.Decoder;
         SamplerChain sampler = SamplerChain.FromOptions(sampling, _tokenizer, _generation.DecoderConfig.Vocab);
@@ -47,27 +49,33 @@ public sealed class KimiK31VisionGenerator
         List<int> history = [];
         List<int> reply = [];
         float[] logits = prefilled.Logits;
+        bool stopped = false;
         for (int step = 0; step < maxTokens; step++)
         {
+            cancel.ThrowIfCancellationRequested();
             int token = sampler.Next(logits.AsSpan(), history);
-            if (stops.Contains(token)) break;
+            if (stops.Contains(token))
+            {
+                stopped = true;
+                break;
+            }
             reply.Add(token);
             history.Add(token);
             if (step + 1 < maxTokens) logits = decoder.ForwardToken(token, state);
         }
-        return (_tokenizer.Decode(reply), reply.Count);
+        return new KimiK31VisionReply(_tokenizer.Decode(reply), reply.Count, HitTokenLimit: !stopped);
     }
 
     // The logits after the spliced prompt, for a caller that samples its own reply.
     internal float[] PrefillLogits(int[] promptIds, IReadOnlyList<RawRgbFrame> images)
     {
-        Prefilled prefilled = Prefill(promptIds, images, extraTokens: 1);
+        Prefilled prefilled = Prefill(promptIds, images, extraTokens: 1, CancellationToken.None);
         prefilled.State.Dispose();
         return prefilled.Logits;
     }
 
     // Encodes the images, splices them into the prompt and prefills the sequence. The caller owns the state.
-    private Prefilled Prefill(int[] promptIds, IReadOnlyList<RawRgbFrame> images, int extraTokens)
+    private Prefilled Prefill(int[] promptIds, IReadOnlyList<RawRgbFrame> images, int extraTokens, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(promptIds);
         ArgumentNullException.ThrowIfNull(images);
@@ -76,7 +84,11 @@ public sealed class KimiK31VisionGenerator
         List<Tensor> features = [];
         try
         {
-            foreach (RawRgbFrame image in images) features.Add(Encode(image));
+            foreach (RawRgbFrame image in images)
+            {
+                cancel.ThrowIfCancellationRequested();
+                features.Add(Encode(image));
+            }
             int[] ids = ExpandPads(promptIds, features, padId, hidden);
             int capacity = ids.Length + extraTokens;
             if (capacity > _generation.MaxSequenceTokens)
@@ -94,7 +106,11 @@ public sealed class KimiK31VisionGenerator
             {
                 ReadOnlySpan<float> rows = embeds.AsReadOnlySpan<float>();
                 float[] last = [];
-                for (int r = 0; r < ids.Length; r++) last = _generation.Decoder.ForwardEmbeddingHidden(rows.Slice(r * hidden, hidden), state);
+                for (int r = 0; r < ids.Length; r++)
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    last = _generation.Decoder.ForwardEmbeddingHidden(rows.Slice(r * hidden, hidden), state);
+                }
                 return new Prefilled(_generation.Decoder.ProjectHidden(last), state);
             }
             catch

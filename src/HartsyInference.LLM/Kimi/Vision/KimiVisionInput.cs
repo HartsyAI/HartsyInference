@@ -94,7 +94,8 @@ public sealed class KimiVisionInput : IDisposable
         }
     }
 
-    // Reads the tower once. A failure becomes the refusal; the text decoder never sees it.
+    // Reads the tower once. A failure becomes the refusal, IOException included, and is kept for the life of this input: a later image request
+    // repeats it without reading again, so a transient read error needs the slot reloaded.
     private void Resolve()
     {
         try

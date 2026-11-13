@@ -41,10 +41,11 @@ public sealed partial class TextService
 
         int[] promptIds = kimi.Template.Encode(kimi.Tokenizer, messages, addGenerationPrompt: true, enableThinking: genRequest.EnableThinking);
         List<RawRgbFrame> frames = [.. images.Select(image => new RawRgbFrame(image.Rgb, image.Width, image.Height))];
+        // The generator loads the tower here, after every refusal above, so a refused request never reads the tower.
         KimiK31VisionGenerator generator = new(kimi.Generation, kimi.Tokenizer, kimi.Vision);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
-        (string answer, int completion) = generator.Generate(promptIds, frames, BuildVisionSampling(request), maxTokens);
-        sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = answer });
-        return new GenOutcome(answer, StopReason.Stop, 0, completion);
+        KimiK31VisionReply reply = generator.Generate(promptIds, frames, BuildVisionSampling(request), maxTokens, cancel);
+        sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = reply.Text });
+        return new GenOutcome(reply.Text, reply.HitTokenLimit ? StopReason.Length : StopReason.Stop, 0, reply.Tokens);
     }
 }

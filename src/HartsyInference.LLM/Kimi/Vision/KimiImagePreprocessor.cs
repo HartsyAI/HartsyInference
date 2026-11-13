@@ -80,6 +80,7 @@ public readonly record struct KimiImageResize(int NewWidth, int NewHeight, int P
 public static class KimiImagePreprocessor
 {
     /// <summary>Works out the resize of a <paramref name="width"/>×<paramref name="height"/> image.</summary>
+    /// <exception cref="NotSupportedException">The side limit is not a whole number of merge blocks, so the padded image would overrun it.</exception>
     public static KimiImageResize Resize(int width, int height, KimiImageSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
@@ -95,8 +96,13 @@ public static class KimiImagePreprocessor
         int padHeight = (factor - newHeight % factor) % factor;
         int padWidth = (factor - newWidth % factor) % factor;
         int tokenHeight = (newHeight + padHeight) / factor, tokenWidth = (newWidth + padWidth) / factor;
+        // The clamp keeps the resized side within the limit, but the pad rounds it up to a whole merge block, so a limit that is not a multiple
+        // of the merge size can be overrun.
         if (tokenHeight * spec.MergeKernelSize > side || tokenWidth * spec.MergeKernelSize > side)
-            throw new ArgumentOutOfRangeException(nameof(width), $"The {width}x{height} image overruns the side limit of {side} patches.");
+        {
+            throw new NotSupportedException($"The {width}x{height} image pads past the {side}-patch side limit, which is not a whole number of "
+                + $"{spec.MergeKernelSize}-patch merge blocks.");
+        }
         return new KimiImageResize(newWidth, newHeight, padWidth, padHeight, tokenHeight * tokenWidth);
     }
 
