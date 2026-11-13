@@ -263,4 +263,47 @@ public sealed class HunyuanPaintUnet21ReferenceTests(ITestOutputHelper output)
         Report("vae decode (latent / 0.18215)", ToArray(decoded), ToArray(fixture["vae_decoded"]));
         AssertGpuBound();
     }
+
+    /// <summary>The VAE encoder the pipeline runs on the reference picture and the normal and position maps, against upstream's posterior. Upstream draws <c>posterior.sample()</c> (mean plus
+    /// standard deviation times noise); this repository's encoder returns the mean, so the test compares the mean and logs the size of the noise upstream adds. Set <c>HARTSY_PAINT21_AUX</c> to a fixture
+    /// made with <c>dump_paint21_unet.py --aux-only --encode-image</c> and <c>HARTSY_PAINT21_VAE</c>.</summary>
+    [RealWeightsFact("HARTSY_PAINT21_AUX", "HARTSY_PAINT21_VAE")]
+    public unsafe void VaeEncode_MatchesUpstreamPosteriorMean_AndTheSamplingNoiseIsNegligible()
+    {
+        using SafeTensorsLoader fixtureLoader = new();
+        fixtureLoader.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_AUX")!);
+        Dictionary<string, Tensor> fixture = fixtureLoader.GetAllTensors();
+        Assert.True(fixture.ContainsKey("enc_mean"), "the fixture has no enc_mean: regenerate it with dump_paint21_unet.py --aux-only --encode-image <png>");
+
+        using PytorchPickleLoader pickle = new();
+        pickle.Load(Environment.GetEnvironmentVariable("HARTSY_PAINT21_VAE")!);
+        using HunyuanPaintF32Weights weights = new(HunyuanPaintLoader.ModernizeVaeKeys(pickle.GetAllTensors()));
+        HartsyInference.Diffusion.Models.Vae.VaeEncoder encoder = new(HartsyInference.Diffusion.Models.Vae.VaeConfig.Sd15);
+        encoder.LoadWeights(weights);
+        using KnobScope knobs = new();
+        using IBackend backend = Backend();
+        Tensor source = fixture["enc_image"];
+        long count = source.ElementCount;
+        using Tensor image = new(source.Shape, DType.F32);
+        float* src = (float*)source.DataPointer, dst = (float*)image.DataPointer;
+        for (long i = 0; i < count; i++)
+            dst[i] = (src[i] - 0.5f) * 2f; // upstream's encode_images maps [0, 1] to [-1, 1] the same way; this test does not run the pipeline's own picture-to-tensor conversion
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        using Tensor encoded = encoder.Encode(backend, image);
+        output.WriteLine($"vae encode: {watch.Elapsed.TotalSeconds:F1} s");
+
+        float[] expectedMean = ToArray(fixture["enc_mean"]), std = ToArray(fixture["enc_std"]);
+        Report("vae encode (posterior mean x 0.18215)", ToArray(encoded), expectedMean);
+        // Per image (the picture, then the position map), because a white-background map is nearly constant: RMS(std) / RMS(mean) of each half of the batch.
+        int half = std.Length / 2;
+        for (int image2 = 0; image2 < 2; image2++)
+        {
+            double noise = Math.Sqrt(std.Skip(image2 * half).Take(half).Sum(v => (double)v * v) / half);
+            double signal = Math.Sqrt(expectedMean.Skip(image2 * half).Take(half).Sum(v => (double)v * v) / half);
+            output.WriteLine($"upstream's sampling noise, {(image2 == 0 ? "picture" : "position map")}: RMS {noise:E2} against a latent RMS of {signal:E2} (ratio {noise / signal:E2})");
+            Assert.True(noise / signal < 0.01, $"the noise upstream adds to the {(image2 == 0 ? "picture" : "position map")} latents is not negligible against the mean this repository's encoder returns (a property of upstream's weights and the fixture)");
+        }
+
+        AssertGpuBound();
+    }
 }
