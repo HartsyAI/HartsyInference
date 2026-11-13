@@ -207,32 +207,33 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         return joined;
     }
 
-    /// <summary>Checks that the field of a <paramref name="grid"/> request fits one array, before any weight loads: the finest level has <c>grid + 1</c> points per axis for the dense decode, and for FlashVDM the one <see cref="Hunyuan3DFlashVdm.Resolutions"/> gives.</summary>
+    /// <summary>Checks that the field of a <paramref name="grid"/> request fits one array, before any weight loads: the dense decode holds <c>grid</c> points per axis, and FlashVDM the finest level <see cref="Hunyuan3DFlashVdm.Resolutions"/> gives plus one.</summary>
     /// <param name="grid">The marching-cubes resolution; 0 takes the checkpoint's.</param>
     /// <param name="flashVdm">Whether the pipeline decodes with FlashVDM (the turbo VAE).</param>
-    /// <exception cref="ArgumentOutOfRangeException">The field has more points than an array can hold; the parameter is <c>grid</c>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The field has more points than an array can hold, or FlashVDM has no level for the grid; the parameter is <c>grid</c>.</exception>
     public static void ValidateGrid(int grid, bool flashVdm)
     {
-        if (grid <= 0 || FieldPoints(grid, flashVdm) <= Array.MaxLength)
+        if (grid <= 0)
             return;
-        int largest = grid;
+        if (flashVdm && grid < MinFlashVdmGrid)
+            throw new ArgumentOutOfRangeException("grid", grid, $"FlashVDM needs a grid of at least {MinFlashVdmGrid}.");
+        if (FieldPoints(grid, flashVdm) <= Array.MaxLength)
+            return;
+        int largest = Math.Min(grid, MaxAxis);
         while (largest > 1 && FieldPoints(largest, flashVdm) > Array.MaxLength)
             largest--;
         throw new ArgumentOutOfRangeException(
-            "grid", grid, $"A grid of {grid} needs a field of {FieldPoints(grid, flashVdm):N0} points, more than one array holds; the largest this decode takes is {largest}.");
+            "grid", grid, $"A grid of {grid} needs a field too large for one array; the largest that fits one is {largest} (host memory runs out sooner).");
     }
+
+    // The cube root of Array.MaxLength, rounded up: an axis beyond it cannot fit, and capping there keeps the cube inside a long.
+    private const int MaxAxis = 1291;
+    private const int MinFlashVdmGrid = 3;
 
     private static long FieldPoints(int grid, bool flashVdm)
     {
-        long axis;
-        try
-        {
-            axis = flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid + 1L;
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            return 0;
-        }
+        long axis = flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid;
+        axis = Math.Min(axis, MaxAxis + 1L);
         return axis * axis * axis;
     }
 

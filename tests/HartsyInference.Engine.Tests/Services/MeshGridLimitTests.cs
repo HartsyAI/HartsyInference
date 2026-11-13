@@ -20,7 +20,7 @@ public sealed class MeshGridLimitTests
         ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate("hunyuan3d-turbo", Request(1536), matterAvailable: false));
 
         Assert.Equal(nameof(MeshRequest.GridResolution), MeshFieldTag.FieldOf(error));
-        Assert.Contains("largest this decode takes", error.Message);
+        Assert.Contains("largest that fits one", error.Message);
     }
 
     [Fact]
@@ -34,8 +34,31 @@ public sealed class MeshGridLimitTests
     [Fact]
     public void ADenseModelsLimitIsItsOwnCube()
     {
-        MeshRequestValidator.Validate("hunyuan3d", Request(1289), matterAvailable: false);
+        MeshRequestValidator.Validate("hunyuan3d", Request(1290), matterAvailable: false);
         Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate("hunyuan3d", Request(1291), matterAvailable: false));
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-turbo", 2_097_152)]
+    [InlineData("hunyuan3d-turbo", int.MaxValue)]
+    [InlineData("hunyuan3d", 2_097_152)]
+    [InlineData("hunyuan3d", int.MaxValue)]
+    public void AGridSoLargeItsCubeWouldWrapIsRefusedToo(string id, int grid)
+    {
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate(id, Request(grid), matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.GridResolution), MeshFieldTag.FieldOf(error));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ATurboGridWithNoFlashVdmLevelIsRefusedUpFront(int grid)
+    {
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() => MeshRequestValidator.Validate("hunyuan3d-turbo", Request(grid), matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.GridResolution), MeshFieldTag.FieldOf(error));
+        MeshRequestValidator.Validate("hunyuan3d-turbo", Request(3), matterAvailable: false);
     }
 
     [Fact]
