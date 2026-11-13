@@ -224,7 +224,7 @@ public sealed unsafe class Hunyuan3DDit : IHunyuan3DDenoiser
     }
 
     /// <summary>Drops the captured step graph. The graph holds the device addresses of the block weights, so it is stale once they are freed and uploaded again; the next forward captures a new one.</summary>
-    public void ReleaseStepGraph(IBackend backend)
+    public void InvalidateStepGraph(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         if (ReferenceEquals(backend.StepGraphOwner, this))

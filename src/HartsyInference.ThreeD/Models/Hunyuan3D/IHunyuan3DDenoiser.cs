@@ -13,5 +13,5 @@ internal interface IHunyuan3DDenoiser
     IEnumerable<Tensor> EnumerateWeights();
 
     /// <summary>Drops anything captured against the weights' device addresses; called when the weights are freed, since a later upload puts them elsewhere.</summary>
-    void ReleaseStepGraph(IBackend backend) { }
+    void InvalidateStepGraph(IBackend backend) { }
 }

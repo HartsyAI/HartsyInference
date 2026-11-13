@@ -39,13 +39,13 @@ public sealed class Hunyuan3DStepGraphTests
     private static Hunyuan3DDit Dit() => new(Hunyuan3DConfig.Hunyuan3D2 with { DepthDouble = 0, DepthSingle = 0 });
 
     [Fact]
-    public void FreeingTheWeightsDropsTheGraphTheDitCaptured()
+    public void InvalidatingDropsTheGraphTheDitOwns()
     {
         (IBackend backend, RecordingBackend recorder) = Backend();
         Hunyuan3DDit dit = Dit();
         recorder.Owner = dit;
 
-        dit.ReleaseStepGraph(backend);
+        dit.InvalidateStepGraph(backend);
 
         Assert.Contains("StepGraphReset", recorder.Calls);
         Assert.Null(recorder.Owner);
@@ -58,7 +58,7 @@ public sealed class Hunyuan3DStepGraphTests
         object other = new();
         recorder.Owner = other;
 
-        Dit().ReleaseStepGraph(backend);
+        Dit().InvalidateStepGraph(backend);
 
         Assert.DoesNotContain("StepGraphReset", recorder.Calls);
         Assert.Same(other, recorder.Owner);
