@@ -8,7 +8,7 @@ timeout, a region block). The mirror is off until `paths.weightsMirrorUrl` names
 
 ## The staging folder
 
-`C:\Users\AI Overlord\Desktop\hartsyweb-staging`, outside the repository and outside `Models/`. Layout: `<model id>/<the pickle's path with the extension .safetensors>`, which is
+A folder outside the repository and outside `Models/` (`<staging>` below; the repack run made it on the maintainer's desktop). Layout: `<model id>/<the pickle's path with the extension .safetensors>`, which is
 the `MirrorPath` the catalog lists for the file, plus `manifest.json` (sources, revisions, hashes, tensor counts, verification and licence of every file).
 
 | Path under the mirror base | Bytes | sha256 | Licence | A catalog asset lists it |
@@ -42,11 +42,11 @@ change nothing until a catalog entry downloads them. The full set is 28,696,874,
    | `Notice.txt` | `https://huggingface.co/tencent/Hunyuan3D-2.1/raw/0b94677654c57bb9a6b6845cd7b704ccf551d327/Notice.txt` | 16,644 | `bd3dea50102cdd5628a7a803c5d0c68a522a29ff` |
    | `License.txt` | `https://huggingface.co/tencent/Hunyuan3D-Omni/raw/70e803bfb4e127d534049d8ab8c8cb511780d485/License.txt` | 16,966 | `5674ec7220abe6787d0f3c7e56945b4e7bb7715f` |
    | `Notice.txt` (Omni) | `https://huggingface.co/tencent/Hunyuan3D-Omni/raw/70e803bfb4e127d534049d8ab8c8cb511780d485/Notice.txt` | 16,695 | `cbecd5c4252c0c7d66872de370467184181bb1c6` |
-   | `LICENSE` (NAF) | `https://raw.githubusercontent.com/valeoai/NAF/main/LICENSE` | 11,357 | `7a4a3ea2424c09fbe48d455aed1eaa94d9124835` |
-   | `LICENSE` (UniRig) | `https://raw.githubusercontent.com/VAST-AI-Research/UniRig/main/LICENSE` | 1,124 | `a20d482774136ee1858d92964e896031598902b4` |
+   | `LICENSE` (NAF) | `https://raw.githubusercontent.com/valeoai/NAF/4a73dfbe8851d44a7c62a6c6aba2a59fd9ebcf87/LICENSE` | 11,357 | `7a4a3ea2424c09fbe48d455aed1eaa94d9124835` |
+   | `LICENSE` (UniRig) | `https://raw.githubusercontent.com/VAST-AI-Research/UniRig/cf7622f2be1de5ae315478ed8d21681b95dc9ff3/LICENSE` | 1,124 | `a20d482774136ee1858d92964e896031598902b4` |
 
    Then `... -- licenses --staging <staging>` compares each file's git blob SHA-1 with the one above and lists what is missing (it ends with `All 8 licence files are in place`).
-   The two GitHub files track `main`; if they have changed, the check says so and the manifest entry needs the new hash.
+   The two GitHub files are pinned to the last commit that changed them, so their blob hashes are reproducible.
 4. **The terms are decided** (next section).
 
 ## Territory and terms
@@ -68,14 +68,15 @@ proxy (the Omni DiT is 12.2 GB); for the Tencent files, a region block.
 The host is not known, so these are templates. Nothing is run until the owner approves the list.
 
 ```
-rsync -av --partial --checksum --exclude manifest.json "<staging>/hunyuan3d-paint21/" <user>@<host>:<web root>/<mirror path>/hunyuan3d-paint21/
+rsync -av --partial --checksum "<staging>/hunyuan3d-paint21/" <user>@<host>:<web root>/<mirror path>/hunyuan3d-paint21/
 ```
 
-Repeat for each model folder in the approved list, with its `LICENSE`, `Notice.txt` and `CHANGES.txt`. Then, from another machine, compare what is served with the manifest for each file:
+Repeat for each model folder in the approved list; each folder carries its licence and notice files and its `CHANGES.txt`. Then, from another machine, compare what is served with the manifest for each file
+(PowerShell; use `curl.exe`, since `curl` is an alias there; on bash use `curl` and `sha256sum check.bin`):
 
 ```
-curl -sI https://<host>/<mirror path>/<path>                                   # 200 and the Content-Length above
-curl -sL https://<host>/<mirror path>/<path> -o check.bin
+curl.exe -sIL https://<host>/<mirror path>/<path>                              # a final 200 and the Content-Length above
+curl.exe -sL https://<host>/<mirror path>/<path> -o check.bin
 (Get-FileHash check.bin -Algorithm SHA256).Hash                                # equals the sha256 above, case aside
 ```
 

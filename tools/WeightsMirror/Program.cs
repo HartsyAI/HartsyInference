@@ -318,7 +318,10 @@ static int Check(Dictionary<string, string> options)
     {
         return Fail("check needs --staging.");
     }
-    MirrorManifest manifest = MirrorManifest.LoadOrNew(Path.Combine(staging, "manifest.json"));
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
     int bad = 0;
     foreach (MirrorManifestItem item in manifest.Items)
     {
@@ -331,13 +334,29 @@ static int Check(Dictionary<string, string> options)
     return bad == 0 ? 0 : 1;
 }
 
+// A missing or empty manifest is a failed check, not a pass: a mistyped --staging must not look like a clean folder.
+static MirrorManifest? LoadRequired(string staging)
+{
+    string path = Path.Combine(staging, "manifest.json");
+    MirrorManifest manifest = MirrorManifest.LoadOrNew(path);
+    if (!File.Exists(path) || manifest.Items.Count == 0)
+    {
+        Console.Error.WriteLine($"'{path}' is missing or lists no files; give the staging folder the run wrote.");
+        return null;
+    }
+    return manifest;
+}
+
 static int Notices(Dictionary<string, string> options)
 {
     if (!options.TryGetValue("--staging", out string? staging))
     {
         return Fail("notices needs --staging.");
     }
-    MirrorManifest manifest = MirrorManifest.LoadOrNew(Path.Combine(staging, "manifest.json"));
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
     foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal))
     {
         System.Text.StringBuilder text = new();
@@ -345,8 +364,9 @@ static int Notices(Dictionary<string, string> options)
         text.AppendLine();
         text.AppendLine("The files listed here are modified copies of the files named as their source. They were changed by HartsyInference");
         text.AppendLine("(https://github.com/HartsyAI/HartsyInference, tools/WeightsMirror): the container format only, from a PyTorch pickle to safetensors.");
-        text.AppendLine("Tensor names, their order, shapes, dtypes and values are unchanged (compared tensor for tensor), and a metadata entry in the");
-        text.AppendLine("safetensors header names the source. They remain subject to the licence below.");
+        text.AppendLine("Tensor names, their order, shapes, dtypes and values are unchanged for every tensor written (compared tensor for tensor), and a");
+        text.AppendLine("metadata entry in the safetensors header names the source. Where a note below says that data of the source was left out, it says what.");
+        text.AppendLine("They remain subject to the licence below.");
         foreach (MirrorManifestItem item in model.OrderBy(i => i.Repack.Path, StringComparer.Ordinal))
         {
             text.AppendLine();
@@ -354,6 +374,10 @@ static int Notices(Dictionary<string, string> options)
             text.AppendLine($"Source:    {item.Source.Repo} {item.Source.Revision}, {item.Source.Path} ({item.Source.Size:N0} bytes, sha256 {item.Source.Sha256})");
             text.AppendLine($"This file: {item.Repack.Size:N0} bytes, sha256 {item.Repack.Sha256}");
             text.AppendLine($"Licence:   {item.License.Name}");
+            if (!string.IsNullOrWhiteSpace(item.Notes))
+            {
+                text.AppendLine($"Note:      {item.Notes}");
+            }
         }
         string path = Path.Combine(staging, model.Key, "CHANGES.txt");
         File.WriteAllText(path, text.ToString().ReplaceLineEndings("\n"), new System.Text.UTF8Encoding(false));
@@ -368,32 +392,36 @@ static int Licenses(Dictionary<string, string> options)
     {
         return Fail("licenses needs --staging.");
     }
-    MirrorManifest manifest = MirrorManifest.LoadOrNew(Path.Combine(staging, "manifest.json"));
+    if (LoadRequired(staging) is not MirrorManifest manifest)
+    {
+        return 1;
+    }
     int bad = 0;
     int total = 0;
-    foreach (MirrorManifestItem item in manifest.Items.DistinctBy(i => i.Model, StringComparer.Ordinal).OrderBy(i => i.Model, StringComparer.Ordinal))
+    foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal).OrderBy(g => g.Key, StringComparer.Ordinal))
     {
-        foreach (MirrorLicenseFile file in item.License.TextFiles)
+        // Every licence of the model's files counts, so a folder that mixed licences would need all their texts.
+        foreach (MirrorLicenseFile file in model.SelectMany(i => i.License.TextFiles).DistinctBy(f => (f.Name, f.GitBlobSha1)))
         {
             total++;
-            string path = Path.Combine(staging, item.Model, file.Name);
+            string path = Path.Combine(staging, model.Key, file.Name);
             if (!File.Exists(path))
             {
                 bad++;
-                Console.WriteLine($"[{item.Model}] MISSING {file.Name}  fetch {file.Url}  ({file.Size:N0} bytes, git blob {file.GitBlobSha1})");
+                Console.WriteLine($"[{model.Key}] MISSING {file.Name}  fetch {file.Url}  ({file.Size:N0} bytes, git blob {file.GitBlobSha1})");
                 continue;
             }
             byte[] content = File.ReadAllBytes(path);
             byte[] header = System.Text.Encoding.ASCII.GetBytes($"blob {content.Length}\0");
             string blob = Convert.ToHexString(SHA1.HashData([.. header, .. content])).ToLowerInvariant();
-            bool ok = blob == file.GitBlobSha1;
+            bool ok = string.Equals(blob, file.GitBlobSha1, StringComparison.OrdinalIgnoreCase);
             bad += ok ? 0 : 1;
-            Console.WriteLine($"[{item.Model}] {(ok ? "ok" : "MISMATCH (git blob " + blob + ")")} {file.Name}");
+            Console.WriteLine($"[{model.Key}] {(ok ? "ok" : "MISMATCH (git blob " + blob + ")")} {file.Name}");
         }
-        if (!File.Exists(Path.Combine(staging, item.Model, "CHANGES.txt")))
+        if (!File.Exists(Path.Combine(staging, model.Key, "CHANGES.txt")))
         {
             bad++;
-            Console.WriteLine($"[{item.Model}] MISSING CHANGES.txt  run the notices command");
+            Console.WriteLine($"[{model.Key}] MISSING CHANGES.txt  run the notices command");
         }
     }
     Console.WriteLine(bad == 0 ? $"All {total} licence files are in place." : $"{bad} licence or notice file(s) missing or different.");
