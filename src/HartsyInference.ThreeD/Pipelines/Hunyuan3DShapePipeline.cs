@@ -231,6 +231,46 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
 
     private static long FieldAxis(int grid, bool flashVdm) => flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid;
 
+    /// <summary>The Euler steps of the flow, in place on <paramref name="latents"/>: <c>x += (sigma[k + 1] - sigma[k]) * v</c> with <c>v = u + g (c - u)</c> from the unconditional and conditional velocities
+    /// (upstream's <c>denoise_with_cfg</c> inside <c>sample_ode(euler)</c>), or <c>v = c</c> when there is no unconditional one (a guidance-distilled checkpoint, whose guidance the velocity callback embeds).
+    /// A step with no width (the schedule ends 1, 1) changes nothing and is not evaluated. <paramref name="stepDone"/> gets the number of finished steps. Returns the number of steps evaluated.</summary>
+    internal static int Integrate(IBackend backend, Tensor latents, float[] sigmas, Func<Tensor, float, Tensor> conditional, Func<Tensor, float, Tensor>? unconditional, float guidance,
+        Action<int>? stepDone = null, CancellationToken cancel = default)
+    {
+        int evaluations = 0;
+        for (int k = 0; k < sigmas.Length - 1; k++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            float dt = sigmas[k + 1] - sigmas[k];
+            if (dt != 0f)
+            {
+                // The last step has zero width, so its velocity cannot change the latent.
+                float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
+                evaluations++;
+                if (unconditional is null)
+                {
+                    Tensor velocity = conditional(latents, t);
+                    backend.GuidedEulerStep(latents, velocity, velocity, GuidedEulerSpec.Lerp(1f, dt));
+                    velocity.Dispose();
+                }
+                else
+                {
+                    Tensor vCond = conditional(latents, t);
+                    Tensor vUncond = unconditional(latents, t);
+                    // Device-resident CFG + ascending Euler (z += dt·(uncond + cfg·(cond−uncond))): `latents` stays on the GPU across the whole loop, with no per-step D2H drain of the two
+                    // velocities (the graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
+                    backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.Lerp(guidance, dt));
+                    vCond.Dispose();
+                    vUncond.Dispose();
+                }
+            }
+
+            stepDone?.Invoke(k + 1);
+        }
+
+        return evaluations;
+    }
+
     private ThreeDResult Sample(Func<ConditionPair> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
         Action<GenerationProgress>? onProgress, CancellationToken cancel = default)
     {
@@ -262,36 +302,10 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         try
         {
             Backend.PreloadWeights(_dit.EnumerateWeights());
-            for (int k = 0; k < steps; k++)
-            {
-                cancel.ThrowIfCancellationRequested();
-                float dt = sigmas[k + 1] - sigmas[k];
-                if (dt == 0f)
-                {
-                    // The last step has zero width, so its velocity cannot change the latent.
-                    onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
-                    continue;
-                }
-                float t = Hunyuan3DFlowSchedule.DitTimestep(sigmas[k]);
-                evaluations++;
-                if (uncond is null)
-                {
-                    Tensor velocity = _dit.Forward(Backend, latents, cond, t, guidance);
-                    Backend.GuidedEulerStep(latents, velocity, velocity, GuidedEulerSpec.Lerp(1f, dt));
-                    velocity.Dispose();
-                    onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
-                    continue;
-                }
-                Tensor vCond = _dit.Forward(Backend, latents, cond, t);
-                Tensor vUncond = _dit.Forward(Backend, latents, uncond, t);
-                // Device-resident CFG + ascending Euler (matches FlowStepAscending: z += dt·(uncond + cfg·(cond−uncond))).
-                // Keeps `latents` on the GPU across the whole loop — no per-step D2H drain of the two velocities (the
-                // graph replays stay async; the stream drains only once, at the post-loop scale-factor readback).
-                Backend.GuidedEulerStep(latents, vCond, vUncond, GuidedEulerSpec.Lerp(guidance, dt));
-                vCond.Dispose();
-                vUncond.Dispose();
-                onProgress?.Invoke(new GenerationProgress(k + 1, steps, 0));
-            }
+            evaluations = Integrate(Backend, latents, sigmas,
+                (x, t) => uncond is null ? _dit.Forward(Backend, x, cond, t, guidance) : _dit.Forward(Backend, x, cond, t),
+                uncond is null ? null : (x, t) => _dit.Forward(Backend, x, uncond, t),
+                guidance, k => onProgress?.Invoke(new GenerationProgress(k, steps, 0)), cancel);
             Backend.Sync();
         }
         catch
