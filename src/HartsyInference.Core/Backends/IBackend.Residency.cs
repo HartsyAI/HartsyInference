@@ -80,6 +80,9 @@ public partial interface IBackend
     /// <summary>Pre-uploads weights into the weight cache so ops avoid re-uploading; pair with <see cref="FreeWeights"/>.</summary>
     void PreloadWeights(IEnumerable<Tensor> weights) { }
 
+    /// <summary>True when the weight is already on the device in the weight cache, so a preload would not upload it.</summary>
+    bool IsWeightResident(Tensor weight) => false;
+
     /// <summary>Pre-uploads weights as groups a backend may place in ONE device allocation each, such as a MoE layer's
     /// routed experts of one projection; pair with <see cref="FreeWeights"/>, member by member. The members stay ordinary
     /// weights: every op finds them by tensor as before. The default preloads each member on its own.</summary>

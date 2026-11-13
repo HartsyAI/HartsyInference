@@ -12,12 +12,13 @@ namespace HartsyInference.Engine.Tests;
 /// and can be switched back to the tile-major order with <c>vae.blockMajorTiles=false</c>. The two orders run the same
 /// operations on the same tiles, so their pixels must be identical. A component check on the real VAE, not a generation.</summary>
 [Trait("Category", "GpuIntegration")]
+[Collection("MiniMaxH3Gpu")]
 public sealed class MiniMaxH3VaeTileOrderGpuTests
 {
     private const string ModelsDirVariable = "HARTSYINFERENCE_MODELS_DIR";
     private const string VaeRelative = "VAE/MiniMaxH3/minimax_h3_image_vae_fp16.safetensors";
 
-    [MiniMaxH3ImageGpuFact]
+    [MiniMaxH3VaeGpuFact]
     public void BlockMajorTilesDecodeToTheSamePixelsAsTileMajor()
     {
         string models = Environment.GetEnvironmentVariable(ModelsDirVariable)!;
@@ -37,10 +38,10 @@ public sealed class MiniMaxH3VaeTileOrderGpuTests
 
             KnobStore.Set(EngineKnobs.VaeBlockMajorTiles, false);
             float[] tileMajor;
-            using (Tensor reference = decoder.Decode(backend, latent)) tileMajor = reference.AsSpan<float>().ToArray();
+            using (Tensor reference = decoder.Decode(backend, latent, blockMajor: true)) tileMajor = reference.AsSpan<float>().ToArray();
             KnobStore.Set(EngineKnobs.VaeBlockMajorTiles, true);
             float[] blockMajor;
-            using (Tensor candidate = decoder.Decode(backend, latent)) blockMajor = candidate.AsSpan<float>().ToArray();
+            using (Tensor candidate = decoder.Decode(backend, latent, blockMajor: true)) blockMajor = candidate.AsSpan<float>().ToArray();
 
             Assert.Equal(tileMajor.Length, blockMajor.Length);
             int mismatches = 0;
@@ -71,4 +72,23 @@ public sealed class MiniMaxH3VaeTileOrderGpuTests
         decoder.LoadWeights(weights);
         return decoder;
     }
+}
+
+/// <summary>Runs when the image VAE file is present. The device check needs nothing else from the model directory.</summary>
+public sealed class MiniMaxH3VaeGpuFactAttribute : FactAttribute
+{
+    public MiniMaxH3VaeGpuFactAttribute()
+    {
+        string? models = Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS_DIR");
+        if (string.IsNullOrWhiteSpace(models) || !File.Exists(Path.Combine(models, "VAE", "MiniMaxH3", "minimax_h3_image_vae_fp16.safetensors")))
+        {
+            Skip = "SKIPPED: HARTSYINFERENCE_MODELS_DIR does not hold the MiniMax-H3 image VAE; the device check did not run.";
+        }
+    }
+}
+
+/// <summary>Serialises the MiniMax-H3 GPU tests, which share process-wide knob state.</summary>
+[CollectionDefinition("MiniMaxH3Gpu", DisableParallelization = true)]
+public sealed class MiniMaxH3GpuCollection
+{
 }

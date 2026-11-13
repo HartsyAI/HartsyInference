@@ -20,6 +20,7 @@ namespace HartsyInference.Engine.Tests;
 /// the live SwarmUI API. They run only where the models root and the dump directory exist and CUDA is usable, and they are
 /// skipped (not passed) otherwise.</summary>
 [Trait("Category", "GpuIntegration")]
+[Collection("MiniMaxH3Gpu")]
 public sealed class MiniMaxH3ImageGpuTests
 {
     private const string ModelsDirVariable = "HARTSYINFERENCE_MODELS_DIR";

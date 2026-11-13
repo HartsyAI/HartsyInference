@@ -171,6 +171,9 @@ public abstract class GpuBackendBase
         Residency.ResetD2hSyncCount();
     }
 
+    /// <summary>True when the weight is already cached on the device. A backend without a device cache answers false.</summary>
+    public virtual bool IsWeightResident(Tensor weight) => false;
+
     /// <summary>Uploads weights ahead of first use, so no op pays a cache-miss transfer mid-generation.</summary>
     /// <remarks>Expands low-rank adjuncts first, and both backends did: a weight carrying an adjunct is read as
     /// its factors, so preloading the weight alone leaves the factors to miss one at a time on the hot path.

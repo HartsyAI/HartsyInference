@@ -96,7 +96,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     /// <summary>Decodes a normalized latent <c>[1, 24, T, H, W]</c> to RGB <c>[1, 3, F, H·16, W·16]</c> in [-1, 1],
     /// denormalizing with <c>latent · std + mean</c> first. Spatial tiling and temporal chunking both run internally,
     /// so 2K clips never materialize a whole-frame token sequence.</summary>
-    public Tensor Decode(IBackend backend, Tensor latent)
+    public Tensor Decode(IBackend backend, Tensor latent, bool blockMajor = false)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(latent);
@@ -117,7 +117,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         }
 
         int height = zh * _config.VaeRatio, width = zw * _config.VaeRatio;
-        using Tensor single = AdaptiveDecode(backend, z, 1, zh, zw, blockMajor: true);
+        using Tensor single = AdaptiveDecode(backend, z, 1, zh, zw, blockMajor: blockMajor);
         return SliceFrames(single, _config.TemporalPatch, height, width, _config.TemporalPatch - 1, 1, asRank5: true);
     }
 
@@ -415,7 +415,16 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
     {
         foreach (MiniMaxH3VideoVaeVitBlock block in _blocks)
         {
-            backend.PreloadWeights(block.EnumerateWeights());
+            // Only the weights this preload uploads are freed afterwards; a weight already resident stays resident.
+            List<Tensor> uploads = [];
+            foreach (Tensor weight in block.EnumerateWeights())
+            {
+                if (!backend.IsWeightResident(weight))
+                {
+                    uploads.Add(weight);
+                }
+            }
+            backend.PreloadWeights(uploads);
             try
             {
                 foreach (TileState? state in states)
@@ -425,7 +434,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
             }
             finally
             {
-                backend.FreeWeights(block.EnumerateWeights());
+                backend.FreeWeights(uploads);
             }
         }
     }
@@ -516,8 +525,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         backend.Clamp(patches, patches, 0f, 1f);
         backend.Scale(patches, patches, 2f);
         backend.AddScalar(patches, patches, -1f);
-        Tensor unpatched = Unpatchify(patches, zt, zh, zw);
-        return unpatched;
+        return Unpatchify(patches, zt, zh, zw);
     }
 
     /// <summary>One tile through the transformer: <c>[1, C_lat, T, H, W]</c> → <c>[1, 3·T·4, H·16, W·16]</c> (the

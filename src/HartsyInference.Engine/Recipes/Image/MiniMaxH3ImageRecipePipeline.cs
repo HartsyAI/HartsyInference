@@ -267,7 +267,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
     internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
     {
         using Tensor latent = MiniMaxH3Latents.UnpackVideo(x, 1, latentH, latentW, _config);
-        using Tensor frame = _decoder.Decode(_vaeBackend, latent);
+        using Tensor frame = _decoder.Decode(_vaeBackend, latent, blockMajor: true);
         // The 2D decoder returns [1, 3, 1, H, W]; the RGB converter takes [1, 3, H, W].
         using Tensor image = frame.Reshape(new TensorShape(1, 3, height, width));
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);

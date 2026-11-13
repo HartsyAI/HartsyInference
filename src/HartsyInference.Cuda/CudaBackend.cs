@@ -8893,6 +8893,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     });
 
+    /// <inheritdoc/>
+    public override bool IsWeightResident(Tensor weight) => GpuTransferHelper.IsWeightCached(weight);
+
     private static int _preloadSkipWarned;
 
     /// <summary>Runs a preload pass; if it throws, frees every weight it reported as uploaded, then rethrows.</summary>
