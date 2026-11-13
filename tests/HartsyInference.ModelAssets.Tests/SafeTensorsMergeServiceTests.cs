@@ -133,6 +133,8 @@ public sealed class SafeTensorsMergeServiceTests : IDisposable
 
         using SafeTensorsLoader merged = Reopen(output);
         Assert.Equal("iris-z-small", merged.Metadata!["modelspec.architecture"]);
+        Assert.Equal("Iris-Z-small (bf16)", merged.Metadata["modelspec.title"]);
+        Assert.Equal("bf16", merged.Metadata["hartsy.precision"]);
         Assert.Equal(identity.License, merged.Metadata["modelspec.license"]);
         Assert.Equal("speridlabs/iris-z", merged.Metadata["hartsy.source_repo"]);
         Assert.Equal("0x" + report.PayloadSha256, merged.Metadata[ArtifactMetadata.HashKey]);

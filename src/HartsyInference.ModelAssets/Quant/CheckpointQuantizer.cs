@@ -439,6 +439,13 @@ public static class CheckpointQuantizer
         _ => "nvfp4",
     };
 
+    /// <summary>A title without its trailing <c>(precision)</c> qualifier, which the merge writes from the stored dtype.</summary>
+    private static string WithoutPrecision(string title)
+    {
+        int open = title.LastIndexOf(" (", StringComparison.Ordinal);
+        return open > 0 && title.EndsWith(')') ? title[..open] : title;
+    }
+
     /// <summary>The source's identity for a quantized copy, so SwarmUI still classifies it under the same class and keeps
     /// its license flag. Only a safetensors source carries one: a GGUF's own keys describe its container. The payload
     /// digest and any layout marker describe the source's bytes, so they are left out for the caller to set.</summary>
@@ -461,7 +468,7 @@ public static class CheckpointQuantizer
         {
             if (metadata.TryGetValue("modelspec.title", out string? title))
             {
-                metadata["modelspec.title"] = $"{title} ({label})";
+                metadata["modelspec.title"] = $"{WithoutPrecision(title)} ({label})";
             }
             metadata["hartsy.quant"] = label;
         }

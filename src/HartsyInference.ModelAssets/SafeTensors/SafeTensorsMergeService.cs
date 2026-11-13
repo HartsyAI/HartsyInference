@@ -108,7 +108,8 @@ public static class SafeTensorsMergeService
                 throw new HartsyInferenceException($"'{job.OutputPath}' is one of the inputs. Write the merge to another path.");
 
             IReadOnlyList<string> sources = loaders.Select(loader => loader.FilePath).ToList();
-            string writerDigest = SafeTensorsMerger.Write(job.OutputPath, tensors, job.CastTo, BuildMetadata(job, sources));
+            string writerDigest = SafeTensorsMerger.Write(job.OutputPath, tensors, job.CastTo,
+                BuildMetadata(job, sources, PrecisionLabel(job.CastTo, tensors)));
             return Verify(job.OutputPath, tensors.Count, sources.Count, writerDigest);
         }
         finally
@@ -160,7 +161,36 @@ public static class SafeTensorsMergeService
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
-    private static Dictionary<string, string> BuildMetadata(SafeTensorsMergeJob job, IReadOnlyList<string> sources)
+    /// <summary>The precision the file is stored in, named as the repacker names it (<c>bf16</c>, <c>fp16</c>, <c>fp32</c>): the
+    /// cast when one is asked for, else the single dtype every input tensor shares, or <c>mixed</c>.</summary>
+    private static string PrecisionLabel(DType? cast, IReadOnlyList<KeyValuePair<string, Tensor>> tensors)
+    {
+        if (cast is { } target)
+        {
+            return PrecisionName(target);
+        }
+        HashSet<DType> stored = [.. tensors.Select(tensor => tensor.Value.DType)];
+        return stored.Count == 1 ? PrecisionName(stored.Single()) : "mixed";
+    }
+
+    private static string PrecisionName(DType dtype)
+    {
+        if (dtype == DType.BF16)
+        {
+            return "bf16";
+        }
+        if (dtype == DType.F16)
+        {
+            return "fp16";
+        }
+        if (dtype == DType.F32)
+        {
+            return "fp32";
+        }
+        return dtype.Name.ToLowerInvariant();
+    }
+
+    private static Dictionary<string, string> BuildMetadata(SafeTensorsMergeJob job, IReadOnlyList<string> sources, string precision)
     {
         Dictionary<string, string> metadata = job.Identity is { } identity
             ? ArtifactMetadata.ForRepack(identity, new ArtifactProvenance
@@ -170,7 +200,7 @@ public static class SafeTensorsMergeService
                 SourceRepo = job.SourceRepo,
                 SourceFile = string.Join(",", sources.Select(Path.GetFileName)),
                 SourceSha256 = CombinedSourceSha256(sources),
-                Precision = job.CastTo?.Name ?? "source",
+                Precision = precision,
             })
             : new Dictionary<string, string>(StringComparer.Ordinal);
         if (job.Metadata is not null)

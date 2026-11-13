@@ -40,7 +40,7 @@ public sealed class CheckpointQuantizerOutputTests : IDisposable
     {
         ["modelspec.architecture"] = "iris-z-small",
         ["modelspec.license"] = "other",
-        ["modelspec.title"] = "Iris-Z-small",
+        ["modelspec.title"] = "Iris-Z-small (bf16)",
         ["modelspec.hash_sha256"] = "0x" + new string('0', 64),
         ["hartsy.engine_id"] = "iris-z-small",
     };
