@@ -1,5 +1,6 @@
 using System.Text;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Kimi;
@@ -8,7 +9,8 @@ namespace HartsyInference.LLM.Kimi;
 /// checkpoint ships no <c>chat_template.jinja</c>, so this is the template the Text path renders with. Control markers are emitted by id; text is
 /// encoded as ordinary BPE, one segment at a time, exactly as the reference does, so pre-token boundaries match.</summary>
 /// <remarks>Covers user, system and assistant turns with text content, reasoning and names, plus the thinking-effort turn and the generation prompt.
-/// Tool schemas, tool calls and results, images, response formats and prefilled turns are refused by name rather than rendered wrong. The
+/// Image blocks render the processor's media placeholder for the image's size (<see cref="KimiVisionInput.MediaPrompt"/>), so the image needs its
+/// pixel size. Tool schemas, tool calls and results, response formats and prefilled turns are refused by name rather than rendered wrong. The
 /// engine's numeric reasoning effort is not used: the reference fixes the effort to <c>max</c>.</remarks>
 public sealed class KimiK31ChatTemplate : IChatTemplate
 {
@@ -48,6 +50,8 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
         {
             if (piece.Control)
                 ids.Add(tokenizer.SpecialId(piece.Text) ?? throw new InvalidOperationException($"The tokenizer has no '{piece.Text}' control token."));
+            else if (piece.Special)
+                ids.AddRange(tokenizer.Encode(piece.Text, addSpecial: true));
             else
                 ids.AddRange(tokenizer.EncodeOrdinary(piece.Text));
         }
@@ -110,13 +114,19 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
         CloseTag(pieces, "response");
     }
 
-    // A message's structured text blocks replace its content when present, as the reference's list-of-parts content does.
+    // A message's structured blocks replace its content when present, as the reference's list-of-parts content does. An image renders the
+    // processor's placeholder for its size, encoded with its special tokens as the reference's allow_special segment is.
     private static void Content(List<Piece> pieces, ChatMessage message)
     {
         if (message.Blocks is { Count: > 0 } blocks)
         {
             foreach (ContentBlock block in blocks)
-                Text(pieces, ((TextBlock)block).Text);
+            {
+                if (block is ImageBlock image)
+                    pieces.Add(Piece.Media(KimiVisionInput.MediaPrompt(image.Width!.Value, image.Height!.Value)));
+                else
+                    Text(pieces, ((TextBlock)block).Text);
+            }
             return;
         }
         Text(pieces, message.Content);
@@ -137,8 +147,16 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
             throw new NotSupportedException("Kimi K3.1 prefilled assistant turns are not rendered by the Text path yet.");
         if (message.Task is not null)
             throw new NotSupportedException("Kimi K3.1 internal classification tasks are not rendered by the Text path yet.");
-        if (message.Blocks is { Count: > 0 } blocks && blocks.Any(block => block is not TextBlock))
-            throw new NotSupportedException("Kimi K3.1 image input is not supported: the Text path renders text blocks only.");
+        if (message.Blocks is not { Count: > 0 } blocks) return;
+        foreach (ContentBlock block in blocks)
+        {
+            if (block is ImageBlock && message.Role != "user")
+                throw new NotSupportedException($"Kimi K3.1 renders image blocks on user turns only, not on '{message.Role}' turns.");
+            if (block is ImageBlock { Width: null } or ImageBlock { Height: null })
+                throw new NotSupportedException("Kimi K3.1 image blocks need the image's pixel size to render its media placeholder.");
+            if (block is not (TextBlock or ImageBlock))
+                throw new NotSupportedException($"Kimi K3.1 content blocks of type {block.GetType().Name} are not rendered by the Text path yet.");
+        }
     }
 
     // Mirrors _open_tag: the tag and each attribute are separate text pieces, then the separator, so BPE boundaries match the reference.
@@ -177,8 +195,11 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
     private static string EscapeAttribute(string value) =>
         value.Replace("&", "&amp;", StringComparison.Ordinal).Replace("\"", "&quot;", StringComparison.Ordinal);
 
-    private readonly record struct Piece(string Text, bool Control)
+    // Special: text whose special-token literals encode as their ids, the rest as ordinary BPE (the reference's allow_special segment).
+    private readonly record struct Piece(string Text, bool Control, bool Special = false)
     {
         public static Piece Marker(string literal) => new(literal, Control: true);
+
+        public static Piece Media(string prompt) => new(prompt, Control: false, Special: true);
     }
 }

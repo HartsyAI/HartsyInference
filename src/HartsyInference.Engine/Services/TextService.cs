@@ -20,6 +20,8 @@ using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.LLM.Looped;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Multimodal;
@@ -518,11 +520,11 @@ public sealed partial class TextService : ITextService, IDisposable
             try
             {
                 ImageData? image = LastImage(request);
-                KimiK31Refusals.RefuseImage(slot.HostReference, image is not null);
                 if ((request.ForcedTokenIds is not null || request.ReturnTokenScores) && (image is not null || slot.SsmPipeline is not null))
                     throw new HartsyInferenceException("Teacher forcing and token scores are served for text-only transformer models.");
                 if (slot.MossVl is null) RequireNoVideo(request);
                 outcome = slot.MossVl is not null ? RunMossVl(slot, request, sink, cancel)
+                    : image is not null && slot.HostReference is KimiK31TextModel kimi ? RunKimiVision(kimi, request, sink, cancel)
                     : image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
                     ? RunVision(slot, request, image, sink, cancel)
                     : RunText(slot, request, sink, diagnosticId, cancel);
@@ -1952,7 +1954,8 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <summary>What the model at <paramref name="localPath"/> takes besides text, from its file or folder alone (nothing is loaded and
     /// no device is touched). A GGUF is read by its header; a Hugging Face checkpoint folder by its <c>config.json</c>. A MOSS-VL
     /// model (<c>moss_vl</c>) takes images, video and live sessions with no sidecar; any other GGUF takes images when a sidecar
-    /// <c>mmproj</c> sits beside it (<see cref="FindMmproj"/>). A missing, unreadable or unknown path is
+    /// <c>mmproj</c> sits beside it (<see cref="FindMmproj"/>). A Kimi K3.1 folder takes images when its vision tower checks out from its files
+    /// (<see cref="KimiVisionInput.RefusalFromFiles"/>). A missing, unreadable or unknown path is
     /// <see cref="TextInputCapabilities.None"/>; this never throws.</summary>
     public static TextInputCapabilities InputCapabilities(string? localPath)
     {
@@ -1962,9 +1965,13 @@ public sealed partial class TextService : ITextService, IDisposable
         {
             if (Directory.Exists(localPath))
             {
-                return HfCheckpointDirectory.TryProbe(localPath)?.ModelType == LLM.Models.MossVl.MossVlConfig.ModelType
-                    ? new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true)
-                    : TextInputCapabilities.None;
+                HfCheckpointInfo? folder = HfCheckpointDirectory.TryProbe(localPath);
+                if (folder?.ModelType == LLM.Models.MossVl.MossVlConfig.ModelType)
+                    return new TextInputCapabilities(Images: true, Video: true, RealtimeSession: true);
+                // A Kimi K3.1 folder takes images when its files would let the vision route load (the same checks, no tower load).
+                if (folder is not null && HfTextDirectoryLoader.IsKimiK31(folder) && KimiVisionInput.RefusalFromFiles(localPath) is null)
+                    return new TextInputCapabilities(Images: true, Video: false, RealtimeSession: false);
+                return TextInputCapabilities.None;
             }
             if (!File.Exists(localPath) || !localPath.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
                 return TextInputCapabilities.None;

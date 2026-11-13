@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.LLM.Kimi.Vision;
 
@@ -36,7 +37,26 @@ public static class KimiVisionWeightLoader
         }
     }
 
-    private static List<(string Name, long[] Dims)> Requirements(KimiVisionConfig c)
+    /// <summary>The first reason the checkpoint's tensor inventory cannot supply the tower, or null when every tensor the tower reads is present with
+    /// its shape. Reads tensor headers only.</summary>
+    internal static string? Refusal(KimiVisionConfig config, IReadOnlyDictionary<string, TensorLocation> inventory)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(inventory);
+        config.Validate();
+
+        List<string> missing = [];
+        foreach ((string name, long[] dims) in Requirements(config))
+        {
+            if (!inventory.TryGetValue(name, out TensorLocation? location))
+                missing.Add(name);
+            else if (location.Shape != new TensorShape(dims))
+                return Mismatch(name, location.Shape, dims).Message;
+        }
+        return missing.Count == 0 ? null : $"The checkpoint lacks {missing.Count} vision tensor(s): {string.Join(", ", missing)}.";
+    }
+
+    internal static List<(string Name, long[] Dims)> Requirements(KimiVisionConfig c)
     {
         long h = c.Hidden, q = c.QkvHidden, m = c.MlpDim, g = c.InitPosGrid, p = c.PatchSize, mm = c.MergedDim, t = c.TextHidden;
         List<(string Name, long[] Dims)> list =

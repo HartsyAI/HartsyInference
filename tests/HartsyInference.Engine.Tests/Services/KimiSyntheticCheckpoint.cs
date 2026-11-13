@@ -18,13 +18,13 @@ internal static class KimiSyntheticCheckpoint
     // 0-based layers that use MLA with the DSA indexer.
     private static readonly int[] MlaLayers = [1, 3];
 
-    /// <summary>Writes the checkpoint into <paramref name="directory"/>; <paramref name="withVision"/> adds a vision config and vision tensors.</summary>
-    internal static void Write(string directory, int seed = 7, bool withVision = false)
+    /// <summary>Writes the checkpoint into <paramref name="directory"/>, with <paramref name="vocab"/> embedding rows.</summary>
+    internal static void Write(string directory, int seed = 7, int vocab = Vocab)
     {
         Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson(withVision));
+        File.WriteAllText(Path.Combine(directory, "config.json"), ConfigJson(vocab));
 
-        List<(string Name, int[] Shape)> tensors = TensorNames(withVision);
+        List<(string Name, int[] Shape)> tensors = TensorNames(vocab);
         Random rng = new(seed);
         WriteShard(Path.Combine(directory, "model.safetensors"), tensors, rng);
 
@@ -38,12 +38,11 @@ internal static class KimiSyntheticCheckpoint
         File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
     }
 
-    internal static string ConfigJson(bool withVision = false)
+    internal static string ConfigJson(int vocab = Vocab)
     {
         int[] oneBased = [.. MlaLayers.Select(i => i + 1)];
-        string vision = withVision ? "\"vision_config\": {\"hidden_size\": 8, \"patch_size\": 14}, " : string.Empty;
         return "{"
-            + "\"model_type\": \"kimi_k31\", " + vision
+            + "\"model_type\": \"kimi_k31\", "
             + $"\"bos_token_id\": {BosId}, \"eos_token_id\": {EosId}, "
             + "\"text_config\": {"
             + "\"model_type\": \"kimi_linear\", \"hidden_act\": \"situ\", \"activation_situ_beta\": 4.0, \"activation_situ_linear_beta\": 25.0,"
@@ -53,19 +52,19 @@ internal static class KimiSyntheticCheckpoint
             + $"\"moe_intermediate_size\": {MoeInter}, \"num_attention_heads\": {Heads}, \"num_experts\": {Experts}, \"num_experts_per_token\": {ExpertsPerTok},"
             + $"\"num_hidden_layers\": {Layers}, \"num_key_value_heads\": {Heads}, \"num_shared_experts\": {Shared}, \"q_lora_rank\": {QLora},"
             + $"\"qk_nope_head_dim\": {Nope}, \"qk_rope_head_dim\": {Rope}, \"rms_norm_eps\": 1e-5, \"routed_expert_hidden_size\": {Latent},"
-            + $"\"v_head_dim\": {VDim}, \"vocab_size\": {Vocab.ToString(CultureInfo.InvariantCulture)}"
+            + $"\"v_head_dim\": {VDim}, \"vocab_size\": {vocab.ToString(CultureInfo.InvariantCulture)}"
             + "}}";
     }
 
-    internal static List<(string Name, int[] Shape)> TensorNames(bool withVision = false)
+    internal static List<(string Name, int[] Shape)> TensorNames(int vocab = Vocab)
     {
         const string root = "language_model.model.";
         int keyDim = Heads * KdaHeadDim, qk = Nope + Rope;
         List<(string, int[])> t = new()
         {
-            ($"{root}embed_tokens.weight", [Vocab, Hidden]),
+            ($"{root}embed_tokens.weight", [vocab, Hidden]),
             ($"{root}norm.weight", [Hidden]),
-            ("language_model.lm_head.weight", [Vocab, Hidden]),
+            ("language_model.lm_head.weight", [vocab, Hidden]),
             ($"{root}output_attn_res_proj.weight", [1, Hidden]),
             ($"{root}output_attn_res_norm.weight", [Hidden]),
         };
@@ -132,11 +131,6 @@ internal static class KimiSyntheticCheckpoint
                     t.Add(($"{m}experts.{e}.w2.weight", [Latent, MoeInter]));
                 }
             }
-        }
-        if (withVision)
-        {
-            t.Add(("vision_tower.encoder.weight", [4, 4]));
-            t.Add(("mm_projector.proj.weight", [4, 4]));
         }
         return t.Select(x => (x.Item1, x.Item2)).ToList();
     }

@@ -14,10 +14,13 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## Unreleased
 
-- **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text only (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
+- **Added: Kimi K3.1 Pro on the Text path (`kimi_k31`), text and images (no real-weight run).** A checkpoint directory loads as `KimiK31TextModel` on the
   requested CPU, CUDA or Vulkan device (GPU paths not run), from its `tiktoken.model` with the built-in XTML chat template when `tokenizer.json` is
-  absent. Image input is refused by name. Multi-GPU placement shards the decoder over the requested devices, one rank per device, and each rank reads only its own share of the checkpoint (NCCL or host-staged collective); a placement the decoder does not run is refused by name. Sharded placement is tested on CPU virtual ranks only (GPU not run).
-  The MoonViT vision tower is tested on CPU only and is not routed yet. The `kimi-k3.1-pro` catalog row is Structural and not CLI-drivable.
+  absent. Images on the last user turn go through the MoonViT-V2 tower and are spliced at the checkpoint's media placeholder. The tower loads on the
+  first image request, so a text load reads none of its tensors; a checkpoint whose tower or placeholder id does not load, and video, are refused by
+  name. Multi-GPU placement shards the decoder over the requested devices, one rank per device, and each rank reads only its own share of the
+  checkpoint (NCCL or host-staged collective); a placement the decoder does not run is refused by name. Image input and sharded placement are tested
+  on CPU only (synthetic checkpoints and CPU virtual ranks; GPU not run). The `kimi-k3.1-pro` catalog row is Structural and not CLI-drivable.
 
 - **Added: ERNIE-5.5 real-dimension checks and the real-weight run harness (no real weights run yet).** A synthetic checkpoint at the real
   checkpoint's dimensions (hidden 4096, 64 heads of 512, FP8 128-blocks, BF16 routers, LM head and indexer projections, split-feature routing)

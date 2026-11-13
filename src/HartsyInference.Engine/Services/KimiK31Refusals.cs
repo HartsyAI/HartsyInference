@@ -1,21 +1,12 @@
-using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Kimi;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>The requests the Kimi K3.1 Text route refuses by name: image input, because the route loads no vision tower, and placements the
-/// route does not run: a request that names fewer ranks than the sharding needs, a rank count the decoder does not split across, and a
-/// device listed twice. A multi-device request that passes these checks is sharded over its devices and never falls back to one.</summary>
+/// <summary>The placements the Kimi K3.1 Text route refuses by name: a request that names fewer ranks than the sharding needs, a rank count the
+/// decoder does not split across, and a device listed twice. A multi-device request that passes these checks is sharded over its devices and
+/// never falls back to one. Image refusals are in <c>RunKimiVision</c> and the vision input, before the vision tower loads.</summary>
 internal static class KimiK31Refusals
 {
-    /// <summary>Refuses an image on a Kimi K3.1 slot. The checkpoint's vision tower is not loaded, so an image would be dropped silently otherwise.</summary>
-    /// <exception cref="NotSupportedException">The slot holds a Kimi K3.1 model and the request carries an image.</exception>
-    internal static void RefuseImage(IHostReferenceTextModel? model, bool hasImage)
-    {
-        if (hasImage && model is KimiK31TextModel)
-            throw new NotSupportedException("Kimi K3.1 image input is not supported: the Text path loads the text decoder only and runs no vision tower (vision_tower.*).");
-    }
-
     /// <summary>Accepts a single-device request and a multi-device request the decoder runs; refuses any other by name.</summary>
     /// <param name="deviceKey">The device the request names, possibly a composite such as <c>cuda:0+cuda:1</c>.</param>
     /// <param name="rankDevices">The devices the request shards over; empty when it names one device.</param>

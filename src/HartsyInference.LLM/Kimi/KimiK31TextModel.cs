@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Kimi.Vision;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Kimi;
@@ -10,18 +11,23 @@ namespace HartsyInference.LLM.Kimi;
 /// <summary>Everything the Text path needs to run a Kimi K3.1 directory: the generation model, the tokenizer from the checkpoint's
 /// <c>tokenizer.json</c> or, when that is absent, its <c>tiktoken.model</c>, and the chat template from its <c>chat_template.jinja</c> or, when that
 /// is absent on a <c>tiktoken.model</c> checkpoint, the built-in XTML template (<see cref="KimiK31ChatTemplate"/>).</summary>
-/// <remarks>Text only: the vision tower is not loaded, and image input is refused by the engine. Owns the generation model, which owns the checkpoint.</remarks>
+/// <remarks>Takes images through <see cref="Vision"/> when the checkpoint's vision tower loads; otherwise image input is refused by name. Owns the
+/// generation model, which owns the checkpoint, and the vision input.</remarks>
 public sealed class KimiK31TextModel : IHostReferenceTextModel
 {
-    private KimiK31TextModel(KimiK31GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template)
+    private KimiK31TextModel(KimiK31GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template, KimiVisionInput vision)
     {
         Generation = generation;
         Tokenizer = tokenizer;
         Template = template;
+        Vision = vision;
     }
 
     /// <summary>The engine-facing model.</summary>
     public KimiK31GenerationModel Generation { get; }
+
+    /// <summary>The checkpoint's image inputs: the vision encoder, or the reason images are refused.</summary>
+    public KimiVisionInput Vision { get; }
 
     /// <inheritdoc />
     public ILlmTokenizer Tokenizer { get; }
@@ -35,21 +41,32 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     /// <param name="maxSequenceTokens">Longest sequence (prompt plus generation) the decoder accepts; it sizes the positional tables.</param>
     /// <exception cref="HartsyInferenceException">The directory has neither tokenizer file, lacks a chat template where it has no <c>tiktoken.model</c>, the tokenizer is not usable, or its special ids disagree with <c>config.json</c>.</exception>
     /// <exception cref="InvalidDataException">The config or a tensor does not match the Kimi K3.1 decoder.</exception>
-    public static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens)
+    public static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens) =>
+        Load(backend, directory, maxSequenceTokens, KimiK31CheckpointWeights.Open);
+
+    /// <summary>Loads like <see cref="Load(IBackend, string, int)"/>, reading the checkpoint's tensors from the stores <paramref name="openWeights"/> opens.</summary>
+    internal static KimiK31TextModel Load(IBackend backend, string directory, int maxSequenceTokens, Func<string, IKimiK31WeightStore> openWeights)
     {
         ArgumentNullException.ThrowIfNull(backend);
-        return Load([backend], null, directory, maxSequenceTokens);
+        return Load([backend], null, directory, maxSequenceTokens, openWeights);
     }
 
     /// <summary>Loads <paramref name="directory"/> sharded over <paramref name="rankBackends"/>, one backend per rank, with <paramref name="comm"/>
     /// the collective over them. Each rank loads only its share; the result owns the backends' decoder but not the backends.</summary>
     /// <exception cref="ArgumentException">The rank backends are empty, or the config does not split across them.</exception>
     /// <exception cref="HartsyInferenceException">As <see cref="Load(IBackend, string, int)"/>.</exception>
-    public static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens)
+    public static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens) =>
+        Load(rankBackends, comm, directory, maxSequenceTokens, KimiK31CheckpointWeights.Open);
+
+    /// <summary>Loads like <see cref="Load(IReadOnlyList{IBackend}, ICollectiveComm?, string, int)"/>, reading the checkpoint's tensors from the stores
+    /// <paramref name="openWeights"/> opens.</summary>
+    internal static KimiK31TextModel Load(IReadOnlyList<IBackend> rankBackends, ICollectiveComm? comm, string directory, int maxSequenceTokens,
+        Func<string, IKimiK31WeightStore> openWeights)
     {
         ArgumentNullException.ThrowIfNull(rankBackends);
         if (rankBackends.Count == 0) throw new ArgumentException("A Kimi K3.1 load needs at least one rank backend.", nameof(rankBackends));
         ArgumentException.ThrowIfNullOrEmpty(directory);
+        ArgumentNullException.ThrowIfNull(openWeights);
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
         string tiktokenPath = Path.Combine(directory, KimiK31Tokenizer.TiktokenFile);
         // The Moonshot repo ships tiktoken.model and no tokenizer.json; tokenizer.json wins when both are present.
@@ -83,7 +100,8 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{(useTiktoken ? tiktokenPath : tokenizerPath)}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
-        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, rankBackends, comm, maxSequenceTokens);
+        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(directory, rankBackends, comm, maxSequenceTokens, openWeights);
+        KimiVisionInput? vision = null;
         try
         {
             // a mismatch would make the model read the wrong embeddings, so refuse rather than guess
@@ -94,14 +112,23 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
             if (configEos is { } eos && tokenizer.EosId != eos)
                 throw new HartsyInferenceException(
                     $"{tokenizerFile} puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");
-            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, rankBackends[0], maxSequenceTokens), tokenizer, template);
+            // Reads no vision tensor: the tower loads on the first image request, so a text load never depends on it.
+            vision = KimiVisionInput.Load(directory, tokenizer, checkpoint.Config.Hidden, template is KimiK31ChatTemplate, openWeights);
+            return new KimiK31TextModel(new KimiK31GenerationModel(checkpoint, rankBackends[0], maxSequenceTokens), tokenizer, template, vision);
         }
         catch
         {
+            vision?.Dispose();
             checkpoint.Dispose();
             throw;
         }
     }
+
+    /// <summary>Whether <paramref name="directory"/> loads with the built-in XTML template, the one that renders image placeholders: a tiktoken checkpoint
+    /// with no <c>chat_template.jinja</c>. Mirrors the template choice in Load, from the files alone.</summary>
+    internal static bool UsesXtmlTemplate(string directory) =>
+        !File.Exists(Path.Combine(directory, "tokenizer.json")) && !File.Exists(Path.Combine(directory, "chat_template.jinja"))
+        && File.Exists(Path.Combine(directory, KimiK31Tokenizer.TiktokenFile));
 
     /// <summary>The top-level <c>bos_token_id</c> and <c>eos_token_id</c> of <c>config.json</c>, each null when absent.</summary>
     private static (int? Bos, int? Eos) ReadSpecialIds(string configPath)
@@ -131,5 +158,9 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
     }
 
     /// <inheritdoc />
-    public void Dispose() => Generation.Dispose();
+    public void Dispose()
+    {
+        Vision.Dispose();
+        Generation.Dispose();
+    }
 }
