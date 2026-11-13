@@ -137,4 +137,32 @@ public sealed class InpainterTests
         Assert.Contains(free, v => v is > 1.001f or < -0.001f);
         Assert.All(clamped, v => Assert.InRange(v, 0f, 1f));
     }
+
+    [Fact]
+    public void BoundByNeighbours_KeepsFilledValuesInsideTheRangeOfTheKnownTexelsAcrossALargeGap()
+    {
+        // A sharp edge between two known colours next to a gap wider than the radius: the gradient correction overshoots past 0.2 and 0.8 (towards saturated stripes) unless it is bounded.
+        const int side = 64;
+        float[] image = new float[side * side * 3];
+        bool[] known = new bool[side * side];
+        for (int y = 0; y < side; y++)
+            for (int x = 0; x < side; x++)
+            {
+                known[y * side + x] = x < 6;
+                float value = (x + y / 3) % 2 == 0 ? 0.2f : 0.8f; // a high-contrast pattern in the known strip
+                for (int c = 0; c < 3; c++)
+                    image[(y * side + x) * 3 + c] = known[y * side + x] ? value + 0.05f * c : 0f;
+            }
+
+        float[] free = Inpainter.Inpaint(image, side, side, 3, known, 3, clampToUnit: true);
+        float[] bounded = Inpainter.Inpaint(image, side, side, 3, known, 3, clampToUnit: true, boundByNeighbours: true);
+
+        // Without the bound some filled value leaves [0.2, 0.9] (the known range); with it none does, and known texels are unchanged.
+        Assert.Contains(free, v => v < 0.199f || v > 0.901f);
+        Assert.All(bounded, v => Assert.InRange(v, 0.199f, 0.901f));
+        for (int i = 0; i < known.Length; i++)
+            if (known[i])
+                for (int c = 0; c < 3; c++)
+                    Assert.Equal(image[i * 3 + c], bounded[i * 3 + c]);
+    }
 }

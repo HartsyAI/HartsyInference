@@ -404,7 +404,7 @@ public sealed class HunyuanPaintPipeline
             (float[] texture, bool[] known) = merger.Finish();
             if (m == 0)
                 painted = known.Count(k => k);
-            textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true);
+            textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true, boundByNeighbours: true);
             FlattenFarGutter(textures[m], surface, size);
         }
 
