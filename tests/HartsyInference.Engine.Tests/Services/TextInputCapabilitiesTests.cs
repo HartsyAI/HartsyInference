@@ -1,8 +1,12 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Kimi.Vision;
+using HartsyInference.LLM.Tests.Kimi.Vision;
 using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.Engine.Tests.Services;
@@ -47,6 +51,59 @@ public sealed class TextInputCapabilitiesTests : IDisposable
     public void AMossVlCheckpointFolderTakesImagesVideoAndLiveSessions()
     {
         Assert.Equal(new TextInputCapabilities(true, true, true), TextService.InputCapabilities(WriteFolder("moss-nf4", "moss_vl")));
+    }
+
+    // A Kimi K3.1 folder: the decoder's config with the vision keys, the processor config, and the tower's tensors in its index. The index holds
+    // indexLayers blocks and the config asks for configLayers, so the two differ when a tensor is missing. No decoder weights are written.
+    private string WriteKimiFolder(string name, int indexLayers = 1, int configLayers = 1)
+    {
+        string dir = Path.Combine(_root, name);
+        Directory.CreateDirectory(dir);
+        KimiVisionConfig stored = KimiVisionSyntheticCheckpoint.Tiny(indexLayers) with { TextHidden = KimiSyntheticCheckpoint.Hidden };
+        KimiVisionSyntheticCheckpoint.Write(dir, stored, KimiVisionSyntheticCheckpoint.Values(stored, seed: 5));
+        KimiVisionConfig asked = KimiVisionSyntheticCheckpoint.Tiny(configLayers) with { TextHidden = KimiSyntheticCheckpoint.Hidden };
+        JsonObject config = JsonNode.Parse(KimiSyntheticCheckpoint.ConfigJson())!.AsObject();
+        config["media_placeholder_token_id"] = 267;
+        config["vision_config"] = JsonNode.Parse(
+            $"{{\"vt_hidden_size\": {asked.Hidden}, \"vt_num_attention_heads\": {asked.Heads}, \"qkv_hidden_size\": {asked.QkvHidden}, "
+            + $"\"vt_intermediate_size\": {asked.MlpDim}, \"vt_num_hidden_layers\": {asked.Layers}, \"patch_size\": {asked.PatchSize}, "
+            + $"\"merge_kernel_size\": [{asked.MergeSize}, {asked.MergeSize}], \"init_pos_emb_height\": {asked.InitPosGrid}, "
+            + $"\"init_pos_emb_width\": {asked.InitPosGrid}, \"text_hidden_size\": {asked.TextHidden}, \"projector_ln_eps\": 1e-05}}");
+        File.WriteAllText(Path.Combine(dir, "config.json"), config.ToJsonString());
+        File.WriteAllText(Path.Combine(dir, KimiK31Tokenizer.TiktokenFile), "");
+        File.WriteAllText(Path.Combine(dir, "preprocessor_config.json"),
+            "{\"media_proc_cfg\": {\"in_patch_limit\": 65536, \"patch_size\": 2, \"image_mean\": [0.5, 0.5, 0.5], \"image_std\": [0.5, 0.5, 0.5], "
+            + "\"merge_kernel_size\": 2, \"fixed_output_tokens\": null, \"patch_limit_on_one_side\": 512}}");
+        return dir;
+    }
+
+    [Fact]
+    public void AKimiFolderWhoseVisionTowerChecksOutFromItsFilesTakesImagesOnly()
+    {
+        Assert.Equal(new TextInputCapabilities(Images: true, Video: false, RealtimeSession: false),
+            TextService.InputCapabilities(WriteKimiFolder("kimi-ok")));
+    }
+
+    [Fact]
+    public void AKimiFolderWhoseIndexLacksAVisionTensorTakesNothing()
+    {
+        Assert.Equal(TextInputCapabilities.None, TextService.InputCapabilities(WriteKimiFolder("kimi-short", indexLayers: 1, configLayers: 2)));
+    }
+
+    [Fact]
+    public void AKimiFolderWithAJinjaTemplateFileTakesNothing()
+    {
+        string dir = WriteKimiFolder("kimi-jinja");
+        File.WriteAllText(Path.Combine(dir, "chat_template.jinja"), "{{ messages }}");
+        Assert.Equal(TextInputCapabilities.None, TextService.InputCapabilities(dir));
+    }
+
+    [Fact]
+    public void AKimiFolderWithNoTokenizerFileTakesNoImages()
+    {
+        string dir = WriteKimiFolder("kimi-no-tokenizer");
+        File.Delete(Path.Combine(dir, KimiK31Tokenizer.TiktokenFile));
+        Assert.False(TextService.InputCapabilities(dir).Images);
     }
 
     [Fact]

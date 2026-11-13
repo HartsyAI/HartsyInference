@@ -1,0 +1,138 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Kimi;
+using HartsyInference.LLM.Transformer;
+using Xunit;
+
+namespace HartsyInference.LLM.Tests.Kimi;
+
+/// <summary>The tensor- and expert-parallel decoder on virtual CPU ranks (<see cref="HostStagedComm"/>) must match the single-rank decoder on the
+/// same weights. Heads, vocabulary, experts and the dense and shared intermediates all split evenly at 2 and 4 ranks.</summary>
+public sealed class KimiK31ShardedForwardTests
+{
+    private const float Tol = 1e-4f;
+
+    // 4 heads, 8 experts and the other split dimensions divide by both 2 and 4 ranks.
+    internal static readonly KimiK31Config Config = KimiK31ModelTests.Config with
+    {
+        Heads = 4, Experts = 8, ExpertsPerToken = 2, FullAttentionLayers = new HashSet<int> { 1, 3 },
+    };
+
+    private static readonly int[] Tokens = [4, 4, 9, 0, 13, 7];
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void ShardedForward_MatchesTheOneRankForward_AtEveryToken(int ranks)
+    {
+        // The one-rank decoder runs the same weights unsliced and with no collective, so every token's logits must agree with it.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        using KimiK31Model single = new(new CpuBackend(), Config, weights, maxPositions: 16);
+        using KimiK31State singleState = new(Config, capacity: 16);
+        using KimiK31Model sharded = Sharded(weights, ranks);
+        using KimiK31State shardedState = new(Config, capacity: 16, ranks);
+        foreach (int token in Tokens)
+        {
+            float[] expected = single.ForwardToken(token, singleState);
+            float[] actual = sharded.ForwardToken(token, shardedState);
+            Assert.Equal(expected.Length, actual.Length);
+            for (int i = 0; i < expected.Length; i++) Assert.Equal(expected[i], actual[i], Tol);
+        }
+    }
+
+    [Fact]
+    public void FailedStateConstruction_ReportsItsCause_NotANullReference()
+    {
+        // ConvKernel 0 makes the KDA conv history's extent negative, so rank 0's first KDA state fails and rank 1's arrays never exist.
+        KimiK31Config broken = Config with { ConvKernel = 0 };
+
+        Exception? ex = Record.Exception(() => new KimiK31State(broken, capacity: 16, ranks: 2));
+
+        Assert.NotNull(ex);
+        Assert.IsNotType<NullReferenceException>(ex);
+    }
+
+    [Fact]
+    public void ShardedState_CarriesEachRanksCachesAcrossTokens()
+    {
+        // A second call advances the same sharded state: its logits depend on the earlier tokens through every rank's caches.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        using KimiK31Model model = Sharded(weights, 2);
+        using KimiK31State state = new(Config, capacity: 16, ranks: 2);
+        model.Forward([4], state);
+        float[] withHistory = model.Forward([1], state);
+        using KimiK31Model fresh = Sharded(weights, 2);
+        using KimiK31State freshState = new(Config, capacity: 16, ranks: 2);
+        float[] alone = fresh.Forward([1], freshState);
+
+        Assert.Equal(2, state.Position);
+        bool differs = false;
+        for (int i = 0; i < alone.Length; i++) differs |= MathF.Abs(withHistory[i] - alone[i]) > 1e-5f;
+        Assert.True(differs, "the sharded state did not carry the earlier token");
+    }
+
+    [Fact]
+    public void Model_RefusesAHeadCountThatDoesNotSplit()
+    {
+        // The synthetic decoder has 2 heads; 4 ranks cannot each own a whole head.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9));
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => Sharded(weights, KimiK31ModelTests.Config, 4));
+        Assert.Contains("Heads", ex.Message);
+    }
+
+    [Fact]
+    public void Require_RefusesAnExpertCountThatDoesNotSplit()
+    {
+        KimiK31Config nine = Config with { Experts = 9 };
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => KimiK31Sharding.Require(nine, 4));
+        Assert.Contains("Experts", ex.Message);
+    }
+
+    [Fact]
+    public void State_RefusesAModelOfAnotherRankCount()
+    {
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        using KimiK31Model model = Sharded(weights, 2);
+        using KimiK31State state = new(Config, capacity: 16);
+        Assert.Throws<ArgumentException>(() => model.ForwardToken(1, state));
+    }
+
+    [Fact]
+    public void SingleRankShards_ReferenceTheSourceTensors_AndOwnNothing()
+    {
+        // One rank holds the whole model, so no slice or replica is copied; the loader's tensors are the only F32 copies.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        List<Tensor> owned = [];
+
+        Assert.Same(weights.Embedding, KimiK31Sharding.VocabShard(weights.Embedding, 0, 1, owned, "embed_tokens"));
+        Assert.Same(weights.FinalNorm, KimiK31Sharding.Replica(weights.FinalNorm, owned, 1));
+        Assert.Same(weights.Layers[0].Kda!.OutProj, KimiK31Sharding.KdaShard(weights.Layers[0].Kda!, Config, 0, 1, owned).OutProj);
+        Assert.Same(weights.Layers[1].Mla!.QB, KimiK31Sharding.MlaShard(weights.Layers[1].Mla!, 0, 1, owned).QB);
+        KimiK31LayerWeights dense = weights.Layers[0];
+        (Tensor gate, _, _) = KimiK31Sharding.FfnShard(dense.DenseGate!, dense.DenseUp!, dense.DenseDown!, 0, 1, owned, "dense");
+        Assert.Same(dense.DenseGate, gate);
+        Assert.Empty(owned);
+    }
+
+    [Fact]
+    public void SingleRankModel_DoesNotOwnTheWeightsItReadsInPlace()
+    {
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        KimiK31Model model = new(new CpuBackend(), Config, weights, maxPositions: 16);
+        model.Dispose();
+
+        // Disposing the model must not release the tensors the caller (the loader) still owns.
+        Assert.Equal(Config.Vocab * Config.Hidden, weights.LmHead.AsReadOnlySpan<float>().Length);
+    }
+
+    private static KimiK31Model Sharded(KimiK31Weights weights, int ranks) => Sharded(weights, Config, ranks);
+
+    private static KimiK31Model Sharded(KimiK31Weights weights, KimiK31Config config, int ranks)
+    {
+        List<IBackend> backends = new(ranks);
+        for (int r = 0; r < ranks; r++) backends.Add(new CpuBackend());
+        TpPlacement placement = new(backends, new HostStagedComm(ranks));
+        return new KimiK31Model(placement, config, weights, maxPositions: 16);
+    }
+}

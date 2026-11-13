@@ -115,6 +115,53 @@ public sealed unsafe class NcclComm : ICollectiveComm
         SyncAll();
     }
 
+    /// <inheritdoc/>
+    /// <remarks>NCCL has no all-to-all call: each ordered pair (i, j) is one grouped send on rank i's communicator and one receive on
+    /// rank j's, skipped when its count is zero. Both sides read the same counts matrix, so the pairs always match.</remarks>
+    public void AllToAll(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] elementCounts)
+    {
+        ThrowIfDisposed();
+        AllToAllLayout.Validate(RankCount, sendBuffers, recvBuffers, elementCounts);
+        DType dtype = sendBuffers[0].DType;
+        NcclApi.DataType ncclType = MapDtype(dtype);
+        ulong size = (ulong)dtype.SizeInBytes;
+        ulong[] src = new ulong[RankCount];
+        ulong[] dst = new ulong[RankCount];
+        for (int i = 0; i < RankCount; i++)
+        {
+            _backends[i].BindAmbient();
+            src[i] = GpuTransferHelper.CopyToDevice(sendBuffers[i]);
+            // Each receive buffer is a fresh output sized to its whole tensor, zeroed past the exchange like the host transport.
+            nuint recvBytes = (nuint)(recvBuffers[i].ElementCount * dtype.SizeInBytes);
+            dst[i] = GpuTransferHelper.AllocateDevice(recvBytes);
+            CudaDriverApi.cuMemsetD8Async(dst[i], 0, recvBytes, _backends[i].Stream.Handle).ThrowOnError();
+        }
+        NcclApi.Check(NcclApi.ncclGroupStart(), "GroupStart");
+        for (int i = 0; i < RankCount; i++)
+        {
+            for (int j = 0; j < RankCount; j++)
+            {
+                long count = elementCounts[i, j];
+                if (count == 0)
+                {
+                    continue;
+                }
+                ulong sendPtr = src[i] + (ulong)AllToAllLayout.SendOffset(elementCounts, i, j) * size;
+                ulong recvPtr = dst[j] + (ulong)AllToAllLayout.RecvOffset(elementCounts, i, j) * size;
+                NcclApi.Check(NcclApi.ncclSend(sendPtr, (nuint)count, ncclType, j, _comms[i], _backends[i].Stream.Handle), "Send");
+                NcclApi.Check(NcclApi.ncclRecv(recvPtr, (nuint)count, ncclType, i, _comms[j], _backends[j].Stream.Handle), "Recv");
+            }
+        }
+        NcclApi.Check(NcclApi.ncclGroupEnd(), "GroupEnd");
+        for (int i = 0; i < RankCount; i++)
+        {
+            _backends[i].BindAmbient();
+            GpuTransferHelper.FreeDevice(src[i]);
+            GpuTransferHelper.CacheActivation(recvBuffers[i], dst[i], (nuint)(recvBuffers[i].ElementCount * dtype.SizeInBytes));
+        }
+        SyncAll();
+    }
+
     private void SyncAll()
     {
         foreach (CudaBackend backend in _backends)
