@@ -7,8 +7,8 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 /// </summary>
 public static class MeshCleaner
 {
-    /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, non-manifold, small
-    /// components, holes, orientation.</summary>
+    /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, small components by face count, non-manifold, small
+    /// components by area, holes, orientation.</summary>
     public static Mesh Clean(Mesh mesh, MeshCleanOptions? options = null)
     {
         Validate(mesh);
@@ -17,6 +17,8 @@ public static class MeshCleaner
         if (options.WeldVertices) m = WeldVertices(m, options.WeldTolerance);
         if (options.RemoveDegenerateFaces) m = RemoveDegenerateFaces(m);
         if (options.RemoveDuplicateFaces) m = RemoveDuplicateFaces(m);
+        // The face-count rule goes before the non-manifold split, which cuts vertices and so could separate faces that MeshLab sees as one component.
+        if (options.SmallComponentFaceRatio > 0) m = RemoveSmallComponentsByFaceCount(m, options.SmallComponentFaceRatio);
         if (options.RepairNonManifoldEdges) m = RepairNonManifoldEdges(m);
         if (options.SmallComponentAreaRatio > 0) m = RemoveSmallComponents(m, options.SmallComponentAreaRatio);
         if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
@@ -249,6 +251,48 @@ public static class MeshCleaner
             s = e;
         }
         return Rebuild(mesh, keep);
+    }
+
+    /// <summary>Removes the edge-connected components (faces linked through shared edges, as MeshLab's face-face adjacency links them; faces that only touch at a vertex are separate) that fall under the
+    /// threshold of MeshLab's <c>SmallComponent::Select</c> (<c>smallcomponentselection.h</c>, read 2026-11-13), the rule of upstream's <c>remove_floater</c> (pymeshlab <c>nbfaceratio</c> 0.005): the
+    /// threshold is <c>(uint)((float)largest * (float)faceRatio)</c>, a single-precision product truncated to an integer, and a component stays when its face count is at least that. With a largest of 1,000
+    /// faces and a ratio of 0.005 a 5-face piece stays and a 4-face piece goes; with 1,100 the threshold is 5.5 truncated to 5, so a 5-face piece still stays.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="faceRatio"/> is negative, above 1 (the rule would remove the largest component too) or not a number.</exception>
+    public static Mesh RemoveSmallComponentsByFaceCount(Mesh mesh, double faceRatio) => Rebuild(mesh, FaceCountComponentMask(mesh, faceRatio));
+
+    /// <summary>For each face, whether its edge-connected component stays under <see cref="RemoveSmallComponentsByFaceCount"/>'s rule.</summary>
+    internal static bool[] FaceCountComponentMask(Mesh mesh, double faceRatio)
+    {
+        Validate(mesh);
+        if (!(faceRatio >= 0 && faceRatio <= 1))
+            throw new ArgumentOutOfRangeException(nameof(faceRatio), "Ratio must be between 0 and 1.");
+        int faces = mesh.TriangleCount;
+        int[] parent = new int[faces];
+        for (int i = 0; i < faces; i++) parent[i] = i;
+        Dictionary<long, int> firstFace = new(faces * 3 / 2 + 1);
+        for (int f = 0; f < faces; f++)
+        {
+            for (int e = 0; e < 3; e++)
+            {
+                int a = mesh.Indices[f * 3 + e], b = mesh.Indices[f * 3 + (e + 1) % 3];
+                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                if (firstFace.TryGetValue(key, out int other))
+                    Union(parent, f, other);
+                else
+                    firstFace[key] = f;
+            }
+        }
+
+        int[] size = new int[faces];
+        for (int f = 0; f < faces; f++)
+            size[Find(parent, f)]++;
+        int largest = size.Length == 0 ? 0 : size.Max();
+        float product = (float)largest * (float)faceRatio; // single precision and truncated, as in MeshLab: uint th = max(largest, remaining) * nbFaceRatio
+        uint threshold = (uint)product;
+        bool[] keep = new bool[faces];
+        for (int f = 0; f < faces; f++)
+            keep[f] = size[Find(parent, f)] >= threshold;
+        return keep;
     }
 
     /// <summary>Removes vertex-connected components below <paramref name="areaRatio"/> of the total area; the largest always stays.</summary>

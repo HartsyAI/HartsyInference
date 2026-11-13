@@ -84,7 +84,7 @@ Caveats on three rows:
 | HairDeck | image, colour, chain, card VAE models | `hyz317/HairDeck` @ `7d2e07c5` | Apache-2.0 |
 | DINOv2-large / giant (Omni, Paint 2.1) | `model.safetensors` | `facebook/dinov2-large` @ `47b73eef` (the catalog's pin), `facebook/dinov2-giant` (no revision pinned here) | Apache-2.0 |
 | BiRefNet-matting | `model.safetensors` (885 MB) | `ZhengPeng7/BiRefNet-matting` @ `eccde0a8` | MIT |
-| Sonata (inside P3-SAM and the X-Part conditioner) | already bundled in the Part safetensors | `facebook/sonata` also lists `model.safetensors`; its weights licence is unstated | unverified |
+| Sonata (inside P3-SAM and the X-Part conditioner) | already bundled in the Part safetensors | `facebook/sonata` also lists `model.safetensors`; the model card states no licence, the `facebookresearch/sonata` README says the code is Apache-2.0 and the weights CC-BY-NC 4.0 (restricted by the NC terms of HM3D and ArkitScenes), read 2026-11-12 | CC-BY-NC 4.0 (non-commercial); do not host |
 
 ### Do not host
 
