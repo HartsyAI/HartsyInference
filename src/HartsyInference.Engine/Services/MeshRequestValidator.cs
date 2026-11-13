@@ -80,7 +80,15 @@ internal static class MeshRequestValidator
         {
             Sam3dObjectsRequestMapper.Validate(request);
         }
+        else if (MeshModelIds.Hunyuan3D.Contains(id))
+        {
+            TagPipelineErrors(() => Hunyuan3DShapePipeline.ValidateGrid(request.GridResolution, UsesFlashVdm(id)));
+        }
     }
+
+    /// <summary>Whether the catalog build decodes with FlashVDM: it carries the turbo VAE asset.</summary>
+    private static bool UsesFlashVdm(string id) =>
+        Registry.ModelCatalog.Find(id)?.Assets?.Any(asset => asset.Role == Registry.ModelCatalog.Hunyuan3DFlashVdmVaeRole) == true;
 
     /// <summary>Runs a pipeline's own request check and tags its exception with the request field it is about, which its messages name in the pipeline's words (<c>grid</c>, <c>FovRadians</c>).</summary>
     private static void TagPipelineErrors(Action check)

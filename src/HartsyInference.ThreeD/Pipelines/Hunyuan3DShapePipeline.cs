@@ -207,9 +207,39 @@ public sealed unsafe class Hunyuan3DShapePipeline : ThreeDPipelineBase
         return joined;
     }
 
+    /// <summary>Checks that the field of a <paramref name="grid"/> request fits one array, before any weight loads: the finest level has <c>grid + 1</c> points per axis for the dense decode, and for FlashVDM the one <see cref="Hunyuan3DFlashVdm.Resolutions"/> gives.</summary>
+    /// <param name="grid">The marching-cubes resolution; 0 takes the checkpoint's.</param>
+    /// <param name="flashVdm">Whether the pipeline decodes with FlashVDM (the turbo VAE).</param>
+    /// <exception cref="ArgumentOutOfRangeException">The field has more points than an array can hold; the parameter is <c>grid</c>.</exception>
+    public static void ValidateGrid(int grid, bool flashVdm)
+    {
+        if (grid <= 0 || FieldPoints(grid, flashVdm) <= Array.MaxLength)
+            return;
+        int largest = grid;
+        while (largest > 1 && FieldPoints(largest, flashVdm) > Array.MaxLength)
+            largest--;
+        throw new ArgumentOutOfRangeException(
+            "grid", grid, $"A grid of {grid} needs a field of {FieldPoints(grid, flashVdm):N0} points, more than one array holds; the largest this decode takes is {largest}.");
+    }
+
+    private static long FieldPoints(int grid, bool flashVdm)
+    {
+        long axis;
+        try
+        {
+            axis = flashVdm ? Hunyuan3DFlashVdm.Resolutions(grid)[^1] + 1L : grid + 1L;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return 0;
+        }
+        return axis * axis * axis;
+    }
+
     private ThreeDResult Sample(Func<ConditionPair> encode, int? requestSeed, int requestSteps, float requestCfg, int requestGrid, float requestIso,
         Action<GenerationProgress>? onProgress)
     {
+        ValidateGrid(requestGrid, _flashVdm);
         int seed = requestSeed ?? SeedGenerator.RandomSeed();
         int steps = requestSteps > 0 ? requestSteps : _cfg.NumInferenceSteps;
         float guidance = requestCfg > 0 ? requestCfg : _cfg.GuidanceScale;
