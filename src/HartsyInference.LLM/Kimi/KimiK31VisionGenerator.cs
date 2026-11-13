@@ -2,6 +2,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Kimi.Vision;
+using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -32,12 +33,13 @@ public sealed class KimiK31VisionGenerator
     }
 
     /// <summary>Samples a reply of at most <paramref name="maxTokens"/> tokens to <paramref name="promptIds"/> and <paramref name="images"/>, in
-    /// placeholder order. Stops at a stop id, which is not returned.</summary>
+    /// placeholder order. The reply is capped at the room the spliced prompt leaves in the context. Stops at a stop id, which is not returned.
+    /// <paramref name="onDelta"/> receives each new piece of decoded text as soon as it ends on a whole character.</summary>
     /// <exception cref="ArgumentException">The prompt's media pads do not match the images, or an image is malformed.</exception>
-    /// <exception cref="HartsyInferenceException">The spliced prompt and the reply do not fit the loaded context.</exception>
+    /// <exception cref="HartsyInferenceException">The spliced prompt alone does not fit the loaded context.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancel"/> is set; checked per image, per prefill row and per sampled token.</exception>
     public KimiK31VisionReply Generate(int[] promptIds, IReadOnlyList<RawRgbFrame> images, SamplingOptions sampling, int maxTokens,
-        CancellationToken cancel)
+        Action<string>? onDelta, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(sampling);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxTokens, 1);
@@ -47,35 +49,22 @@ public sealed class KimiK31VisionGenerator
         SamplerChain sampler = SamplerChain.FromOptions(sampling, _tokenizer, _generation.DecoderConfig.Vocab);
         HashSet<int> stops = new(_tokenizer.StopIds);
         List<int> history = [];
-        List<int> reply = [];
-        float[] logits = prefilled.Logits;
-        bool stopped = false;
-        for (int step = 0; step < maxTokens; step++)
-        {
-            cancel.ThrowIfCancellationRequested();
-            int token = sampler.Next(logits.AsSpan(), history);
-            if (stops.Contains(token))
-            {
-                stopped = true;
-                break;
-            }
-            reply.Add(token);
-            history.Add(token);
-            if (step + 1 < maxTokens) logits = decoder.ForwardToken(token, state);
-        }
-        return new KimiK31VisionReply(_tokenizer.Decode(reply), reply.Count, HitTokenLimit: !stopped);
+        int first = sampler.Next(prefilled.Logits.AsSpan(), history);
+        (string text, int tokens, bool hitLimit) = VlmDecodeOps.DecodeLoop(_tokenizer, first,
+            token => sampler.Next(decoder.ForwardToken(token, state).AsSpan(), history), stops, prefilled.Budget, history, onDelta, cancel);
+        return new KimiK31VisionReply(text, prefilled.PromptTokens, tokens, hitLimit);
     }
 
     // The logits after the spliced prompt, for a caller that samples its own reply.
     internal float[] PrefillLogits(int[] promptIds, IReadOnlyList<RawRgbFrame> images)
     {
-        Prefilled prefilled = Prefill(promptIds, images, extraTokens: 1, CancellationToken.None);
+        Prefilled prefilled = Prefill(promptIds, images, maxTokens: 1, CancellationToken.None);
         prefilled.State.Dispose();
         return prefilled.Logits;
     }
 
     // Encodes the images, splices them into the prompt and prefills the sequence. The caller owns the state.
-    private Prefilled Prefill(int[] promptIds, IReadOnlyList<RawRgbFrame> images, int extraTokens, CancellationToken cancel)
+    private Prefilled Prefill(int[] promptIds, IReadOnlyList<RawRgbFrame> images, int maxTokens, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(promptIds);
         ArgumentNullException.ThrowIfNull(images);
@@ -90,9 +79,12 @@ public sealed class KimiK31VisionGenerator
                 features.Add(Encode(image));
             }
             int[] ids = ExpandPads(promptIds, features, padId, hidden);
-            int capacity = ids.Length + extraTokens;
-            if (capacity > _generation.MaxSequenceTokens)
-                throw new HartsyInferenceException($"The prompt is {ids.Length} tokens with its images and the reply {extraTokens}; the model holds {_generation.MaxSequenceTokens}.");
+            int context = _generation.MaxSequenceTokens;
+            if (ids.Length > context)
+                throw new HartsyInferenceException($"The prompt is {ids.Length} tokens with its images; the model holds {context}.");
+            // The first reply token comes from the prefill logits and takes no slot; each later one takes one.
+            int budget = Math.Min(maxTokens, context - ids.Length + 1);
+            int capacity = ids.Length + budget - 1;
 
             // The splice overwrites the pad rows, so they look up token 0 rather than the pad's own embedding.
             int[] lookup = new int[ids.Length];
@@ -111,7 +103,7 @@ public sealed class KimiK31VisionGenerator
                     cancel.ThrowIfCancellationRequested();
                     last = _generation.Decoder.ForwardEmbeddingHidden(rows.Slice(r * hidden, hidden), state);
                 }
-                return new Prefilled(_generation.Decoder.ProjectHidden(last), state);
+                return new Prefilled(_generation.Decoder.ProjectHidden(last), state, ids.Length, budget);
             }
             catch
             {
@@ -156,6 +148,6 @@ public sealed class KimiK31VisionGenerator
         return [.. ids];
     }
 
-    // The logits after the spliced prompt, and the state that holds it.
-    private sealed record Prefilled(float[] Logits, KimiK31State State);
+    // The prefill's logits and state, the prompt length after the splice, and the reply budget the room leaves.
+    private sealed record Prefilled(float[] Logits, KimiK31State State, int PromptTokens, int Budget);
 }

@@ -35,6 +35,8 @@ public sealed partial class TextService
         int userTurn = messages.FindLastIndex(m => m.Role == "user");
         if (userTurn < 0) throw new HartsyInferenceException("The request has no user turn to attach the image to.");
         List<ContentBlock> blocks = [];
+        // Writes the original size, not the resized one. Unverified against the reference processor;
+        // the placeholder text it writes for a large image (encoding_k3.py) settles it.
         for (int k = 0; k < images.Count; k++) blocks.Add(new ImageBlock(k) { Width = images[k].Width, Height = images[k].Height });
         blocks.Add(new TextBlock(VisionQuestion(request)));
         messages[userTurn] = messages[userTurn] with { Blocks = blocks };
@@ -44,8 +46,8 @@ public sealed partial class TextService
         // The generator loads the tower here, after every refusal above, so a refused request never reads the tower.
         KimiK31VisionGenerator generator = new(kimi.Generation, kimi.Tokenizer, kimi.Vision);
         int maxTokens = request.MaxTokens > 0 ? request.MaxTokens : 512;
-        KimiK31VisionReply reply = generator.Generate(promptIds, frames, BuildVisionSampling(request), maxTokens, cancel);
-        sink?.Invoke(new TextChunk { Kind = TextChunkKind.Chunk, Text = reply.Text });
-        return new GenOutcome(reply.Text, reply.HitTokenLimit ? StopReason.Length : StopReason.Stop, 0, reply.Tokens);
+        KimiK31VisionReply reply = generator.Generate(promptIds, frames, BuildVisionSampling(request), maxTokens,
+            sink is null ? null : delta => sink(new TextChunk { Kind = TextChunkKind.Chunk, Text = delta }), cancel);
+        return new GenOutcome(reply.Text, reply.HitTokenLimit ? StopReason.Length : StopReason.Stop, reply.PromptTokens, reply.Tokens);
     }
 }

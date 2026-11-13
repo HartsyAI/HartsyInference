@@ -1,11 +1,13 @@
 using System.Linq;
 using System.Text;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Imaging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Kimi.Vision;
+using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Tests.Kimi.Vision;
 using HartsyInference.ModelAssets.Tokenizers;
 using Xunit;
@@ -18,6 +20,9 @@ public sealed class KimiK31VisionRouteTests : IDisposable
 {
     // The media pad sits above the fixture's named specials, inside the reserved range, as the real tokenizer's <|media_pad|> does.
     private const int MediaPadId = 267;
+
+    // The longest sequence the synthetic decoder is loaded for, so the context is small enough that a reply budget must be clamped.
+    private const int ContextTokens = 32;
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "hartsy-kimi-route-" + Guid.NewGuid().ToString("N"));
 
@@ -144,6 +149,77 @@ public sealed class KimiK31VisionRouteTests : IDisposable
     }
 
     [Fact]
+    public void The_reply_reports_the_expanded_prompt_length()
+    {
+        using CpuBackend backend = new();
+        using KimiK31GenerationModel generation = LoadDecoder(backend);
+        KimiVisionInput vision = LoadVision(textHidden: generation.DecoderConfig.Hidden);
+        KimiK31VisionGenerator generator = new(generation, Tokenizer(), vision);
+        int[] prompt = [1, 2, MediaPadId, 3];
+
+        KimiK31VisionReply reply = generator.Generate(prompt, [Frame(seed: 3)], new SamplingOptions { Temperature = 0f }, maxTokens: 2, onDelta: null,
+            CancellationToken.None);
+
+        // The one pad becomes the image's vision-token count; the other three ids stay one each.
+        int rows = KimiImagePreprocessor.Resize(8, 6, vision.Route().Image).Tokens;
+        Assert.Equal(prompt.Length - 1 + rows, reply.PromptTokens);
+        vision.Dispose();
+    }
+
+    [Fact]
+    public void A_prompt_that_fits_with_most_of_the_context_free_has_its_reply_clamped_to_the_room()
+    {
+        using CpuBackend backend = new();
+        using KimiK31GenerationModel generation = LoadDecoder(backend);
+        KimiVisionInput vision = LoadVision(textHidden: generation.DecoderConfig.Hidden);
+        KimiK31VisionGenerator generator = new(generation, Tokenizer(), vision);
+
+        // The 7-token prompt leaves 25 of the 32-token context, far fewer than the 512-token default the request asks for.
+        KimiK31VisionReply reply = generator.Generate([1, 2, MediaPadId, 3], [Frame(seed: 3)], new SamplingOptions { Temperature = 0f }, maxTokens: 512,
+            onDelta: null, CancellationToken.None);
+
+        // The first reply token takes no slot, so the reply may run one past the room the prompt leaves.
+        int budget = ContextTokens - reply.PromptTokens + 1;
+        Assert.True(reply.HitTokenLimit, "the reply stopped on a stop id before the clamped budget");
+        Assert.Equal(budget, reply.Tokens);
+        vision.Dispose();
+    }
+
+    [Fact]
+    public void A_prompt_that_fills_the_context_still_samples_one_token_and_one_that_overflows_is_refused()
+    {
+        using CpuBackend backend = new();
+        using KimiK31GenerationModel generation = LoadDecoder(backend);
+        KimiVisionInput vision = LoadVision(textHidden: generation.DecoderConfig.Hidden);
+        KimiK31VisionGenerator generator = new(generation, Tokenizer(), vision);
+        SamplingOptions greedy = new() { Temperature = 0f };
+
+        KimiK31VisionReply full = generator.Generate(new int[ContextTokens], [], greedy, maxTokens: 512, onDelta: null, CancellationToken.None);
+        Assert.True(full.Tokens <= 1);
+
+        Assert.Throws<HartsyInferenceException>(() =>
+            generator.Generate(new int[ContextTokens + 1], [], greedy, maxTokens: 4, onDelta: null, CancellationToken.None));
+        vision.Dispose();
+    }
+
+    [Fact]
+    public void Streamed_deltas_concatenate_to_the_reply_text()
+    {
+        using CpuBackend backend = new();
+        using KimiK31GenerationModel generation = LoadDecoder(backend);
+        KimiVisionInput vision = LoadVision(textHidden: generation.DecoderConfig.Hidden);
+        KimiK31VisionGenerator generator = new(generation, Tokenizer(), vision);
+        SamplingOptions greedy = new() { Temperature = 0f };
+        List<string> deltas = [];
+
+        KimiK31VisionReply streamed = generator.Generate([1, 2, MediaPadId, 3], [Frame(seed: 3)], greedy, maxTokens: 6, deltas.Add,
+            CancellationToken.None);
+
+        Assert.Equal(streamed.Text, string.Concat(deltas));
+        vision.Dispose();
+    }
+
+    [Fact]
     public void Vision_input_accepts_a_tower_whose_pad_and_geometry_load()
     {
         string dir = Path.Combine(_root, "vision");
@@ -201,8 +277,8 @@ public sealed class KimiK31VisionRouteTests : IDisposable
     {
         string dir = Path.Combine(_root, "text");
         if (!Directory.Exists(dir)) KimiSyntheticCheckpoint.Write(dir);
-        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(dir, backend, maxPositions: 32);
-        return new KimiK31GenerationModel(checkpoint, backend, maxTokens: 32);
+        KimiK31Checkpoint checkpoint = KimiK31Checkpoint.Load(dir, backend, maxPositions: ContextTokens);
+        return new KimiK31GenerationModel(checkpoint, backend, maxTokens: ContextTokens);
     }
 
     // The vision tower of the tiny config, widened to the decoder's hidden width, written under the names a checkpoint index carries.

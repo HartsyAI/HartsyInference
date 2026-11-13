@@ -128,7 +128,7 @@ public sealed class KimiVisionLazyLoadTests : IDisposable
         cancel.Cancel();
 
         Assert.Throws<OperationCanceledException>(() =>
-            generator.Generate([1, 2, MediaPadId, 3], [Frame(seed: 3)], new SamplingOptions { Temperature = 0f }, maxTokens: 4, cancel.Token));
+            generator.Generate([1, 2, MediaPadId, 3], [Frame(seed: 3)], new SamplingOptions { Temperature = 0f }, maxTokens: 4, onDelta: null, cancel.Token));
     }
 
     [Fact]
@@ -141,7 +141,7 @@ public sealed class KimiVisionLazyLoadTests : IDisposable
 
         // A stop id ends the reply before its budget; a reply that samples a token for every step of a one-token budget hit the limit.
         KimiK31VisionReply reply = generator.Generate([1, 2, MediaPadId, 3], [Frame(seed: 3)], new SamplingOptions { Temperature = 0f }, maxTokens: 1,
-            CancellationToken.None);
+            onDelta: null, CancellationToken.None);
 
         Assert.Equal(reply.Tokens == 1, reply.HitTokenLimit);
     }
