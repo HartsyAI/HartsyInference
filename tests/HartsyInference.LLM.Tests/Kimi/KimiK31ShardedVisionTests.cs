@@ -11,11 +11,13 @@ using Xunit;
 namespace HartsyInference.LLM.Tests.Kimi;
 
 /// <summary>An image request on a sharded Kimi K3.1 load: the image prefill builds its state over the decoder's ranks, so the spliced prompt runs on a
-/// 2-rank decoder and gives finite logits. Runs on virtual CPU ranks; no GPU.</summary>
+/// 2-rank decoder, gives finite logits and matches the one-rank logits of the same checkpoint. Runs on virtual CPU ranks; no GPU.</summary>
 public sealed class KimiK31ShardedVisionTests : IDisposable
 {
     // The media pad sits above the fixture's named specials, as the real tokenizer's <|media_pad|> does.
     private const int MediaPadId = 267, MaxSequence = 32;
+    // The same tolerance KimiK31ShardedLoadTests uses for sharded against one-rank logits.
+    private const float Tol = 1e-4f;
     private const string TowerShard = "vision.safetensors";
     private const string PreprocessorConfig = "{\"media_proc_cfg\": {\"in_patch_limit\": 65536, \"patch_size\": 2, \"image_mean\": [0.5, 0.5, 0.5], "
         + "\"image_std\": [0.5, 0.5, 0.5], \"merge_kernel_size\": 2, \"fixed_output_tokens\": null, \"patch_limit_on_one_side\": 512}}";
@@ -28,10 +30,20 @@ public sealed class KimiK31ShardedVisionTests : IDisposable
     }
 
     [Fact]
-    public void Image_prefill_on_a_two_rank_load_gives_finite_logits()
+    public void Image_prefill_on_a_two_rank_load_matches_the_one_rank_logits()
     {
         KimiK31Config config = KimiSyntheticCheckpoint.ShardedConfig;
         WriteShardedVisionCheckpoint(_dir, config);
+        int[] prompt = [1, 2, MediaPadId, 3];
+        RawRgbFrame[] frames = [Frame(seed: 3)];
+
+        float[] reference;
+        using (CpuBackend cpu = new())
+        using (KimiK31TextModel single = KimiK31TextModel.Load(cpu, _dir, MaxSequence))
+        {
+            reference = new KimiK31VisionGenerator(single.Generation, single.Tokenizer, single.Vision).PrefillLogits(prompt, frames);
+        }
+
         List<IBackend> backends = [new CpuBackend(), new CpuBackend()];
         try
         {
@@ -39,10 +51,12 @@ public sealed class KimiK31ShardedVisionTests : IDisposable
             Assert.Equal(2, model.Generation.Decoder.Ranks);
 
             KimiK31VisionGenerator generator = new(model.Generation, model.Tokenizer, model.Vision);
-            float[] logits = generator.PrefillLogits([1, 2, MediaPadId, 3], [Frame(seed: 3)]);
+            float[] logits = generator.PrefillLogits(prompt, frames);
 
             Assert.Equal(config.Vocab, logits.Length);
             Assert.All(logits, v => Assert.True(float.IsFinite(v)));
+            Assert.Equal(reference.Length, logits.Length);
+            for (int i = 0; i < reference.Length; i++) Assert.Equal(reference[i], logits[i], Tol);
         }
         finally
         {
