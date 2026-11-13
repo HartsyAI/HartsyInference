@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 
@@ -116,7 +117,7 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         }
 
         int height = zh * _config.VaeRatio, width = zw * _config.VaeRatio;
-        using Tensor single = AdaptiveDecode(backend, z, 1, zh, zw);
+        using Tensor single = AdaptiveDecode(backend, z, 1, zh, zw, blockMajor: true);
         return SliceFrames(single, _config.TemporalPatch, height, width, _config.TemporalPatch - 1, 1, asRank5: true);
     }
 
@@ -293,12 +294,12 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
 
     // ── Spatial tiling ──────────────────────────────────────────────────
 
-    private Tensor AdaptiveDecode(IBackend backend, Tensor z, int zt, int zh, int zw) =>
-        _config.DecoderTiling ? TiledDecode(backend, z, zt, zh, zw) : DecodePixels(backend, z, zt, zh, zw);
+    private Tensor AdaptiveDecode(IBackend backend, Tensor z, int zt, int zh, int zw, bool blockMajor = false) =>
+        _config.DecoderTiling ? TiledDecode(backend, z, zt, zh, zw, blockMajor && EngineKnobs.VaeBlockMajorTiles.Value) : DecodePixels(backend, z, zt, zh, zw);
 
     /// <summary>Decodes tile by tile into one canvas, ramp-blending each tile against the RAW (unblended) overlap of
     /// its top and left neighbours, then cropping the overlap away — matching the reference's tile bookkeeping.</summary>
-    private Tensor TiledDecode(IBackend backend, Tensor z, int zt, int zh, int zw)
+    private Tensor TiledDecode(IBackend backend, Tensor z, int zt, int zh, int zw, bool blockMajor)
     {
         int ratio = _config.VaeRatio;
         int height = zh * ratio, width = zw * ratio;
@@ -314,10 +315,17 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         Tensor canvas = new Tensor(new TensorShape(1, planes, height, width), DType.F32);
         using Tensor zView = new Tensor((void*)z.DataPointer, new TensorShape(1, latentPlanes, zh, zw), DType.F32);
         Tensor?[] rowTails = new Tensor?[xs.Length];
+        TileState?[,]? states = null;
         int outY = 0;
 
         try
         {
+            if (blockMajor)
+            {
+                states = EmbedAllTiles(backend, zView, zt, latentPlanes, ratio, ys, yLen, xs, xLen);
+                RunBlocksBlockMajor(backend, states);
+            }
+
             for (int i = 0; i < ys.Length; i++)
             {
                 Tensor?[] newTails = new Tensor?[xs.Length];
@@ -326,9 +334,10 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
                 for (int j = 0; j < xs.Length; j++)
                 {
                     int tileH = yLen[i], tileW = xLen[j];
-                    using Tensor zTile = VaeTiling.ExtractTile(zView, 1, latentPlanes,
-                        ys[i] / ratio, xs[j] / ratio, tileH / ratio, tileW / ratio);
-                    using Tensor tile = DecodePixels(backend, zTile, zt, tileH / ratio, tileW / ratio);
+                    using Tensor tile = blockMajor
+                        ? FinishBlockMajorTile(backend, states!, i, j, zt, tileH / ratio, tileW / ratio)
+                        : DecodeTileFromLatent(backend, zView, zt, latentPlanes,
+                            ys[i] / ratio, xs[j] / ratio, tileH / ratio, tileW / ratio);
 
                     if (i < ys.Length - 1)
                     {
@@ -367,17 +376,104 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         finally
         {
             foreach (Tensor? t in rowTails) t?.Dispose();
+            if (states is not null)
+            {
+                foreach (TileState? state in states) state?.Dispose();
+            }
         }
         return canvas;
+    }
+
+    /// <summary>Block-major tiles: every tile's embedding and RoPE tables are built before any block runs.</summary>
+    private TileState?[,] EmbedAllTiles(IBackend backend, Tensor zView, int zt, int latentPlanes, int ratio,
+        int[] ys, int[] yLen, int[] xs, int[] xLen)
+    {
+        TileState?[,] states = new TileState?[ys.Length, xs.Length];
+        try
+        {
+            for (int i = 0; i < ys.Length; i++)
+            {
+                for (int j = 0; j < xs.Length; j++)
+                {
+                    using Tensor zTile = VaeTiling.ExtractTile(zView, 1, latentPlanes,
+                        ys[i] / ratio, xs[j] / ratio, yLen[i] / ratio, xLen[j] / ratio);
+                    states[i, j] = EmbedTile(backend, zTile, zt, yLen[i] / ratio, xLen[j] / ratio);
+                }
+            }
+        }
+        catch
+        {
+            foreach (TileState? state in states) state?.Dispose();
+            throw;
+        }
+        return states;
+    }
+
+    /// <summary>Runs each block over every tile in turn. A block's weights are made resident once for all the tiles and
+    /// released after its pass, so they cross the bus once per decode instead of once per tile.</summary>
+    private void RunBlocksBlockMajor(IBackend backend, TileState?[,] states)
+    {
+        foreach (MiniMaxH3VideoVaeVitBlock block in _blocks)
+        {
+            backend.PreloadWeights(block.EnumerateWeights());
+            try
+            {
+                foreach (TileState? state in states)
+                {
+                    block.Forward(backend, state!.H, state.Cos, state.Sin, _qkNormOnes!);
+                }
+            }
+            finally
+            {
+                backend.FreeWeights(block.EnumerateWeights());
+            }
+        }
+    }
+
+    /// <summary>The per-tile suffix of a block-major tile: head and unpatchify, then that tile's state is released.</summary>
+    private Tensor FinishBlockMajorTile(IBackend backend, TileState?[,] states, int i, int j, int zt, int zh, int zw)
+    {
+        TileState state = states[i, j]!;
+        try
+        {
+            return FinishTile(backend, state.H, zt, zh, zw);
+        }
+        finally
+        {
+            state.Dispose();
+            states[i, j] = null;
+        }
+    }
+
+    /// <summary>Extracts one latent tile and decodes it through the tile-major path.</summary>
+    private Tensor DecodeTileFromLatent(IBackend backend, Tensor zView, int zt, int latentPlanes,
+        int startH, int startW, int tileH, int tileW)
+    {
+        using Tensor zTile = VaeTiling.ExtractTile(zView, 1, latentPlanes, startH, startW, tileH, tileW);
+        return DecodePixels(backend, zTile, zt, tileH, tileW);
     }
 
     private (int[] Start, int[] Length, int[] Overlap) SplitTiles(int inputLen) => _config.SplitTiles(inputLen);
 
     // ── ViT3D forward ───────────────────────────────────────────────────
 
-    /// <summary>One tile through the transformer: <c>[1, C_lat, T, H, W]</c> → <c>[1, 3·T·4, H·16, W·16]</c> (the
-    /// channel and frame axes stay folded so the tiling helpers can treat it as a 4-D plane stack).</summary>
-    private Tensor DecodePixels(IBackend backend, Tensor z, int zt, int zh, int zw)
+    /// <summary>One tile's transformer state between the embedding and the head: the token rows and their RoPE tables.</summary>
+    private sealed class TileState : IDisposable
+    {
+        public required Tensor H { get; init; }
+        public required Tensor Cos { get; init; }
+        public required Tensor Sin { get; init; }
+
+        public void Dispose()
+        {
+            H.Dispose();
+            Cos.Dispose();
+            Sin.Dispose();
+        }
+    }
+
+    /// <summary>The per-tile prefix of the ViT3D forward: post-quant, the x embedder, the register and cls tokens, and the RoPE tables.</summary>
+    private TileState EmbedTile(IBackend backend, Tensor z, int zt, int zh, int zw)
     {
         int dim = _config.Dim;
         int n = zt * zh * zw;
@@ -390,24 +486,28 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         using Tensor embedded = new Tensor(new TensorShape(n, dim), DType.F32);
         backend.Linear(embedded, projected, _xEmbedW!, _xEmbedB);
 
-        using Tensor h = new Tensor(new TensorShape(seq, dim), DType.F32);
-        backend.Concat(h, [embedded, _registerTokens!, _clsToken!], 0);
-
-        (Tensor cos, Tensor sin) = BuildRope(zt, zh, zw);
+        Tensor h = new Tensor(new TensorShape(seq, dim), DType.F32);
         try
         {
-            foreach (MiniMaxH3VideoVaeVitBlock block in _blocks)
-            {
-                block.Forward(backend, h, cos, sin, _qkNormOnes!);
-            }
-        }
-        finally
-        {
-            cos.Dispose();
-            sin.Dispose();
-        }
+            backend.Concat(h, [embedded, _registerTokens!, _clsToken!], 0);
 
-        using Tensor normed = new Tensor(new TensorShape(seq, dim), DType.F32);
+            (Tensor cos, Tensor sin) = BuildRope(zt, zh, zw);
+            return new TileState { H = h, Cos = cos, Sin = sin };
+        }
+        catch
+        {
+            h.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The per-tile suffix: the final norm, the projection head, the clamp to [-1, 1], and the unpatchify to pixels.</summary>
+    private Tensor FinishTile(IBackend backend, Tensor h, int zt, int zh, int zw)
+    {
+        int n = zt * zh * zw;
+        int seq = n + _config.NumSuffixTokens;
+
+        using Tensor normed = new Tensor(new TensorShape(seq, _config.Dim), DType.F32);
         backend.LayerNorm(normed, h, _normOutW!, _normOutB!, _config.Eps);
         using Tensor projFull = new Tensor(new TensorShape(seq, _config.PatchDim), DType.F32);
         backend.Linear(projFull, normed, _projOutW!, _projOutB);
@@ -416,7 +516,20 @@ public sealed unsafe class MiniMaxH3VideoVaeDecoder : IDisposable
         backend.Clamp(patches, patches, 0f, 1f);
         backend.Scale(patches, patches, 2f);
         backend.AddScalar(patches, patches, -1f);
-        return Unpatchify(patches, zt, zh, zw);
+        Tensor unpatched = Unpatchify(patches, zt, zh, zw);
+        return unpatched;
+    }
+
+    /// <summary>One tile through the transformer: <c>[1, C_lat, T, H, W]</c> → <c>[1, 3·T·4, H·16, W·16]</c> (the
+    /// channel and frame axes stay folded so the tiling helpers can treat it as a 4-D plane stack).</summary>
+    private Tensor DecodePixels(IBackend backend, Tensor z, int zt, int zh, int zw)
+    {
+        using TileState state = EmbedTile(backend, z, zt, zh, zw);
+        foreach (MiniMaxH3VideoVaeVitBlock block in _blocks)
+        {
+            block.Forward(backend, state.H, state.Cos, state.Sin, _qkNormOnes!);
+        }
+        return FinishTile(backend, state.H, zt, zh, zw);
     }
 
     /// <summary>Length-normalized coordinates on (t, h, w), pre-scaled by 2π (the reference's <c>use_angle</c>);
