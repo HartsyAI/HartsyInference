@@ -101,7 +101,7 @@ internal static class MeshModelProfiles
                 [Steps("50", 0, 1000, "Euler steps of the part flow; 0 takes 50."),
                     Grid("256", null, 32, 512, "Marching-cubes grid per axis of each part, decoded densely (the host holds the cube: 0.5 GB at 512); 0 takes 256, upstream extracts on an octree at 512."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)),
-                    Used(nameof(MeshRequest.Seed), "42", 0, MeshSeed.Max, null, "Fixes the surface samples, the part ids and the noise; a negative value takes 42."), .. NoHairDeck(), .. NoTexture()],
+                    Seed("Fixes the surface samples, the part ids and the noise; a negative value draws a random seed."), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence
                 {
                     Summary = "Tencent Hunyuan 3D-Part Community License; the Sonata weights' own terms are unverified",

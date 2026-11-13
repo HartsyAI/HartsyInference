@@ -31,6 +31,20 @@ public sealed class MeshSettingsTests
     }
 
     [Theory]
+    [InlineData("hunyuan3d-part")]
+    [InlineData("hunyuan3d-xpart")]
+    public void ThePartModelsDrawARandomSeedWhenNoneIsGivenAndKeepAGivenOne(string id)
+    {
+        // The split of a mesh depends on the seed: a request without one must not silently take a fixed value, and a given one must reach the run unchanged.
+        long first = MeshService.SettingsOf(id, new MeshRequest { Seed = -1 }).Seed!.Value;
+        long second = MeshService.SettingsOf(id, new MeshRequest { Seed = -1 }).Seed!.Value;
+        Assert.InRange(first, 0, int.MaxValue - 1);
+        Assert.NotEqual(first, second);
+        Assert.Equal(7, MeshService.SettingsOf(id, new MeshRequest { Seed = 7 }).Seed);
+        Assert.DoesNotContain("42", MeshPlanningService.DescriptorOf(id).Fields[nameof(MeshRequest.Seed)].Note!);
+    }
+
+    [Theory]
     [InlineData("triposr")]
     [InlineData("cola3d")]
     public void AModelWithNoSeedReportsNone(string id)
