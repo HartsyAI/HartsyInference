@@ -398,6 +398,7 @@ static int Licenses(Dictionary<string, string> options)
     }
     int bad = 0;
     int total = 0;
+    bool changed = false;
     foreach (IGrouping<string, MirrorManifestItem> model in manifest.Items.GroupBy(i => i.Model, StringComparer.Ordinal).OrderBy(g => g.Key, StringComparer.Ordinal))
     {
         // Every licence of the model's files counts, so a folder that mixed licences would need all their texts.
@@ -416,13 +417,36 @@ static int Licenses(Dictionary<string, string> options)
             string blob = Convert.ToHexString(SHA1.HashData([.. header, .. content])).ToLowerInvariant();
             bool ok = string.Equals(blob, file.GitBlobSha1, StringComparison.OrdinalIgnoreCase);
             bad += ok ? 0 : 1;
-            Console.WriteLine($"[{model.Key}] {(ok ? "ok" : "MISMATCH (git blob " + blob + ")")} {file.Name}");
+            string sha = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+            if (ok)
+            {
+                // The first verified copy fixes the hash; a later copy must match it.
+                foreach (MirrorLicenseFile recorded in model.SelectMany(i => i.License.TextFiles).Where(f => f.Name == file.Name && f.GitBlobSha1 == file.GitBlobSha1))
+                {
+                    if (recorded.Sha256.Length == 0)
+                    {
+                        recorded.Sha256 = sha;
+                        recorded.VerifiedUtc = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+                        changed = true;
+                    }
+                    else if (recorded.Sha256 != sha)
+                    {
+                        ok = false;
+                        bad++;
+                    }
+                }
+            }
+            Console.WriteLine($"[{model.Key}] {(ok ? "ok" : "MISMATCH (git blob " + blob + ", sha256 " + sha + ")")} {file.Name}  {content.Length:N0} bytes  sha256 {sha}  from {file.Url}");
         }
         if (!File.Exists(Path.Combine(staging, model.Key, "CHANGES.txt")))
         {
             bad++;
             Console.WriteLine($"[{model.Key}] MISSING CHANGES.txt  run the notices command");
         }
+    }
+    if (changed)
+    {
+        manifest.Save(Path.Combine(staging, "manifest.json"));
     }
     Console.WriteLine(bad == 0 ? $"All {total} licence files are in place." : $"{bad} licence or notice file(s) missing or different.");
     return bad == 0 ? 0 : 1;
