@@ -24,6 +24,22 @@ public sealed class MeshAssetService : IMeshAssetService
     /// <inheritdoc/>
     public MeshAssetStatus GetStatus(ModelSpec spec) => GetInventory(spec).Status;
 
+    /// <summary>The required catalog files <paramref name="spec"/>'s loader does not find, looked up where the loader looks (a DINOv2 copy inside an installed Hunyuan3D shape checkpoint counts for Paint 2.1,
+    /// the folder named as the model path counts for the part and Omni models): the files a download would have to fetch. The asset status and this list therefore never disagree.</summary>
+    public IReadOnlyList<ModelAsset> MissingRequiredAssets(ModelSpec spec)
+    {
+        MeshInventory inventory = GetInventory(spec);
+        List<ModelAsset> missing = [];
+        for (int i = 0; i < inventory.Catalog.Count; i++)
+        {
+            MeshAssetInfo row = inventory.Status.Assets[i];
+            if (inventory.Catalog[i] is { } asset && row.Required && !row.Present)
+                missing.Add(asset);
+        }
+
+        return missing;
+    }
+
     /// <summary>The instructions of a gated file the user has to unlock on Hugging Face.</summary>
     internal static string GatedInstructions(string repo) =>
         $"{repo} is gated: accept its terms on Hugging Face and set HF_TOKEN to a token with read access, then fetch again.";

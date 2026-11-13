@@ -49,6 +49,23 @@ public sealed class MeshAssetTests : IDisposable
     }
 
     [Fact]
+    public void Paint21NeedsNoSeparateDinoFileWhenAShapeCheckpointHoldsOne_AndTheMissingListAgreesWithTheStatus()
+    {
+        PlaceCatalog("hunyuan3d-paint21", skip: a => a.TargetName?.StartsWith("dino", StringComparison.OrdinalIgnoreCase) == true);
+        MeshAssetService service = new();
+
+        // Without the DINOv2 file anywhere, it is the one file a download has to fetch, and the status says the same.
+        ModelAsset dino = Assert.Single(service.MissingRequiredAssets(Spec("hunyuan3d-paint21")));
+        Assert.Equal("facebook/dinov2-giant", dino.Repo);
+        Assert.False(service.GetStatus(Spec("hunyuan3d-paint21")).Complete);
+
+        // The F16 copy inside an installed Hunyuan3D shape checkpoint is what the loader reads, so nothing is missing.
+        Place(Path.Combine(_root, "3D", "hunyuan3d2", "hunyuan3d-dit-v2-0", "model.fp16.safetensors"));
+        Assert.Empty(service.MissingRequiredAssets(Spec("hunyuan3d-paint21")));
+        Assert.True(service.GetStatus(Spec("hunyuan3d-paint21")).Complete);
+    }
+
+    [Fact]
     public void XPartStatusFollowsTheFolderTheLoaderIsGiven_FileByFile()
     {
         string install = Path.Combine(_root, "elsewhere", "xpart");
