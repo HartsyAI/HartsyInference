@@ -106,12 +106,13 @@ public sealed class KimiK31WeightLoader
         int key = _c.KeyDim, h = _c.Hidden, k = _c.ConvKernel, rank = _c.KdaForgetRank;
         int keyRank = key / _shard.Ranks, firstChannel = _shard.Rank * keyRank;
 
-        // q, k and v stacked in the order the KDA conv splits them; their depthwise taps stacked the same way.
+        // q, k and v stacked in the order the KDA conv splits them. The depthwise taps are F32 [3 * keyRank, k], the rank-2 shape KdaWeights takes.
         Tensor qkv = Own(ConcatRows(Part(p + "q_proj.weight", 0, key, h), Part(p + "k_proj.weight", 0, key, h), Part(p + "v_proj.weight", 0, key, h)),
             p + "qkv_proj.weight");
-        Tensor taps = Track(ConcatRows(
-            ToF32(Part(p + "q_conv1d.weight", 0, key, 1, k)), ToF32(Part(p + "k_conv1d.weight", 0, key, 1, k)),
-            ToF32(Part(p + "v_conv1d.weight", 0, key, 1, k))));
+        float[] taps =
+        [
+            .. HostPart(p + "q_conv1d.weight", 0, key, 1, k), .. HostPart(p + "k_conv1d.weight", 0, key, 1, k), .. HostPart(p + "v_conv1d.weight", 0, key, 1, k),
+        ];
 
         // A_log holds one value per head; every key channel of a head takes that head's value. The fold is per channel, so this
         // rank folds only its own channels.
@@ -123,7 +124,7 @@ public sealed class KimiK31WeightLoader
 
         return new KdaWeights(
             QkvProj: qkv,
-            ConvTaps: taps,
+            ConvTaps: Make(taps, 3L * keyRank, k),
             ForgetDown: DensePart(p + "f_a_proj.weight", -1, rank, h),
             ForgetUp: Make(up, keyRank, rank),
             ForgetBias: Make(bias, keyRank),

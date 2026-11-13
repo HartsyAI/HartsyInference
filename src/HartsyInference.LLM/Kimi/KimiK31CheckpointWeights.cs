@@ -39,27 +39,36 @@ public sealed class KimiK31CheckpointWeights : IKimiK31RankWeightSource, IDispos
         if (dim == 1 && shape.Rank != 2) throw new ArgumentOutOfRangeException(nameof(dim), dim, "Column ranges are read for rank-2 tensors only.");
         if (start < 0 || count < 1 || start + count > shape[dim])
             throw new ArgumentOutOfRangeException(nameof(count), count, $"[{start}, {start + count}) lies outside '{name}' dimension {dim} of {shape[dim]}.");
+        SafeTensorDTypes.ThrowIfNotMaterialisable(location.DType, name, location.Shard.Path);
 
         long[] dims = new long[shape.Rank];
         for (int d = 0; d < dims.Length; d++) dims[d] = shape[d];
         dims[dim] = count;
         Tensor slice = new(new TensorShape(dims), location.DType);
-        IWeightByteSource source = set.GetByteSource(location.Shard);
-        if (dim == 0)
+        try
         {
-            long rowBytes = location.ByteLength / shape[0];
-            source.ReadAt(location.FileOffset + start * rowBytes, new Span<byte>(slice.DataPointer, checked((int)(count * rowBytes))));
+            IWeightByteSource source = set.GetByteSource(location.Shard);
+            if (dim == 0)
+            {
+                long rowBytes = location.ByteLength / shape[0];
+                source.ReadAt(location.FileOffset + start * rowBytes, new Span<byte>(slice.DataPointer, checked((int)(count * rowBytes))));
+                return slice;
+            }
+            long fullRowBytes = location.DType.ComputeByteCount(shape[1]);
+            long sliceRowBytes = location.DType.ComputeByteCount(count);
+            long startBytes = location.DType.ComputeByteCount(start);
+            for (long row = 0; row < shape[0]; row++)
+            {
+                byte* at = (byte*)slice.DataPointer + row * sliceRowBytes;
+                source.ReadAt(location.FileOffset + row * fullRowBytes + startBytes, new Span<byte>(at, checked((int)sliceRowBytes)));
+            }
             return slice;
         }
-        long fullRowBytes = location.DType.ComputeByteCount(shape[1]);
-        long sliceRowBytes = location.DType.ComputeByteCount(count);
-        long startBytes = location.DType.ComputeByteCount(start);
-        for (long row = 0; row < shape[0]; row++)
+        catch
         {
-            byte* at = (byte*)slice.DataPointer + row * sliceRowBytes;
-            source.ReadAt(location.FileOffset + row * fullRowBytes + startBytes, new Span<byte>(at, checked((int)sliceRowBytes)));
+            slice.Dispose();
+            throw;
         }
-        return slice;
     }
 
     private ShardedSafeTensorSet Set => _set ?? throw new ObjectDisposedException(nameof(KimiK31CheckpointWeights));

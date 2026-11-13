@@ -914,13 +914,14 @@ public sealed partial class TextService : ITextService, IDisposable
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
+        if (KeepsLoadedModel(slot, path, hfDirectory: true))
+            return;
+        // Before the unload, so a refused placement leaves the slot's model in place; only a load that will happen reads the config.
         if (HfTextDirectoryLoader.IsKimiK31(checkpoint))
         {
             KimiK31Refusals.RequireRunnablePlacement(deviceKey, ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree,
                 _engine.Placement.ShardRatios, HfTextDirectoryLoader.ReadKimiK31Config(checkpoint));
         }
-        if (KeepsLoadedModel(slot, path, hfDirectory: true))
-            return;
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {

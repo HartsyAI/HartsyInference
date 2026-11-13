@@ -55,7 +55,10 @@ public sealed class KimiK31Checkpoint : IDisposable
             for (int r = 0; r < ranks; r++)
             {
                 IBackend backend = rankBackends[r];
-                loaded.Add(KimiK31WeightLoader.Load(config, weights, new KimiK31Shard(r, ranks), (t, key) => DenseWeightCasts.ForBackend(t, backend, key)));
+                // One device loads F32 dense weights as it always has; sharded ranks keep the dtype their own backend runs.
+                loaded.Add(ranks == 1
+                    ? KimiK31WeightLoader.Load(config, weights)
+                    : KimiK31WeightLoader.Load(config, weights, new KimiK31Shard(r, ranks), (t, key) => DenseWeightCasts.ForBackend(t, backend, key)));
             }
             KimiK31Model model = ranks == 1
                 ? new KimiK31Model(rankBackends[0], config, loaded[0], maxPositions)

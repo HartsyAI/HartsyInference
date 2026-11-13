@@ -166,6 +166,24 @@ public sealed class KimiK31TextPathTests : IDisposable
         Assert.Contains("more than once", refused.Message);
     }
 
+    [Theory]
+    [InlineData("cuda:0+cuda", "cuda:0", "cuda")]
+    [InlineData("cuda+CUDA:0", "cuda", "CUDA:0")]
+    public void A_composite_naming_one_cuda_device_under_two_spellings_is_refused_by_name(string deviceKey, string first, string second)
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement(deviceKey, [first, second], tensorParallelDegree: 1, shardRatios: null, PlacementConfig));
+        Assert.Contains("more than once", refused.Message);
+    }
+
+    [Fact]
+    public void A_request_naming_no_composite_says_it_names_one_device()
+    {
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() =>
+            KimiK31Refusals.RequireRunnablePlacement("cuda:0", [], tensorParallelDegree: 2, shardRatios: null, PlacementConfig));
+        Assert.Contains("names one device", refused.Message);
+    }
+
     [Fact]
     public void A_tensor_parallel_degree_that_differs_from_the_devices_is_refused_by_name()
     {

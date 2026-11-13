@@ -35,7 +35,8 @@ public sealed class KimiK31ShardedLoadTests : IDisposable
     {
         KimiSyntheticCheckpoint.WriteSharded(_dir, Config, shardFiles: 3, packedExperts: true, bf16Dense: false);
 
-        using KimiK31Checkpoint single = KimiK31Checkpoint.Load(_dir, new CpuBackend(), maxPositions: 16);
+        using CpuBackend cpu = new();
+        using KimiK31Checkpoint single = KimiK31Checkpoint.Load(_dir, cpu, maxPositions: 16);
         float[] reference = Forward(single.Model, single.Config, ranks: 1);
 
         List<IBackend> backends = Backends(ranks);
@@ -50,13 +51,40 @@ public sealed class KimiK31ShardedLoadTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void WholeLoad_SlicedInMemory_MatchesTheSingleRankLogits(int ranks)
+    {
+        // The loader's whole decoder goes straight into the in-memory Slice overload: the path a single-device load and a test cut share.
+        KimiSyntheticCheckpoint.WriteSharded(_dir, Config, shardFiles: 3, packedExperts: true, bf16Dense: true);
+        KimiK31Config parsed = ParsedConfig();
+        using KimiK31CheckpointWeights source = KimiK31CheckpointWeights.Open(_dir);
+        float[] reference = SingleRank(source, parsed);
+
+        KimiK31Weights whole = KimiK31WeightLoader.Load(parsed, source);
+        List<IBackend> backends = Backends(ranks);
+        try
+        {
+            AssertConvTapsAreRank2(whole, parsed);
+            using KimiK31Model model = new(new TpPlacement(backends, new HostStagedComm(ranks)), parsed, whole, maxPositions: 16);
+            AssertClose(reference, Forward(model, parsed, ranks));
+        }
+        finally
+        {
+            foreach (Tensor t in whole.Owned) t.Dispose();
+            DisposeAll(backends);
+        }
+    }
+
     [Fact]
     public void EightRanks_PackedExperts_ShardedCheckpoint_MatchesTheSingleRankLogits()
     {
         KimiK31Config config = KimiSyntheticCheckpoint.ShardedEightConfig;
         KimiSyntheticCheckpoint.WriteSharded(_dir, config, shardFiles: 4, packedExperts: true, bf16Dense: true);
 
-        using KimiK31Checkpoint single = KimiK31Checkpoint.Load(_dir, new CpuBackend(), maxPositions: 16);
+        using CpuBackend cpu = new();
+        using KimiK31Checkpoint single = KimiK31Checkpoint.Load(_dir, cpu, maxPositions: 16);
         float[] reference = Forward(single.Model, single.Config, ranks: 1);
 
         List<IBackend> backends = Backends(8);
@@ -114,6 +142,18 @@ public sealed class KimiK31ShardedLoadTests : IDisposable
             {
                 foreach (Tensor t in weights.Owned) t.Dispose();
             }
+        }
+    }
+
+    // KdaWeights takes the conv taps as [3 * key, kernel]; a rank-3 tensor is what the in-memory cut cannot slice.
+    private static void AssertConvTapsAreRank2(KimiK31Weights weights, KimiK31Config config)
+    {
+        foreach (KimiK31LayerWeights layer in weights.Layers)
+        {
+            if (layer.Kda is null) continue;
+            Assert.Equal(2, layer.Kda.ConvTaps.Shape.Rank);
+            Assert.Equal(3L * config.KeyDim, layer.Kda.ConvTaps.Shape[0]);
+            Assert.Equal((long)config.ConvKernel, layer.Kda.ConvTaps.Shape[1]);
         }
     }
 

@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Kimi;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.Kimi;
 
@@ -15,7 +17,10 @@ public sealed class KimiK31ShardedCudaTests : IDisposable
 
     private static readonly int[] Tokens = [4, 4, 9, 0, 13, 7];
 
+    private readonly ITestOutputHelper _output;
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "hartsy-kimi-cuda-" + Guid.NewGuid().ToString("N"));
+
+    public KimiK31ShardedCudaTests(ITestOutputHelper output) => _output = output;
 
     public void Dispose()
     {
@@ -32,11 +37,13 @@ public sealed class KimiK31ShardedCudaTests : IDisposable
 
     private void Run(int ranks, KimiK31Config config)
     {
-        if (!CudaContext.IsAvailable() || CudaContext.GetDeviceCount() < ranks) return;
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        if (CudaContext.GetDeviceCount() < ranks) { _output.WriteLine($"SKIPPED: needs {ranks} physical GPUs."); return; }
         KimiSyntheticCheckpoint.WriteSharded(_dir, config, shardFiles: 3, packedExperts: true, bf16Dense: true);
 
         float[] reference;
-        using (KimiK31Checkpoint cpu = KimiK31Checkpoint.Load(_dir, new HartsyInference.Core.Backends.Cpu.CpuBackend(), maxPositions: 16))
+        using (CpuBackend cpuBackend = new())
+        using (KimiK31Checkpoint cpu = KimiK31Checkpoint.Load(_dir, cpuBackend, maxPositions: 16))
         {
             reference = Forward(cpu, ranks: 1);
         }

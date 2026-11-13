@@ -30,7 +30,8 @@ internal static class KimiK31Refusals
         if (ranks == 0 && tensorParallelDegree <= 1) return;
         if (ranks < 2)
         {
-            throw new NotSupportedException($"Kimi K3.1 multi-GPU placement needs at least 2 ranks: the request for '{deviceKey}' names {ranks} device(s) "
+            string named = ranks == 0 ? "names one device" : $"names {ranks} device(s)";
+            throw new NotSupportedException($"Kimi K3.1 multi-GPU placement needs at least 2 ranks: the request for '{deviceKey}' {named} "
                 + $"and the engine's tensor-parallel degree is {tensorParallelDegree}. It is refused rather than loaded on one device.");
         }
         if (tensorParallelDegree > 1 && tensorParallelDegree != ranks)
@@ -38,7 +39,7 @@ internal static class KimiK31Refusals
             throw new NotSupportedException($"Kimi K3.1 multi-GPU placement: the engine's tensor-parallel degree is {tensorParallelDegree}, "
                 + $"but the request for '{deviceKey}' names {ranks} devices.");
         }
-        if (rankDevices.Distinct(StringComparer.OrdinalIgnoreCase).Count() != ranks)
+        if (rankDevices.Select(DeviceIdentity).Distinct(StringComparer.Ordinal).Count() != ranks)
             throw new NotSupportedException($"Kimi K3.1 multi-GPU placement: the request for '{deviceKey}' lists a device more than once.");
         if (shardRatios is not null)
             throw new NotSupportedException($"Kimi K3.1 multi-GPU placement splits the decoder evenly; uneven ShardRatios are not supported for '{deviceKey}'.");
@@ -50,5 +51,12 @@ internal static class KimiK31Refusals
         {
             throw new NotSupportedException($"Kimi K3.1 multi-GPU placement over {ranks} ranks is not supported: {ex.Message}", ex);
         }
+    }
+
+    // 'cuda' and 'cuda:0' name one device. A bare Vulkan selector ranks the devices rather than naming index 0, so it stays as written.
+    private static string DeviceIdentity(string device)
+    {
+        string s = device.Trim().ToLowerInvariant();
+        return BackendFactory.IsValidSelector(s) && BackendFactory.Kind(s) == "cuda" ? $"cuda:{BackendFactory.ParseOrdinal(s)}" : s;
     }
 }
