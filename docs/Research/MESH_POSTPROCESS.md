@@ -123,6 +123,33 @@ GLB stores it; "welded" merges vertices at the same position, so the copies made
 - **Measuring**: the welded count is what `MeshStatistics` reports and can never read as watertight while the repair duplicates positions; the by-index count is the topology a
   consumer that does not merge vertices sees. Both are reported.
 
+## Decimation target and texture size, measured (2026-11-13)
+
+Upstream's own defaults (read from `microsoft/TRELLIS.2` on 2026-11-13): `o_voxel.postprocess.to_glb` takes `decimation_target = 1000000` and `texture_size = 2048`; `example.py` calls it with 1,000,000 and
+4096 (and `remesh=True`); the Gradio `app.py` offers a decimation slider from 100,000 to 1,000,000 that starts at **500,000** and a texture slider from 1,024 to 4,096 that starts at 2,048. This engine's
+`PbrPostProcessOptions` defaults to 1,000,000 and 2,048, the function defaults.
+
+CPU run of `PbrMeshPostProcessor` on the saved textured TRELLIS.2 bust (1,007,560 faces) with every other setting at its default. The attribute volume is a stand-in rebuilt from the saved atlas (the colour
+of each vertex's texel, averaged on a 512 grid, 379,483 voxels), not the original volume, so the look is a proxy; the coverage, chart and time columns do not depend on the volume.
+
+| Decimation target | Texture | Faces | Charts | Faces per chart | Atlas covered by UV triangles | Post-process time | GLB size |
+|---|---|---|---|---|---|---|---|
+| 1,000,000 | 2048 | 999,969 | 44,752 | 22 | 20.0 % | 38 s | 40.1 MB |
+| 500,000 | 2048 | 499,840 | 29,968 | 16 | 20.3 % | 33 s | 24.1 MB |
+| 200,000 | 2048 | 199,788 | 27,751 | 7 | 20.1 % | 32 s | 14.5 MB |
+| 1,000,000 | 4096 | 999,969 | 44,752 | 22 | 22.6 % | 97 s | 51.2 MB |
+| 500,000 | 4096 | 499,840 | 29,968 | 16 | 22.8 % | 102 s | 35.1 MB |
+| 200,000 | 4096 | 199,788 | 27,751 | 7 | 22.4 % | 100 s | 25.3 MB |
+
+- **The atlas is about 80 % padding whatever the target.** Coverage stays at 20 to 23 % because the packer keeps a gutter of 4 texels around every one of 28,000 to 45,000 small charts; a coarser mesh does not
+  make the charts bigger, it makes their faces bigger (about 0.8 covered texel per face at 1 M faces, 1.7 at 500 k, 4.2 at 200 k). Doubling the texture side (4096) adds 2.4 points of coverage, triples the time
+  and adds 11 to 12 MB to the GLB.
+- **A 1 M-face mesh has less than one texel per face**, so the texture cannot carry per-face detail and the baked colour at that density shows as blotches (rendered front views of all six runs: 1 M faces at either
+  size shows pale blotches on the forehead and hair that 500 k and 200 k do not; 4096 over 2048 adds little at any target). The look comparison is a proxy (see above) and a single subject.
+- **Proposed default for textured output, not applied:** 500,000 faces and a 2048 texture, which is the value upstream's own app starts at, gives a 40 % smaller GLB than the current default with no loss in
+  these renders; 4096 stays an explicit choice. Changing the default needs the same comparison on a run with the real attribute volume (one GPU run of TRELLIS.2 at 512).
+- The saved render sheet of the six runs is `trellis2-atlas-defaults-compare.png` in the GPU block results folder.
+
 ## Known limits against cumesh and xatlas
 
 - **Parametrization is planar projection per chart**, not LSCM, ABF or xatlas' iterative chart optimization. Stretch is bounded by the
