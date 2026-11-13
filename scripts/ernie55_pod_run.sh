@@ -93,7 +93,7 @@ stage_verify() {
             echo "size mismatch: ${path} is ${actual}, the pin says ${size}"
             mismatched=$((mismatched + 1))
         fi
-    done < "$MANIFEST"
+    done < <(tr -d '\r' < "$MANIFEST")
     [[ "$missing" -eq 0 ]] || fail "${missing} file(s) missing"
     [[ "$mismatched" -eq 0 ]] || fail "${mismatched} file(s) differ in size"
     [[ "$sum" -eq "$EXPECTED_BYTES" ]] || fail "manifest sums to ${sum}, expected ${EXPECTED_BYTES}"
@@ -109,7 +109,7 @@ stage_verify() {
     if [[ "${ERNIE_VERIFY:-size}" == "sha256" ]]; then
         local list="${RUN_DIR}/sha256.list"
         ensure_run_dir
-        awk '$1 != "-" && $1 !~ /^#/ { print $1 "  " $3 }' "$MANIFEST" > "$list"
+        tr -d '\r' < "$MANIFEST" | awk '$1 != "-" && $1 !~ /^#/ { print $1 "  " $3 }' > "$list"
         (cd "$ERNIE_CKPT_DIR" && sha256sum -c --quiet "$list") || fail "sha256 mismatch"
         echo "sha256 ok: $(wc -l < "$list") files"
     else
