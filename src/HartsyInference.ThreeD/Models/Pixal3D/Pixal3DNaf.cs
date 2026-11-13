@@ -44,16 +44,16 @@ public sealed class Pixal3DNaf : IDisposable
         _owner = owner;
     }
 
-    /// <summary>Reads <c>naf_release.pth</c> with the safe-subset pickle reader (nothing in the file is executed) and checks every tensor.</summary>
+    /// <summary>Reads <c>naf_release.pth</c> with the safe-subset pickle reader (nothing in the file is executed), or its safetensors repack when one sits beside it, and checks every tensor.</summary>
     public static Pixal3DNaf Load(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        if (!File.Exists(path))
+        if (!RepackedCheckpoint.Exists(path))
             throw new FileNotFoundException($"NAF checkpoint not found: '{path}'.", path);
-        PytorchPickleLoader loader = new();
+        AnyFormatCheckpointLoader loader = new();
         try
         {
-            loader.Load(path);
+            loader.Load(RepackedCheckpoint.Resolve(path));
             return FromTensors(loader.GetAllTensors(), loader);
         }
         catch

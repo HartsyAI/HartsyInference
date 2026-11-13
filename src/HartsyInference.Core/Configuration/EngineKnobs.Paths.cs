@@ -16,6 +16,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SideModelAutofetch =
         Bool("paths.sideModelAutofetch", true, KnobScope.Runtime, KnobDomain.Paths, "Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error.");
 
+    /// <summary>Base URL of a weights mirror (for example HartsyWeb) that hosts safetensors repacks of pickle-only checkpoints; empty (the default) disables it.</summary>
+    public static readonly Knob<string?> WeightsMirrorUrl =
+        Str("paths.weightsMirrorUrl", null, KnobScope.Runtime, KnobDomain.Paths, "Base https URL of a weights mirror that hosts safetensors repacks of pickle-only 3D checkpoints. A catalog file that lists a repack is asked for there first and falls back to its upstream file on any failure. Empty disables the mirror.");
+
     /// <summary>Lets the first call that needs cuDNN download the NVIDIA cuDNN 9 redist into the per-user cache when none is installed.</summary>
     public static readonly Knob<bool> CudnnAutofetch =
         Bool("paths.cudnnAutofetch", true, KnobScope.Construction, KnobDomain.Paths, "Lets the first conv or attention call that needs cuDNN download the NVIDIA cuDNN 9 redist (about 1 GB) into the per-user cache when none is installed. Off keeps the fallbacks.");

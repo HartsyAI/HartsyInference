@@ -31,6 +31,13 @@ public sealed record ModelAsset
     /// size-correct but byte-corrupt file loads as NaN).</summary>
     public string? Sha256 { get; init; }
 
+    /// <summary>Direct https URL of a file that is not in a Hugging Face repository (a GitHub release asset). When set, the file is fetched from here, never with the Hugging Face token, and <see cref="Sha256"/> is required.
+    /// <see cref="Repo"/> and <see cref="RepoPath"/> then only name the source for messages.</summary>
+    public string? Url { get; init; }
+
+    /// <summary>The safetensors repack of this (pickle) file that a weights mirror hosts, or null when none is. Fetched from the mirror named by <c>paths.weightsMirrorUrl</c> first; the upstream file stays the fallback.</summary>
+    public AssetRepack? Repack { get; init; }
+
     /// <summary>Audio cache category to fetch into, when it is not the one this model's modality implies.
     /// SheetSage2 transcribes, so its modality says <c>"stt"</c>, but its weights ship inside the YuE2 repo and
     /// belong beside it under <c>"music"</c> — and the loader looks there, so a prefetch into <c>"stt"</c> would
