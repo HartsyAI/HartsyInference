@@ -90,6 +90,57 @@ public sealed class PbrMeshPostProcessorTests
         Assert.True(checkedTexels > 200);
     }
 
+    // A high-contrast colour pattern (voxels alternate between 0.15 and 0.85 per channel) so the covered texels have a sharp structure at every chart border.
+    private static SparseAttributeVolume CheckerVolume()
+    {
+        float voxel = 1f / Grid;
+        List<int> coords = [];
+        List<float> attrs = [];
+        for (int z = 0; z < Grid; z++)
+            for (int y = 0; y < Grid; y++)
+                for (int x = 0; x < Grid; x++)
+                {
+                    float px = -0.5f + (x + 0.5f) * voxel, py = -0.5f + (y + 0.5f) * voxel, pz = -0.5f + (z + 0.5f) * voxel;
+                    if (MathF.Abs(MathF.Sqrt(px * px + py * py + pz * pz) - Radius) > 2.5f * voxel) continue;
+                    coords.AddRange([x, y, z]);
+                    float a = (x + y + z) % 2 == 0 ? 0.15f : 0.85f, b = (x + 2 * y) % 2 == 0 ? 0.85f : 0.15f, c = (y + z) % 2 == 0 ? 0.15f : 0.85f;
+                    attrs.AddRange([a, b, c, 0.25f, 0.75f, 1f]);
+                }
+        return new SparseAttributeVolume([.. coords], [.. attrs], 6, (Grid, Grid, Grid), new Vector3(-0.5f), voxel);
+    }
+
+    [Fact]
+    public void Process_GutterColoursStayInsideTheRangeOfTheBakedTexels()
+    {
+        // The inpaint is bounded by its neighbours: a gutter texel never leaves the per-channel range of the covered texels (without the bound the gradient correction overshoots at the sharp chart borders).
+        Mesh sphere = SyntheticMeshes.Icosphere(2, Radius);
+        PbrPostProcessOptions options = new() { DecimationTarget = 80, TextureSize = 128, PaddingTexels = 3 };
+
+        PbrPostProcessResult result = PbrMeshPostProcessor.Process(sphere, CheckerVolume(), PbrAttributeLayout.Default, options);
+        RasterizedUvMap raster = Rasterizer.Rasterize(result.Mesh.Uvs!, result.Mesh.Indices, 128, 128);
+
+        int[] low = [255, 255, 255], high = [0, 0, 0];
+        for (int texel = 0; texel < 128 * 128; texel++)
+            if (raster.TriangleIds[texel] >= 0)
+                for (int c = 0; c < 3; c++)
+                {
+                    int v = result.Material.BaseColor.Pixels[texel * 3 + c];
+                    low[c] = Math.Min(low[c], v);
+                    high[c] = Math.Max(high[c], v);
+                }
+
+        int gutterTexels = 0;
+        for (int texel = 0; texel < 128 * 128; texel++)
+        {
+            if (raster.TriangleIds[texel] >= 0) continue;
+            gutterTexels++;
+            for (int c = 0; c < 3; c++)
+                Assert.InRange((int)result.Material.BaseColor.Pixels[texel * 3 + c], low[c] - 1, high[c] + 1);
+        }
+
+        Assert.True(gutterTexels > 1000, "the test needs a gutter to check");
+    }
+
     [Fact]
     public void Process_FillsGuttersSoNoTexelStaysBlack()
     {
