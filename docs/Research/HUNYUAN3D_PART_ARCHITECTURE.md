@@ -6,7 +6,7 @@ Status line of the first spike (2026-11-11: source read, nothing run); later sec
 
 Tencent Hunyuan 3D-Part Community License Agreement (release 2025-09-23), root `LICENSE` and `NOTICE` of the repository and the weights repository. Same shape as the 3D 2.1 licence: the grant covers the Territory only (worldwide excluding the EU, UK and South Korea), and using or distributing the Works or the Output outside it is unlicensed (5c); more than 1M monthly active users needs a licence from Tencent (4); the Works and Output must not be used to improve any other AI model (5b); distribution needs the licence text and a Notice file (3); a product or service built on the Works must disclose to all end users the full legal name and entity of its actual provider and state conspicuously that Tencent is not affiliated with, sponsoring or endorsing it, and must not show any Tencent name, logo or mark in a way that suggests otherwise (3e). Tencent claims no rights in Output (6d). Hong Kong law. Behaviour that follows: a hosted service may not offer these models in the EU, UK or South Korea, and nothing generated here may be used as training data.
 
-Dependencies: Sonata (`facebook/sonata`, a Pointcept PTv3 pretraining; the model card carries no licence text, so the licence of its weights has to be read from the Sonata repository before any use) and the Hunyuan3D shape VAE family (already in this repository).
+Dependencies: Sonata (`facebook/sonata`, a Pointcept PTv3 pretraining; the model card carries no licence text; the Sonata repository (`facebookresearch/sonata`, read 2026-11-12) says the code is Apache-2.0 and the weights are CC-BY-NC 4.0, restricted by the non-commercial terms of datasets such as HM3D and ArkitScenes, and the engine lists that as a restriction of both part models) and the Hunyuan3D shape VAE family (already in this repository).
 
 ## Pipeline
 
@@ -78,7 +78,7 @@ Times on the CPU (i7-9700K): this repository, features for 6000 points 12.5 s (5
 
 Findings: (1) upstream's `PointTransformerV3.__init__` builds its `GridPooling` layers without `shuffle_orders`, so they keep the default `True` and permute the serialisation orders at random on every pooling, at inference too: upstream's features from stage 1 on differ from run to run (about 10 % RMS between two runs of the unmodified code). The oracle pins it off; this repository always uses the fixed order sequence, which is one of the outputs upstream can produce. (2) `GridSample` in the `train` mode picks a random point per voxel; the oracle and this repository's `First` pick agree on the voxel selection, the random pick is not reproducible against Python.
 
-Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, the farthest-point prompts (`fpsample` versus `SurfaceSampler`), a whole run on a real mesh, the GPU. The Sonata weights licence is not stated by the model card (the pickle `sonata.pth` and the Sonata repository were not read); this file is distributed under the Tencent licence above, but Sonata's own terms are unverified.
+Not compared: the auto-mask geometry (`P3SamPartLabeler`), the surface sampler, the farthest-point prompts (`fpsample` versus `SurfaceSampler`), a whole run on a real mesh, the GPU. This file is distributed under the Tencent licence above; the Sonata backbone's own terms (CC-BY-NC 4.0 weights) are in the Dependencies paragraph at the top.
 
 ## GPU run and TF32 (2026-11-12, RTX 3060)
 

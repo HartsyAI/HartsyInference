@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends;
@@ -76,6 +77,33 @@ public sealed unsafe class HostStagedComm : ICollectiveComm
     /// <inheritdoc/>
     public void Dispose()
     {
+    }
+
+    /// <inheritdoc/>
+    public void AllToAll(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] elementCounts)
+    {
+        AllToAllLayout.Validate(_ranks, sendBuffers, recvBuffers, elementCounts);
+        int size = sendBuffers[0].DType.SizeInBytes;
+        for (int dst = 0; dst < _ranks; dst++)
+        {
+            // Zeroed like the device path, so a receive buffer's tail past the exchange is the same on every transport.
+            NativeMemory.Clear(recvBuffers[dst].DataPointer, (nuint)(recvBuffers[dst].ElementCount * size));
+        }
+        for (int src = 0; src < _ranks; src++)
+        {
+            byte* srcHost = (byte*)sendBuffers[src].DataPointer;
+            for (int dst = 0; dst < _ranks; dst++)
+            {
+                long count = elementCounts[src, dst];
+                if (count == 0)
+                {
+                    continue;
+                }
+                nuint bytes = (nuint)(count * size);
+                byte* dstHost = (byte*)recvBuffers[dst].DataPointer + (nuint)(AllToAllLayout.RecvOffset(elementCounts, src, dst) * size);
+                Buffer.MemoryCopy(srcHost + (nuint)(AllToAllLayout.SendOffset(elementCounts, src, dst) * size), dstHost, bytes, bytes);
+            }
+        }
     }
 
     private void ValidateRanks(int actual, string name)

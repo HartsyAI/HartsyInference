@@ -47,7 +47,7 @@ internal sealed class TextDeviceSlot
     /// <summary>The loaded GGUF looped (latent-recurrent) model (Dory), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter.</summary>
     public LoopedLanguageModel? Looped { get; set; }
 
-    /// <summary>The loaded host reference model (DeepSeek-V4.1 or ERNIE-5.5), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
+    /// <summary>The loaded host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1), or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter. The slot's <see cref="Backend"/> is a CPU backend for DeepSeek-V4.1 and ERNIE-5.5, and the requested device for Kimi K3.1.</summary>
     public IHostReferenceTextModel? HostReference { get; set; }
 
     /// <summary>The host residency plan the <see cref="HostReference"/> load was admitted under, or null when the free memory was unknown or nothing is loaded.</summary>

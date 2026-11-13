@@ -21,4 +21,10 @@
     <ProjectReference Include="..\..\src\HartsyInference.Engine\HartsyInference.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The MoonViT-V2 tensor layout the LLM tests write, so the engine's vision checkpoint cannot drift from the tower loader. -->
+    <Compile Include="..\HartsyInference.LLM.Tests\Kimi\Vision\KimiVisionSyntheticCheckpoint.cs"
+             Link="Shared\KimiVisionSyntheticCheckpoint.cs" />
+  </ItemGroup>
+
 </Project>
