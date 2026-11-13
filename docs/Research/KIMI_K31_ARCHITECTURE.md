@@ -46,7 +46,7 @@ Shared experts (bf16): `shared_experts.{gate_proj,up_proj}` [6144, 7168], `down_
 Dense layer 0 (bf16): `mlp.{gate_proj,up_proj}` [33792, 7168], `mlp.down_proj` [7168, 33792].
 
 KDA layers: `self_attn.{q,k,v}_proj` [12288, 7168] bf16; conv `{q,k,v}_conv1d` [12288, 1, 4] F32; low-rank forget gate
-`f_a_proj` [128, 7168] and `f_b_proj` [12288, 128]; `b_proj` [96, 7168] (beta, one per head); `A_log` **[128] F32**;
+`f_a_proj` [128, 7168] and `f_b_proj` [12288, 128]; `b_proj` [96, 7168] (beta, one per head); `A_log` **[128] F32** (as first recorded, unconfirmed; see the A_log shape conflict);
 `dt_bias` [12288] F32; `g_proj` [12288, 7168] (output gate); `o_norm` [128] F32; `o_proj` [7168, 12288].
 
 Full-attention layers: MLA `q_a_proj` [1536, 7168], `q_a_layernorm` [1536], `q_b_proj` [18432, 1536] (96 heads of
@@ -94,9 +94,12 @@ runs on q, k and v before this. State is F32; chunk size 64 in NeMo's CUDA kerne
 **KDA output.** `o = RMSNorm(o) · weight · sigmoid(g_proj(x))` (the gate multiplies after the norm, inside
 `FusedRMSNormGated`), then `o_proj`.
 
-**A_log shape conflict.** NeMo declares `A_log` as `[num_heads]` and views it as `[num_heads, 1]`, but the checkpoint has
-`[128]` (head dim). The implementation takes `A_log` as one value per key channel, broadcast over heads, which is the
-only shape-consistent reading. Confirm on real weights.
+**A_log shape conflict (open).** NeMo declares `A_log` as `[num_heads]` and views it as `[num_heads, 1]`. The first
+reading of the checkpoint recorded it as `[128]` (the KDA head dim), which would make it one value per key channel. The
+shard header that settles this has not been read, so neither reading is verified. The code takes the NeMo reading: the
+loader reads `A_log` as one value per head and accepts only a vector of exactly `Heads` values. A `[128]` tensor, a
+`[1, 1, Heads, 1]` export or any other shape is refused by name, not truncated or padded. The KDA forget gate's
+per-channel values depend on this reading, so they are unconfirmed on real weights until the header is read.
 
 **MLA (full layers) is NoPE.** No rotary embedding is applied. The 64-dim rope slice of `kv_a_proj_with_mqa` is split
 off and concatenated, unrotated, to the 128-dim nope part: q head dim 192, k head dim 192 (the rope part shared across
@@ -129,7 +132,8 @@ takes (value, gate)). NeMo's `situ.py` uses `tanh` soft bounds, not a hard clamp
 
 ## Remaining unknowns (need weights or the K3 modeling file)
 
-1. The `A_log` shape reading above.
+1. The `A_log` layout: the loader accepts only `[Heads]` and refuses `[128]`. Read the checkpoint's shard header for its
+   real shape, and confirm or change the loader and this section to match. The header has not been read.
 2. The attention-residual RMSNorm eps and the output mix details; the NeMo forward code past the first 100k characters.
 3. The attention scale for 192-dim MLA heads (NeMo `softmax_scale`).
 4. Whether `g_proj` on full layers gates the attention output exactly as NeMo states (sigmoid then `o_proj`).

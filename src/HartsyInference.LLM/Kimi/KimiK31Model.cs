@@ -155,10 +155,11 @@ public sealed class KimiK31State : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        // A failed constructor stops partway, so the later ranks' arrays may not exist yet.
         for (int r = 0; r < _kda.Length; r++)
         {
-            foreach (KdaState? k in _kda[r]) k?.Dispose();
-            foreach (DsaAttentionState? m in _mla[r]) m?.Dispose();
+            foreach (KdaState? k in _kda[r] ?? []) k?.Dispose();
+            foreach (DsaAttentionState? m in _mla[r] ?? []) m?.Dispose();
         }
     }
 }
@@ -181,7 +182,8 @@ public sealed class KimiK31Model : IDisposable
     private readonly List<Tensor> _owned = [];
     private bool _disposed;
 
-    /// <summary>Builds the single-backend decoder. <paramref name="maxPositions"/> sizes the identity rotary tables the NoPE attention reads.</summary>
+    /// <summary>Builds the single-backend decoder. It borrows <paramref name="weights"/>, which the caller keeps alive and disposes.
+    /// <paramref name="maxPositions"/> sizes the identity rotary tables the NoPE attention reads.</summary>
     public KimiK31Model(IBackend backend, KimiK31Config config, KimiK31Weights weights, int maxPositions)
         : this(new[] { backend ?? throw new ArgumentNullException(nameof(backend)) }, null, config, weights, maxPositions)
     {
@@ -351,7 +353,8 @@ public sealed class KimiK31Model : IDisposable
         Dictionary<string, Tensor> block = new(StringComparer.Ordinal);
         foreach (string key in new[] { "gate.weight", "gate.e_score_correction_bias", "pre_expert_proj.weight", "pre_expert_norm.weight", "post_expert_proj.weight" })
         {
-            if (lw.Moe!.TryGetValue($"{mlp}.{key}", out Tensor? whole)) block[$"{mlp}.{key}"] = KimiK31Sharding.Replica(whole, _owned);
+            if (lw.Moe!.TryGetValue($"{mlp}.{key}", out Tensor? whole))
+                block[$"{mlp}.{key}"] = KimiK31Sharding.Replica(whole, _ranks, _owned);
         }
         // An F32 checkpoint's experts are read where they are; a packed one arrives through LoadPackedExperts below.
         for (int g = first; g < first + perRank; g++)

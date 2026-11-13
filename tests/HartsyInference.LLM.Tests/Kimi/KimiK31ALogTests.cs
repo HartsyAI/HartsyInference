@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Transformer.Kda;
@@ -47,6 +48,69 @@ public sealed class KimiK31ALogTests : IDisposable
         finally
         {
             foreach (Tensor t in weights.Owned) t.Dispose();
+        }
+    }
+
+    [Fact]
+    public void ALog_OfExactlyOneValuePerHead_LoadsAndRunsThroughTheDecoder()
+    {
+        KimiSyntheticCheckpoint.Write(_dir);
+        KimiK31Config c = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(_dir, "config.json")));
+        using KimiK31CheckpointWeights source = KimiK31CheckpointWeights.Open(_dir);
+        KimiK31Weights weights = KimiK31WeightLoader.Load(c, source);
+        try
+        {
+            using KimiK31Model model = new(new CpuBackend(), c, weights, maxPositions: 16);
+            using KimiK31State state = new(c, capacity: 4);
+            float[] logits = model.Forward([1, 2], state);
+            Assert.Equal(c.Vocab, logits.Length);
+            foreach (float v in logits) Assert.True(float.IsFinite(v));
+        }
+        finally
+        {
+            foreach (Tensor t in weights.Owned) t.Dispose();
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(8)]
+    public void ALog_OfAnyLengthOtherThanOnePerHead_IsRefusedWithItsShape(int length)
+    {
+        KimiSyntheticCheckpoint.Write(_dir);
+        KimiK31Config c = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(_dir, "config.json")));
+        using KimiK31CheckpointWeights source = KimiK31CheckpointWeights.Open(_dir);
+
+        InvalidDataException ex = Assert.Throws<InvalidDataException>(() => KimiK31WeightLoader.Load(c, new WithALogShape(source, length)));
+        Assert.Contains($"[{length}]", ex.Message);
+        Assert.Contains("open", ex.Message);
+    }
+
+    [Fact]
+    public void ALog_InAMultiDimensionalExport_IsRefusedWithItsShape()
+    {
+        // The HF or NeMo export may store A_log as [1, 1, Heads, 1]; the loader names that shape rather than reading it.
+        KimiSyntheticCheckpoint.Write(_dir);
+        KimiK31Config c = KimiK31HfConfig.Parse(File.ReadAllText(Path.Combine(_dir, "config.json")));
+        using KimiK31CheckpointWeights source = KimiK31CheckpointWeights.Open(_dir);
+
+        WithALogShape exported = new(source, 1, 1, c.Heads, 1);
+        InvalidDataException ex = Assert.Throws<InvalidDataException>(() => KimiK31WeightLoader.Load(c, exported));
+        Assert.Contains("[1, 1, 2, 1]", ex.Message);
+    }
+
+    // Serves the checkpoint as it is except A_log, which comes back zero-filled with the given shape.
+    private sealed class WithALogShape(IKimiK31WeightSource inner, params long[] shape) : IKimiK31WeightSource
+    {
+        public bool Has(string name) => inner.Has(name);
+
+        public Tensor Read(string name)
+        {
+            if (!name.EndsWith("A_log", StringComparison.Ordinal)) return inner.Read(name);
+            Tensor t = new(new TensorShape(shape), DType.F32);
+            t.AsSpan<float>().Clear();
+            return t;
         }
     }
 

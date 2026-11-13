@@ -52,6 +52,26 @@ public sealed class HostStagedAllToAllTests
     }
 
     [Fact]
+    public void AllToAll_ZeroesEachReceiveBufferPastItsExchange()
+    {
+        // Rank 1 receives nothing, so its whole buffer is tail; rank 0 keeps one element and zeroes the other three.
+        long[,] counts = { { 1, 0 }, { 0, 0 } };
+        Tensor[] send = [new Tensor(new TensorShape(1), DType.F32), new Tensor(new TensorShape(1), DType.F32)];
+        Tensor[] recv = [new Tensor(new TensorShape(4), DType.F32), new Tensor(new TensorShape(4), DType.F32)];
+        send[0].AsSpan<float>()[0] = 7f;
+        recv[0].AsSpan<float>().Fill(9f);
+        recv[1].AsSpan<float>().Fill(9f);
+        using HostStagedComm comm = new(2);
+
+        comm.AllToAll(send, recv, counts);
+
+        Assert.Equal(new float[] { 7f, 0f, 0f, 0f }, recv[0].AsReadOnlySpan<float>().ToArray());
+        Assert.Equal(new float[] { 0f, 0f, 0f, 0f }, recv[1].AsReadOnlySpan<float>().ToArray());
+        foreach (Tensor t in send) t.Dispose();
+        foreach (Tensor t in recv) t.Dispose();
+    }
+
+    [Fact]
     public void AllToAll_RefusesAChunkLargerThanItsBuffer()
     {
         long[,] counts = { { 5, 0 }, { 0, 0 } };

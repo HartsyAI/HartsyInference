@@ -100,8 +100,8 @@ public sealed class KimiK31WeightLoader
             Host(src, p + "k_conv1d.weight", key, 1L, k),
             Host(src, p + "v_conv1d.weight", key, 1L, k));
 
-        // A_log holds one value per head; every key channel of a head takes that head's value.
-        float[] aLogHead = HostLeading(src, p + "A_log", c.Heads);
+        // Only one value per head is accepted; the A_log layout is open (docs/Research/KIMI_K31_ARCHITECTURE.md).
+        float[] aLogHead = HostVector(src, p + "A_log", c.Heads);
         float[] aLog = new float[key];
         for (int ch = 0; ch < key; ch++) aLog[ch] = aLogHead[ch / c.KdaHeadDim];
         (float[] up, float[] bias) = KdaLayer.FoldForgetGate(
@@ -239,16 +239,18 @@ public sealed class KimiK31WeightLoader
         }
     }
 
-    // The first n values of a vector. A published vector may carry trailing padding past its heads; only the leading n are read.
-    private static float[] HostLeading(IKimiK31WeightSource src, string name, int n)
+    // A vector of exactly n values as host F32. Any other shape is refused by name; the loader never truncates or pads it.
+    private static float[] HostVector(IKimiK31WeightSource src, string name, int n)
     {
         Tensor t = src.Read(name);
         Tensor f = t.DType == DType.F32 ? t : ProjectionOps.EnsureF32(t);
         try
         {
-            if (f.Shape.Rank != 1 || f.Shape[0] < n)
-                throw new InvalidDataException($"Tensor '{name}' must be a vector of at least {n} values, got {f.Shape}.");
-            return f.AsReadOnlySpan<float>().Slice(0, n).ToArray();
+            if (f.Shape.Rank != 1 || f.Shape[0] != n)
+                throw new InvalidDataException(
+                    $"Tensor '{name}' has shape {f.Shape}; the loader reads it as one value per head, [{n}]. The layout of this tensor is an open "
+                    + "question (docs/Research/KIMI_K31_ARCHITECTURE.md, \"A_log shape conflict\"); no shard header has settled it yet.");
+            return f.AsReadOnlySpan<float>().ToArray();
         }
         finally
         {

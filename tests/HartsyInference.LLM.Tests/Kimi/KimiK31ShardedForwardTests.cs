@@ -1,7 +1,9 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Kimi;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.LLM.Transformer.Kda;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests.Kimi;
@@ -23,15 +25,46 @@ public sealed class KimiK31ShardedForwardTests
     [Theory]
     [InlineData(2)]
     [InlineData(4)]
-    public void ShardedForward_MatchesSingleRank(int ranks)
+    public void ShardedForward_MatchesTheOneRankForward_AtEveryToken(int ranks)
+    {
+        // The one-rank decoder runs the same weights unsliced and with no collective, so every token's logits must agree with it.
+        KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
+        using KimiK31Model single = new(new CpuBackend(), Config, weights, maxPositions: 16);
+        using KimiK31State singleState = new(Config, capacity: 16);
+        using KimiK31Model sharded = Sharded(weights, ranks);
+        using KimiK31State shardedState = new(Config, capacity: 16, ranks);
+        foreach (int token in Tokens)
+        {
+            float[] expected = single.ForwardToken(token, singleState);
+            float[] actual = sharded.ForwardToken(token, shardedState);
+            Assert.Equal(expected.Length, actual.Length);
+            for (int i = 0; i < expected.Length; i++) Assert.Equal(expected[i], actual[i], Tol);
+        }
+    }
+
+    [Fact]
+    public void OneRank_SharesEveryTensorWithoutCopyingOrOwningIt()
     {
         KimiK31Weights weights = KimiK31ModelTests.RandomWeights(new Random(9), Config);
-        float[] single = RunSingle(weights);
+        KdaWeights kda = weights.Layers[0].Kda!;
+        List<Tensor> owned = [];
 
-        float[] sharded = RunSharded(weights, ranks);
+        Assert.Same(weights.Embedding, KimiK31Sharding.VocabShard(weights.Embedding, 0, 1, owned, "embed_tokens"));
+        Assert.Same(kda, KimiK31Sharding.KdaShard(kda, Config, 0, 1, owned));
+        Assert.Same(kda.ForgetDown, KimiK31Sharding.Replica(kda.ForgetDown, 1, owned));
+        Assert.Empty(owned);
+    }
 
-        Assert.Equal(single.Length, sharded.Length);
-        for (int i = 0; i < single.Length; i++) Assert.Equal(single[i], sharded[i], Tol);
+    [Fact]
+    public void FailedStateConstruction_ReportsItsCause_NotANullReference()
+    {
+        // ConvKernel 0 makes the KDA conv history's extent negative, so rank 0's first KDA state fails and rank 1's arrays never exist.
+        KimiK31Config broken = Config with { ConvKernel = 0 };
+
+        Exception? ex = Record.Exception(() => new KimiK31State(broken, capacity: 16, ranks: 2));
+
+        Assert.NotNull(ex);
+        Assert.IsNotType<NullReferenceException>(ex);
     }
 
     [Fact]
@@ -77,20 +110,6 @@ public sealed class KimiK31ShardedForwardTests
         using KimiK31Model model = Sharded(weights, 2);
         using KimiK31State state = new(Config, capacity: 16);
         Assert.Throws<ArgumentException>(() => model.ForwardToken(1, state));
-    }
-
-    private static float[] RunSingle(KimiK31Weights weights)
-    {
-        using KimiK31Model model = new(new CpuBackend(), Config, weights, maxPositions: 16);
-        using KimiK31State state = new(Config, capacity: 16);
-        return model.Forward(Tokens, state);
-    }
-
-    private static float[] RunSharded(KimiK31Weights weights, int ranks)
-    {
-        using KimiK31Model model = Sharded(weights, ranks);
-        using KimiK31State state = new(Config, capacity: 16, ranks);
-        return model.Forward(Tokens, state);
     }
 
     private static KimiK31Model Sharded(KimiK31Weights weights, int ranks) => Sharded(weights, Config, ranks);
