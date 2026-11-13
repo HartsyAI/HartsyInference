@@ -33,13 +33,11 @@ public sealed class P3SamGeometryParityTests(ITestOutputHelper output)
         int[] faces = fixture.Get("faces").ToInt32(), pointFace = fixture.Get("face_idx").ToInt32();
         NpzArray maskArray = fixture.Get("masks");
         int prompts = (int)maskArray.Shape[0], pointCount = (int)maskArray.Shape[1];
-        bool[][] masks = new bool[prompts][]; // stored as bytes, one per point
-        for (int m = 0; m < prompts; m++)
-        {
-            masks[m] = new bool[pointCount];
-            for (int p = 0; p < pointCount; p++)
-                masks[m][p] = maskArray.Data[(long)m * pointCount + p] != 0;
-        }
+        Assert.Equal(pointCount * 3, points.Length);
+        Assert.Equal(pointCount, pointFace.Length);
+        Assert.Equal(prompts, iou.Length);
+        bool[] flat = maskArray.ToBool();
+        bool[][] masks = [.. Enumerable.Range(0, prompts).Select(m => flat.AsSpan(m * pointCount, pointCount).ToArray())];
 
         string suffix = postProcess ? "1" : "0";
         int[] expectedIds = fixture.Get($"face_ids_{suffix}").ToInt32();
@@ -47,13 +45,13 @@ public sealed class P3SamGeometryParityTests(ITestOutputHelper output)
 
         P3SamPartLabeler.Result result = P3SamPartLabeler.Label(vertices, faces, points, pointFace, masks, iou, postProcess, 0.95);
 
+        Assert.Equal(expectedIds.Length, result.FaceIds.Length);
         int different = 0;
         for (int f = 0; f < expectedIds.Length; f++)
             if (result.FaceIds[f] != expectedIds[f])
                 different++;
         int expectedParts = expectedBoxes.Length / 6;
         output.WriteLine($"{fixtureName} post_process={postProcess}: {faces.Length / 3} faces, {pointCount} points, {prompts} prompts; upstream {expectedParts} parts, here {result.PartIds.Length}; {different} faces carry another label");
-        Assert.Equal(expectedIds.Length, result.FaceIds.Length);
         Assert.Equal(0, different);
         Assert.Equal(expectedParts, result.Boxes.Length);
         double worst = 0;
@@ -61,6 +59,6 @@ public sealed class P3SamGeometryParityTests(ITestOutputHelper output)
             for (int c = 0; c < 6; c++)
                 worst = Math.Max(worst, Math.Abs(result.Boxes[part][c] - expectedBoxes[part * 6 + c]));
         output.WriteLine($"largest box difference {worst:E2}");
-        Assert.True(worst < 1e-5, $"largest box difference {worst}");
+        Assert.True(worst == 0, $"largest box difference {worst}");
     }
 }

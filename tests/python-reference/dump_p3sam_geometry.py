@@ -91,7 +91,7 @@ def main():
 
     namespace["Timer"] = Timer
 
-    # trimesh's fix_normals (called by Trimesh.process inside upstream's clean_mesh) needs scipy, which is not installed here; the winding of the input mesh is already consistent.
+    # trimesh's fix_normals (called by Trimesh.process inside upstream's clean_mesh) needs scipy, which is not installed here, so it is skipped. Both sides receive the same cleaned mesh, so the comparison does not depend on it; the winding of the input mesh is not checked.
     trimesh.Trimesh.fix_normals = lambda self, *args, **kwargs: None
 
     captured = {"masks": [], "iou": []}
@@ -141,13 +141,19 @@ def main():
         print(f"post_process={bool(post)}: {len(used.faces)} faces, {len(np.unique(face_ids[face_ids >= 0]))} parts, {time.time() - start:.0f} s", flush=True)
         out[f"face_ids_{post}"] = np.asarray(face_ids, dtype=np.int32)
         out[f"aabb_{post}"] = np.asarray(aabb, dtype=np.float32)
+        points = captured["points"].astype(np.float32)
+        face_idx = captured["face_idx"].astype(np.int32)
+        masks = np.stack(captured["masks"]).astype(np.uint8)
+        iou = np.asarray(captured["iou"], dtype=np.float32)
         if post == 0:
             out["vertices"] = np.asarray(used.vertices, dtype=np.float32)
             out["faces"] = np.asarray(used.faces, dtype=np.int32)
-            out["points"] = captured["points"].astype(np.float32)
-            out["face_idx"] = captured["face_idx"].astype(np.int32)
-            out["masks"] = np.stack(captured["masks"]).astype(np.uint8)
-            out["iou"] = np.asarray(captured["iou"], dtype=np.float32)
+            out["points"], out["face_idx"], out["masks"], out["iou"] = points, face_idx, masks, iou
+        else:
+            # The C# test replays the post_process=0 inputs for both runs, so the second run must have seen the same ones.
+            assert np.array_equal(points, out["points"]) and np.array_equal(face_idx, out["face_idx"]), "the second run sampled other points"
+            assert np.array_equal(masks, out["masks"]) and np.array_equal(iou, out["iou"]), "the second run produced other masks"
+            assert np.array_equal(np.asarray(used.vertices, dtype=np.float32), out["vertices"]) and np.array_equal(np.asarray(used.faces, dtype=np.int32), out["faces"]), "the second run cleaned the mesh differently"
     np.savez(args.out, **out)
     print("wrote", args.out)
 
