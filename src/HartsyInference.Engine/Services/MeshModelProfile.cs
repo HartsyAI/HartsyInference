@@ -11,7 +11,7 @@ internal sealed record MeshModelProfile
     [
         nameof(MeshRequest.Steps), nameof(MeshRequest.GridResolution), nameof(MeshRequest.FieldOfViewRadians), nameof(MeshRequest.Seed),
         nameof(MeshRequest.Samples), nameof(MeshRequest.Colors), nameof(MeshRequest.Chains), nameof(MeshRequest.Rigged),
-        nameof(MeshRequest.Texture), nameof(MeshRequest.TextureSize), nameof(MeshRequest.Mesh), nameof(MeshRequest.Preprocess), nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame), nameof(MeshRequest.Control),
+        nameof(MeshRequest.Texture), nameof(MeshRequest.TextureSize), nameof(MeshRequest.Mesh), nameof(MeshRequest.Preprocess), nameof(MeshRequest.PreviewTriangles), nameof(MeshRequest.Frame), nameof(MeshRequest.Control), nameof(MeshRequest.Quality),
     ];
 
     /// <summary>The catalog id.</summary>
@@ -37,4 +37,7 @@ internal sealed record MeshModelProfile
 
     /// <summary>A line of what to know before using the model.</summary>
     public string? Note { get; init; }
+
+    /// <summary>What <see cref="MeshQuality.High"/> and <see cref="MeshQuality.Max"/> set; empty when the model has no preset.</summary>
+    public IReadOnlyDictionary<MeshQuality, MeshPreset> Presets { get; init; } = new Dictionary<MeshQuality, MeshPreset>();
 }

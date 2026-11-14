@@ -856,6 +856,7 @@ public static class GenerationDispatch
             Texture = parameters.GetBool("texture", false),
             TextureSize = parameters.GetInt("texture-size", 0),
             Mesh = parameters.GetBool("mesh", false),
+            Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -1693,6 +1694,12 @@ public static class GenerationDispatch
         }
         return new SceneMeshData { Data = File.ReadAllBytes(path), Format = SceneMeshReader.FormatOf(path) };
     }
+
+    /// <summary>The <see cref="MeshQuality"/> named by <c>--quality</c>; unset is <see cref="MeshQuality.Default"/>.</summary>
+    private static MeshQuality ParseMeshQuality(string? text) =>
+        text is null ? MeshQuality.Default
+        : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
+        : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
 
     /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
     private static ImageData LoadMeshImage(string promptPath)

@@ -41,6 +41,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
             Outputs = profile.Outputs,
             Status = catalog?.Status ?? ModelStatus.Structural,
             Fields = profile.Fields.ToDictionary(field => field.Name, StringComparer.Ordinal),
+            Presets = profile.Presets,
             Licence = profile.Licence with { GatedRepos = GatedRepos(catalog) },
             Cost = profile.Cost,
             Note = profile.Note,
@@ -55,10 +56,11 @@ public sealed class MeshPlanningService : IMeshPlanningService
         cancel.ThrowIfCancellationRequested();
         string id = MeshService.IdOf(spec);
         MeshModelDescriptor descriptor = Describe(id);
+        MeshRequest resolved = MeshQualityPresets.Resolve(id, request);
         List<MeshPlanIssue> issues = [];
         try
         {
-            MeshRequestValidator.Validate(id, request, MeshService.MatterAvailable());
+            MeshRequestValidator.Validate(id, resolved, MeshService.MatterAvailable());
         }
         catch (Exception ex) when (ex is NotSupportedException or ArgumentException or HartsyInferenceException)
         {
@@ -67,7 +69,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         AddIgnoredFieldWarnings(request, descriptor, issues);
         MeshAssetStatus assets = _assets.GetStatus(spec);
         AddAssetIssues(spec, assets, issues);
-        MemoryFit memory = _memory.AssessMesh(id, request, request.Vram);
+        MemoryFit memory = _memory.AssessMesh(id, resolved, request.Vram);
         if (memory.Verdict == MemoryFitVerdict.Infeasible)
         {
             issues.Add(new MeshPlanIssue { Code = "mesh.memory.infeasible", Severity = MeshPlanIssueSeverity.Error, Message = memory.Reason });
@@ -156,6 +158,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Frame) => request.Frame != MeshFrame.Native,
         nameof(MeshRequest.Mesh) => request.Mesh,
         nameof(MeshRequest.Control) => request.Control is not null,
+        nameof(MeshRequest.Quality) => request.Quality != MeshQuality.Default,
         _ => false,
     };
 
@@ -166,9 +169,13 @@ public sealed class MeshPlanningService : IMeshPlanningService
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))
         {
             bool set = IsSet(request, field.Name);
+            int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name);
+            // A preset value equal to the model's own default changes nothing, so the plan does not credit the preset with it.
             ResolvedParameter parameter = set
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)
-                : new ResolvedParameter(field.Default, ParameterSource.RecipeDefault);
+                : preset is int value && value.ToString(System.Globalization.CultureInfo.InvariantCulture) != field.Default
+                    ? new ResolvedParameter(value.ToString(System.Globalization.CultureInfo.InvariantCulture), ParameterSource.ProfileDefault, $"the {request.Quality} preset")
+                    : new ResolvedParameter(field.Default, ParameterSource.RecipeDefault);
             settings[field.Name] = parameter;
         }
         return settings;
@@ -191,6 +198,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Frame) => request.Frame.ToString(),
         nameof(MeshRequest.Mesh) => request.Mesh.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
+        nameof(MeshRequest.Quality) => request.Quality.ToString(),
         _ => null,
     };
 }

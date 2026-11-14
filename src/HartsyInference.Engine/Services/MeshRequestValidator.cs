@@ -21,6 +21,8 @@ internal static class MeshRequestValidator
         // An id the engine does not know fails as an unknown model below, not as a range error.
         if (MeshModelProfiles.Find(id) is not null)
             MeshSeed.Require(request);
+        if (request.Quality != MeshQuality.Default && MeshModelProfiles.Find(id)?.Presets.ContainsKey(request.Quality) == false)
+            throw new NotSupportedException($"3D model '{id}' has no {request.Quality} preset; leave Quality at Default.").ForField(nameof(MeshRequest.Quality));
         if (request.Control is not null && !MeshModelIds.OmniMesh.Contains(id))
             throw new NotSupportedException($"3D model '{id}' takes no control signal; Control applies to {MeshModelIds.Omni}.").ForField(nameof(MeshRequest.Control));
         if (request.Mesh && id != MeshModelIds.Sam3dObjects)
