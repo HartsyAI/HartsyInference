@@ -86,7 +86,7 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, n, flow.Config.InChannels), seed);
         Tensor latent;
         backend.PreloadWeights(flow.EnumerateWeights());
-        using StageWatchdog watchdog = new(Path.GetFileNameWithoutExtension(flowPath), backend.GetVramInfo);
+        using StageWatchdog watchdog = new(Path.GetFileNameWithoutExtension(flowPath), backend.GetVramInfo, remedy: Trellis2DeviceMemory.StallRemedy);
         Action<int> watched = step =>
         {
             watchdog.Step();

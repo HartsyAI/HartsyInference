@@ -278,10 +278,10 @@ public sealed class MeshPlanningTests
     }
 
     [Theory]
-    [InlineData(512, 6.2)]
-    [InlineData(1536, 10.4)]
+    [InlineData(512, 7.4)]
+    [InlineData(1536, null)]
     [InlineData(1024, null)]
-    public void Trellis2HasAMeasuredPeakOnlyForTheGridsItWasMeasuredAt(int grid, double? expected)
+    public void Trellis2PlansFromAPeakOnlyAt512(int grid, double? expected)
     {
         double? peak = MeshModelProfiles.Find("trellis2")!.PeakGiB!(Valid("trellis2") with { GridResolution = grid });
 
@@ -304,6 +304,21 @@ public sealed class MeshPlanningTests
         Assert.Equal(MemoryFitVerdict.Resident, windows.Verdict);
         Assert.Contains("Windows", windows.Reason);
         Assert.DoesNotContain("Windows", other.Reason);
+    }
+
+    [Fact]
+    public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, (8L << 30) - 1, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.DoesNotContain("Windows", fit.Reason);
     }
 
     [Fact]

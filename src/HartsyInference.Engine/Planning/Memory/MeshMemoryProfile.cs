@@ -33,13 +33,14 @@ internal static class MeshMemoryProfile
         request.Image is { } image && !MeshPreparationService.HasUsableAlpha(image)
         && (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id)));
 
-    /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps.</summary>
     /// <summary>The video memory Windows gives one process before it pages the rest, about 8 GiB (see <c>vram.preloadHeadroomMb</c>).</summary>
     public const long WindowsProcessBudgetBytes = 8L << 30;
 
+    /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps. On Windows a peak past <see cref="WindowsProcessBudgetBytes"/> still fits, with a reason that warns of paging.</summary>
     public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier) =>
         Judge(estimate, totalBytes, tier, OperatingSystem.IsWindows());
 
+    /// <param name="windows">Whether the paging warning applies; the public overload passes the running OS.</param>
     internal static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier, bool windows)
     {
         long peak = estimate.PeakResidentBytes;

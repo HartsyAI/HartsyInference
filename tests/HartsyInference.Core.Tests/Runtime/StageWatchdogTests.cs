@@ -12,8 +12,8 @@ public sealed class StageWatchdogTests
         public double Now;
     }
 
-    private static StageWatchdog Make(Clock clock, Action<StageStalledException>? onStall = null, double minimum = 120) =>
-        new("flow", () => (3L << 30, 12L << 30), 10, TimeSpan.FromSeconds(minimum), onStall, TimeSpan.Zero, () => clock.Now);
+    private static StageWatchdog Make(Clock clock, Action<StageStalledException>? onStall = null, double minimum = 120, Func<(long, long)>? memory = null) =>
+        new("flow", memory ?? (() => (3L << 30, 12L << 30)), 10, TimeSpan.FromSeconds(minimum), "Try X.", onStall, TimeSpan.Zero, () => clock.Now);
 
     [Fact]
     public void SilenceUnderTheLimitIsNotAStall()
@@ -43,12 +43,12 @@ public sealed class StageWatchdogTests
         StageStalledException thrown = Assert.Throws<StageStalledException>(watchdog.Step);
 
         Assert.Single(raised);
-        Assert.Same(raised[0], thrown);
+        Assert.Same(raised[0], thrown.InnerException);
         Assert.Equal("flow", thrown.Stage);
         Assert.Equal(121, thrown.StalledSeconds);
         Assert.Equal(12, thrown.ExpectedStepSeconds);
         Assert.Equal((3L << 30, 12L << 30), (thrown.FreeBytes, thrown.TotalBytes));
-        Assert.Contains("numerics.flowF16Weights", thrown.Message);
+        Assert.EndsWith("Try X.", thrown.Message);
     }
 
     [Fact]
@@ -83,6 +83,83 @@ public sealed class StageWatchdogTests
         watchdog.Poll();
 
         Assert.Empty(raised);
+    }
+
+    [Fact]
+    public void ASlowFirstStepOnlyWarnsAndALaterStallStillThrows()
+    {
+        Clock clock = new();
+        List<StageStalledException> raised = [];
+        using StageWatchdog watchdog = Make(clock, raised.Add);
+        clock.Now = 130;
+        watchdog.Poll();
+
+        watchdog.Step();
+        foreach (double end in new[] { 131.0, 132.0, 133.0 })
+        {
+            clock.Now = end;
+            watchdog.Step();
+        }
+
+        clock.Now = 133 + 121;
+        watchdog.Poll();
+
+        Assert.Equal(2, raised.Count);
+        Assert.Throws<StageStalledException>(watchdog.Step);
+    }
+
+    [Fact]
+    public void ADeviceThatReportsNoMemoryIsNotWatched()
+    {
+        Clock clock = new();
+        List<StageStalledException> raised = [];
+        using StageWatchdog watchdog = Make(clock, raised.Add, memory: () => (0, 0));
+        clock.Now = 10_000;
+
+        watchdog.Poll();
+        watchdog.Step();
+
+        Assert.Empty(raised);
+    }
+
+    [Fact]
+    public void PollNeverCallsTheMemoryDelegateSoABackendLockCannotBlockIt()
+    {
+        Clock clock = new();
+        int calls = 0;
+        using StageWatchdog watchdog = Make(clock, memory: () =>
+        {
+            calls++;
+            return (3L << 30, 12L << 30);
+        });
+        int afterConstruction = calls;
+        clock.Now = 500;
+
+        watchdog.Poll();
+
+        Assert.Equal(afterConstruction, calls);
+    }
+
+    [Fact]
+    public void AnEvenNumberOfStepsUsesTheMeanOfTheMiddleTwo()
+    {
+        Clock clock = new();
+        List<StageStalledException> raised = [];
+        using StageWatchdog watchdog = Make(clock, raised.Add, minimum: 1);
+        foreach (double end in new[] { 10.0, 30.0, 40.0, 60.0 })
+        {
+            clock.Now = end;
+            watchdog.Step();
+        }
+
+        clock.Now = 60 + 149;
+        watchdog.Poll();
+        Assert.Empty(raised);
+        clock.Now = 60 + 151;
+        watchdog.Poll();
+
+        Assert.Single(raised);
+        Assert.Equal(15, raised[0].ExpectedStepSeconds);
     }
 
     [Fact]

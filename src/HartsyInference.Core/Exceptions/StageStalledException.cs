@@ -18,8 +18,10 @@ public sealed class StageStalledException : HartsyInferenceException
     /// <summary>Total device memory in bytes, or 0 when it was not known.</summary>
     public long TotalBytes { get; }
 
-    public StageStalledException(string stage, double stalledSeconds, double expectedStepSeconds, long freeBytes, long totalBytes)
-        : base(Describe(stage, stalledSeconds, expectedStepSeconds, freeBytes, totalBytes))
+    /// <param name="remedy">What the caller can try, in the stage's own terms; appended to the message when given.</param>
+    /// <param name="inner">The exception the watchdog recorded when it first saw the stall, when this one is thrown later.</param>
+    public StageStalledException(string stage, double stalledSeconds, double expectedStepSeconds, long freeBytes, long totalBytes, string? remedy = null, Exception? inner = null)
+        : base(Describe(stage, stalledSeconds, expectedStepSeconds, freeBytes, totalBytes, remedy), inner!)
     {
         Stage = stage;
         StalledSeconds = stalledSeconds;
@@ -28,12 +30,12 @@ public sealed class StageStalledException : HartsyInferenceException
         TotalBytes = totalBytes;
     }
 
-    /// <summary>The message: what stalled, for how long against what, the memory state, and what to try.</summary>
-    internal static string Describe(string stage, double stalledSeconds, double expectedStepSeconds, long freeBytes, long totalBytes)
+    /// <summary>The message: what stalled, for how long against what, the memory state, and the caller's remedy.</summary>
+    internal static string Describe(string stage, double stalledSeconds, double expectedStepSeconds, long freeBytes, long totalBytes, string? remedy)
     {
         string normal = expectedStepSeconds > 0 ? $"a step normally takes {expectedStepSeconds:F0} s" : "no step had finished yet";
         string memory = totalBytes > 0 ? $" The device had {freeBytes / (1024 * 1024)} MiB free of {totalBytes / (1024 * 1024)} MiB." : "";
-        return $"Stage '{stage}' made no progress for {stalledSeconds:F0} s ({normal}).{memory} On Windows this usually means the process went past the video memory it is given and the driver is paging: "
-            + "close other programs that use the GPU, lower the resolution, or set numerics.flowF16Weights to halve the flow weights.";
+        string advice = string.IsNullOrWhiteSpace(remedy) ? "" : " " + remedy;
+        return $"Stage '{stage}' made no progress for {stalledSeconds:F0} s ({normal}).{memory}{advice}";
     }
 }
