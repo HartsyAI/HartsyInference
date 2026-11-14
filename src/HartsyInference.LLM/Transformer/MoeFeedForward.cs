@@ -160,25 +160,28 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _indexedAlignOk = null;
         ValidateRoutingOptions();
         string block = $"{prefix}.mlp";
-        _routerW = w[$"{block}.gate.weight"];
+        // Routers and router vectors may be BF16 or F16 in the checkpoint; they widen to F32 here (exactly), so the router GEMM and the
+        // device router see the same F32 values an F32 checkpoint holds.
+        _routerW = RouterF32(w[$"{block}.gate.weight"], $"{block}.gate.weight");
         RequireShape(_routerW, $"{block}.gate.weight", _moe.NumExperts, _modelHidden);
-        _routerW2 = _moe.SplitFeatureRouting ? w[$"{block}.gate.weight_1"] : null;
+        _routerW2 = _moe.SplitFeatureRouting ? RouterF32(w[$"{block}.gate.weight_1"], $"{block}.gate.weight_1") : null;
         if (_routerW2 is not null) RequireShape(_routerW2, $"{block}.gate.weight_1", _moe.NumExperts, _modelHidden);
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
-        // llama.cpp keeps router biases F32, so a direct host copy is exact.
         _correctionBias = null;
         _correctionBiasT = null;
         if (w.TryGetValue($"{block}.gate.e_score_correction_bias", out Tensor? cb))
         {
-            _correctionBias = HostVector(cb, _moe.NumExperts, $"{block}.gate.e_score_correction_bias");
-            _correctionBiasT = cb;
+            string key = $"{block}.gate.e_score_correction_bias";
+            Tensor cbF32 = RouterF32(cb, key);
+            _correctionBias = HostVector(cbF32, _moe.NumExperts, key);
+            _correctionBiasT = cbF32;
         }
         else if (_moe.Scoring == MoeScoring.SigmoidLogitAdd)
         {
             throw new InvalidDataException("SigmoidLogitAdd routing requires an e_score_correction_bias tensor.");
         }
-        Tensor? routedScaleT = _moe.LearnedRoutedScale ? w[$"{block}.gate.routed_scaling_factor_param"] : null;
+        Tensor? routedScaleT = _moe.LearnedRoutedScale ? RouterF32(w[$"{block}.gate.routed_scaling_factor_param"], $"{block}.gate.routed_scaling_factor_param") : null;
         _routedScale = routedScaleT is null ? null : HostVector(routedScaleT, _moe.NumExperts, $"{block}.gate.routed_scaling_factor_param");
         _routedScaleT = routedScaleT;
         LoadLatentAndExpertNorm(w, block);
@@ -216,7 +219,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             _shDownW = w[$"{sp}.down_proj.weight"];
             // The shared-expert sigmoid gate ([1, hidden]) is optional (Qwen2-MoE has it; some variants don't).
             w.TryGetValue($"{block}.shared_expert_gate.weight", out Tensor? sg);
-            _shGateScoreW = sg;
+            _shGateScoreW = sg is null ? null : RouterF32(sg, $"{block}.shared_expert_gate.weight");
             // The shared expert reads and writes the model width, not the expert width (a latent block's routed width is the latent).
             RequireShape(_shGateW, $"{sp}.gate_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
             RequireShape(_shUpW, $"{sp}.up_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
@@ -244,6 +247,15 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _gateW = [];
         _upW = [];
         _downW = [];
+    }
+
+    /// <summary>A router or router-vector weight as F32. F32 passes through; F16 and BF16 widen through <see cref="GenericTransformer.EnsureF32"/>,
+    /// the same host widening the rest of the engine uses. Any other dtype (quantized packed formats, integer tensors) is refused by name.</summary>
+    private static Tensor RouterF32(Tensor t, string key)
+    {
+        if (t.DType != DType.F32 && t.DType != DType.F16 && t.DType != DType.BF16)
+            throw new InvalidDataException($"{key} must be F32, F16 or BF16; got {t.DType}.");
+        return GenericTransformer.EnsureF32(t);
     }
 
     /// <summary>Refuses a projection whose shape is not the one this block reads, naming the tensor, its shape and the expected shape.</summary>

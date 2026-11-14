@@ -204,16 +204,98 @@ public sealed class Ernie5MoeTests
     }
 
     [Theory]
-    [InlineData("gate.e_score_correction_bias")]
-    [InlineData("gate.routed_scaling_factor_param")]
-    public void Load_RefusesARouterVectorThatIsNotF32_ByName(string leaf)
+    [InlineData("gate.weight", "I8")]
+    [InlineData("gate.e_score_correction_bias", "I8")]
+    [InlineData("gate.routed_scaling_factor_param", "I8")]
+    [InlineData("gate.weight", "Q8_0")]
+    [InlineData("gate.e_score_correction_bias", "Q8_0")]
+    [InlineData("gate.routed_scaling_factor_param", "Q8_0")]
+    public void Load_RefusesARouterTensorOfAnUnconvertibleDtype_ByName(string leaf, string dtypeName)
     {
+        // Integer and quantized packed dtypes have no widening here; the refusal names the tensor and its dtype.
         Weights w = Weights.Create(47, Small, new Flags(LearnedScale: true));
         string key = $"{Prefix}.mlp.{leaf}";
-        using Tensor half = new(new TensorShape(Small.Experts), DType.F16);
-        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = half));
+        DType dtype = dtypeName == "I8" ? DType.I8 : DType.Q8_0;
+        using Tensor bad = new(new TensorShape(32), dtype);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = bad));
         Assert.Contains(key, error.Message, StringComparison.Ordinal);
-        Assert.Contains("F16", error.Message, StringComparison.Ordinal);
+        Assert.Contains(dtypeName, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("BF16", false)]
+    [InlineData("BF16", true)]
+    [InlineData("F16", false)]
+    public void HalfPrecisionRouter_LoadsAndRoutesLikeItsF32Twin(string dtypeName, bool split)
+    {
+        // The twin holds the same values the half-precision router does: both are rounded to the half-precision grid first, so the
+        // widening to F32 is exact and every routing and expert result must match bit for bit.
+        DType dtype = Named(dtypeName);
+        Flags flags = new(Split: split);
+        Weights w = Weights.Create(61, Small, flags);
+        Round(w.Router, dtype);
+        if (w.Router2 is not null) Round(w.Router2, dtype);
+        const int n = 6;
+        float[] x = Input(n * Small.Hidden, 63);
+        using Loaded twin = new(w);
+        float[] expected = twin.Run(x, n);
+        AssertClose(Reference(w, x, n), expected, Tol, "f32 twin against the reference");
+
+        using Tensor router = Typed(w.Router, dtype);
+        using Tensor router2 = w.Router2 is null ? null! : Typed(w.Router2, dtype);
+        using Loaded moe = new(w, tensors =>
+        {
+            tensors[$"{Prefix}.mlp.gate.weight"] = router;
+            if (split) tensors[$"{Prefix}.mlp.gate.weight_1"] = router2;
+        });
+        AssertBitIdentical(expected, moe.Run(x, n), $"{dtypeName} router against its f32 twin");
+    }
+
+    [Theory]
+    [InlineData("BF16")]
+    [InlineData("F16")]
+    public void HalfPrecisionCorrectionBias_SelectsLikeItsF32Twin(string dtypeName)
+    {
+        DType dtype = Named(dtypeName);
+        Weights w = Weights.Create(67, Small, new Flags(NormTopK: false));
+        w.Bias = Param.Vector(100f, 0.25f, -0.5f, 0.75f, 0f, -1f);
+        Round(w.Bias, dtype);
+        const int n = 5;
+        float[] x = Input(n * Small.Hidden, 69);
+        using Loaded twin = new(w);
+        float[] expected = twin.Run(x, n);
+        AssertClose(Reference(w, x, n), expected, Tol, "f32 twin against the reference");
+
+        using Tensor bias = Typed(w.Bias, dtype);
+        using Loaded moe = new(w, tensors => tensors[$"{Prefix}.mlp.gate.e_score_correction_bias"] = bias);
+        AssertBitIdentical(expected, moe.Run(x, n), $"{dtypeName} correction bias against its f32 twin");
+    }
+
+    private static DType Named(string name) => name == "F16" ? DType.F16 : DType.BF16;
+
+    // Rounds the values onto the grid of the dtype, in place, so the F32 twin holds exactly what the half-precision tensor decodes to.
+    private static void Round(Param p, DType dtype)
+    {
+        for (int i = 0; i < p.Values.Length; i++)
+            p.Values[i] = dtype == DType.F16
+                ? (float)(Half)p.Values[i]
+                : BitConverter.UInt32BitsToSingle(BitConverter.SingleToUInt32Bits(p.Values[i]) & 0xFFFF0000u);
+    }
+
+    // The parameter as a tensor of the given dtype, through the engine's own F32 to dtype cast.
+    private static Tensor Typed(Param p, DType dtype)
+    {
+        using Tensor f32 = new(new TensorShape(p.Shape), DType.F32);
+        p.Values.AsSpan().CopyTo(f32.AsSpan<float>());
+        return f32.CastTo(dtype);
+    }
+
+    private static void AssertBitIdentical(float[] expected, float[] actual, string label)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++)
+            Assert.True(BitConverter.SingleToInt32Bits(expected[i]) == BitConverter.SingleToInt32Bits(actual[i]),
+                $"{label}[{i}]: expected {expected[i]}, actual {actual[i]}");
     }
 
     [Fact]
@@ -522,6 +604,8 @@ public sealed class Ernie5MoeTests
         private readonly CpuBackend _backend = new();
         private readonly int _hidden;
         private readonly MoeFeedForward _block;
+        private Dictionary<string, Tensor> _tensors = [];
+        private bool _loaded;
 
         public Loaded(Weights w, Action<Dictionary<string, Tensor>>? edit = null)
         {
@@ -530,8 +614,10 @@ public sealed class Ernie5MoeTests
             {
                 Dictionary<string, Tensor> tensors = w.Tensors(_owned);
                 edit?.Invoke(tensors);
+                _tensors = tensors;
                 _block = new MoeFeedForward(w.Config(), _hidden, lowVram: false);
                 _block.LoadWeights(tensors, Prefix);
+                _loaded = true;
             }
             catch
             {
@@ -550,6 +636,13 @@ public sealed class Ernie5MoeTests
 
         public void Dispose()
         {
+            // A half-precision router widens into a tensor the block holds (through EnumerateWeights), not the loader; it goes with the block.
+            if (_loaded)
+            {
+                foreach (Tensor t in _block.EnumerateWeights())
+                    if (!_tensors.Values.Any(v => ReferenceEquals(v, t))) t.Dispose();
+            }
+            _loaded = false;
             foreach (Tensor t in _owned) t.Dispose();
             _owned.Clear();
         }
