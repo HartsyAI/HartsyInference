@@ -67,6 +67,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.TextureSize) => request with { TextureSize = 512 },
         nameof(MeshRequest.Mesh) => request with { Mesh = true },
         nameof(MeshRequest.Control) => request with { Control = Box() },
+        nameof(MeshRequest.Quality) => request with { Quality = MeshQuality.Max },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
@@ -176,6 +177,75 @@ public sealed class MeshPlanningTests
         Exception? error = Record.Exception(() => MeshRequestValidator.Validate("pixal3d", request, matterAvailable: false));
 
         Assert.Equal(legal, error is null);
+    }
+
+    [Theory]
+    [MemberData(nameof(Ids))]
+    public void EveryPresetOfEveryModelPassesTheValidatorOnceResolved(string id)
+    {
+        foreach ((MeshQuality quality, MeshPreset preset) in Profile(id).Presets)
+        {
+            MeshRequest request = MeshQualityPresets.Resolve(id, Valid(id) with { Quality = quality, Texture = preset.TextureSize != 0 });
+
+            Exception? error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false));
+
+            Assert.True(error is null, $"{id} {quality}: {error?.Message}");
+            Assert.False(string.IsNullOrWhiteSpace(preset.Basis));
+        }
+    }
+
+    [Fact]
+    public void AModelWithPresetsDescribesBothAndOneWithoutRejectsThem()
+    {
+        Assert.Equal([MeshQuality.Quality, MeshQuality.Max], Profile("trellis2").Presets.Keys.Order());
+        Assert.Empty(Profile("triposr").Presets);
+        Assert.Equal(MeshFieldAccess.Used, Profile("trellis2").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
+        Assert.Equal(MeshFieldAccess.Rejected, Profile("triposr").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
+    }
+
+    [Fact]
+    public void AResolvedPresetFillsOnlyTheFieldsTheRequestLeavesUnset()
+    {
+        MeshRequest request = Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true, TextureSize = 1024 };
+
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", request);
+
+        Assert.Equal(1536, resolved.GridResolution);
+        Assert.Equal(1024, resolved.TextureSize);
+        Assert.Equal(0, resolved.Steps);
+        Assert.Equal(MeshQuality.Default, MeshQualityPresets.Resolve("trellis2", Valid("trellis2")).Quality);
+        Assert.Equal(0, MeshQualityPresets.Resolve("trellis2", Valid("trellis2")).GridResolution);
+    }
+
+    [Fact]
+    public void ThePresetTextureSizeNeedsTheTextureOptionSoAShapeOnlyRequestStaysLegal()
+    {
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.Quality });
+
+        Assert.Equal(0, resolved.TextureSize);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+    }
+
+    [Fact]
+    public async Task APlanNamesThePresetAsTheSourceOfWhatItFilledAndValidatesTheResolvedRequest()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.Max, Steps = 8 });
+
+        Assert.Equal(("1536", ParameterSource.ProfileDefault), (plan.Settings[nameof(MeshRequest.GridResolution)].Value, plan.Settings[nameof(MeshRequest.GridResolution)].Source));
+        Assert.Equal(ParameterSource.UserOverride, plan.Settings[nameof(MeshRequest.Steps)].Source);
+        Assert.DoesNotContain(plan.Issues, i => i.Field == nameof(MeshRequest.Quality));
+    }
+
+    [Fact]
+    public async Task APlanReportsAPresetOnAModelWithoutOneAsAnErrorOnTheQualityField()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Quality = MeshQuality.Quality });
+
+        Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Quality));
     }
 
     [Theory]

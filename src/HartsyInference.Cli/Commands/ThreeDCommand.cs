@@ -83,6 +83,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Baked texture size in texels, 16 to 8192 (trellis2 and pixal3d with --texture; 0 = 2048).")]
         public int TextureSize { get; init; }
 
+        /// <summary>A named bundle of quality settings.</summary>
+        [CommandOption("--quality")]
+        [Description("Quality preset: default (the model's own settings), quality (the best that fits a 12 GB card in a few minutes) or max (the best the model can give, whatever the time). Fills --steps, --grid and --texture-size where you leave them at 0; models without a preset reject it.")]
+        public string? Quality { get; init; }
+
         /// <summary>Path to the model directory or checkpoint.</summary>
         [CommandOption("--model-path")]
         [Description("Path to the model directory or checkpoint.")]
@@ -184,6 +189,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("texture", settings.Texture ? "true" : "false");
         parameters.Put("mesh", settings.Mesh ? "true" : "false");
         parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
+        if (settings.Quality is not null)
+            parameters.Put("quality", settings.Quality);
         string label = CommandRunner.ResolveLabel(spec, settings.Model);
 
         return CommandRunner.Run(Modality.Mesh, spec, settings.Input, parameters, settings.Backend, settings.Quiet,

@@ -46,7 +46,10 @@ internal static class MeshModelProfiles
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. TextureOptional()],
                 new MeshLicence { Summary = "MIT (TRELLIS.2, TRELLIS-image-large); DINOv3 under the DINOv3 License; BiRefNet-matting MIT" },
                 new MeshCost { Basis = "Timings differ by path (512, 1024 cascade, textured); no whole-card peak is recorded for the default request." },
-                note: "Needs the foreground cut out: an image with alpha, or the BiRefNet matting checkpoint installed."),
+                note: "Needs the foreground cut out: an image with alpha, or the BiRefNet matting checkpoint installed.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 1024, TextureSize = 4096, Basis = "Upstream's 1024 cascade (its default) and the 4096 texture of its example.py. RTX 3060: the 1024 cascade took 564 s; a 4096 bake takes about 2.6 times the CPU post-process time of 2048 and adds about 11 MB to the GLB; a real 4096 run was not made." },
+                    new MeshPreset { GridResolution = 1536, TextureSize = 4096, Basis = "Upstream's largest cascade. RTX 3060: 1,668 s with a 11.6 GiB card total (past the 8 GiB Windows budget, so expect paging); a 4096 texture on top was not run." })),
             Profile(MeshModelIds.Pixal3D, MeshInputKind.Image, MeshOutputKinds.Mesh | MeshOutputKinds.TexturedMesh,
                 [Steps(null, 0, 200, "Sampler steps of each flow; 0 takes the checkpoint's schedule."), Grid("1024", ["1024", "1536"], null, null, "Final dual-grid resolution; there is no 512 pipeline."),
                     Used(nameof(MeshRequest.FieldOfViewRadians), "0.8575560450553894", 0, Math.PI / 2, "radians", "The photo's horizontal field of view, strictly between 0 and pi/2."),
@@ -54,7 +57,10 @@ internal static class MeshModelProfiles
                 new MeshLicence { Summary = "MIT (Pixal3D); DINOv3 under the DINOv3 License; the NAF weights' licence is not stated" },
                 new MeshCost { PeakVramGiB = 9.3, TypicalSeconds = 386, Basis = "RTX 3060, 1024 cascade, shape-only, 12 steps per flow, one image (a bust); 1536 peaks at 11.6." },
                 peak: request => request.GridResolution == 1536 ? 11.6 : 9.3,
-                note: "naf_release.pth is fetched from the NAF release with the other files (or place it, or its safetensors repack, in the model folder); needs the foreground cut out like TRELLIS.2."),
+                note: "naf_release.pth is fetched from the NAF release with the other files (or place it, or its safetensors repack, in the model folder); needs the foreground cut out like TRELLIS.2.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 1024, TextureSize = 4096, Basis = "The 1024 cascade (RTX 3060: about 6.4 to 8.5 minutes shape-only, 9.3 GiB peak) with a 4096 texture, which was not run." },
+                    new MeshPreset { GridResolution = 1536, TextureSize = 4096, Basis = "Upstream's default resolution. RTX 3060: shape-only 25.6 minutes at an 11.6 GiB peak; a textured 1536 run was not made." })),
             Profile(MeshModelIds.Sam3dObjects, MeshInputKind.ImageWithMask, MeshOutputKinds.Splats | MeshOutputKinds.Mesh,
                 [Steps("25", 0, null, "Steps of the structure flow and of the SLAT flow."), Rejected(nameof(MeshRequest.GridResolution)),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
@@ -113,6 +119,9 @@ internal static class MeshModelProfiles
                 },
                 new MeshCost { PeakVramGiB = 9.5, TypicalSeconds = 385, Basis = "RTX 3060, a 40,080-face bust split into 3 parts, grid 256, 50 steps: P3-SAM 66 s, conditioning 21 s, flow 140 s, decode 141 s." },
                 peak: _ => 9.5,
+                presets: Presets(
+                    new MeshPreset { GridResolution = 384, Basis = "Not run on the 3060: the dense decode grows with the grid's cube (141 s at 256 for 3 parts)." },
+                    new MeshPreset { GridResolution = 512, Basis = "Upstream's grid; not run on the 3060 (the host holds a 0.5 GB cube per part)." }),
                 note: "P3-SAM splits the mesh into parts and each part is generated again as a complete shape; the boxes and face counts come back in MeshResult.Parts. Decimate a dense mesh to about 40,000 faces first. The setting numerics.xpartFastDecode (off) decodes the parts with FlashVDM: about 113 s for three parts instead of 141 s, on a finer grid (504 cells), approximating the dense field."),
             Profile(MeshModelIds.Omni, MeshInputKind.ImageAndControl, MeshOutputKinds.Mesh,
                 [Steps("50", 0, 1000, "Euler steps of the flow; 0 takes 50 (49 evaluations, each with and without the image)."),
@@ -125,6 +134,9 @@ internal static class MeshModelProfiles
                 },
                 new MeshCost { PeakVramGiB = 9.1, TypicalSeconds = 394, Basis = "RTX 3060, a bust photo and a 2,048-point control, 50 steps, guidance 7.5, grid 384: load 27 s, flow 132 s, decode and marching cubes 235 s; grid 256 took 285 s and peaked at 8.9 GB." },
                 peak: _ => 9.1,
+                presets: Presets(
+                    new MeshPreset { GridResolution = 512, Basis = "Upstream's script grid; grid 384 (the default) took 394 s at 9.1 GiB on the 3060, 512 was not run (the decode grows with the cube)." },
+                    new MeshPreset { GridResolution = 512, Basis = "The largest grid the engine takes; there is no finer setting upstream." }),
                 note: "The image guides appearance and the control guides shape: give the image's foreground on white (Preprocess Auto does it) and a control in the model's own frame. Guidance is 4.5, the value upstream's script uses."),
             Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
                 new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
@@ -145,7 +157,10 @@ internal static class MeshModelProfiles
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
                 new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
-                note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.");
+                note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.",
+                presets: Presets(
+                    new MeshPreset { GridResolution = 384, Basis = "The Gradio demo's High decoding mode; the default grid is 256. Not run at 384 on the 3060." },
+                    new MeshPreset { GridResolution = 512, Basis = "The largest grid the demo offers; not run on the 3060 (the FlashVDM and dense decodes both grow with the cube)." }));
         }
     }
 
@@ -160,12 +175,40 @@ internal static class MeshModelProfiles
                 Summary = terms + "; the UNet is built on SD 2.1-base (CreativeML Open RAIL++-M)",
                 Restrictions = HunyuanRestrictions,
             },
-            cost, peak, note + " The mesh and the reference image are both required.");
+            cost, peak, note + " The mesh and the reference image are both required.",
+            Presets(
+                new MeshPreset { GridResolution = 4096, Basis = "Upstream's texture size (hy3dpaint's config); the default is 2048. The multiview stage does not change, only the CPU bake and the PNGs; not run at 4096." },
+                new MeshPreset { GridResolution = 4096, Basis = "The largest texture upstream's pipeline bakes." }));
 
     private static MeshModelProfile Profile(
         string id, MeshInputKind input, MeshOutputKinds outputs, IEnumerable<MeshFieldSpec> fields, MeshLicence licence, MeshCost cost,
-        Func<MeshRequest, double?>? peak = null, string? note = null) =>
-        new() { Id = id, Input = input, Outputs = outputs, Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), .. OutputFields(outputs)], Licence = licence, Cost = cost, PeakGiB = peak, Note = note };
+        Func<MeshRequest, double?>? peak = null, string? note = null, IReadOnlyDictionary<MeshQuality, MeshPreset>? presets = null) =>
+        new()
+        {
+            Id = id,
+            Input = input,
+            Outputs = outputs,
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), QualityField(presets), .. OutputFields(outputs)],
+            Licence = licence,
+            Cost = cost,
+            PeakGiB = peak,
+            Note = note,
+            Presets = presets ?? new Dictionary<MeshQuality, MeshPreset>(),
+        };
+
+    private static Dictionary<MeshQuality, MeshPreset> Presets(MeshPreset quality, MeshPreset max) =>
+        new() { [MeshQuality.Quality] = quality, [MeshQuality.Max] = max };
+
+    private static MeshFieldSpec QualityField(IReadOnlyDictionary<MeshQuality, MeshPreset>? presets) => presets is { Count: > 0 }
+        ? new()
+        {
+            Name = nameof(MeshRequest.Quality),
+            Access = MeshFieldAccess.Used,
+            Default = nameof(MeshQuality.Default),
+            Values = [nameof(MeshQuality.Default), nameof(MeshQuality.Quality), nameof(MeshQuality.Max)],
+            Note = "Quality: the best settings known to fit a 12 GB card in a few minutes; Max: the best the model can give whatever it costs. They fill Steps, GridResolution and TextureSize where the request leaves them at 0; the descriptor's Presets say what each sets.",
+        }
+        : Rejected(nameof(MeshRequest.Quality));
 
     private static MeshFieldSpec[] OutputFields(MeshOutputKinds outputs)
     {
@@ -242,6 +285,7 @@ internal static class MeshModelProfiles
     {
         nameof(MeshRequest.Samples) => "1",
         nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) => "false",
+        nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
         nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) => "unset",
         _ => "0",
     };

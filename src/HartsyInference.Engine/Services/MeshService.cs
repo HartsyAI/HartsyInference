@@ -53,7 +53,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         ArgumentNullException.ThrowIfNull(request);
         string id = IdOf(spec);
         MeshSettingsUsed settings = SettingsOf(id, request);
-        MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? request with { Seed = seed } : request;
+        MeshRequest resolved = MeshQualityPresets.Resolve(id, request);
+        MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? resolved with { Seed = seed } : resolved;
         MeshResult raw = await WithOutOfVramRetry(
             () => GenerateRawAsync(id, spec, effective, progress, cancel),
             () =>
