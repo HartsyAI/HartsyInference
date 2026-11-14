@@ -207,6 +207,8 @@ public sealed class Ernie5MoeTests
     [Theory]
     [InlineData("gate.weight", "I8")]
     [InlineData("gate.e_score_correction_bias", "I8")]
+    [InlineData("gate.routed_scaling_factor_param", "I8")]
+    [InlineData("shared_expert_gate.weight", "I8")]
     public void Load_RefusesARouterTensorOfAnUnconvertibleDtype_ByName(string leaf, string dtypeName)
     {
         // An integer dtype with no F32 conversion here is refused; the refusal names the tensor and its dtype. Quantized routers load (see below).
