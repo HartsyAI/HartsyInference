@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.Gguf;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests.Moe;
@@ -206,20 +207,48 @@ public sealed class Ernie5MoeTests
     [Theory]
     [InlineData("gate.weight", "I8")]
     [InlineData("gate.e_score_correction_bias", "I8")]
-    [InlineData("gate.routed_scaling_factor_param", "I8")]
-    [InlineData("gate.weight", "Q8_0")]
-    [InlineData("gate.e_score_correction_bias", "Q8_0")]
-    [InlineData("gate.routed_scaling_factor_param", "Q8_0")]
     public void Load_RefusesARouterTensorOfAnUnconvertibleDtype_ByName(string leaf, string dtypeName)
     {
-        // Integer and quantized packed dtypes have no widening here; the refusal names the tensor and its dtype.
+        // An integer dtype with no F32 conversion here is refused; the refusal names the tensor and its dtype. Quantized routers load (see below).
         Weights w = Weights.Create(47, Small, new Flags(LearnedScale: true));
         string key = $"{Prefix}.mlp.{leaf}";
-        DType dtype = dtypeName == "I8" ? DType.I8 : DType.Q8_0;
-        using Tensor bad = new(new TensorShape(32), dtype);
+        using Tensor bad = new(new TensorShape(32), DType.I8);
         InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = bad));
         Assert.Contains(key, error.Message, StringComparison.Ordinal);
         Assert.Contains(dtypeName, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Q8_0Router_RoutesLikeItsDequantizedF32Twin(bool split)
+    {
+        // The router is quantized with the engine's own Q8_0 quantizer and loads through the same F32 widening as every other dtype, so it
+        // must select the same top-k experts, in the same order, as the F32 twin holding its dequantized values.
+        Dims d = Small with { Hidden = 32 };   // E * hidden is a whole number of Q8_0 blocks
+        Flags flags = new(Split: split, NormTopK: true);
+        const int n = 6;
+        float[] x = Input(n * d.Hidden, 73);
+
+        Weights w = Weights.Create(71, d, flags);
+        using Tensor routerQ8 = Quantized(w.Router);
+        using Tensor router2Q8 = w.Router2 is null ? null! : Quantized(w.Router2!);
+        Weights twinW = Weights.Create(71, d, flags);
+        twinW.Router = Dequantized(routerQ8);
+        if (split) twinW.Router2 = Dequantized(router2Q8);
+        using Loaded twin = new(twinW);
+        (int[] twinRoutes, float[] twinWeights) = twin.Route(x, n, d.TopK);
+
+        using Loaded moe = new(w, tensors =>
+        {
+            tensors[$"{Prefix}.mlp.gate.weight"] = routerQ8;
+            if (split) tensors[$"{Prefix}.mlp.gate.weight_1"] = router2Q8;
+        });
+        Assert.Equal(DType.Q8_0, routerQ8.DType);
+        (int[] routes, float[] weights) = moe.Route(x, n, d.TopK);
+        Assert.Equal(twinRoutes, routes);
+        AssertClose(twinWeights, weights, Tol, "top-k weights against the dequantized twin");
+        AssertClose(twin.Run(x, n), moe.Run(x, n), Tol, "output against the dequantized twin");
     }
 
     [Theory]
@@ -288,6 +317,21 @@ public sealed class Ernie5MoeTests
         using Tensor f32 = new(new TensorShape(p.Shape), DType.F32);
         p.Values.AsSpan().CopyTo(f32.AsSpan<float>());
         return f32.CastTo(dtype);
+    }
+
+    // The parameter quantized to Q8_0 by the engine's own quantizer, as a checkpoint's quantized router would be stored.
+    private static Tensor Quantized(Param p)
+    {
+        using Tensor f32 = new(new TensorShape(p.Shape), DType.F32);
+        p.Values.AsSpan().CopyTo(f32.AsSpan<float>());
+        return GgufQuantizer.Quantize(f32, DType.Q8_0);
+    }
+
+    // The F32 twin of a quantized tensor: the values the engine's own dequantizer gives it, as a parameter.
+    private static Param Dequantized(Tensor q)
+    {
+        using Tensor f32 = GgufDequantizer.Dequantize(q, DType.F32);
+        return new Param([f32.Shape[0], f32.Shape[1]], f32.AsReadOnlySpan<float>().ToArray());
     }
 
     private static void AssertBitIdentical(float[] expected, float[] actual, string label)
@@ -628,10 +672,26 @@ public sealed class Ernie5MoeTests
 
         public float[] Run(float[] x, int n)
         {
-            using Tensor input = new(new TensorShape(1, n, _hidden), DType.F32);
-            x.AsSpan().CopyTo(input.AsSpan<float>());
+            using Tensor input = Input(x, n);
             using Tensor y = _block.Forward(_backend, input, n);
             return y.AsReadOnlySpan<float>().ToArray();
+        }
+
+        // The top-k experts of each of the first n rows, laid out [n, k], with their normalized weights (the engine's own routing stage).
+        public (int[] Routes, float[] Weights) Route(float[] x, int n, int k)
+        {
+            using Tensor input = Input(x, n);
+            int[] routes = new int[n * k];
+            float[] weights = new float[n * k];
+            _block.RouteRows(_backend, input, n, routes, weights);
+            return (routes, weights);
+        }
+
+        private Tensor Input(float[] x, int n)
+        {
+            Tensor input = new(new TensorShape(1, n, _hidden), DType.F32);
+            x.AsSpan().CopyTo(input.AsSpan<float>());
+            return input;
         }
 
         public void Dispose()

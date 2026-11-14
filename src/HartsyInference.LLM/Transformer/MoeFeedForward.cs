@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Backends.Routing;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
@@ -249,13 +250,19 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _downW = [];
     }
 
-    /// <summary>A router or router-vector weight as F32. F32 passes through; F16 and BF16 widen through <see cref="GenericTransformer.EnsureF32"/>,
-    /// the same host widening the rest of the engine uses. Any other dtype (quantized packed formats, integer tensors) is refused by name.</summary>
+    /// <summary>A router or router-vector weight as F32, through the same <see cref="GenericTransformer.EnsureF32"/> the rest of the engine uses:
+    /// F32 passes through, F16 and BF16 cast, and quantized GGUF formats (Q8_0, the K-quants) dequantize at load. A dtype that cannot convert
+    /// to F32 is refused by name, with the tensor key and its dtype.</summary>
     private static Tensor RouterF32(Tensor t, string key)
     {
-        if (t.DType != DType.F32 && t.DType != DType.F16 && t.DType != DType.BF16)
-            throw new InvalidDataException($"{key} must be F32, F16 or BF16; got {t.DType}.");
-        return GenericTransformer.EnsureF32(t);
+        try
+        {
+            return GenericTransformer.EnsureF32(t);
+        }
+        catch (HartsyInferenceException ex)
+        {
+            throw new InvalidDataException($"{key} must convert to F32; got {t.DType}.", ex);
+        }
     }
 
     /// <summary>Refuses a projection whose shape is not the one this block reads, naming the tensor, its shape and the expected shape.</summary>
