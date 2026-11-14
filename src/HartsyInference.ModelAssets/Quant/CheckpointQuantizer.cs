@@ -1,10 +1,15 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Metadata;
+using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Quant;
@@ -23,12 +28,19 @@ public enum QuantizationTargetKind
     /// eligible weight stored as I8 beside a <c>[rows,1]</c> <c>.weight_scale</c> and a <c>.comfy_quant</c>
     /// descriptor naming the format, which is what a reader trusts rather than the file-level mirror.</summary>
     Int8ConvRot,
+
+    /// <summary>A safetensors file in ComfyUI's NVFP4 shape: each eligible weight stored as packed FP4 (<c>.weight</c>)
+    /// beside its E4M3 block scales (<c>.weight_scale</c>) and an F32 tensor scale (<c>.weight_scale_2</c>), with the
+    /// file's <c>_quantization_metadata</c> listing those layers. Every other tensor is stored BF16.</summary>
+    Nvfp4,
 }
 
 /// <summary>The output format for a <see cref="QuantizationJob"/>.</summary>
 /// <param name="Kind">Container to write.</param>
 /// <param name="Policy">Per-tensor precision rules; required for <see cref="QuantizationTargetKind.Gguf"/>.</param>
-public sealed record QuantizationTarget(QuantizationTargetKind Kind, GgufQuantPolicy? Policy = null);
+/// <param name="Preset">The preset's name, such as <c>Q4_K_M</c>, which labels the output. A policy is a set of rules and does not
+/// carry its name, so a GGUF written without one is labelled by its backbone dtype.</param>
+public sealed record QuantizationTarget(QuantizationTargetKind Kind, GgufQuantPolicy? Policy = null, string? Preset = null);
 
 /// <summary>One offline quantization request. Precision is an argument here rather than a knob on purpose: knob
 /// domains are Numerics/Vram/Diagnostics/Paths, and "what precision is this file" is none of those.</summary>
@@ -102,7 +114,7 @@ public static class CheckpointQuantizer
 
         // Both targets stream now: each tensor is widened, quantized and its wide copy freed before the next one
         // is touched, so the peak is one tensor plus the output rather than the whole checkpoint as F32.
-        RefuseIfWorkingSetWontFit(source, job.SourcePath);
+        RefuseIfWorkingSetWontFit(source, job);
 
         List<Tensor> owned = new();
         try
@@ -144,6 +156,10 @@ public static class CheckpointQuantizer
         using GgufWriter writer = new(job.OutputPath);
         writer.SetMetadata("general.architecture", architecture);
         writer.SetMetadata("general.name", $"{architecture} (HartsyInference quantized)");
+        foreach ((string key, string value) in CarriedIdentity(source, job, QuantLabel(job.Target)))
+        {
+            writer.SetMetadata(key, value);
+        }
         List<Tensor> pending = new();
         int written = 0, quantized = 0;
         try
@@ -189,8 +205,9 @@ public static class CheckpointQuantizer
     /// <para>Measured from real element counts rather than the file size, because a block-quantized tensor is
     /// several times its own stored size once widened. Passing is a necessary condition, not a guarantee: another
     /// process can take the memory between this check and the allocation.</para></summary>
-    private static void RefuseIfWorkingSetWontFit(CheckpointSource source, string sourcePath)
+    private static void RefuseIfWorkingSetWontFit(CheckpointSource source, QuantizationJob job)
     {
+        string sourcePath = job.SourcePath;
         long widestTensorBytes = 0;
         foreach (KeyValuePair<string, Tensor> kv in source.Weights)
         {
@@ -200,9 +217,9 @@ public static class CheckpointQuantizer
                 widestTensorBytes = bytes;
             }
         }
-        // The output roughly tracks the source on disk — a quantized target is smaller, a dense one comparable —
-        // and it is the term that dominates now that the F32 intermediate is one tensor rather than all of them.
-        long needed = widestTensorBytes + new FileInfo(sourcePath).Length;
+        // The output is what the writers hold, sized from the target's storage. The source is mapped, not held, so its file
+        // size is not this run's memory: a 64 GB BF16 source makes an fp8 output of about 33 GB.
+        long needed = widestTensorBytes + EstimateOutputBytes(source, job.Target);
         long available = AvailableMemoryBytes();
         if (available <= 0 || needed <= available)
         {
@@ -213,6 +230,45 @@ public static class CheckpointQuantizer
             + $"the finished file plus its widest tensor as F32 ({widestTensorBytes / (1024L * 1024)} MiB) — but "
             + $"only about {available / (1024L * 1024 * 1024)} GiB is free. Close what else is running, or "
             + "quantize from a smaller source.");
+    }
+
+    /// <summary>The bytes the output occupies in memory before it is written, from each tensor's element count and the storage
+    /// the target gives it, under the same eligibility rules the writers apply. An upper bound: the writers hold the whole
+    /// output until <c>Save</c> or <c>Flush</c>.</summary>
+    internal static long EstimateOutputBytes(CheckpointSource source, QuantizationTarget target)
+    {
+        double total = 0;
+        foreach (KeyValuePair<string, Tensor> kv in source.Weights)
+        {
+            string key = kv.Key;
+            Tensor tensor = kv.Value;
+            long elements = tensor.ElementCount;
+            bool linear = key.EndsWith(".weight", StringComparison.Ordinal) && tensor.Shape.Rank == 2 && elements >= (1L << 20);
+            total += target.Kind switch
+            {
+                // fp8: one byte per weight and a scalar scale; everything else is narrowed to BF16.
+                QuantizationTargetKind.Fp8Scaled => linear ? elements + 4.0 : elements * 2.0,
+                // int8: one byte per weight and one scale per row; everything else is held as F32.
+                QuantizationTargetKind.Int8ConvRot => IsInt8Eligible(key, tensor) ? elements + 4.0 * tensor.Shape[0] : elements * 4.0,
+                // NVFP4: half a byte per weight, one E4M3 scale per 16, and an F32 tensor scale; everything else is BF16.
+                QuantizationTargetKind.Nvfp4 => IsNvfp4Eligible(key, tensor) ? elements / 2.0 + elements / 16.0 + 4.0 : elements * 2.0,
+                // GGUF: each tensor takes the storage the writer's own routing gives it.
+                _ => GgufBytes(target.Policy!, key, tensor),
+            };
+        }
+        return (long)total;
+    }
+
+    /// <summary>The bytes one tensor takes in a GGUF preset, from the routing the writer uses: F16 for the tensors the policy keeps,
+    /// 4 bytes for F32, and a block quant's size otherwise (at most 34 bytes per 32 values, Q8_0).</summary>
+    private static double GgufBytes(GgufQuantPolicy policy, string key, Tensor tensor)
+    {
+        DType target = policy.ResolveTargetDType(key, tensor);
+        if (target.IsQuantized)
+        {
+            return 1.0625 * tensor.ElementCount;
+        }
+        return (target == DType.F32 ? 4.0 : 2.0) * tensor.ElementCount;
     }
 
     /// <summary>Memory this process could actually get, not what the machine has.
@@ -250,6 +306,7 @@ public static class CheckpointQuantizer
     {
         Dictionary<string, Tensor> output = new(source.Weights.Count, StringComparer.Ordinal);
         int quantized = 0;
+        List<string> nvfp4Layers = [];
         foreach (KeyValuePair<string, Tensor> sourceEntry in source.Weights)
         {
             cancel.ThrowIfCancellationRequested();
@@ -294,6 +351,29 @@ public static class CheckpointQuantizer
                 FreeWideCopy(scratch, output, outputCountBefore, owned);
                 continue;
             }
+            if (job.Target.Kind == QuantizationTargetKind.Nvfp4)
+            {
+                if (IsNvfp4Eligible(kv.Key, kv.Value))
+                {
+                    // The codec names the packed weight and its two scales from the key; they are the file's tensors now.
+                    foreach (KeyValuePair<string, Tensor> companion in Nvfp4Codec.QuantizeToComfyCompanions(
+                        kv.Key, kv.Value.AsSpan<float>(), kv.Value.Shape[0], kv.Value.Shape[1]))
+                    {
+                        output[companion.Key] = companion.Value;
+                        owned.Add(companion.Value);
+                    }
+                    nvfp4Layers.Add(kv.Key[..^".weight".Length]);
+                    quantized++;
+                    FreeWideCopy(scratch, output, outputCountBefore, owned);
+                    continue;
+                }
+                // Ineligible: stored BF16, as the fp8 path stores them. The narrowed copy is the stored value, so it outlives the loop.
+                Tensor narrowed = kv.Value.CastTo(DType.BF16);
+                owned.Add(narrowed);
+                output[kv.Key] = narrowed;
+                FreeWideCopy(scratch, output, outputCountBefore, owned);
+                continue;
+            }
             if (IsInt8Eligible(kv.Key, kv.Value))
             {
                 // QuantizeFromF32 rotates in place, so it gets a copy rather than the container's mapped tensor.
@@ -325,7 +405,17 @@ public static class CheckpointQuantizer
             output[kv.Key] = kv.Value;
             FreeWideCopy(scratch, output, outputCountBefore, owned);
         }
-        SafeTensorsWriter.Save(job.OutputPath, output);
+        Dictionary<string, string> metadata = CarriedIdentity(source, job, QuantLabel(job.Target));
+        if (metadata.Count > 0)
+        {
+            // The digest describes the payload being written, not the source's, so it is recomputed over the same tensors.
+            metadata[ArtifactMetadata.HashKey] = "0x" + SafeTensorsWriter.ComputeTensorDataSha256(output);
+        }
+        if (nvfp4Layers.Count > 0)
+        {
+            metadata["_quantization_metadata"] = Nvfp4Codec.QuantizationMetadata(nvfp4Layers);
+        }
+        SafeTensorsWriter.Save(job.OutputPath, output, metadata.Count > 0 ? metadata : null);
         return (output.Count, quantized);
     }
 
@@ -375,6 +465,83 @@ public static class CheckpointQuantizer
         && tensor.Shape.Rank == 2
         && tensor.ElementCount >= (1L << 20)
         && tensor.Shape[1] % ConvRotGroup == 0;
+
+    /// <summary>Whether a tensor is stored as NVFP4: the fp8 gate (a rank-2 <c>.weight</c> with at least 2^20 elements)
+    /// plus a row length the 16-element block scales divide.</summary>
+    private static bool IsNvfp4Eligible(string key, Tensor tensor) =>
+        key.EndsWith(".weight", StringComparison.Ordinal)
+        && tensor.Shape.Rank == 2
+        && tensor.ElementCount >= (1L << 20)
+        && tensor.Shape[1] % Nvfp4Codec.GroupSize == 0;
+
+    /// <summary>What a quantized copy is labelled as in its metadata: the GGUF preset, or the format name.</summary>
+    private static string QuantLabel(QuantizationTarget target) => target.Kind switch
+    {
+        QuantizationTargetKind.Gguf => target.Preset ?? target.Policy!.BackboneDType.Name,
+        QuantizationTargetKind.Fp8Scaled => "fp8-scaled",
+        QuantizationTargetKind.Int8ConvRot => "int8-convrot",
+        _ => "nvfp4",
+    };
+
+    /// <summary>A title without its trailing <c>(precision)</c> qualifier. Only a label the merge or a quantize writes is stripped,
+    /// so a name that carries its own parenthetical, such as <c>Lance (Image)</c>, keeps it.</summary>
+    private static string WithoutPrecision(string title)
+    {
+        int open = title.LastIndexOf(" (", StringComparison.Ordinal);
+        if (open <= 0 || !title.EndsWith(')'))
+        {
+            return title;
+        }
+        return IsPrecisionLabel(title[(open + 2)..^1]) ? title[..open] : title;
+    }
+
+    private static readonly Regex GgufPresetLabel = new(@"^Q\d_(0|K)(_[MS])?$", RegexOptions.CultureInvariant);
+
+    /// <summary>Whether a parenthetical in a title is a precision or quant label rather than part of the name.</summary>
+    private static bool IsPrecisionLabel(string label) =>
+        label is "bf16" or "fp16" or "fp32" or "mixed" or "fp8-scaled" or "int8-convrot" or "nvfp4" || GgufPresetLabel.IsMatch(label);
+
+    /// <summary>The source's identity for a quantized copy, so SwarmUI still classifies it under the same class and keeps
+    /// its license flag. Only a safetensors source carries one: a GGUF's own keys describe its container. The payload
+    /// digest and any layout marker describe the source's bytes, so they are left out for the caller to set.</summary>
+    private static Dictionary<string, string> CarriedIdentity(CheckpointSource source, QuantizationJob job, string label)
+    {
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal);
+        if (source.Format != ModelFormat.SafeTensors)
+        {
+            return metadata;
+        }
+        foreach ((string key, string value) in source.Header.Metadata)
+        {
+            if (key is "_quantization_metadata" or ArtifactMetadata.HashKey)
+            {
+                continue;
+            }
+            metadata[key] = value;
+        }
+        if (metadata.Count > 0)
+        {
+            if (metadata.TryGetValue("modelspec.title", out string? title))
+            {
+                metadata["modelspec.title"] = $"{WithoutPrecision(title)} ({label})";
+            }
+            // The copy's own provenance: its label, the writer, the date, and the input it was made from. What the input
+            // recorded about its own source moves to hartsy.parent_*, so the chain back to the checkpoint survives.
+            foreach (string inherited in new[] { "hartsy.source_file", "hartsy.source_sha256" })
+            {
+                if (metadata.Remove(inherited, out string? inheritedValue))
+                {
+                    metadata[inherited.Replace("hartsy.source_", "hartsy.parent_source_", StringComparison.Ordinal)] = inheritedValue;
+                }
+            }
+            metadata["hartsy.source_file"] = Path.GetFileName(job.SourcePath);
+            metadata["hartsy.converter"] = "HartsyInference.CheckpointQuantizer";
+            metadata["hartsy.precision"] = label;
+            metadata["hartsy.quant"] = label;
+            metadata["modelspec.date"] = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+        return metadata;
+    }
 
     /// <summary>Gets a tensor to plain F32 whatever form it arrived in, so the quantizer only ever sees real values.
     /// <para>The three forms need three different routes and picking the wrong one is silent: <c>CastTo</c> folds an
