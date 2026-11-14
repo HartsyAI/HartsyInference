@@ -49,6 +49,8 @@ public sealed unsafe class MoonViTEncoder : IVlmImageEncoder
     /// <inheritdoc/>
     public Tensor Encode(IBackend backend, Tensor pixelValues)
     {
+        // TODO(moonvit): Encode has no try/finally, so intermediate tensors leak if a backend op throws. Finish it by wrapping the work in try/finally
+        // that disposes every intermediate.
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(pixelValues);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
@@ -108,6 +110,7 @@ public sealed unsafe class MoonViTEncoder : IVlmImageEncoder
 
     private Tensor Block(IBackend backend, Tensor x, KimiVisionBlockWeights b, Tensor cos, Tensor sin, int np)
     {
+        // TODO(moonvit): Block has no try/finally, so intermediate tensors leak if a backend op throws. Finish it as in Encode.
         int hidden = _config.Hidden, heads = _config.Heads, hd = _config.HeadDim, mlp = _config.MlpDim;
         float eps = _config.BlockNormEpsilon;
         TensorShape flat = new(1, np, hidden);

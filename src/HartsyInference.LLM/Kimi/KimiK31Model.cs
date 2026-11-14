@@ -171,6 +171,8 @@ public sealed class KimiK31State : IDisposable
 /// (attention then FFN, each mixed in by a block attention residual), so chunked prefill and decode share one path and carry the same state.</summary>
 public sealed class KimiK31Model : IDisposable
 {
+    // TODO(kimi): the CUDA and Vulkan decoder path is not run on GPU; only the CPU reference has run. Finish it by running ForwardToken on CUDA and
+    // Vulkan and checking the logits against the CPU path.
     private readonly IReadOnlyList<IBackend> _backends;
     private readonly ICollectiveComm? _comm;
     private readonly KimiK31Config _config;

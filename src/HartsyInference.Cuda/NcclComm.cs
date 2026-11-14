@@ -120,6 +120,8 @@ public sealed unsafe class NcclComm : ICollectiveComm
     /// rank j's, skipped when its count is zero. Both sides read the same counts matrix, so the pairs always match.</remarks>
     public void AllToAll(IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] elementCounts)
     {
+        // TODO(kimi): NCCL AllToAll is not run on GPU. Finish it by running the grouped send and receive pairs on a multi-GPU box and checking the
+        // result against HostStagedComm.
         ThrowIfDisposed();
         AllToAllLayout.Validate(RankCount, sendBuffers, recvBuffers, elementCounts);
         DType dtype = sendBuffers[0].DType;

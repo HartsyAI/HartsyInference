@@ -235,6 +235,8 @@ public sealed class DsaAttention : IDisposable
     // Splits kv_b_proj into per-head key-absorption [heads, nope, kvr] and value-expansion [heads, kvr, vd] matrices, once at load.
     private static (Tensor KeyAbsorb, Tensor ValueExpand) FoldKvB(Tensor kvB, DsaAttentionSettings s)
     {
+        // TODO(kimi): kv_b_proj is kept as a second F32 copy here, for the absorb and expand matrices, beside the loader's own copy. Finish it by
+        // folding in the checkpoint dtype or dropping the source copy once both matrices are built.
         int h = s.Heads, nope = s.QkNopeDim, vd = s.VDim, kvr = s.KvLoraRank, per = nope + vd;
         Tensor f32 = ProjectionOps.EnsureF32(kvB);
         try

@@ -153,6 +153,7 @@ public sealed class ExpertParallelMoe
             for (int r = 0; r < ranks; r++) recvBack[r] = Own(owned, NewRows(SumRow(rows, r, ranks), width));
             Exchange(back, recvBack, backRows, width);
 
+            // TODO(kimi): the combine runs on the host, a per-token round trip on the GPU path. Finish it with a device kernel over the returned rows.
             // Combine on each source: row j of the return from destination d is the j-th entry d received from that source.
             float[][] combined = new float[ranks][];
             for (int r = 0; r < ranks; r++) combined[r] = new float[count[r] * width];
@@ -210,6 +211,8 @@ public sealed class ExpertParallelMoe
 
     private static Tensor SliceRows(Tensor x, int start, int count, int width)
     {
+        // TODO(kimi): SliceRows copies rows through the host, a per-token round trip on the GPU path. Finish it with an on-device slice or gather so the
+        // input stays resident.
         Tensor slice = new(new TensorShape(1, count, width), DType.F32);
         x.AsReadOnlySpan<float>().Slice(start * width, count * width).CopyTo(slice.AsSpan<float>());
         return slice;

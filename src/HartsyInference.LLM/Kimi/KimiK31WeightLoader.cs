@@ -34,6 +34,8 @@ public sealed class KimiK31WeightLoader
 
     /// <summary>Loads every tensor of the whole decoder as F32. The result owns the tensors the loader created (<see cref="KimiK31Weights.Owned"/>).</summary>
     public static KimiK31Weights Load(KimiK31Config c, IKimiK31WeightSource src) => Load(c, src, KimiK31Shard.Whole, (t, _) => TensorCasts.EnsureF32(t));
+    // TODO(kimi): the text decoder weights are loaded eagerly as F32 at text load (this overload). Finish it by loading each layer in its checkpoint
+    // dtype and converting only when the layer runs.
 
     /// <summary>Loads the part of the decoder that <paramref name="shard"/> holds.</summary>
     /// <param name="denseWeight">Returns a dense Linear weight in the dtype its backend runs. A returned tensor other than the argument is
@@ -314,6 +316,8 @@ public sealed class KimiK31WeightLoader
     // One value per head. Exactly `heads` values, or the stored `headDim` form whose entries past `heads` must all be zero.
     private float[] HostPerHead(string name, int heads, int headDim)
     {
+        // TODO(kimi): the A_log layout (one value per head, or padded to headDim) is not confirmed against a real shard header. Finish it by reading
+        // A_log from a real K3.1 shard and narrowing the accepted shapes to the one it stores.
         Tensor f = ToF32(_src.Read(name));
         try
         {

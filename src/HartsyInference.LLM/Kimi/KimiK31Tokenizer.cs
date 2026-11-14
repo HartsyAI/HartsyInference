@@ -14,6 +14,8 @@ public static class KimiK31Tokenizer
     /// <summary>Reserved special ids above the ranks, as <c>num_reserved_special_tokens</c> in <c>tokenization_kimi.py</c>.</summary>
     public const int ReservedSpecialCount = 256;
 
+    // TODO(kimi): the letter classes match UTF-16 units, so Plane 1 letters may split differently from the Python regex. Finish it by matching code
+    // points in the pre-tokenizer, then comparing Plane 1 text against Python.
     // tokenization_kimi.py's pat_str, rewritten for .NET, which has no \p{Han} script class and no && set intersection. Han is its BMP blocks plus the
     // astral ideograph planes as surrogate pairs; "letter minus Han" is a negative lookahead. The astral ranges cover planes 2 and 3 as a whole, which
     // holds no non-Han letters, so the approximation only differs on unassigned code points.
@@ -44,6 +46,8 @@ public static class KimiK31Tokenizer
     /// <exception cref="InvalidDataException">The tiktoken file or the special-token table is malformed, or a given id names no special token.</exception>
     public static ILlmTokenizer Load(string directory, IReadOnlyList<int> stopIds, int? bosId, int? eosId)
     {
+        // TODO(kimi): the real tokenizer vocabulary was checked only against a Python re-implementation. Finish it by comparing ids from tiktoken.model
+        // on real text with the reference tokenizer's output.
         ArgumentException.ThrowIfNullOrEmpty(directory);
         ArgumentNullException.ThrowIfNull(stopIds);
         string tiktokenPath = Path.Combine(directory, TiktokenFile);

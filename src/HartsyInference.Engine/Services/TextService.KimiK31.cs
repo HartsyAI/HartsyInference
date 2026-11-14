@@ -35,6 +35,8 @@ public sealed partial class TextService
         int userTurn = messages.FindLastIndex(m => m.Role == "user");
         if (userTurn < 0) throw new HartsyInferenceException("The request has no user turn to attach the image to.");
         List<ContentBlock> blocks = [];
+        // TODO(kimi): the image placeholder size text and the pad expansion are unverified against the reference processor. Finish it by comparing the
+        // placeholder and pad count for a large image with encoding_k3.py.
         // Writes the original size, not the resized one. Unverified against the reference processor;
         // the placeholder text it writes for a large image (encoding_k3.py) settles it.
         for (int k = 0; k < images.Count; k++) blocks.Add(new ImageBlock(k) { Width = images[k].Width, Height = images[k].Height });

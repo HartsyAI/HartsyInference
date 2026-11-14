@@ -40,6 +40,8 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
         string tokenizerPath = Path.Combine(directory, "tokenizer.json"), templatePath = Path.Combine(directory, "chat_template.jinja");
         if (!File.Exists(tokenizerPath))
             throw new HartsyInferenceException($"'{directory}' has no tokenizer.json, which the ERNIE-5.5 Text path needs to build its prompt.");
+        // TODO(ernie5): the base checkpoint ships no chat_template.jinja, so this refusal blocks the Text path on it. Finish it with a built-in
+        // ERNIE-5.5 template used when the file is absent, once that template is checked against the reference.
         if (!File.Exists(templatePath))
             throw new HartsyInferenceException($"'{directory}' has no chat_template.jinja, which the ERNIE-5.5 Text path needs.");
 
@@ -59,6 +61,8 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
+        // TODO(ernie5): the Text path never sets Ernie5LoadOptions.Mtp (HfTextDirectoryLoader.Ernie5Options leaves it false), so MTP layer 43 does not
+        // run. Finish it by loading with Mtp on and driving MtpForward as a draft step in generation.
         Ernie5Model model = Ernie5Model.Load(directory, backend, options);
         try
         {

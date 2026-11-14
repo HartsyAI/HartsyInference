@@ -13,6 +13,8 @@ public static class AllToAllLayout
     /// <exception cref="ArgumentException">A count is negative, a buffer is too small, or the dtypes differ.</exception>
     public static void Validate(int ranks, IReadOnlyList<Tensor> sendBuffers, IReadOnlyList<Tensor> recvBuffers, long[,] counts)
     {
+        // TODO(common): a send buffer that is also its receive buffer is not refused, though the layout doc says it must not be. Finish it by rejecting
+        // any send buffer that shares memory with a receive buffer.
         ArgumentNullException.ThrowIfNull(sendBuffers);
         ArgumentNullException.ThrowIfNull(recvBuffers);
         ArgumentNullException.ThrowIfNull(counts);

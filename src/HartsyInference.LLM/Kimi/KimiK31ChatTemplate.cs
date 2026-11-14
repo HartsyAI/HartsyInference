@@ -122,6 +122,8 @@ public sealed class KimiK31ChatTemplate : IChatTemplate
         {
             foreach (ContentBlock block in blocks)
             {
+                // TODO(kimi): the media placeholder and its pad expansion (KimiVisionInput.MediaPrompt) are unverified against the reference processor.
+                // Finish it by checking the rendered prompt ids for a sized image against encoding_k3.py.
                 if (block is ImageBlock image)
                     pieces.Add(Piece.Media(KimiVisionInput.MediaPrompt(image.Width!.Value, image.Height!.Value)));
                 else

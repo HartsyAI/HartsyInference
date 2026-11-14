@@ -10,6 +10,8 @@ namespace HartsyInference.LLM.Kimi;
 /// the hidden and logits tensors come back on the host. Not thread-safe: run one sequence at a time.</remarks>
 public sealed class KimiK31GenerationModel : IGenerationModel
 {
+    // TODO(kimi): the CUDA and Vulkan decoder is not run on GPU through this adapter. Finish it by running generation on a GPU backend and checking its
+    // tokens against the CPU run.
     private readonly KimiK31Checkpoint _checkpoint;
     private readonly int _maxTokens;
 
@@ -138,6 +140,8 @@ public sealed class KimiK31GenerationModel : IGenerationModel
     /// <summary>Free and total host memory as the runtime sees it; the decoder runs on the host or on the backend the checkpoint was loaded to.</summary>
     public CapacitySnapshot Capacity()
     {
+        // TODO(kimi): no memory guard exists, and Capacity() reports host memory even when the decoder runs on a GPU. Finish it by reporting device
+        // memory for a GPU-built decoder and checking EstimateSequenceBytes against it before a request.
         GCMemoryInfo info = GC.GetGCMemoryInfo();
         return new CapacitySnapshot(Math.Max(0, info.TotalAvailableMemoryBytes - info.MemoryLoadBytes), info.TotalAvailableMemoryBytes);
     }
