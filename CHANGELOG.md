@@ -5,9 +5,9 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.428
 
-- **Added: a stall warning for the TRELLIS.2 and Pixal3D flow stages (Windows).** When no step finishes for ten times the median step (never under
+- **Added: a stall warning for the TRELLIS.2 and Pixal3D flow stages.** When no step finishes for ten times the median step (never under
   two minutes), the engine logs one `[Stall]` warning naming the stage, the free device memory and what to try, and the next finished step throws
-  `StageStalledException`. The memory plan also says when a recorded peak is past the roughly 8 GiB Windows gives one process.
+  `StageStalledException`. On Windows the memory plan also says when a recorded peak is past the roughly 8 GiB Windows gives one process.
 - **Added: `MeshRequest.Quality` presets (`Default`, `High`, `Max`) for the 3D models that have them.** An explicit field still wins; the plan
   says which values the preset filled.
 - **Added: an opt-in `Remesh` for textured TRELLIS.2 and Pixal3D (`MeshRequest.Remesh`, CLI `--remesh`).** It rebuilds the surface with a CPU

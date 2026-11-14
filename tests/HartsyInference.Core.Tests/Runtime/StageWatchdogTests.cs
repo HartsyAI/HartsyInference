@@ -184,7 +184,12 @@ public sealed class StageWatchdogTests
     public void AStallCallbackThatThrowsDoesNotEscapeThePollAndTheStallStillEndsTheRun()
     {
         Clock clock = new();
-        using StageWatchdog watchdog = Make(clock, _ => throw new InvalidOperationException("boom"));
+        int calls = 0;
+        using StageWatchdog watchdog = Make(clock, _ =>
+        {
+            calls++;
+            throw new InvalidOperationException("boom");
+        });
         clock.Now = 12;
         watchdog.Step();
         clock.Now = 24;
@@ -193,6 +198,7 @@ public sealed class StageWatchdogTests
         clock.Now = 24 + 121;
         watchdog.Poll();
 
+        Assert.Equal(1, calls);
         Assert.Throws<StageStalledException>(watchdog.Step);
     }
 

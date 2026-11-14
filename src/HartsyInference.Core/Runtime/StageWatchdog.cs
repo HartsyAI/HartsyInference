@@ -108,7 +108,7 @@ public sealed class StageWatchdog : IDisposable
                 }
                 catch (Exception ex)
                 {
-                    Logs.Error($"[Stall] The stall callback for '{_stage}' threw and was ignored: {ex.Message}");
+                    Logs.Error($"[Stall] The stall callback for '{_stage}' threw {ex.GetType().Name} and was ignored: {ex.Message}");
                 }
             }
         }
