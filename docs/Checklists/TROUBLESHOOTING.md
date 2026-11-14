@@ -427,7 +427,7 @@ no bug, any more than one bad seed was proof there was one.
 - **A TRELLIS.2 or Pixal3D shape or texture flow step stops returning and nothing is logged (Windows).** The entry below is the cause. These flow stages now run a
   `StageWatchdog` (`HartsyInference.Core.Runtime`; the small structure flows are not watched): when no step finishes for ten times the median step so far (never under two minutes), it logs one `[Stall]`
   warning naming the stage, the free and total device memory as of the last finished step and the remedies, and the next finished step throws `StageStalledException`, so a run that would
-  have crawled on is ended with a clear error. A slow first step (the weights load inside it) only warns, and a backend that reports no device memory (the CPU) is not watched. A step already
+  have crawled on is ended with a clear error. A slow first step (lazy uploads and kernel setup) only warns and is left out of the median, and a backend that reports no device memory (the CPU) is not watched. A step already
   running cannot be interrupted, so a stage that never returns is reported, not ended; stop the process. The plan's memory reason also says when a recorded peak is past the roughly 8 GiB
   Windows gives one process. Measured on the 3060 (2026-11-14): the 1024 cascade with 12 steps completes in about 15.5 minutes on an idle card, with F32 flows (11.9 GB card peak) and with
   `numerics.flowF16Weights` (11.7 GB; 13% less GPU time), but 9 of 12 fine-flow steps run at 33 to 36 s, three times a step that does not page; the earlier 23-minute stall at the first fine step

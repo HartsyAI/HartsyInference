@@ -3,7 +3,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Core.Runtime;
 
-/// <summary>Watches a stage that reports each finished step through <see cref="Step"/>. When no step finishes for much longer than the steps so far took (<c>stallFactor</c> times their median, but never under <c>minimumStall</c>), it logs one warning, calls the stall callback, and makes the next <see cref="Step"/> throw <see cref="StageStalledException"/>. A step that is still running cannot be interrupted, so a stage that never returns is reported but not ended; the host decides whether to stop the process. The device memory is read on the thread that calls <see cref="Step"/>, never from the timer, because a backend query can wait for the lock a long operation holds. A device that reports no memory (the CPU backend) is not watched, and a slow first step (which loads and uploads the weights) only warns.</summary>
+/// <summary>Watches a stage that reports each finished step through <see cref="Step"/>. When no step finishes for much longer than the steps so far took (<c>stallFactor</c> times their median, but never under <c>minimumStall</c>), it logs one warning, calls the stall callback, and makes the next <see cref="Step"/> throw <see cref="StageStalledException"/>. A step that is still running cannot be interrupted, so a stage that never returns is reported but not ended; the host decides whether to stop the process. The device memory is read on the thread that calls <see cref="Step"/>, never from the timer, because a backend query can wait for the lock a long operation holds. A device that reports no memory (the CPU backend) is not watched, and a slow first step (lazy uploads and kernel setup after the weights are placed) only warns and is left out of the median.</summary>
 public sealed class StageWatchdog : IDisposable
 {
     private readonly string _stage;
@@ -56,6 +56,7 @@ public sealed class StageWatchdog : IDisposable
     /// <exception cref="StageStalledException">The stage had stalled before this step finished, and this is not its first step.</exception>
     public void Step()
     {
+        // On the calling thread on purpose: on a device backend the query takes the same lock a running operation holds, so the timer must not make it.
         (long, long)? sampled = _watched ? _memory!.Invoke() : null;
         lock (_gate)
         {
@@ -67,7 +68,7 @@ public sealed class StageWatchdog : IDisposable
             StageStalledException? stalled = _stalled;
             if (stalled is null)
                 return;
-            // The first step loads and uploads the weights; a long one is reported but does not end the run.
+            // The first step sets up lazily (uploads, kernels); a long one is reported but does not end the run.
             if (_stepSeconds.Count == 1)
             {
                 _stalled = null;
@@ -114,11 +115,12 @@ public sealed class StageWatchdog : IDisposable
         _timer?.Dispose();
     }
 
+    // The first step loads and sets up, so once a later step exists it does not count towards what a step normally takes.
     private double Median()
     {
         if (_stepSeconds.Count == 0)
             return 0;
-        double[] sorted = [.. _stepSeconds];
+        double[] sorted = _stepSeconds.Count == 1 ? [_stepSeconds[0]] : [.. _stepSeconds.Skip(1)];
         Array.Sort(sorted);
         int mid = sorted.Length / 2;
         return sorted.Length % 2 == 1 ? sorted[mid] : 0.5 * (sorted[mid - 1] + sorted[mid]);

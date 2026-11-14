@@ -109,6 +109,24 @@ public sealed class StageWatchdogTests
     }
 
     [Fact]
+    public void ASlowFirstStepDoesNotStretchTheLimitOfTheStepsAfter()
+    {
+        Clock clock = new();
+        List<StageStalledException> raised = [];
+        using StageWatchdog watchdog = Make(clock, raised.Add);
+        clock.Now = 300;
+        watchdog.Step();
+        clock.Now = 310;
+        watchdog.Step();
+
+        clock.Now = 310 + 121;
+        watchdog.Poll();
+
+        Assert.Single(raised);
+        Assert.Equal(10, raised[0].ExpectedStepSeconds);
+    }
+
+    [Fact]
     public void ADeviceThatReportsNoMemoryIsNotWatched()
     {
         Clock clock = new();
@@ -146,16 +164,16 @@ public sealed class StageWatchdogTests
         Clock clock = new();
         List<StageStalledException> raised = [];
         using StageWatchdog watchdog = Make(clock, raised.Add, minimum: 1);
-        foreach (double end in new[] { 10.0, 30.0, 40.0, 60.0 })
+        foreach (double end in new[] { 100.0, 110.0, 130.0, 140.0, 160.0 })
         {
             clock.Now = end;
             watchdog.Step();
         }
 
-        clock.Now = 60 + 149;
+        clock.Now = 160 + 149;
         watchdog.Poll();
         Assert.Empty(raised);
-        clock.Now = 60 + 151;
+        clock.Now = 160 + 151;
         watchdog.Poll();
 
         Assert.Single(raised);

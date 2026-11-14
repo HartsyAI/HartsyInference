@@ -307,6 +307,21 @@ public sealed class MeshPlanningTests
     }
 
     [Fact]
+    public async Task Trellis2At512WithMattingGetsNoPagingWarning()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("trellis2") with { GridResolution = 512, Image = new ImageData { Rgb = new byte[4 * 4 * 3], Width = 4, Height = 4 } };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), request);
+        MemoryEstimate estimate = MeshMemoryProfile.Estimate("trellis2", request)!;
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.True(MeshMemoryProfile.Mattes("trellis2", request));
+        Assert.DoesNotContain("page", fit.Reason);
+        Assert.NotNull(plan.Memory);
+    }
+
+    [Fact]
     public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
     {
         MemoryEstimate estimate = new()

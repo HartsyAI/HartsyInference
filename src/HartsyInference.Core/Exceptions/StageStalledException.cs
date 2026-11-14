@@ -21,7 +21,7 @@ public sealed class StageStalledException : HartsyInferenceException
     /// <param name="remedy">What the caller can try, in the stage's own terms; appended to the message when given.</param>
     /// <param name="inner">The exception the watchdog recorded when it first saw the stall, when this one is thrown later.</param>
     public StageStalledException(string stage, double stalledSeconds, double expectedStepSeconds, long freeBytes, long totalBytes, string? remedy = null, Exception? inner = null)
-        : base(Describe(stage, stalledSeconds, expectedStepSeconds, freeBytes, totalBytes, remedy), inner!)
+        : base(Describe(stage, stalledSeconds, expectedStepSeconds, freeBytes, totalBytes, remedy), inner)
     {
         Stage = stage;
         StalledSeconds = stalledSeconds;

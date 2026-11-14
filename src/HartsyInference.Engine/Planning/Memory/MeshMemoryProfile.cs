@@ -36,6 +36,9 @@ internal static class MeshMemoryProfile
     /// <summary>The video memory Windows gives one process before it pages the rest, about 8 GiB (see <c>vram.preloadHeadroomMb</c>).</summary>
     public const long WindowsProcessBudgetBytes = 8L << 30;
 
+    /// <summary>The video memory the desktop and the driver hold on an idle card (1.0 to 1.3 GiB measured on the RTX 3060), taken out of a whole-card peak before it is held against the per-process Windows budget.</summary>
+    public const long DesktopBaselineBytes = 1_288_490_189;
+
     /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps. On Windows a peak past <see cref="WindowsProcessBudgetBytes"/> still fits, with a reason that warns of paging.</summary>
     public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier) =>
         Judge(estimate, totalBytes, tier, OperatingSystem.IsWindows());
@@ -45,8 +48,8 @@ internal static class MeshMemoryProfile
     {
         long peak = estimate.PeakResidentBytes;
         bool fits = peak <= totalBytes;
-        string paging = windows && fits && peak > WindowsProcessBudgetBytes
-            ? $" That is past the roughly {ByteFormat.GbF1(WindowsProcessBudgetBytes)} of video memory Windows gives one process, so expect the driver to page and single steps to slow down by a large factor or stall; close other GPU programs first."
+        string paging = windows && fits && peak - DesktopBaselineBytes > WindowsProcessBudgetBytes
+            ? $" Less the {ByteFormat.GbF1(DesktopBaselineBytes)} the desktop is assumed to hold, that is past the roughly {ByteFormat.GbF1(WindowsProcessBudgetBytes)} of video memory Windows gives one process, so the driver may page and single steps may slow down by a large factor or stall; close other GPU programs first."
             : "";
         return new MemoryFit
         {
