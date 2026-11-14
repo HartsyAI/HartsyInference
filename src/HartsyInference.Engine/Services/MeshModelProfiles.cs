@@ -45,7 +45,8 @@ internal static class MeshModelProfiles
                 [Steps(null, 0, 200, "Sampler steps of each flow; 0 takes the checkpoint's schedule."), Grid("1024", ["512", "1024", "1536"], null, null, "Final dual-grid resolution."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. TextureOptional()],
                 new MeshLicence { Summary = "MIT (TRELLIS.2, TRELLIS-image-large); DINOv3 under the DINOv3 License; BiRefNet-matting MIT" },
-                new MeshCost { Basis = "Timings differ by path (512, 1024 cascade, textured); no whole-card peak is recorded for the default request." },
+                new MeshCost { Basis = "Timings differ by path (512, 1024 cascade, textured). Peaks above the card's baseline, RTX 3060, textured: 512 6.2 GiB (178 s); 1536 10.4 GiB (1,668 s). The 1024 cascade has no full-run figure: a 1-step run took 7.9 GiB, and the one 12-step run stalled in the fine flow on a card another program was also using, so it plans as unknown." },
+                peak: request => request.GridResolution switch { 512 => 6.2, 1536 => 10.4, _ => null },
                 note: "Needs the foreground cut out: an image with alpha, or the BiRefNet matting checkpoint installed.",
                 presets: Presets(
                     new MeshPreset { GridResolution = 1024, TextureSize = 4096, Basis = "Upstream's 1024 cascade (its default, so the preset only changes the texture) and the 4096 texture of its example.py. RTX 3060: the 1024 cascade took 564 s; a 4096 bake takes about 2.6 times the CPU post-process time of 2048 and adds about 11 MB to the GLB; a real 4096 run was not made." },

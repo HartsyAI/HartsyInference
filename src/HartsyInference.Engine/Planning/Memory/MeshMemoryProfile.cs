@@ -34,10 +34,19 @@ internal static class MeshMemoryProfile
         && (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id)));
 
     /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps.</summary>
-    public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier)
+    /// <summary>The video memory Windows gives one process before it pages the rest, about 8 GiB (see <c>vram.preloadHeadroomMb</c>).</summary>
+    public const long WindowsProcessBudgetBytes = 8L << 30;
+
+    public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier) =>
+        Judge(estimate, totalBytes, tier, OperatingSystem.IsWindows());
+
+    internal static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier, bool windows)
     {
         long peak = estimate.PeakResidentBytes;
         bool fits = peak <= totalBytes;
+        string paging = windows && fits && peak > WindowsProcessBudgetBytes
+            ? $" That is past the roughly {ByteFormat.GbF1(WindowsProcessBudgetBytes)} of video memory Windows gives one process, so expect the driver to page and single steps to slow down by a large factor or stall; close other GPU programs first."
+            : "";
         return new MemoryFit
         {
             Verdict = fits ? MemoryFitVerdict.Resident : MemoryFitVerdict.Infeasible,
@@ -45,7 +54,7 @@ internal static class MeshMemoryProfile
             CapacityBytes = totalBytes,
             EffectiveTier = tier,
             Reason = fits
-                ? $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card; free memory is not checked, so other programs on the card can still make it fail."
+                ? $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card; free memory is not checked, so other programs on the card can still make it fail.{paging}"
                 : $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)}; this card has {ByteFormat.GbF1(totalBytes)}.",
         };
     }

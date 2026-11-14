@@ -1,4 +1,5 @@
 using System.Reflection;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
@@ -274,6 +275,35 @@ public sealed class MeshPlanningTests
         MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.High });
 
         Assert.Equal(ParameterSource.RecipeDefault, plan.Settings[nameof(MeshRequest.GridResolution)].Source);
+    }
+
+    [Theory]
+    [InlineData(512, 6.2)]
+    [InlineData(1536, 10.4)]
+    [InlineData(1024, null)]
+    public void Trellis2HasAMeasuredPeakOnlyForTheGridsItWasMeasuredAt(int grid, double? expected)
+    {
+        double? peak = MeshModelProfiles.Find("trellis2")!.PeakGiB!(Valid("trellis2") with { GridResolution = grid });
+
+        Assert.Equal(expected, peak);
+    }
+
+    [Fact]
+    public void APeakPastWhatWindowsGivesOneProcessIsJudgedWithAPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, 10L << 30, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit windows = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+        MemoryFit other = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: false);
+
+        Assert.Equal(MemoryFitVerdict.Resident, windows.Verdict);
+        Assert.Contains("Windows", windows.Reason);
+        Assert.DoesNotContain("Windows", other.Reason);
     }
 
     [Fact]
