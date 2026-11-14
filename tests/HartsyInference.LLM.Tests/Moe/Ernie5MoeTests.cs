@@ -159,7 +159,27 @@ public sealed class Ernie5MoeTests
             case "down": w.Down[0] = w.Down[0].Reshape(Small.Inter, Small.Latent); break;
             default: w.Router = w.Router.Reshape(Small.Hidden, Small.Experts); break;
         }
-        Assert.Throws<InvalidDataException>(() => new Loaded(w).Dispose());
+        string key = which switch
+        {
+            "gate" => $"{Prefix}.mlp.experts.0.gate_proj.weight",
+            "down" => $"{Prefix}.mlp.experts.0.down_proj.weight",
+            _ => $"{Prefix}.mlp.gate.weight",
+        };
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w).Dispose());
+        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("gate.e_score_correction_bias")]
+    [InlineData("gate.routed_scaling_factor_param")]
+    public void Load_RefusesARouterVectorThatIsNotF32_ByName(string leaf)
+    {
+        Weights w = Weights.Create(47, Small, new Flags(LearnedScale: true));
+        string key = $"{Prefix}.mlp.{leaf}";
+        using Tensor half = new(new TensorShape(Small.Experts), DType.F16);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = half));
+        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+        Assert.Contains("F16", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
