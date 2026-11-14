@@ -108,6 +108,31 @@ public sealed class UvUnwrapperNoisyMeshTests
     }
 
     [Fact]
+    public void ManyMixedSizeCharts_FillTheAtlasBetterThanRowsOfShelves()
+    {
+        // 900 rectangles of mixed shape: a shelf packer leaves the space above each short chart empty and covers under 0.6 of the atlas here; the skyline fills it.
+        Random random = new(7);
+        List<float> verts = [];
+        List<int> idx = [];
+        for (int q = 0; q < 900; q++)
+        {
+            int b = verts.Count / 3;
+            float x = (q % 30) * 12f, y = (q / 30) * 12f, w = 1f + 5f * (float)random.NextDouble(), h = 1f + 5f * (float)random.NextDouble();
+            verts.AddRange([x, y, 0, x + w, y, 0, x + w, y + h, 0, x, y + h, 0]);
+            idx.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+
+        UvUnwrapResult result = UvUnwrapper.Unwrap(new Mesh { Vertices = [.. verts], Indices = [.. idx] }, new UvUnwrapOptions { TextureSize = 512, PaddingTexels = 1, MinPaddingTexels = 1 });
+
+        double covered = 0;
+        for (int f = 0; f < result.Mesh.TriangleCount; f++)
+            covered += UvArea(result.Mesh, f);
+        Assert.Equal(900, result.ChartCount);
+        Assert.Equal(0, CountOverlappingPairs(result.Mesh));
+        Assert.True(covered > 0.65, $"the charts cover {covered:P0} of the atlas");
+    }
+
+    [Fact]
     public void ARequestedPaddingBelowTheDefaultMinimumIsStillHonoured()
     {
         // An unpadded atlas was a valid request before the minimum existed; the minimum follows the padding down instead of throwing.

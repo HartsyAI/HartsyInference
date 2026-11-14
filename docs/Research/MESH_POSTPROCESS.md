@@ -241,8 +241,11 @@ position-welded manifold geometry; a single-layer alternative (flood fill from t
   46 to 68 s.
 - No seam-length minimization and no chart optimization beyond the grow-and-absorb above; charts are only rotated to the best of 24
   bounding-box angles before packing.
-- Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
-  efficient). The gutter around each chart is `PaddingTexels` (4); it halves while the charts do not fit at a useful scale but never below
+- Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a bottom-left skyline packer over the same
+  chart rectangles (it replaced a height-sorted shelf packer: on the saved 512 bust at 500,000 faces the triangles cover 36.7 % of a 2048
+  atlas, up from 22.6 %, and 39.0 % at 4096, up from 23.4 %; 200,000 faces 38.6 %, up from 21.8 %; unwrap time up by about half a second).
+  Half of each chart's rectangle is still empty (triangle area is 47 % of the bounding boxes' area on that bust), which only an
+  irregular, bitmap-level packing would recover. The gutter around each chart is `PaddingTexels` (4); it halves while the charts do not fit at a useful scale but never below
   `MinPaddingTexels` (1), and a chart whose longest side is under 8 texels keeps the minimum gutter, so thousands of slivers do not each cost
   a full gutter. `UvUnwrapResult.PaddingTexels` reports what was kept. Sorts break ties on the index, so the atlas is the same on every run.
 - Decimation is quadric collapse only: no attribute-aware metric, no preservation of sharp features beyond the quadric itself, and

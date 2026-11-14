@@ -131,7 +131,78 @@ internal static class UvAtlasPacker
     }
 
     private static bool TryPack(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy) =>
-        order.Length <= MaxRectsLimit ? TryMaxRects(w, h, order, scale, g, ox, oy) : TryShelf(w, h, order, scale, g, ox, oy);
+        order.Length <= MaxRectsLimit ? TryMaxRects(w, h, order, scale, g, ox, oy) : TrySkyline(w, h, order, scale, g, ox, oy);
+
+    // Bottom-left skyline: each rectangle goes where its bottom edge ends lowest (leftmost on ties), so a row of small charts fills the gaps
+    // beside tall ones that a shelf packer leaves empty. The skyline stays a few hundred segments long, so thousands of charts pack quickly.
+    private static bool TrySkyline(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy)
+    {
+        List<(double X, double Width, double Y)> line = [(0, 1, 0)];
+        foreach (int i in order)
+        {
+            double pad = g.Of(scale, w[i], h[i]);
+            double rw = scale * w[i] + 2 * pad, rh = scale * h[i] + 2 * pad;
+            if (rw > 1.0 + 1e-12) return false;
+            int bestStart = -1;
+            double bestX = 0, bestY = double.MaxValue;
+            for (int start = 0; start < line.Count; start++)
+            {
+                double x = line[start].X;
+                if (x + rw > 1.0 + 1e-12) break;
+                double y = 0, covered = 0;
+                for (int s = start; s < line.Count && covered < rw - 1e-12; s++)
+                {
+                    y = Math.Max(y, line[s].Y);
+                    covered += line[s].Width;
+                }
+                if (y + rh > 1.0 + 1e-12 || y >= bestY - 1e-12) continue;
+                bestStart = start; bestX = x; bestY = y;
+            }
+            if (bestStart < 0) return false;
+            ox[i] = bestX; oy[i] = bestY;
+
+            List<(double X, double Width, double Y)> updated = new(line.Count + 2);
+            double right = bestX + rw;
+            bool inserted = false;
+            foreach ((double X, double Width, double Y) seg in line)
+            {
+                double segRight = seg.X + seg.Width;
+                if (segRight <= bestX + 1e-12 || seg.X >= right - 1e-12)
+                {
+                    if (!inserted && seg.X >= right - 1e-12)
+                    {
+                        updated.Add((bestX, rw, bestY + rh));
+                        inserted = true;
+                    }
+                    updated.Add(seg);
+                    continue;
+                }
+                if (seg.X < bestX - 1e-12) updated.Add((seg.X, bestX - seg.X, seg.Y));
+                if (!inserted)
+                {
+                    updated.Add((bestX, rw, bestY + rh));
+                    inserted = true;
+                }
+                if (segRight > right + 1e-12) updated.Add((right, segRight - right, seg.Y));
+            }
+            if (!inserted) updated.Add((bestX, rw, bestY + rh));
+            line = Merge(updated);
+        }
+        return true;
+    }
+
+    private static List<(double X, double Width, double Y)> Merge(List<(double X, double Width, double Y)> line)
+    {
+        List<(double X, double Width, double Y)> merged = new(line.Count);
+        foreach ((double X, double Width, double Y) seg in line)
+        {
+            if (merged.Count > 0 && Math.Abs(merged[^1].Y - seg.Y) <= 1e-12)
+                merged[^1] = (merged[^1].X, merged[^1].Width + seg.Width, seg.Y);
+            else
+                merged.Add(seg);
+        }
+        return merged;
+    }
 
     private static bool TryShelf(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy)
     {
