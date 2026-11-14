@@ -106,17 +106,4 @@ internal static class PrimitiveEdit
 
     /// <summary>The position of vertex <paramref name="index"/>.</summary>
     public static System.Numerics.Vector3 At(float[] positions, int index) => new(positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2]);
-
-    /// <summary>The diagonal of the bounding box of <paramref name="positions"/>.</summary>
-    public static float Diagonal(float[] positions)
-    {
-        System.Numerics.Vector3 min = new(float.PositiveInfinity), max = new(float.NegativeInfinity);
-        for (int i = 0; i < positions.Length; i += 3)
-        {
-            System.Numerics.Vector3 v = new(positions[i], positions[i + 1], positions[i + 2]);
-            min = System.Numerics.Vector3.Min(min, v);
-            max = System.Numerics.Vector3.Max(max, v);
-        }
-        return (max - min).Length();
-    }
 }

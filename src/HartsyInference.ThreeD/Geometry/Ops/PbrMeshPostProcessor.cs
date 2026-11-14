@@ -42,7 +42,7 @@ public static class PbrMeshPostProcessor
         {
             SmallComponentAreaRatio = options.SmallComponentAreaRatio,
             HoleFillMaxPerimeter = options.HoleFillMaxPerimeter,
-            HoleFillMaxWidth = options.OpeningWidthRatio * ShapeMeshFinisher.Diagonal(mesh),
+            HoleFillMaxWidth = options.OpeningWidthRatio * MeshOps.BoundingBoxDiagonal(mesh.Vertices),
         };
         Mesh reduced = MeshDecimator.DecimateStaged(source, options.DecimationTarget, options.IntermediateFactor, between,
             cancellationToken: cancellationToken);
