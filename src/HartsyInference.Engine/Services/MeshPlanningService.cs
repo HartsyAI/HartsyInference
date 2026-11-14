@@ -159,7 +159,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh,
         nameof(MeshRequest.Control) => request.Control is not null,
         nameof(MeshRequest.Quality) => request.Quality != MeshQuality.Default,
-        nameof(MeshRequest.Remesh) => request.Remesh,
+        nameof(MeshRequest.Remesh) => request.Remesh is not null,
         _ => false,
     };
 
@@ -176,7 +176,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)
                 : preset is int value && value.ToString(System.Globalization.CultureInfo.InvariantCulture) != field.Default
                     ? new ResolvedParameter(value.ToString(System.Globalization.CultureInfo.InvariantCulture), ParameterSource.ProfileDefault, $"the {request.Quality} preset")
-                    : new ResolvedParameter(field.Default, ParameterSource.RecipeDefault);
+                    : new ResolvedParameter(field.Name == nameof(MeshRequest.Remesh) ? MeshRemesh.Effective(request).ToString().ToLowerInvariant() : field.Default, ParameterSource.RecipeDefault);
             settings[field.Name] = parameter;
         }
         return settings;
@@ -200,7 +200,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
         nameof(MeshRequest.Quality) => request.Quality.ToString(),
-        nameof(MeshRequest.Remesh) => request.Remesh.ToString().ToLowerInvariant(),
+        nameof(MeshRequest.Remesh) => request.Remesh?.ToString().ToLowerInvariant(),
         _ => null,
     };
 }

@@ -302,6 +302,6 @@ internal static class MeshModelProfiles
     [
         Used(nameof(MeshRequest.Texture), "false", null, null, null, "Also generate the PBR texture; needs the texture checkpoints beside the shape ones."),
         Used(nameof(MeshRequest.TextureSize), "2048", 16, 8192, "texels", "The baked texture's edge; needs Texture. 0 takes 2048."),
-        Used(nameof(MeshRequest.Remesh), "false", null, null, null, "Rebuild the surface as a closed shell on the final grid before baking (upstream's remesh=True; CPU narrow-band dual contouring): far fewer UV charts and no holes, about 5 to 60 s and 1 to 6 GiB of host memory, thin features thicken by a voxel; needs Texture and a grid of 512 or 1024."),
+        Used(nameof(MeshRequest.Remesh), "true", null, null, null, "On by default with Texture at a grid of 512 or 1024 (off for shape-only output and at 1536; false turns it off): rebuilds the surface as a closed shell on the final grid before baking (upstream's remesh=True; CPU narrow-band dual contouring): far fewer UV charts and no holes, about 10 s and 3.6 GiB of host memory at 512, thin features thicken by a voxel."),
     ];
 }

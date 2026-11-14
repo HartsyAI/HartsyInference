@@ -349,6 +349,55 @@ public sealed class MeshPlanningTests
         Assert.True(id == "trellis2" ? Trellis2RequestMapper.ToOptions(request).Remesh : Pixal3DRequestMapper.ToOptions(request).Remesh);
     }
 
+    [Theory]
+    [InlineData("trellis2", true, 0, null, true)]
+    [InlineData("trellis2", true, 512, null, true)]
+    [InlineData("trellis2", true, 1024, null, true)]
+    [InlineData("trellis2", true, 1536, null, false)]
+    [InlineData("trellis2", false, 512, null, false)]
+    [InlineData("trellis2", true, 512, false, false)]
+    [InlineData("trellis2", true, 512, true, true)]
+    [InlineData("pixal3d", true, 0, null, true)]
+    [InlineData("pixal3d", true, 1024, null, true)]
+    [InlineData("pixal3d", true, 1536, null, false)]
+    [InlineData("pixal3d", false, 1024, null, false)]
+    [InlineData("pixal3d", true, 1024, false, false)]
+    public void RemeshIsOnForTexturedOutputUnlessTheCallerOptsOut(string id, bool texture, int grid, bool? remesh, bool expected)
+    {
+        MeshRequest request = Valid(id) with { Texture = texture, GridResolution = grid, Remesh = remesh };
+
+        MeshRequestValidator.Validate(id, request, matterAvailable: false);
+
+        Assert.Equal(expected, id == "trellis2" ? Trellis2RequestMapper.ToOptions(request).Remesh : Pixal3DRequestMapper.ToOptions(request).Remesh);
+    }
+
+    [Fact]
+    public void AMaxPresetWithTextureKeepsGrid1536AndLeavesTheRemeshOff()
+    {
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true });
+
+        Assert.Equal(1536, resolved.GridResolution);
+        Assert.False(Trellis2RequestMapper.ToOptions(resolved).Remesh);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+    }
+
+    [Fact]
+    public async Task APlanShowsTheRemeshDefaultAndTheOptOut()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan on = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, GridResolution = 512 });
+        MeshPlan off = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, GridResolution = 512, Remesh = false });
+        MeshPlan shapeOnly = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { GridResolution = 512 });
+
+        Assert.Equal("true", on.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.RecipeDefault, on.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("false", off.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.UserOverride, off.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("false", shapeOnly.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.DoesNotContain(on.Issues.Concat(off.Issues).Concat(shapeOnly.Issues), i => i.Field == nameof(MeshRequest.Remesh));
+    }
+
     [Fact]
     public async Task APlanListsRemeshAsAFieldOfTheTexturedModelsOnly()
     {
