@@ -23,6 +23,9 @@ public sealed record MeshModelDescriptor
     /// <summary>Every <see cref="Requests.MeshRequest"/> field this model treats specially, keyed by property name; a field not listed is read as the request carries it.</summary>
     public required IReadOnlyDictionary<string, MeshFieldSpec> Fields { get; init; }
 
+    /// <summary>What <see cref="Requests.MeshQuality.High"/> and <see cref="Requests.MeshQuality.Max"/> set for this model; empty when it has none.</summary>
+    public IReadOnlyDictionary<Requests.MeshQuality, MeshPreset> Presets { get; init; } = new Dictionary<Requests.MeshQuality, MeshPreset>();
+
     /// <summary>The terms the weights are used under.</summary>
     public required MeshLicence Licence { get; init; }
 
