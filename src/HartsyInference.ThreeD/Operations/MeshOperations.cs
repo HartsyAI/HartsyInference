@@ -12,7 +12,7 @@ public static class MeshOperations
     public static IReadOnlyList<IMeshOperation> All { get; } =
     [
         new RemoveSmallComponentsOperation(), new FillHolesOperation(), new DecimateOperation(), new SmoothOperation(),
-        new RecomputeNormalsOperation(), new RecenterOperation(), new RescaleOperation(),
+        new RecomputeNormalsOperation(), new RecenterOperation(), new RescaleOperation(), new RemeshOperation(),
     ];
 
     /// <summary>The operation for <paramref name="id"/> (case-insensitive).</summary>
