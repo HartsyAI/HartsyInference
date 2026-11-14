@@ -262,3 +262,25 @@ position-welded manifold geometry; a single-layer alternative (flood fill from t
 determinism, UV range and overlap (with an independent polygon-clipping check), BVH against brute force, hand-computed trilinear
 values, texel-exact bakes, inpainting smoothness and GLB structure (chunks, accessors, views, PNG payloads). They do not compare
 against upstream output; no upstream dump was available.
+
+## Narrow-band remesh (`NarrowBandRemesher`, the `remesh` mesh operation)
+
+Ported from CuMesh `remesh_narrow_band_dc` and `simple_dual_contour` (read as raw sources on 2026-11-14), which upstream `to_glb(remesh=True)` runs (the Gradio app passes `remesh_band=1, remesh_project=0`; the function default for the projection is 0.9). A sparse grid is refined from 32 cells up to the resolution, keeping a voxel while `|distance(centre) - band*voxel| < 0.87 * cell`; the field at a corner is the unsigned distance to the input minus the band, so the zero set is the input offset by the band on both sides, a closed shell however torn the input is. Each voxel gets one vertex (the mean of the linearly interpolated zero crossings of its 12 edges, the centre when none) and each sign-changing edge one quad through the four voxels around it (a quad with a missing voxel is dropped), split along the diagonal whose triangles face most alike; vertices may then move towards the input (`ProjectBack`). `OuterShellOnly` is this engine's addition: it floods the corners outside the shell from just beyond the leftmost corner of each inside component and keeps only the quads whose outside end is in that region, so no hidden inner sheet is unwrapped. Distances come from `TriangleBvh` (exact, threaded); nothing is CUDA-only. Limits of `OuterShellOnly`: the fill runs per separate piece of the shell from its own -x side, a hollow inside a solid wall thicker than twice the band keeps the sheets that face into the wall (an unsigned distance cannot tell it from a closed part inside a hollow one), and the branch where the side cannot be told (the walk reaches the grid edge, both sheets stay) has no test.
+
+Measured on the CPU (8 threads), grid 512, one input per row, then `DecimateStaged` to 500,000 faces, `UvUnwrapper` and a 2048 bake as in `PbrMeshPostProcessor` (surface snapped to the original):
+
+| Input | Faces from the remesh, time, peak working set | Welded boundary / non-manifold edges | Charts at 500k faces | Atlas covered |
+|---|---|---|---|---|
+| Bust 1, raw (1,487,440 faces, 736,637 voxels), before | | 16,824 / 3,755 | 4,622 | 36.7 % |
+| Bust 1, outer sheet only | 2,865,416, 4.6 s, 1.0 GiB | 0 / 243 | 545 | 36.6 % |
+| Bust 1, both sheets | 2,866,488, 3.9 s, 1.0 GiB | 0 / 357 | 560 | 36.4 % |
+| Bust 2, raw (3,811,232 faces, 1,865,382 voxels), before | | 279,414 / 20,021 | 100,238 | 19.7 % |
+| Bust 2, outer sheet only | 4,749,124, 8.6 s, 2.0 GiB | 0 / 20,811 | 18,198 | 32.1 % |
+| Bust 2, both sheets | 5,054,024, 6.8 s, 2.0 GiB | 0 / 39,821 | 21,450 | 30.0 % |
+| 1024 mesh (1,024,871 faces, already decimated; geometry only), before | | 308,312 / 30,518 | 155,702 | 15.5 % |
+| 1024 mesh, grid 1024, outer sheet only | 20,578,820, 38.5 s, 5.7 GiB | 0 / 100,290 | 49,502 | 28.7 % |
+| 1024 mesh, grid 1024, both sheets | 22,518,744, 29.2 s, 5.9 GiB | 0 / 233,570 | 91,617 | 17.8 % |
+
+(The 1024 rows use the GLB of the 1024 run as the input and a volume of another subject only to run the bake, so their bake columns mean nothing; the charts and coverage are geometry only.)
+
+The shell is watertight by construction (no boundary edge); the non-manifold edges are where two sheets of the offset surface touch. Rendered, bust 1 has no specks or cracks and bust 2 loses the peeling, torn look (its terraced forehead is the decoder's shape and stays). There is no numeric comparison with upstream: CuMesh's CUDA operations cannot run here, nothing was cloned or installed, and the checks are synthetic (a sphere, a torus, two spheres, a hole narrower than the band, other bands) plus the three real meshes. Not verified: numeric agreement with CuMesh, thin features (the shell is a voxel thicker on each side with `ProjectBack` 0), and the textured end-to-end results on a GPU.

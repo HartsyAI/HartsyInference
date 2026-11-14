@@ -384,10 +384,27 @@ public sealed class MeshOperationTests
     }
 
     [Fact]
+    public void RemeshClosesATornPrimitiveAndKeepsItsMaterialButNotItsUvs()
+    {
+        MeshDocument document = Textured(Trim(Sphere(30, 60), 90));
+
+        MeshOperationRun run = Run(document, "remesh", ("resolution", 64), ("outerOnly", 1));
+
+        Mesh result = run.Document.Primitives[0].Geometry;
+        Assert.True(result.TriangleCount > 1000);
+        Assert.Null(result.Uvs);
+        Assert.Equal(0, run.Document.Primitives[0].Material);
+        Assert.Single(run.Document.Primitives);
+        Assert.Throws<ArgumentException>(() => Run(document, "remesh", ("resolution", 100.5)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Run(document, "remesh", ("projectBack", 2)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Run(document, "remesh", ("resolution", 2048)));
+    }
+
+    [Fact]
     public void EveryOperationDescribesItsParametersAndANewOneNeedsOnlyTheRegistry()
     {
         Assert.Equal(
-            ["remove-small-components", "fill-holes", "decimate", "smooth", "recompute-normals", "recenter", "rescale"],
+            ["remove-small-components", "fill-holes", "decimate", "smooth", "recompute-normals", "recenter", "rescale", "remesh"],
             MeshOperations.All.Select(o => o.Id));
         foreach (IMeshOperation operation in MeshOperations.All)
         {

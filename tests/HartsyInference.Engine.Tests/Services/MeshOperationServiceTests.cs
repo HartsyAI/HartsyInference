@@ -74,7 +74,7 @@ public sealed class MeshOperationServiceTests
         Assert.Throws<ArgumentException>(() => engine.MeshOperations.Apply(glb, "glb", []));
         Assert.Throws<ArgumentOutOfRangeException>(() => engine.MeshOperations.Apply(glb, "glb", [Step("smooth", ("iterations", 0))]));
         Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => engine.MeshOperations.Apply([1, 2, 3, 4], "glb", [Step("recenter")]));
-        Assert.Equal(7, engine.MeshOperations.Operations.Count);
+        Assert.Equal(8, engine.MeshOperations.Operations.Count);
     }
 
     [Fact]
