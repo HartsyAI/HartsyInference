@@ -299,3 +299,17 @@ The shell is watertight by construction (no boundary edge); the non-manifold edg
 | Bust 2 | 512 | 47.4 s, 3.6 GiB | 499,594 | 0 / 23 | 31.6 % |
 
 Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Not verified on a GPU run of the whole pipeline (textured TRELLIS.2 and Paint 2.1 on a remeshed mesh) at the time of writing.
+
+### Paint 2.1 on a remeshed mesh: which input size (RTX 3060, 2026-11-14)
+
+Bust 2 (the folded, torn TRELLIS.2 512 output), remeshed at 512 (outer sheet only), then decimated by this engine to the face count shown and textured with Paint 2.1 (`hartsy 3d <obj> --image <png> -m hunyuan3d-paint21`, default 15 steps, 2048 texture, card idle at 829 MiB):
+
+| Input | Faces | Charts | UV triangles cover | Welded boundary / non-manifold edges | Time | Card peak | Engine chart warning | By eye |
+|---|---|---|---|---|---|---|---|---|
+| Not remeshed, decimated (it stops at 193k) | 192,958 | 78,329 | 9.0 % | 42,767 / 197 | 122 s | 11,465 MiB | yes (2.5 faces per chart) | torn, shard-like surface, speckled |
+| Remeshed, 40k | 40,077 | 13,321 | 23.5 % | 350 / 50 | 123 s | 10,046 MiB | yes (3.0) | coherent texture, geometry destroyed: the face is faceted with star artifacts |
+| Remeshed, 100k | 99,957 | 13,830 | 31.6 % | 530 / 65 | 115 s | 10,090 MiB | yes (7.2) | good geometry, even texture with small dots |
+| Remeshed, 193k | 192,889 | 15,196 | 32.4 % | 619 / 129 | 118 s | 10,049 MiB | no | best: smooth surface, even texture |
+
+Decimating 4.6 M faces to 40k with quadric collapse (a 100x ratio) destroys the facial detail whatever the remesh does, so a Paint input should be decimated to 100,000 faces or more; the remesh lets the decimator reach its target (the torn input stopped at 118k to 255k). Per-step time was 5.0 s in every run, with no memory spill. The charts stay in the 13,000 to 15,000 range because quadric decimation keeps the terraces of the decoded shape; "a clean mesh gives a few hundred" does not hold for a TRELLIS.2 surface even after the remesh. One subject; texture quality was judged by eye on four views each (`texture-diag/gpu-R2*` in the shared notes folder).
+
