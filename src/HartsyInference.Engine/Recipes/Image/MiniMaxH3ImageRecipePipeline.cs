@@ -15,9 +15,8 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>MiniMax-H3-Image text-to-image pipeline: Qwen3-VL text encoding, six stacked-head denoise steps on the
 /// checkpoint's own sigma grid, and the 2D single-frame VAE decode.
-/// <para>UNTESTED. Written without weights, a GPU or a parity reference. Every TODO(gpu) marks a step that still needs a
-/// real-weight run before it can be trusted. The first suspects, in order: the velocity sign, the head selected per step,
-/// the picture-label string, the latent statistics and the 2D RoPE axis order.</para></summary>
+/// <para>CPU parity tests cover the schedule, noise and packing; the DiT steps and VAE decode have device parity tests
+/// against ComfyUI that need real weights and a GPU. Each remaining TODO(gpu) is still open.</para></summary>
 internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 {
     /// <summary>The image build's head grid is distilled on six steps; the official server refuses any other count.</summary>
@@ -76,6 +75,8 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
         int latentH = height / 16, latentW = width / 16;
         int seed = RecipeRequestMapper.MapSeed(request.Seed) ?? SeedGenerator.RandomSeed();
+        // torch.manual_seed keeps the low 32 bits of the seed, so the full request seed drives the noise (TorchCompatibleNoise masks it).
+        long noiseSeed = NoiseSeed(request.Seed, seed);
         double[] sigmas = MiniMaxH3Schedule.ImageSigmas(_config.OutputHeadSigmas!, RequiredSteps);
 
         // TODO(gpu): the picture label. The image path uses "Picture N: " with no brackets (nodes_minimax_h3.py); this
@@ -90,8 +91,10 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
 
             // The same seed gives the same noise as ComfyUI's torch.randn (see TorchCompatibleNoise), so a request is comparable
             // with the reference image, not just with itself.
-            noise = TorchCompatibleNoise.Randn(new TensorShape([1L, _config.LatentsDim, 1L, latentH, latentW]), seed);
+            noise = TorchCompatibleNoise.Randn(new TensorShape([1L, _config.LatentsDim, 1L, latentH, latentW]), noiseSeed);
             x = MiniMaxH3Latents.PackVideo(noise, _config);
+            noise.Dispose();
+            noise = null;
 
             (Tensor cos, Tensor sin) = RopeTables(layout);
             try
@@ -108,7 +111,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
                 sin.Dispose();
             }
 
-            return Decode(x, latentH, latentW, width, height, seed);
+            return Decode(x, latentH, latentW, width, height, seed, noiseSeed);
         }
         finally
         {
@@ -227,8 +230,7 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             MiniMaxH3Conditioning.BuildTimestepRows(layout, tVideo, 0f, MiniMaxH3Schedule.VisualCondTimestep,
                 MiniMaxH3Schedule.AudioCondTimestep);
 
-        // TODO(gpu): the head span is resolved from the sigma pair, the same path ComfyUI's FinalLayer takes. Verify the
-        // span against the reference on a real step; the plan flags the block-0 weighting as a likely error.
+        // The span comes from the sigma pair, the path ComfyUI's FinalLayer takes; the step-velocity device tests check it.
         OutputHeadStep span = _heads.Resolve(sigma, sigmaNext);
         (Tensor headWeight, Tensor headBias) = StackedOutputHeadWeights.Combine(_backend, stackedWeight, stackedBias,
             _config.VideoPatchDim, span);
@@ -238,25 +240,26 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             heads, encoded.TagRuns);
         try
         {
-            // TODO(gpu): ComfyUI's MiniMaxH3ImageModel returns -out as the model output. This negates the head output
-            // to match. If every image comes out as noise, check this sign first.
+            // ComfyUI's MiniMaxH3ImageModel returns -out as the model output, so the head output is negated here.
             Tensor velocity = new Tensor(raw.Shape, DType.F32);
             Tensor scaled = new Tensor(raw.Shape, DType.F32);
-            Tensor next = new Tensor(raw.Shape, DType.F32);
+            Tensor? next = new Tensor(raw.Shape, DType.F32);
             try
             {
                 _backend.Scale(velocity, raw, -1f);
                 _backend.Scale(scaled, velocity, (float)(sigmaNext - sigma));
                 _backend.Add(next, x, scaled);
+                x.Dispose();
+                Tensor result = next;
+                next = null;
+                return result;
             }
             finally
             {
                 velocity.Dispose();
                 scaled.Dispose();
+                next?.Dispose();
             }
-
-            x.Dispose();
-            return next;
         }
         finally
         {
@@ -264,7 +267,12 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
         }
     }
 
-    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed)
+    /// <summary>The seed that drives the noise. A non-negative request seed goes to the noise unchanged, because torch.manual_seed
+    /// keeps the low 32 bits and TorchCompatibleNoise masks the seed the same way. Only a negative or unset seed takes the
+    /// 31-bit <paramref name="fallback"/>.</summary>
+    internal static long NoiseSeed(long requestSeed, int fallback) => requestSeed >= 0 ? requestSeed : fallback;
+
+    internal ImageResult Decode(Tensor x, int latentH, int latentW, int width, int height, int seed, long noiseSeed)
     {
         using Tensor latent = MiniMaxH3Latents.UnpackVideo(x, 1, latentH, latentW, _config);
         using Tensor frame = _decoder.Decode(_vaeBackend, latent);
@@ -277,12 +285,13 @@ internal sealed class MiniMaxH3ImageRecipePipeline : IRecipePipeline
             Rgb = rgb,
             Width = width,
             Height = height,
+            // Seed is the 31-bit alias. Meta["seed"] carries the seed that drove the noise, which reproduces the image.
             Seed = seed,
             Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["arch"] = "minimax-h3-image",
                 ["size"] = $"{width}x{height}",
-                ["seed"] = seed.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["seed"] = noiseSeed.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 ["steps"] = RequiredSteps.ToString(System.Globalization.CultureInfo.InvariantCulture),
             },
         };

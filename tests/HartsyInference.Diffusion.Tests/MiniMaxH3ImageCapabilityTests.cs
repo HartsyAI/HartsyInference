@@ -197,6 +197,25 @@ public sealed class MiniMaxH3ImageCapabilityTests
     }
 
     [Fact]
+    public void SeededNoise_AboveTwoToTheThirtyFirstMatchesTorchRandn()
+    {
+        // torch 2.14.1 on CPU: torch.manual_seed(3000000000); torch.randn(16). The seed does not fit in 31 bits.
+        float[] expected =
+        [
+            1.0594391822814941f, 0.08553901314735413f, -0.30735281109809875f, -1.542439579963684f, 0.11002636700868607f, 0.5044845342636108f, 0.1833072304725647f, -0.17026226222515106f, 0.7902361154556274f, 0.7020527720451355f, 0.9796063303947449f, 0.3025224208831787f, -0.3602932095527649f, -0.533551812171936f, -1.272803783416748f, -0.6860402226448059f,
+        ];
+
+        using Tensor noise = TorchCompatibleNoise.Randn(new TensorShape([16L]), seed: 3000000000L);
+        float[] actual = noise.AsSpan<float>().ToArray();
+
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.True(Math.Abs(expected[i] - actual[i]) < 1e-5f, $"index {i}: expected {expected[i]}, got {actual[i]}");
+        }
+    }
+
+    [Fact]
     public void SameSeedRepeatsTheNoiseAndAnotherSeedDoesNot()
     {
         TensorShape shape = new([1L, 24L, 1L, 8L, 8L]);
