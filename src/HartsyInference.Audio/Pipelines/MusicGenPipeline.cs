@@ -126,6 +126,7 @@ public sealed unsafe class MusicGenPipeline(MusicGenConfig cfg, MusicGenDecoder 
                     }
                 }
             }
+            if (cache.DevicePos != 0) backend.ThrowOnDevicePosError(cache.DevicePos);
             cache.Length = pos + 1;   // device KV was appended at slot=pos by the launch
             float[][][] batched = _decoder.ReadBatchedLogits(backend, B);
             float[][] condLogits = batched[0];

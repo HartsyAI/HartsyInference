@@ -2533,7 +2533,7 @@ public sealed partial class CudaKernels : IDisposable
         uint gridDim = (uint)((long)batch * hq * tq);
         CudaDriverApi.cuLaunchKernel(
             _flashAttnF32Combine, gridDim, 1, 1, blockThreads, 1, 1,
-            0, stream, (nint)args, 0).ThrowOnError();
+            (uint)(splits * sizeof(float)), stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Launches in-place KV-cache append: copies newKv [1,H,tNew,D] into buffer [1,H,maxSeq,D] at offset.</summary>

@@ -8,7 +8,7 @@
 // An empty chunk writes m = -INF, l = 0, acc = 0, which the combine weighs as zero.
 //
 // Causal for the single row at absolute position qOffset (keys 0..qOffset), optionally windowed to the last `window` keys and soft-capped.
-// dPos, when non-null, supplies {kvLen, qOffset} from device memory so one captured CUDA graph replays at every position.
+// dPos, when non-null, supplies {kvLen, qOffset, status}; invalid positions are clamped for safety and reported through status.
 //
 // Block = 256 threads = 8 warps; warp w owns the heads w, w+8, ... of the group. The key axis is walked in tiles of 32: a tile of K and V
 // is staged in shared memory (coalesced), then each warp takes one key per lane for the scores and one head dimension slice per lane for
@@ -46,6 +46,10 @@ __device__ __forceinline__ float4 dec_f4(const uint2& r)
 }
 __device__ __forceinline__ float2 dec_ld2(const float* p) { return *reinterpret_cast<const float2*>(p); }
 __device__ __forceinline__ float2 dec_ld2(const __half* p) { return __half22float2(*reinterpret_cast<const __half2*>(p)); }
+__device__ __forceinline__ float dec_max(float a, float b)
+{
+    return isnan(a) || isnan(b) ? __int_as_float(0x7fc00000) : fmaxf(a, b);
+}
 
 template <typename KvT, int D>
 __device__ __forceinline__ void fa_decode_gqa(
@@ -70,7 +74,13 @@ __device__ __forceinline__ void fa_decode_gqa(
     const int tid = threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
-    if (dPos != nullptr) { kvLen = min(max(dPos[0], 0), Lk); qOffset = dPos[1]; }
+    if (dPos != nullptr) {
+        const int rawKvLen = dPos[0];
+        qOffset = dPos[1];
+        if (tid == 0 && (rawKvLen <= 0 || rawKvLen > Lk || qOffset < 0 || qOffset >= rawKvLen))
+            atomicOr(const_cast<int*>(dPos + 2), 1);
+        kvLen = min(max(rawKvLen, 0), Lk);
+    }
 
     const int kMax = min(qOffset, kvLen - 1);
     const int kMin = window > 0 ? max(0, qOffset - window + 1) : 0;
@@ -146,9 +156,9 @@ __device__ __forceinline__ void fa_decode_gqa(
 
             float tm = s;
             #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) tm = fmaxf(tm, __shfl_xor_sync(0xffffffffu, tm, o));
-            const float mNew = fmaxf(m[j], tm);
-            const float corr = m[j] <= -DEC_INF ? 0.0f : __expf(m[j] - mNew);
+            for (int o = 16; o > 0; o >>= 1) tm = dec_max(tm, __shfl_xor_sync(0xffffffffu, tm, o));
+            const float mNew = dec_max(m[j], tm);
+            const float corr = l[j] == 0.0f ? 0.0f : __expf(m[j] - mNew);
             const float p = valid ? __expf(s - mNew) : 0.0f;
             float ps = p;
             #pragma unroll

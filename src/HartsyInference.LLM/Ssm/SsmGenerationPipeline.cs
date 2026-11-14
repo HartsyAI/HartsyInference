@@ -91,6 +91,7 @@ public sealed class SsmGenerationPipeline
                 generated.Add(next); onToken?.Invoke(next); consumed++;
                 g.ForwardGraphDecodeStep(_backend, embed, cos, sin, devicePos, deviceTokenId);
                 next = _backend.ReadDeviceTokenId(deviceTokenId);
+                _backend.ThrowOnDevicePosError(devicePos);
                 pos++;
                 _backend.WriteDevicePos(devicePos, pos + 1, pos);
 
@@ -106,6 +107,7 @@ public sealed class SsmGenerationPipeline
                     consumed++;
                     _backend.LaunchGraph(graph!);
                     next = _backend.ReadDeviceTokenId(deviceTokenId);
+                    _backend.ThrowOnDevicePosError(devicePos);
                     pos++;
                     _backend.WriteDevicePos(devicePos, pos + 1, pos);
                 }
