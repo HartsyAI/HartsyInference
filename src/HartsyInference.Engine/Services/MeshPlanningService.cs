@@ -170,7 +170,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))
         {
             bool set = IsSet(request, field.Name);
-            int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name);
+            int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name, MeshQualityPresets.TakesRemesh(descriptor.Id));
             // A preset value equal to the model's own default changes nothing, so the plan does not credit the preset with it.
             ResolvedParameter parameter = set
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)

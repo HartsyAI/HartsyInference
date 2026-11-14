@@ -388,6 +388,14 @@ public sealed class MeshPlanningTests
     }
 
     [Fact]
+    public void ARemeshRequestLeavesAPaintPresetsTextureEdgeAlone()
+    {
+        MeshRequest request = Valid("hunyuan3d-paint21") with { Quality = MeshQuality.High, Remesh = true };
+
+        Assert.Equal(4096, MeshQualityPresets.Resolve("hunyuan3d-paint21", request).GridResolution);
+    }
+
+    [Fact]
     public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
     {
         MemoryEstimate estimate = new()
