@@ -121,7 +121,7 @@ public sealed partial class CudaKernels
     }
 
     /// <summary>Partial online-softmax states of one decode row per sequence, one block per (split, KV head, sequence); merge them with the flash-attention combine kernel.</summary>
-    /// <param name="devicePos">Device pointer to {kvLen, qOffset} for graph replay, or 0 to use the host values.</param>
+    /// <param name="devicePos">Device pointer to {kvLen, qOffset, status} for graph replay, or 0 to use the host values.</param>
     public unsafe void LaunchFlashDecodeGqa(ulong partialM, ulong partialL, ulong partialAcc, ulong q, ulong k, ulong v, int b, int hq, int d,
         int hkv, int keyStride, int kvLen, int kvGroup, int qOffset, float scale, float softcap, int window, int splits, int chunk,
         ulong devicePos, bool f16Kv, nint stream)

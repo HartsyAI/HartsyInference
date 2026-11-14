@@ -26,6 +26,11 @@
 
 #define INF_F 3.402823466e+38f
 
+__device__ __forceinline__ float attnMax(float a, float b)
+{
+    return isnan(a) || isnan(b) ? __int_as_float(0x7fc00000) : fmaxf(a, b);
+}
+
 // K/V element access. The F16 overload upconverts on load, exactly as lm_flash_attn_f16kv_f32 does; everything
 // downstream stays F32, so the two instantiations are numerically identical apart from the stored KV precision.
 __device__ __forceinline__ float kvLoad(const float* p, size_t i) { return p[i]; }
@@ -57,9 +62,16 @@ __device__ __forceinline__ void flashAttnSplitBody(
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
 
-    // Graph-capture decode: read this step's position {kvLen, qOffset} from device so one captured graph replays
+    // Graph-capture decode: read this step's position {kvLen, qOffset, status} from device so one captured graph replays
     // at every step with a FIXED split count (chunk is sized to capacity; splits past kvLen early-exit below).
-    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
+    if (dPos != nullptr) {
+        const int rawKvLen = dPos[0];
+        qOffset = dPos[1];
+        if (tid == 0 && (rawKvLen <= 0 || (unsigned int)rawKvLen > Lk || qOffset < 0
+                || (causal && (long long)qOffset + Tq > rawKvLen)))
+            atomicOr(const_cast<int*>(dPos + 2), 1);
+        kvLen = min((unsigned int)max(rawKvLen, 0), Lk);
+    }
 
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;
@@ -101,8 +113,8 @@ __device__ __forceinline__ void flashAttnSplitBody(
         // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), identical to the monolithic kernel.
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
-        float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float newM = attnMax(m, score);
+        float corr = l == 0.0f ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? kvLoad(V, kvBase + tid) : 0.0f;
@@ -170,26 +182,48 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     if (idx >= total) return;
     unsigned int tid = threadIdx.x;
 
-    // Global max over chunks (uniform across threads).
-    float m = -INF_F;
-    for (unsigned int g = 0; g < G; g++)
+    extern __shared__ float combineWeights[];
+    __shared__ float totalL;
+    if (G <= 32)
     {
-        float mg = partialM[idx * G + g];
-        m = fmaxf(m, mg);
+        if (tid < 32)
+        {
+            bool active = tid < G;
+            float mg = active ? partialM[idx * G + tid] : -INF_F;
+            float m = mg;
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) m = attnMax(m, __shfl_xor_sync(0xffffffffu, m, o));
+            float lg = active ? partialL[idx * G + tid] : 0.0f;
+            if (active) combineWeights[tid] = lg == 0.0f ? 0.0f : __expf(mg - m);
+            __syncwarp();
+            if (tid == 0)
+            {
+                float l = 0.0f;
+                for (unsigned int g = 0; g < G; g++) l += partialL[idx * G + g] * combineWeights[g];
+                totalL = l;
+            }
+        }
+        __syncthreads();
+        if (tid < D)
+        {
+            float acc = 0.0f;
+            for (unsigned int g = 0; g < G; g++)
+                acc += partialAcc[(size_t)(idx * G + g) * D + tid] * combineWeights[g];
+            out[(size_t)idx * D + tid] = totalL != 0.0f ? acc / totalL : 0.0f;
+        }
+        return;
     }
 
+    float m = -INF_F;
+    for (unsigned int g = 0; g < G; g++) m = attnMax(m, partialM[idx * G + g]);
     float l = 0.0f, acc = 0.0f;
     for (unsigned int g = 0; g < G; g++)
     {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_F) ? 0.0f : __expf(mg - m);
-        l += partialL[idx * G + g] * w;
+        float lg = partialL[idx * G + g];
+        float w = lg == 0.0f ? 0.0f : __expf(mg - m);
+        l += lg * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }
-
-    if (tid < D)
-    {
-        size_t qBase = (size_t)idx * D;
-        out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
-    }
+    if (tid < D) out[(size_t)idx * D + tid] = l != 0.0f ? acc / l : 0.0f;
 }

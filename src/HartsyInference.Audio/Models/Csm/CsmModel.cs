@@ -512,6 +512,7 @@ public sealed unsafe class CsmModel : IDisposable
             _backbone.ForwardGraphDecodeStepDualEmbeds(backend, gs.InEmbed, cond, uncond, cos, sin, gs.DevicePos, gs.OutHidden);
             gs.Warmed++;
         }
+        backend.ThrowOnDevicePosError(gs.DevicePos);
         cond.AdvanceLength(1);      // the dual step appended one row to each stream
         uncond.AdvanceLength(1);
 
@@ -714,6 +715,7 @@ public sealed unsafe class CsmModel : IDisposable
             _decoder.ForwardGraphDecodeStepEmbeds(backend, gs.InEmbed, cache, cos, sin, gs.DevicePos, gs.OutHidden);
             gs.Warmed++;
         }
+        backend.ThrowOnDevicePosError(gs.DevicePos);
         cache.AdvanceLength(1);
 
         Tensor dLast = new(new TensorShape(1, 1, dh), DType.F32);

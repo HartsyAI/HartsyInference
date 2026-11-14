@@ -44,7 +44,7 @@ public partial interface IBackend
 
     // A captured decode graph must NOT re-bake the per-step KV position into its kernel params, or every replay
     // would append/attend at the capture-time position. Instead the self-attention KV-append and flash kernels
-    // read the position from a small device buffer {kvLen, qOffset}, refreshed (outside capture) each step. This
+    // read the position from a small device buffer {kvLen, qOffset, status}, refreshed (outside capture) each step. This
     // lets ONE captured graph replay at every step. Defaults: unsupported (eager backends use the host ints).
 
     /// <summary>True when the backend supports device-position decode-graph replay for every graph consumer (text LLM, SSM, CSM, MusicGen). CUDA only; Vulkan reports its text-LLM graph through <see cref="LlmGraphDecodeSupported"/> instead.</summary>
@@ -62,11 +62,14 @@ public partial interface IBackend
     /// <summary>True when the text-LLM graph's device-position attention takes a sliding window and an attention logit soft-cap (the Gemma-2/3 shapes). CUDA does. A backend that returns false refuses those models from the graph: they decode eagerly, and an explicit graph request for them fails with the reason (<c>GenericTransformer.GraphDecodeRefusal</c>).</summary>
     bool LlmGraphDecodeWindowSoftcap => true;
 
-    /// <summary>Allocates a persistent 2-int device buffer {kvLen, qOffset} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
+    /// <summary>Allocates a persistent device position buffer {kvLen, qOffset, status} (0 = unsupported); free with <see cref="FreeDevicePos"/>.</summary>
     ulong AllocDevicePos() => 0;
 
-    /// <summary>Refreshes the device position buffer (outside any capture region) for the next step/launch.</summary>
+    /// <summary>Refreshes the device position buffer and clears its status (outside any capture region) for the next step/launch.</summary>
     void WriteDevicePos(ulong handle, int kvLen, int qOffset) { }
+
+    /// <summary>Synchronizes and throws when a device-position kernel reported an invalid position. Call at the step/replay readback point.</summary>
+    void ThrowOnDevicePosError(ulong handle) { }
 
     /// <summary>Frees a buffer from <see cref="AllocDevicePos"/>.</summary>
     void FreeDevicePos(ulong handle) { }

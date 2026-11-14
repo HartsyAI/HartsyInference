@@ -7932,12 +7932,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     // ── Device-side decode position (autoregressive step-graph replay) ──────────────────────────────────────
     public bool GraphDecodeSupported => true;
 
-    /// <summary>Persistent 2-int device buffer {kvLen, qOffset} the graph-decode kernels read each step.</summary>
+    /// <summary>Persistent 3-int device buffer {kvLen, qOffset, status} the graph-decode kernels read each step.</summary>
     /// <remarks>Allocated once (outside capture) via the synchronous persistent allocator so it survives graph AUTO_FREE_ON_LAUNCH.</remarks>
     public ulong AllocDevicePos()
     {
         using OpScope _op = EnterOp();
-        return CudaMemory.AllocatePersistent((nuint)(2 * sizeof(int)));
+        return CudaMemory.AllocatePersistent((nuint)(3 * sizeof(int)));
     }
 
     /// <summary>Refreshes the device position buffer for the next step.</summary>
@@ -7946,10 +7946,20 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         if (handle == 0) return;
         using OpScope _op = EnterOp();
-        int* v = stackalloc int[2]; v[0] = kvLen; v[1] = qOffset;
+        int* v = stackalloc int[3]; v[0] = kvLen; v[1] = qOffset; v[2] = 0;
         // HtoDAsync from pageable host memory stages synchronously (host buffer consumed before return), so the
         // stackalloc is safe; the device write is stream-ordered before the subsequent kernels/graph launch.
-        CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)v, (nuint)(2 * sizeof(int)), _stream.Handle).ThrowOnError();
+        CudaDriverApi.cuMemcpyHtoDAsync(handle, (nint)v, (nuint)(3 * sizeof(int)), _stream.Handle).ThrowOnError();
+    }
+
+    public unsafe void ThrowOnDevicePosError(ulong handle)
+    {
+        if (handle == 0) return;
+        using OpScope _op = EnterOp();
+        int* v = stackalloc int[3];
+        CudaMemory.CopyDeviceToHost(v, handle, (nuint)(3 * sizeof(int)));
+        if (v[2] != 0)
+            throw new InvalidOperationException($"CUDA device-position attention rejected kvLen={v[0]}, qOffset={v[1]} (status={v[2]}).");
     }
 
     public void FreeDevicePos(ulong handle)

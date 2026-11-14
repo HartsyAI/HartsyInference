@@ -59,6 +59,7 @@ internal sealed class GraphDecodeSession
             _backend.WriteDecodeEmbedRow(_embedRow, _rowSource.GraphDecodeEmbedRow(_tokenToEmbed), _embedWidth);
         _backend.LaunchGraph(_graph!);
         _tokenToEmbed = _backend.ReadDeviceTokenId(_deviceTokenId);
+        _backend.ThrowOnDevicePosError(_devicePos);
         return _tokenToEmbed;
     }
 

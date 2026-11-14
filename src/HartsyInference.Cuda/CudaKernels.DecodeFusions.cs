@@ -115,7 +115,7 @@ public sealed partial class CudaKernels
         args[7] = &bArg; args[8] = &hqArg; args[9] = &tqArg; args[10] = &dArg; args[11] = &gArg;
         uint blockThreads = 32;
         while (blockThreads < (uint)headDim) blockThreads <<= 1;
-        CudaDriverApi.cuLaunchKernel(_faCombineQ8, (uint)((long)batch * hq * tq), 1, 1, blockThreads, 1, 1, 0, stream, (nint)args, 0)
-            .ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(_faCombineQ8, (uint)((long)batch * hq * tq), 1, 1, blockThreads, 1, 1,
+            (uint)(splits * sizeof(float)), stream, (nint)args, 0).ThrowOnError();
     }
 }

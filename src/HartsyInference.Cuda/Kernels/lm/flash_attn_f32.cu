@@ -15,6 +15,11 @@
 
 #define INF_F 3.402823466e+38f
 
+__device__ __forceinline__ float attnMax(float a, float b)
+{
+    return isnan(a) || isnan(b) ? __int_as_float(0x7fc00000) : fmaxf(a, b);
+}
+
 extern "C" __global__ void lm_flash_attn_f32(
     float* __restrict__ out,
     const float* __restrict__ Q,
@@ -37,10 +42,17 @@ extern "C" __global__ void lm_flash_attn_f32(
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
 
-    // Graph-capture decode: read this step's position from a device buffer {kvLen, qOffset} so one captured
+    // Graph-capture decode: read this step's position from a device buffer {kvLen, qOffset, status} so one captured
     // graph replays at every step without re-baking host ints (grid is position-independent for Tq=1). Null →
     // use the host-passed kvLen/qOffset (eager path, cross-attention, and all LLM callers).
-    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
+    if (dPos != nullptr) {
+        const int rawKvLen = dPos[0];
+        qOffset = dPos[1];
+        if (tid == 0 && (rawKvLen <= 0 || (unsigned int)rawKvLen > Lk || qOffset < 0
+                || (causal && (long long)qOffset + Tq > rawKvLen)))
+            atomicOr(const_cast<int*>(dPos + 2), 1);
+        kvLen = min((unsigned int)max(rawKvLen, 0), Lk);
+    }
 
     // blockDim.x is a power of two >= max(D, 32), so the tree reduction always has a complete final warp;
     // threads tid in [D, blockDim.x) are padding (contribute 0, write no output). This lets the
@@ -93,8 +105,8 @@ extern "C" __global__ void lm_flash_attn_f32(
         // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), applied to each logit before the softmax.
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
-        float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float newM = attnMax(m, score);
+        float corr = l == 0.0f ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? V[kvBase + tid] : 0.0f;
@@ -109,15 +121,15 @@ extern "C" __global__ void lm_flash_attn_f32(
     if (sink != nullptr)
     {
         float sv = sink[h];
-        float newM = fmaxf(m, sv);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float newM = attnMax(m, sv);
+        float corr = l == 0.0f ? 0.0f : __expf(m - newM);
         float p = __expf(sv - newM);
         l = l * corr + p;
         acc = acc * corr;   // sink value is implicitly zero
         m = newM;
     }
 
-    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+    if (tid < D) out[qBase + tid] = l != 0.0f ? acc / l : 0.0f;
 }
 
 // F16-storage KV variant: identical to lm_flash_attn_f32 above (same online-softmax algorithm, same F32
@@ -147,7 +159,14 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
     if (hkv >= Hkv) hkv = Hkv - 1;
     unsigned int tid = threadIdx.x;
 
-    if (dPos != nullptr) { kvLen = min((unsigned int)max(dPos[0], 0), Lk); qOffset = dPos[1]; }
+    if (dPos != nullptr) {
+        const int rawKvLen = dPos[0];
+        qOffset = dPos[1];
+        if (tid == 0 && (rawKvLen <= 0 || (unsigned int)rawKvLen > Lk || qOffset < 0
+                || (causal && (long long)qOffset + Tq > rawKvLen)))
+            atomicOr(const_cast<int*>(dPos + 2), 1);
+        kvLen = min((unsigned int)max(rawKvLen, 0), Lk);
+    }
 
     extern __shared__ float sdata[];
     size_t qBase = (((size_t)b * Hq + h) * Tq + r) * D;
@@ -186,8 +205,8 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
         }
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
-        float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float newM = attnMax(m, score);
+        float corr = l == 0.0f ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? __half2float(V[kvBase + tid]) : 0.0f;
@@ -199,13 +218,13 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
     if (sink != nullptr)
     {
         float sv = sink[h];
-        float newM = fmaxf(m, sv);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float newM = attnMax(m, sv);
+        float corr = l == 0.0f ? 0.0f : __expf(m - newM);
         float p = __expf(sv - newM);
         l = l * corr + p;
         acc = acc * corr;
         m = newM;
     }
 
-    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+    if (tid < D) out[qBase + tid] = l != 0.0f ? acc / l : 0.0f;
 }

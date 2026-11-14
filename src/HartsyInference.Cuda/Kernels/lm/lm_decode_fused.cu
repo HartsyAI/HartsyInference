@@ -235,10 +235,15 @@ QKFULL(f32, float)
 QKFULL(f16kv, __half)
 
 // ---------------------------------------------------------------------------------------------------------------------------
-// lm_flash_attn_f32_combine (verbatim) + Q8_1 sidecar of out. One block per (b, head, row); blockDim = next pow2 >= max(D, 32).
+// lm_flash_attn_f32_combine + Q8_1 sidecar of out. One block per (b, head, row); blockDim = next pow2 >= max(D, 32).
 // D % 32 == 0 (host-gated), so the warps with tid < D are full and each holds one aligned 32-block of the output.
 
 #define INF_FC 3.402823466e+38f   // INF_F of flash_attn_f32_split.cu
+
+__device__ __forceinline__ float combineMax(float a, float b)
+{
+    return isnan(a) || isnan(b) ? __int_as_float(0x7fc00000) : fmaxf(a, b);
+}
 
 extern "C" __global__ void lm_flash_attn_f32_combine_q8_1(
     float* __restrict__ out,
@@ -253,23 +258,51 @@ extern "C" __global__ void lm_flash_attn_f32_combine_q8_1(
     if (idx >= total) return;
     unsigned int tid = threadIdx.x;
 
-    float m = -INF_FC;
-    for (unsigned int g = 0; g < G; g++) {
-        float mg = partialM[idx * G + g];
-        m = fmaxf(m, mg);
+    extern __shared__ float combineWeights[];
+    __shared__ float totalL;
+    if (G <= 32) {
+        if (tid < 32) {
+            bool active = tid < G;
+            float mg = active ? partialM[idx * G + tid] : -INF_FC;
+            float m = mg;
+            #pragma unroll
+            for (int o = 16; o > 0; o >>= 1) m = combineMax(m, __shfl_xor_sync(0xffffffffu, m, o));
+            float lg = active ? partialL[idx * G + tid] : 0.0f;
+            if (active) combineWeights[tid] = lg == 0.0f ? 0.0f : __expf(mg - m);
+            __syncwarp();
+            if (tid == 0) {
+                float l = 0.0f;
+                for (unsigned int g = 0; g < G; g++) l += partialL[idx * G + g] * combineWeights[g];
+                totalL = l;
+            }
+        }
+        __syncthreads();
+        if (tid < D) {
+            float acc = 0.0f;
+            for (unsigned int g = 0; g < G; g++)
+                acc += partialAcc[(size_t)(idx * G + g) * D + tid] * combineWeights[g];
+            size_t qBase = (size_t)idx * D;
+            const float o = totalL != 0.0f ? acc / totalL : 0.0f;
+            out[qBase + tid] = o;
+            const size_t blk = (qBase + tid) >> 5;
+            fast_quantize_block(xq + blk * 32, xd + blk, xs + blk, o, tid & 31u);
+        }
+        return;
     }
 
+    float m = -INF_FC;
+    for (unsigned int g = 0; g < G; g++) m = combineMax(m, partialM[idx * G + g]);
     float l = 0.0f, acc = 0.0f;
     for (unsigned int g = 0; g < G; g++) {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_FC) ? 0.0f : __expf(mg - m);
-        l += partialL[idx * G + g] * w;
+        float lg = partialL[idx * G + g];
+        float w = lg == 0.0f ? 0.0f : __expf(mg - m);
+        l += lg * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }
-
     if (tid < D) {
         size_t qBase = (size_t)idx * D;
-        const float o = l > 0.0f ? acc / l : 0.0f;
+        const float o = l != 0.0f ? acc / l : 0.0f;
         out[qBase + tid] = o;
         const size_t blk = (qBase + tid) >> 5;
         fast_quantize_block(xq + blk * 32, xd + blk, xs + blk, o, tid & 31u);
