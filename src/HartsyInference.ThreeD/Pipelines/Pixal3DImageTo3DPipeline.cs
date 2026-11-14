@@ -203,8 +203,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
 
         if (options.DecimationTarget < 0)
             throw new ArgumentException($"DecimationTarget must not be negative; got {options.DecimationTarget}.", nameof(options));
-        if (options.Remesh && options.Grid == 1536)
-            throw new ArgumentException("Remesh needs a grid of 512 or 1024; the remesh at 1536 would take more memory than a 12 GB machine has.", nameof(options));
+        if (options.Remesh && ResolveGrid(options.Grid) == 1536)
+            throw new ArgumentException("Remesh needs a grid of 1024; the remesh at 1536 would take more memory than a 12 GB machine has.", nameof(options));
         try
         {
             ViewOf(options).Validate();

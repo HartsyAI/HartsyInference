@@ -27,11 +27,11 @@ public sealed record Pixal3DOptions
     /// <summary>Face count the textured mesh is decimated to. 0 uses <see cref="Trellis2ImageTo3DPipeline.DefaultDecimationTarget"/>.</summary>
     public int DecimationTarget { get; init; }
 
-    /// <summary>Repair the shape-only mesh (<see cref="Geometry.Ops.ShapeMeshFinisher"/>): weld, non-manifold split, specks removed, small holes closed, winding unified.
-    /// The textured path always repairs through its post-processor. Boundary edges along larger openings remain either way.</summary>
     /// <summary>Textured output only: rebuild the surface as a closed shell on the final grid before decimating (upstream <c>remesh=True</c>); the grid must be 512 or 1024.</summary>
     public bool Remesh { get; init; }
 
+    /// <summary>Repair the shape-only mesh (<see cref="Geometry.Ops.ShapeMeshFinisher"/>): weld, non-manifold split, specks removed, small holes closed, winding unified.
+    /// The textured path always repairs through its post-processor. Boundary edges along larger openings remain either way.</summary>
     public bool CleanMesh { get; init; } = true;
 
     /// <summary>With <see cref="CleanMesh"/>, also close the thin slits and gaps the repair leaves: every boundary loop that triangulates with no new edge longer than

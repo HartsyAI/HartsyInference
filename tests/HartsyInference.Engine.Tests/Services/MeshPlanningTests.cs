@@ -364,6 +364,29 @@ public sealed class MeshPlanningTests
         Assert.DoesNotContain(plan.Issues, i => i.Field == nameof(MeshRequest.Remesh));
     }
 
+    [Theory]
+    [InlineData("triposr")]
+    [InlineData("hunyuan3d")]
+    [InlineData("hunyuan3d-paint21")]
+    public void RemeshAloneIsRejectedForAModelWithoutTextureOutputAndTaggedToItsField(string id)
+    {
+        NotSupportedException error = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate(id, Valid(id) with { Remesh = true }, matterAvailable: false));
+
+        Assert.Equal(nameof(MeshRequest.Remesh), MeshFieldTag.FieldOf(error));
+    }
+
+    [Fact]
+    public void AMaxPresetGivesWayToGrid1024ForARemeshRequest()
+    {
+        MeshRequest request = Valid("trellis2") with { Quality = MeshQuality.Max, Texture = true, Remesh = true };
+
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", request);
+
+        Assert.Equal(1024, resolved.GridResolution);
+        MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
+        Assert.Equal(1536, MeshQualityPresets.Resolve("trellis2", request with { Remesh = false }).GridResolution);
+    }
+
     [Fact]
     public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
     {

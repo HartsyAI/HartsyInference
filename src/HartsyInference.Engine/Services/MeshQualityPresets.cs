@@ -19,7 +19,7 @@ internal static class MeshQualityPresets
     internal static MeshRequest Apply(MeshPreset preset, MeshRequest request) => request with
     {
         Steps = request.Steps == 0 ? preset.Steps : request.Steps,
-        GridResolution = request.GridResolution == 0 ? preset.GridResolution : request.GridResolution,
+        GridResolution = request.GridResolution == 0 ? PresetGrid(preset, request) : request.GridResolution,
         TextureSize = request.TextureSize == 0 && request.Texture ? preset.TextureSize : request.TextureSize,
     };
 
@@ -29,10 +29,13 @@ internal static class MeshQualityPresets
         int value = field switch
         {
             nameof(MeshRequest.Steps) => preset?.Steps ?? 0,
-            nameof(MeshRequest.GridResolution) => preset?.GridResolution ?? 0,
+            nameof(MeshRequest.GridResolution) => preset is null ? 0 : PresetGrid(preset, request),
             nameof(MeshRequest.TextureSize) => request.Texture ? preset?.TextureSize ?? 0 : 0,
             _ => 0,
         };
         return value == 0 ? null : value;
     }
+
+    // The remesh does not run at 1536 (it needs more host memory than a 12 GB machine has), so a preset's 1536 gives way to 1024 for a request that asks for it.
+    private static int PresetGrid(MeshPreset preset, MeshRequest request) => request.Remesh && preset.GridResolution > 1024 ? 1024 : preset.GridResolution;
 }

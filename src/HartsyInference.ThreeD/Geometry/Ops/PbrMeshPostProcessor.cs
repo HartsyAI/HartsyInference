@@ -1,3 +1,4 @@
+using System.Numerics;
 using HartsyInference.ThreeD.Io;
 
 namespace HartsyInference.ThreeD.Geometry.Ops;
@@ -70,13 +71,13 @@ public static class PbrMeshPostProcessor
         return new PbrPostProcessResult(unwrapped.Mesh, material, covered) { Remeshed = options.RemeshResolution > 0 };
     }
 
-    // Upstream centres the grid on the attribute volume and widens it by three bands of the remesh resolution.
+    // Upstream centres the grid on the attribute volume and widens it by three bands of the remesh resolution; the projection back stays 0, as in its demo app (the function default is 0.9).
     private static Mesh Remesh(Mesh source, TriangleBvh bvh, SparseAttributeVolume volume, PbrPostProcessOptions options, CancellationToken cancellationToken)
     {
         const double Band = 1.0;
         int res = options.RemeshResolution;
         double extent = Math.Max(volume.GridSize.X, Math.Max(volume.GridSize.Y, volume.GridSize.Z)) * (double)volume.VoxelSize;
-        System.Numerics.Vector3 center = volume.Origin + new System.Numerics.Vector3(volume.GridSize.X, volume.GridSize.Y, volume.GridSize.Z) * (volume.VoxelSize * 0.5f);
+        Vector3 center = volume.Origin + new Vector3(volume.GridSize.X, volume.GridSize.Y, volume.GridSize.Z) * (volume.VoxelSize * 0.5f);
         NarrowBandRemeshOptions remesh = new()
         {
             Resolution = res,
