@@ -109,7 +109,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Python reference dumps and per-stage parity (needs the GPU server or a CUDA reference env), then promote the status row.
 - [ ] Texture flow, texture decoder and the GLB bake (a separate PR); hole filling.
 - [ ] Cache the cross-attention keys and values per block, keep the flows resident or in BF16, and tile attention for the 1024/1536 high-resolution step.
-- [ ] Textured quality: see [Textured quality and the newest open models](#textured-quality-and-the-newest-open-models-2026-11-14) for the measured state and what is not verified (remesh on Pixal3D end to end, no numeric comparison with upstream, thin-feature thickening, F16 against F32, nostril and ear-canal openings).
+- [ ] Textured quality: the open items are listed under [Textured quality and the newest open models](#textured-quality-and-the-newest-open-models-2026-11-14).
 
 ### Other models / features
 - [ ] Hunyuan3D Paint: per-stage parity against the Python reference (2.0 runs on real weights and renders), the 2.1 weights and path, the delight stage, a view-count field on `MeshRequest`. Hunyuan3D Part and Omni follow as their own spikes. ([details](#hunyuan3d-paint))
@@ -324,34 +324,26 @@ GPU frame check 2026-11-12 (RTX 3060, a bust cut out by colour keying, shape onl
 
 ### Textured quality and the newest open models (2026-11-14)
 
-**Quality state (TRELLIS.2, RTX 3060 12 GB, one bust, seed 1, 12 steps, F16 flows at 1024, 2048 texture).** The remesh is on by default for textured TRELLIS.2 and Pixal3D output at a grid of 512 or 1024 ([#900](https://github.com/HartsyAI/HartsyInference/pull/900); `--no-remesh` or `Remesh = false` opts out; shape-only output, grid 1536 and the other models are unchanged). Measured on the real GLBs (charts = vertex-index components, atlas = share of the 2048 atlas covered by UV triangles, boundary and non-manifold edges after welding positions):
-
-| Run | Time | Card peak | Faces | Charts | Atlas covered | Boundary / non-manifold |
-|---|---|---|---|---|---|---|
-| 512 with remesh (R1) | 177 s | 7,180 MiB | 999,600 | 22,019 | 30.5 % | 0 / 186 |
-| 1024 with remesh (R3) | 963 s | 11,708 MiB (host working set peak 20.1 GB of 40) | 994,568 | 107,377 | 23.5 % | 0 / 154 |
-| 1024 without remesh (earlier run, same flags) | 936 s | 11,679 MiB | 1,024,871 | 231,622 | 14.6 % | 308,312 / 30,518 |
-
-On the 12 GB card **512 with the remesh is the best setting**: a clean closed surface in about three minutes and 7.2 GB. At 1024 the remesh costs about 22 s more than without it (the last step took 215 s against 193 s) and the whole run 15 to 16 minutes, because the flows go past the 8 GiB a Windows process gets on this card and page (the engine prints a paging warning, and [#896](https://github.com/HartsyAI/HartsyInference/pull/896) added a stall watchdog). By eye the 1024 result has finer brows and eyes but speckled hair and edges, dark seam lines and a patch on the nose bridge: 20 M faces decimated to 1 M keep the decoder's terraces, so its charts stay five times the 512 count. Method and per-stage detail: [MESH_POSTPROCESS.md](../Research/MESH_POSTPROCESS.md).
-
-**Paint 2.1 input** (the remeshed bust decimated by this engine, default 15 steps, 2048 texture, about 2 minutes, 10 GB peak): 193k faces gave the best texture and geometry (smooth surface, even texture, 32.4 % atlas, 15,196 charts); 100k was nearly as good (31.6 %); 40k lost the face (23.5 %): quadric collapse from 4.6 M to 40k faces, a 100x ratio, destroys facial detail whatever the remesh does. **Feed Paint 100,000 faces or more, 193,000 where it fits.** The engine has a chart-count warning (fewer than 12 faces per chart) and no face-count target; the warning also fires on good 100k inputs (7.2 faces per chart), so it is not a quality gate. Table: [MESH_POSTPROCESS.md](../Research/MESH_POSTPROCESS.md#paint-21-on-a-remeshed-mesh-which-input-size-rtx-3060-2026-11-14).
+**Verdicts** (TRELLIS.2 on the RTX 3060 12 GB, one bust and one seed; the measurements are in [MESH_POSTPROCESS.md](../Research/MESH_POSTPROCESS.md#wiring-into-the-textured-post-process-on-by-default-for-textured-requests)):
+- The remesh is on by default for textured TRELLIS.2 and Pixal3D output at a grid of 512 or 1024 ([#900](https://github.com/HartsyAI/HartsyInference/pull/900); `--no-remesh` or `Remesh = false` opts out; shape-only output, grid 1536 and the other models are unchanged).
+- **512 with the remesh is the best setting on the 12 GB card**: a closed surface in about three minutes. 1024 with the remesh works (about 16 minutes, because the flows page past the 8 GiB a Windows process gets on this card) but gave a noisier result than 512 and five times its UV charts.
+- **Feed Paint 100,000 faces or more, 193,000 where it fits**: 40,000 loses the face (a 100x decimation destroys facial detail), 100,000 is nearly as good as 193,000 ([the table](../Research/MESH_POSTPROCESS.md#paint-21-on-a-remeshed-mesh-which-input-size-rtx-3060-2026-11-14)). The engine's chart-count warning is not a quality gate: it also fires on good 100,000-face inputs.
 
 **Not verified:**
 - The remesh on Pixal3D end to end: only TRELLIS.2 ran through the whole pipeline on a GPU; Pixal3D shares the post-process and its options are wired and unit-tested.
 - Any numeric comparison with upstream: CuMesh's remesh is CUDA-only, so the port was checked by its own geometric tests and by looking at renders.
-- Thin features thicken by one voxel per side (the projection back toward the original is 0, as in upstream's demo app), and non-manifold edges remain where sheets touch (154 to 186 here).
-- F16 against F32 flow quality at 1024: F16 fits and is 13 % faster, and only a render was compared.
-- Nostril and ear-canal openings: the remesh's outer-shell mode (and the hole fill) may close small openings such as nostrils and ear canals; this was not checked against the source image.
+- Thin features thicken by one voxel per side (the projection back toward the original is 0, as in upstream's demo app), and non-manifold edges remain where sheets touch.
+- F16 against F32 flow quality at 1024: F16 fits and is 13 % faster; only a render was compared.
+- Nostril and ear-canal openings: the remesh's outer-shell mode (and the hole fill) may close small openings; this was not checked against the source image.
 - One subject and one seed throughout; the grey back cavity seen once was not reproduced.
 
-**Newest open-weights releases per family, from primary pages on 2026-11-14** (Hugging Face model API and the GitHub READMEs; the pages were read through a summarising fetch tool, so dates and sizes are the API's `createdAt` / `usedStorage` values and are not rechecked by hand). Nothing was downloaded or ported.
+**Newest open-weights releases per family, from primary pages on 2026-11-14** (Hugging Face model API and the GitHub READMEs, read through a summarising fetch tool, so dates and sizes are the API's `createdAt` / `usedStorage` values and were not rechecked by hand). Nothing was downloaded or ported.
 
 | Family | Newest open release found | Licence | Size (repo) | Newer open model? |
 |---|---|---|---|---|
 | Hunyuan3D | `tencent/Hunyuan3D-2.1` (2025-06-13, last modified 2025-10-17): shape 3.3 B, Paint 2.1 texture 2 B; Part and Omni followed (2025-09-23) | `tencent-hunyuan-community` (Hugging Face `license: other`) | about 15.0 GB | None found. No `tencent` model on Hugging Face is named 2.5, 3.0 or 3.1, and the newest 3D repository there is dated 2025-10-17. The Tencent-Hunyuan GitHub organisation lists Hunyuan3D-Buffalo1.0 (2026-08-05) and Hunyuan3D-WorldClaw (2026-08-07) with a paper and project page only: no weights, no code and no licence are stated |
-| TRELLIS.2 | `microsoft/TRELLIS.2-4B` (created 2025-12-01, last modified 2025-12-27): shape, texture, structure flows and the SC-VAEs | MIT | about 16.2 GB | None. No newer checkpoint is listed; its README roadmap still lists "shape-conditioned texture generation inference code" as an item. Community conversions (GGUF, int8) exist and are not official |
-| Pixal3D | `TencentARC/Pixal3D` (created 2026-04-30, last modified 2026-08-31) | MIT | about 46.0 GB | Newer than this port: the `main` branch uses the improved TRELLIS.2 backbone (May 2026; a `paper` branch keeps the Direct3D-S2 backbone), and multi-view checkpoints (`*_mv`, `pipeline_mv.json`, September 2026) with multi-view inference code. Which backbone this engine's port follows, and whether the multi-view weights are worth porting, is not checked |
-| Texture-only | Hunyuan3D Paint 2.1 (inside the 2.1 repository, `hunyuan3d-paintpbr-v2-1`, 2 B); TRELLIS.2's own texturing pipeline (`texturing_pipeline.json`, shape-conditioned) | as above | as above | None found from primary pages. A web search also named Ubisoft's CHORD (open weights for PBR material estimation from one image); that came from a secondary page and its release was not checked |
+| TRELLIS.2 | `microsoft/TRELLIS.2-4B` (created 2025-12-01, last modified 2025-12-27): shape, texture and structure flows and the SC-VAEs | MIT | about 16.2 GB | None. No newer checkpoint is listed; its README roadmap still lists "shape-conditioned texture generation inference code" as an item. Community conversions (GGUF, int8) exist and are not official |
+| Pixal3D | `TencentARC/Pixal3D` (created 2026-04-30, last modified 2026-08-31) | MIT | about 46.0 GB | Nothing newer than the pinned revision (weights `b0cb2e1b`, code `f7cf3842`, 2026-09-01). The port follows the TRELLIS.2-based `main` branch; the multi-view checkpoints (`*_mv`, same keys) and the Direct3D-S2 `paper` branch are inventoried but not implemented ([details](../Research/PIXAL3D_ARCHITECTURE.md)) |
+| Texture-only | Hunyuan3D Paint 2.1 (inside the 2.1 repository, `hunyuan3d-paintpbr-v2-1`, 2 B); TRELLIS.2's own shape-conditioned texturing pipeline (`texturing_pipeline.json`) | as above | as above | None found from primary pages |
 
 Hosted-only statements about Hunyuan3D 2.5, 3.0 and 3.1 were not confirmed from a primary page: no open repository for them was found, which is not proof that none exists.
-

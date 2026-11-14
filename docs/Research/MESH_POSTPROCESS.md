@@ -300,7 +300,15 @@ Cost: about 10 s of CPU and 3.6 GiB of host memory at 512 (the table below); at 
 | Bust 2 (1,865,382 voxels) | off | 63.7 s, 2.8 GiB | 509,188 | 224,074 / 20,048 | 19.7 % |
 | Bust 2 | 512 | 47.4 s, 3.6 GiB | 499,594 | 0 / 23 | 31.6 % |
 
-Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Whole-pipeline GPU runs (RTX 3060, bust 2, F16 flow at 1024, 2026-11-14): at 512 the GLB has 22,019 charts and covers 30.5 % of the 2048 atlas, with no boundary edges and 186 non-manifold ones; at 1024 with the remesh it has 107,377 charts and 23.5 %, boundary 0 and 154 non-manifold, against 231,622 charts, 14.6 %, 308,312 boundary and 30,518 non-manifold edges at 1024 without it. By eye the 512 result is the cleaner one; the 1024 result has finer brows and eyes but speckled hair, dark seam lines and a patch on the nose bridge, because 20 M faces decimated to 1 M keep the decoder's terraces. The 1024 run took 963 s in all, the same as without the remesh plus about 22 s. One subject and one seed.
+Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Whole-pipeline GPU runs (RTX 3060, bust 2, seed 1, 12 steps, F16 flow at 1024, 2026-11-14; charts and coverage measured on the GLB):
+
+| Run | Time | Card peak | Faces | Charts | Atlas covered | Boundary / non-manifold |
+|---|---|---|---|---|---|---|
+| 512 with remesh | 177 s | 7,180 MiB | 999,600 | 22,019 | 30.5 % | 0 / 186 |
+| 1024 with remesh | 963 s | 11,708 MiB (host working set peak 20.1 GiB on a 40 GiB machine) | 994,568 | 107,377 | 23.5 % | 0 / 154 |
+| 1024 without remesh | 936 s | 11,679 MiB | 1,024,871 | 231,622 | 14.6 % | 308,312 / 30,518 |
+
+The remesh adds about 22 s to the last step at 1024 (215 s against 193 s); the other 5 s of the 27 s difference in the totals is run-to-run variation. By eye the 512 result is the cleaner one; the 1024 result has finer brows and eyes but speckled hair, dark seam lines and a patch on the nose bridge, because 20 M faces decimated to 1 M keep the decoder's terraces. One subject and one seed.
 
 ### Paint 2.1 on a remeshed mesh: which input size (RTX 3060, 2026-11-14)
 
