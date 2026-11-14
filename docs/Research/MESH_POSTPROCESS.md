@@ -277,5 +277,10 @@ Measured on the CPU (8 threads), grid 512, one input per row, then `DecimateStag
 | Bust 2, raw (3,811,232 faces, 1,865,382 voxels), before | | 279,414 / 20,021 | 100,238 | 19.7 % |
 | Bust 2, outer sheet only | 4,749,124, 8.6 s, 2.0 GiB | 0 / 20,811 | 18,198 | 32.1 % |
 | Bust 2, both sheets | 5,054,024, 6.8 s, 2.0 GiB | 0 / 39,821 | 21,450 | 30.0 % |
+| 1024 mesh (1,024,871 faces, already decimated; geometry only), before | | 308,312 / 30,518 | 155,702 | 15.5 % |
+| 1024 mesh, grid 1024, outer sheet only | 20,578,820, 38.5 s, 5.7 GiB | 0 / 100,290 | 49,502 | 28.7 % |
+| 1024 mesh, grid 1024, both sheets | 22,518,744, 29.2 s, 5.9 GiB | 0 / 233,570 | 91,617 | 17.8 % |
 
-The shell is watertight by construction (no boundary edge); the non-manifold edges are where two sheets of the offset surface touch. Rendered, bust 1 has no specks or cracks and bust 2 loses the peeling, torn look (its terraced forehead is the decoder's shape and stays). Not verified: numeric agreement with CuMesh (its CUDA operations cannot run here), thin features (the shell is a voxel thicker on each side with `ProjectBack` 0), and the textured end-to-end results on a GPU.
+(The 1024 rows use the GLB of the 1024 run as the input and a volume of another subject only to run the bake, so their bake columns mean nothing; the charts and coverage are geometry only.)
+
+The shell is watertight by construction (no boundary edge); the non-manifold edges are where two sheets of the offset surface touch. Rendered, bust 1 has no specks or cracks and bust 2 loses the peeling, torn look (its terraced forehead is the decoder's shape and stays). There is no numeric comparison with upstream: CuMesh's CUDA operations cannot run here, nothing was cloned or installed, and the checks are synthetic (a sphere, a torus, two spheres, a hole narrower than the band, other bands) plus the three real meshes. Not verified: numeric agreement with CuMesh, thin features (the shell is a voxel thicker on each side with `ProjectBack` 0), and the textured end-to-end results on a GPU.

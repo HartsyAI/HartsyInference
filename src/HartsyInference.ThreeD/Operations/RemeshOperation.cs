@@ -16,9 +16,9 @@ public sealed class RemeshOperation : IMeshOperation
     /// <inheritdoc/>
     public IReadOnlyList<MeshOperationParameter> Parameters { get; } =
     [
-        new("resolution", "Grid cells along the longest side, 32 times a power of two or 1536 and the like; the faces grow with its square.", 256, 32, 4096, Integer: true),
+        new("resolution", "Grid cells along the longest side (512, 1024, 1536 and the like: a number that halves evenly down to a base grid of at most 64 cells); the faces and the memory grow with its square, about 2 GiB at 512 for a 1.5 to 3.8 M-face input.", 256, 32, 1024, Integer: true),
         new("band", "Half the shell's thickness in voxels.", 1, 0.1, 8),
-        new("projectBack", "How far each vertex moves back towards the input surface, 0 to 1.", 0, 0, 1),
+        new("projectBack", "How far each vertex moves back towards the input surface, 0 to 1; close to 1 with outerOnly 0 puts both sheets on the input as coincident surfaces.", 0, 0, 1),
         new("outerOnly", "1 keeps only the outer sheet of the shell (found by flood fill), 0 keeps both.", 0, 0, 1, Integer: true),
     ];
 

@@ -72,7 +72,7 @@ public static class NarrowBandRemesher
         Parallel.For(0, cornerCount, parallel, c =>
             value[c] = (float)(bvh.Distance(origin.X + cornerX[c] * voxel, origin.Y + cornerY[c] * voxel, origin.Z + cornerZ[c] * voxel) - eps));
 
-        bool[]? exterior = options.OuterShellOnly ? ExteriorCorners(corners, value, cornerX, cornerY, cornerZ, CornerKey) : null;
+        ExteriorMap? exterior = options.OuterShellOnly ? ExteriorCorners(corners, value, cornerX, cornerY, cornerZ, CornerKey) : null;
 
         float[] vertex = new float[voxels * 3];
         sbyte[] flag = new sbyte[voxels * 3];
@@ -89,13 +89,13 @@ public static class NarrowBandRemesher
                 int f = flag[i * 3 + axis];
                 if (f == 0)
                     continue;
-                if (exterior is not null && !PositiveEndIsExterior(i, axis, f, vx, vy, vz, corners, exterior, CornerKey))
+                if (exterior is not null && !KeepsQuad(i, axis, f, vx, vy, vz, corners, exterior, CornerKey))
                     continue;
                 AddQuad(i, axis, f, vx, vy, vz, voxelMap, CornerKey, vertex, triangles, used);
             }
         }
 
-        return Finish(vertex, triangles, used, origin, voxel, bvh, options.ProjectBack);
+        return Finish(vertex, triangles, used, origin, voxel, bvh, options.ProjectBack, cancellationToken);
     }
 
     private static void Validate(Mesh mesh, NarrowBandRemeshOptions options)
@@ -108,7 +108,7 @@ public static class NarrowBandRemesher
         while (cells > BaseCells && cells % 2 == 0)
             cells /= 2;
         if (cells > 64)
-            throw new ArgumentException($"The resolution must be {BaseCells} times a power of two, or a multiple of one such as 1536; got {options.Resolution}.", nameof(options));
+            throw new ArgumentException($"The resolution must halve evenly down to a base grid of at most 64 cells (32 times a power of two, 48 times one as 1536 is, and so on); got {options.Resolution}.", nameof(options));
         if (!(options.Band > 0) || !double.IsFinite(options.Band))
             throw new ArgumentOutOfRangeException(nameof(options), "The band must be positive.");
         if (!(options.ProjectBack >= 0 && options.ProjectBack <= 1))
@@ -240,12 +240,14 @@ public static class NarrowBandRemesher
     {
         int p = (axis + 1) % 3, q = (axis + 2) % 3;
         Span<int> quad = stackalloc int[4];
+        Span<int> c = stackalloc int[3];
         for (int n = 0; n < 4; n++)
         {
-            int[] o = QuadOffsets[n];
-            int[] c = [vx[i], vy[i], vz[i]];
-            c[p] += o[0];
-            c[q] += o[1];
+            c[0] = vx[i];
+            c[1] = vy[i];
+            c[2] = vz[i];
+            c[p] += QuadOffsets[n][0];
+            c[q] += QuadOffsets[n][1];
             int found = voxelMap.Find(key(c[0], c[1], c[2]));
             if (found < 0)
                 return;
@@ -253,19 +255,24 @@ public static class NarrowBandRemesher
         }
 
         if (direction < 0)
-        {
             (quad[1], quad[3]) = (quad[3], quad[1]);
-        }
 
         // Of the two diagonals, split along the one whose triangles face most alike.
         double aligned02 = Alignment(vertex, quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]);
         double aligned13 = Alignment(vertex, quad[1], quad[2], quad[3], quad[1], quad[3], quad[0]);
         if (aligned02 >= aligned13)
-            triangles.AddRange([quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]]);
+        {
+            triangles.Add(quad[0]); triangles.Add(quad[1]); triangles.Add(quad[2]);
+            triangles.Add(quad[0]); triangles.Add(quad[2]); triangles.Add(quad[3]);
+        }
         else
-            triangles.AddRange([quad[1], quad[2], quad[3], quad[1], quad[3], quad[0]]);
-        foreach (int v in quad)
-            used[v] = true;
+        {
+            triangles.Add(quad[1]); triangles.Add(quad[2]); triangles.Add(quad[3]);
+            triangles.Add(quad[1]); triangles.Add(quad[3]); triangles.Add(quad[0]);
+        }
+
+        for (int n = 0; n < 4; n++)
+            used[quad[n]] = true;
     }
 
     private static double Alignment(float[] vertex, int a0, int b0, int c0, int a1, int b1, int c1)
@@ -284,21 +291,27 @@ public static class NarrowBandRemesher
 
     private static Vector3 At(float[] v, int i) => new(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
 
+    /// <summary>Which corners lie outside the shell, which inside-the-shell component each negative corner belongs to, and whether an outside corner was found for that component.</summary>
+    private sealed record ExteriorMap(bool[] Exterior, int[] Component, bool[] Seeded);
+
     // The corners outside the shell: the positive corners reachable from the one just beyond the leftmost corner of each negative (inside the shell) component.
-    private static bool[] ExteriorCorners(
+    private static ExteriorMap ExteriorCorners(
         VoxelKeyMap corners, float[] value, List<int> cx, List<int> cy, List<int> cz, Func<int, int, int, long> key)
     {
         int n = value.Length;
         bool[] exterior = new bool[n];
-        bool[] seen = new bool[n];
+        int[] component = new int[n];
+        Array.Fill(component, -1);
+        List<bool> seeded = [];
         Queue<int> queue = new();
         int[] dx = [-1, 1, 0, 0, 0, 0], dy = [0, 0, -1, 1, 0, 0], dz = [0, 0, 0, 0, -1, 1];
         for (int start = 0; start < n; start++)
         {
-            if (value[start] >= 0 || seen[start])
+            if (value[start] >= 0 || component[start] >= 0)
                 continue;
+            int id = seeded.Count;
             int leftmost = start;
-            seen[start] = true;
+            component[start] = id;
             queue.Enqueue(start);
             while (queue.Count > 0)
             {
@@ -308,20 +321,22 @@ public static class NarrowBandRemesher
                 for (int d = 0; d < 6; d++)
                 {
                     int next = corners.Find(key(cx[c] + dx[d], cy[c] + dy[d], cz[c] + dz[d]));
-                    if (next >= 0 && value[next] < 0 && !seen[next])
+                    if (next >= 0 && value[next] < 0 && component[next] < 0)
                     {
-                        seen[next] = true;
+                        component[next] = id;
                         queue.Enqueue(next);
                     }
                 }
             }
 
             int seed = corners.Find(key(cx[leftmost] - 1, cy[leftmost], cz[leftmost]));
-            if (seed >= 0 && value[seed] >= 0 && !exterior[seed])
+            bool found = seed >= 0 && value[seed] >= 0;
+            seeded.Add(found);
+            if (found && !exterior[seed])
                 Flood(seed);
         }
 
-        return exterior;
+        return new ExteriorMap(exterior, component, [.. seeded]);
 
         void Flood(int seed)
         {
@@ -343,28 +358,38 @@ public static class NarrowBandRemesher
         }
     }
 
-    // A component whose seed corner was not found keeps both sheets, so its quads pass.
-    private static bool PositiveEndIsExterior(
-        int i, int axis, int direction, int[] vx, int[] vy, int[] vz, VoxelKeyMap corners, bool[] exterior, Func<int, int, int, long> key)
+    // A quad stays when its positive end is outside the shell, or when the shell piece it belongs to has no outside corner we could find (that piece keeps both sheets).
+    private static bool KeepsQuad(
+        int i, int axis, int direction, int[] vx, int[] vy, int[] vz, VoxelKeyMap corners, ExteriorMap map, Func<int, int, int, long> key)
     {
         int p = (axis + 1) % 3, q = (axis + 2) % 3;
-        int[] c = [vx[i], vy[i], vz[i]];
-        c[p] += 1;
-        c[q] += 1;
-        if (direction > 0)
-            c[axis] += 1;
-        int corner = corners.Find(key(c[0], c[1], c[2]));
-        return corner >= 0 && exterior[corner];
+        Span<int> start = stackalloc int[3];
+        start[0] = vx[i];
+        start[1] = vy[i];
+        start[2] = vz[i];
+        start[p] += 1;
+        start[q] += 1;
+        Span<int> end = stackalloc int[3];
+        start.CopyTo(end);
+        end[axis] += 1;
+        Span<int> positive = direction > 0 ? end : start;
+        Span<int> negative = direction > 0 ? start : end;
+        int negativeCorner = corners.Find(key(negative[0], negative[1], negative[2]));
+        if (negativeCorner >= 0 && map.Component[negativeCorner] >= 0 && !map.Seeded[map.Component[negativeCorner]])
+            return true;
+        int positiveCorner = corners.Find(key(positive[0], positive[1], positive[2]));
+        return positiveCorner >= 0 && map.Exterior[positiveCorner];
     }
 
-    private static Mesh Finish(float[] vertex, List<int> triangles, bool[] used, Vector3 origin, double voxel, TriangleBvh bvh, double projectBack)
+    private static Mesh Finish(
+        float[] vertex, List<int> triangles, bool[] used, Vector3 origin, double voxel, TriangleBvh bvh, double projectBack, CancellationToken cancellationToken)
     {
         int[] remap = new int[used.Length];
         int kept = 0;
         for (int i = 0; i < used.Length; i++)
             remap[i] = used[i] ? kept++ : -1;
         float[] positions = new float[kept * 3];
-        Parallel.For(0, used.Length, i =>
+        Parallel.For(0, used.Length, new ParallelOptions { CancellationToken = cancellationToken }, i =>
         {
             if (!used[i])
                 return;

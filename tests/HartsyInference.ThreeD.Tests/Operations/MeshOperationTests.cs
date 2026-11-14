@@ -397,6 +397,7 @@ public sealed class MeshOperationTests
         Assert.Single(run.Document.Primitives);
         Assert.Throws<ArgumentException>(() => Run(document, "remesh", ("resolution", 100.5)));
         Assert.Throws<ArgumentOutOfRangeException>(() => Run(document, "remesh", ("projectBack", 2)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Run(document, "remesh", ("resolution", 2048)));
     }
 
     [Fact]

@@ -87,6 +87,50 @@ public sealed class NarrowBandRemesherTests
         Assert.Equal(a.Vertices, b.Vertices);
     }
 
+    [Fact]
+    public void TwoSeparateSpheres_EachKeepOnlyTheirOuterSheet()
+    {
+        Mesh a = SyntheticMeshes.Icosphere(3, 1f);
+        Mesh b = SyntheticMeshes.Icosphere(3, 1f);
+        float[] moved = [.. b.Vertices];
+        for (int i = 0; i < moved.Length; i += 3)
+            moved[i] += 3f;
+        Mesh two = new() { Vertices = [.. a.Vertices, .. moved], Indices = [.. a.Indices, .. b.Indices.Select(i => i + a.VertexCount)] };
+
+        Mesh outer = NarrowBandRemesher.Remesh(two, Options());
+        Mesh both = NarrowBandRemesher.Remesh(two, Options(outerOnly: false));
+
+        Assert.Equal(4, SyntheticMeshes.EulerCharacteristic(outer));
+        Assert.InRange(outer.TriangleCount, both.TriangleCount * 4 / 10, both.TriangleCount * 6 / 10);
+        Assert.True(SyntheticMeshes.SignedVolume(outer) > 2 * 4.0 / 3 * Math.PI * 0.95);
+    }
+
+    [Theory]
+    [InlineData(1.5)]
+    [InlineData(2.5)]
+    public void AnotherBand_StillGivesAClosedShellAtTheMatchingOffset(double band)
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(4, 1f);
+
+        Mesh shell = NarrowBandRemesher.Remesh(sphere, new NarrowBandRemeshOptions { Resolution = Res, Band = band, OuterShellOnly = true });
+
+        (double[] min, double[] max) = SyntheticMeshes.Bounds(shell);
+        double voxel = (2.0 * (Res + 3 * band) / Res) / Res;
+        Assert.True(SyntheticMeshes.IsClosedManifold(shell));
+        Assert.InRange(max[0], 1 + (band - 1.0) * voxel, 1 + (band + 1.0) * voxel);
+        Assert.InRange(min[0], -(1 + (band + 1.0) * voxel), -(1 + (band - 1.0) * voxel));
+    }
+
+    [Fact]
+    public void AResolutionThatHalvesToABaseGridIsAccepted()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2, 1f);
+
+        Mesh shell = NarrowBandRemesher.Remesh(sphere, new NarrowBandRemeshOptions { Resolution = 100, OuterShellOnly = true });
+
+        Assert.True(shell.TriangleCount > 0);
+    }
+
     [Theory]
     [InlineData(31)]
     [InlineData(1001)]
