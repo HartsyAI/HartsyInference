@@ -108,17 +108,22 @@ public sealed class NarrowBandRemesherTests
     [Theory]
     [InlineData(1.5)]
     [InlineData(2.5)]
-    public void AnotherBand_StillGivesAClosedShellAtTheMatchingOffset(double band)
+    [InlineData(4.0)]
+    public void AnotherBand_GivesAClosedShellAtTheMatchingOffsetAndStillDropsTheInnerSheet(double band)
     {
         Mesh sphere = SyntheticMeshes.Icosphere(4, 1f);
+        NarrowBandRemeshOptions options = new() { Resolution = Res, Band = band, OuterShellOnly = true };
 
-        Mesh shell = NarrowBandRemesher.Remesh(sphere, new NarrowBandRemeshOptions { Resolution = Res, Band = band, OuterShellOnly = true });
+        Mesh outer = NarrowBandRemesher.Remesh(sphere, options);
+        Mesh both = NarrowBandRemesher.Remesh(sphere, options with { OuterShellOnly = false });
 
-        (double[] min, double[] max) = SyntheticMeshes.Bounds(shell);
+        (double[] min, double[] max) = SyntheticMeshes.Bounds(outer);
         double voxel = (2.0 * (Res + 3 * band) / Res) / Res;
-        Assert.True(SyntheticMeshes.IsClosedManifold(shell));
+        Assert.True(SyntheticMeshes.IsClosedManifold(outer));
         Assert.InRange(max[0], 1 + (band - 1.0) * voxel, 1 + (band + 1.0) * voxel);
         Assert.InRange(min[0], -(1 + (band + 1.0) * voxel), -(1 + (band - 1.0) * voxel));
+        Assert.True(outer.TriangleCount < both.TriangleCount * 0.7, $"outer {outer.TriangleCount}, both {both.TriangleCount}");
+        Assert.True(SyntheticMeshes.SignedVolume(outer) > 4.0 / 3 * Math.PI);
     }
 
     [Fact]

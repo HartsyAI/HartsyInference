@@ -12,7 +12,7 @@ public sealed record NarrowBandRemeshOptions
     /// <summary>How far each vertex moves back towards its closest point on the input, 0 (stay on the offset surface) to 1 (on the input); upstream's function default is 0.9 and its demo app uses 0. Close to 1 with both sheets kept, the two sheets land on the input as coincident surfaces that face opposite ways.</summary>
     public double ProjectBack { get; init; }
 
-    /// <summary>Keeps only the outer sheet of the shell, found by flood-filling the space outside it, which halves the faces and leaves no hidden inner sheet to unwrap. A hole wider than twice the band lets the fill in, and both sheets then stay, as upstream's always are.</summary>
+    /// <summary>Keeps only the outer sheet of the shell, found by flood-filling from just beyond the leftmost corner of each separate piece of the shell, which halves the faces and leaves no hidden inner sheet to unwrap; a closed part inside a hollow one keeps its own outer sheet. A hole wider than twice the band lets the fill in, and both sheets then stay, as upstream's always are; so do the sheets of a piece whose side cannot be told.</summary>
     public bool OuterShellOnly { get; init; }
 
     /// <summary>Centre of the grid, or null for the centre of the input's bounding box. Upstream passes the centre of the attribute volume.</summary>

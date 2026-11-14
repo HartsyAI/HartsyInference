@@ -291,8 +291,8 @@ public static class NarrowBandRemesher
 
     private static Vector3 At(float[] v, int i) => new(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
 
-    /// <summary>Which corners lie outside the shell, which inside-the-shell component each negative corner belongs to, and whether an outside corner was found for that component.</summary>
-    private sealed record ExteriorMap(bool[] Exterior, int[] Component, bool[] Seeded);
+    /// <summary>Which corners lie outside the shell, which inside-the-shell component each negative corner belongs to, and whether that component's side could not be told (it keeps both sheets).</summary>
+    private sealed record ExteriorMap(bool[] Exterior, int[] Component, bool[] Unknown);
 
     // The corners outside the shell: the positive corners reachable from the one just beyond the leftmost corner of each negative (inside the shell) component.
     private static ExteriorMap ExteriorCorners(
@@ -302,14 +302,14 @@ public static class NarrowBandRemesher
         bool[] exterior = new bool[n];
         int[] component = new int[n];
         Array.Fill(component, -1);
-        List<bool> seeded = [];
+        List<bool> unknown = [];
         Queue<int> queue = new();
         int[] dx = [-1, 1, 0, 0, 0, 0], dy = [0, 0, -1, 1, 0, 0], dz = [0, 0, 0, 0, -1, 1];
         for (int start = 0; start < n; start++)
         {
             if (value[start] >= 0 || component[start] >= 0)
                 continue;
-            int id = seeded.Count;
+            int id = unknown.Count;
             int leftmost = start;
             component[start] = id;
             queue.Enqueue(start);
@@ -329,14 +329,29 @@ public static class NarrowBandRemesher
                 }
             }
 
-            int seed = corners.Find(key(cx[leftmost] - 1, cy[leftmost], cz[leftmost]));
-            bool found = seed >= 0 && value[seed] >= 0;
-            seeded.Add(found);
-            if (found && !exterior[seed])
+            // Walk -x from the leftmost corner past corners that are not in the sparse set: the first one found is outside the shell when it is positive,
+            // and when it is negative this component lies inside another one's shell (an inner layer, which a wide band separates from the outer one).
+            // Reaching the grid edge leaves the side unknown.
+            int seed = -1;
+            bool enclosed = false;
+            for (int x = cx[leftmost] - 1; x >= 0; x--)
+            {
+                int near = corners.Find(key(x, cy[leftmost], cz[leftmost]));
+                if (near < 0)
+                    continue;
+                if (value[near] >= 0)
+                    seed = near;
+                else
+                    enclosed = true;
+                break;
+            }
+
+            unknown.Add(seed < 0 && !enclosed);
+            if (seed >= 0 && !exterior[seed])
                 Flood(seed);
         }
 
-        return new ExteriorMap(exterior, component, [.. seeded]);
+        return new ExteriorMap(exterior, component, [.. unknown]);
 
         void Flood(int seed)
         {
@@ -358,7 +373,7 @@ public static class NarrowBandRemesher
         }
     }
 
-    // A quad stays when its positive end is outside the shell, or when the shell piece it belongs to has no outside corner we could find (that piece keeps both sheets).
+    // A quad stays when its positive end is outside the shell, or when the side of the shell piece it belongs to could not be told (that piece keeps both sheets).
     private static bool KeepsQuad(
         int i, int axis, int direction, int[] vx, int[] vy, int[] vz, VoxelKeyMap corners, ExteriorMap map, Func<int, int, int, long> key)
     {
@@ -375,7 +390,7 @@ public static class NarrowBandRemesher
         Span<int> positive = direction > 0 ? end : start;
         Span<int> negative = direction > 0 ? start : end;
         int negativeCorner = corners.Find(key(negative[0], negative[1], negative[2]));
-        if (negativeCorner >= 0 && map.Component[negativeCorner] >= 0 && !map.Seeded[map.Component[negativeCorner]])
+        if (negativeCorner >= 0 && map.Component[negativeCorner] >= 0 && map.Unknown[map.Component[negativeCorner]])
             return true;
         int positiveCorner = corners.Find(key(positive[0], positive[1], positive[2]));
         return positiveCorner >= 0 && map.Exterior[positiveCorner];
