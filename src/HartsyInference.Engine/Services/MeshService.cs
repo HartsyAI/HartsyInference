@@ -52,8 +52,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
         ArgumentNullException.ThrowIfNull(spec);
         ArgumentNullException.ThrowIfNull(request);
         string id = IdOf(spec);
-        MeshSettingsUsed settings = SettingsOf(id, request);
         MeshRequest resolved = MeshQualityPresets.Resolve(id, request);
+        MeshSettingsUsed settings = SettingsOf(id, request, resolved);
         MeshRequest effective = settings.Seed is long seed && request.Seed < 0 ? resolved with { Seed = seed } : resolved;
         MeshResult raw = await WithOutOfVramRetry(
             () => GenerateRawAsync(id, spec, effective, progress, cancel),
@@ -247,12 +247,12 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>The settings a request runs with: the planned values and sources, and the seed resolved now (a random draw for a negative request) so the result can report and embed it. Unknown models fail later, in validation.</summary>
-    internal static MeshSettingsUsed SettingsOf(string id, MeshRequest request)
+    internal static MeshSettingsUsed SettingsOf(string id, MeshRequest request, MeshRequest? resolved = null)
     {
         if (MeshModelProfiles.Find(id) is null)
             return new MeshSettingsUsed { ModelId = id, EngineVersion = EngineVersion };
         MeshModelDescriptor descriptor = MeshPlanningService.DescriptorOf(id);
-        Dictionary<string, ResolvedParameter> parameters = new(MeshPlanningService.Settings(request, descriptor));
+        Dictionary<string, ResolvedParameter> parameters = new(MeshPlanningService.Settings(request, descriptor, resolved));
         long? seed = null;
         if (descriptor.Fields[nameof(MeshRequest.Seed)].Access == MeshFieldAccess.Used)
         {

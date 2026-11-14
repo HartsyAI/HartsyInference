@@ -78,7 +78,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         {
             Model = spec,
             Descriptor = descriptor,
-            Settings = Settings(request, descriptor),
+            Settings = Settings(request, descriptor, resolved),
             Issues = issues,
             Assets = assets,
             Memory = memory,
@@ -164,7 +164,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
     };
 
     /// <summary>What will run for each tunable field, and whether the caller or the model chose it.</summary>
-    internal static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor)
+    internal static IReadOnlyDictionary<string, ResolvedParameter> Settings(MeshRequest request, MeshModelDescriptor descriptor, MeshRequest? resolved = null)
     {
         Dictionary<string, ResolvedParameter> settings = new(StringComparer.Ordinal);
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))
@@ -176,7 +176,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)
                 : preset is int value && value.ToString(System.Globalization.CultureInfo.InvariantCulture) != field.Default
                     ? new ResolvedParameter(value.ToString(System.Globalization.CultureInfo.InvariantCulture), ParameterSource.ProfileDefault, $"the {request.Quality} preset")
-                    : new ResolvedParameter(field.Name == nameof(MeshRequest.Remesh) ? MeshRemesh.Effective(request).ToString().ToLowerInvariant() : field.Default, ParameterSource.RecipeDefault);
+                    : new ResolvedParameter(field.Name == nameof(MeshRequest.Remesh) ? MeshRemesh.Effective(resolved ?? request, descriptor.Id).ToString().ToLowerInvariant() : field.Default, ParameterSource.RecipeDefault);
             settings[field.Name] = parameter;
         }
         return settings;

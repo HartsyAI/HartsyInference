@@ -19,7 +19,7 @@ internal static class Trellis2RequestMapper
             Seed = MeshSeed.ForSampler(request.Seed),
             Texture = request.Texture,
             TextureSize = request.TextureSize,
-            Remesh = MeshRemesh.Effective(request),
+            Remesh = MeshRemesh.Effective(request, MeshModelIds.Trellis2),
         };
     }
 
