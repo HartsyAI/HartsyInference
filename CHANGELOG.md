@@ -3,6 +3,16 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.428
+
+- **Added: a stall warning for the TRELLIS.2 and Pixal3D flow stages.** When no step finishes for ten times the median step (never under
+  two minutes), the engine logs one `[Stall]` warning naming the stage, the free device memory and what to try, and the next finished step throws
+  `StageStalledException`. On Windows the memory plan also says when a recorded peak is past the roughly 8 GiB Windows gives one process.
+- **Added: `MeshRequest.Quality` presets (`Default`, `High`, `Max`) for the 3D models that have them.** An explicit field still wins; the plan
+  says which values the preset filled.
+- **Added: an opt-in `Remesh` for textured TRELLIS.2 and Pixal3D (`MeshRequest.Remesh`, CLI `--remesh`).** It rebuilds the surface with a CPU
+  port of CuMesh's narrow-band remesh before unwrapping, at a grid of 512 or 1024.
+
 ## alpha.426
 
 - **Fixed: a sharded checkpoint loads without its index file.** Picking any `name-00001-of-0000N.safetensors` shard now loads

@@ -181,6 +181,28 @@ public sealed class StageWatchdogTests
     }
 
     [Fact]
+    public void AStallCallbackThatThrowsDoesNotEscapeThePollAndTheStallStillEndsTheRun()
+    {
+        Clock clock = new();
+        int calls = 0;
+        using StageWatchdog watchdog = Make(clock, _ =>
+        {
+            calls++;
+            throw new InvalidOperationException("boom");
+        });
+        clock.Now = 12;
+        watchdog.Step();
+        clock.Now = 24;
+        watchdog.Step();
+
+        clock.Now = 24 + 121;
+        watchdog.Poll();
+
+        Assert.Equal(1, calls);
+        Assert.Throws<StageStalledException>(watchdog.Step);
+    }
+
+    [Fact]
     public void AFactorBelowOneIsRefused()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new StageWatchdog("flow", stallFactor: 0.5));
