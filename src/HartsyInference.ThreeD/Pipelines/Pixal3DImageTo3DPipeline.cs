@@ -203,6 +203,8 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
 
         if (options.DecimationTarget < 0)
             throw new ArgumentException($"DecimationTarget must not be negative; got {options.DecimationTarget}.", nameof(options));
+        if (options.Remesh && options.Grid == 1536)
+            throw new ArgumentException("Remesh needs a grid of 512 or 1024; the remesh at 1536 would take more memory than a 12 GB machine has.", nameof(options));
         try
         {
             ViewOf(options).Validate();
@@ -244,7 +246,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
     public static byte[] ToGlb(PbrPostProcessResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
-        return PbrGlbWriter.Write(result.Mesh, result.Material, new PbrGlbOptions { DoubleSided = true });
+        return PbrGlbWriter.Write(result.Mesh, result.Material, new PbrGlbOptions { DoubleSided = !result.Remeshed });
     }
 
     private Pixal3DOutput Run(Trellis2InputImage image, Pixal3DOptions? options, Action<GenerationProgress>? onProgress, bool textured,
@@ -383,6 +385,7 @@ public sealed class Pixal3DImageTo3DPipeline : ThreeDPipelineBase
             {
                 TextureSize = options.TextureSize > 0 ? options.TextureSize : DefaultTextureSize,
                 DecimationTarget = options.DecimationTarget > 0 ? options.DecimationTarget : DefaultDecimationTarget,
+                RemeshResolution = options.Remesh ? fineResolution : 0,
             };
 
             // The post-processor unifies the winding after decimation and recomputes the normals, so the raw dual-grid mesh goes in.

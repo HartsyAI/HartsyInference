@@ -159,6 +159,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh,
         nameof(MeshRequest.Control) => request.Control is not null,
         nameof(MeshRequest.Quality) => request.Quality != MeshQuality.Default,
+        nameof(MeshRequest.Remesh) => request.Remesh,
         _ => false,
     };
 
@@ -199,6 +200,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
         nameof(MeshRequest.Quality) => request.Quality.ToString(),
+        nameof(MeshRequest.Remesh) => request.Remesh.ToString().ToLowerInvariant(),
         _ => null,
     };
 }

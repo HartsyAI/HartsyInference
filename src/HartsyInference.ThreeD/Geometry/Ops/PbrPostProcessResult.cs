@@ -8,4 +8,7 @@ public sealed record PbrPostProcessResult(Mesh Mesh, PbrMaterial Material, int C
 {
     /// <summary>What the caller should know about the result (an input that unwrapped into confetti, for one); empty when nothing is wrong.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>Whether the surface was rebuilt by the remesh; upstream marks the material single-sided then.</summary>
+    public bool Remeshed { get; init; }
 }

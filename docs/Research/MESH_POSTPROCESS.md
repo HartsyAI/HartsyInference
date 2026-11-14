@@ -284,3 +284,18 @@ Measured on the CPU (8 threads), grid 512, one input per row, then `DecimateStag
 (The 1024 rows use the GLB of the 1024 run as the input and a volume of another subject only to run the bake, so their bake columns mean nothing; the charts and coverage are geometry only.)
 
 The shell is watertight by construction (no boundary edge); the non-manifold edges are where two sheets of the offset surface touch. Rendered, bust 1 has no specks or cracks and bust 2 loses the peeling, torn look (its terraced forehead is the decoder's shape and stays). There is no numeric comparison with upstream: CuMesh's CUDA operations cannot run here, nothing was cloned or installed, and the checks are synthetic (a sphere, a torus, two spheres, a hole narrower than the band, other bands) plus the three real meshes. Not verified: numeric agreement with CuMesh, thin features (the shell is a voxel thicker on each side with `ProjectBack` 0), and the textured end-to-end results on a GPU.
+
+### Wiring into the textured post-process (opt-in)
+
+`PbrPostProcessOptions.RemeshResolution` (0, off, by default) runs upstream's remesh branch of `to_glb`: fill holes, BVH of the original, remesh on the attribute volume's grid (centre and size taken from the volume, scale widened by three bands, as upstream does), `DecimateStaged`, unwrap, bake from the original surface through the BVH; the result carries `Remeshed`, and the GLB material is then single-sided as upstream marks it. `MeshRequest.Remesh` (CLI `--remesh`) sets it for TRELLIS.2 and Pixal3D with `Texture`, at the request's grid (512 or 1024; 1536 is refused: it would take more host memory than a 12 GB machine has), and other models reject the field.
+
+`PbrMeshPostProcessor` end to end on the saved real volumes (CPU, 2048 texture, 500,000-face target, defaults otherwise):
+
+| Input | Remesh | Time, peak working set | Faces | Welded boundary / non-manifold edges | Atlas covered |
+|---|---|---|---|---|---|
+| Bust 1 (736,637 voxels) | off | 21.6 s, 1.6 GiB | 500,785 | 3,444 / 2,606 | 36.7 % |
+| Bust 1 | 512 | 28.9 s, 2.3 GiB | 500,000 | 0 / 1 | 37.3 % |
+| Bust 2 (1,865,382 voxels) | off | 63.7 s, 2.8 GiB | 509,188 | 224,074 / 20,048 | 19.7 % |
+| Bust 2 | 512 | 47.4 s, 3.6 GiB | 499,594 | 0 / 23 | 31.6 % |
+
+Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Not verified on a GPU run of the whole pipeline (textured TRELLIS.2 and Paint 2.1 on a remeshed mesh) at the time of writing.

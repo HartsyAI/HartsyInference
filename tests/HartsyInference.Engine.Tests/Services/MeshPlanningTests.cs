@@ -69,6 +69,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Mesh) => request with { Mesh = true },
         nameof(MeshRequest.Control) => request with { Control = Box() },
         nameof(MeshRequest.Quality) => request with { Quality = MeshQuality.Max },
+        nameof(MeshRequest.Remesh) => request with { Remesh = true, Texture = true },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
@@ -319,6 +320,48 @@ public sealed class MeshPlanningTests
         Assert.True(MeshMemoryProfile.Mattes("trellis2", request));
         Assert.DoesNotContain("page", fit.Reason);
         Assert.NotNull(plan.Memory);
+    }
+
+    [Theory]
+    [InlineData("trellis2", false, 0, "Remesh")]
+    [InlineData("trellis2", true, 1536, "Remesh")]
+    [InlineData("pixal3d", true, 1536, "Remesh")]
+    public void RemeshNeedsTextureAndAGridOf512Or1024(string id, bool texture, int grid, string field)
+    {
+        MeshRequest request = Valid(id) with { Remesh = true, Texture = texture, GridResolution = grid };
+
+        Exception error = Record.Exception(() => MeshRequestValidator.Validate(id, request, matterAvailable: false))!;
+
+        Assert.NotNull(error);
+        Assert.Equal(field, MeshFieldTag.FieldOf(error));
+    }
+
+    [Theory]
+    [InlineData("trellis2", 512)]
+    [InlineData("trellis2", 1024)]
+    [InlineData("pixal3d", 1024)]
+    public void RemeshWithTextureAtAFineEnoughGridPassesTheValidatorAndReachesTheOptions(string id, int grid)
+    {
+        MeshRequest request = Valid(id) with { Remesh = true, Texture = true, GridResolution = grid };
+
+        MeshRequestValidator.Validate(id, request, matterAvailable: false);
+
+        Assert.True(id == "trellis2" ? Trellis2RequestMapper.ToOptions(request).Remesh : Pixal3DRequestMapper.ToOptions(request).Remesh);
+    }
+
+    [Fact]
+    public async Task APlanListsRemeshAsAFieldOfTheTexturedModelsOnly()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshModelDescriptor trellis = engine.MeshPlanning.Describe("trellis2");
+        MeshModelDescriptor triposr = engine.MeshPlanning.Describe("triposr");
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Remesh = true, Texture = true, GridResolution = 512 });
+
+        Assert.Equal(MeshFieldAccess.Used, trellis.Fields[nameof(MeshRequest.Remesh)].Access);
+        Assert.Equal(MeshFieldAccess.Rejected, triposr.Fields[nameof(MeshRequest.Remesh)].Access);
+        Assert.Equal("true", plan.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.DoesNotContain(plan.Issues, i => i.Field == nameof(MeshRequest.Remesh));
     }
 
     [Fact]

@@ -36,6 +36,12 @@ public sealed record PbrPostProcessOptions
     /// <summary>Snap each texel's position to the pre-decimation surface before sampling (upstream behavior).</summary>
     public bool SnapToSourceSurface { get; init; } = true;
 
+    /// <summary>Rebuilds the surface as a closed shell on a grid of this many cells along the volume's longest side before decimating (upstream <c>to_glb(remesh=True)</c>, <see cref="NarrowBandRemesher"/>); 0 leaves the surface as it is. Use the volume's own grid resolution. The textures are still baked from the original surface.</summary>
+    public int RemeshResolution { get; init; }
+
+    /// <summary>With <see cref="RemeshResolution"/>: keep only the outer sheet of the shell (see <see cref="NarrowBandRemeshOptions.OuterShellOnly"/>).</summary>
+    public bool RemeshOuterShellOnly { get; init; } = true;
+
     /// <summary>Material name carried into the result.</summary>
     public string MaterialName { get; init; } = "pbr";
 }

@@ -77,12 +77,14 @@ internal static class MeshRequestValidator
         {
             Trellis2Options options = Trellis2RequestMapper.ToOptions(request);
             RequireTextureForSize(request, "TRELLIS.2");
+            RequireTextureForRemesh(request, "TRELLIS.2");
             TagPipelineErrors(() => Trellis2ImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable));
         }
         else if (id == MeshModelIds.Pixal3D)
         {
             Pixal3DOptions options = Pixal3DRequestMapper.ToOptions(request);
             RequireTextureForSize(request, "Pixal3D");
+            RequireTextureForRemesh(request, "Pixal3D");
             TagPipelineErrors(() => Pixal3DImageTo3DPipeline.ValidateRequest(options, ToInput(request.Image), matterAvailable));
         }
         else if (id == MeshModelIds.Sam3dObjects)
@@ -131,6 +133,7 @@ internal static class MeshRequestValidator
             : message.StartsWith("Steps", StringComparison.Ordinal) ? nameof(MeshRequest.Steps)
             : message.StartsWith("Seed", StringComparison.Ordinal) ? nameof(MeshRequest.Seed)
             : message.StartsWith("TextureSize", StringComparison.Ordinal) ? nameof(MeshRequest.TextureSize)
+            : message.StartsWith("Remesh", StringComparison.Ordinal) ? nameof(MeshRequest.Remesh)
             : null;
     }
 
@@ -146,6 +149,12 @@ internal static class MeshRequestValidator
 
     private static Trellis2InputImage ToInput(ImageData source) =>
         new() { Rgb = source.Rgb, Alpha = source.Alpha, Width = source.Width, Height = source.Height };
+
+    private static void RequireTextureForRemesh(MeshRequest request, string model)
+    {
+        if (request.Remesh && !request.Texture)
+            throw new NotSupportedException($"Remesh rebuilds the surface for the texture bake and needs Texture; leave it off for a shape-only {model} mesh.").ForField(nameof(MeshRequest.Remesh));
+    }
 
     private static void RequireTextureForSize(MeshRequest request, string model)
     {

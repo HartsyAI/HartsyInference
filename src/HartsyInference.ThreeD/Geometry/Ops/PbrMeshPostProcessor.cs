@@ -26,6 +26,8 @@ public static class PbrMeshPostProcessor
             throw new ArgumentOutOfRangeException(nameof(options), "Decimation target and texture size must be positive.");
         if (!(options.OpeningWidthRatio >= 0))
             throw new ArgumentOutOfRangeException(nameof(options), "The opening width ratio must not be negative.");
+        if (options.RemeshResolution < 0)
+            throw new ArgumentOutOfRangeException(nameof(options), "The remesh resolution must not be negative; 0 leaves the surface as it is.");
 
         MeshCleanOptions initial = new()
         {
@@ -44,7 +46,8 @@ public static class PbrMeshPostProcessor
             HoleFillMaxPerimeter = options.HoleFillMaxPerimeter,
             HoleFillMaxWidth = options.OpeningWidthRatio * MeshOps.BoundingBoxDiagonal(mesh.Vertices),
         };
-        Mesh reduced = MeshDecimator.DecimateStaged(source, options.DecimationTarget, options.IntermediateFactor, between,
+        Mesh toReduce = options.RemeshResolution > 0 ? Remesh(source, bvh, volume, options, cancellationToken) : source;
+        Mesh reduced = MeshDecimator.DecimateStaged(toReduce, options.DecimationTarget, options.IntermediateFactor, between,
             cancellationToken: cancellationToken);
         MeshOps.ComputeVertexNormals(reduced);
         cancellationToken.ThrowIfCancellationRequested();
@@ -64,7 +67,25 @@ public static class PbrMeshPostProcessor
         int covered = 0;
         foreach (bool c in baked.Covered)
             if (c) covered++;
-        return new PbrPostProcessResult(unwrapped.Mesh, material, covered);
+        return new PbrPostProcessResult(unwrapped.Mesh, material, covered) { Remeshed = options.RemeshResolution > 0 };
+    }
+
+    // Upstream centres the grid on the attribute volume and widens it by three bands of the remesh resolution.
+    private static Mesh Remesh(Mesh source, TriangleBvh bvh, SparseAttributeVolume volume, PbrPostProcessOptions options, CancellationToken cancellationToken)
+    {
+        const double Band = 1.0;
+        int res = options.RemeshResolution;
+        double extent = Math.Max(volume.GridSize.X, Math.Max(volume.GridSize.Y, volume.GridSize.Z)) * (double)volume.VoxelSize;
+        System.Numerics.Vector3 center = volume.Origin + new System.Numerics.Vector3(volume.GridSize.X, volume.GridSize.Y, volume.GridSize.Z) * (volume.VoxelSize * 0.5f);
+        NarrowBandRemeshOptions remesh = new()
+        {
+            Resolution = res,
+            Band = Band,
+            OuterShellOnly = options.RemeshOuterShellOnly,
+            Center = center,
+            Scale = (res + 3 * Band) / res * extent,
+        };
+        return NarrowBandRemesher.Remesh(source, remesh, bvh, cancellationToken);
     }
 
     /// <summary>Runs <see cref="Process"/> and serializes the result with <see cref="PbrGlbWriter"/>.</summary>

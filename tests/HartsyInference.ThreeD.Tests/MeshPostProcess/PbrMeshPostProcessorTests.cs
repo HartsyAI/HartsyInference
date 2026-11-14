@@ -87,6 +87,33 @@ public sealed class PbrMeshPostProcessorTests
     }
 
     [Fact]
+    public void Process_WithARemeshRebuildsATornSurfaceAsAClosedShellAndMarksTheResult()
+    {
+        // A quarter of the sphere is missing; the perimeter and width fills are off so only the remesh can close it.
+        Mesh sphere = SyntheticMeshes.Icosphere(4, Radius);
+        Mesh torn = new() { Vertices = sphere.Vertices, Indices = sphere.Indices[..(sphere.Indices.Length * 3 / 4)] };
+        PbrPostProcessOptions plain = new() { DecimationTarget = 1_000_000, TextureSize = 128, PaddingTexels = 3, HoleFillMaxPerimeter = 1e-9, OpeningWidthRatio = 0 };
+
+        PbrPostProcessResult open = PbrMeshPostProcessor.Process(torn, ShellVolume(), PbrAttributeLayout.Default, plain);
+        PbrPostProcessResult closed = PbrMeshPostProcessor.Process(torn, ShellVolume(), PbrAttributeLayout.Default, plain with { RemeshResolution = Grid });
+
+        Assert.False(open.Remeshed);
+        Assert.True(closed.Remeshed);
+        Assert.True(MeshStatistics.Measure(open.Mesh).BoundaryEdges > 0);
+        Assert.Equal(0, MeshStatistics.Measure(closed.Mesh).BoundaryEdges);
+        Assert.True(closed.CoveredTexels > 0);
+    }
+
+    [Fact]
+    public void Process_RejectsANegativeRemeshResolution()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2, Radius);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PbrMeshPostProcessor.Process(
+            sphere, ShellVolume(), PbrAttributeLayout.Default, SmallOptions() with { RemeshResolution = -1 }));
+    }
+
+    [Fact]
     public void Process_RejectsANegativeOpeningWidth()
     {
         Mesh sphere = SyntheticMeshes.Icosphere(2, Radius);
