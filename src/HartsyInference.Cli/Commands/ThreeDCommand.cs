@@ -78,10 +78,15 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Texture the mesh with baked PBR textures (trellis2 and pixal3d; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md and docs/Research/PIXAL3D_ARCHITECTURE.md).")]
         public bool Texture { get; init; }
 
-        /// <summary>Rebuild the surface as a closed shell before the bake (TRELLIS.2 and Pixal3D with --texture).</summary>
+        /// <summary>Force the closed-shell rebuild before the bake (TRELLIS.2 and Pixal3D with --texture); it is already on by default there.</summary>
         [CommandOption("--remesh")]
-        [Description("Rebuild the surface as a closed shell on the final grid before baking the texture (trellis2 and pixal3d with --texture, grid 512 or 1024): far fewer UV charts and no holes; costs about 5 to 60 s and 1 to 6 GiB of memory and thickens thin features by a voxel.")]
+        [Description("Rebuild the surface as a closed shell on the final grid before baking the texture (trellis2 and pixal3d with --texture, grid 512 or 1024). On by default for those; --remesh forces it and fails at grid 1536.")]
         public bool Remesh { get; init; }
+
+        /// <summary>Turn the closed-shell rebuild off (it is on by default for textured TRELLIS.2 and Pixal3D output).</summary>
+        [CommandOption("--no-remesh")]
+        [Description("Skip the closed-shell rebuild of the surface before baking the texture (it is on by default for textured trellis2 and pixal3d output at grid 512 or 1024; it costs about 10 s and 3.6 GiB of host memory at 512 and thickens thin features by a voxel).")]
+        public bool NoRemesh { get; init; }
 
         /// <summary>Baked texture edge in texels (TRELLIS.2 and Pixal3D with --texture).</summary>
         [CommandOption("--texture-size")]
@@ -167,6 +172,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             return 1;
         }
 
+        if (settings.Remesh && settings.NoRemesh)
+        {
+            AnsiConsole.MarkupLine("[red]Give[/] [#2ea5e0]--remesh[/] [red]or[/] [#2ea5e0]--no-remesh[/][red], not both.[/]");
+            return 1;
+        }
+
         ParamState parameters = new ParamState(Modality.Mesh) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         if (settings.PromptMasks is { Length: > 0 })
             parameters.Put("prompt-mask", string.Join('\n', settings.PromptMasks));
@@ -192,7 +203,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
         parameters.Put("no-chains", settings.NoChains ? "true" : "false");
         parameters.Put("texture", settings.Texture ? "true" : "false");
-        parameters.Put("remesh", settings.Remesh ? "true" : "false");
+        if (settings.Remesh || settings.NoRemesh)
+            parameters.Put("remesh", settings.Remesh ? "true" : "false");
         parameters.Put("mesh", settings.Mesh ? "true" : "false");
         parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
         if (settings.Quality is not null)

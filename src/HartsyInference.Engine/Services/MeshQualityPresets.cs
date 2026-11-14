@@ -36,8 +36,8 @@ internal static class MeshQualityPresets
         return value == 0 ? null : value;
     }
 
-    // The remesh does not run at 1536 (it needs more host memory than a 12 GB machine has), so a preset's 1536 gives way to 1024 for a request that asks for it.
-    private static int PresetGrid(MeshPreset preset, MeshRequest request, bool remeshCapable) => remeshCapable && request.Remesh && preset.GridResolution > 1024 ? 1024 : preset.GridResolution;
+    // The remesh does not run at 1536 (it would need several times the host memory of the 1024 one and was not tried), so a preset's 1536 gives way to 1024 for a request that asks for it.
+    private static int PresetGrid(MeshPreset preset, MeshRequest request, bool remeshCapable) => remeshCapable && request.Remesh == true && preset.GridResolution > 1024 ? 1024 : preset.GridResolution;
 
     /// <summary>Whether the model's profile takes <see cref="MeshRequest.Remesh"/>; only those presets give way to the remesh's grid limit.</summary>
     internal static bool TakesRemesh(string id) =>

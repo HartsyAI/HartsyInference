@@ -19,7 +19,7 @@ internal static class Trellis2RequestMapper
             Seed = MeshSeed.ForSampler(request.Seed),
             Texture = request.Texture,
             TextureSize = request.TextureSize,
-            Remesh = request.Remesh,
+            Remesh = MeshRemesh.Effective(request, MeshModelIds.Trellis2),
         };
     }
 
@@ -29,7 +29,7 @@ internal static class Trellis2RequestMapper
     public static void RejectForOtherModels(MeshRequest request, string modelId)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Texture || request.TextureSize != 0 || request.Remesh)
+        if (request.Texture || request.TextureSize != 0 || request.Remesh == true)
             throw new NotSupportedException($"'{modelId}' has no texture output; Texture, TextureSize and Remesh apply to trellis2 and {MeshModelIds.Pixal3D}.").ForField(request.Texture ? nameof(MeshRequest.Texture) : request.TextureSize != 0 ? nameof(MeshRequest.TextureSize) : nameof(MeshRequest.Remesh));
     }
 }

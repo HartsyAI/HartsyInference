@@ -152,7 +152,7 @@ internal static class MeshRequestValidator
 
     private static void RequireTextureForRemesh(MeshRequest request, string model)
     {
-        if (request.Remesh && !request.Texture)
+        if (request.Remesh == true && !request.Texture)
             throw new NotSupportedException($"Remesh rebuilds the surface for the texture bake and needs Texture; leave it off for a shape-only {model} mesh.").ForField(nameof(MeshRequest.Remesh));
     }
 
