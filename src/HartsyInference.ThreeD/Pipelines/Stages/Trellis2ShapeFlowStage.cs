@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Sparse;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Utilities;
@@ -85,9 +86,15 @@ public sealed class Trellis2ShapeFlowStage : ITrellis2ShapeFlowStage
         using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, n, flow.Config.InChannels), seed);
         Tensor latent;
         backend.PreloadWeights(flow.EnumerateWeights());
+        using StageWatchdog watchdog = new(Path.GetFileNameWithoutExtension(flowPath), backend.GetVramInfo, remedy: Trellis2DeviceMemory.StallRemedy);
+        Action<int> watched = step =>
+        {
+            watchdog.Step();
+            onStep?.Invoke(step);
+        };
         try
         {
-            latent = Trellis2FlowSampler.Sample(backend, noise, parameters, (x, tModel, conditional) => forward(flow, x, tModel, conditional), onStep);
+            latent = Trellis2FlowSampler.Sample(backend, noise, parameters, (x, tModel, conditional) => forward(flow, x, tModel, conditional), watched);
         }
         finally
         {

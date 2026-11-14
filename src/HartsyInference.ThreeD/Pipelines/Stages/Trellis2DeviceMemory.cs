@@ -18,6 +18,9 @@ namespace HartsyInference.ThreeD.Pipelines.Stages;
 /// </summary>
 internal static class Trellis2DeviceMemory
 {
+    /// <summary>What a stalled TRELLIS.2 or Pixal3D flow stage tells the caller to try.</summary>
+    internal const string StallRemedy = "On Windows this usually means the process went past the video memory it is given and the driver is paging: close other programs that use the GPU, lower the resolution, or set numerics.flowF16Weights to halve the flow weights.";
+
     /// <summary>Offloads <paramref name="live"/> to the host, drains the stream, then returns cached activations, attention plans and pool
     /// reservations to the driver. Cheap when there is nothing to return, and a no-op on the CPU backend.</summary>
     /// <param name="live">Every tensor a later stage still reads that an op may have produced on the device.</param>

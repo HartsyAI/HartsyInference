@@ -1,4 +1,5 @@
 using System.Reflection;
+using HartsyInference.Core.Memory.Vram;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Planning.Memory;
@@ -274,6 +275,65 @@ public sealed class MeshPlanningTests
         MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.High });
 
         Assert.Equal(ParameterSource.RecipeDefault, plan.Settings[nameof(MeshRequest.GridResolution)].Source);
+    }
+
+    [Theory]
+    [InlineData(512, 7.4)]
+    [InlineData(1536, null)]
+    [InlineData(1024, null)]
+    public void Trellis2PlansFromAPeakOnlyAt512(int grid, double? expected)
+    {
+        double? peak = MeshModelProfiles.Find("trellis2")!.PeakGiB!(Valid("trellis2") with { GridResolution = grid });
+
+        Assert.Equal(expected, peak);
+    }
+
+    [Fact]
+    public void APeakPastWhatWindowsGivesOneProcessIsJudgedWithAPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, 10L << 30, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit windows = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+        MemoryFit other = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: false);
+
+        Assert.Equal(MemoryFitVerdict.Resident, windows.Verdict);
+        Assert.Contains("Windows", windows.Reason);
+        Assert.DoesNotContain("Windows", other.Reason);
+    }
+
+    [Fact]
+    public async Task Trellis2At512WithMattingGetsNoPagingWarning()
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid("trellis2") with { GridResolution = 512, Image = new ImageData { Rgb = new byte[4 * 4 * 3], Width = 4, Height = 4 } };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), request);
+        MemoryEstimate estimate = MeshMemoryProfile.Estimate("trellis2", request)!;
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.True(MeshMemoryProfile.Mattes("trellis2", request));
+        Assert.DoesNotContain("page", fit.Reason);
+        Assert.NotNull(plan.Memory);
+    }
+
+    [Fact]
+    public void APeakJustUnderTheWindowsBudgetGetsNoPagingWarning()
+    {
+        MemoryEstimate estimate = new()
+        {
+            FamilyId = "test",
+            Phases = [new MemoryPhase(MemoryComponent.Stage, (8L << 30) - 1, 0, 0, false)],
+            Accuracy = MemoryEstimateAccuracy.Measured,
+        };
+
+        MemoryFit fit = MeshMemoryProfile.Judge(estimate, 12L << 30, VramTier.Auto, windows: true);
+
+        Assert.DoesNotContain("Windows", fit.Reason);
     }
 
     [Fact]

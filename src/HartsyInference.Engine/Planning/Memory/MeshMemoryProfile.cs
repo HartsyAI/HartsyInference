@@ -33,11 +33,24 @@ internal static class MeshMemoryProfile
         request.Image is { } image && !MeshPreparationService.HasUsableAlpha(image)
         && (id == MeshModelIds.Trellis2 || id == MeshModelIds.Pixal3D || (request.Preprocess == MeshPreprocess.Auto && MeshPreparationService.UsesPreparation(id)));
 
-    /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps.</summary>
-    public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier)
+    /// <summary>The video memory Windows gives one process before it pages the rest, about 8 GiB (see <c>vram.preloadHeadroomMb</c>).</summary>
+    public const long WindowsProcessBudgetBytes = 8L << 30;
+
+    /// <summary>The video memory the desktop and the driver hold on an idle card (1.0 to 1.3 GiB measured on the RTX 3060), taken out of a whole-card peak before it is held against the per-process Windows budget.</summary>
+    public const long DesktopBaselineBytes = 1_288_490_189;
+
+    /// <summary>Whether <paramref name="estimate"/> fits a card of <paramref name="totalBytes"/>. The recorded peak is whole-card, so it is held against the whole card, not against the reserve the image path keeps. On Windows a peak past <see cref="WindowsProcessBudgetBytes"/> still fits, with a reason that warns of paging.</summary>
+    public static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier) =>
+        Judge(estimate, totalBytes, tier, OperatingSystem.IsWindows());
+
+    /// <param name="windows">Whether the paging warning applies; the public overload passes the running OS.</param>
+    internal static MemoryFit Judge(MemoryEstimate estimate, long totalBytes, VramTier tier, bool windows)
     {
         long peak = estimate.PeakResidentBytes;
         bool fits = peak <= totalBytes;
+        string paging = windows && fits && peak - DesktopBaselineBytes > WindowsProcessBudgetBytes
+            ? $" Less the {ByteFormat.GbF1(DesktopBaselineBytes)} the desktop is assumed to hold, that is past the roughly {ByteFormat.GbF1(WindowsProcessBudgetBytes)} of video memory Windows gives one process, so the driver may page and single steps may slow down by a large factor or stall; close other GPU programs first."
+            : "";
         return new MemoryFit
         {
             Verdict = fits ? MemoryFitVerdict.Resident : MemoryFitVerdict.Infeasible,
@@ -45,7 +58,7 @@ internal static class MeshMemoryProfile
             CapacityBytes = totalBytes,
             EffectiveTier = tier,
             Reason = fits
-                ? $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card; free memory is not checked, so other programs on the card can still make it fail."
+                ? $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)} of {ByteFormat.GbF1(totalBytes)} on the card; free memory is not checked, so other programs on the card can still make it fail.{paging}"
                 : $"The recorded peak, with the matting model when the engine mattes the image, is {ByteFormat.GbF1(peak)}; this card has {ByteFormat.GbF1(totalBytes)}.",
         };
     }
