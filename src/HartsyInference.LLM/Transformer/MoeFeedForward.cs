@@ -217,10 +217,10 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             // The shared-expert sigmoid gate ([1, hidden]) is optional (Qwen2-MoE has it; some variants don't).
             w.TryGetValue($"{block}.shared_expert_gate.weight", out Tensor? sg);
             _shGateScoreW = sg;
-            // A latent block's shared expert reads and writes the model width, not the expert width.
-            if (_latentDown is not null
-                && (_shGateW.Shape[1] != _modelHidden || _shUpW.Shape[1] != _modelHidden || _shDownW.Shape[0] != _modelHidden))
-                throw new InvalidDataException($"{block}: the shared expert of a latent block must read and write the model width {_modelHidden}.");
+            // The shared expert reads and writes the model width, not the expert width (a latent block's routed width is the latent).
+            RequireShape(_shGateW, $"{sp}.gate_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
+            RequireShape(_shUpW, $"{sp}.up_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
+            RequireShape(_shDownW, $"{sp}.down_proj.weight", _modelHidden, _moe.SharedExpertIntermediateSize);
         }
     }
 
@@ -281,8 +281,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             _latentDown = w[$"{block}.pre_expert_proj.weight"];
             _latentNorm = _moe.LatentNorm == MoeLatentNorm.None ? null : GenericTransformer.EnsureF32(w[$"{block}.pre_expert_norm.weight"]);
             _latentUp = w[$"{block}.post_expert_proj.weight"];
-            if (_latentDown.Shape[0] != _hidden || _latentUp.Shape[1] != _hidden)
-                throw new InvalidDataException($"{block}: latent projections do not match the configured latent size {_hidden}.");
+            RequireShape(_latentDown, $"{block}.pre_expert_proj.weight", _hidden, _modelHidden);
+            RequireShape(_latentUp, $"{block}.post_expert_proj.weight", _modelHidden, _hidden);
         }
         if (_moe.PostExpertNorm)
         {

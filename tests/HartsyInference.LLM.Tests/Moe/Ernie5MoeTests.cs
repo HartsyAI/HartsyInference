@@ -170,6 +170,40 @@ public sealed class Ernie5MoeTests
     }
 
     [Theory]
+    [InlineData("pre_expert_proj.weight")]
+    [InlineData("post_expert_proj.weight")]
+    public void Load_RefusesALatentProjectionWithTheWrongModelWidth_ByName(string leaf)
+    {
+        // The latent width matches, the model-width side does not: pre_expert_proj is [latent, model width], post_expert_proj the reverse.
+        Weights w = Weights.Create(53, Small, new Flags());
+        string key = $"{Prefix}.mlp.{leaf}";
+        bool pre = leaf.StartsWith("pre", StringComparison.Ordinal);
+        using Tensor wrong = pre
+            ? new Tensor(new TensorShape(Small.Latent, Small.Hidden + 2), DType.F32)
+            : new Tensor(new TensorShape(Small.Hidden + 2, Small.Latent), DType.F32);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = wrong));
+        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+        string expected = pre ? $"[{Small.Latent}, {Small.Hidden}]" : $"[{Small.Hidden}, {Small.Latent}]";
+        Assert.Contains($"expected {expected}", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("gate_proj.weight", 7, 12)]   // intermediate side wrong
+    [InlineData("gate_proj.weight", 6, 10)]   // model-width side wrong
+    [InlineData("up_proj.weight", 7, 12)]
+    [InlineData("up_proj.weight", 6, 10)]
+    [InlineData("down_proj.weight", 12, 7)]   // intermediate side wrong
+    [InlineData("down_proj.weight", 10, 6)]   // model-width side wrong
+    public void Load_RefusesAWrongSharedExpertShape_ByName(string leaf, int rows, int cols)
+    {
+        Weights w = Weights.Create(59, Small, new Flags());
+        string key = $"{Prefix}.mlp.shared_expert.{leaf}";
+        using Tensor wrong = new(new TensorShape(rows, cols), DType.F32);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => new Loaded(w, tensors => tensors[key] = wrong));
+        Assert.Contains(key, error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData("gate.e_score_correction_bias")]
     [InlineData("gate.routed_scaling_factor_param")]
     public void Load_RefusesARouterVectorThatIsNotF32_ByName(string leaf)
