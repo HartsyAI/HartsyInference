@@ -48,6 +48,53 @@ public sealed class PbrMeshPostProcessorTests
         Assert.InRange(result.CoveredTexels, 2000, 128 * 128);
     }
 
+    // The second and fourth triangles of an icosphere face (corner a, and the centre one) share the edge between a's two midpoints: removing both leaves one quad hole.
+    private static Mesh WithAQuadHole(int subdivisions)
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(subdivisions, Radius);
+        return new Mesh { Vertices = sphere.Vertices, Indices = [.. sphere.Indices[3..9], .. sphere.Indices[12..]] };
+    }
+
+    [Fact]
+    public void Process_ClosesAPinholeWithinTheOpeningWidthAndLeavesItWithoutOne()
+    {
+        // The hole's zip edge is longer than the perimeter fill's reach (limit lowered to 1e-3) but within the opening width of 0.1 of the diagonal.
+        Mesh holed = WithAQuadHole(4);
+        PbrPostProcessOptions open = new() { DecimationTarget = 100_000, TextureSize = 128, PaddingTexels = 3, HoleFillMaxPerimeter = 1e-3, OpeningWidthRatio = 0 };
+
+        long without = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, open).Mesh).BoundaryEdges;
+        long with = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, open with { OpeningWidthRatio = 0.1 }).Mesh).BoundaryEdges;
+
+        Assert.True(without > 0);
+        Assert.Equal(0, with);
+    }
+
+    [Fact]
+    public void Process_ClosesAPinholeOfAFewVoxelsWithTheDefaultOpeningWidth()
+    {
+        // A 220 x 220 grid with one cell removed: the zip edge is the cell's diagonal, 0.0045 of the grid's diagonal, inside the default 0.005; the perimeter fill is off so only the width can close it.
+        const int n = 220;
+        Mesh grid = SyntheticMeshes.Grid(n);
+        int cell = (n / 2 * n + n / 2) * 6;
+        Mesh holed = new() { Vertices = grid.Vertices, Indices = [.. grid.Indices[..cell], .. grid.Indices[(cell + 6)..]] };
+        PbrPostProcessOptions defaults = new() { DecimationTarget = 1_000_000, TextureSize = 128, PaddingTexels = 3, HoleFillMaxPerimeter = 1e-9 };
+
+        long closed = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, defaults).Mesh).BoundaryEdges;
+        long open = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, defaults with { OpeningWidthRatio = 0 }).Mesh).BoundaryEdges;
+
+        Assert.Equal(0.005, new PbrPostProcessOptions().OpeningWidthRatio);
+        Assert.Equal(open - 4, closed);
+    }
+
+    [Fact]
+    public void Process_RejectsANegativeOpeningWidth()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2, Radius);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PbrMeshPostProcessor.Process(
+            sphere, ShellVolume(), PbrAttributeLayout.Default, SmallOptions() with { OpeningWidthRatio = -0.1 }));
+    }
+
     [Fact]
     public void Process_AcceptsAZeroPaddingRequest()
     {

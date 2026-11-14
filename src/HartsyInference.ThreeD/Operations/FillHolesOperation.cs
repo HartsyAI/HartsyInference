@@ -30,7 +30,7 @@ public sealed class FillHolesOperation : IMeshOperation
             Mesh g = primitive.Geometry;
             WeldedVertices welded = WeldedVertices.Build(g);
             Mesh weldedMesh = welded.ToMesh();
-            double diagonal = PrimitiveEdit.Diagonal(welded.Positions);
+            double diagonal = MeshOps.BoundingBoxDiagonal(welded.Positions);
             Mesh filled = MeshCleaner.FillHoles(weldedMesh, share * diagonal);
             if (widthShare > 0)
             {

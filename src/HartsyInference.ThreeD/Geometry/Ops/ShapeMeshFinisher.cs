@@ -28,28 +28,11 @@ public static class ShapeMeshFinisher
             {
                 SmallComponentAreaRatio = smallComponentAreaRatio,
                 SmallComponentFaceRatio = smallComponentFaceRatio,
-                HoleFillMaxWidth = openingWidthRatio * Diagonal(mesh),
+                HoleFillMaxWidth = openingWidthRatio * MeshOps.BoundingBoxDiagonal(mesh.Vertices),
             };
             return MeshOps.ComputeVertexNormals(MeshCleaner.Clean(mesh, options));
         }
         FaceOrientation.Unify(mesh);
         return MeshOps.ComputeVertexNormals(mesh);
-    }
-
-    private static double Diagonal(Mesh mesh)
-    {
-        if (mesh.VertexCount == 0) return 0;
-        float[] min = [float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity];
-        float[] max = [float.NegativeInfinity, float.NegativeInfinity, float.NegativeInfinity];
-        for (int i = 0; i < mesh.Vertices.Length; i += 3)
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                min[c] = Math.Min(min[c], mesh.Vertices[i + c]);
-                max[c] = Math.Max(max[c], mesh.Vertices[i + c]);
-            }
-        }
-        double dx = max[0] - min[0], dy = max[1] - min[1], dz = max[2] - min[2];
-        return Math.Sqrt(dx * dx + dy * dy + dz * dz);
     }
 }
