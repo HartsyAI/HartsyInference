@@ -32,10 +32,10 @@ public sealed class KimiK31WeightLoader
         _dense = dense;
     }
 
+    // TODO(kimi): the single-rank text load (KimiK31Checkpoint.Load, ranks == 1) calls this overload, so the decoder weights are loaded eagerly as F32 at
+    // text load. Finish it by loading each layer in its checkpoint dtype and converting only when the layer runs.
     /// <summary>Loads every tensor of the whole decoder as F32. The result owns the tensors the loader created (<see cref="KimiK31Weights.Owned"/>).</summary>
     public static KimiK31Weights Load(KimiK31Config c, IKimiK31WeightSource src) => Load(c, src, KimiK31Shard.Whole, (t, _) => TensorCasts.EnsureF32(t));
-    // TODO(kimi): the text decoder weights are loaded eagerly as F32 at text load (this overload). Finish it by loading each layer in its checkpoint
-    // dtype and converting only when the layer runs.
 
     /// <summary>Loads the part of the decoder that <paramref name="shard"/> holds.</summary>
     /// <param name="denseWeight">Returns a dense Linear weight in the dtype its backend runs. A returned tensor other than the argument is
