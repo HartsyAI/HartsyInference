@@ -17,7 +17,7 @@ Every stage is a public type of its own and usable alone.
 |---|---|---|
 | cumesh `simplify` | `MeshDecimator`: Garland-Heckbert quadric edge collapse | Link condition keeps the mesh manifold and its genus; boundary edges get penalty planes and boundary vertices never move; a collapse that turns a neighbor face past `MinNormalDot` is refused. Deterministic: ties break on edge keys. |
 | `remove_duplicate_faces`, `repair_non_manifold_edges`, `remove_small_connected_components`, `fill_holes`, `unify_face_orientations` | `MeshCleaner` | Non-manifold edges are repaired by splitting vertices, as upstream's docstring says ("duplicates with the same coordinates"): the consistently wound, largest pair of faces stays joined, the others are cut off along the edge with copies of its two vertices, and no face is removed (`RemoveNonManifoldFaces` is the variant that drops them). Components are vertex-connected and judged by area ratio. Holes fill as a triangle or a centroid fan. Orientation floods across manifold edges, then flips closed components with negative signed volume (extra). |
-| cumesh `uv_unwrap` | `UvUnwrapper` | Charts grow face by face (`UvChartGrower`): a face joins when its normal is within the cone of the chart's projection normal and its projected triangle overlaps nothing in the chart, so a chart is valid by construction. Small charts dissolve into large neighbours at a wider cone. Planar projection per chart (mean normal when that stays valid), MaxRects (up to 256 charts) or shelf packing at uniform texel density, with a gutter that never drops below `MinPaddingTexels`. |
+| cumesh `uv_unwrap` | `UvUnwrapper` | Charts grow face by face (`UvChartGrower`): a face joins when its normal is within the cone of the chart's projection normal and its projected triangle overlaps nothing in the chart, so a chart is valid by construction. Small charts dissolve into large neighbours at a wider cone. Planar projection per chart (mean normal when that stays valid), MaxRects (up to 256 charts) or a bottom-left skyline at uniform texel density, with a gutter that never drops below `MinPaddingTexels`. |
 | cuBVH `unsigned_distance` | `TriangleBvh` | Median-split BVH, exact closest point and barycentrics, thread-safe queries. |
 | nvdiffrast UV rasterize | `Rasterizer` | CPU, banded over rows, lowest triangle index wins on overlap, so threading never changes the result. |
 | flex_gemm `grid_sample_3d(trilinear)` | `SparseAttributeSampler` | See conventions. |
@@ -143,7 +143,7 @@ of each vertex's texel, averaged on a 512 grid, 379,483 voxels), not the origina
 
 - **About 80 % of the atlas stays uncovered whatever the target.** Coverage is 20 to 23 % at every target, so it is not a face-count effect. The cost is the space between charts: the unwrapper makes
   28,000 to 45,000 small charts (a coarser mesh leaves their count almost flat, 29,968 at 500 k against 27,751 at 200 k, while the faces per chart fall from 17 to 7), each with a gutter (4 texels, 1 for
-  charts under 8 texels, halved when the packed scale falls under 0.2 of ideal), and above 1,000 charts the shelf packer also loses space at the end of every shelf. The split between gutters and packing loss
+  charts under 8 texels, halved when the packed scale falls under 0.2 of ideal), and above 1,000 charts the packer used at the time (a shelf packer, since replaced by a skyline) also lost space at the end of every shelf. The split between gutters and packing loss
   was not measured; going to 4096 halves the gutters' share yet adds only 2.3 to 2.6 points, which suggests the gutter is not the main cost. The lever may be fewer, larger charts, not the texture size. The
   texture side doubled (4096) takes about 2.6 times as long at 1 M faces and about 3.1 times at 500 k and 200 k, and adds about 11 MB to the GLB.
 - **The 1 M-face results show blotches, at both sizes; the cause is open.** In the front-view renders of all six runs, 1 M faces at 2048 and at 4096 shows pale blotches on the forehead and hair that 500 k and 200 k do
@@ -241,8 +241,11 @@ position-welded manifold geometry; a single-layer alternative (flood fill from t
   46 to 68 s.
 - No seam-length minimization and no chart optimization beyond the grow-and-absorb above; charts are only rotated to the best of 24
   bounding-box angles before packing.
-- Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a height-sorted shelf packer (roughly 65-75%
-  efficient). The gutter around each chart is `PaddingTexels` (4); it halves while the charts do not fit at a useful scale but never below
+- Packing: MaxRects best-short-side-fit only for up to 256 charts; larger counts use a bottom-left skyline packer over the same
+  chart rectangles (it replaced a height-sorted shelf packer: on the saved 512 bust at 500,000 faces the triangles cover 36.7 % of a 2048
+  atlas, up from 22.6 %, and 39.0 % at 4096, up from 23.4 %; 200,000 faces 38.6 %, up from 21.8 %; unwrap time up by about half a second).
+  Half of each chart's rectangle is still empty (triangle area is 47 % of the bounding boxes' area on that bust), which only an
+  irregular, bitmap-level packing would recover. The gutter around each chart is `PaddingTexels` (4); it halves while the charts do not fit at a useful scale but never below
   `MinPaddingTexels` (1), and a chart whose longest side is under 8 texels keeps the minimum gutter, so thousands of slivers do not each cost
   a full gutter. `UvUnwrapResult.PaddingTexels` reports what was kept. Sorts break ties on the index, so the atlas is the same on every run.
 - Decimation is quadric collapse only: no attribute-aware metric, no preservation of sharp features beyond the quadric itself, and
