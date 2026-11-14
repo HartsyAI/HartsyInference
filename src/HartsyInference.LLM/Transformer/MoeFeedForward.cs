@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Backends.Routing;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
@@ -160,24 +161,30 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _indexedAlignOk = null;
         ValidateRoutingOptions();
         string block = $"{prefix}.mlp";
-        _routerW = w[$"{block}.gate.weight"];
-        _routerW2 = _moe.SplitFeatureRouting ? w[$"{block}.gate.weight_1"] : null;
+        // Routers and router vectors may be BF16 or F16 in the checkpoint; they widen to F32 here (exactly), so the router GEMM and the
+        // device router see the same F32 values an F32 checkpoint holds.
+        _routerW = RouterF32(w[$"{block}.gate.weight"], $"{block}.gate.weight");
+        RequireShape(_routerW, $"{block}.gate.weight", _moe.NumExperts, _modelHidden);
+        _routerW2 = _moe.SplitFeatureRouting ? RouterF32(w[$"{block}.gate.weight_1"], $"{block}.gate.weight_1") : null;
+        if (_routerW2 is not null) RequireShape(_routerW2, $"{block}.gate.weight_1", _moe.NumExperts, _modelHidden);
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
-        // llama.cpp keeps router biases F32, so a direct host copy is exact.
         _correctionBias = null;
         _correctionBiasT = null;
         if (w.TryGetValue($"{block}.gate.e_score_correction_bias", out Tensor? cb))
         {
-            _correctionBias = HostVector(cb, _moe.NumExperts, "correction bias");
-            _correctionBiasT = cb;
+            string key = $"{block}.gate.e_score_correction_bias";
+            Tensor cbF32 = RouterF32(cb, key);
+            _correctionBias = HostVector(cbF32, _moe.NumExperts, key);
+            _correctionBiasT = cbF32;
         }
         else if (_moe.Scoring == MoeScoring.SigmoidLogitAdd)
         {
             throw new InvalidDataException("SigmoidLogitAdd routing requires an e_score_correction_bias tensor.");
         }
-        _routedScaleT = _moe.LearnedRoutedScale ? w[$"{block}.gate.routed_scaling_factor_param"] : null;
-        _routedScale = _routedScaleT is null ? null : HostVector(_routedScaleT, _moe.NumExperts, "routed scale");
+        Tensor? routedScaleT = _moe.LearnedRoutedScale ? RouterF32(w[$"{block}.gate.routed_scaling_factor_param"], $"{block}.gate.routed_scaling_factor_param") : null;
+        _routedScale = routedScaleT is null ? null : HostVector(routedScaleT, _moe.NumExperts, $"{block}.gate.routed_scaling_factor_param");
+        _routedScaleT = routedScaleT;
         LoadLatentAndExpertNorm(w, block);
         int e = _localExperts;
         _packed = null;
@@ -192,6 +199,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 _gateW[i] = w[$"{ep}.gate_proj.weight"];
                 _upW[i] = w[$"{ep}.up_proj.weight"];
                 _downW[i] = w[$"{ep}.down_proj.weight"];
+                RequireShape(_gateW[i], $"{ep}.gate_proj.weight", _moe.MoeIntermediateSize, _hidden);
+                RequireShape(_upW[i], $"{ep}.up_proj.weight", _moe.MoeIntermediateSize, _hidden);
+                RequireShape(_downW[i], $"{ep}.down_proj.weight", _hidden, _moe.MoeIntermediateSize);
             }
         }
         else
@@ -210,11 +220,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             _shDownW = w[$"{sp}.down_proj.weight"];
             // The shared-expert sigmoid gate ([1, hidden]) is optional (Qwen2-MoE has it; some variants don't).
             w.TryGetValue($"{block}.shared_expert_gate.weight", out Tensor? sg);
-            _shGateScoreW = sg;
-            // A latent block's shared expert reads and writes the model width, not the expert width.
-            if (_latentDown is not null
-                && (_shGateW.Shape[1] != _modelHidden || _shUpW.Shape[1] != _modelHidden || _shDownW.Shape[0] != _modelHidden))
-                throw new InvalidDataException($"{block}: the shared expert of a latent block must read and write the model width {_modelHidden}.");
+            _shGateScoreW = sg is null ? null : RouterF32(sg, $"{block}.shared_expert_gate.weight");
+            // The shared expert reads and writes the model width, not the expert width (a latent block's routed width is the latent).
+            RequireShape(_shGateW, $"{sp}.gate_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
+            RequireShape(_shUpW, $"{sp}.up_proj.weight", _moe.SharedExpertIntermediateSize, _modelHidden);
+            RequireShape(_shDownW, $"{sp}.down_proj.weight", _modelHidden, _moe.SharedExpertIntermediateSize);
         }
     }
 
@@ -238,6 +248,28 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _gateW = [];
         _upW = [];
         _downW = [];
+    }
+
+    /// <summary>A router or router-vector weight as F32, through the same <see cref="GenericTransformer.EnsureF32"/> the rest of the engine uses:
+    /// F32 passes through, F16 and BF16 cast, and quantized GGUF formats (Q8_0, the K-quants) dequantize at load. A dtype that cannot convert
+    /// to F32 is refused by name, with the tensor key and its dtype.</summary>
+    private static Tensor RouterF32(Tensor t, string key)
+    {
+        try
+        {
+            return GenericTransformer.EnsureF32(t);
+        }
+        catch (HartsyInferenceException ex)
+        {
+            throw new InvalidDataException($"{key} must convert to F32; got {t.DType}.", ex);
+        }
+    }
+
+    /// <summary>Refuses a projection whose shape is not the one this block reads, naming the tensor, its shape and the expected shape.</summary>
+    private static void RequireShape(Tensor t, string key, long rows, long cols)
+    {
+        if (t.Shape.Rank == 2 && t.Shape[0] == rows && t.Shape[1] == cols) return;
+        throw new InvalidDataException($"{key} has shape {t.Shape}; expected [{rows}, {cols}].");
     }
 
     private static void RequireMxfp4Projection(PackedMxfp4Projection p, int rows, int cols, string name)
@@ -268,8 +300,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             _latentDown = w[$"{block}.pre_expert_proj.weight"];
             _latentNorm = _moe.LatentNorm == MoeLatentNorm.None ? null : GenericTransformer.EnsureF32(w[$"{block}.pre_expert_norm.weight"]);
             _latentUp = w[$"{block}.post_expert_proj.weight"];
-            if (_latentDown.Shape[0] != _hidden || _latentUp.Shape[1] != _hidden)
-                throw new InvalidDataException($"{block}: latent projections do not match the configured latent size {_hidden}.");
+            RequireShape(_latentDown, $"{block}.pre_expert_proj.weight", _hidden, _modelHidden);
+            RequireShape(_latentUp, $"{block}.post_expert_proj.weight", _modelHidden, _hidden);
         }
         if (_moe.PostExpertNorm)
         {
@@ -1009,7 +1041,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     }
 
     /// <summary>Per-token top-k expert selection + routing weights (softmax, sigmoid, or Kolibri's biased-logit
-    /// selection with unbiased sigmoid weights; optional renorm).</summary>
+    /// selection with unbiased sigmoid weights; optional renorm).
+    /// Equal selection scores go to the lower expert index: the scan keeps the first strict maximum.</summary>
     internal void Route(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
     {
         float[] selection = new float[e];
@@ -1263,11 +1296,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
     }
 
-    /// <summary>A per-expert F32 router vector read once to the host; refuses any other dtype or length.</summary>
-    private static float[] HostVector(Tensor t, int experts, string what)
+    /// <summary>A per-expert F32 router vector read once to the host; refuses any other dtype or length, naming the tensor.</summary>
+    private static float[] HostVector(Tensor t, int experts, string key)
     {
-        if (t.DType != DType.F32) throw new NotSupportedException($"MoE {what} must be F32; got {t.DType}.");
-        if (t.ElementCount != experts) throw new InvalidDataException($"MoE {what} has {t.ElementCount} entries; expected {experts}.");
+        if (t.DType != DType.F32) throw new InvalidDataException($"{key} must be F32; got {t.DType}.");
+        if (t.ElementCount != experts) throw new InvalidDataException($"{key} has shape {t.Shape}; expected [{experts}] (one value per expert).");
         return HostCopy(t, experts);
     }
 
