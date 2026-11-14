@@ -397,6 +397,10 @@ public sealed class MeshPlanningTests
         Assert.Equal("false", shapeOnly.Settings[nameof(MeshRequest.Remesh)].Value);
         MeshPlan max = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, Quality = MeshQuality.Max });
         Assert.Equal("false", max.Settings[nameof(MeshRequest.Remesh)].Value);
+        MeshPlan forced = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Texture = true, Quality = MeshQuality.Max, Remesh = true });
+        Assert.Equal("true", forced.Settings[nameof(MeshRequest.Remesh)].Value);
+        Assert.Equal(ParameterSource.UserOverride, forced.Settings[nameof(MeshRequest.Remesh)].Source);
+        Assert.Equal("1024", forced.Settings[nameof(MeshRequest.GridResolution)].Value);
         Assert.Equal("auto", engine.MeshPlanning.Describe("trellis2").Fields[nameof(MeshRequest.Remesh)].Default);
         Assert.DoesNotContain(on.Issues.Concat(off.Issues).Concat(shapeOnly.Issues), i => i.Field == nameof(MeshRequest.Remesh));
     }
