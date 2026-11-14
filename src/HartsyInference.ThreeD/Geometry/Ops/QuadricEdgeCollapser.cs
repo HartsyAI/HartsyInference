@@ -283,7 +283,7 @@ internal sealed class QuadricEdgeCollapser
         int sharedCount = SharedFaces(a, b, shared);
         if (sharedCount is < 1 or > 2)
             return false;
-        if (_boundary[a] && _boundary[b] && sharedCount == 2)
+        if (_boundary[a] && _boundary[b] && sharedCount == 2 && !_options.AllowBoundaryPinch)
             return false;
 
         _scratchA.Clear();

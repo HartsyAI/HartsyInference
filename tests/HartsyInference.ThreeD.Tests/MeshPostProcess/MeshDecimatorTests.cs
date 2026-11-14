@@ -140,4 +140,38 @@ public sealed class MeshDecimatorTests
             Assert.InRange(Math.Abs(omax[a] - rmax[a]), 0, relativeTolerance * extent);
         }
     }
+
+    // Every fourth face removed: boundary vertices everywhere, so the link of most interior edges has two boundary ends.
+    private static Mesh TornSphere()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(5, 1f);
+        List<int> kept = [];
+        for (int f = 0; f < sphere.TriangleCount; f++)
+            if (f % 4 != 0)
+                kept.AddRange(sphere.Indices[(f * 3)..(f * 3 + 3)]);
+        return new Mesh { Vertices = sphere.Vertices, Indices = [.. kept] };
+    }
+
+    [Fact]
+    public void BoundaryPinch_LetsATornMeshReachWhatItsBoundariesOtherwiseBlock()
+    {
+        Mesh torn = TornSphere();
+
+        int pinned = MeshDecimator.Decimate(torn, 500).TriangleCount;
+        int pinching = MeshDecimator.Decimate(torn, 500, new MeshDecimatorOptions { AllowBoundaryPinch = true }).TriangleCount;
+
+        Assert.True(pinned > 1000, $"without the pinch it stopped at {pinned}");
+        Assert.True(pinching < pinned / 2, $"with the pinch it reached {pinching}, without {pinned}");
+    }
+
+    [Fact]
+    public void Staged_FallsBackToThePinchWhenAPassStallsAboveTheTarget()
+    {
+        Mesh torn = TornSphere();
+        MeshCleanOptions clean = new() { SmallComponentAreaRatio = 0, HoleFillMaxPerimeter = 0, UnifyOrientation = false };
+
+        Mesh staged = MeshDecimator.DecimateStaged(torn, 500, 3, clean);
+
+        Assert.True(staged.TriangleCount < 1000, $"the staged result kept {staged.TriangleCount} faces");
+    }
 }

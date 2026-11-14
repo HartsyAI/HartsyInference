@@ -7,6 +7,8 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 /// </summary>
 public static class MeshDecimator
 {
+    private const double StallTolerance = 1.05;
+
     /// <summary>Simplifies <paramref name="mesh"/> toward <paramref name="targetFaceCount"/> faces. Closed manifold meshes land on the target
     /// or one face below; meshes that run out of legal collapses stop early.</summary>
     public static Mesh Decimate(Mesh mesh, int targetFaceCount, MeshDecimatorOptions? options = null,
@@ -43,6 +45,13 @@ public static class MeshDecimator
         pass = MeshCleaner.Clean(pass, interim);
         cancellationToken.ThrowIfCancellationRequested();
         pass = Decimate(pass, targetFaceCount, options, cancellationToken);
-        return MeshCleaner.Clean(pass, clean);
+        Mesh result = MeshCleaner.Clean(pass, clean);
+        // A mesh torn into many pieces stops above the target because its boundary vertices cannot meet; one more pass may join them.
+        if (result.TriangleCount > targetFaceCount * StallTolerance && options?.AllowBoundaryPinch != true)
+        {
+            MeshDecimatorOptions relaxed = (options ?? new MeshDecimatorOptions()) with { AllowBoundaryPinch = true };
+            result = MeshCleaner.Clean(Decimate(result, targetFaceCount, relaxed, cancellationToken), clean);
+        }
+        return result;
     }
 }
