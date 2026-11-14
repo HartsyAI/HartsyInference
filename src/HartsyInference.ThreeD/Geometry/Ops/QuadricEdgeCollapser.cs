@@ -226,7 +226,7 @@ internal sealed class QuadricEdgeCollapser
         double mx = 0.5 * (ax + bx), my = 0.5 * (ay + by), mz = 0.5 * (az + bz);
         double len2 = (ax - bx) * (ax - bx) + (ay - by) * (ay - by) + (az - bz) * (az - bz);
 
-        // A boundary vertex never moves: collapsing into it keeps the boundary curve; two boundary vertices may also meet midway.
+        // A boundary vertex never moves unless the edge joins two boundary vertices (a pinch, only with AllowBoundaryPinch): collapsing into it keeps the boundary curve; the ends of a boundary edge may also meet midway.
         if (!ba || bb) Consider(q, bx, by, bz, ref x, ref y, ref z, ref cost);
         if (!bb || ba) Consider(q, ax, ay, az, ref x, ref y, ref z, ref cost);
         if (!ba && !bb)

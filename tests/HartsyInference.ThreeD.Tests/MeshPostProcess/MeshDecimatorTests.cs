@@ -170,8 +170,22 @@ public sealed class MeshDecimatorTests
         Mesh torn = TornSphere();
         MeshCleanOptions clean = new() { SmallComponentAreaRatio = 0, HoleFillMaxPerimeter = 0, UnifyOrientation = false };
 
+        Mesh without = MeshDecimator.DecimateStaged(torn, 500, 3, clean, new MeshDecimatorOptions { PinchWhenStalled = false });
         Mesh staged = MeshDecimator.DecimateStaged(torn, 500, 3, clean);
 
+        Assert.True(without.TriangleCount > 1000, $"without the fallback it kept {without.TriangleCount} faces");
         Assert.True(staged.TriangleCount < 1000, $"the staged result kept {staged.TriangleCount} faces");
+        Assert.Equal(0, SyntheticMeshes.Topology(staged).NonManifold);
+    }
+
+    [Fact]
+    public void Staged_SkipsThePinchPassOnAClosedMesh()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(4);
+
+        Mesh staged = MeshDecimator.DecimateStaged(sphere, 1000);
+
+        Assert.InRange(staged.TriangleCount, 900, 1000);
+        Assert.True(SyntheticMeshes.IsClosedManifold(staged));
     }
 }
