@@ -182,38 +182,6 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     if (idx >= total) return;
     unsigned int tid = threadIdx.x;
 
-    extern __shared__ float combineWeights[];
-    __shared__ float totalL;
-    if (G <= 32)
-    {
-        if (tid < 32)
-        {
-            bool active = tid < G;
-            float mg = active ? partialM[idx * G + tid] : -INF_F;
-            float m = mg;
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) m = attnMax(m, __shfl_xor_sync(0xffffffffu, m, o));
-            float lg = active ? partialL[idx * G + tid] : 0.0f;
-            if (active) combineWeights[tid] = lg == 0.0f ? 0.0f : __expf(mg - m);
-            __syncwarp();
-            if (tid == 0)
-            {
-                float l = 0.0f;
-                for (unsigned int g = 0; g < G; g++) l += partialL[idx * G + g] * combineWeights[g];
-                totalL = l;
-            }
-        }
-        __syncthreads();
-        if (tid < D)
-        {
-            float acc = 0.0f;
-            for (unsigned int g = 0; g < G; g++)
-                acc += partialAcc[(size_t)(idx * G + g) * D + tid] * combineWeights[g];
-            out[(size_t)idx * D + tid] = totalL != 0.0f ? acc / totalL : 0.0f;
-        }
-        return;
-    }
-
     float m = -INF_F;
     for (unsigned int g = 0; g < G; g++) m = attnMax(m, partialM[idx * G + g]);
     float l = 0.0f, acc = 0.0f;

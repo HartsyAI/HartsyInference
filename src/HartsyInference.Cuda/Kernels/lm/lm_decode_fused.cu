@@ -258,38 +258,6 @@ extern "C" __global__ void lm_flash_attn_f32_combine_q8_1(
     if (idx >= total) return;
     unsigned int tid = threadIdx.x;
 
-    extern __shared__ float combineWeights[];
-    __shared__ float totalL;
-    if (G <= 32) {
-        if (tid < 32) {
-            bool active = tid < G;
-            float mg = active ? partialM[idx * G + tid] : -INF_FC;
-            float m = mg;
-            #pragma unroll
-            for (int o = 16; o > 0; o >>= 1) m = combineMax(m, __shfl_xor_sync(0xffffffffu, m, o));
-            float lg = active ? partialL[idx * G + tid] : 0.0f;
-            if (active) combineWeights[tid] = lg == 0.0f ? 0.0f : __expf(mg - m);
-            __syncwarp();
-            if (tid == 0) {
-                float l = 0.0f;
-                for (unsigned int g = 0; g < G; g++) l += partialL[idx * G + g] * combineWeights[g];
-                totalL = l;
-            }
-        }
-        __syncthreads();
-        if (tid < D) {
-            float acc = 0.0f;
-            for (unsigned int g = 0; g < G; g++)
-                acc += partialAcc[(size_t)(idx * G + g) * D + tid] * combineWeights[g];
-            size_t qBase = (size_t)idx * D;
-            const float o = totalL != 0.0f ? acc / totalL : 0.0f;
-            out[qBase + tid] = o;
-            const size_t blk = (qBase + tid) >> 5;
-            fast_quantize_block(xq + blk * 32, xd + blk, xs + blk, o, tid & 31u);
-        }
-        return;
-    }
-
     float m = -INF_FC;
     for (unsigned int g = 0; g < G; g++) m = combineMax(m, partialM[idx * G + g]);
     float l = 0.0f, acc = 0.0f;

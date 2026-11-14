@@ -23,13 +23,9 @@ public sealed class NcclRankCommTests
     private static string PtxDir()
     {
         string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
-        if (Directory.Exists(ptxDir)) return ptxDir;
-        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            string candidate = Path.Combine(dir.FullName, "src", "HartsyInference.Cuda", "Ptx");
-            if (Directory.Exists(candidate)) return candidate;
-        }
-        throw new DirectoryNotFoundException("src/HartsyInference.Cuda/Ptx not found above the test output directory.");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        return ptxDir;
     }
 
     private static int FreePort()
