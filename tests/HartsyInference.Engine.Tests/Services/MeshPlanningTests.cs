@@ -197,7 +197,7 @@ public sealed class MeshPlanningTests
     [Fact]
     public void AModelWithPresetsDescribesBothAndOneWithoutRejectsThem()
     {
-        Assert.Equal([MeshQuality.Quality, MeshQuality.Max], Profile("trellis2").Presets.Keys.Order());
+        Assert.Equal([MeshQuality.High, MeshQuality.Max], Profile("trellis2").Presets.Keys.Order());
         Assert.Empty(Profile("triposr").Presets);
         Assert.Equal(MeshFieldAccess.Used, Profile("trellis2").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
         Assert.Equal(MeshFieldAccess.Rejected, Profile("triposr").Fields.Single(f => f.Name == nameof(MeshRequest.Quality)).Access);
@@ -220,7 +220,7 @@ public sealed class MeshPlanningTests
     [Fact]
     public void ThePresetTextureSizeNeedsTheTextureOptionSoAShapeOnlyRequestStaysLegal()
     {
-        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.Quality });
+        MeshRequest resolved = MeshQualityPresets.Resolve("trellis2", Valid("trellis2") with { Quality = MeshQuality.High });
 
         Assert.Equal(0, resolved.TextureSize);
         MeshRequestValidator.Validate("trellis2", resolved, matterAvailable: false);
@@ -239,11 +239,49 @@ public sealed class MeshPlanningTests
     }
 
     [Fact]
+    public void APresetThatSetsStepsFillsThemOnlyWhenTheRequestLeavesThemUnset()
+    {
+        MeshPreset preset = new() { Steps = 7, GridResolution = 64, Basis = "test" };
+
+        MeshRequest filled = MeshQualityPresets.Apply(preset, new MeshRequest());
+        MeshRequest kept = MeshQualityPresets.Apply(preset, new MeshRequest { Steps = 3, GridResolution = 32 });
+
+        Assert.Equal((7, 64), (filled.Steps, filled.GridResolution));
+        Assert.Equal((3, 32), (kept.Steps, kept.GridResolution));
+        Assert.Equal(7, MeshQualityPresets.Supplied(preset, new MeshRequest(), nameof(MeshRequest.Steps)));
+        Assert.Null(MeshQualityPresets.Supplied(new MeshPreset { Basis = "test" }, new MeshRequest(), nameof(MeshRequest.Steps)));
+    }
+
+    [Theory]
+    [InlineData("hunyuan3d-omni", 512)]
+    [InlineData("hunyuan3d-xpart", 384)]
+    public async Task APresetGridPastTheMeasuredOneGetsAnUnknownMemoryVerdictNotTheSmallerGridsPeak(string id, int grid)
+    {
+        using InferenceEngine engine = new("cpu");
+        MeshRequest request = Valid(id) with { Quality = MeshQuality.High };
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec(id), request);
+
+        Assert.Equal(grid, MeshQualityPresets.Resolve(id, request).GridResolution);
+        Assert.Equal(Planning.Memory.MemoryFitVerdict.Unknown, plan.Memory.Verdict);
+    }
+
+    [Fact]
+    public async Task APresetValueEqualToTheModelsDefaultIsNotCreditedToThePreset()
+    {
+        using InferenceEngine engine = new("cpu");
+
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("trellis2"), Valid("trellis2") with { Quality = MeshQuality.High });
+
+        Assert.Equal(ParameterSource.RecipeDefault, plan.Settings[nameof(MeshRequest.GridResolution)].Source);
+    }
+
+    [Fact]
     public async Task APlanReportsAPresetOnAModelWithoutOneAsAnErrorOnTheQualityField()
     {
         using InferenceEngine engine = new("cpu");
 
-        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Quality = MeshQuality.Quality });
+        MeshPlan plan = await engine.MeshPlanning.PlanAsync(Spec("triposr"), Valid("triposr") with { Quality = MeshQuality.High });
 
         Assert.Contains(plan.Issues, i => i.Severity == MeshPlanIssueSeverity.Error && i.Field == nameof(MeshRequest.Quality));
     }

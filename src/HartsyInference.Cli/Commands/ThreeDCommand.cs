@@ -85,7 +85,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>A named bundle of quality settings.</summary>
         [CommandOption("--quality")]
-        [Description("Quality preset: default (the model's own settings), quality (the best that fits a 12 GB card in a few minutes) or max (the best the model can give, whatever the time). Fills --steps, --grid and --texture-size where you leave them at 0; models without a preset reject it.")]
+        [Description("Quality preset: default (the model's own settings), high (the best that fits a 12 GB card in under ten minutes) or max (the best the model can give, whatever the time). Fills --steps, --grid and --texture-size where you leave them at 0; models without a preset reject it.")]
         public string? Quality { get; init; }
 
         /// <summary>Path to the model directory or checkpoint.</summary>

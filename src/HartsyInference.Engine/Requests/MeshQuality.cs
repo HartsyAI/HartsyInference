@@ -6,9 +6,9 @@ public enum MeshQuality
     /// <summary>The model's own defaults, as today.</summary>
     Default = 0,
 
-    /// <summary>The best result that is known to fit a 12 GB card in a few minutes. A model without a preset rejects it.</summary>
-    Quality = 1,
+    /// <summary>The best result that is known to fit a 12 GB card in under ten minutes. A model without a preset rejects it.</summary>
+    High = 1,
 
-    /// <summary>The best result the model can give whatever it costs in time; it may not fit a 12 GB card. A model without a preset rejects it.</summary>
+    /// <summary>The best result the model can give whatever it costs in time; it may not fit a 12 GB card, and for a model with no finer setting it equals <see cref="High"/>. A model without a preset rejects it.</summary>
     Max = 2,
 }

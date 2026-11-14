@@ -38,6 +38,6 @@ internal sealed record MeshModelProfile
     /// <summary>A line of what to know before using the model.</summary>
     public string? Note { get; init; }
 
-    /// <summary>What <see cref="MeshQuality.Quality"/> and <see cref="MeshQuality.Max"/> set; empty when the model has no preset.</summary>
+    /// <summary>What <see cref="MeshQuality.High"/> and <see cref="MeshQuality.Max"/> set; empty when the model has no preset.</summary>
     public IReadOnlyDictionary<MeshQuality, MeshPreset> Presets { get; init; } = new Dictionary<MeshQuality, MeshPreset>();
 }

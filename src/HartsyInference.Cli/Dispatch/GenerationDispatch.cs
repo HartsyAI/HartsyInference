@@ -1699,7 +1699,7 @@ public static class GenerationDispatch
     private static MeshQuality ParseMeshQuality(string? text) =>
         text is null ? MeshQuality.Default
         : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
-        : throw new ArgumentException($"--quality must be default, quality or max; got '{text}'.");
+        : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
 
     /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
     private static ImageData LoadMeshImage(string promptPath)

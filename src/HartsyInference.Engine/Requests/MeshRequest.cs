@@ -65,7 +65,7 @@ public sealed record MeshRequest
     /// <summary>The frame to return a glb in: <see cref="MeshFrame.Native"/> (default) keeps the model's own, <see cref="MeshFrame.GltfYUpMetres"/> normalises it. Splat results are not changed.</summary>
     public MeshFrame Frame { get; init; }
 
-    /// <summary>A named bundle of quality settings: <see cref="MeshQuality.Default"/> keeps the model's defaults, <see cref="MeshQuality.Quality"/> and <see cref="MeshQuality.Max"/> fill <see cref="Steps"/>, <see cref="GridResolution"/> and <see cref="TextureSize"/> where the request leaves them at 0 (the model's descriptor lists the values). A model with no preset rejects both.</summary>
+    /// <summary>A named bundle of quality settings: <see cref="MeshQuality.Default"/> keeps the model's defaults, <see cref="MeshQuality.High"/> and <see cref="MeshQuality.Max"/> fill <see cref="Steps"/>, <see cref="GridResolution"/> and <see cref="TextureSize"/> where the request leaves them at 0 (the model's descriptor lists the values). A model with no preset rejects both.</summary>
     public MeshQuality Quality { get; init; }
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>

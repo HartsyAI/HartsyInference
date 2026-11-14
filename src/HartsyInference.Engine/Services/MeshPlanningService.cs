@@ -170,9 +170,10 @@ public sealed class MeshPlanningService : IMeshPlanningService
         {
             bool set = IsSet(request, field.Name);
             int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name);
+            // A preset value equal to the model's own default changes nothing, so the plan does not credit the preset with it.
             ResolvedParameter parameter = set
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)
-                : preset is int value
+                : preset is int value && value.ToString(System.Globalization.CultureInfo.InvariantCulture) != field.Default
                     ? new ResolvedParameter(value.ToString(System.Globalization.CultureInfo.InvariantCulture), ParameterSource.ProfileDefault, $"the {request.Quality} preset")
                     : new ResolvedParameter(field.Default, ParameterSource.RecipeDefault);
             settings[field.Name] = parameter;
