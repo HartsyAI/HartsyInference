@@ -50,6 +50,12 @@ public static partial class EngineKnobs
 
     // ── Override knobs: a positive value replaces a computed decision ──
 
+    /// <summary>MiniMax-H3 image VAE: decode the tiles block-major (each block's weights resident once for all tiles).
+    /// Off restores the tile-major order, which re-streams the weights for every tile when VRAM is tight.</summary>
+    public static readonly Knob<bool> VaeBlockMajorTiles =
+        Bool("vae.blockMajorTiles", true, KnobScope.Runtime, KnobDomain.Vram,
+            "MiniMax-H3 image VAE tiles decode block-major, so each block's weights cross the bus once per decode.");
+
     /// <summary>Forces MiniMax-H3 attention/MLP chunk rows; unset lets the policy size chunks from free VRAM.</summary>
     public static readonly Knob<int?> H3ChunkRows =
         IntOverride("vram.h3ChunkRows", KnobScope.Runtime, KnobDomain.Vram,
