@@ -24,6 +24,8 @@ public static class PbrMeshPostProcessor
         layout.Validate(volume.Channels);
         if (options.DecimationTarget < 1 || options.TextureSize < 1)
             throw new ArgumentOutOfRangeException(nameof(options), "Decimation target and texture size must be positive.");
+        if (!(options.OpeningWidthRatio >= 0))
+            throw new ArgumentOutOfRangeException(nameof(options), "The opening width ratio must not be negative.");
 
         MeshCleanOptions initial = new()
         {
@@ -40,6 +42,7 @@ public static class PbrMeshPostProcessor
         {
             SmallComponentAreaRatio = options.SmallComponentAreaRatio,
             HoleFillMaxPerimeter = options.HoleFillMaxPerimeter,
+            HoleFillMaxWidth = options.OpeningWidthRatio * ShapeMeshFinisher.Diagonal(mesh),
         };
         Mesh reduced = MeshDecimator.DecimateStaged(source, options.DecimationTarget, options.IntermediateFactor, between,
             cancellationToken: cancellationToken);

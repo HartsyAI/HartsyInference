@@ -36,7 +36,8 @@ public static class ShapeMeshFinisher
         return MeshOps.ComputeVertexNormals(mesh);
     }
 
-    private static double Diagonal(Mesh mesh)
+    /// <summary>Length of the mesh's bounding-box diagonal; 0 for an empty mesh.</summary>
+    public static double Diagonal(Mesh mesh)
     {
         if (mesh.VertexCount == 0) return 0;
         float[] min = [float.PositiveInfinity, float.PositiveInfinity, float.PositiveInfinity];

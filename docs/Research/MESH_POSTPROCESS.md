@@ -51,6 +51,7 @@ Every stage is a public type of its own and usable alone.
 - Texels whose eight volume neighbors are all empty are treated as uncovered and inpainted; upstream leaves them zero.
 - Upstream marks the material double-sided unless remeshed; here `DoubleSided` defaults to false and the caller chooses.
 - The cleaner also welds identical vertices and drops degenerate faces, and its orientation step can flip a closed component outward.
+- Pinholes: the raw dual-grid surface keeps thousands of tiny boundary loops that the perimeter fill does not close, and they render as dark specks in a textured result (the same dots appear with no texture at all). `PbrPostProcessOptions.OpeningWidthRatio` (0.005 of the bounding-box diagonal by default, 0 restores the old behaviour) also zips shut every loop of the decimation passes' cleans that triangulates within that width. On the saved 512 bust at 500,000 faces the welded boundary edges fell from 16,824 to 3,444 and the specks on the hair, forehead and shirt are gone; a width of 0.1 closes more but draws long crack lines, so it stays opt-in on the shape-only finisher. Upstream's own examples and Gradio app avoid the holes by running `to_glb` with `remesh=True`, which this engine does not port.
 - Output is geometry-only after cleaning and decimation; normals are recomputed (area-weighted) before unwrapping and carried
   across seams.
 

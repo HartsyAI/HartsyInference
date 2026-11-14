@@ -15,6 +15,9 @@ public sealed record PbrPostProcessOptions
     /// <summary>Hole perimeter filled before the surface is snapshotted for baking, and again between decimation passes.</summary>
     public double HoleFillMaxPerimeter { get; init; } = 3e-2;
 
+    /// <summary>Widest opening, as a share of the mesh's bounding-box diagonal, the cleaning passes close by zipping a boundary loop shut (<see cref="MeshCleanOptions.HoleFillMaxWidth"/>); 0 leaves them open. The raw dual-grid surface has pinholes a perimeter limit cannot close, which render as dark specks.</summary>
+    public double OpeningWidthRatio { get; init; } = 0.005;
+
     /// <summary>Component area fraction below which fragments are dropped.</summary>
     public double SmallComponentAreaRatio { get; init; } = 1e-5;
 

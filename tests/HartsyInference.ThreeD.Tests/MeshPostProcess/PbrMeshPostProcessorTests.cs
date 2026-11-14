@@ -49,6 +49,31 @@ public sealed class PbrMeshPostProcessorTests
     }
 
     [Fact]
+    public void Process_ClosesAPinholeWithinTheOpeningWidthAndLeavesItWithoutOne()
+    {
+        // Two neighbouring faces removed: a quad hole whose zip edge is longer than the perimeter fill's reach but within the opening width.
+        Mesh sphere = SyntheticMeshes.Icosphere(4, Radius);
+        int[] indices = sphere.Indices[6..];
+        Mesh holed = new() { Vertices = sphere.Vertices, Indices = indices };
+        PbrPostProcessOptions open = new() { DecimationTarget = 100_000, TextureSize = 128, PaddingTexels = 3, HoleFillMaxPerimeter = 1e-3, OpeningWidthRatio = 0 };
+
+        long without = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, open).Mesh).BoundaryEdges;
+        long with = MeshStatistics.Measure(PbrMeshPostProcessor.Process(holed, ShellVolume(), PbrAttributeLayout.Default, open with { OpeningWidthRatio = 0.1 }).Mesh).BoundaryEdges;
+
+        Assert.True(without > 0);
+        Assert.Equal(0, with);
+    }
+
+    [Fact]
+    public void Process_RejectsANegativeOpeningWidth()
+    {
+        Mesh sphere = SyntheticMeshes.Icosphere(2, Radius);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => PbrMeshPostProcessor.Process(
+            sphere, ShellVolume(), PbrAttributeLayout.Default, SmallOptions() with { OpeningWidthRatio = -0.1 }));
+    }
+
+    [Fact]
     public void Process_AcceptsAZeroPaddingRequest()
     {
         // PaddingTexels = 0 was a valid request before the unwrapper had a minimum gutter; it must keep working through the PBR options.
