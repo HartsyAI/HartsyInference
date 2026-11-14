@@ -332,10 +332,10 @@ GPU frame check 2026-11-12 (RTX 3060, a bust cut out by colour keying, shape onl
 **Not verified:**
 - The remesh on Pixal3D end to end: only TRELLIS.2 ran through the whole pipeline on a GPU; Pixal3D shares the post-process and its options are wired and unit-tested.
 - Any numeric comparison with upstream: CuMesh's remesh is CUDA-only, so the port was checked by its own geometric tests and by looking at renders.
-- Thin features thicken by one voxel per side (the projection back toward the original is 0, as in upstream's demo app), and non-manifold edges remain where sheets touch.
+- Thin features thicken by one voxel (the projection back toward the original is 0, as in upstream's demo app), and non-manifold edges remain where sheets touch (186 and 154 on the real GLBs above).
 - F16 against F32 flow quality at 1024: F16 fits and is 13 % faster; only a render was compared.
 - Nostril and ear-canal openings: the remesh's outer-shell mode (and the hole fill) may close small openings; this was not checked against the source image.
-- One subject and one seed throughout; the grey back cavity seen once was not reproduced.
+- One subject and one seed throughout.
 
 **Newest open-weights releases per family, from primary pages on 2026-11-14** (Hugging Face model API and the GitHub READMEs, read through a summarising fetch tool, so dates and sizes are the API's `createdAt` / `usedStorage` values and were not rechecked by hand). Nothing was downloaded or ported.
 

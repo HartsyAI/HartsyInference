@@ -300,7 +300,7 @@ Cost: about 10 s of CPU and 3.6 GiB of host memory at 512 (the table below); at 
 | Bust 2 (1,865,382 voxels) | off | 63.7 s, 2.8 GiB | 509,188 | 224,074 / 20,048 | 19.7 % |
 | Bust 2 | 512 | 47.4 s, 3.6 GiB | 499,594 | 0 / 23 | 31.6 % |
 
-Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Whole-pipeline GPU runs (RTX 3060, bust 2, seed 1, 12 steps, F16 flow at 1024, 2026-11-14; charts and coverage measured on the GLB):
+Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are mostly cleaned by the decimation passes on the saved volumes (1 and 23 here), though the real GLBs of the whole pipeline below still carry 186 and 154; and there is no numeric comparison with upstream (CuMesh is CUDA-only). Whole-pipeline GPU runs (RTX 3060, bust 2, seed 1, 12 steps, F16 flow at 1024, 2026-11-14; charts and coverage measured on the GLB):
 
 | Run | Time | Card peak | Faces | Charts | Atlas covered | Boundary / non-manifold |
 |---|---|---|---|---|---|---|
