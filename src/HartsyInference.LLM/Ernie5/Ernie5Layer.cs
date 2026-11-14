@@ -116,6 +116,8 @@ internal sealed class Ernie5Layer : IDisposable
         VDim = cfg.MlaVHeadDim,
         Window = cfg.SlidingWindow,
         NormEps = (float)cfg.RmsNormEps,
+        // TODO(ernie5): the DSA indexer ReLU is unverified against the reference kernel (see DsaIndexer; DeepGEMM fp8_mqa_logits is not in the reference
+        // sources). Finish it by comparing indexer scores from a real DSA layer against that kernel's output.
         Indexer = new DsaIndexerSettings
         {
             Heads = cfg.IndexNHeads, HeadDim = cfg.IndexHeadDim, RopeDim = cfg.MlaQkRopeHeadDim, TopK = cfg.IndexTopk,

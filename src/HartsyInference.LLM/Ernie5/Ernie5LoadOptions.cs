@@ -9,6 +9,9 @@ public sealed record Ernie5LoadOptions
     /// <summary>Builds every layer once at load and keeps it. When false each layer is read, dequantized and dropped on every forward,
     /// which bounds host memory to one layer's F32 weights at the cost of re-reading them per call.</summary>
     public bool ResidentWeights { get; init; }
+    // TODO(ernie5): the real checkpoint loads with ResidentWeights false (HfTextDirectoryLoader.Ernie5Options), so every layer streams from the volume
+    // on each forward. A resident multi-device path is not built. Finish it by keeping layers resident across devices, with this flag as the
+    // single-device fallback.
 
     /// <summary>Maps and loads the multi-token-prediction layers so <see cref="Ernie5Model.MtpForward"/> can draft tokens, and gives every
     /// sequence state their caches. When false their keys are skipped (<see cref="Ernie5WeightCoverage.SkippedMtp"/>). Without

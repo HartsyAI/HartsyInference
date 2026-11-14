@@ -19,6 +19,8 @@ public static partial class KnobProfiles
     /// outside its reach: SDPA still auto-tiles under memory pressure regardless of <c>sdpaForceTiled</c>, and
     /// <c>vram.h3ChunkRows</c> decides from free VRAM, so H3 parity runs must pin it per run.</para></remarks>
     private static readonly KnobProfile ReferenceProfile = KnobProfile.Create("reference")
+        // TODO(ernie5): production precision (TF32 and F16 GEMM) is not measured for ERNIE-5.5; this profile pins the faithful arm. Finish it by running
+        // the ERNIE-5.5 quality and speed check under the production arm and recording the result beside these pins.
         // Bypass skips the checkpoint's LlmAdapter and feeds raw Qwen-3 hiddens to DiT cross-attn; a diagnostic, not the model path.
         .With(EngineKnobs.AnimaBypassLlmAdapter, false)
         // Pinned: the reference nn.GELU() is exact erf, and tanh drifts from it.

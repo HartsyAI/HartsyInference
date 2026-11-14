@@ -75,6 +75,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// <param name="layer">This block's layer index, the bank layer its experts are keyed by.</param>
     public void AttachOffload(MoeExpertOffload offload, int layer)
     {
+        // TODO(ernie5): packed MXFP4 experts are refused here, so the packed-expert offload path is not built. Finish it by letting the offload cache
+        // hold and run packed experts, then drop this refusal.
         if (_packed is not null) throw new NotSupportedException("Packed MXFP4 experts run resident; they cannot be offloaded.");
         ArgumentNullException.ThrowIfNull(offload);
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
@@ -114,6 +116,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         get => _useHostExpertRuntime;
         set
         {
+            // TODO(ernie5): the host expert runtime refuses packed MXFP4 experts; that packed-expert path is not built. Finish it by giving
+            // HostExpertCache and HeterogeneousExpertExecutor a packed-weight route, then drop this refusal.
             if (value && _packed is not null) throw new NotSupportedException("The host expert runtime needs F32 experts; packed MXFP4 experts run resident.");
             if (value) _ = HostExpertProgram(_moe.Activation);
             _useHostExpertRuntime = value;
@@ -718,6 +722,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private bool DeviceRoutingEligible()
     {
         if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
+        // TODO(ernie5): packed experts and offload are refused from the device-routed paths, so the packed-expert offload path is not built. Finish it
+        // by adding packed and offloaded experts to the indexed and grouped kernels, then drop those terms.
         if (UseHostExpertRuntime || _offload is not null || _packed is not null) return false;
         _deviceShapeOk ??= DeviceRoutedShapeOk();
         return _deviceShapeOk.Value;
@@ -842,6 +848,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     /// normalization and routed scale; the router is whole on every block, so every rank routes identically.</summary>
     internal unsafe void RouteRows(IBackend backend, Tensor x, int n, int[] routes, float[] weights)
     {
+        // TODO(kimi): RouteRows runs on the host, so the GPU expert path does a per-token host round trip. Finish it by routing on the device and
+        // returning only the per-expert counts to the host.
         int e = _moe.NumExperts, k = _moe.NumExpertsPerTok;
         if (routes.Length < n * k || weights.Length < n * k) throw new ArgumentException($"routes and weights must hold {n}x{k} entries.");
         Tensor logitsT = ComputeRouterLogits(backend, x, n);

@@ -109,6 +109,8 @@ public sealed class KimiK31TextModel : IHostReferenceTextModel
             if (configBos is { } bos && tokenizer.BosId != bos)
                 throw new HartsyInferenceException(
                     $"{tokenizerFile} puts begin-of-sentence at {tokenizer.BosId?.ToString() ?? "no id"}, but config.json says {bos}.");
+            // TODO(kimi): config.json gives EOS 163586 but tokenizer_config.json gives "[EOS]" as 163585; this check uses the config id. Finish it by
+            // confirming which id the reference stops on, then aligning the tokenizer and config.
             if (configEos is { } eos && tokenizer.EosId != eos)
                 throw new HartsyInferenceException(
                     $"{tokenizerFile} puts end-of-sentence at {tokenizer.EosId?.ToString() ?? "no id"}, but config.json says {eos}.");

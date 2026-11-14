@@ -196,6 +196,8 @@ public sealed class Ernie5Model : IDisposable
         {
             for (int i = 0; i < _layers.Length; i++)
             {
+                // TODO(ernie5): with ResidentWeights off, every layer is read from the volume on each forward. A resident multi-device path is not
+                // built. Finish it by building _layers once across the devices and reusing them here.
                 Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
                 try
                 {
