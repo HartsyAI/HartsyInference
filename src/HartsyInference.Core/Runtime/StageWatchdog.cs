@@ -99,7 +99,18 @@ public sealed class StageWatchdog : IDisposable
             }
 
             Logs.Warning($"[Stall] {raised.Message}");
-            _onStall?.Invoke(raised);
+            if (_onStall is not null)
+            {
+                // A callback that throws on the timer thread would end the process, and the watchdog only reports.
+                try
+                {
+                    _onStall(raised);
+                }
+                catch (Exception ex)
+                {
+                    Logs.Error($"[Stall] The stall callback for '{_stage}' threw and was ignored: {ex.Message}");
+                }
+            }
         }
         finally
         {
