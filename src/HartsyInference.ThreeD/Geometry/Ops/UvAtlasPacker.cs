@@ -1,7 +1,7 @@
 namespace HartsyInference.ThreeD.Geometry.Ops;
 
 /// <summary>Orients, scales and packs charts into the unit square at uniform texel density (UV area proportional to surface area).
-/// Small chart counts use MaxRects best-short-side-fit; large counts use a height-sorted shelf packer.</summary>
+/// Small chart counts use MaxRects best-short-side-fit; large counts use a bottom-left skyline packer.</summary>
 internal static class UvAtlasPacker
 {
     private const int RotationSteps = 24;
@@ -138,6 +138,7 @@ internal static class UvAtlasPacker
     private static bool TrySkyline(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy)
     {
         List<(double X, double Width, double Y)> line = [(0, 1, 0)];
+        List<(double X, double Width, double Y)> updated = [];
         foreach (int i in order)
         {
             double pad = g.Of(scale, w[i], h[i]);
@@ -161,7 +162,7 @@ internal static class UvAtlasPacker
             if (bestStart < 0) return false;
             ox[i] = bestX; oy[i] = bestY;
 
-            List<(double X, double Width, double Y)> updated = new(line.Count + 2);
+            updated.Clear();
             double right = bestX + rw;
             bool inserted = false;
             foreach ((double X, double Width, double Y) seg in line)
@@ -186,44 +187,22 @@ internal static class UvAtlasPacker
                 if (segRight > right + 1e-12) updated.Add((right, segRight - right, seg.Y));
             }
             if (!inserted) updated.Add((bestX, rw, bestY + rh));
-            line = Merge(updated);
+            MergeInto(updated, line);
         }
         return true;
     }
 
-    private static List<(double X, double Width, double Y)> Merge(List<(double X, double Width, double Y)> line)
+    // Joins neighbouring segments of equal height, writing the result over `into`.
+    private static void MergeInto(List<(double X, double Width, double Y)> line, List<(double X, double Width, double Y)> into)
     {
-        List<(double X, double Width, double Y)> merged = new(line.Count);
+        into.Clear();
         foreach ((double X, double Width, double Y) seg in line)
         {
-            if (merged.Count > 0 && Math.Abs(merged[^1].Y - seg.Y) <= 1e-12)
-                merged[^1] = (merged[^1].X, merged[^1].Width + seg.Width, seg.Y);
+            if (into.Count > 0 && Math.Abs(into[^1].Y - seg.Y) <= 1e-12)
+                into[^1] = (into[^1].X, into[^1].Width + seg.Width, seg.Y);
             else
-                merged.Add(seg);
+                into.Add(seg);
         }
-        return merged;
-    }
-
-    private static bool TryShelf(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy)
-    {
-        double x = 0, y = 0, shelfHeight = 0;
-        foreach (int i in order)
-        {
-            double pad = g.Of(scale, w[i], h[i]);
-            double rw = scale * w[i] + 2 * pad, rh = scale * h[i] + 2 * pad;
-            if (rw > 1.0 + 1e-12) return false;
-            if (x + rw > 1.0 + 1e-12)
-            {
-                y += shelfHeight;
-                x = 0;
-                shelfHeight = 0;
-            }
-            if (y + rh > 1.0 + 1e-12) return false;
-            ox[i] = x; oy[i] = y;
-            x += rw;
-            shelfHeight = Math.Max(shelfHeight, rh);
-        }
-        return true;
     }
 
     private static bool TryMaxRects(double[] w, double[] h, int[] order, double scale, Gutters g, double[] ox, double[] oy)
