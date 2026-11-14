@@ -854,6 +854,7 @@ public static class GenerationDispatch
             Colors = parameters.GetBool("no-colors", false) ? false : null,
             Chains = parameters.GetBool("no-chains", false) ? false : null,
             Texture = parameters.GetBool("texture", false),
+            Remesh = parameters.GetBool("remesh", false),
             TextureSize = parameters.GetInt("texture-size", 0),
             Mesh = parameters.GetBool("mesh", false),
             Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),

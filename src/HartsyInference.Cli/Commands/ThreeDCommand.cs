@@ -78,6 +78,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Texture the mesh with baked PBR textures (trellis2 and pixal3d; needs the texture checkpoints, see docs/Research/TRELLIS2_ARCHITECTURE.md and docs/Research/PIXAL3D_ARCHITECTURE.md).")]
         public bool Texture { get; init; }
 
+        /// <summary>Rebuild the surface as a closed shell before the bake (TRELLIS.2 and Pixal3D with --texture).</summary>
+        [CommandOption("--remesh")]
+        [Description("Rebuild the surface as a closed shell on the final grid before baking the texture (trellis2 and pixal3d with --texture, grid 512 or 1024): far fewer UV charts and no holes; costs about 5 to 60 s and 1 to 6 GiB of memory and thickens thin features by a voxel.")]
+        public bool Remesh { get; init; }
+
         /// <summary>Baked texture edge in texels (TRELLIS.2 and Pixal3D with --texture).</summary>
         [CommandOption("--texture-size")]
         [Description("Baked texture size in texels, 16 to 8192 (trellis2 and pixal3d with --texture; 0 = 2048).")]
@@ -187,6 +192,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
         parameters.Put("no-chains", settings.NoChains ? "true" : "false");
         parameters.Put("texture", settings.Texture ? "true" : "false");
+        parameters.Put("remesh", settings.Remesh ? "true" : "false");
         parameters.Put("mesh", settings.Mesh ? "true" : "false");
         parameters.Put("texture-size", settings.TextureSize.ToString(CultureInfo.InvariantCulture));
         if (settings.Quality is not null)

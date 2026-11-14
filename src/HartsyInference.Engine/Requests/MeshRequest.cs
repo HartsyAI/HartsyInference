@@ -53,6 +53,9 @@ public sealed record MeshRequest
     /// <summary>TRELLIS.2 with <see cref="Texture"/>: baked texture edge in texels, 16 to 8192; 0 uses 2048. Other models reject a value.</summary>
     public int TextureSize { get; init; }
 
+    /// <summary>TRELLIS.2 and Pixal3D with <see cref="Texture"/>: rebuild the surface as a closed shell on the final grid before the texture is baked (upstream's <c>remesh=True</c>, narrow-band dual contouring on the CPU). It closes the holes and folds of the raw surface, so the atlas holds far fewer charts; it costs about 5 to 60 seconds and 1 to 6 GiB of host memory, thickens thin features by a voxel, and needs a grid of 512 or 1024. Off by default; other models reject it.</summary>
+    public bool Remesh { get; init; }
+
     /// <summary>SAM 3D Objects: return a triangle mesh (a geometry-only GLB, from the mesh decoder and FlexiCubes at the 256 grid; the decoder's vertex colours are noisy, so they are not written) instead of Gaussian splats (a PLY). It needs <c>slat_decoder_mesh.safetensors</c> beside the other checkpoints. Other models reject it.</summary>
     public bool Mesh { get; init; }
 

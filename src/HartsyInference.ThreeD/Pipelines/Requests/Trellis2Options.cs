@@ -21,6 +21,9 @@ public sealed record Trellis2Options
     /// <summary>Face count the textured mesh is decimated to. 0 uses <see cref="Trellis2ImageTo3DPipeline.DefaultDecimationTarget"/>.</summary>
     public int DecimationTarget { get; init; }
 
+    /// <summary>Textured output only: rebuild the surface as a closed shell on the final grid before decimating (upstream <c>remesh=True</c>); the grid must be 512 or 1024. The shape-only entry points ignore it.</summary>
+    public bool Remesh { get; init; }
+
     /// <summary>Repair the shape-only mesh (<see cref="Geometry.Ops.ShapeMeshFinisher"/>): weld, non-manifold split, specks removed, small holes closed, winding unified.
     /// The textured path always repairs through its post-processor. Boundary edges along larger openings remain either way.</summary>
     public bool CleanMesh { get; init; } = true;

@@ -221,6 +221,8 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             throw new ArgumentException($"TextureSize must be 0 or within [16, {MaxTextureSize}]; got {options.TextureSize}.", nameof(options));
         if (options.DecimationTarget < 0)
             throw new ArgumentException($"DecimationTarget must not be negative; got {options.DecimationTarget}.", nameof(options));
+        if (options.Remesh && ResolveType(options.Grid) == Trellis2PipelineType.Cascade1536)
+            throw new ArgumentException("Remesh needs a grid of 512 or 1024; the remesh at 1536 would take more memory than a 12 GB machine has.", nameof(options));
         image.Validate();
         if (!canMatte && !image.HasForegroundAlpha)
         {
@@ -254,7 +256,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     public static byte[] ToGlb(PbrPostProcessResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
-        return PbrGlbWriter.Write(result.Mesh, result.Material, new PbrGlbOptions { ConvertZUpToYUp = true, DoubleSided = true });
+        return PbrGlbWriter.Write(result.Mesh, result.Material, new PbrGlbOptions { ConvertZUpToYUp = true, DoubleSided = !result.Remeshed });
     }
 
     private Trellis2Output Run(Trellis2InputImage image, Trellis2Options? options, Action<GenerationProgress>? onProgress, bool textured,
@@ -384,6 +386,7 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
             {
                 TextureSize = options.TextureSize > 0 ? options.TextureSize : DefaultTextureSize,
                 DecimationTarget = options.DecimationTarget > 0 ? options.DecimationTarget : DefaultDecimationTarget,
+                RemeshResolution = options.Remesh ? resolution : 0,
             };
             PbrPostProcessResult baked = PbrMeshPostProcessor.Process(mesh, volume, PbrAttributeLayout.Default, post, cancellationToken);
             done++;

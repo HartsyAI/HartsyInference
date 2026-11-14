@@ -46,12 +46,12 @@ Every stage is a public type of its own and usable alone.
 
 ## Differences from upstream
 
-- Remesh (narrow-band dual contouring) is not ported; only the standard path is.
+- Remesh (narrow-band dual contouring) is a port, opt-in (`PbrPostProcessOptions.RemeshResolution`, see the sections at the end): it keeps the outer sheet only by default (`RemeshOuterShellOnly`, our addition; upstream keeps both sheets) and leaves the projection back at 0 as upstream's demo app does (the function default is 0.9).
 - Inpainting runs on float data before quantization (upstream quantizes first), with radius 3 for base color and 1 for the rest.
 - Texels whose eight volume neighbors are all empty are treated as uncovered and inpainted; upstream leaves them zero.
-- Upstream marks the material double-sided unless remeshed; here `DoubleSided` defaults to false and the caller chooses.
+- Upstream marks the material double-sided unless remeshed; here `DoubleSided` defaults to false and the caller chooses. The TRELLIS.2 and Pixal3D `ToGlb` follow upstream: double-sided, single-sided only for a remeshed result.
 - The cleaner also welds identical vertices and drops degenerate faces, and its orientation step can flip a closed component outward.
-- Pinholes: the raw dual-grid surface keeps thousands of tiny boundary loops that the perimeter fill does not close, and they render as dark specks in a textured result (the same dots appear with no texture at all). `PbrPostProcessOptions.OpeningWidthRatio` (0.005 of the bounding-box diagonal by default, 0 restores the old behaviour) also makes the cleans between the decimation passes zip shut every boundary loop that triangulates within that width. On the saved 512 bust at 500,000 faces the welded boundary edges fell from 16,824 to 3,444 and the specks on the hair, forehead and shirt are gone; a width of 0.1 closes more but draws long crack lines, so it stays opt-in on the shape-only finisher. A second, noisier subject (1.87 M voxels; its surface is torn and terraced, 279,414 welded boundary edges after the clean) went to 224,074 with the nose and eye sockets cleaner but the shape still broken, so this removes pinholes, not a bad surface. Not checked: whether the default seals a real opening of about 0.5 % of the diagonal (a nostril, an ear canal, a gap between fingers); `OpeningWidthRatio = 0` restores the old behaviour. Upstream's own examples and Gradio app avoid the holes by running `to_glb` with `remesh=True`, which this engine does not port.
+- Pinholes: the raw dual-grid surface keeps thousands of tiny boundary loops that the perimeter fill does not close, and they render as dark specks in a textured result (the same dots appear with no texture at all). `PbrPostProcessOptions.OpeningWidthRatio` (0.005 of the bounding-box diagonal by default, 0 restores the old behaviour) also makes the cleans between the decimation passes zip shut every boundary loop that triangulates within that width. On the saved 512 bust at 500,000 faces the welded boundary edges fell from 16,824 to 3,444 and the specks on the hair, forehead and shirt are gone; a width of 0.1 closes more but draws long crack lines, so it stays opt-in on the shape-only finisher. A second, noisier subject (1.87 M voxels; its surface is torn and terraced, 279,414 welded boundary edges after the clean) went to 224,074 with the nose and eye sockets cleaner but the shape still broken, so this removes pinholes, not a bad surface. Not checked: whether the default seals a real opening of about 0.5 % of the diagonal (a nostril, an ear canal, a gap between fingers); `OpeningWidthRatio = 0` restores the old behaviour. Upstream's own examples and Gradio app avoid the holes by running `to_glb` with `remesh=True`, which this engine now offers as the opt-in `PbrPostProcessOptions.RemeshResolution` / `MeshRequest.Remesh` (see the sections at the end of this file).
 - Output is geometry-only after cleaning and decimation; normals are recomputed (area-weighted) before unwrapping and carried
   across seams.
 
@@ -284,3 +284,32 @@ Measured on the CPU (8 threads), grid 512, one input per row, then `DecimateStag
 (The 1024 rows use the GLB of the 1024 run as the input and a volume of another subject only to run the bake, so their bake columns mean nothing; the charts and coverage are geometry only.)
 
 The shell is watertight by construction (no boundary edge); the non-manifold edges are where two sheets of the offset surface touch. Rendered, bust 1 has no specks or cracks and bust 2 loses the peeling, torn look (its terraced forehead is the decoder's shape and stays). There is no numeric comparison with upstream: CuMesh's CUDA operations cannot run here, nothing was cloned or installed, and the checks are synthetic (a sphere, a torus, two spheres, a hole narrower than the band, other bands) plus the three real meshes. Not verified: numeric agreement with CuMesh, thin features (the shell is a voxel thicker on each side with `ProjectBack` 0), and the textured end-to-end results on a GPU.
+
+### Wiring into the textured post-process (opt-in)
+
+`PbrPostProcessOptions.RemeshResolution` (0, off, by default) runs upstream's remesh branch of `to_glb`: fill holes, BVH of the original, remesh on the attribute volume's grid (centre and size taken from the volume, scale widened by three bands, as upstream does), `DecimateStaged`, unwrap, bake from the original surface through the BVH; the result carries `Remeshed`, and the GLB material is then single-sided as upstream marks it. `MeshRequest.Remesh` (CLI `--remesh`) sets it for TRELLIS.2 and Pixal3D with `Texture`, at the request's grid (512 or 1024; 1536 is refused: it would take more host memory than a 12 GB machine has), and other models reject the field.
+
+`PbrMeshPostProcessor` end to end on the saved real volumes (CPU, 2048 texture, 500,000-face target, defaults otherwise):
+
+| Input | Remesh | Time, peak working set | Faces | Welded boundary / non-manifold edges | Atlas covered |
+|---|---|---|---|---|---|
+| Bust 1 (736,637 voxels) | off | 21.6 s, 1.6 GiB | 500,785 | 3,444 / 2,606 | 36.7 % |
+| Bust 1 | 512 | 28.9 s, 2.3 GiB | 500,000 | 0 / 1 | 37.3 % |
+| Bust 2 (1,865,382 voxels) | off | 63.7 s, 2.8 GiB | 509,188 | 224,074 / 20,048 | 19.7 % |
+| Bust 2 | 512 | 47.4 s, 3.6 GiB | 499,594 | 0 / 23 | 31.6 % |
+
+Rendered, bust 2 is a continuous surface where it was peeling and torn; its terraced forehead is the decoder's shape and stays. The remesh does not repair a shape the decoder got wrong, it makes the surface a clean closed shell; it thickens thin features by one voxel; non-manifold edges that remain after the remesh are cleaned by the decimation passes (1 and 23 here); and there is no numeric comparison with upstream (CuMesh is CUDA-only). Not verified on a GPU run of the whole pipeline (textured TRELLIS.2 and Paint 2.1 on a remeshed mesh) at the time of writing.
+
+### Paint 2.1 on a remeshed mesh: which input size (RTX 3060, 2026-11-14)
+
+Bust 2 (the folded, torn TRELLIS.2 512 output), remeshed at 512 (outer sheet only), then decimated by this engine to the face count shown and textured with Paint 2.1 (`hartsy 3d <obj> --image <png> -m hunyuan3d-paint21`, default 15 steps, 2048 texture, card idle at 829 MiB):
+
+| Input | Faces | Charts | UV triangles cover | Welded boundary / non-manifold edges | Time | Card peak | Engine chart warning | By eye |
+|---|---|---|---|---|---|---|---|---|
+| Not remeshed, decimated (it stops at 193k) | 192,958 | 78,329 | 9.0 % | 42,767 / 197 | 122 s | 11,465 MiB | yes (2.5 faces per chart) | torn, shard-like surface, speckled |
+| Remeshed, 40k | 40,077 | 13,321 | 23.5 % | 350 / 50 | 123 s | 10,046 MiB | yes (3.0) | coherent texture, geometry destroyed: the face is faceted with star artifacts |
+| Remeshed, 100k | 99,957 | 13,830 | 31.6 % | 530 / 65 | 115 s | 10,090 MiB | yes (7.2) | good geometry, even texture with small dots |
+| Remeshed, 193k | 192,889 | 15,196 | 32.4 % | 619 / 129 | 118 s | 10,049 MiB | no | best: smooth surface, even texture |
+
+Decimating 4.6 M faces to 40k with quadric collapse (a 100x ratio) destroys the facial detail whatever the remesh does, so a Paint input should be decimated to 100,000 faces or more; the remesh lets the decimator reach its target (the torn input stopped at 118k to 255k). Per-step time was 5.0 s in every run, with no memory spill. The charts stay in the 13,000 to 15,000 range because quadric decimation keeps the terraces of the decoded shape; "a clean mesh gives a few hundred" does not hold for a TRELLIS.2 surface even after the remesh. One subject; texture quality was judged by eye on four views each (`texture-diag/gpu-R2*` in the shared notes folder).
+

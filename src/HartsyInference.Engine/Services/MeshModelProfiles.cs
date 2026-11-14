@@ -285,7 +285,7 @@ internal static class MeshModelProfiles
     private static string DefaultOf(string name) => name switch
     {
         nameof(MeshRequest.Samples) => "1",
-        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) => "false",
+        nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) or nameof(MeshRequest.Remesh) => "false",
         nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
         nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) => "unset",
         _ => "0",
@@ -296,11 +296,12 @@ internal static class MeshModelProfiles
         Rejected(nameof(MeshRequest.Samples)), Rejected(nameof(MeshRequest.Colors)), Rejected(nameof(MeshRequest.Chains)), Rejected(nameof(MeshRequest.Rigged)),
     ];
 
-    private static MeshFieldSpec[] NoTexture() => [Rejected(nameof(MeshRequest.Texture)), Rejected(nameof(MeshRequest.TextureSize))];
+    private static MeshFieldSpec[] NoTexture() => [Rejected(nameof(MeshRequest.Texture)), Rejected(nameof(MeshRequest.TextureSize)), Rejected(nameof(MeshRequest.Remesh))];
 
     private static MeshFieldSpec[] TextureOptional() =>
     [
         Used(nameof(MeshRequest.Texture), "false", null, null, null, "Also generate the PBR texture; needs the texture checkpoints beside the shape ones."),
         Used(nameof(MeshRequest.TextureSize), "2048", 16, 8192, "texels", "The baked texture's edge; needs Texture. 0 takes 2048."),
+        Used(nameof(MeshRequest.Remesh), "false", null, null, null, "Rebuild the surface as a closed shell on the final grid before baking (upstream's remesh=True; CPU narrow-band dual contouring): far fewer UV charts and no holes, about 5 to 60 s and 1 to 6 GiB of host memory, thin features thicken by a voxel; needs Texture and a grid of 512 or 1024."),
     ];
 }

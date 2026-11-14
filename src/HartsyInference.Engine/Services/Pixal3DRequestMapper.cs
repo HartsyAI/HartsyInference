@@ -20,6 +20,7 @@ public static class Pixal3DRequestMapper
             FovRadians = request.FieldOfViewRadians,
             Texture = request.Texture,
             TextureSize = request.TextureSize,
+            Remesh = request.Remesh,
         };
     }
 

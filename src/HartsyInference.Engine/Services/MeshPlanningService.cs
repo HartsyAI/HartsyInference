@@ -159,6 +159,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh,
         nameof(MeshRequest.Control) => request.Control is not null,
         nameof(MeshRequest.Quality) => request.Quality != MeshQuality.Default,
+        nameof(MeshRequest.Remesh) => request.Remesh,
         _ => false,
     };
 
@@ -169,7 +170,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         foreach (MeshFieldSpec field in descriptor.Fields.Values.Where(f => f.Access == MeshFieldAccess.Used))
         {
             bool set = IsSet(request, field.Name);
-            int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name);
+            int? preset = set ? null : MeshQualityPresets.Supplied(descriptor.Presets.GetValueOrDefault(request.Quality), request, field.Name, MeshQualityPresets.TakesRemesh(descriptor.Id));
             // A preset value equal to the model's own default changes nothing, so the plan does not credit the preset with it.
             ResolvedParameter parameter = set
                 ? new ResolvedParameter(Requested(request, field.Name), ParameterSource.UserOverride)
@@ -199,6 +200,7 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Mesh) => request.Mesh.ToString().ToLowerInvariant(),
         nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
         nameof(MeshRequest.Quality) => request.Quality.ToString(),
+        nameof(MeshRequest.Remesh) => request.Remesh.ToString().ToLowerInvariant(),
         _ => null,
     };
 }
