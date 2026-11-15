@@ -4,23 +4,25 @@
     <IsPackable>false</IsPackable>
     <RootNamespace>HartsyInference.GpuBenchmarks</RootNamespace>
     <AssemblyName>HartsyInference.GpuBenchmarks</AssemblyName>
+    <AttentionProductionRoot Condition="'$(AttentionProductionRoot)' == ''">$(MSBuildThisFileDirectory)..\..</AttentionProductionRoot>
     <!-- BenchmarkDotNet emits sample apps that intentionally exceed our project's strict warning rules; suppress for benches only. -->
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" />
+    <Compile Include="../Shared/BenchmarkKnobProfiles.cs" Link="Shared/BenchmarkKnobProfiles.cs" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\HartsyInference.Core\HartsyInference.Core.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
-    <ProjectReference Include="..\..\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
+    <ProjectReference Include="$(AttentionProductionRoot)\src\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="$(AttentionProductionRoot)\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <ProjectReference Include="$(AttentionProductionRoot)\src\HartsyInference.Vulkan\HartsyInference.Vulkan.csproj" />
   </ItemGroup>
 
   <!-- Copy compiled PTX kernels next to the benchmark executable so CudaBackend can locate them. -->
   <ItemGroup>
-    <None Include="..\..\src\HartsyInference.Cuda\Ptx\*.ptx">
+    <None Include="$(AttentionProductionRoot)\src\HartsyInference.Cuda\Ptx\*.ptx">
       <Link>Ptx\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -30,7 +32,7 @@
        (same convention as HartsyInference.Vulkan.Tests.csproj — ProjectReference alone doesn't
        propagate the Vulkan project's own Content glob). -->
   <ItemGroup>
-    <Content Include="..\..\src\HartsyInference.Vulkan\Spirv\*.spv" Link="Spirv\%(Filename)%(Extension)">
+    <Content Include="$(AttentionProductionRoot)\src\HartsyInference.Vulkan\Spirv\*.spv" Link="Spirv\%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

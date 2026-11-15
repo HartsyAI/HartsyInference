@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace HartsyInference.Core.Backends.Attention;
 
 /// <summary>A bounded host-only evidence buffer allocated before inference; overflow invalidates the capture.</summary>
@@ -44,6 +46,10 @@ public sealed class AttentionEvidenceSession : IDisposable
         _events[(int)index] = observation;
         Volatile.Write(ref _published[(int)index], 1);
     }
+
+    /// <summary>Writes a completed capture outside inference, using source-generated JSON metadata.</summary>
+    public void WriteJson(Stream output) =>
+        JsonSerializer.Serialize(output, Snapshot(), AttentionEvidenceJsonContext.Default.AttentionEvidenceEventArray);
 
     /// <summary>Disables collection without waiting, synchronizing a device, or formatting the capture.</summary>
     public void Dispose()

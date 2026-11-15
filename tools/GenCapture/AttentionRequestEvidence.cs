@@ -1,0 +1,143 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text.Json;
+using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
+
+namespace HartsyInference.GenCapture;
+
+/// <summary>Exercises frozen ordinary Engine requests; scoring and forced-token paths are never primary measurements.</summary>
+internal static class AttentionRequestEvidence
+{
+    public static async Task<int> RunAsync(Dictionary<string, string> options)
+    {
+        string manifestPath = options["workload"];
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
+        JsonElement manifest = document.RootElement;
+        string family = manifest.GetProperty("family").GetString()!;
+        if (family is not ("qwen" or "krea")) throw new InvalidDataException("Unknown primary workload.");
+        string model = manifest.GetProperty("model_path").GetString()!;
+        string promptPath = manifest.GetProperty("prompt_path").GetString()!;
+        Verify(model, manifest.GetProperty("model_sha256").GetString()!);
+        Verify(promptPath, manifest.GetProperty("prompt_sha256").GetString()!);
+        string prompt = File.ReadAllText(promptPath);
+        string selector = options.GetValueOrDefault("backend", "cuda:0");
+        string lane = options.GetValueOrDefault("lane", "paged");
+        if (lane is not ("paged" or "dense" or "graph")) throw new ArgumentException("Unknown request lane.");
+        bool paged = family == "qwen" && options.GetValueOrDefault("lane", "paged") == "paged";
+        bool graph = family == "qwen" && options.GetValueOrDefault("lane", "paged") == "graph";
+        Dictionary<string, string> auxiliary = new(StringComparer.Ordinal);
+        if (manifest.TryGetProperty("aux", out JsonElement aux))
+            foreach (JsonProperty item in aux.EnumerateObject())
+            {
+                string path = item.Value.GetProperty("path").GetString()!;
+                Verify(path, item.Value.GetProperty("sha256").GetString()!);
+                auxiliary.Add(item.Name, path);
+            }
+        ModelSpec spec = new()
+        {
+            Requested = manifest.GetProperty("model_id").GetString()!, LocalPath = model,
+            Modality = family == "qwen" ? Modality.Text : Modality.Image, Aux = auxiliary,
+        };
+        KnobProfile profile = HartsyInference.Benchmarks.Shared.BenchmarkKnobProfiles.Capture(false,
+            out SortedDictionary<string, string> settings).With(EngineKnobs.ContinuousBatching, paged);
+        settings[EngineKnobs.ContinuousBatching.Id] = paged.ToString();
+        using (profile.Push())
+        {
+            using InferenceEngine engine = new(selector, new EngineOptions { KvPoolBytesBudget = 4L * 1024 * 1024 * 1024 });
+            TextRequest text = new()
+            {
+                Messages = [new TextMessage { Role = TextRole.User, Content = prompt }],
+                Temperature = 0, Greedy = true, TopP = 1, TopK = 0, MinP = 0, RepetitionPenalty = 1,
+                MaxTokens = 128, Seed = 42, EnableThinking = false, Device = selector, GraphDecode = graph,
+                SpeculativeDecode = false, AlwaysFreeMemory = false,
+            };
+            ImageRequest image = new()
+            {
+                Prompt = prompt, Width = 1024, Height = 1024, Steps = 8, Seed = 42, Batch = 1, CfgScale = 1,
+            };
+            IDisposable? evidence = null;
+            if (options.ContainsKey("observe"))
+            {
+                Type? observer = typeof(AttentionCall).Assembly.GetType("HartsyInference.Core.Backends.Attention.AttentionEvidence");
+                evidence = (IDisposable)(observer?.GetMethod("Begin")?.Invoke(null, [262144])
+                    ?? throw new NotSupportedException("The loaded pristine assembly has no telemetry."));
+            }
+            try
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    if (family == "qwen") Check(await engine.Text.GenerateAsync(spec, text));
+                    else _ = await engine.Images.GenerateAsync(spec, image);
+                }
+                long measuredObservationStart = evidence is null ? 0
+                    : (long)evidence.GetType().GetProperty("Attempted")!.GetValue(evidence)!;
+                long start = Stopwatch.GetTimestamp();
+                TextResult? completion = family == "qwen" ? await engine.Text.GenerateAsync(spec, text) : null;
+                ImageResult? pixels = family == "krea" ? await engine.Images.GenerateAsync(spec, image) : null;
+                double milliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                if (completion is not null) Check(completion);
+                if (pixels is not null && (pixels.Width != 1024 || pixels.Height != 1024))
+                    throw new InvalidDataException("The image workload changed dimensions.");
+                if (evidence is not null)
+                {
+                    evidence.Dispose();
+                    using FileStream observations = new(options["observe"], FileMode.CreateNew);
+                    evidence.GetType().GetMethod("WriteJson")!.Invoke(evidence, [observations]);
+                }
+                using FileStream output = new(options["out"], FileMode.CreateNew);
+                using Utf8JsonWriter writer = new(output, new JsonWriterOptions { Indented = true });
+                writer.WriteStartObject();
+                writer.WriteNumber("schema", 1);
+                writer.WriteString("family", family);
+                writer.WriteString("backend", selector);
+                writer.WriteString("workload_sha256", Hash(manifestPath));
+                writer.WriteString("model_sha256", Hash(model));
+                writer.WriteString("core_sha256", Hash(typeof(AttentionCall).Assembly.Location));
+                writer.WriteString("engine_sha256", Hash(typeof(InferenceEngine).Assembly.Location));
+                writer.WriteStartObject("resolved_settings");
+                foreach ((string key, string value) in settings) writer.WriteString(key, value);
+                writer.WriteEndObject();
+                writer.WriteString("lane", family == "krea" ? "image" : paged ? "paged" : graph ? "graph" : "dense");
+                writer.WriteString("telemetry", evidence is null ? "disabled" : "enabled");
+                writer.WriteNumber("measured_observation_start", measuredObservationStart);
+                writer.WriteString("observations_include", "model loading, two request warmups, then the measured request");
+                writer.WriteNumber("milliseconds", milliseconds);
+                writer.WriteNumber("request_warmups", 2);
+                if (completion is not null)
+                {
+                    writer.WriteNumber("prompt_tokens", completion.PromptTokens);
+                    writer.WriteNumber("completion_tokens", completion.CompletionTokens);
+                    writer.WriteString("text", completion.Text);
+                    writer.WriteNumber("prefill_ms", completion.PrefillMilliseconds);
+                    writer.WriteNumber("decode_ms", completion.DecodeMilliseconds);
+                }
+                if (pixels is not null) writer.WriteString("rgb_sha256", Convert.ToHexString(SHA256.HashData(pixels.Rgb)));
+                writer.WriteEndObject();
+                return 0;
+            }
+            finally { evidence?.Dispose(); }
+        }
+    }
+
+    private static void Check(TextResult result)
+    {
+        if (result.PromptTokens != 8192 || result.CompletionTokens != 128 || result.Stop != StopReason.Length)
+            throw new InvalidDataException("Qwen primary requires exactly 8192 prompt and 128 generated tokens ending at the limit.");
+    }
+
+    private static void Verify(string path, string expected)
+    {
+        if (!File.Exists(path) || Hash(path) != expected) throw new InvalidDataException("Missing or changed workload asset: " + path);
+    }
+
+    private static string Hash(string path)
+    {
+        using FileStream input = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant();
+    }
+}
