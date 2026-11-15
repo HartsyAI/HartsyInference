@@ -3,6 +3,10 @@
 PR 02 is a stacked draft on PR 01, started under the user's subsequent authorization. PR 01's exit evidence
 remains incomplete. This report does not freeze Bfix, approve later work, or claim primary-workload speed gains.
 
+The subsequent [4090 evidence review](pr01-4090-review.md) records a Krea CUDA identity failure and incomplete
+operation non-inferiority evidence. They block merge despite the reported 45 passing semantic cases. The active
+P2 production pin remains immutable while the corrected harness and first-divergence diagnostics are audited.
+
 ## Changes and reproduced defects
 
 - CPU FlashAttention now preserves a NaN normalization result and treats a negative-infinite sink as absent.

@@ -25,13 +25,20 @@ CUDA is the primary focus; Vulkan must actually execute and work. A CUDA-only re
 | P2 | `57b143f004050d484dc1b667ae8d5f91fc82ac22` | PR 02 correctness candidate with review fixes |
 | K0 | `7d6a22ae8281cd1053a8449530fa0e764a2e51cb` | Unmodified Comfy Kitchen |
 
-The corrected operation harness is separately pinned at `4ce2c223c6abe67b3d9096276a67b40735455575` (H).
-It rejects specialized fixture APIs/options/operands that the C# dense adapter and oracle cannot implement.
+The corrected operation harness is separately pinned at `fe12180ee389ab8aeb5720ddf44b041ca9998217` (H).
+It rejects specialized fixture APIs/options/operands that the C# dense adapter and oracle cannot implement, and
+validates the arm's declared route, dtypes and numerical assertion against the immutable fixture before GPU work.
 Production pins above do not change. Any earlier C# passing dense result for a merge, Sol-Attn, Sage or decode API
 cell is invalid attribution; retain the raw result, mark Hartsy coverage unvalidated, and do not call it a K0 failure.
 Create an additional H worktree and use its benchmark/GenCapture sources for all three arms, recording H and each
 tool binary hash independently from the production identity. Do not mix old/new harness results within a campaign;
 register fresh comparisons if necessary. Unsupported cells need a complete adapter/oracle before parity claims.
+
+The first remote campaign is recorded in the [4090 evidence review](reports/pr01-4090-review.md). Audit its
+arm/fixture/branch mapping and diagnose the first Krea CUDA divergence before launching further full campaigns.
+Keep the worktrees and artifacts. The CUDA identity failure remains blocking; no new tolerance is accepted.
+Follow up with narrowly scoped, separately registered reruns. Qwen request-level P1/B0 and observation-overhead
+comparisons remain unexecuted; operation-level overhead does not establish request overhead.
 
 Read repository AGENTS.md and its routed instructions. Use separate worktrees under `.claude/worktrees/`.
 Fetch both PR branches, verify that these pins exist and record current remote heads. If production code changed
@@ -223,6 +230,10 @@ dotnet "$RAW/bin/p2-op/HartsyInference.GpuBenchmarks.dll" attention-table \
 
 Repeat with B0/P1 tools, `--boundary resident`, and `HARTSYINFERENCE_BENCH_BACKEND=vulkan` where applicable
 (Vulkan's expected branch is A.2 for this scalar case). F16 fixture/arm `mat-f16` expects S.15 on CUDA.
+Freeze F16 fixtures with `--legacy-asserted-bounded` to match that arm. Flash arms require a `--route Flash`
+fixture with matching Q/O and K/V types; use `--dtype f32 --kv-dtype f16` for `fa-f16kv` and split variants.
+Discover routes with `--boundary observe`, then review and freeze `--expect-branch` before timing. An S-series
+Dense branch under a Flash label is not split evidence. Do not modify fixtures in place to repair old campaigns.
 Use `--observe FILE` for separate diagnostics. Use `telemetry_check.py` for supported operation equivalence,
 and independently check generation identity; that helper does not certify all nested/request paths.
 
@@ -266,7 +277,7 @@ python -s benchmarks/attention/evidence.py matrix --kitchen "$KITCHEN" --cohort 
   --out "$RAW/k0-matrix.json"
 python -s benchmarks/attention/evidence.py cell-fixture --matrix "$RAW/k0-matrix.json" \
   --cell CONCRETE_CELL_ID --out "$RAW/fixtures/CONCRETE_CELL_ID"
-python -s benchmarks/python-baseline/bench_attention.py --fixture "$RAW/fixtures/CONCRETE_CELL_ID/fixture.json" \
+python -s benchmarks/attention/kitchen_operation.py --fixture "$RAW/fixtures/CONCRETE_CELL_ID/fixture.json" \
   --environment "$RAW/k0-environment.json" --api API_FROM_CELL --boundary public \
   --trials 5 --out "$RAW/k0-CELL-public.json"
 ```
