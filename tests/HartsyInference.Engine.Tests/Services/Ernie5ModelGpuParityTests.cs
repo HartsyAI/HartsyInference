@@ -66,16 +66,23 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
 
     // The engine's Text service end to end on the device: the slot's backend is the requested GPU (resident layers), and a request generates on the
     // pipeline and, with continuous batching on, on the scheduler under the device gate. The tokens must match the CPU run of the same request.
+    // FP8 is the real checkpoint's storage, whose resident preload and per-call expert upload the service turns on.
     [ErnieCudaFact]
-    public Task Cuda_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0");
+    public Task Cuda_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.F32);
+
+    [ErnieCudaFact]
+    public Task Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
 
     [ErnieVulkanFact]
-    public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0");
+    public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.F32);
 
-    private async Task TextServiceOn(string device)
+    [ErnieVulkanFact]
+    public Task Vulkan_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    private async Task TextServiceOn(string device, Ernie5SyntheticCheckpoint.Storage storage)
     {
-        string dir = Path.Combine(_root, "service-" + device.Replace(':', '-'));
-        Ernie5SyntheticCheckpoint.Write(dir);
+        string dir = Path.Combine(_root, $"service-{storage}-" + device.Replace(':', '-'));
+        Ernie5SyntheticCheckpoint.Write(dir, storage: storage);
         Ernie5TextPathTests.ServiceRun cpu = await Ernie5TextPathTests.GenerateThroughService(dir, "cpu", continuousBatching: false);
         foreach (bool batching in new[] { false, true })
         {

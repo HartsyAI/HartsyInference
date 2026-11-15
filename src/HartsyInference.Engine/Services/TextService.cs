@@ -912,8 +912,8 @@ public sealed partial class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1 checkpoint onto its host reference model, or a stateful
-    /// family or MiniMax-M3. DeepSeek-V4.1 keeps its weights on the host, so its slot gets a CPU backend whatever device was asked for.</summary>
+    /// <summary>Loads a Hugging Face text directory: a host reference model (DeepSeek-V4.1, ERNIE-5.5, Kimi K3.1), a stateful family, or
+    /// MiniMax-M3. DeepSeek-V4.1 keeps its weights on the host, so its slot gets a CPU backend whatever device was asked for.</summary>
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
@@ -954,7 +954,19 @@ public sealed partial class TextService : ITextService, IDisposable
         ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
-        IBackend backend = ReplaceWithHostBackend(slot, deviceKey, modelName);
+        // Host-backed and CPU-only: its rounds run ungated.
+        LoadHostReferenceInto(slot, checkpoint, path, ReplaceWithHostBackend(slot, deviceKey, modelName), gateOrdinals: [], plan);
+        if (plan?.Verdict == MemoryFitVerdict.Streamed)
+            Logs.Info($"[TextService] {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
+        Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+    }
+
+    /// <summary>Loads a host reference directory onto <paramref name="backend"/> and makes it the slot's model: pipeline, scheduler (gated on
+    /// <paramref name="gateOrdinals"/>, no KV pool since the sequence states own their storage) and load fields. The slot owns the backend from
+    /// here; a failed load disposes it.</summary>
+    private void LoadHostReferenceInto(TextDeviceSlot slot, HfCheckpointInfo checkpoint, string path, IBackend backend, IReadOnlyList<int> gateOrdinals,
+        ResidencyPlan? plan)
+    {
         try
         {
             slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
@@ -966,15 +978,12 @@ public sealed partial class TextService : ITextService, IDisposable
         }
         slot.Backend = backend;
         slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
-        // Host-backed and CPU-only: its rounds run ungated, and its sequence states own their storage (no KV pool).
-        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null, gateOrdinals: []);
+        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null,
+            gateOrdinals: gateOrdinals);
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         slot.ResidencyPlan = plan;
-        if (plan?.Verdict == MemoryFitVerdict.Streamed)
-            Logs.Info($"[TextService] {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
-        Logs.Info($"[TextService] Loaded {modelName} '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
     /// <summary>Disposes the slot's stage and primary backends and clears its placement, before a load builds its own backend.</summary>
@@ -1028,24 +1037,7 @@ public sealed partial class TextService : ITextService, IDisposable
     {
         DisposeSlotBackends(slot);
         IBackend backend = CreateBackendFor(deviceKey);
-        try
-        {
-            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
-        }
-        catch
-        {
-            backend.Dispose();
-            throw;
-        }
-        slot.Backend = backend;
-        slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
-        // The sequence states own their storage (no KV pool).
-        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null,
-            gateOrdinals: [.. GateOrdinalsFor(slot, deviceKey)]);
-        slot.CacheWeightCastsApplied = null;
-        slot.PreloadRedundantWeightSplitsApplied = null;
-        slot.LoadedPath = path;
-        slot.ResidencyPlan = null;
+        LoadHostReferenceInto(slot, checkpoint, path, backend, [.. GateOrdinalsFor(slot, deviceKey)], plan: null);
         string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
         Logs.Warning(backend.Device.IsGpu
             ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
