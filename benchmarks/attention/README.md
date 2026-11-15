@@ -116,8 +116,9 @@ dotnet /external/evidence/b0-request/hartsy-gencapture.dll attention-request \
   --out /external/evidence/qwen-b0.json
 ```
 
-The request tool loads the model, performs the protocol warmups, then times the public Engine result including
-request-owned scheduler cleanup. It rejects early EOS or changed lengths. `dense` and `graph` lanes are separate;
+The request tool reads the copied `attention-protocol.json` beside the executable and records its hash. It executes
+exactly that protocol's warmup count, including lazy model loading in the first untimed request, then times the
+public Engine result including request-owned scheduler cleanup. It rejects early EOS or changed lengths. `dense` and `graph` lanes are separate;
 verify replay rather than assuming admission. The separate `batched` lane submits two concurrent ordinary requests
 and records group throughput plus each request's latency; its trace must prove actual batching. Request-level
 memory/TTFT sampling still needs campaign integration before exit. Krea manifests must pin DiT, encoder, VAE and auxiliary assets;

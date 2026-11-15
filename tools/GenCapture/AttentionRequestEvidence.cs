@@ -15,6 +15,11 @@ internal static class AttentionRequestEvidence
 {
     public static async Task<int> RunAsync(Dictionary<string, string> options)
     {
+        byte[] protocolBytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "attention-protocol.json"));
+        using JsonDocument protocol = JsonDocument.Parse(protocolBytes);
+        int requestWarmups = protocol.RootElement.GetProperty("request_warmups").GetInt32();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(requestWarmups);
+        string protocolHash = Convert.ToHexString(SHA256.HashData(protocolBytes)).ToLowerInvariant();
         string manifestPath = options["workload"];
         using JsonDocument document = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         JsonElement manifest = document.RootElement;
@@ -70,7 +75,7 @@ internal static class AttentionRequestEvidence
             }
             try
             {
-                for (int i = 0; i < 3; i++)
+                for (int i = 0; i < requestWarmups; i++)
                 {
                     if (family == "qwen")
                     {
@@ -110,6 +115,7 @@ internal static class AttentionRequestEvidence
                 writer.WriteStartObject();
                 writer.WriteNumber("schema", 1);
                 writer.WriteString("tool_sha256", Hash(typeof(AttentionRequestEvidence).Assembly.Location));
+                writer.WriteString("protocol_sha256", protocolHash);
                 writer.WriteString("family", family);
                 writer.WriteString("backend", selector);
                 writer.WriteString("workload_sha256", Hash(manifestPath));
@@ -122,9 +128,9 @@ internal static class AttentionRequestEvidence
                 writer.WriteString("lane", family == "krea" ? "image" : lane);
                 writer.WriteString("telemetry", evidence is null ? "disabled" : "enabled");
                 writer.WriteNumber("measured_observation_start", measuredObservationStart);
-                writer.WriteString("observations_include", "model loading, two request warmups, then the measured request");
+                writer.WriteString("observations_include", "request warmups (including lazy model loading), then the measured request");
                 writer.WriteNumber("milliseconds", milliseconds);
-                writer.WriteNumber("request_warmups", 2);
+                writer.WriteNumber("request_warmups", requestWarmups);
                 if (completion is not null)
                 {
                     writer.WriteNumber("prompt_tokens", completion.PromptTokens);

@@ -12,6 +12,8 @@
     <ProjectReference Include="$(AttentionProductionRoot)/src/HartsyInference.Engine/HartsyInference.Engine.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="../../benchmarks/attention/protocol.json" Link="attention-protocol.json"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="$(AttentionProductionRoot)/src/HartsyInference.Cuda/Ptx/*.ptx" Link="Ptx\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="$(AttentionProductionRoot)/src/HartsyInference.Vulkan/Spirv/*.spv" Link="Spirv\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
