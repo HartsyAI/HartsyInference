@@ -3,6 +3,20 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.429
+
+- **Added: Hunyuan3D Paint bakes the reference picture into the front of the texture.** Paint repaints each view at 512 px, so on a full
+  figure a face is a few dozen pixels wide and comes out without eyes or brows; upstream's Python pipeline loses it the same way. When the
+  reference carries alpha, the picture's outline is fitted to the mesh's front silhouette, the picture is moved locally (up to 10 px at
+  512, smoothed) onto the generated front view, which follows the mesh's own geometry, and then, at its own resolution, replaces that
+  view's albedo except where the two still show different surfaces. On the Old Sage test character the face went from a melted blur to
+  the picture's glasses, brows, nose and beard lines (2026-11-14, RTX 3060, 2048 texture; the bake took 15 s, as before). A poor fit
+  (under 80 percent overlap) falls back to the generated view with a warning. **Behaviour change:** any caller that sends a transparent PNG now gets this by default; the knob
+  `numerics.paintProjectReference` (or `HunyuanPaintOptions.ProjectReference`) turns it off. Send the reference square and as large as it
+  comes: the diffusion still sees it resized to the view size.
+- **Added: `MeshCleanOptions.FlatComponentThicknessRatio` and `MeshCleaner.RemoveFlatComponents`.** Drops loose pieces thinner than a share
+  of the mesh's diagonal whatever their area, such as the flat sheets image-to-3D models leave beside a figure. Off by default.
+
 ## alpha.428
 
 - **Added: a stall warning for the TRELLIS.2 and Pixal3D flow stages.** When no step finishes for ten times the median step (never under

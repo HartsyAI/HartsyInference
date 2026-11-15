@@ -34,6 +34,10 @@ public sealed record HunyuanPaintOptions
     /// <summary>Inpainting radius of the unpainted texels.</summary>
     public int InpaintRadius { get; init; } = 3;
 
+    /// <summary>Bakes the reference picture itself into the front view's albedo wherever it lines up with the mesh (see <see cref="PaintReferenceProjector"/>), so a face
+    /// keeps the picture's detail instead of the 512 px repaint. Needs the picture's alpha; without it, or when the fit is poor, the painted front view is used.</summary>
+    public bool ProjectReference { get; init; } = true;
+
     /// <summary>Back-projection constants.</summary>
     public PaintBakeOptions Bake { get; init; } = new();
 }

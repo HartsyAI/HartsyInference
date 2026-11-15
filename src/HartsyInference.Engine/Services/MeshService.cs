@@ -651,6 +651,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             Steps = request.Steps == 0 ? null : request.Steps,
             TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
             Seed = MeshSeed.ForSampler(request.Seed),
+            ProjectReference = EngineKnobs.PaintProjectReference.Value,
         };
 
         return Task.Run(
@@ -662,7 +663,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
                 byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
-                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
+                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.HasAlpha ? reference.Alpha : default, reference.Width,
+                    reference.Height, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
@@ -711,6 +713,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
                 }
                 HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
+                loader.Pipeline.StageLog = line => Logs.Debug($"[Paint] {line}");
                 _paintPipelines[folder] = loader;
                 return loader;
             }
