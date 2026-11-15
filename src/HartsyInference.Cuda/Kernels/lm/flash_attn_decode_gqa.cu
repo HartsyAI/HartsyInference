@@ -148,7 +148,7 @@ __device__ __forceinline__ void fa_decode_gqa(
             #pragma unroll
             for (int o = 16; o > 0; o >>= 1) tm = fmaxf(tm, __shfl_xor_sync(0xffffffffu, tm, o));
             const float mNew = fmaxf(m[j], tm);
-            const float corr = m[j] <= -DEC_INF ? 0.0f : __expf(m[j] - mNew);
+            const float corr = l[j] == 0.0f ? 0.0f : __expf(m[j] - mNew);
             const float p = valid ? __expf(s - mNew) : 0.0f;
             float ps = p;
             #pragma unroll

@@ -102,7 +102,7 @@ __device__ __forceinline__ void flashAttnSplitBody(
         if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
         float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? kvLoad(V, kvBase + tid) : 0.0f;
@@ -182,7 +182,7 @@ extern "C" __global__ void lm_flash_attn_f32_combine(
     for (unsigned int g = 0; g < G; g++)
     {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_F) ? 0.0f : __expf(mg - m);
+        float w = (partialL[idx * G + g] == 0.0f) ? 0.0f : __expf(mg - m);
         l += partialL[idx * G + g] * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }
