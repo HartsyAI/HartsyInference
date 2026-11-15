@@ -72,11 +72,11 @@ public static partial class EngineKnobs
         Bool("numerics.paintUpscaleViews", true, KnobScope.Construction, KnobDomain.Numerics,
             "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking, as upstream; on by default (sharper edges, about 220 s extra on a 12 GB card).");
 
-    /// <summary>Bakes the Paint reference picture itself into the front view where it lines up with the mesh. Off by default, as upstream has no such step: where the picture and the
-    /// mesh differ in shape it pastes picture detail onto the wrong surface (a forehead onto a hat brim). Acts only when the reference carries alpha.</summary>
+    /// <summary>Bakes the Paint reference picture itself onto the surfaces the front camera sees, at the picture's own resolution, so a face looks like the picture's instead of
+    /// the 512 px repaint (upstream has no such step and its faces melt). On by default; acts only when the reference carries alpha and its outline fits the mesh's front.</summary>
     public static readonly Knob<bool> PaintProjectReference =
-        Bool("numerics.paintProjectReference", false, KnobScope.Runtime, KnobDomain.Numerics,
-            "Bakes the Paint reference picture into the front view where it lines up with the mesh (needs the picture's alpha); off by default, as upstream, which paints the front from the generated view only.");
+        Bool("numerics.paintProjectReference", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Bakes the Paint reference picture onto the surfaces the front camera sees, at its own resolution (needs the picture's alpha); off paints the front from the generated views only, as upstream.");
 
     /// <summary>Decodes each X-Part part with the hierarchical FlashVDM decoder instead of the dense grid. Off by default: upstream decodes densely, FlashVDM approximates that field (0.4 to 0.7 percent of the part's extent on the test bust).</summary>
     public static readonly Knob<bool> XPartFastDecode =

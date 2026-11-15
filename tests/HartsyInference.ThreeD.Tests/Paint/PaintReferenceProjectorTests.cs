@@ -91,89 +91,95 @@ public sealed class PaintReferenceProjectorTests
         Assert.Null(PaintReferenceProjector.Project(renderer, new byte[64 * 64 * 3], new byte[64 * 64], 64, 64, 64));
     }
 
-    [Fact]
-    public void Overlay_UsesThePictureWhereItAgreesAndKeepsTheViewWhereItDoesNot()
+    // A quad from (x0, y0) to (x1, y1) at depth z, facing +z, with UVs over [u0, u1] x [0, 1], appended to the given lists.
+    private static void Quad(List<float> vertices, List<int> indices, List<float> uvs, float x0, float y0, float x1, float y1, float z, float u0, float u1)
     {
-        int size = 64;
-        float[] image = new float[size * size * 3];
-        bool[] covered = new bool[size * size];
-        for (int p = 0; p < covered.Length; p++)
+        int b = vertices.Count / 3;
+        vertices.AddRange([x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z]);
+        uvs.AddRange([u0, 1, u1, 1, u1, 0, u0, 0]);
+        indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+    }
+
+    private sealed record Scene(PaintViewRenderer Renderer, PaintTexelSurface Surface, PaintReferenceProjection Placement, byte[] Rgb, byte[] Alpha, int Size);
+
+    // A scene whose front silhouette is the square [-1, 1]^2 (the subject's outline), so the placement fit is exact; the picture is Quadrants(300, 60, 240).
+    private static Scene Build(Action<List<float>, List<int>, List<float>> extra)
+    {
+        List<float> vertices = [], uvs = [];
+        List<int> indices = [];
+        Quad(vertices, indices, uvs, -1, -1, 1, 1, 0, 0, 0.5f);
+        extra(vertices, indices, uvs);
+        Mesh mesh = new() { Vertices = [.. vertices], Indices = [.. indices], Uvs = [.. uvs] };
+        PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
+        PaintViewRenderer renderer = new(frame);
+        PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, 128, 128);
+        (byte[] rgb, byte[] alpha) = Quadrants(300, 60, 240);
+        PaintReferenceProjection placement = PaintReferenceProjector.Project(renderer, rgb, alpha, 300, 300, 256)!;
+        return new Scene(renderer, surface, placement, rgb, alpha, 128);
+    }
+
+    private static int Apply(Scene scene, float[] texture, bool[] known) =>
+        PaintReferenceProjector.ApplyToTexels(scene.Placement, scene.Renderer, scene.Surface, texture, known, scene.Rgb, scene.Alpha, 300, 300, 3e-3);
+
+    [Fact]
+    public void ApplyToTexels_ReplacesThePaintedColourWithThePicturesOwnOnAFrontFacingSurface()
+    {
+        Scene scene = Build((_, _, _) => { });
+        float[] texture = Enumerable.Repeat(0.5f, scene.Size * scene.Size * 3).ToArray();
+        bool[] known = Enumerable.Repeat(true, scene.Size * scene.Size).ToArray();
+
+        int written = Apply(scene, texture, known);
+
+        Assert.True(written > scene.Surface.Count / 2, $"{written} of {scene.Surface.Count}");
+        // Away from the quadrant borders every texel is one of the picture's four colours, with nothing of the painted grey mixed in.
+        int[] pure = new int[4];
+        (float, float, float)[] colours = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1)];
+        foreach (int texel in scene.Surface.Texels)
         {
-            covered[p] = true;
-            // Left half of the picture is light skin, right half too.
-            (image[p * 3], image[p * 3 + 1], image[p * 3 + 2]) = (0.9f, 0.75f, 0.65f);
+            (float r, float g, float b) = (texture[texel * 3], texture[texel * 3 + 1], texture[texel * 3 + 2]);
+            for (int k = 0; k < 4; k++)
+                if (Math.Abs(r - colours[k].Item1) < 1e-3 && Math.Abs(g - colours[k].Item2) < 1e-3 && Math.Abs(b - colours[k].Item3) < 1e-3)
+                    pure[k]++;
         }
-        float[] view = new float[size * size * 3];
-        for (int y = 0; y < size; y++)
-            for (int x = 0; x < size; x++)
-            {
-                int p = y * size + x;
-                // The generated view has slightly darker skin on the left and a blue brim on the right.
-                (view[p * 3], view[p * 3 + 1], view[p * 3 + 2]) = x < size / 2 ? (0.8f, 0.65f, 0.55f) : (0.15f, 0.15f, 0.5f);
-            }
-        PaintReferenceProjection projection = new(image, covered, size, 1, 0, 1, 0, 0);
-
-        PaintReferenceProjector.Overlay(projection, view);
-
-        int left = 32 * size + 4, right = 32 * size + 60;
-        Assert.Equal(0.9f, view[left * 3], 4);
-        Assert.Equal(0.15f, view[right * 3], 4);
+        Assert.All(pure, count => Assert.True(count > scene.Surface.Count / 8, string.Join(", ", pure)));
     }
 
     [Fact]
-    public void Align_MovesThePictureOntoTheGeneratedViewByASmallShift()
+    public void ApplyToTexels_LeavesSurfacesHiddenBehindANearerOneAlone()
     {
-        // A picture with a dark band, and a generated view with the same band 4 px lower (a brim the mesh brings lower than drawn).
-        int size = 128;
-        float[] picture = new float[size * size * 3], view = new float[size * size * 3];
-        bool[] covered = new bool[size * size];
-        for (int y = 0; y < size; y++)
-            for (int x = 0; x < size; x++)
-            {
-                int p = y * size + x;
-                covered[p] = true;
-                float pictureValue = y >= 50 && y < 60 ? 0.1f : 0.9f, viewValue = y >= 54 && y < 64 ? 0.1f : 0.9f;
-                for (int c = 0; c < 3; c++)
-                {
-                    picture[p * 3 + c] = pictureValue;
-                    view[p * 3 + c] = viewValue;
-                }
-            }
-        PaintReferenceProjection projection = new(picture, covered, size, 1, 0, 1, 0, 0);
+        // A smaller quad in front of the square's centre, on the other half of the atlas.
+        Scene scene = Build((vertices, indices, uvs) => Quad(vertices, indices, uvs, -0.4f, -0.4f, 0.4f, 0.4f, 0.5f, 0.5f, 1));
+        float[] texture = new float[scene.Size * scene.Size * 3];
+        bool[] known = new bool[scene.Size * scene.Size];
 
-        (float[] aligned, bool[] alignedCovered) = PaintReferenceProjector.Align(projection, view);
+        Apply(scene, texture, known);
 
-        int inside = 60 * size + 64, above = 52 * size + 64;
-        Assert.True(alignedCovered[inside]);
-        Assert.Equal(0.1f, aligned[inside * 3], 2);
-        Assert.Equal(0.9f, aligned[above * 3], 2);
+        // The back square's texels behind the front quad (UV centre of its half) took nothing; its corners did.
+        int behind = scene.Size / 2 * scene.Size + scene.Size / 4, corner = 4 * scene.Size + 4;
+        Assert.False(known[behind]);
+        Assert.True(known[corner]);
+        Assert.True(known[scene.Size / 2 * scene.Size + scene.Size * 3 / 4]);
     }
 
     [Fact]
-    public void Overlay_KeepsTheViewOnSurfacesTurnedAwayFromTheFront()
+    public void ApplyToTexels_SkipsSurfacesTurnedAwayFromTheFront()
     {
-        int size = 32;
-        float[] image = Enumerable.Repeat(0.8f, size * size * 3).ToArray(), view = Enumerable.Repeat(0.7f, size * size * 3).ToArray();
-        bool[] covered = Enumerable.Repeat(true, size * size).ToArray();
-        float[] facing = new float[size * size];
-        for (int p = 0; p < facing.Length; p++)
-            facing[p] = p % size < size / 2 ? 1f : 0.1f;
-        PaintReferenceProjection projection = new(image, covered, size, 1, 0, 1, 0, 0, facing);
+        // A strip turned 85 degrees about the vertical axis beside the square: the front picture would be a streak on it.
+        Scene scene = Build((vertices, indices, uvs) =>
+        {
+            int b = vertices.Count / 3;
+            float dx = MathF.Cos(85f * MathF.PI / 180f) * 0.8f, dz = MathF.Sin(85f * MathF.PI / 180f) * 0.8f;
+            vertices.AddRange([1.05f, -1, 0, 1.05f + dx, -1, -dz, 1.05f + dx, 1, -dz, 1.05f, 1, 0]);
+            uvs.AddRange([0.5f, 1, 1, 1, 1, 0, 0.5f, 0]);
+            indices.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
+        });
+        float[] texture = new float[scene.Size * scene.Size * 3];
+        bool[] known = new bool[scene.Size * scene.Size];
 
-        PaintReferenceProjector.Overlay(projection, view);
+        Apply(scene, texture, known);
 
-        Assert.Equal(0.8f, view[(16 * size + 4) * 3], 4);
-        Assert.Equal(0.7f, view[(16 * size + 28) * 3], 4);
-    }
-
-    [Fact]
-    public void Overlay_LeavesUncoveredPixelsAlone()
-    {
-        int size = 16;
-        PaintReferenceProjection projection = new(Enumerable.Repeat(1f, size * size * 3).ToArray(), new bool[size * size], size, 1, 0, 1, 0, 0);
-        float[] view = Enumerable.Repeat(0.98f, size * size * 3).ToArray();
-
-        Assert.Equal(0, PaintReferenceProjector.Overlay(projection, view));
-        Assert.All(view, value => Assert.Equal(0.98f, value));
+        for (int y = 8; y < scene.Size - 8; y++)
+            for (int x = scene.Size / 2 + 8; x < scene.Size - 8; x++)
+                Assert.False(known[y * scene.Size + x], $"texel ({x}, {y}) of the turned strip took the picture");
     }
 }

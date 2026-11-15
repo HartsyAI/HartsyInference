@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.435
+
+- Hunyuan3D Paint 2.1 bakes the reference picture itself onto the surfaces the front camera sees, so a face looks like the picture.
+
 ## alpha.434
 
 - Hunyuan3D Paint 2.1 textures match upstream's: the reference projection is off and the Real-ESRGAN view upscaler is on (and downloads with the model) by default.

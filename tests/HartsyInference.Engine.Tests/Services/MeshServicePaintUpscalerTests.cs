@@ -19,11 +19,20 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
     }
 
     [Fact]
-    public void TheReferenceProjectionKnobIsOffByDefaultAndReadPerRun()
+    public void TheReferenceProjectionKnobIsOnByDefaultAndReadPerRun()
     {
-        Assert.False(EngineKnobs.PaintProjectReference.Default);
+        Assert.True(EngineKnobs.PaintProjectReference.Default);
         Assert.Equal(KnobScope.Runtime, EngineKnobs.PaintProjectReference.Scope);
         Assert.Equal("numerics.paintProjectReference", EngineKnobs.PaintProjectReference.Id);
+    }
+
+    [Theory]
+    [InlineData(0, true, 4096)]
+    [InlineData(0, false, 2048)]
+    [InlineData(1024, true, 1024)]
+    public void PaintTextureSize_IsTheRequestsGridElse4096WhenThePictureIsBakedIn(int grid, bool bakesReference, int expected)
+    {
+        Assert.Equal(expected, MeshService.PaintTextureSize(grid, bakesReference));
     }
 
     [Fact]
