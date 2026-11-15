@@ -11,7 +11,8 @@ namespace HartsyInference.ThreeD.Paint;
 /// <param name="Scale">Picture pixels per unit of view.</param>
 /// <param name="OffsetX">Picture x at the view's left edge.</param>
 /// <param name="OffsetY">Picture y at the view's first row.</param>
-public sealed record PaintReferenceProjection(float[] Image, bool[] Covered, int Resolution, double Fit, double MirroredFit, double Scale, double OffsetX, double OffsetY);
+/// <param name="Facing">Per pixel, how squarely the surface there faces the front camera: the cosine between its face normal and the view direction (0 to 1). Null treats every pixel as facing it.</param>
+public sealed record PaintReferenceProjection(float[] Image, bool[] Covered, int Resolution, double Fit, double MirroredFit, double Scale, double OffsetX, double OffsetY, float[]? Facing = null);
 
 /// <summary>Places the reference picture on the mesh's front view so its pixels can be baked at their own resolution. Paint repaints every view at 512 px, so
 /// on a full figure a face is a few dozen pixels wide and its eyes, nose and brows are lost; the front view is the one the picture was drawn from, so the
@@ -64,7 +65,13 @@ public static class PaintReferenceProjector
         (scale, offsetX, offsetY, double fit) = Refine(silhouette, subject, width, height, scale, offsetX, offsetY, py1 + 1 - py0, cancellationToken);
         double mirroredFit = Overlap(silhouette, subject, width, height, -scale, (px0 + px1 + 1) - offsetX, offsetY, cancellationToken);
 
-        ViewRaster raster = renderer.Rasterize(0, 0, resolution, cancellationToken);
+        PaintViewProjection front = renderer.Project(0, 0);
+        ViewRaster raster = ViewRasterizer.Rasterize(front.Clip, renderer.Frame.Indices, resolution, resolution, cancellationToken);
+        float[] faceFacing = FaceFacing(front.Camera, renderer.Frame.Indices);
+        float[] facing = new float[resolution * resolution];
+        for (int p = 0; p < facing.Length; p++)
+            if (raster.FaceIds[p] > 0)
+                facing[p] = faceFacing[raster.FaceIds[p] - 1];
         float[] image = new float[resolution * resolution * 3];
         bool[] covered = new bool[resolution * resolution];
         byte[] colors = rgb.ToArray();
@@ -84,7 +91,31 @@ public static class PaintReferenceProjector
                 covered[pixel] = true;
             }
         });
-        return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY);
+        return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY, facing);
+    }
+
+    /// <summary>The picture is used fully on surfaces facing the front camera at least this squarely (cosine; about 50 degrees off the view direction).</summary>
+    public const float FacingFull = 0.65f;
+
+    /// <summary>Surfaces turned further from the front camera than this (cosine; about 70 degrees) do not take the picture: the front picture has almost no pixels for them, so it
+    /// would be stretched into streaks (a brim's underside, the sides of a face recessed under it). The painted views cover them. In between, the two are blended.</summary>
+    public const float FacingNone = 0.35f;
+
+    // How squarely each triangle faces the camera: |cos| of the angle between its normal and the view axis (camera space looks down -z). A triangle that is drawn faces the camera,
+    // whatever its winding, so the sign is dropped.
+    private static float[] FaceFacing(float[] camera, int[] indices)
+    {
+        float[] facing = new float[indices.Length / 3];
+        for (int t = 0; t < facing.Length; t++)
+        {
+            int a = indices[t * 3] * 3, b = indices[t * 3 + 1] * 3, c = indices[t * 3 + 2] * 3;
+            float e1x = camera[b] - camera[a], e1y = camera[b + 1] - camera[a + 1], e1z = camera[b + 2] - camera[a + 2];
+            float e2x = camera[c] - camera[a], e2y = camera[c + 1] - camera[a + 1], e2z = camera[c + 2] - camera[a + 2];
+            float nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+            float length = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+            facing[t] = length > 1e-12f ? MathF.Abs(nz) / length : 0f;
+        }
+        return facing;
     }
 
     /// <summary>Blurred colours farther apart than this (RGB distance, channels in [0, 1]) after alignment are different surfaces (skin where the mesh has a hat brim): the generated view is kept there.</summary>
@@ -134,6 +165,8 @@ public static class PaintReferenceProjector
             if (!covered[p])
                 continue;
             float weight = keep[p * 3];
+            if (projection.Facing is { } facing)
+                weight *= Math.Clamp((facing[p] - FacingNone) / (FacingFull - FacingNone), 0f, 1f);
             if (weight >= 1f)
                 full++;
             for (int c = 0; c < 3; c++)

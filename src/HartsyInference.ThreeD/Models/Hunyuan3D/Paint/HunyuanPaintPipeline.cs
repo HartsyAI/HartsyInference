@@ -446,6 +446,10 @@ public sealed class HunyuanPaintPipeline
             (float[] texture, bool[] known) = merger.Finish();
             if (m == 0)
                 painted = known.Count(k => k);
+            // Upstream's uv_inpaint: colours spread over the mesh's vertices first, so a surface no view saw takes the colour around it on the mesh, then the 2D fill.
+            int seeded = PaintVertexInpaint.Seed(texture, known, size, size, 3, mesh.Vertices, mesh.Uvs!, mesh.Indices);
+            if (m == 0)
+                StageLog?.Invoke($"vertex inpaint: {seeded} texels seeded");
             textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true, boundByNeighbours: true);
             FlattenFarGutter(textures[m], surface, size);
         }

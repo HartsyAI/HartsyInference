@@ -150,6 +150,23 @@ public sealed class PaintReferenceProjectorTests
     }
 
     [Fact]
+    public void Overlay_KeepsTheViewOnSurfacesTurnedAwayFromTheFront()
+    {
+        int size = 32;
+        float[] image = Enumerable.Repeat(0.8f, size * size * 3).ToArray(), view = Enumerable.Repeat(0.7f, size * size * 3).ToArray();
+        bool[] covered = Enumerable.Repeat(true, size * size).ToArray();
+        float[] facing = new float[size * size];
+        for (int p = 0; p < facing.Length; p++)
+            facing[p] = p % size < size / 2 ? 1f : 0.1f;
+        PaintReferenceProjection projection = new(image, covered, size, 1, 0, 1, 0, 0, facing);
+
+        PaintReferenceProjector.Overlay(projection, view);
+
+        Assert.Equal(0.8f, view[(16 * size + 4) * 3], 4);
+        Assert.Equal(0.7f, view[(16 * size + 28) * 3], 4);
+    }
+
+    [Fact]
     public void Overlay_LeavesUncoveredPixelsAlone()
     {
         int size = 16;
