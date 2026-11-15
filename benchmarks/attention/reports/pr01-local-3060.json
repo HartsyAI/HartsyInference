@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "status": "PR 01 incomplete; draft, not eligible for exit review",
-  "recorded_utc": "2026-11-15T02:39:32.467864+00:00",
+  "recorded_utc": "2026-11-15T02:42:47.126285+00:00",
   "authorized": "PR 01 only; no PR 02 semantic changes or optimization work",
-  "source_commit": "03b6a8bb482dcdaaba65011038213ba6aeebfbd1",
+  "source_commit": "f95fc5d1fcd8f3580081b4913f6c5d90822020b6",
   "baseline_commit": "a6c465bc8aa9121aadcb9d088ddc72e815ae4288",
   "cohort": {
     "id": "windows-rtx3060",
@@ -258,8 +258,8 @@
     "passed": 14,
     "skipped": 0,
     "raw": {
-      "path": "python-tests-final4.log",
-      "sha256": "964f48ee63a6e5cb254de4c4c49f6a90b23c40769b9f7782f7d0fa22b4d69fa3",
+      "path": "python-tests-provenance.log",
+      "sha256": "e5c4f296485e9f913ae4a61ef4c630316faf56ee5287b97cff2a08afee622b30",
       "bytes": 2179
     }
   },
@@ -323,6 +323,11 @@
             "path": "warm-mha-cuda-b0.json",
             "sha256": "b65333c1b58313ba3258f00e7fb70260c3871c0f682d0122875fe2da83b7df34",
             "bytes": 53105
+          },
+          "tool_binary": {
+            "path": "b0-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         },
         "disabled": {
@@ -334,6 +339,11 @@
             "path": "warm-mha-cuda-disabled.json",
             "sha256": "74c0c272142dc8243ff9de2b391a97fd6b1f1309ac5bce36396a58b0603a4a22",
             "bytes": 53107
+          },
+          "tool_binary": {
+            "path": "diagnostic-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         },
         "enabled": {
@@ -345,6 +355,11 @@
             "path": "warm-mha-cuda-enabled.json",
             "sha256": "f2317d0a93bf29ed1de9cd619d393a9850ce65a8819c0e958ae38c37a6e51627",
             "bytes": 53106
+          },
+          "tool_binary": {
+            "path": "diagnostic-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         }
       }
@@ -388,6 +403,11 @@
             "path": "warm-mha-vulkan-b0.json",
             "sha256": "77477d3a2979f6e42753fde00a7f56bcf81e435450a7f6c74d0092f94d1164d7",
             "bytes": 51393
+          },
+          "tool_binary": {
+            "path": "b0-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         },
         "disabled": {
@@ -399,6 +419,11 @@
             "path": "warm-mha-vulkan-disabled.json",
             "sha256": "7e24a847881437b00d652e3414fea816d817def465fad77a6377c65b11dea8f4",
             "bytes": 51392
+          },
+          "tool_binary": {
+            "path": "diagnostic-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         },
         "enabled": {
@@ -410,6 +435,11 @@
             "path": "warm-mha-vulkan-enabled.json",
             "sha256": "4298986fe25039301ae99ad220e1bfa67ba0ec570b9d8fd27a69a80a9084734d",
             "bytes": 51393
+          },
+          "tool_binary": {
+            "path": "diagnostic-operation-v4/HartsyInference.GpuBenchmarks.dll",
+            "sha256": "ee7f52b6726dcf9b61c15786681addb2630fc30219ef513666989e3d8b73883f",
+            "bytes": 95232
           }
         }
       }
@@ -587,7 +617,12 @@
       "sha256": "448637d39170557bbe32585e8afcaba6b7ee32873950809ba63ef3c37fa8bd84",
       "bytes": 3810
     },
-    "tokenizer_identity_scope": "all tokenizer.* metadata, ordinal key order, canonical Utf8JsonWriter encoding"
+    "tokenizer_identity_scope": "all tokenizer.* metadata, ordinal key order, canonical Utf8JsonWriter encoding",
+    "freezer_tool": {
+      "path": "b0-request-v2/hartsy-gencapture.dll",
+      "sha256": "e0db90d3bc520ad5235b033a235a84d905f982b22c12323802560650c61387b2",
+      "bytes": 45056
+    }
   },
   "kitchen_environment": {
     "commit": "7d6a22ae8281cd1053a8449530fa0e764a2e51cb",
@@ -673,6 +708,38 @@
       "path": "build-benchmark-runner-final.log",
       "sha256": "3e80e0eaf9ee89498d95f9d24991aa2414771a6f74346b839984c86d9b812c7e",
       "bytes": 82
+    }
+  ],
+  "sealed_tool_smokes": [
+    {
+      "backend": "cuda",
+      "quality_passed": true,
+      "output_and_route_match_B0": true,
+      "raw": {
+        "path": "final-provenance-smoke.json",
+        "sha256": "5abee9238c93f6f411b828094dda09ac008f4c618200f6eef98caaca10053fb1",
+        "bytes": 53141
+      }
+    },
+    {
+      "backend": "vulkan",
+      "quality_passed": true,
+      "output_and_route_match_B0": true,
+      "raw": {
+        "path": "final-vulkan-provenance-smoke.json",
+        "sha256": "6274c612fb46f0616dc5d92a43ddfc45fd1050602604f6b7a49a765905485931",
+        "bytes": 51428
+      }
+    },
+    {
+      "backend": "Kitchen CUDA fallback",
+      "raw": {
+        "path": "k0-final-provenance-smoke.json",
+        "sha256": "33f997d62f39aa930c0272956089a710127f85fb4b64585d130f2e5b6b84235d",
+        "bytes": 1218
+      },
+      "quality_passed": true,
+      "harness_hashes_recorded": true
     }
   ]
 }
