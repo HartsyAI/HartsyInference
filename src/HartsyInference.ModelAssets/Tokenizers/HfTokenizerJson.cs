@@ -75,7 +75,8 @@ public static class HfTokenizerJson
     /// The caller owns <paramref name="json"/> (this does not dispose it).</summary>
     /// <exception cref="NotSupportedException">The post-processor is a kind this reader does not apply (Bert, Roberta), or its single template
     /// has no <c>$A</c> or names <c>$B</c>.</exception>
-    /// <exception cref="InvalidOperationException">The template names a special token its <c>special_tokens</c> map does not define.</exception>
+    /// <exception cref="InvalidOperationException">The template names a special token its <c>special_tokens</c> map does not define, or the
+    /// post-processor lacks a key its type requires.</exception>
     public static (int[] Prefix, int[] Suffix) ReadSingleSequenceSpecials(Stream json)
     {
         ArgumentNullException.ThrowIfNull(json);
@@ -96,7 +97,7 @@ public static class HfTokenizerJson
             case "ByteLevel":
                 return;
             case "Sequence":
-                foreach (JsonElement inner in processor.GetProperty("processors").EnumerateArray())
+                foreach (JsonElement inner in Required(processor, "processors", "Sequence post_processor").EnumerateArray())
                     ApplyPostProcessor(inner, prefix, suffix);
                 return;
             case "TemplateProcessing":
@@ -105,30 +106,35 @@ public static class HfTokenizerJson
                 throw new NotSupportedException($"tokenizer.json has a '{type ?? "untyped"}' post_processor, whose special tokens this reader does not apply.");
         }
 
-        JsonElement specials = processor.GetProperty("special_tokens");
+        JsonElement specials = Required(processor, "special_tokens", "TemplateProcessing post_processor");
         List<int> before = [], after = [];
         bool sawA = false;
-        foreach (JsonElement piece in processor.GetProperty("single").EnumerateArray())
+        foreach (JsonElement piece in Required(processor, "single", "TemplateProcessing post_processor").EnumerateArray())
         {
             if (piece.TryGetProperty("Sequence", out JsonElement sequence))
             {
-                string? id = sequence.GetProperty("id").GetString();
+                string? id = Required(sequence, "id", "template Sequence piece").GetString();
                 if (id != "A" || sawA)
                     throw new NotSupportedException($"tokenizer.json's single-sequence template names sequence '{id}', where only one '$A' is expected.");
                 sawA = true;
                 continue;
             }
-            string literal = piece.GetProperty("SpecialToken").GetProperty("id").GetString()
+            string literal = Required(Required(piece, "SpecialToken", "template piece"), "id", "template SpecialToken piece").GetString()
                 ?? throw new InvalidOperationException("tokenizer.json's single-sequence template has a special token with no id.");
             if (!specials.TryGetProperty(literal, out JsonElement special))
                 throw new InvalidOperationException($"tokenizer.json's single-sequence template names '{literal}', which its special_tokens map does not define.");
-            foreach (JsonElement id in special.GetProperty("ids").EnumerateArray())
+            foreach (JsonElement id in Required(special, "ids", $"special token '{literal}'").EnumerateArray())
                 (sawA ? after : before).Add(id.GetInt32());
         }
         if (!sawA) throw new NotSupportedException("tokenizer.json's single-sequence template has no '$A', so it does not say where the text goes.");
         prefix.InsertRange(0, before);
         suffix.AddRange(after);
     }
+
+    // A key the post-processor shape requires; a missing one is a malformed file, named for the caller's load error.
+    private static JsonElement Required(JsonElement element, string key, string where)
+        => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(key, out JsonElement value) ? value
+            : throw new InvalidOperationException($"tokenizer.json's {where} has no '{key}'.");
 
     /// <summary>Reads <c>model.merges</c>, accepting both the legacy <c>"left right"</c> string form and the newer <c>["left","right"]</c> pair form, normalizing to the space-joined form the BPE core expects.</summary>
     private static string[] ReadMerges(JsonElement model)

@@ -14,7 +14,9 @@ namespace HartsyInference.ModelAssets.Tokenizers;
 internal static class OnigurumaPattern
 {
     /// <summary>The .NET form of <paramref name="pattern"/>; a pattern with none of the rewritten forms comes back unchanged.</summary>
-    /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to.</exception>
+    /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to. That includes a quantifier
+    /// that follows another one, such as <c>a{2}{3}+</c> or <c>\d+{2}+</c>: Oniguruma reads those as nested repeats, which this rewrite refuses
+    /// rather than guess at (no known tokenizer uses them).</exception>
     public static string ToDotNet(string pattern)
     {
         ArgumentNullException.ThrowIfNull(pattern);
@@ -46,7 +48,7 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, length);
                 i += length;
                 atom = -1;
-                // an inline option setting like (?i) closes at once and is not an atom
+                // an inline option setting like (?i), or a comment, closes at once and is not an atom
                 if (sb[^1] == ')') groups.Pop();
             }
             else if (c == ')')
@@ -161,7 +163,8 @@ internal static class OnigurumaPattern
         return pattern.Length;
     }
 
-    // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:.
+    // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:,
+    // or a whole (?#comment).
     private static int GroupOpenLength(string pattern, int start)
     {
         int i = start + 1;
@@ -169,7 +172,13 @@ internal static class OnigurumaPattern
         i++;
         if (i >= pattern.Length) return i - start;
         char kind = pattern[i];
-        if (kind is ':' or '=' or '!' or '>' or '#') return i + 1 - start;
+        if (kind is ':' or '=' or '!' or '>') return i + 1 - start;
+        // a (?#...) comment runs to the first ')' and is copied whole, so brackets in its text are not read as pattern
+        if (kind == '#')
+        {
+            int end = pattern.IndexOf(')', i);
+            return end < 0 ? pattern.Length - start : end + 1 - start;
+        }
         if (kind == '<')
         {
             if (i + 1 < pattern.Length && pattern[i + 1] is '=' or '!') return i + 2 - start;

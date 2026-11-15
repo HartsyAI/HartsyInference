@@ -24,6 +24,8 @@ public sealed class OnigurumaPatternTests
     [InlineData(@"[!""#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+")]
     [InlineData(@"\p{Nd}{1,510}(?=(?>\p{Nd}{510})*(?:\P{Nd}|$))|\G\p{Nd}{510}")]
     [InlineData(@"(?<name>a+?)(?i:b)(?<=c)x{2}?\{literal}")]
+    // a comment's text is not pattern, so its unbalanced bracket and parenthesis are copied as written
+    [InlineData(@"a(?#[ not a class (x)b+")]
     public void Leaves_patterns_without_those_forms_unchanged(string pattern) => Assert.Equal(pattern, OnigurumaPattern.ToDotNet(pattern));
 
     [Fact]
@@ -35,6 +37,10 @@ public sealed class OnigurumaPatternTests
         Assert.DoesNotMatch(lead, "123456");
     }
 
-    [Fact]
-    public void A_quantifier_with_nothing_to_repeat_is_refused() => Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet("(++)"));
+    [Theory]
+    [InlineData("(++)")]
+    // Oniguruma nests these repeats; the rewrite refuses them rather than guess
+    [InlineData("a{2}{3}+")]
+    [InlineData(@"\d+{2}+")]
+    public void A_quantifier_with_nothing_to_repeat_is_refused(string pattern) => Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet(pattern));
 }

@@ -145,9 +145,9 @@ internal static class Ernie5SyntheticCheckpoint
     }
 
     /// <summary>The real base checkpoint's post-processor shape, <c>[end token, $A]</c>, with the synthetic end token.</summary>
-    internal const string EosPrefixPostProcessor =
+    internal static readonly string EosPrefixPostProcessor =
         "{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"</s>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],"
-        + "\"pair\":[],\"special_tokens\":{\"</s>\":{\"id\":\"</s>\",\"ids\":[257],\"tokens\":[\"</s>\"]}}}";
+        + $"\"pair\":[],\"special_tokens\":{{\"</s>\":{{\"id\":\"</s>\",\"ids\":[{EosId}],\"tokens\":[\"</s>\"]}}}}}}";
 
     /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials. <paramref name="postProcessor"/> is the
     /// <c>post_processor</c> JSON, or null for none.</summary>
