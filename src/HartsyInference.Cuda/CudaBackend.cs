@@ -5911,6 +5911,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         nuint maskBytes = GpuTransferHelper.ByteSize(mask);
         ulong pMask = GpuTransferHelper.AllocateDevice(maskBytes);
         _kernels!.LaunchCausalBiasMask(pMask, tq, kvLen, qOffset, window, _stream.Handle);
+        AttentionEvidence.Payload(AttentionEvidenceKind.MaterializeMask, "cuda.causal.mask", mask);
         GpuTransferHelper.CacheActivation(mask, pMask, maskBytes);
         return TryCudnnSdpa(output, query, key, value, mask, scale, d, q, k, v, o, default);
     }
@@ -5987,6 +5988,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 CastIn(qCast, pQ, query.ElementCount);
                 CastIn(kCast, pK, key.ElementCount);
                 CastIn(vCast, pV, value.ElementCount);
+                if (AttentionEvidence.Enabled)
+                {
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Cast, "cudnn.inputs",
+                        (query.ElementCount + key.ElementCount + value.ElementCount) * 2, count: 3);
+                    AttentionEvidence.Observed(AttentionEvidenceKind.Workspace, "cudnn.casts",
+                        (query.ElementCount + key.ElementCount + value.ElementCount + output.ElementCount) * 2);
+                }
                 _cudnnSdpa.Execute(qCast, kCast, vCast, oCast, plan, scale, pMask, offsets);
                 if (bf16) _kernels!.LaunchCastBf16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
                 else _kernels!.LaunchCastF16ToF32(pOut, oCast, (int)output.ElementCount, _stream.Handle);
@@ -7628,6 +7636,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         // ShutdownServer path does not reliably dispose the backend, so this is the reliable per-gen dump hook.
         if (EngineKnobs.ProfileEach.Value)
             Profiling.NvtxRange.DumpProfile(EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt");
+        AttentionEvidence.Observed(AttentionEvidenceKind.Synchronization, "cuda.Sync");
     }
 
     /// <inheritdoc/>
@@ -7741,6 +7750,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 _kernels!.LaunchPermute0213F16(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
             else
                 _kernels!.LaunchPermute0213(pOut, pIn, s, h, d, (int)output.ElementCount, _stream.Handle);
+            AttentionEvidence.Payload(AttentionEvidenceKind.Permute, "cuda.Permute0213", output);
 
             GpuTransferHelper.CacheActivation(output, pOut, outBytes);
             cachedOutput = true;

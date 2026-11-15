@@ -596,6 +596,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         ISequenceState cache = graphEligible
             ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, null, req.Loops ?? 0))
             : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool, req.Loops ?? 0));
+        if (HartsyInference.Core.Backends.Attention.AttentionEvidence.Enabled)
+            HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+                HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.Cache,
+                cache is PagedKvCache ? "scheduler.paged" : cache is FixedKvCache ? "scheduler.fixed" : "scheduler.other");
         try
         {
             List<int> generated = new(req.MaxTokens);
@@ -657,6 +661,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
     private void RunDecodeRound(List<ActiveSeq> feeders)
     {
+        using HartsyInference.Core.Backends.Attention.AttentionEvidenceContext evidence =
+            HartsyInference.Core.Backends.Attention.AttentionEvidence.Context("scheduler.decode");
+        HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+            HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.Cache, "scheduler.decode.batch", count: feeders.Count);
         int vocab = _model.Info.VocabSize;
         int bn = feeders.Count;
         int[] tokens = new int[bn];
@@ -682,6 +690,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Generated.Add(seq.Next);
         seq.Pending.OnToken?.Invoke(seq.Next);
         int next = gs.Replay();
+        HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+            HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.GraphReplay, "scheduler.graph.replay");
         gs.Pos++;
         gs.WriteNextPos();
         _graphModel!.CommitReplayedStep(seq.Cache);

@@ -23,9 +23,11 @@ public sealed partial class CpuBackend
                 FlashAttentionKernels.Run(call.Output.Storage, call.Query.Storage, call.Key.Storage, call.Value.Storage, call.ValidKvLength,
                     call.Mask.Causal, call.Positions.QueryOffset, call.Scale, call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow,
                     call.Logits.AlibiSlopes);
+                AttentionEvidence.Executed("cpu", "cpu.flash", null, in call);
                 break;
             default:
                 AttentionHostReference.Run(in call);
+                AttentionEvidence.Executed("cpu", "cpu.host.reference", null, in call);
                 break;
         }
     }

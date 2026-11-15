@@ -553,6 +553,8 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
 
         for (int i = startBlock; i < _blocks.Length; i++)
         {
+            using HartsyInference.Core.Backends.Attention.AttentionEvidenceContext evidence =
+                HartsyInference.Core.Backends.Attention.AttentionEvidence.Context("diffusion.krea2", i);
             // A step-cache HIT sets startBlock = _blocks.Length, skipping this loop and its streaming hook entirely.
             // The controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next
             // miss resumes from there — residency is per-block state, not a position in a sequence.
@@ -642,6 +644,8 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     {
         for (int i = startBlock; i < endBlock; i++)
         {
+            using HartsyInference.Core.Backends.Attention.AttentionEvidenceContext evidence =
+                HartsyInference.Core.Backends.Attention.AttentionEvidence.Context("diffusion.krea2", i);
             BeforeBlockForward?.Invoke(i);
             Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq);
             joint.Dispose();

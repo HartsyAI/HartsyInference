@@ -251,6 +251,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         _xfer.DrainTransients();
         DrainStream();
+        AttentionEvidence.Observed(AttentionEvidenceKind.Synchronization, "vulkan.Sync");
     }
 
     /// <inheritdoc/>
@@ -2799,6 +2800,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             outBuf.Dispose();
             throw;
         }
+        AttentionEvidence.Payload(AttentionEvidenceKind.Permute, "vulkan.Permute0213", output);
     }
 
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)

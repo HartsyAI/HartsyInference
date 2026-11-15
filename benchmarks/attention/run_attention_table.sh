@@ -11,7 +11,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SHAPES="$ROOT/benchmarks/python-baseline/attention_shapes.json"
-GPU_NAME="" OUT="" ONLY="" ARMS="" WARMUP=3 TRIALS=20 COOL=55 BUILD=1 BACKEND=cuda
+GPU_NAME="" OUT="" ONLY="" ARMS="" WARMUP=10 TRIALS=20 COOL=55 BUILD=1 BACKEND=cuda
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu-name) GPU_NAME="$2"; shift 2 ;;  --out) OUT="$2"; shift 2 ;;  --shapes) SHAPES="$2"; shift 2 ;;
@@ -39,7 +39,7 @@ IS4090=0; LOCK=/tmp/claude-1000/vk_3060.lock
 case "$GPU_NAME" in *4090*) IS4090=1; LOCK=/tmp/claude-1000/gpu4090.lock ;; esac
 exec 9>"$LOCK"; flock 9
 if [ "$IS4090" = 1 ]; then
-  until "$ROOT/tests/swarm-quiet-window.sh" --gpu 4090 --minutes 10 --state "$OUT/quiet.state" --max-minutes 9; do sleep 5; done
+  python3 "$ROOT/benchmarks/attention/quiet_window.py" wait --url "${HARTSY_BENCH_SWARM_URL:-http://127.0.0.1:7801}"
 fi
 
 { echo "utc_start=$(date -u +%FT%TZ)"; echo "git=$(git -C "$ROOT" rev-parse HEAD)"; echo "dirty=$(git -C "$ROOT" status --porcelain | wc -l)"
@@ -86,7 +86,14 @@ while read -r SHAPE ARM; do
   # Hard gate: nothing but SwarmUI's own process tree may hold this card.
   while foreign_on_card; do echo "foreign process on $GPU_NAME; waiting"; sleep 30; done
   BASE=$(nvidia-smi -i "$IDX" --query-gpu=memory.used --format=csv,noheader,nounits)
-  STEM="$OUT/arms/$SHAPE.$ARM"; START=$(date -u +%FT%TZ)
+  STEM="$OUT/arms/$SHAPE.$ARM"; START=$(date +%s.%N)
+  if [ "$IS4090" = 1 ]; then
+    python3 "$ROOT/benchmarks/attention/quiet_window.py" watch --url "${HARTSY_BENCH_SWARM_URL:-http://127.0.0.1:7801}" \
+      --state "$STEM.quiet.jsonl" --ready "$STEM.ready" --stop "$STEM.stop" > "$STEM.quiet.log" 2>&1 & QUIET=$!
+    for _ in $(seq 1 10); do [ -f "$STEM.ready" ] && break; kill -0 "$QUIET" || exit 4; sleep 1; done
+    [ -f "$STEM.ready" ] || { kill "$QUIET"; exit 4; }
+    START=$(date +%s.%N)
+  fi
   nvidia-smi -i "$IDX" --query-gpu=memory.used,clocks.sm,clocks_event_reasons.hw_slowdown,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_power_brake_slowdown \
     --format=csv,noheader,nounits -lms 100 > "$STEM.smi" 2>/dev/null & SMI=$!
   rm -f "$STEM.tsv"
@@ -107,8 +114,12 @@ PY
     [ -f "$TABLE" ] || { head -1 "$STEM.tsv" | sed 's/$/\tpeak_vram_mb\tthrottle_frac\tsm_clock_med/' > "$TABLE"; }
     tail -n +2 "$STEM.tsv" | sed "s/\$/\t$EXTRA/" >> "$TABLE"
   fi
-  if [ "$IS4090" = 1 ] && ! "$ROOT/tests/swarm-quiet-window.sh" --verify-since "$START" >/dev/null 2>&1; then
-    echo "Swarm activity during $SHAPE/$ARM; rows from it are void, stopping" | tee -a "$OUT/failures.txt"; exit 4
+  if [ "$IS4090" = 1 ]; then
+    END=$(date +%s.%N); touch "$STEM.stop"
+    wait "$QUIET" || exit 4
+    if ! python3 "$ROOT/benchmarks/attention/quiet_window.py" verify --state "$STEM.quiet.jsonl" --start "$START" --end "$END"; then
+      echo "Swarm activity or incomplete coverage during $SHAPE/$ARM; rows are invalid" | tee -a "$OUT/failures.txt"; exit 4
+    fi
   fi
   echo "$(date +%T) $SHAPE $ARM: $(tail -n +2 "$STEM.tsv" 2>/dev/null | cut -f5,6,7,21,26 | tr '\n' ' ') [$EXTRA]"
 done <<< "$PAIRS"
