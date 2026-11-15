@@ -49,6 +49,26 @@ def verify(records, start, end, max_gap=3):
         raise ValueError('Quiet-window observation has a coverage gap')
 
 
+def watch(args, session):
+    if args.stop.exists() or args.ready.exists():
+        raise ValueError('Watch ready/stop files must be fresh')
+    with args.state.open('x') as output:
+        while True:
+            stopping = args.stop.exists()
+            counters = activity(args.url, session)
+            row = {'time': time.time(), 'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                   'idle': not any(counters.values()), 'counters': counters}
+            output.write(json.dumps(row) + '\n')
+            output.flush()
+            if not args.ready.exists():
+                if not row['idle']:
+                    raise RuntimeError('Swarm became active before measurement')
+                args.ready.touch()
+            if stopping:
+                return
+            time.sleep(0.5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -82,22 +102,7 @@ def main():
                 return
             time.sleep(1)
         raise TimeoutError('Swarm did not become quiet; no service was stopped')
-    if args.stop.exists() or args.ready.exists():
-        raise ValueError('Watch ready/stop files must be fresh')
-    with args.state.open('x') as output:
-        while True:
-            counters = activity(args.url, session)
-            row = {'time': time.time(), 'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                   'idle': not any(counters.values()), 'counters': counters}
-            output.write(json.dumps(row) + '\n')
-            output.flush()
-            if not args.ready.exists():
-                if not row['idle']:
-                    raise RuntimeError('Swarm became active before measurement')
-                args.ready.touch()
-            if args.stop.exists():
-                return
-            time.sleep(0.5)
+    watch(args, session)
 
 
 if __name__ == '__main__':
