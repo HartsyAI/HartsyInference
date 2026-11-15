@@ -46,6 +46,7 @@ internal sealed unsafe class AttentionFixture : IDisposable
             AttentionOperand v = fixture.LoadOperand(directory, tensors.GetProperty("v"));
             Tensor? bias = tensors.TryGetProperty("bias", out JsonElement mask) ? fixture.LoadOperand(directory, mask).Storage : null;
             JsonElement spec = root.GetProperty("call");
+            int validLength = ValidateLengths(spec, q.Batch, k.Tokens);
             Tensor output = new(new TensorShape(q.Batch, q.Heads, q.Tokens, v.HeadDim), q.DType);
             fixture._owned.Add(output);
             fixture._call = new AttentionCall
@@ -55,7 +56,7 @@ internal sealed unsafe class AttentionFixture : IDisposable
                 {
                     Bias = bias, Causal = spec.GetProperty("causal").GetBoolean(),
                 },
-                Positions = AttentionPositions.Host(spec.GetProperty("kv_length").GetInt32(),
+                Positions = AttentionPositions.Host(validLength,
                     spec.GetProperty("query_offset").GetInt32()),
                 Route = Enum.Parse<AttentionRoute>(spec.GetProperty("route").GetString()!),
                 Numerics = NumericalPolicy(spec, q, k, v),
@@ -74,6 +75,23 @@ internal sealed unsafe class AttentionFixture : IDisposable
             fixture.Dispose();
             throw;
         }
+    }
+
+    private static int ValidateLengths(JsonElement spec, int batch, int capacity)
+    {
+        int validLength = spec.GetProperty("kv_length").GetInt32();
+        if (validLength < 0 || validLength > capacity) throw new InvalidDataException("KV length exceeds cache capacity.");
+        if (!spec.TryGetProperty("kv_lengths", out JsonElement lengths)) return validLength;
+        if (lengths.ValueKind != JsonValueKind.Array || lengths.GetArrayLength() != batch)
+            throw new InvalidDataException("Per-sequence KV lengths must contain one entry for each batch element.");
+        foreach (JsonElement item in lengths.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Number || !item.TryGetInt32(out int length) || length < 0 || length > capacity)
+                throw new InvalidDataException("Per-sequence KV length is invalid or exceeds cache capacity.");
+            if (length != validLength)
+                throw new NotSupportedException("The C# fixture adapter cannot honor per-sequence KV lengths that differ from kv_length.");
+        }
+        return validLength;
     }
 
     /// <summary>Creates the independent sampled oracle or rejects unsupported semantics.</summary>
