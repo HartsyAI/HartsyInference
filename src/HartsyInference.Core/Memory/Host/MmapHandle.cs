@@ -1,5 +1,6 @@
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.IO;
 
 namespace HartsyInference.Core.Memory.Host;
 
@@ -9,6 +10,8 @@ public sealed unsafe class MmapHandle : IDisposable
     private nint _basePointer;
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _accessor;
+    private readonly object _readGate = new();
+    private PreadByteSource? _pread;
 
     private MmapHandle(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePointer, long byteLength, string filePath)
     {
@@ -76,6 +79,18 @@ public sealed unsafe class MmapHandle : IDisposable
         return (byte*)ptr + byteOffset;
     }
 
+    /// <summary>Reads bytes of this file by positional read, bypassing the mapping. The read handle opens on first use and closes with this mapping.</summary>
+    public void ReadAt(long offset, Span<byte> destination)
+    {
+        lock (_readGate)
+        {
+            if (_basePointer == 0)
+                throw new ObjectDisposedException(nameof(MmapHandle));
+            _pread ??= new PreadByteSource(FilePath);
+            _pread.ReadAt(offset, destination);
+        }
+    }
+
     /// <summary>Hints the kernel about access to a byte range; false where madvise is unavailable or refuses, and never load-bearing.</summary>
     public bool Advise(long offset, long length, MmapAdvice advice)
     {
@@ -109,6 +124,11 @@ public sealed unsafe class MmapHandle : IDisposable
         nint ptr = Interlocked.Exchange(ref _basePointer, 0);
         if (ptr != 0)
         {
+            lock (_readGate)
+            {
+                _pread?.Dispose();
+                _pread = null;
+            }
             _accessor?.SafeMemoryMappedViewHandle.ReleasePointer();
             _accessor?.Dispose();
             _accessor = null;
@@ -123,6 +143,7 @@ public sealed unsafe class MmapHandle : IDisposable
         nint ptr = Interlocked.Exchange(ref _basePointer, 0);
         if (ptr != 0)
         {
+            _pread?.Dispose();
             _accessor?.SafeMemoryMappedViewHandle.ReleasePointer();
             _accessor?.Dispose();
             _mmf?.Dispose();

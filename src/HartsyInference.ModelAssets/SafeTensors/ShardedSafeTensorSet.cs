@@ -109,7 +109,7 @@ public sealed class ShardedSafeTensorSet : IDisposable
         MmapHandle handle = shard.Map(_options.AdviseRandom);
         Tensor tensor = new Tensor(handle.PointerAt(location.FileOffset), location.Shape, location.DType);
         tensor.SetKeepAlive(handle);
-        TensorFileExtents.Register(tensor, shard.Path, location.FileOffset);
+        TensorFileExtents.Register(tensor, handle, location.FileOffset);
         return tensor;
     }
 

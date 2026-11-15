@@ -1,6 +1,5 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using HartsyInference.Core.IO;
 using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Tensors;
 
@@ -17,7 +16,6 @@ public sealed unsafe class MappedUploadStaging : IDisposable
     public const long DefaultChunkBytes = 64L << 20;
 
     private readonly long _chunkBytes;
-    private readonly Dictionary<string, PreadByteSource> _files = new(StringComparer.Ordinal);
     private byte[] _buffer = [];
     private bool _disposed;
     private bool _copyPending;
@@ -54,9 +52,9 @@ public sealed unsafe class MappedUploadStaging : IDisposable
 
         int count = (int)Math.Min(remaining, _chunkBytes);
         Grow(count);
-        if (TensorFileExtents.TryGet(source, out string path, out long fileStart))
+        if (TensorFileExtents.TryGet(source, out MmapHandle? owner, out long fileStart))
         {
-            FileFor(path).ReadAt(fileStart + offset, _buffer.AsSpan(0, count));
+            owner.ReadAt(fileStart + offset, _buffer.AsSpan(0, count));
         }
         else
         {
@@ -73,7 +71,7 @@ public sealed unsafe class MappedUploadStaging : IDisposable
     /// <summary>Reports that the device copy reading the last staged chunk has finished, so the buffer may be reused.</summary>
     public void MarkCopyComplete() => _copyPending = false;
 
-    /// <summary>Releases the staging buffer and the shard files it read from. Idempotent.</summary>
+    /// <summary>Releases the staging buffer. Idempotent.</summary>
     /// <exception cref="InvalidOperationException">A staged chunk is still being read by a copy.</exception>
     public void Dispose()
     {
@@ -81,9 +79,6 @@ public sealed unsafe class MappedUploadStaging : IDisposable
             throw new InvalidOperationException("The staged chunk is still being read by a copy; call MarkCopyComplete before disposing.");
         _disposed = true;
         _buffer = [];
-        foreach (PreadByteSource file in _files.Values)
-            file.Dispose();
-        _files.Clear();
     }
 
     private void Grow(int count)
@@ -93,17 +88,6 @@ public sealed unsafe class MappedUploadStaging : IDisposable
         // Pinned on the object heap so the pointer StageChunk returns cannot move under the caller.
         long size = Math.Min(_chunkBytes, Math.Max(count, (long)_buffer.Length * 2));
         _buffer = GC.AllocateUninitializedArray<byte>((int)size, pinned: true);
-    }
-
-    /// <summary>Returns the positional-read handle for a file, opening it on first use so each file is opened once.</summary>
-    private PreadByteSource FileFor(string path)
-    {
-        if (!_files.TryGetValue(path, out PreadByteSource? file))
-        {
-            file = new PreadByteSource(path);
-            _files.Add(path, file);
-        }
-        return file;
     }
 
     private static void AdviseWillNeed(Tensor source, byte* src, int count)

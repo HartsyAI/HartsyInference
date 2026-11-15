@@ -110,7 +110,7 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
         using MmapHandle handle = MmapHandle.OpenRead(_path);
         Tensor mapped = MappedTensor(handle, 2500);
         Tensor fileBacked = MappedTensor(handle, 2500);
-        TensorFileExtents.Register(fileBacked, _path, 0);
+        TensorFileExtents.Register(fileBacked, handle, 0);
         using MappedUploadStaging staging = new(ChunkBytes);
 
         byte[] viaMapping = StageAll(staging, mapped);
@@ -126,7 +126,7 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
         using MmapHandle handle = MmapHandle.OpenRead(_path);
         Tensor tensor = new(handle.PointerAt(100), new TensorShape(1000), DType.U8);
         tensor.SetKeepAlive(handle);
-        TensorFileExtents.Register(tensor, _path, 100);
+        TensorFileExtents.Register(tensor, handle, 100);
         using MappedUploadStaging staging = new(ChunkBytes);
 
         Assert.Equal(File.ReadAllBytes(_path).AsSpan(100, 1000).ToArray(), StageAll(staging, tensor));
@@ -137,7 +137,7 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);
         Tensor root = MappedTensor(handle, 2500);
-        TensorFileExtents.Register(root, _path, 0);
+        TensorFileExtents.Register(root, handle, 0);
         Tensor reshaped = root.Reshape(new TensorShape(50, 50));
         Tensor sub = new((byte*)root.DataPointer + 100, new TensorShape(1000), DType.U8);
         sub.SetKeepAlive(root);
@@ -152,8 +152,9 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);
         string decoy = WriteDecoyFile();
+        using MmapHandle decoyHandle = MmapHandle.OpenRead(decoy);
         Tensor tensor = MappedTensor(handle, 2500);
-        TensorFileExtents.Register(tensor, decoy, 0);
+        TensorFileExtents.Register(tensor, decoyHandle, 0);
         using MappedUploadStaging staging = new(ChunkBytes);
 
         Assert.Equal(File.ReadAllBytes(decoy), StageAll(staging, tensor));
@@ -169,6 +170,30 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
 
         Assert.False(TensorFileExtents.TryGet(tensor, out _, out _));
         Assert.Equal(File.ReadAllBytes(_path), StageAll(staging, tensor));
+    }
+
+    [Fact]
+    public void StageChunk_ReloadedCheckpointAtSamePath_ReadsTheNewFile()
+    {
+        using MappedUploadStaging staging = new(ChunkBytes);
+        byte[] original = File.ReadAllBytes(_path);
+        byte[] first = StageMappedFile(staging, _path);
+        byte[] replacement = new byte[2500];
+        new Random(11).NextBytes(replacement);
+        File.WriteAllBytes(_path, replacement);
+
+        byte[] second = StageMappedFile(staging, _path);
+
+        Assert.Equal(original, first);
+        Assert.Equal(replacement, second);
+    }
+
+    private static byte[] StageMappedFile(MappedUploadStaging staging, string path)
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(path);
+        Tensor tensor = MappedTensor(handle, 2500);
+        TensorFileExtents.Register(tensor, handle, 0);
+        return StageAll(staging, tensor);
     }
 
     private string WriteDecoyFile()
