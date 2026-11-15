@@ -16,7 +16,7 @@ internal static class OnigurumaPattern
     /// <summary>The .NET form of <paramref name="pattern"/>; a pattern with none of the rewritten forms comes back unchanged.</summary>
     /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to. That includes a quantifier
     /// that follows another one, such as <c>a{2}{3}+</c> or <c>\d+{2}+</c>: Oniguruma reads those as nested repeats, which this rewrite refuses
-    /// rather than guess at (no known tokenizer uses them). A group or comment left open is refused too.</exception>
+    /// rather than guess at (no known tokenizer uses them).</exception>
     public static string ToDotNet(string pattern)
     {
         ArgumentNullException.ThrowIfNull(pattern);
@@ -72,7 +72,7 @@ internal static class OnigurumaPattern
                 i++;
             }
         }
-        if (groups.Count > 0) throw new NotSupportedException($"The pattern '{pattern}' leaves a group or comment open.");
+        // an unbalanced pattern is left for the regex parser to report: under (?x) a '(' in a '#' line comment is not a group
         return sb.ToString();
     }
 

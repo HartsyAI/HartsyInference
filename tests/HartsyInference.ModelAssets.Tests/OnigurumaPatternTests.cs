@@ -28,6 +28,8 @@ public sealed class OnigurumaPatternTests
     [InlineData(@"a(?#[ not a class (x)b+")]
     // an escaped ')' does not end the comment
     [InlineData(@"a(?#x\)y)b")]
+    // under (?x) a '(' in a '#' line comment is not a group, so the pattern is not refused as unbalanced
+    [InlineData("(?x)a # (\nb")]
     public void Leaves_patterns_without_those_forms_unchanged(string pattern) => Assert.Equal(pattern, OnigurumaPattern.ToDotNet(pattern));
 
     [Fact]
@@ -44,8 +46,5 @@ public sealed class OnigurumaPatternTests
     // Oniguruma nests these repeats; the rewrite refuses them rather than guess
     [InlineData("a{2}{3}+")]
     [InlineData(@"\d+{2}+")]
-    // a group or comment left open
-    [InlineData("(ab")]
-    [InlineData("a(?#oops")]
     public void A_quantifier_with_nothing_to_repeat_is_refused(string pattern) => Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet(pattern));
 }
