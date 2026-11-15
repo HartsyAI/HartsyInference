@@ -912,7 +912,8 @@ public sealed partial class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 or ERNIE-5.5 checkpoint onto its host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
+    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1 checkpoint onto its host reference model, or a stateful
+    /// family or MiniMax-M3. DeepSeek-V4.1 keeps its weights on the host, so its slot gets a CPU backend whatever device was asked for.</summary>
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
@@ -924,6 +925,9 @@ public sealed partial class TextService : ITextService, IDisposable
             KimiK31Refusals.RequireRunnablePlacement(deviceKey, ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree,
                 _engine.Placement.ShardRatios, HfTextDirectoryLoader.ReadKimiK31Config(checkpoint));
         }
+        bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
+        if (ernie)
+            RequireSingleDeviceErnie5(ResolveShardDevices(deviceKey), _engine.Placement.TensorParallelDegree);
         UnloadSlot(slot);
         if (HfTextDirectoryLoader.IsStatefulFamily(checkpoint))
         {
@@ -940,14 +944,16 @@ public sealed partial class TextService : ITextService, IDisposable
             LoadKimiK31Directory(slot, deviceKey, checkpoint, path);
             return;
         }
+        if (ernie)
+        {
+            LoadErnie5Directory(slot, deviceKey, checkpoint, path);
+            return;
+        }
         // after the unload, so the memory of a model this load replaces counts as free
-        bool ernie = string.Equals(checkpoint.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal);
-        string modelName = ernie ? "ERNIE-5.5" : "DeepSeek-V4.1";
-        ResidencyPlan? plan = ernie ? null : EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        const string modelName = "DeepSeek-V4.1";
+        ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (plan is not null)
             ResidencyPlanner.RequireAdmitted(plan);
-        else if (ernie)
-            Logs.Warning("[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, modelName);
         try
         {
@@ -999,6 +1005,52 @@ public sealed partial class TextService : ITextService, IDisposable
         if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
             Logs.Warning($"[TextService] {modelName} runs on the host only; '{deviceKey}' is ignored and the model loads on the CPU.");
         return CreateBackendFor("cpu");
+    }
+
+    /// <summary>Refuses an ERNIE-5.5 load that names more than one device: the model has no layer split or tensor parallelism, so it would
+    /// otherwise load on one device while the request asked for several.</summary>
+    /// <param name="shardDevices">The devices the request shards over; empty when it names one device.</param>
+    /// <param name="tensorParallelDegree">The engine's tensor-parallel degree.</param>
+    /// <exception cref="NotSupportedException">The request names two or more devices, or the engine's tensor-parallel degree is above 1.</exception>
+    internal static void RequireSingleDeviceErnie5(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
+    {
+        if (shardDevices.Count >= 2)
+            throw new NotSupportedException($"ERNIE-5.5 runs on one device; the request names {shardDevices.Count} ({string.Join(" + ", shardDevices)}).");
+        if (tensorParallelDegree > 1)
+            throw new NotSupportedException($"ERNIE-5.5 has no tensor-parallel path; the engine's tensor-parallel degree is {tensorParallelDegree}.");
+    }
+
+    /// <summary>Loads an ERNIE-5.5 directory on the device the request names. On a GPU the layers are built once and each layer's per-token
+    /// weights are preloaded while the device has room; the routed experts stay mapped and are uploaded as tokens pick them. On the CPU each
+    /// layer is read and dequantized on every forward. Scheduler rounds take the device gate, so a GPU run does not share the card with
+    /// another generation.</summary>
+    private void LoadErnie5Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        DisposeSlotBackends(slot);
+        IBackend backend = CreateBackendFor(deviceKey);
+        try
+        {
+            slot.HostReference = HfTextDirectoryLoader.LoadHostReference(checkpoint, backend);
+        }
+        catch
+        {
+            backend.Dispose();
+            throw;
+        }
+        slot.Backend = backend;
+        slot.Pipeline = new TextGenerationPipeline(slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template);
+        // The sequence states own their storage (no KV pool).
+        slot.Scheduler = CreateScheduler(slot, slot.HostReference.Generation, slot.HostReference.Tokenizer, slot.HostReference.Template, pool: null,
+            gateOrdinals: [.. GateOrdinalsFor(slot, deviceKey)]);
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        slot.ResidencyPlan = null;
+        string name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar));
+        Logs.Warning(backend.Device.IsGpu
+            ? "[TextService] ERNIE-5.5 has no memory guard yet; every layer stays built on the host and the routed experts are uploaded on demand, so neither host RAM nor VRAM is checked before the load."
+            : "[TextService] ERNIE-5.5 has no host memory guard yet; its weights are mapped and dequantized one layer at a time, so the peak is not checked against free RAM.");
+        Logs.Info($"[TextService] Loaded ERNIE-5.5 '{name}' on {deviceKey}{(backend.Device.IsGpu ? " with resident layers" : "")}.");
     }
 
     /// <summary>Loads a Kimi K3.1 directory onto the devices the request names. One device loads the whole decoder; two or more (a request-level

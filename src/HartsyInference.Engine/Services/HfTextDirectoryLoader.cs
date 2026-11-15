@@ -30,10 +30,13 @@ internal static class HfTextDirectoryLoader
     /// <summary>The options the Text path loads with; the RAM guard and the memory profile size against the same ones.</summary>
     internal static DeepSeekV41LoadOptions LoadOptions { get; } = new(MaxSequenceTokens);
 
-    /// <summary>The ERNIE-5.5 options the Text path loads with: layers are dequantized one at a time from the mapped checkpoint on every forward.</summary>
-    // TODO(ernie5): TextService runs ERNIE on the CPU backend only (ReplaceWithHostBackend), so resident layers would add host memory with no
-    // device to preload into. Finish it by routing ERNIE to the requested GPU backend, then load with ResidentWeights on.
-    internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
+    /// <summary>The ERNIE-5.5 options the Text path loads with on <paramref name="device"/>. A GPU keeps every layer built and preloads each layer's
+    /// per-token weights while it has room. The CPU reads, dequantizes and drops each layer on every forward, since resident layers there would only
+    /// add host memory.</summary>
+    internal static Ernie5LoadOptions Ernie5OptionsFor(DeviceKind device) => device.IsGpu ? Ernie5Resident : Ernie5Streamed;
+
+    private static readonly Ernie5LoadOptions Ernie5Resident = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = true };
+    private static readonly Ernie5LoadOptions Ernie5Streamed = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
 
     /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1) that <see cref="LoadHostReference"/> serves.</summary>
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>
@@ -44,14 +47,14 @@ internal static class HfTextDirectoryLoader
     /// <summary>Whether <paramref name="info"/> is a Kimi K3.1 checkpoint. Its backend follows the requested device rather than the CPU.</summary>
     internal static bool IsKimiK31(HfCheckpointInfo info) => string.Equals(info.ModelType, KimiK31ModelType, StringComparison.Ordinal);
 
-    /// <summary>Loads a host reference directory onto <paramref name="backend"/>. DeepSeek-V4.1 and ERNIE-5.5 keep their weights on the host, so the caller
-    /// passes a CPU backend; a Kimi K3.1 directory runs on the backend it is given.</summary>
+    /// <summary>Loads a host reference directory onto <paramref name="backend"/>. DeepSeek-V4.1 keeps its weights on the host, so the caller passes a CPU
+    /// backend; ERNIE-5.5 and Kimi K3.1 run on the backend they are given.</summary>
     /// <exception cref="HartsyInferenceException">The directory's model_type is not supported, it has no usable tokenizer.json, or the checkpoint is invalid.</exception>
     internal static IHostReferenceTextModel LoadHostReference(HfCheckpointInfo info, IBackend backend)
     {
         RequireSupported(info);
         if (string.Equals(info.ModelType, Ernie5Config.ModelType, StringComparison.Ordinal))
-            return Ernie5TextModel.Load(backend, info.Root, Ernie5Options);
+            return Ernie5TextModel.Load(backend, info.Root, Ernie5OptionsFor(backend.Device));
         if (IsKimiK31(info))
             return KimiK31TextModel.Load(backend, info.Root, MaxSequenceTokens);
         return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);

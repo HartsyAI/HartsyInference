@@ -7,9 +7,9 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.Ernie5;
 
-/// <summary>Everything the Text path needs to run an ERNIE-5.5 directory on the host: the generation model, the tokenizer from the checkpoint's
+/// <summary>Everything the Text path needs to run an ERNIE-5.5 directory: the generation model, the tokenizer from the checkpoint's
 /// <c>tokenizer.json</c>, and the chat template from its <c>chat_template.jinja</c>.</summary>
-/// <remarks>Owns the generation model, which owns the checkpoint. The host reference path only: weights are read on the CPU.</remarks>
+/// <remarks>Owns the generation model, which owns the checkpoint. The model runs on the backend it is loaded on.</remarks>
 public sealed class Ernie5TextModel : IHostReferenceTextModel
 {
     private Ernie5TextModel(Ernie5GenerationModel generation, ILlmTokenizer tokenizer, IChatTemplate template)
@@ -61,7 +61,7 @@ public sealed class Ernie5TextModel : IHostReferenceTextModel
             throw new HartsyInferenceException($"'{tokenizerPath}' or '{templatePath}' could not be loaded: {ex.Message}", ex);
         }
 
-        // TODO(ernie5): the Text path never sets Ernie5LoadOptions.Mtp (HfTextDirectoryLoader.Ernie5Options leaves it false), so MTP layer 43 does not
+        // TODO(ernie5): the Text path never sets Ernie5LoadOptions.Mtp (HfTextDirectoryLoader.Ernie5OptionsFor leaves it false), so MTP layer 43 does not
         // run. Finish it by loading with Mtp on and driving MtpForward as a draft step in generation.
         Ernie5Model model = Ernie5Model.Load(directory, backend, options);
         try

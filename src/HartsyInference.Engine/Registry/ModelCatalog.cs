@@ -1053,7 +1053,7 @@ public static class ModelCatalog
             // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
             DeepSeekV41Catalog.Build(),
 
-            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the CPU without MTP.
+            // Text / LLM — ERNIE-5.5-Flash-Base: host reference model (Ernie5Model, MTP layer included) and catalog row; the Text path runs it on the requested device without MTP.
             Ernie5Catalog.Build(),
 
             // Text / LLM — Kimi K3.1 Pro: text decoder on the Text path (device-chosen backend, no vision, single device); structural until a real run.
