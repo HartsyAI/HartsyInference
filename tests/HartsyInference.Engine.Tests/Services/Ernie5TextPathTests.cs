@@ -149,6 +149,21 @@ public sealed class Ernie5TextPathTests : IDisposable
     }
 
     [Fact]
+    public void Base_checkpoint_with_a_malformed_post_processor_names_the_tokenizer_file()
+    {
+        string dir = Path.Combine(_root, "base-malformed");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+        string noSpecials = "{\"type\":\"TemplateProcessing\",\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"pair\":[]}";
+        File.WriteAllText(Path.Combine(dir, "tokenizer.json"), Ernie5SyntheticCheckpoint.TokenizerJson(noSpecials));
+        using CpuBackend backend = new();
+
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend));
+
+        Assert.Contains("tokenizer.json", ex.Message);
+        Assert.Contains("special_tokens", ex.Message);
+    }
+
+    [Fact]
     public async Task Base_checkpoint_without_a_chat_template_generates_through_the_text_service()
     {
         string dir = Path.Combine(_root, "base-service");

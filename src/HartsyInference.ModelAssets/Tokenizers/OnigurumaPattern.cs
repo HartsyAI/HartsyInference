@@ -14,12 +14,15 @@ namespace HartsyInference.ModelAssets.Tokenizers;
 internal static class OnigurumaPattern
 {
     /// <summary>The .NET form of <paramref name="pattern"/>; a pattern with none of the rewritten forms comes back unchanged.</summary>
-    /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to.</exception>
+    /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to. That includes a quantifier
+    /// that follows another one, such as <c>a{2}{3}+</c> or <c>\d+{2}+</c>: Oniguruma reads those as nested repeats, which this rewrite refuses
+    /// rather than guess at (no known tokenizer uses them).</exception>
     public static string ToDotNet(string pattern)
     {
         ArgumentNullException.ThrowIfNull(pattern);
         StringBuilder sb = new(pattern.Length + 8);
-        Stack<int> groups = new();
+        Stack<(int Start, bool Extended)> groups = new(); // each open group's start in sb and the extended mode outside it
+        bool extended = false; // (?x): whitespace is ignored and '#' starts a comment that runs to the end of the line
         int atom = -1; // where the last complete atom starts in sb; -1 when a quantifier would have nothing to apply to
         int i = 0;
         while (i < pattern.Length)
@@ -39,19 +42,51 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, end - i);
                 i = end;
             }
+            else if (extended && c == '#')
+            {
+                // a line comment is copied whole, so nothing in it is read as pattern
+                int end = pattern.IndexOf('\n', i);
+                if (end < 0) end = pattern.Length;
+                sb.Append(pattern, i, end - i);
+                i = end;
+            }
+            else if (extended && c is ' ' or '\t' or '\n' or '\v' or '\f' or '\r')
+            {
+                // ignored whitespace (only these ASCII characters; U+00A0 and the like stay literal) leaves the atom before it as the one a
+                // quantifier repeats
+                sb.Append(c);
+                i++;
+            }
+            else if (c == '(' && pattern.AsSpan(i).StartsWith("(?#"))
+            {
+                // a comment means nothing, so its text is dropped (.NET would end it at an escaped ')' that Oniguruma skips) and an empty
+                // (?#) stands in, so the tokens on either side stay apart (a{(?#)2} must not become the interval a{2}). One never closed is
+                // copied as written for the regex parser to report.
+                int length = CommentLength(pattern, i);
+                if (length < 0)
+                {
+                    sb.Append(pattern, i, pattern.Length - i);
+                    break;
+                }
+                sb.Append("(?#)");
+                i += length;
+                atom = -1;
+            }
             else if (c == '(')
             {
-                groups.Push(sb.Length);
-                int length = GroupOpenLength(pattern, i);
+                int start = sb.Length, length = GroupOpenLength(pattern, i);
+                bool inner = ExtendedAfter(pattern.AsSpan(i, length), extended);
                 sb.Append(pattern, i, length);
                 i += length;
                 atom = -1;
-                // an inline option setting like (?i) closes at once and is not an atom
-                if (sb[^1] == ')') groups.Pop();
+                // an inline option setting like (?x) closes at once, is not an atom, and holds to the end of the enclosing group
+                if (sb[^1] != ')') groups.Push((start, extended));
+                extended = inner;
             }
             else if (c == ')')
             {
-                atom = groups.Count > 0 ? groups.Pop() : throw new NotSupportedException($"The pattern '{pattern}' closes a group it never opened.");
+                if (groups.Count == 0) throw new NotSupportedException($"The pattern '{pattern}' closes a group it never opened.");
+                (atom, extended) = groups.Pop();
                 sb.Append(c);
                 i++;
             }
@@ -70,6 +105,7 @@ internal static class OnigurumaPattern
                 i++;
             }
         }
+        // an unbalanced pattern is left for the regex parser to report
         return sb.ToString();
     }
 
@@ -161,6 +197,32 @@ internal static class OnigurumaPattern
         return pattern.Length;
     }
 
+    // The length of a (?#...) comment at start through its first unescaped ')' (Oniguruma skips the character after a '\' in a comment),
+    // or -1 when none closes it.
+    private static int CommentLength(string pattern, int start)
+    {
+        for (int j = start + 3; j < pattern.Length; j++)
+        {
+            if (pattern[j] == '\\') j++;
+            else if (pattern[j] == ')') return j + 1 - start;
+        }
+        return -1;
+    }
+
+    // Whether (?x) holds after a group opener such as (?x), (?x:, (?i-x: or (?-x); any other opener keeps the current mode.
+    private static bool ExtendedAfter(ReadOnlySpan<char> open, bool current)
+    {
+        if (open.Length < 3 || open[1] != '?' || !(char.IsAsciiLetter(open[2]) || open[2] == '-')) return current;
+        bool on = true;
+        foreach (char ch in open[2..])
+        {
+            if (ch == '-') on = false;
+            else if (ch == 'x') current = on;
+            else if (ch is ':' or ')') break;
+        }
+        return current;
+    }
+
     // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:.
     private static int GroupOpenLength(string pattern, int start)
     {
@@ -169,7 +231,7 @@ internal static class OnigurumaPattern
         i++;
         if (i >= pattern.Length) return i - start;
         char kind = pattern[i];
-        if (kind is ':' or '=' or '!' or '>' or '#') return i + 1 - start;
+        if (kind is ':' or '=' or '!' or '>') return i + 1 - start;
         if (kind == '<')
         {
             if (i + 1 < pattern.Length && pattern[i + 1] is '=' or '!') return i + 2 - start;

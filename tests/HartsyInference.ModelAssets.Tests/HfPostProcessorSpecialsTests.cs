@@ -52,6 +52,18 @@ public sealed class HfPostProcessorSpecialsTests
         Assert.Contains("<x>", missing.Message);
     }
 
+    [Fact]
+    public void A_post_processor_missing_a_required_key_is_refused_by_key_name()
+    {
+        // InvalidOperationException, not KeyNotFoundException, so a model load's error filter can wrap it with the file name.
+        string noSpecials = "{\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"pair\":[]}}";
+        Assert.Contains("special_tokens", Assert.Throws<InvalidOperationException>(() => Read(noSpecials)).Message);
+        Assert.Contains("processors", Assert.Throws<InvalidOperationException>(() => Read("{\"post_processor\":{\"type\":\"Sequence\"}}")).Message);
+        string noIds = "{\"post_processor\":{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"<s>\",\"type_id\":0}},"
+            + "{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],\"pair\":[],\"special_tokens\":{\"<s>\":{\"id\":\"<s>\"}}}}";
+        Assert.Contains("ids", Assert.Throws<InvalidOperationException>(() => Read(noIds)).Message);
+    }
+
     private static string TemplateObject(string single) => "{\"type\":\"TemplateProcessing\",\"single\":[" + single + "],\"pair\":[]," + BosEos + "}";
 
     private static string Template(string single) => "{\"post_processor\":" + TemplateObject(single) + "}";

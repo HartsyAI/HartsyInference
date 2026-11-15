@@ -7,7 +7,9 @@ namespace HartsyInference.LLM.ChatTemplates;
 
 /// <summary>Least-common-denominator fallback for tokenizers with no usable chat template and no ChatML control tokens (base/completion models like GPT-2, StarCoder2); concatenates message contents as plain text via <see cref="ILlmTokenizer.EncodeOrdinary"/> so a bare <see cref="Generation.GenerationRequest.Prompt"/> never throws — not a substitute for a model's real turn format when one exists (e.g. LLaVA's Vicuna-v1 template lives in <c>MultimodalGenerator</c>).</summary>
 /// <remarks>The text may be wrapped in fixed special ids, such as the ones a Hugging Face <c>tokenizer.json</c> post-processor adds to a raw prompt
-/// (<see cref="HfTokenizerJson.ReadSingleSequenceSpecials"/>), so the prompt matches what a serving <c>/v1/completions</c> endpoint feeds the model.</remarks>
+/// (<see cref="HfTokenizerJson.ReadSingleSequenceSpecials"/>), so the prompt matches what a serving <c>/v1/completions</c> endpoint feeds the model.
+/// One deliberate difference from Hugging Face <c>tokenizer(prompt)</c>: special-token text inside a message (such as <c>&lt;|ERNIE_MASK|&gt;</c>)
+/// is encoded as ordinary bytes, not as the special id, so user text cannot inject control tokens.</remarks>
 public sealed class RawCompletionTemplate : IChatTemplate
 {
     private readonly int[] _prefix;
