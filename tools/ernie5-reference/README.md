@@ -7,7 +7,8 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps. Reports per layer: max abs diff, relative error, cosine, last-token cosine. Flags the first layer below cosine 0.999. |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps. Reports per layer: max abs diff, relative error, cosine, last-token cosine. Flags the first layer below cosine 0.999. `--strict` also fails when the two layer sets differ; `--expect-layers N` requires exactly layers 0..N-1 on both sides. |
+| `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: strict mode fails on an incomplete reference and passes on a complete one. |
 
 Sources the reference follows (fetched for this change, not from the engine):
 - `baidu/vLLM-ERNIE` at `b8414da6b703579814c2009c5a63bac101916bbe`, `src/vllm_ernie/models/ernie5_5/` (`nvidia/model.py`,
@@ -77,6 +78,7 @@ Assumes the pod setup in `docs/Checklists/ERNIE55_POD_RUNBOOK.md` sections 0-4 (
 checkpoint downloaded and verified). Use the same branch on the pod. Set `RUN` to a new folder on the volume.
 
 ```bash
+set -o pipefail                                      # a failing step fails the pipeline instead of tee's exit 0
 export CKPT=/workspace/ERNIE-5.5-Flash-Base          # checkpoint: config.json, model.safetensors.index.json, 128 shards
 export TOKENS=1,2,3,4,5                              # the same ids the engine test feeds (ERNIE_REAL_TOKENS default)
 export RUN=/workspace/ernie-ref-$(date +%Y%m%d-%H%M)
@@ -90,9 +92,9 @@ ERNIE_DUMP_LAYERS="$RUN/engine" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ER
   dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests" \
   --logger "console;verbosity=normal" 2>&1 | tee "$RUN/engine.log"
 
-# 3. Compare. Exit 1 on the first layer below cosine 0.999 (or a missing layer).
+# 3. Compare. Exit 1 on the first layer below cosine 0.999, or when either folder is not exactly layers 0..42.
 python tools/ernie5-reference/compare.py --ref "$RUN/reference" --engine "$RUN/engine" --threshold 0.999 --strict \
-  2>&1 | tee "$RUN/compare.txt"
+  --expect-layers 43 2>&1 | tee "$RUN/compare.txt"
 ```
 
 Check the engine log before trusting step 3: `Real_PrefillAndDecode_ProduceFiniteLogits` must pass with no `SKIPPED` line, and the
