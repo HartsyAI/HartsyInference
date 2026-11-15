@@ -386,6 +386,35 @@ public sealed class Ernie5MoeTests
     }
 
     [Fact]
+    public void Fp8Experts_OffloadWithoutHostRunner_AdmitsMissesBeforeTheyRun()
+    {
+        // Room for every expert: each first-forward miss is admitted before it runs, so the second forward finds every expert resident and
+        // the cache never needed the after-layer admission.
+        Dims dims = new(260, 140, 140, 6, 6, 2);
+        Weights w = Weights.Create(43, dims, new Flags(Split: true), fp8Experts: true);
+        const int n = 4;
+        float[] x = Input(n * dims.Hidden, 45);
+        float[] expected;
+        using (Loaded direct = new(w)) expected = direct.Run(x, n);
+
+        using Loaded moe = new(w);
+        using MoeExpertOffload offload = new(new HostExpertCache(10_000_000), host: null, new DecayedLfuHysteresisPolicy(0.99996, 0.25));
+        moe.Block.AttachOffload(offload, layer: 1);
+        AssertClose(expected, moe.Run(x, n), Tol, "first forward");
+        MoeOffloadStats first = offload.Stats;
+        Assert.Equal(0, first.ResidentRows);
+        Assert.Equal(n * dims.TopK, first.StreamedRows);
+        Assert.True(first.Admitted > 0, "nothing was admitted before the experts ran");
+        Assert.Equal(first.Admitted, offload.CacheBase.Stats.ResidentExperts);
+
+        AssertClose(expected, moe.Run(x, n), Tol, "second forward");
+        MoeOffloadStats second = offload.Stats;
+        Assert.Equal(n * dims.TopK, second.ResidentRows);
+        Assert.Equal(first.StreamedRows, second.StreamedRows);
+        Assert.Equal(first.Admitted, second.Admitted);
+    }
+
+    [Fact]
     public void SituExperts_OffloadWithHostRunner_IsRefusedAtAttach()
     {
         Weights w = Weights.Create(43, new Dims(260, 140, 140, 6, 6, 2), new Flags(), fp8Experts: true);
