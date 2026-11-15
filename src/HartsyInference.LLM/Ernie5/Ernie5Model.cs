@@ -199,6 +199,7 @@ public sealed class Ernie5Model : IDisposable
         RequireAppendable(tokenIds, state, startPos, state.Faulted, nameof(Forward));
 
         float[] stream = Embed(tokenIds, d, hc);
+        string? dumpDir = Ernie5LayerDump.DirectoryFromEnvironment();
         bool completed = false;
         try
         {
@@ -212,6 +213,7 @@ public sealed class Ernie5Model : IDisposable
                 try
                 {
                     layer.Forward(stream, tokens, startPos, state);
+                    if (dumpDir is not null) Ernie5LayerDump.Write(dumpDir, i, startPos, tokens, hc, d, stream);
                 }
                 finally
                 {
