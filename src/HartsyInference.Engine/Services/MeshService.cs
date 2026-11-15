@@ -647,14 +647,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
-        bool project = EngineKnobs.PaintProjectReference.Value && request.Image is { HasAlpha: true };
-        HunyuanPaintOptions options = new()
-        {
-            Steps = request.Steps == 0 ? null : request.Steps,
-            TextureSize = request.GridResolution != 0 ? request.GridResolution : project ? 4096 : 2048,
-            Seed = MeshSeed.ForSampler(request.Seed),
-            ProjectReference = EngineKnobs.PaintProjectReference.Value,
-        };
+        bool projectReference = EngineKnobs.PaintProjectReference.Value;
 
         return Task.Run(
             () =>
@@ -663,6 +656,14 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 ImageData reference = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
+                // The default size follows the prepared reference: preparation can add the alpha that lets the picture be baked in.
+                HunyuanPaintOptions options = new()
+                {
+                    Steps = request.Steps == 0 ? null : request.Steps,
+                    TextureSize = PaintTextureSize(request.GridResolution, projectReference && reference.HasAlpha),
+                    Seed = MeshSeed.ForSampler(request.Seed),
+                    ProjectReference = projectReference,
+                };
                 byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
                 ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.HasAlpha ? reference.Alpha : default, reference.Width,
@@ -675,6 +676,10 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             },
             cancel);
     }
+
+    /// <summary>The Paint texture size: the request's grid when set, else 4096 when the reference picture is baked in (a full figure's face then gets as many texels as the picture
+    /// has pixels), else 2048.</summary>
+    internal static int PaintTextureSize(int gridResolution, bool bakesReference) => gridResolution != 0 ? gridResolution : bakesReference ? 4096 : 2048;
 
     /// <summary>The reference composited on white, as the Paint pipelines expect.</summary>
     private static byte[] CompositeOnWhite(ImageData image)

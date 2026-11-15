@@ -26,6 +26,15 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
         Assert.Equal("numerics.paintProjectReference", EngineKnobs.PaintProjectReference.Id);
     }
 
+    [Theory]
+    [InlineData(0, true, 4096)]
+    [InlineData(0, false, 2048)]
+    [InlineData(1024, true, 1024)]
+    public void PaintTextureSize_IsTheRequestsGridElse4096WhenThePictureIsBakedIn(int grid, bool bakesReference, int expected)
+    {
+        Assert.Equal(expected, MeshService.PaintTextureSize(grid, bakesReference));
+    }
+
     [Fact]
     public void PaintUpscaler_NeedsBothTheKnobAndTheCheckpoint()
     {
