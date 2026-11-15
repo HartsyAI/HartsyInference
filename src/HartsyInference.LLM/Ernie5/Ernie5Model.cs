@@ -20,9 +20,12 @@ namespace HartsyInference.LLM.Ernie5;
 /// <para>FP8 linears stay E4M3 with their block-scale grid on the weight, so each runs <c>IBackend.Fp8BlockLinear</c>; MoE experts run per
 /// expert through the same linear. <see cref="Ernie5LoadOptions.ResidentWeights"/> keeps every built layer; otherwise each layer is built
 /// and dropped per forward. Not thread-safe: run one sequence at a time.</para>
-/// <para>On CUDA the FP8 linears still upload their weight and scale on every call (<c>CudaBackend.Fp8BlockLinear</c>), so the
-/// packed weights live in host memory and each forward is bound by PCIe; <see cref="Ernie5LoadOptions.ResidentWeights"/> does not
-/// keep them in VRAM.</para>
+/// <para>A GPU linear reads its weight from the backend's weight cache, or uploads it for the one call. With
+/// <see cref="Ernie5LoadOptions.ResidentWeights"/> the load preloads every layer's per-token weights (<see cref="Ernie5Layer.EnumerateDenseWeights"/>)
+/// and the LM head, in layer order, up to the device's free memory less a headroom kept for activations and routed-expert uploads; routed
+/// experts stay mapped on the host and the backend may keep the ones it sees reused. The MTP layer is not preloaded, so with
+/// <see cref="Ernie5LoadOptions.Mtp"/> its weights upload per call. Streamed layers are new tensors on every forward, so nothing of theirs
+/// stays on the device.</para>
 /// </remarks>
 public sealed class Ernie5Model : IDisposable
 {
@@ -47,6 +50,7 @@ public sealed class Ernie5Model : IDisposable
     private Ernie5MtpLayer? _mtp;
     private Tensor? _embedding;
     private Tensor? _lmHead;
+    private bool _preloaded;
     private int _disposed;
 
     /// <param name="backend">The CPU, CUDA or Vulkan backend.</param>
@@ -125,6 +129,7 @@ public sealed class Ernie5Model : IDisposable
             {
                 for (int i = 0; i < _layers.Length; i++) _layers[i] = new Ernie5Layer(backend, config, i, source, _hcaRope, _dsaRope);
                 if (options.Mtp) _mtp = new Ernie5MtpLayer(backend, config, config.NumHiddenLayers, source, _hcaRope, _dsaRope);
+                if (backend.Device.IsGpu) PreloadDense();
             }
         }
         catch
@@ -201,15 +206,20 @@ public sealed class Ernie5Model : IDisposable
         float[] stream = Embed(tokenIds, d, hc);
         string? dumpDir = Ernie5LayerDump.DirectoryFromEnvironment();
         bool completed = false;
+        long forwardStart = Stopwatch.GetTimestamp();
+        double buildMs = 0, runMs = 0;
         try
         {
             for (int i = 0; i < _layers.Length; i++)
             {
-                // TODO(ernie5): with ResidentWeights off, every layer is read from the volume on each forward. A resident multi-device path is not
-                // built. Finish it by building _layers once across the devices and reusing them here.
+                // TODO(ernie5): a model larger than one device's memory runs its routed experts from host memory. A multi-device path is not
+                // built. Finish it by placing the layers across the devices and reusing them here.
                 long layerStart = Stopwatch.GetTimestamp();
-                Logs.Info($"[ernie5] layer {i + 1}/{_layers.Length} start (weights {(_layers[i] is null ? "streamed" : "resident")})");
+                // A start with no matching end line is how a stall inside a layer shows up.
+                Logs.Debug($"[ernie5] layer {i + 1}/{_layers.Length} start");
                 Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
+                double layerBuildMs = Stopwatch.GetElapsedTime(layerStart).TotalMilliseconds;
+                long runStart = Stopwatch.GetTimestamp();
                 try
                 {
                     layer.Forward(stream, tokens, startPos, state);
@@ -219,7 +229,11 @@ public sealed class Ernie5Model : IDisposable
                 {
                     if (!ReferenceEquals(layer, _layers[i])) layer.Dispose();
                 }
-                Logs.Info($"[ernie5] layer {i + 1}/{_layers.Length} done in {Stopwatch.GetElapsedTime(layerStart).TotalMilliseconds:F0} ms");
+                double layerRunMs = Stopwatch.GetElapsedTime(runStart).TotalMilliseconds;
+                buildMs += layerBuildMs;
+                runMs += layerRunMs;
+                Logs.Info($"[ernie5] layer {i + 1}/{_layers.Length}: build {layerBuildMs:F0} ms, forward {layerRunMs:F0} ms "
+                    + $"({(_layers[i] is null ? "streamed" : "resident")})");
             }
             completed = true;
         }
@@ -229,7 +243,54 @@ public sealed class Ernie5Model : IDisposable
             if (!completed) state.MarkFaulted();
         }
         state.Length = startPos + tokens;
+        Logs.Info($"[ernie5] forward of {tokens} token(s) at position {startPos}: {Stopwatch.GetElapsedTime(forwardStart).TotalMilliseconds:F0} ms "
+            + $"(layer build {buildMs:F0} ms, layer forward {runMs:F0} ms){DeviceSummary()}");
         return stream;
+    }
+
+    // Each layer's per-token weights, then the LM head, into the backend's weight cache, in order, until the next set would cross the budget:
+    // the device's free memory less a headroom for activations and the per-call routed-expert uploads. A layer that does not fit, and every
+    // layer after it, stays on the host. The budget is checked here, not left to the backend's preload, which fails the whole load on an
+    // out-of-memory error where the driver does not report a full device first.
+    private void PreloadDense()
+    {
+        long start = Stopwatch.GetTimestamp();
+        DeviceMemoryUsage usage = _backend.GetDeviceMemoryUsage();
+        long budget = PreloadBudget(usage.FreeBytes, usage.TotalBytes), used = 0;
+        int layers = 0;
+        _preloaded = true;
+        foreach (Ernie5Layer? layer in _layers)
+        {
+            List<Tensor> weights = [.. layer!.EnumerateDenseWeights()];
+            long bytes = Bytes(weights);
+            if (used + bytes > budget) break;
+            _backend.PreloadWeights(weights);
+            used += bytes;
+            layers++;
+        }
+        bool head = layers == _layers.Length && used + Bytes([_lmHead!]) <= budget;
+        if (head) _backend.PreloadWeights([_lmHead!]);
+        Logs.Info($"[ernie5] preloaded {layers}/{_layers.Length} layers' per-token weights{(head ? " and the LM head" : "")}, "
+            + $"{used / (1 << 20)} MB of a {Math.Max(budget, 0) / (1 << 20)} MB budget, in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s{DeviceSummary()}");
+    }
+
+    /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB.
+    /// Zero when the backend does not report its memory.</summary>
+    internal static long PreloadBudget(long free, long total)
+    {
+        if (free <= 0 || total <= 0) return 0;
+        long headroom = Math.Max(3L << 30, total * 15 / 100);
+        return Math.Max(free - headroom, 0);
+    }
+
+    private static long Bytes(IEnumerable<Tensor> weights) => weights.Sum(t => t.DType.ComputeByteCount(t.ElementCount));
+
+    private string DeviceSummary()
+    {
+        if (!_backend.Device.IsGpu) return "";
+        DeviceMemoryUsage usage = _backend.GetDeviceMemoryUsage();
+        return $"; device weights {usage.WeightBytes / (1 << 20)} MB, activations {usage.ActivationBytes / (1 << 20)} MB, "
+            + $"free {usage.FreeBytes / (1 << 20)} of {usage.TotalBytes / (1 << 20)} MB";
     }
 
     /// <summary>The mHC head read-out and final RMS norm of residual-stream rows from <see cref="ForwardStream"/>, <c>[rows, hidden]</c>.</summary>
@@ -364,6 +425,14 @@ public sealed class Ernie5Model : IDisposable
 
     private void DisposeWeights()
     {
+        // A preloaded weight's device copy is released by name, not by disposing the tensor.
+        if (_preloaded)
+        {
+            _preloaded = false;
+            foreach (Ernie5Layer? layer in _layers)
+                if (layer is not null) _backend.FreeWeights(layer.EnumerateDenseWeights());
+            if (_lmHead is not null) _backend.FreeWeights([_lmHead]);
+        }
         foreach (Ernie5Layer? layer in _layers) layer?.Dispose();
         Array.Clear(_layers);
         Interlocked.Exchange(ref _mtp, null)?.Dispose();

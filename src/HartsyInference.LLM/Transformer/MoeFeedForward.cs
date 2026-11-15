@@ -314,10 +314,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
     }
 
+    /// <summary>Every weight of the block, the per-token ones (<see cref="EnumerateDenseWeights"/>) first, so a preload that runs out of
+    /// room drops routed experts rather than the router.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        yield return _routerW;
-        if (_routerW2 is not null) yield return _routerW2;
+        foreach (Tensor t in EnumerateDenseWeights()) yield return t;
         if (_packed is null)
         {
             for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
@@ -326,6 +327,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             foreach (PackedMxfp4Expert x in _packed) { yield return x.Gate.Packed; yield return x.Up.Packed; yield return x.Down.Packed; }
         }
+    }
+
+    /// <summary>Every weight but the routed experts: the routers, the shared expert, and the latent projections and norms. These run
+    /// for every token, so a caller that keeps only part of the block on the device keeps these.</summary>
+    public IEnumerable<Tensor> EnumerateDenseWeights()
+    {
+        yield return _routerW;
+        if (_routerW2 is not null) yield return _routerW2;
         if (_shGateW is not null) { yield return _shGateW; yield return _shUpW!; yield return _shDownW!; }
         if (_shGateScoreW is not null) yield return _shGateScoreW;
         if (_correctionBiasT is not null) yield return _correctionBiasT;
