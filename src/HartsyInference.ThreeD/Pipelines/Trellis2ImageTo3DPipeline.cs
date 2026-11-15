@@ -234,10 +234,13 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
 
     /// <summary>Generates the shape mesh for one image; <see cref="Trellis2Options.Texture"/> is ignored (see <see cref="GenerateTextured"/>).</summary>
     /// <param name="onProgress">Reports one step per sampler step and per stage; it may throw to cancel, and every tensor is released.</param>
-    /// <param name="cancellationToken">Checked between the stages after sampling (decode, mesh extraction, clean-up), which report no steps of their own.</param>
     /// <exception cref="HartsyInferenceException">The sampled structure or shape holds no geometry.</exception>
-    public Mesh Generate(Trellis2InputImage image, Trellis2Options? options = null, Action<GenerationProgress>? onProgress = null,
-        CancellationToken cancellationToken = default)
+    public Mesh Generate(Trellis2InputImage image, Trellis2Options? options = null, Action<GenerationProgress>? onProgress = null)
+        => Generate(image, options, onProgress, CancellationToken.None);
+
+    /// <summary>As <see cref="Generate(Trellis2InputImage, Trellis2Options?, Action{GenerationProgress}?)"/>, cancellable.</summary>
+    /// <param name="cancellationToken">Checked between the stages after sampling (decode, mesh extraction, clean-up), which report no steps of their own.</param>
+    public Mesh Generate(Trellis2InputImage image, Trellis2Options? options, Action<GenerationProgress>? onProgress, CancellationToken cancellationToken)
         => Run(image, options, onProgress, textured: false, cancellationToken).Mesh;
 
     /// <summary>
