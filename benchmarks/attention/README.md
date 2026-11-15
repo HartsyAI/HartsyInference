@@ -59,8 +59,11 @@ dotnet run --project tools/OpParity -c Release -f net10.0 -- shared-attention \
   --fixture /external/evidence/pilot/fixture.json --backend cuda:0 --out /external/evidence/parity.json
 ```
 
-The C# pilot reader currently certifies only its sampled dense oracle's supported cases. Unsupported mask,
-metadata, differing value dimensions and nonstandard valid-length cases fail explicitly; they need oracle/adapter
+The C# pilot reader currently certifies only ordinary dense attention with no `call.api` marker or `api: dense`.
+Other API markers (including Sage, decode, speculative merge and Sol-Attn), unknown call options, auxiliary operands
+and prepared reuse counts other than one are rejected before tensor loading. Removing the API marker does not make
+merge operands or sparse options supported. Unsupported mask, metadata, differing value dimensions and nonstandard
+valid-length cases fail explicitly; they need oracle/adapter
 extensions before the complete corpus can run. The Python fixtures also support boolean/int32 metadata,
 broadcast masks, strided storage, speculative prefix state and Sol-Attn metadata. A common random seed is never
 treated as equivalent input storage. New tolerances remain `reviewed: false`; `--mandatory true` rejects them.

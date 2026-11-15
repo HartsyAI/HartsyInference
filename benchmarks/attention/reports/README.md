@@ -14,6 +14,25 @@ The CPU run has two failures reproduced on pristine B0 and one skip. GPU resourc
 whose own output says they lacked multiple GPUs are explicitly unvalidated. A successful test-process exit does
 not turn those cases into regression evidence.
 
+## Fixture API review correction
+
+The C# reader rejects specialized API markers, unknown call options, auxiliary operands and unimplemented prepared
+reuse before loading tensors. It cannot certify tree/step merge, Sol-Attn, Sage or decode API parity with its dense
+adapter/oracle. Keep these cells unvalidated until both operation semantics and an independent oracle exist; any
+earlier C# dense result for such a cell is invalid evidence, not an upstream K0 exception. This is a tool-only change;
+production GPU test pins remain immutable. Record the corrected harness commit and binary hashes separately.
+
+The complete Core CPU suite passes 187 cases on each of net8.0 and net10.0, including 27 fixture cases. Generated tree-merge,
+step-merge and Sol fixtures are rejected by both command-line consumers before result files are written. A dense
+F32 OpParity pilot passes its unreviewed quality threshold (relative L2 `8.06e-8`), which is not mandatory acceptance.
+Both consumer builds pass on net8.0 and net10.0 without warnings. Raw CLI logs are under external
+`artifacts/attention-pr01/api-rejection-review/`.
+
+An initial broad test filter accidentally included `GpuBenchmark`: its memory-pressure preload case failed the
+latency limit (77.9 seconds for matmul, 10,262 MB initially free). It was not an isolated GPU campaign and establishes
+no speed result. Preserve that failure; the subsequent CPU run explicitly excludes GPU integration and benchmark
+categories and does not replace it with a passing GPU claim.
+
 Continue with the [4090 handoff](../vps-handoff.md). Do not begin PR 02 until the complete PR 01 exit evidence has
 been reviewed. Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.

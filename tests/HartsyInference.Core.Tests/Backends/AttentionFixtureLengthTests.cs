@@ -17,16 +17,18 @@ public sealed class AttentionFixtureLengthTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void AcceptsScalarOrMatchingUniformLengths(bool includeArray)
+    [InlineData(true, null)]
+    [InlineData(false, null)]
+    [InlineData(true, "dense")]
+    [InlineData(false, "dense")]
+    public void AcceptsScalarOrMatchingUniformLengths(bool includeArray, string? api)
     {
         WithFixture(includeArray ? [73, 73, 73] : null, path =>
         {
             using AttentionFixture fixture = AttentionFixture.Load(path);
             Assert.Equal(73, fixture.Call.ValidKvLength);
             _ = fixture.Oracle();
-        });
+        }, api);
     }
 
     [Theory]
@@ -38,7 +40,7 @@ public sealed class AttentionFixtureLengthTests
         WithFixture(lengths, path => Assert.Throws<InvalidDataException>(() => AttentionFixture.Load(path)));
     }
 
-    private static void WithFixture(int[]? lengths, Action<string> check)
+    private static void WithFixture(int[]? lengths, Action<string> check, string? api = null)
     {
         string directory = Path.Combine(Path.GetTempPath(), "hartsy-attention-lengths-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -69,6 +71,7 @@ public sealed class AttentionFixtureLengthTests
                 }
                 writer.WriteEndObject();
                 writer.WriteStartObject("call");
+                if (api is not null) writer.WriteString("api", api);
                 writer.WriteNumber("kv_length", 73);
                 if (lengths is not null) WriteArray(writer, "kv_lengths", lengths);
                 writer.WriteString("route", "Dense");
