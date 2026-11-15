@@ -1,7 +1,8 @@
 # Proposed work after the PR 01 exit review
 
-Only PR 01 is authorized. None of this queue starts until its executed-route inventory, frozen workloads,
-numerical definitions, per-cohort Kitchen cells, timing validation, baselines and explicit exceptions pass review.
+The user subsequently authorized starting PR 02 alongside PR 01 review fixes. PR 02 is a separate stacked draft;
+this authorization does not complete PR 01's evidence or approve PR 03 and later. PR 01 still needs review of its
+executed routes, frozen workloads, numerical definitions, per-cohort Kitchen cells, timing, baselines and exceptions.
 Full Kitchen features and per-cell operation non-inferiority remain final CUDA **and** Vulkan gates. Infeasibility
 requires reassessment; do not weaken a gate after inspecting results.
 

@@ -70,5 +70,13 @@ not exist until an independently authorized PR 02 is reviewed and completed.
 
 Run all affected CPU/GPU suites sequentially and retain resource guards as unvalidated. Complete all affected
 real-generation correctness checks, baseline results, explicit exceptions and matrix amendment review. Keep this
-one PR draft until all three groups pass the exit review. The later [implementation queue](proposed-queue.md),
-Blackwell provisioning and PR 02 remain outside current authorization.
+PR 01 draft until all three groups pass the exit review. See the [implementation queue](proposed-queue.md) for
+the user's subsequent PR 02 authorization; Blackwell provisioning and PR 03+ remain unauthorized.
+
+For the stacked `codex/attention-semantic-correctness-pr02` branch, also carry the
+[PR 02 progress report](reports/pr02-semantic-progress.md) and its external `artifacts/attention-pr02` directory.
+Rebuild B0 and the candidate with the same harness and declared numerical policy. Preserve the failed default
+F32 probe and every slower smoke cell. Register a fixed campaign before resolving the recorded timing concern;
+the local smoke is not a passing non-inferiority result. Complete affected real-generation A/B correctness
+alongside the primary Qwen/Krea path proof. The PR 02 candidate must not be labeled Bfix until review and all
+required correctness evidence are complete.

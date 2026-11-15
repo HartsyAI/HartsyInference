@@ -1,5 +1,7 @@
 # PR 01 local evidence status
 
+Subsequent semantic work is tracked separately in the [PR 02 progress report](pr02-semantic-progress.md).
+
 PR 01 remains **incomplete and draft**. The [3060 report](pr01-local-3060.json) contains exact raw-artifact hashes,
 test outcomes, known baseline failures, telemetry identity results, descriptive operation pilots and outstanding
 exit work. The [Kitchen dependency lock](k0-windows-3060.lock.json) describes a Python-only K0 cohort; it does not
@@ -14,6 +16,7 @@ The CPU run has two failures reproduced on pristine B0 and one skip. GPU resourc
 whose own output says they lacked multiple GPUs are explicitly unvalidated. A successful test-process exit does
 not turn those cases into regression evidence.
 
-Continue with the [4090 handoff](../vps-handoff.md). Do not begin PR 02 until the complete PR 01 exit evidence has
-been reviewed. Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
+Continue with the [4090 handoff](../vps-handoff.md). The user's subsequent authorization to start PR 02 is recorded
+in the [implementation queue](../proposed-queue.md); it does not certify the incomplete PR 01 evidence or create Bfix.
+Raw binaries, models, tensors, full locks and captures remain in the external artifact directory
 identified by the report; retain it through the handoff and exit review.

@@ -1,8 +1,9 @@
 # Attention evidence program
 
-PR 01 is observation and measurement work. PR 02 and the proposed implementation queue require the PR 01 exit
-review. Production arithmetic, admission, memory budgets, workspaces, ordering, synchronization and fallback
-selection must remain unchanged. Kernel sources and shipped PTX/SPIR-V stay in their existing locations.
+PR 01 is observation and measurement work: its production arithmetic, admission, memory budgets, workspaces,
+ordering, synchronization and fallback selection must remain unchanged. The subsequent PR 02 authorization is
+recorded in the [implementation queue](proposed-queue.md); its semantic changes remain in a separate draft.
+Kernel sources and shipped PTX/SPIR-V stay in their existing locations.
 
 The frozen endpoints, baseline/Kitchen revisions and statistical constants live in [protocol.json](protocol.json).
 The independent semantic authority remains [the attention contract](../../docs/ATTENTION_CONTRACT.md).
