@@ -40,12 +40,13 @@ internal sealed unsafe class AttentionFixture : IDisposable
             if (root.GetProperty("schema").GetInt32() != 1) throw new InvalidDataException("Unsupported fixture schema.");
             fixture.CaseId = root.GetProperty("case_id").GetString() ?? throw new InvalidDataException("Missing case id.");
             JsonElement tensors = root.GetProperty("tensors");
+            JsonElement spec = root.GetProperty("call");
+            ValidateSemantics(spec, tensors);
             string directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
             AttentionOperand q = fixture.LoadOperand(directory, tensors.GetProperty("q"));
             AttentionOperand k = fixture.LoadOperand(directory, tensors.GetProperty("k"));
             AttentionOperand v = fixture.LoadOperand(directory, tensors.GetProperty("v"));
             Tensor? bias = tensors.TryGetProperty("bias", out JsonElement mask) ? fixture.LoadOperand(directory, mask).Storage : null;
-            JsonElement spec = root.GetProperty("call");
             int validLength = ValidateLengths(spec, q.Batch, k.Tokens);
             Tensor output = new(new TensorShape(q.Batch, q.Heads, q.Tokens, v.HeadDim), q.DType);
             fixture._owned.Add(output);
@@ -74,6 +75,33 @@ internal sealed unsafe class AttentionFixture : IDisposable
         {
             fixture.Dispose();
             throw;
+        }
+    }
+
+    private static void ValidateSemantics(JsonElement spec, JsonElement tensors)
+    {
+        if (spec.ValueKind != JsonValueKind.Object || tensors.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("Fixture call and tensors must be objects.");
+        if (spec.TryGetProperty("api", out JsonElement api))
+        {
+            if (api.ValueKind != JsonValueKind.String)
+                throw new InvalidDataException("Fixture API must be a string.");
+            if (api.GetString() != "dense")
+                throw new NotSupportedException("The C# fixture adapter and oracle only support ordinary dense attention API semantics.");
+        }
+        foreach (JsonProperty field in spec.EnumerateObject())
+        {
+            if (field.Name is not ("api" or "route" or "scale" or "causal" or "kv_length" or "kv_lengths"
+                or "query_offset" or "legacy_asserted_bounded" or "precision" or "reuse_count"))
+                throw new NotSupportedException("Unsupported fixture call semantics: " + field.Name);
+        }
+        if (spec.TryGetProperty("reuse_count", out JsonElement reuse)
+            && (reuse.ValueKind != JsonValueKind.Number || !reuse.TryGetInt32(out int count) || count != 1))
+            throw new NotSupportedException("The C# fixture adapter does not implement prepared-state reuse semantics.");
+        foreach (JsonProperty tensor in tensors.EnumerateObject())
+        {
+            if (tensor.Name is not ("q" or "k" or "v" or "bias"))
+                throw new NotSupportedException("Unsupported fixture operand semantics: " + tensor.Name);
         }
     }
 

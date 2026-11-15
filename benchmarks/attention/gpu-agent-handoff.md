@@ -25,6 +25,14 @@ CUDA is the primary focus; Vulkan must actually execute and work. A CUDA-only re
 | P2 | `57b143f004050d484dc1b667ae8d5f91fc82ac22` | PR 02 correctness candidate with review fixes |
 | K0 | `7d6a22ae8281cd1053a8449530fa0e764a2e51cb` | Unmodified Comfy Kitchen |
 
+The corrected operation harness is separately pinned at `4ce2c223c6abe67b3d9096276a67b40735455575` (H).
+It rejects specialized fixture APIs/options/operands that the C# dense adapter and oracle cannot implement.
+Production pins above do not change. Any earlier C# passing dense result for a merge, Sol-Attn, Sage or decode API
+cell is invalid attribution; retain the raw result, mark Hartsy coverage unvalidated, and do not call it a K0 failure.
+Create an additional H worktree and use its benchmark/GenCapture sources for all three arms, recording H and each
+tool binary hash independently from the production identity. Do not mix old/new harness results within a campaign;
+register fresh comparisons if necessary. Unsupported cells need a complete adapter/oracle before parity claims.
+
 Read repository AGENTS.md and its routed instructions. Use separate worktrees under `.claude/worktrees/`.
 Fetch both PR branches, verify that these pins exist and record current remote heads. If production code changed
 after these pins, report the difference and request an updated test pin; never silently test a moving branch.
@@ -54,7 +62,7 @@ Run GPU suites, benchmarks and generations sequentially.
 ## 2. Build one harness against three production roots
 
 Create pristine worktrees for B0/P1/P2 and set absolute shell variables `B0`, `P1`, `P2`, and `RAW`.
-Run these commands from P2. The harness is identical; only production roots and their kernel artifacts vary.
+Run these commands from H. The harness is identical; only production roots and their kernel artifacts vary.
 
 ```bash
 for arm in b0 p1 p2; do
