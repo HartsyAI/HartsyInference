@@ -80,6 +80,14 @@ public static class AttentionArms
             "native F16 through the materialized cuBLAS score matrix"),
         new("def-f32", "sdpa", DType.F32, DType.F32, false, null, () => { },
             "F32 I/O, allowF16=false: the unbounded-score caller"),
+        new("mat-f32-strict", "sdpa", DType.F32, DType.F32, false, "materialized",
+            () =>
+            {
+                KnobStore.Set(EngineKnobs.SageAttn, false);
+                KnobStore.Set(EngineKnobs.SdpaCudnn, false);
+                KnobStore.Set(EngineKnobs.FlashF16, false);
+                KnobStore.Set(EngineKnobs.SdpaNoTf32, true);
+            }, "materialized F32 operands and compute, without TF32"),
         new("tiled-f32", "sdpa", DType.F32, DType.F32, false, "tiled",
             () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true),
             "F32 I/O through the query-tiled core"),
