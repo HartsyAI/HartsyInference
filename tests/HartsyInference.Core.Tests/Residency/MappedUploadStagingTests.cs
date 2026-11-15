@@ -39,6 +39,7 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
         {
             int count = staging.StageChunk(mapped, offset, 2500 - offset, out void* host);
             staged.AddRange(new ReadOnlySpan<byte>(host, count).ToArray());
+            staging.MarkCopyComplete();
             offset += count;
         }
 
@@ -72,6 +73,22 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
         Tensor borrowed = new((void*)block, new TensorShape(2500), DType.U8);
 
         Assert.False(MappedUploadStaging.IsMappedView(borrowed));
+    }
+
+    [Fact]
+    public void StageChunk_BeforeCopyCompletes_Throws()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor mapped = MappedTensor(handle, 2500);
+        using MappedUploadStaging staging = new(ChunkBytes);
+
+        staging.StageChunk(mapped, 0, 2500, out _);
+
+        Assert.Throws<InvalidOperationException>(() => staging.StageChunk(mapped, ChunkBytes, 2500 - ChunkBytes, out _));
+        Assert.Throws<InvalidOperationException>(() => staging.Dispose());
+        staging.MarkCopyComplete();
+        staging.StageChunk(mapped, ChunkBytes, 2500 - ChunkBytes, out _);
+        staging.MarkCopyComplete();
     }
 
     [Fact]

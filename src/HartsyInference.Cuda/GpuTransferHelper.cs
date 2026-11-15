@@ -31,7 +31,28 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Host staging for uploads of borrowed mapped tensors; one buffer per backend, grown on demand.</summary>
         internal readonly MappedUploadStaging MappedStaging = new();
 
-        protected override void DisposeCore() => MappedStaging.Dispose();
+        private nint _mappedFence;
+
+        /// <summary>Event recorded after each staged copy, so the host buffer is not reused while the copy still reads it.</summary>
+        internal nint MappedFence
+        {
+            get
+            {
+                if (_mappedFence == 0)
+                    CudaDriverApi.cuEventCreate(out _mappedFence, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+                return _mappedFence;
+            }
+        }
+
+        protected override void DisposeCore()
+        {
+            MappedStaging.Dispose();
+            if (_mappedFence != 0)
+            {
+                CudaDriverApi.cuEventDestroy(_mappedFence).ThrowOnError();
+                _mappedFence = 0;
+            }
+        }
 
         /// <summary>Releases every unpinned activation, and every Q8_1 sidecar riding on one.</summary>
         /// <remarks>An override rather than the base's version because two things here are CUDA's: the sidecars,
@@ -1058,7 +1079,17 @@ internal static unsafe class GpuTransferHelper
             for (long offset = 0; offset < total;)
             {
                 int count = s.MappedStaging.StageChunk(source, offset, total - offset, out void* host);
-                CudaMemory.CopyHostToDeviceAsync(destination + (ulong)offset, host, (nuint)count, stream);
+                try
+                {
+                    CudaMemory.CopyHostToDeviceAsync(destination + (ulong)offset, host, (nuint)count, stream);
+                }
+                finally
+                {
+                    // Waits for this copy before the buffer is handed to the next chunk, or released on error.
+                    CudaDriverApi.cuEventRecord(s.MappedFence, stream).ThrowOnError();
+                    CudaDriverApi.cuEventSynchronize(s.MappedFence).ThrowOnError();
+                    s.MappedStaging.MarkCopyComplete();
+                }
                 offset += count;
             }
         }
