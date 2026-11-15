@@ -2,6 +2,9 @@
 
 Subsequent semantic work is tracked separately in the [PR 02 progress report](pr02-semantic-progress.md).
 
+The [RTX 4090 evidence review](pr01-4090-review.md) records the subsequently received remote report, unresolved
+correctness/path/measurement gates and the harness contract correction. It does not clear either PR for merge.
+
 PR 01 remains **incomplete and draft**. The [3060 report](pr01-local-3060.json) contains exact raw-artifact hashes,
 test outcomes, known baseline failures, telemetry identity results, descriptive operation pilots and outstanding
 exit work. The [Kitchen dependency lock](k0-windows-3060.lock.json) describes a Python-only K0 cohort; it does not

@@ -30,6 +30,10 @@ internal static class AttentionEvidenceRunner
         if (options.GetValueOrDefault("mandatory", "false") == "true" && !fixture.AcceptanceReviewed)
             throw new InvalidOperationException("Unreviewed acceptance cannot certify a mandatory case.");
         AttentionArm arm = AttentionArms.Get(options.GetValueOrDefault("arm", "def-f16"));
+        AttentionCall call = fixture.Call;
+        string? registeredBranch = options.GetValueOrDefault("expect-branch");
+        AttentionEvidenceContract.Validate(arm, in call, boundary, registeredBranch);
+        AttentionOracle oracle = fixture.Oracle();
         AttentionArms.ClearAll();
         arm.Apply();
         using IDisposable settingsScope = HartsyInference.Benchmarks.Shared.BenchmarkKnobProfiles
@@ -37,10 +41,8 @@ internal static class AttentionEvidenceRunner
         using BenchmarkFixture hardware = new();
         IBackend backend = hardware.Backend;
         arm.Configure?.Invoke(backend);
-        AttentionCall call = fixture.Call;
         Action operation = () => backend.Attention(in call);
         Func<string?> route = BranchReader(backend);
-        AttentionOracle oracle = fixture.Oracle();
         IDisposable? evidence = null;
         string? observationPath = options.GetValueOrDefault("observe");
         try
@@ -54,7 +56,7 @@ internal static class AttentionEvidenceRunner
             }
             for (int i = 0; i < 10; i++) { operation(); backend.Sync(); }
             string? initialRoute = route();
-            string expectedRoute = options.GetValueOrDefault("expect-branch", initialRoute ?? "");
+            string expectedRoute = registeredBranch ?? initialRoute ?? "";
             if (string.IsNullOrEmpty(expectedRoute) || initialRoute != expectedRoute)
                 throw new InvalidOperationException("Executed branch does not match the requested evidence cell.");
             double[] milliseconds = new double[trials];
@@ -104,6 +106,15 @@ internal static class AttentionEvidenceRunner
             writer.WriteString("backend", hardware.Kind.ToString().ToLowerInvariant());
             writer.WriteString("device", backend.Capabilities.DeviceName);
             writer.WriteString("arm", arm.Name);
+            writer.WriteString("route", call.Route.ToString());
+            writer.WriteString("query_dtype", call.Query.DType.ToString());
+            writer.WriteString("key_dtype", call.Key.DType.ToString());
+            writer.WriteString("value_dtype", call.Value.DType.ToString());
+            writer.WriteString("output_dtype", call.Output.DType.ToString());
+            writer.WriteBoolean("legacy_asserted_bounded", call.Numerics.LegacyAssertedBounded);
+            writer.WriteString("query_key_permissions", call.Numerics.QueryKey.ToString());
+            writer.WriteString("prob_value_permissions", call.Numerics.ProbValue.ToString());
+            writer.WriteBoolean("timing_eligible", boundary != "observe" && fixture.AcceptanceReviewed && quality);
             writer.WriteString("knobs", AttentionArms.Provenance());
             writer.WriteStartObject("resolved_settings");
             foreach ((string key, string value) in settings) writer.WriteString(key, value);

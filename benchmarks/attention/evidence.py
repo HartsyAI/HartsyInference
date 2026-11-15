@@ -152,6 +152,11 @@ def main():
         p.add_argument('--' + name, type=int, default=default)
     p.add_argument('--dtype', choices=('f32', 'f16', 'bf16'), default='f16')
     p.add_argument('--precision', choices=('f32', 'tf32', 'f16', 'bf16', 'int8'))
+    p.add_argument('--route', choices=('Dense', 'Flash'), default='Dense')
+    p.add_argument('--kv-dtype', choices=('f32', 'f16', 'bf16'))
+    p.add_argument('--causal', action='store_true')
+    p.add_argument('--query-offset', type=int)
+    p.add_argument('--legacy-asserted-bounded', action='store_true')
     p = sub.add_parser('verify-fixture'); p.add_argument('path')
     p = sub.add_parser('cell-fixture')
     p.add_argument('--matrix', required=True); p.add_argument('--cell', required=True); p.add_argument('--out', required=True)
@@ -165,7 +170,8 @@ def main():
     args = parser.parse_args()
     if args.command == 'fixture':
         print(create(args.out, args.id, args.batch, args.heads, args.kv_heads, args.sq, args.skv, args.dim, args.dtype,
-                     precision=args.precision))
+                     precision=args.precision, route=args.route, kv_dtype=args.kv_dtype, causal=args.causal,
+                     query_offset=args.query_offset, legacy_asserted_bounded=args.legacy_asserted_bounded))
     elif args.command == 'verify-fixture':
         print(json.dumps({'case_id': load(args.path)['case_id'], 'verified': True}))
     elif args.command == 'cell-fixture':

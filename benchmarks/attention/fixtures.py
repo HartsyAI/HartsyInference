@@ -77,29 +77,35 @@ def load(path):
     return document
 
 
-def create(root, case_id, batch=1, heads=4, kv_heads=4, sq=32, skv=48, dim=64, dtype='f16', seed=1234, precision=None):
+def create(root, case_id, batch=1, heads=4, kv_heads=4, sq=32, skv=48, dim=64, dtype='f16', seed=1234, precision=None,
+           route='Dense', kv_dtype=None, causal=False, query_offset=None, legacy_asserted_bounded=False):
     if batch <= 0 or heads <= 0 or kv_heads <= 0 or heads % kv_heads or min(sq, skv, dim) <= 0:
         raise ValueError('Invalid attention geometry')
+    kv_dtype = kv_dtype or dtype
+    if route not in ('Dense', 'Flash') or dtype not in ('f32', 'f16', 'bf16') or kv_dtype not in ('f32', 'f16', 'bf16'):
+        raise ValueError('Unsupported fixture route or dtype')
+    if query_offset is None: query_offset = skv - sq if causal else 0
     root = pathlib.Path(root)
     root.mkdir(parents=True, exist_ok=False)
     rng = random.Random(seed)
     tensors = {}
     for name, shape in (('q', [batch, heads, sq, dim]), ('k', [batch, kv_heads, skv, dim]),
                         ('v', [batch, kv_heads, skv, dim])):
+        storage_dtype = dtype if name == 'q' else kv_dtype
         file = root / (name + '.bin')
         with file.open('wb') as output:
             for _ in range(math.prod(shape)):
-                output.write(encode(rng.uniform(-1, 1), dtype))
+                output.write(encode(rng.uniform(-1, 1), storage_dtype))
         b, h, s, d = shape
-        tensors[name] = {'file': file.name, 'sha256': sha256(file), 'dtype': dtype,
+        tensors[name] = {'file': file.name, 'sha256': sha256(file), 'dtype': storage_dtype,
                          'shape': shape, 'storage_shape': shape, 'strides': [h*s*d, s*d, d, 1], 'offset': 0}
     precision = precision or dtype
     tolerances = {'f32': 2e-5, 'tf32': 2e-3, 'f16': 3e-3, 'bf16': 8e-3, 'int8': 1e-2}
     if precision not in tolerances:
         raise ValueError('Unknown frozen numerical policy')
     document = {'schema': 1, 'case_id': case_id, 'tensors': tensors,
-                'call': {'route': 'Dense', 'scale': 1 / math.sqrt(dim), 'causal': False,
-                         'kv_length': skv, 'query_offset': 0, 'legacy_asserted_bounded': False,
+                'call': {'route': route, 'scale': 1 / math.sqrt(dim), 'causal': causal,
+                         'kv_length': skv, 'query_offset': query_offset, 'legacy_asserted_bounded': legacy_asserted_bounded,
                          'precision': precision},
                 'acceptance': {'source': 'docs/ATTENTION_CONTRACT.md section 8',
                                'rel_l2': tolerances[precision],
