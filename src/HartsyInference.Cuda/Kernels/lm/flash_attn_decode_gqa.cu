@@ -5,7 +5,7 @@
 //   partialM[idx*G + g]            running max of the (scaled, soft-capped) scores of chunk g
 //   partialL[idx*G + g]            sum of exp(score - m)
 //   partialAcc[(idx*G + g)*D + d]  sum of exp(score - m) * V, un-normalized
-// An empty chunk writes m = -INF, l = 0, acc = 0, which the combine weighs as zero.
+// An empty chunk writes l = 0 and acc = 0, which the combine weighs as zero. Emptiness is tested with l == 0, never m, since a real score can equal -FLT_MAX.
 //
 // Causal for the single row at absolute position qOffset (keys 0..qOffset), optionally windowed to the last `window` keys and soft-capped.
 // dPos, when non-null, supplies {kvLen, qOffset} from device memory so one captured CUDA graph replays at every position.
