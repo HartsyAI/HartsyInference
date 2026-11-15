@@ -533,6 +533,8 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
         int startBlock = 0;
         if (stepCache is not null && attnBias is null && vScaleExpanded is null && _blocks.Length > 1)
         {
+            using HartsyInference.Core.Backends.Attention.AttentionEvidenceContext evidence =
+                HartsyInference.Core.Backends.Attention.AttentionEvidence.Context("diffusion.krea2", 0);
             BeforeBlockForward?.Invoke(0);
             Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias, vScaleExpanded);
             joint.Dispose();

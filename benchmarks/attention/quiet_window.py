@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import json
+import math
 import pathlib
 import time
 import urllib.request
@@ -24,15 +25,17 @@ def activity(url, session):
     required = ('live_gens', 'waiting_gens', 'loading_models')
     if not isinstance(status, dict) or any(key not in status for key in required):
         raise RuntimeError('Global status is incomplete; quiet cannot be established')
-    if any(not isinstance(status[key], (int, float)) or status[key] < 0 for key in required):
+    if any(type(status[key]) not in (int, float) or not math.isfinite(status[key]) or status[key] < 0 for key in required):
         raise RuntimeError('Global status counters are invalid')
     return {key: status[key] for key in required}
 
 
 def verify(records, start, end, max_gap=3):
-    if not records or end < start:
+    if not records or not all(math.isfinite(value) for value in (start, end)) or end < start:
         raise ValueError('Missing or invalid quiet-window interval')
     times = [row['time'] for row in records]
+    if not all(math.isfinite(value) for value in times):
+        raise ValueError('Quiet-window timestamps must be finite')
     if any(b <= a for a, b in zip(times, times[1:])):
         raise ValueError('Quiet-window timestamps are not increasing')
     before = [i for i, timestamp in enumerate(times) if timestamp <= start]

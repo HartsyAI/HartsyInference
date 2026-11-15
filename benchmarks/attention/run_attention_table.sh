@@ -2,11 +2,11 @@
 # Attention shape table on one card: one process per (shape, arm), each sampled for peak VRAM and throttling.
 #
 #   benchmarks/attention/run_attention_table.sh --gpu-name "RTX 3060" --out DIR [--backend cuda|vulkan] [--shapes FILE]
-#       [--only id,id] [--arms a,b] [--warmup 3] [--trials 20] [--cool-to 55] [--no-build]
+#       [--only id,id] [--arms a,b] [--warmup 10] [--trials 20] [--cool-to 55] [--no-build]
 #
 # Rows land in DIR/table.tsv (runner columns + peak_vram_mb, throttle_frac, sm_clock_med). The card is chosen by
 # name in PCI order, so the mask names the card nvidia-smi names. The 3060 run takes /tmp/claude-1000/vk_3060.lock;
-# a 4090 run takes /tmp/claude-1000/gpu4090.lock and then requires tests/swarm-quiet-window.sh to pass (SwarmUI lives
+# a 4090 run takes /tmp/claude-1000/gpu4090.lock and then requires quiet_window.py to pass (SwarmUI lives
 # there; this script never stops it) and re-verifies the window after every arm, aborting on foreign activity.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -72,13 +72,21 @@ swarm_tree() {
   ps -eo pid=,ppid= | awk -v r="$root" '{p[$1]=$2} END{for (k in p){x=k; while (x>1){if (x==r){print k; break}; x=p[x]}}}'
 }
 # The desktop's own GPU clients (display server, remote desktop, browser) hold a context on the display card for good;
-# the same list tests/swarm-quiet-window.sh allows.
+# these are excluded from foreign compute-client checks.
 desktop_pids() { pgrep -x 'Xorg|rustdesk|cinnamon|gnome-shell|chrome' || true; }
 foreign_on_card() {
   local allowed; allowed=" $(swarm_tree | tr '\n' ' ') $(desktop_pids | tr '\n' ' ') "
   nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader \
     | awk -F', ' -v u="$UUID" -v ok="$allowed" '$1==u && index(ok, " "$2" ")==0 {f=1} END{exit !f}'
 }
+QUIET="" SMI=""
+cleanup() {
+  if [ -n "$QUIET" ]; then kill "$QUIET" 2>/dev/null || true; wait "$QUIET" 2>/dev/null || true; fi
+  if [ -n "$SMI" ]; then kill "$SMI" 2>/dev/null || true; wait "$SMI" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 while read -r SHAPE ARM; do
   [ -n "$SHAPE" ] || continue
   # Cool the card between arms: back-to-back runs on the 3060 lose double-digit SM clock to heat soak.
@@ -99,7 +107,7 @@ while read -r SHAPE ARM; do
   rm -f "$STEM.tsv"
   timeout 1800 dotnet "$BIN" attention-table --shapes "$SHAPES" --shape "$SHAPE" --arm "$ARM" --out "$STEM.tsv" \
     --warmup "$WARMUP" --trials "$TRIALS" > "$STEM.log" 2>&1 || echo "rc=$? $SHAPE $ARM" >> "$OUT/failures.txt"
-  kill "$SMI" 2>/dev/null; wait "$SMI" 2>/dev/null || true
+  kill "$SMI" 2>/dev/null || true; wait "$SMI" 2>/dev/null || true; SMI=""
   EXTRA=$(python3 - "$STEM.smi" "$BASE" <<'PY'
 import sys, statistics
 rows = [l.strip().split(", ") for l in open(sys.argv[1]) if l.strip()]
@@ -110,16 +118,17 @@ thr = sum(1 for r in rows if "Active" in r[2:]) / len(rows)
 print(f"{peak}\t{thr:.3f}\t{statistics.median(int(r[1]) for r in rows)}")
 PY
 )
-  if [ -f "$STEM.tsv" ]; then
-    [ -f "$TABLE" ] || { head -1 "$STEM.tsv" | sed 's/$/\tpeak_vram_mb\tthrottle_frac\tsm_clock_med/' > "$TABLE"; }
-    tail -n +2 "$STEM.tsv" | sed "s/\$/\t$EXTRA/" >> "$TABLE"
-  fi
   if [ "$IS4090" = 1 ]; then
     END=$(date +%s.%N); touch "$STEM.stop"
     wait "$QUIET" || exit 4
+    QUIET=""
     if ! python3 "$ROOT/benchmarks/attention/quiet_window.py" verify --state "$STEM.quiet.jsonl" --start "$START" --end "$END"; then
       echo "Swarm activity or incomplete coverage during $SHAPE/$ARM; rows are invalid" | tee -a "$OUT/failures.txt"; exit 4
     fi
+  fi
+  if [ -f "$STEM.tsv" ]; then
+    [ -f "$TABLE" ] || { head -1 "$STEM.tsv" | sed 's/$/\tpeak_vram_mb\tthrottle_frac\tsm_clock_med/' > "$TABLE"; }
+    tail -n +2 "$STEM.tsv" | sed "s/\$/\t$EXTRA/" >> "$TABLE"
   fi
   echo "$(date +%T) $SHAPE $ARM: $(tail -n +2 "$STEM.tsv" 2>/dev/null | cut -f5,6,7,21,26 | tr '\n' ' ') [$EXTRA]"
 done <<< "$PAIRS"
