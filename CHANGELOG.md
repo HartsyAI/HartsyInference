@@ -3,6 +3,12 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.430
+
+- **Fixed: `MeshCleaner.RemoveFlatComponents` sees a flat piece whatever way it is turned.** Thickness was the thinnest side of the
+  piece's axis-aligned box, so a sheet tilted 45 degrees about two axes measured 0.71 of its width and stayed. It is now the spread of
+  the piece's vertices along the normal of their best-fitting plane (or the thinnest axis, if smaller).
+
 ## alpha.429
 
 - **Added: Hunyuan3D Paint bakes the reference picture into the front of the texture.** Paint repaints each view at 512 px, so on a full

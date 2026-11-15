@@ -33,6 +33,28 @@ public sealed class MeshCleanerTests
     }
 
     [Fact]
+    public void RemoveFlatComponents_DropsASheetTurnedAwayFromTheAxes()
+    {
+        Mesh body = Tetrahedron(0, 1f);
+        // A flat unit square at x 3 to 4 turned 45 degrees about X then 45 about Y: its box is about 1.21 x 0.71 x 1.21, so only an oriented measure sees it is flat.
+        double c = Math.Sqrt(0.5);
+        float[] sheet = new float[12];
+        (double X, double Y)[] corners = [(0, 0), (1, 0), (1, 1), (0, 1)];
+        for (int i = 0; i < 4; i++)
+        {
+            (double x, double y, double z) = (corners[i].X, corners[i].Y, 0.0);
+            (y, z) = (c * y - c * z, c * y + c * z);
+            (x, z) = (c * x + c * z, -c * x + c * z);
+            (sheet[i * 3], sheet[i * 3 + 1], sheet[i * 3 + 2]) = ((float)(x + 3), (float)y, (float)z);
+        }
+        Mesh joined = new() { Vertices = [.. body.Vertices, .. sheet], Indices = [.. body.Indices, 4, 5, 6, 4, 6, 7] };
+
+        Mesh cleaned = MeshCleaner.RemoveFlatComponents(joined, 1.5e-2);
+
+        Assert.Equal(4, cleaned.TriangleCount);
+    }
+
+    [Fact]
     public void RemoveFlatComponents_KeepsTheLargestPieceEvenWhenItIsFlat()
     {
         Mesh flat = new() { Vertices = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], Indices = [0, 1, 2, 0, 2, 3] };
