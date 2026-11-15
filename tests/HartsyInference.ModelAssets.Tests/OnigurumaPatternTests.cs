@@ -17,17 +17,20 @@ public sealed class OnigurumaPatternTests
     [InlineData(@"\s*+x", @"(?>\s*)x")]
     // {,n} is {0,n}
     [InlineData(@"a{,3}", @"a{0,3}")]
-    public void Rewrites_the_forms_dotnet_reads_differently(string onig, string dotNet) => Assert.Equal(dotNet, OnigurumaPattern.ToDotNet(onig));
+    // a (?#) comment is dropped: its text is not pattern, and an escaped ')' (which .NET would stop at) does not end it
+    [InlineData(@"a(?#[ not a class (x)b+", @"ab+")]
+    [InlineData(@"a(?#x\)y)b", @"ab")]
+    public void Rewrites_the_forms_dotnet_reads_differently(string onig, string dotNet)
+    {
+        Assert.Equal(dotNet, OnigurumaPattern.ToDotNet(onig));
+        _ = new Regex(dotNet); // the rewrite must be a pattern .NET compiles
+    }
 
     [Theory]
     [InlineData(@"'s|'t| ?\p{L}+| ?\p{N}+|\s+(?!\S)|\s+")]
     [InlineData(@"[!""#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+")]
     [InlineData(@"\p{Nd}{1,510}(?=(?>\p{Nd}{510})*(?:\P{Nd}|$))|\G\p{Nd}{510}")]
     [InlineData(@"(?<name>a+?)(?i:b)(?<=c)x{2}?\{literal}")]
-    // a comment's text is not pattern, so its unbalanced bracket and parenthesis are copied as written
-    [InlineData(@"a(?#[ not a class (x)b+")]
-    // an escaped ')' does not end the comment
-    [InlineData(@"a(?#x\)y)b")]
     // under (?x) a '(' in a '#' line comment is not a group, so the pattern is not refused as unbalanced
     [InlineData("(?x)a # (\nb")]
     public void Leaves_patterns_without_those_forms_unchanged(string pattern) => Assert.Equal(pattern, OnigurumaPattern.ToDotNet(pattern));
@@ -46,5 +49,8 @@ public sealed class OnigurumaPatternTests
     // Oniguruma nests these repeats; the rewrite refuses them rather than guess
     [InlineData("a{2}{3}+")]
     [InlineData(@"\d+{2}+")]
+    // a comment that is never closed, including one whose only ')' is escaped
+    [InlineData("a(?#oops")]
+    [InlineData(@"a(?#x\)")]
     public void A_quantifier_with_nothing_to_repeat_is_refused(string pattern) => Assert.Throws<NotSupportedException>(() => OnigurumaPattern.ToDotNet(pattern));
 }

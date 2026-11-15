@@ -16,7 +16,7 @@ internal static class OnigurumaPattern
     /// <summary>The .NET form of <paramref name="pattern"/>; a pattern with none of the rewritten forms comes back unchanged.</summary>
     /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to. That includes a quantifier
     /// that follows another one, such as <c>a{2}{3}+</c> or <c>\d+{2}+</c>: Oniguruma reads those as nested repeats, which this rewrite refuses
-    /// rather than guess at (no known tokenizer uses them).</exception>
+    /// rather than guess at (no known tokenizer uses them). A <c>(?#</c> comment that is never closed is refused too.</exception>
     public static string ToDotNet(string pattern)
     {
         ArgumentNullException.ThrowIfNull(pattern);
@@ -41,6 +41,12 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, end - i);
                 i = end;
             }
+            else if (c == '(' && pattern.AsSpan(i).StartsWith("(?#"))
+            {
+                // a comment means nothing, so it is dropped: .NET would end it at an escaped ')' that Oniguruma skips
+                i += CommentLength(pattern, i);
+                atom = -1;
+            }
             else if (c == '(')
             {
                 groups.Push(sb.Length);
@@ -48,7 +54,7 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, length);
                 i += length;
                 atom = -1;
-                // an inline option setting like (?i), or a comment, closes at once and is not an atom
+                // an inline option setting like (?i) closes at once and is not an atom
                 if (sb[^1] == ')') groups.Pop();
             }
             else if (c == ')')
@@ -164,8 +170,18 @@ internal static class OnigurumaPattern
         return pattern.Length;
     }
 
-    // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:,
-    // or a whole (?#comment).
+    // The length of a (?#...) comment at start through its first unescaped ')' (Oniguruma skips the character after a '\' in a comment).
+    private static int CommentLength(string pattern, int start)
+    {
+        for (int j = start + 3; j < pattern.Length; j++)
+        {
+            if (pattern[j] == '\\') j++;
+            else if (pattern[j] == ')') return j + 1 - start;
+        }
+        throw new NotSupportedException($"The pattern '{pattern}' has a (?# comment that is never closed.");
+    }
+
+    // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:.
     private static int GroupOpenLength(string pattern, int start)
     {
         int i = start + 1;
@@ -174,17 +190,6 @@ internal static class OnigurumaPattern
         if (i >= pattern.Length) return i - start;
         char kind = pattern[i];
         if (kind is ':' or '=' or '!' or '>') return i + 1 - start;
-        // a (?#...) comment runs to the first unescaped ')' (Oniguruma skips the character after a '\' in a comment) and is copied
-        // whole, so brackets in its text are not read as pattern
-        if (kind == '#')
-        {
-            for (int j = i + 1; j < pattern.Length; j++)
-            {
-                if (pattern[j] == '\\') j++;
-                else if (pattern[j] == ')') return j + 1 - start;
-            }
-            return pattern.Length - start;
-        }
         if (kind == '<')
         {
             if (i + 1 < pattern.Length && pattern[i + 1] is '=' or '!') return i + 2 - start;
