@@ -28,6 +28,11 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Upload counts for host tensors that miss both caches. A tensor re-uploaded with unchanged host data is behaving like a weight, whoever created it — on its second upload it is promoted into the weight cache (see <see cref="TryAutoPromote"/>), making pipelines that never call <c>PreloadWeights</c> (the audio stack) GPU-resident instead of PCIe-bound. Weak-keyed so tracked tensors stay collectible; the state dies with its tensor. Per-State so promotion bookkeeping stays with the backend that owns the device copy.</summary>
         public readonly ConditionalWeakTable<Tensor, UploadState> UploadTracker = new();
 
+        /// <summary>Host staging for uploads of borrowed mapped tensors; one buffer per backend, grown on demand.</summary>
+        internal readonly MappedUploadStaging MappedStaging = new();
+
+        protected override void DisposeCore() => MappedStaging.Dispose();
+
         /// <summary>Releases every unpinned activation, and every Q8_1 sidecar riding on one.</summary>
         /// <remarks>An override rather than the base's version because two things here are CUDA's: the sidecars,
         /// which are swept wholesale — pinned survivors included, since a consumer that misses one simply
@@ -1032,10 +1037,31 @@ internal static unsafe class GpuTransferHelper
             Logs.Debug($"[Cuda][H2D] {(long)byteSize >> 20} MB {source.DType} "
                 + $"[{string.Join("x", Enumerable.Range(0, source.Shape.Rank).Select(i => source.Shape[i]))}]");
         }
+        if (MappedUploadStaging.IsMappedView(source))
+        {
+            s.Context?.EnsureCurrent();
+            StageMappedUpload(s, destination, source, byteSize, stream);
+            return;
+        }
         // The host read can run another backend's hook on a shared tensor, which leaves that backend's context current.
         void* host = source.DataPointer;
         s.Context?.EnsureCurrent();
         CudaMemory.CopyHostToDeviceAsync(destination, host, byteSize, stream);
+    }
+
+    /// <summary>Uploads a borrowed mapped tensor through the backend's staging buffer, one chunk per async copy.</summary>
+    private static unsafe void StageMappedUpload(State s, ulong destination, Tensor source, nuint byteSize, nint stream)
+    {
+        long total = (long)byteSize;
+        lock (s.MappedStaging)
+        {
+            for (long offset = 0; offset < total;)
+            {
+                int count = s.MappedStaging.StageChunk(source, offset, total - offset, out void* host);
+                CudaMemory.CopyHostToDeviceAsync(destination + (ulong)offset, host, (nuint)count, stream);
+                offset += count;
+            }
+        }
     }
 
     /// <summary>True when the pointer lies inside ANY live graph-capture arena (never individually freed).</summary>
