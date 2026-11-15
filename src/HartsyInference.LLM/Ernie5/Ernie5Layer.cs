@@ -190,6 +190,7 @@ internal sealed class Ernie5Layer : IDisposable
         Tensor Read(string leaf) => Own(source.Read(Ernie5WeightNames.Attn(index, leaf)));
         float[] Host(string leaf) => HostF32(source, Ernie5WeightNames.Attn(index, leaf));
         string[] l = Ernie5WeightNames.HcaLeaves;
+        (Tensor woa, Tensor? woaScale) = GroupedOutput(source, Ernie5WeightNames.Attn(index, l[5]));
         return new HcaAttentionWeights
         {
             WqA = Read(l[0]),
@@ -197,7 +198,8 @@ internal sealed class Ernie5Layer : IDisposable
             WqB = Read(l[2]),
             Wkv = Read(l[3]),
             KvNorm = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[4]))),
-            WoA = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[5]))),
+            WoA = woa,
+            WoAScaleInv = woaScale,
             WoB = Read(l[6]),
             Sink = Own(ReadF32(source, Ernie5WeightNames.Attn(index, l[7]))),
             CompressorWkv = Read(l[8]),
@@ -235,6 +237,17 @@ internal sealed class Ernie5Layer : IDisposable
             OGate = _cfg.UseGatedAttn ? Read(Ernie5WeightNames.AttnGate) : null,
             HeadMix = _cfg.UseVhaAttention ? FoldVha(index, source, _cfg.MlaHeads) : null,
         };
+    }
+
+    // The grouped output projection stays FP8 with its 128x128 scale grid, which the block-diagonal linear reads directly, so it costs a quarter of
+    // an F32 copy on the host and on the device. Any other storage is decoded to F32.
+    private (Tensor Weight, Tensor? ScaleInv) GroupedOutput(IErnie5WeightSource source, string name)
+    {
+        Tensor t = source.Read(name);
+        if (t.DType == DType.F8E4M3 && t.QuantInfo is { Fp8BlockScaleInv: { } scale, Fp8BlockSize: Fp8BlockF32Codec.DefaultBlock })
+            return (Own(t), scale);
+        if (t.DType == DType.F32) return (Own(t), null);
+        using (t) return (Own(ProjectionOps.EnsureF32(t)), null);
     }
 
     // m = I + V U^T, rounded to BF16 as the reference's fold in the BF16 weights' dtype is (vLLM fold_vha).
