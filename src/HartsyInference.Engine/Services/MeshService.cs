@@ -651,6 +651,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
             Steps = request.Steps == 0 ? null : request.Steps,
             TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
             Seed = MeshSeed.ForSampler(request.Seed),
+            ProjectReference = EngineKnobs.PaintProjectReference.Value,
         };
 
         return Task.Run(
@@ -662,7 +663,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     reference = _engine.MeshPreparationInternal.Prepare(id, reference, cancel).Image;
                 byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
-                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.Width, reference.Height, options, p =>
+                ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.HasAlpha ? reference.Alpha : default, reference.Width,
+                    reference.Height, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));

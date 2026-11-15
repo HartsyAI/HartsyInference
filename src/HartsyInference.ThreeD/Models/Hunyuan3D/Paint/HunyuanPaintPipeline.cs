@@ -56,7 +56,14 @@ public sealed class HunyuanPaintPipeline
 
     /// <summary>Paints <paramref name="mesh"/> (unwrapped first if it has no UVs) from <paramref name="referenceRgb"/>, a square or any-size RGB image on white.</summary>
     public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, int referenceWidth, int referenceHeight, HunyuanPaintOptions? options = null,
-        Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default)
+        Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+        Generate(mesh, referenceRgb, default, referenceWidth, referenceHeight, options, progress, cancellationToken);
+
+    /// <summary>Paints <paramref name="mesh"/> from <paramref name="referenceRgb"/> (on white) with its subject mask <paramref name="referenceAlpha"/> (one byte per pixel, or empty).
+    /// With the mask and <see cref="HunyuanPaintOptions.ProjectReference"/>, the picture itself is baked into the front view; it should then be square, as the diffusion
+    /// sees it resized to the view size, and as large as it comes (it is sampled at the render resolution).</summary>
+    public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, ReadOnlySpan<byte> referenceAlpha, int referenceWidth, int referenceHeight,
+        HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         options ??= new HunyuanPaintOptions();
@@ -86,10 +93,25 @@ public sealed class HunyuanPaintPipeline
             : PaintViewCandidate.Fixed;
 
         Stage($"frame and views ({views.Count})");
+        PaintReferenceProjection? projection = null;
+        if (options.ProjectReference && !referenceAlpha.IsEmpty)
+        {
+            projection = PaintReferenceProjector.Project(renderer, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, options.RenderResolution, cancellationToken);
+            Stage(projection is null ? "reference projection (no subject or silhouette)"
+                : $"reference projection (fit {projection.Fit:F3}, mirrored {projection.MirroredFit:F3}, scale {projection.Scale:F1}, offset {projection.OffsetX:F1} {projection.OffsetY:F1})");
+            if (projection is not null && projection.Fit < PaintReferenceProjector.MinimumFit)
+            {
+                string poor = $"The reference picture overlaps the model's front by {projection.Fit:P0}, under the {PaintReferenceProjector.MinimumFit:P0} needed to bake it in place, "
+                    + "so the front was painted from the generated view only. A picture and model with the same pose and framing line up.";
+                StageLog?.Invoke(poor);
+                warnings.Add(poor);
+                projection = null;
+            }
+        }
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
         Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
-        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, cancellationToken);
+        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, projection, cancellationToken);
         Stage("bake");
         return warnings.Count == 0 ? baked : baked with { Warnings = warnings };
     }
@@ -386,7 +408,7 @@ public sealed class HunyuanPaintPipeline
     }
 
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
-        HunyuanPaintOptions o, CancellationToken cancellationToken)
+        HunyuanPaintOptions o, PaintReferenceProjection? projection, CancellationToken cancellationToken)
     {
         int n = views.Count, materials = _config.MaterialCount, size = o.TextureSize, render = o.RenderResolution;
         PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, size, size, cancellationToken);
@@ -406,6 +428,9 @@ public sealed class HunyuanPaintPipeline
                 float[] image = new float[view.Length];
                 for (int i = 0; i < image.Length; i++)
                     image[i] = view[i] / 255f;
+                // The picture replaces the front view's albedo where it lines up; metal and roughness stay as generated.
+                if (projection is not null && m == 0 && views[v].Elevation == 0 && views[v].Azimuth == 0)
+                    PaintReferenceProjector.Overlay(projection, image);
                 PaintViewBake bake = PaintBackProjector.Project(renderer, surface, image, render, 3, views[v].Elevation, views[v].Azimuth, o.Bake, cancellationToken);
                 merger.Add(bake, views[v].Weight);
             }

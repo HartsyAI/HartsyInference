@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 public static class MeshCleaner
 {
     /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, small components by face count, non-manifold, small
-    /// components by area, holes (perimeter, then width), orientation.</summary>
+    /// components by area, flat components, holes (perimeter, then width), orientation.</summary>
     public static Mesh Clean(Mesh mesh, MeshCleanOptions? options = null)
     {
         Validate(mesh);
@@ -21,6 +21,7 @@ public static class MeshCleaner
         if (options.SmallComponentFaceRatio > 0) m = RemoveSmallComponentsByFaceCount(m, options.SmallComponentFaceRatio);
         if (options.RepairNonManifoldEdges) m = RepairNonManifoldEdges(m);
         if (options.SmallComponentAreaRatio > 0) m = RemoveSmallComponents(m, options.SmallComponentAreaRatio);
+        if (options.FlatComponentThicknessRatio > 0) m = RemoveFlatComponents(m, options.FlatComponentThicknessRatio);
         if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
         if (options.HoleFillMaxWidth > 0)
         {
@@ -334,6 +335,59 @@ public static class MeshCleaner
             keep[f] = a >= largest || a >= areaRatio * total;
         }
         return keep;
+    }
+
+    /// <summary>Removes vertex-connected components whose bounding box is thinner, on its thinnest axis, than <paramref name="thicknessRatio"/> of the mesh's bounding-box diagonal (see
+    /// <see cref="MeshCleanOptions.FlatComponentThicknessRatio"/>). The component with the most faces always stays.</summary>
+    public static Mesh RemoveFlatComponents(Mesh mesh, double thicknessRatio)
+    {
+        Validate(mesh);
+        if (!(thicknessRatio >= 0))
+            throw new ArgumentOutOfRangeException(nameof(thicknessRatio), "Ratio must be non-negative.");
+        int faces = mesh.TriangleCount;
+        float[] v = mesh.Vertices;
+        int[] parent = new int[mesh.VertexCount];
+        for (int i = 0; i < parent.Length; i++) parent[i] = i;
+        for (int f = 0; f < faces; f++)
+        {
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 1]);
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 2]);
+        }
+        // Per component root: face count and box (min x, y, z, max x, y, z).
+        int[] count = new int[mesh.VertexCount];
+        Dictionary<int, double[]> boxes = [];
+        double[] whole = [double.MaxValue, double.MaxValue, double.MaxValue, double.MinValue, double.MinValue, double.MinValue];
+        for (int f = 0; f < faces; f++)
+        {
+            int root = Find(parent, mesh.Indices[f * 3]);
+            count[root]++;
+            if (!boxes.TryGetValue(root, out double[]? box))
+                boxes[root] = box = [double.MaxValue, double.MaxValue, double.MaxValue, double.MinValue, double.MinValue, double.MinValue];
+            for (int k = 0; k < 3; k++)
+            {
+                int vertex = mesh.Indices[f * 3 + k] * 3;
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    box[axis] = Math.Min(box[axis], v[vertex + axis]);
+                    box[axis + 3] = Math.Max(box[axis + 3], v[vertex + axis]);
+                    whole[axis] = Math.Min(whole[axis], v[vertex + axis]);
+                    whole[axis + 3] = Math.Max(whole[axis + 3], v[vertex + axis]);
+                }
+            }
+        }
+        if (boxes.Count < 2)
+            return Compact(mesh.Vertices, mesh.Indices);
+        int biggest = boxes.Keys.MaxBy(root => count[root]);
+        double dx = whole[3] - whole[0], dy = whole[4] - whole[1], dz = whole[5] - whole[2];
+        double limit = Math.Sqrt(dx * dx + dy * dy + dz * dz) * thicknessRatio;
+        HashSet<int> flat = [];
+        foreach ((int root, double[] box) in boxes)
+            if (root != biggest && Math.Min(box[3] - box[0], Math.Min(box[4] - box[1], box[5] - box[2])) < limit)
+                flat.Add(root);
+        bool[] keep = new bool[faces];
+        for (int f = 0; f < faces; f++)
+            keep[f] = !flat.Contains(Find(parent, mesh.Indices[f * 3]));
+        return Rebuild(mesh, keep);
     }
 
     /// <summary>Closes boundary loops whose perimeter is at most <paramref name="maxPerimeter"/> (mesh units): a triangle for three
