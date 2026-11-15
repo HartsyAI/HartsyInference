@@ -3,7 +3,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.Engine.Tests.Services;
 
-/// <summary>The Paint 2.1 view upscaler is opt-in: off by default it is never loaded, even when its checkpoint is in the model folder.</summary>
+/// <summary>The Paint 2.1 view upscaler is on by default, as upstream; it loads only when its checkpoint is in the model folder, and the knob turns it off.</summary>
 public sealed class MeshServicePaintUpscalerTests : IDisposable
 {
     private readonly string _folder = Directory.CreateTempSubdirectory("paint-upscaler").FullName;
@@ -11,17 +11,17 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
     public void Dispose() => Directory.Delete(_folder, recursive: true);
 
     [Fact]
-    public void TheKnobIsOffByDefaultAndFixedAtConstruction()
+    public void TheKnobIsOnByDefaultAndFixedAtConstruction()
     {
-        Assert.False(EngineKnobs.PaintUpscaleViews.Default);
+        Assert.True(EngineKnobs.PaintUpscaleViews.Default);
         Assert.Equal(KnobScope.Construction, EngineKnobs.PaintUpscaleViews.Scope);
         Assert.Equal("numerics.paintUpscaleViews", EngineKnobs.PaintUpscaleViews.Id);
     }
 
     [Fact]
-    public void TheReferenceProjectionKnobIsOnByDefaultAndReadPerRun()
+    public void TheReferenceProjectionKnobIsOffByDefaultAndReadPerRun()
     {
-        Assert.True(EngineKnobs.PaintProjectReference.Default);
+        Assert.False(EngineKnobs.PaintProjectReference.Default);
         Assert.Equal(KnobScope.Runtime, EngineKnobs.PaintProjectReference.Scope);
         Assert.Equal("numerics.paintProjectReference", EngineKnobs.PaintProjectReference.Id);
     }

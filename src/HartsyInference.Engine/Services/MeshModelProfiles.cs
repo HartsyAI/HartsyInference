@@ -142,7 +142,7 @@ internal static class MeshModelProfiles
             Paint("hunyuan3d-paint", "Tencent Hunyuan 3D 2.0 Community License", "Albedo only; metallic is 0 and roughness 1.",
                 new MeshCost { Basis = "A 30-step run was estimated at 175 s from a 12-step run on a card shared with another process; no isolated peak." }, peak: null),
             Paint("hunyuan3d-paint21", "Tencent Hunyuan 3D 2.1 Community License", "PBR texture (base color, metallic, roughness).",
-                new MeshCost { PeakVramGiB = 9.8, TypicalSeconds = 99, Basis = "RTX 3060, 512 px views, 15 UniPC steps, no upscaler, a 19,800-triangle mesh; the first run on a saturated card took 246 s." },
+                new MeshCost { PeakVramGiB = 9.8, TypicalSeconds = 330, Basis = "RTX 3060, 512 px views, 15 UniPC steps: 99 s on a 19,800-triangle mesh without the view upscaler; the default Real-ESRGAN upscaler adds about 220 s (a 2048 texture on upstream's penguin demo took about 330 s in all)." },
                 peak: _ => 9.8),
         ];
         return all.ToDictionary(profile => profile.Id, StringComparer.OrdinalIgnoreCase);

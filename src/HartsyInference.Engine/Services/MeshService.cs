@@ -710,7 +710,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 string? upscaler = PaintUpscaler(folder, upscale);
                 if (upscale && upscaler is null)
                 {
-                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
+                    Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (lllyasviel/Annotators RealESRGAN_x4plus.pth, one of the model's catalog assets): the views are baked without the upscaler and come out softer. Download the model's assets again to add it.");
                 }
                 HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
                 loader.Pipeline.StageLog = line => Logs.Debug($"[Paint] {line}");

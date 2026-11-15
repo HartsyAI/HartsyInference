@@ -3,6 +3,10 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.434
+
+- Hunyuan3D Paint 2.1 textures match upstream's: the reference projection is off and the Real-ESRGAN view upscaler is on (and downloads with the model) by default.
+
 ## alpha.433
 
 - Hunyuan3D Paint 2.1 views match upstream's, and 3D shape runs stop promptly when cancelled.
