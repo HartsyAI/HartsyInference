@@ -690,8 +690,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Generated.Add(seq.Next);
         seq.Pending.OnToken?.Invoke(seq.Next);
         int next = gs.Replay();
-        HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
-            HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.GraphReplay, "scheduler.graph.replay");
         gs.Pos++;
         gs.WriteNextPos();
         _graphModel!.CommitReplayedStep(seq.Cache);

@@ -3487,6 +3487,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // The pre-launch control-buffer writes went through the normal stream; make them complete first.
         DrainStream();
         g.Graph.Launch();
+        AttentionEvidence.Observed(AttentionEvidenceKind.GraphReplay, "vulkan.graph.replay");
     }
 
     /// <inheritdoc/>

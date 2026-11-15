@@ -8353,6 +8353,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     {
         using OpScope _op = EnterOp();
         ((CudaGraph)graphHandle).Launch();
+        AttentionEvidence.Observed(AttentionEvidenceKind.GraphReplay, "cuda.graph.replay");
     }
 
     public void DisposeGraph(object graphHandle)
