@@ -22,6 +22,8 @@ public sealed class OnigurumaPatternTests
     [InlineData(@"a(?#x\)y)b", @"ab")]
     // under (?x) whitespace is ignored, so the quantifier still repeats the atom before it
     [InlineData("(?x)a {3}+", "(?x)(?:a {3})+")]
+    // a non-breaking space is not ignored whitespace, so it is the atom repeated
+    [InlineData("(?x)a {2}+", "(?x)a(?: {2})+")]
     public void Rewrites_the_forms_dotnet_reads_differently(string onig, string dotNet)
     {
         Assert.Equal(dotNet, OnigurumaPattern.ToDotNet(onig));

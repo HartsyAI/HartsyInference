@@ -50,9 +50,10 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, end - i);
                 i = end;
             }
-            else if (extended && char.IsWhiteSpace(c))
+            else if (extended && c is ' ' or '\t' or '\n' or '\v' or '\f' or '\r')
             {
-                // ignored whitespace leaves the atom before it as the one a quantifier repeats
+                // ignored whitespace (only these ASCII characters; U+00A0 and the like stay literal) leaves the atom before it as the one a
+                // quantifier repeats
                 sb.Append(c);
                 i++;
             }
