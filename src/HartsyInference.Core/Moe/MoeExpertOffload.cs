@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Moe.Residency;
@@ -6,7 +7,8 @@ namespace HartsyInference.Core.Moe;
 
 /// <summary>Running totals of where a model's routed experts ran.</summary>
 /// <param name="ResidentRows">Routed (token, slot) pairs served by an expert resident in the device cache.</param>
-/// <param name="StreamedRows">Pairs served on the device by an expert uploaded for that one call (a large batch, such as a prefill).</param>
+/// <param name="StreamedRows">Pairs served on the device by an expert uploaded for that call: a miss copied for one large batch (a
+/// prefill), and, on an offload with no host runner, a miss admitted into the cache just before it ran.</param>
 /// <param name="HostRows">Pairs served on the CPU.</param>
 /// <param name="Admitted">Experts queued for upload into the cache after a miss.</param>
 public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRows, long HostRows, long Admitted)
@@ -26,7 +28,8 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 /// for experts the CPU kernels cannot read.
 /// </summary>
 /// <remarks>
-/// <para><b>Admission.</b> After a layer runs, its misses may be queued for upload so later steps find them resident. Misses fill
+/// <para><b>Admission.</b> After a layer runs, its misses may be queued for upload so later steps find them resident; with no host
+/// runner they are admitted before the layer runs them instead (<see cref="AdmitNow"/>), since each miss is uploaded anyway. Misses fill
 /// free room first, as many as fit without evicting anything (at most <see cref="MaxFillsPerLayer"/>). Beyond that a miss may
 /// displace a resident expert only when its recent use (<see cref="DecayedLfuHysteresisPolicy"/>, the same scores that choose
 /// eviction victims) reaches <see cref="AdmitMinScore"/>, and at most <see cref="MaxSwapsPerLayer"/> per layer per step, so a full
@@ -34,7 +37,8 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 /// next step's plan waits only for the experts it uses.</para>
 /// <para><b>Model contract.</b> A MoE block registers each layer's experts with <see cref="RegisterLayer"/>, plans each forward with
 /// <see cref="ExpertScheduler.Plan"/> against <see cref="Cache"/> and <see cref="Policy"/>, and reports with
-/// <see cref="Record"/> and <see cref="AfterLayer"/>. The weights a layer registers must be the tensors its device path projects
+/// <see cref="Record"/> and <see cref="AfterLayer"/>, or, with no host runner, admits with <see cref="AdmitNow"/> before running the
+/// misses and pins them with a second lease. The weights a layer registers must be the tensors its device path projects
 /// with, so a resident expert's device copy is the one the projection finds.</para>
 /// </remarks>
 public sealed class MoeExpertOffload : IDisposable
@@ -130,7 +134,7 @@ public sealed class MoeExpertOffload : IDisposable
         if (misses.Count == 0) return;
         SelectAdmissions(misses, _admit);
         if (_admit.Count == 0) return;
-        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_admit));
+        int started = CacheBase.Prefetch(CollectionsMarshal.AsSpan(_admit));
         Interlocked.Add(ref _admitted, started);
     }
 
@@ -147,7 +151,7 @@ public sealed class MoeExpertOffload : IDisposable
         if (misses.Count == 0) return 0;
         SelectAdmissions(misses, admitted);
         if (admitted.Count == 0) return 0;
-        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(admitted));
+        int started = CacheBase.Prefetch(CollectionsMarshal.AsSpan(admitted));
         Interlocked.Add(ref _admitted, started);
         return started;
     }
@@ -202,7 +206,7 @@ public sealed class MoeExpertOffload : IDisposable
         {
             keys.Clear();
             for (int e = 0; e < Math.Min(perLayer, count); e++) keys.Add(new ExpertKey(layer, e));
-            if (CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(keys)) < keys.Count) break;
+            if (CacheBase.Prefetch(CollectionsMarshal.AsSpan(keys)) < keys.Count) break;
         }
     }
 
