@@ -713,6 +713,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     Logs.Warning($"numerics.paintUpscaleViews is on but {Path.Combine(folder, "RealESRGAN_x4plus.pth")} is missing (it is lllyasviel/Annotators RealESRGAN_x4plus.pth, not downloaded with the model): the views are baked without the upscaler.");
                 }
                 HunyuanPaintLoader loader = HunyuanPaintLoader.Load(_engine.Backend, folder, dino, upscaler);
+                loader.Pipeline.StageLog = line => Logs.Debug($"[Paint] {line}");
                 _paintPipelines[folder] = loader;
                 return loader;
             }

@@ -19,6 +19,14 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
     }
 
     [Fact]
+    public void TheReferenceProjectionKnobIsOnByDefaultAndReadPerRun()
+    {
+        Assert.True(EngineKnobs.PaintProjectReference.Default);
+        Assert.Equal(KnobScope.Runtime, EngineKnobs.PaintProjectReference.Scope);
+        Assert.Equal("numerics.paintProjectReference", EngineKnobs.PaintProjectReference.Id);
+    }
+
+    [Fact]
     public void PaintUpscaler_NeedsBothTheKnobAndTheCheckpoint()
     {
         Assert.Null(MeshService.PaintUpscaler(_folder, enabled: true));

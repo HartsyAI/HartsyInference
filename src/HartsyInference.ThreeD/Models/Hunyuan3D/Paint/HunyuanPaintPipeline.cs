@@ -15,6 +15,9 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 public sealed class HunyuanPaintPipeline
 {
     private const int FixedViews = 6;
+
+    // Share of the distrusted edge band kept for a front view that carries the reference picture.
+    private const double ProjectedBoundaryShare = 0.25;
     private readonly IBackend _backend;
     private readonly HunyuanPaintConfig _config;
     private readonly HunyuanPaintUnet _unet, _reference;
@@ -428,10 +431,16 @@ public sealed class HunyuanPaintPipeline
                 float[] image = new float[view.Length];
                 for (int i = 0; i < image.Length; i++)
                     image[i] = view[i] / 255f;
-                // The picture replaces the front view's albedo where it lines up; metal and roughness stay as generated.
+                // The picture replaces the front view's albedo where it lines up; metal and roughness stay as generated. Its pixels are sharp up to a depth edge (a brim over a face),
+                // so the band the bake distrusts around such edges, sized for the blurrier generated views, is narrowed for it.
+                PaintBakeOptions bakeOptions = o.Bake;
                 if (projection is not null && m == 0 && views[v].Elevation == 0 && views[v].Azimuth == 0)
-                    PaintReferenceProjector.Overlay(projection, image);
-                PaintViewBake bake = PaintBackProjector.Project(renderer, surface, image, render, 3, views[v].Elevation, views[v].Azimuth, o.Bake, cancellationToken);
+                {
+                    int full = PaintReferenceProjector.Overlay(projection, image);
+                    StageLog?.Invoke($"reference overlay: {full} px from the picture, {projection.Covered.Count(c => c) - full} blended or kept as generated");
+                    bakeOptions = o.Bake with { UnreliableBoundaryScale = o.Bake.UnreliableBoundaryScale * ProjectedBoundaryShare };
+                }
+                PaintViewBake bake = PaintBackProjector.Project(renderer, surface, image, render, 3, views[v].Elevation, views[v].Azimuth, bakeOptions, cancellationToken);
                 merger.Add(bake, views[v].Weight);
             }
             (float[] texture, bool[] known) = merger.Finish();

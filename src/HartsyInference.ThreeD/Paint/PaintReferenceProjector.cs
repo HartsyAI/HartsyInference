@@ -87,17 +87,235 @@ public static class PaintReferenceProjector
         return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY);
     }
 
-    /// <summary>Puts the picture over a view image: covered pixels take the picture's colour, the rest keep <paramref name="view"/>'s. Both are RGB floats at the projection's resolution.</summary>
-    public static void Overlay(PaintReferenceProjection projection, float[] view)
+    /// <summary>Blurred colours farther apart than this (RGB distance, channels in [0, 1]) after alignment are different surfaces (skin where the mesh has a hat brim): the generated view is kept there.</summary>
+    public const float DisagreeDistance = 0.5f;
+
+    /// <summary>Largest local shift, in pixels at 512, that <see cref="Overlay"/> applies to line the picture's features up with the generated view's.</summary>
+    public const int MaxShift = 10;
+
+    /// <summary>Puts the picture over the generated front view (RGB floats at the projection's resolution). The silhouette fit places the picture as a whole; inside, the mesh follows it only
+    /// roughly (a hat brim the mesh brings lower than drawn covers the eyes), while the generated view was painted on the mesh's own geometry. So the picture is first moved locally onto the
+    /// generated view: a displacement of up to <see cref="MaxShift"/> px at 512 per 8 px block, found by matching blurred patches and smoothed, pulls its features to where the mesh has them.
+    /// Its small details stay its own (the generated view's are the 512 px repaint the picture is here to replace). Where the aligned picture still shows a different surface than the
+    /// generated view (blurred colours further apart than <see cref="DisagreeDistance"/>, widened by 2 px at 512 and softened by 1 px), the generated view is kept.
+    /// Returns how many pixels took the picture fully.</summary>
+    public static int Overlay(PaintReferenceProjection projection, float[] view)
     {
         ArgumentNullException.ThrowIfNull(projection);
         ArgumentNullException.ThrowIfNull(view);
         if (view.Length != projection.Image.Length)
             throw new ArgumentException("The view image does not match the projection's resolution.", nameof(view));
+        int size = projection.Resolution;
+        (float[] image, bool[] covered) = Align(projection, view);
+        int radius = Math.Max(1, size / 128);
+        float[] picture = BoxBlur(image, size, radius);
+        float[] generated = BoxBlur(view, size, radius);
+        bool[] rejected = new bool[size * size];
+        for (int p = 0; p < covered.Length; p++)
+        {
+            if (!covered[p])
+                continue;
+            float sum = 0;
+            for (int c = 0; c < 3; c++)
+            {
+                float d = picture[p * 3 + c] - generated[p * 3 + c];
+                sum += d * d;
+            }
+            rejected[p] = MathF.Sqrt(sum) > DisagreeDistance;
+        }
+        rejected = PaintImageFilters.Dilate(rejected, size, size, Math.Max(1, size / 256));
+        float[] keep = new float[size * size * 3];
+        for (int p = 0; p < rejected.Length; p++)
+            keep[p * 3] = keep[p * 3 + 1] = keep[p * 3 + 2] = rejected[p] ? 0f : 1f;
+        keep = BoxBlur(keep, size, Math.Max(1, size / 512));
+        int full = 0;
+        for (int p = 0; p < covered.Length; p++)
+        {
+            if (!covered[p])
+                continue;
+            float weight = keep[p * 3];
+            if (weight >= 1f)
+                full++;
+            for (int c = 0; c < 3; c++)
+                view[p * 3 + c] += weight * (image[p * 3 + c] - view[p * 3 + c]);
+        }
+        return full;
+    }
+
+    // Side of the grid the alignment matches on, the block step, the patch radius (all in pixels of that grid), and the cost of a shift: matching is on colours in [0, 1], so a block
+    // moved MaxShift px must explain about 0.06 of mean colour difference more than staying put.
+    private const int AlignResolution = 512, AlignStep = 8, AlignPatch = 7;
+    private const double ShiftCost = 0.06 * 0.06 / (MaxShift * MaxShift);
+
+    // The picture moved locally onto the generated view, with its coverage moved alike. See Overlay.
+    internal static (float[] Image, bool[] Covered) Align(PaintReferenceProjection projection, float[] view)
+    {
+        int size = projection.Resolution, factor = Math.Max(1, size / AlignResolution), small = size / factor;
+        // Outside the picture's coverage the generated view stands in, so a patch at the silhouette compares like with like.
+        float[] filled = (float[])view.Clone();
         for (int p = 0; p < projection.Covered.Length; p++)
             if (projection.Covered[p])
                 for (int c = 0; c < 3; c++)
-                    view[p * 3 + c] = projection.Image[p * 3 + c];
+                    filled[p * 3 + c] = projection.Image[p * 3 + c];
+        float[] picture = BoxBlur(Downsample(filled, size, factor), small, 1);
+        float[] generated = BoxBlur(Downsample(view, size, factor), small, 1);
+        bool[] coveredSmall = new bool[small * small];
+        for (int y = 0; y < small; y++)
+            for (int x = 0; x < small; x++)
+                coveredSmall[y * small + x] = projection.Covered[(y * factor + factor / 2) * size + x * factor + factor / 2];
+
+        int blocks = (small + AlignStep - 1) / AlignStep;
+        float[] shiftX = new float[blocks * blocks], shiftY = new float[blocks * blocks];
+        Parallel.For(0, blocks * blocks, block =>
+        {
+            int cx = block % blocks * AlignStep + AlignStep / 2, cy = block / blocks * AlignStep + AlignStep / 2;
+            if (cx >= small || cy >= small || !coveredSmall[cy * small + cx])
+                return;
+            double best = double.MaxValue;
+            int bestX = 0, bestY = 0;
+            for (int dy = -MaxShift; dy <= MaxShift; dy++)
+                for (int dx = -MaxShift; dx <= MaxShift; dx++)
+                {
+                    double cost = PatchCost(generated, picture, small, cx, cy, dx, dy);
+                    if (double.IsNaN(cost))
+                        continue;
+                    cost += ShiftCost * (dx * dx + dy * dy);
+                    if (cost < best)
+                        (best, bestX, bestY) = (cost, dx, dy);
+                }
+            shiftX[block] = bestX;
+            shiftY[block] = bestY;
+        });
+        shiftX = Median3(shiftX, blocks);
+        shiftY = Median3(shiftY, blocks);
+
+        float[] image = new float[projection.Image.Length];
+        bool[] covered = new bool[projection.Covered.Length];
+        Parallel.For(0, size, row =>
+        {
+            for (int column = 0; column < size; column++)
+            {
+                int p = row * size + column;
+                if (!projection.Covered[p])
+                    continue;
+                // The block grid's value at this pixel, bilinear between block centres, scaled from the alignment grid to this one.
+                double gx = Math.Clamp(((column + 0.5) / factor - AlignStep / 2.0) / AlignStep, 0, blocks - 1);
+                double gy = Math.Clamp(((row + 0.5) / factor - AlignStep / 2.0) / AlignStep, 0, blocks - 1);
+                double sx = Bilinear(shiftX, blocks, gx, gy) * factor, sy = Bilinear(shiftY, blocks, gx, gy) * factor;
+                double x = column + sx, y = row + sy;
+                int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
+                if (nx < 0 || ny < 0 || nx >= size || ny >= size || !projection.Covered[ny * size + nx])
+                    continue;
+                for (int c = 0; c < 3; c++)
+                    image[p * 3 + c] = (float)BilinearChannel(projection.Image, size, x, y, c);
+                covered[p] = true;
+            }
+        });
+        return (image, covered);
+    }
+
+    // Mean squared colour difference between the generated patch at (cx, cy) and the picture patch shifted by (dx, dy); NaN when the shifted patch leaves the grid.
+    private static double PatchCost(float[] generated, float[] picture, int size, int cx, int cy, int dx, int dy)
+    {
+        if (cx - AlignPatch + dx < 0 || cy - AlignPatch + dy < 0 || cx + AlignPatch + dx >= size || cy + AlignPatch + dy >= size
+            || cx - AlignPatch < 0 || cy - AlignPatch < 0 || cx + AlignPatch >= size || cy + AlignPatch >= size)
+            return double.NaN;
+        double sum = 0;
+        for (int y = -AlignPatch; y <= AlignPatch; y++)
+        {
+            int g = ((cy + y) * size + cx - AlignPatch) * 3, q = ((cy + y + dy) * size + cx - AlignPatch + dx) * 3;
+            for (int k = 0; k < (2 * AlignPatch + 1) * 3; k++)
+            {
+                double d = generated[g + k] - picture[q + k];
+                sum += d * d;
+            }
+        }
+        return sum / ((2 * AlignPatch + 1) * (2 * AlignPatch + 1) * 3);
+    }
+
+    private static float[] Downsample(float[] image, int size, int factor)
+    {
+        int small = size / factor;
+        float[] result = new float[small * small * 3];
+        for (int y = 0; y < small; y++)
+            for (int x = 0; x < small; x++)
+                for (int c = 0; c < 3; c++)
+                {
+                    double sum = 0;
+                    for (int j = 0; j < factor; j++)
+                        for (int i = 0; i < factor; i++)
+                            sum += image[((y * factor + j) * size + x * factor + i) * 3 + c];
+                    result[(y * small + x) * 3 + c] = (float)(sum / (factor * factor));
+                }
+        return result;
+    }
+
+    private static float[] Median3(float[] grid, int side)
+    {
+        float[] result = new float[grid.Length];
+        float[] window = new float[9];
+        for (int y = 0; y < side; y++)
+            for (int x = 0; x < side; x++)
+            {
+                int n = 0;
+                for (int j = -1; j <= 1; j++)
+                    for (int i = -1; i <= 1; i++)
+                        window[n++] = grid[Math.Clamp(y + j, 0, side - 1) * side + Math.Clamp(x + i, 0, side - 1)];
+                Array.Sort(window);
+                result[y * side + x] = window[4];
+            }
+        return result;
+    }
+
+    private static double Bilinear(float[] grid, int side, double x, double y)
+    {
+        int x0 = (int)Math.Floor(x), y0 = (int)Math.Floor(y), x1 = Math.Min(x0 + 1, side - 1), y1 = Math.Min(y0 + 1, side - 1);
+        double wx = x - x0, wy = y - y0;
+        return (grid[y0 * side + x0] * (1 - wx) + grid[y0 * side + x1] * wx) * (1 - wy) + (grid[y1 * side + x0] * (1 - wx) + grid[y1 * side + x1] * wx) * wy;
+    }
+
+    private static double BilinearChannel(float[] image, int size, double x, double y, int channel)
+    {
+        int x0 = Math.Clamp((int)Math.Floor(x), 0, size - 1), y0 = Math.Clamp((int)Math.Floor(y), 0, size - 1);
+        int x1 = Math.Min(x0 + 1, size - 1), y1 = Math.Min(y0 + 1, size - 1);
+        double wx = Math.Clamp(x - x0, 0, 1), wy = Math.Clamp(y - y0, 0, 1);
+        return (image[(y0 * size + x0) * 3 + channel] * (1 - wx) + image[(y0 * size + x1) * 3 + channel] * wx) * (1 - wy)
+            + (image[(y1 * size + x0) * 3 + channel] * (1 - wx) + image[(y1 * size + x1) * 3 + channel] * wx) * wy;
+    }
+
+    // Box blur of a square RGB float image, separable, edges clamped.
+    internal static float[] BoxBlur(float[] image, int size, int radius)
+    {
+        float[] across = new float[image.Length], result = new float[image.Length];
+        Parallel.For(0, size, row =>
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                double sum = 0;
+                for (int k = -radius; k <= radius; k++)
+                    sum += image[(row * size + Math.Clamp(k, 0, size - 1)) * 3 + c];
+                for (int x = 0; x < size; x++)
+                {
+                    across[(row * size + x) * 3 + c] = (float)(sum / (2 * radius + 1));
+                    sum += image[(row * size + Math.Min(x + radius + 1, size - 1)) * 3 + c] - image[(row * size + Math.Max(x - radius, 0)) * 3 + c];
+                }
+            }
+        });
+        Parallel.For(0, size, column =>
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                double sum = 0;
+                for (int k = -radius; k <= radius; k++)
+                    sum += across[(Math.Clamp(k, 0, size - 1) * size + column) * 3 + c];
+                for (int y = 0; y < size; y++)
+                {
+                    result[(y * size + column) * 3 + c] = (float)(sum / (2 * radius + 1));
+                    sum += across[(Math.Min(y + radius + 1, size - 1) * size + column) * 3 + c] - across[(Math.Max(y - radius, 0) * size + column) * 3 + c];
+                }
+            }
+        });
+        return result;
     }
 
     // Pattern search on the overlap: each step tries the scale and both offsets one step up and down and keeps any gain; when none gains, the steps halve.

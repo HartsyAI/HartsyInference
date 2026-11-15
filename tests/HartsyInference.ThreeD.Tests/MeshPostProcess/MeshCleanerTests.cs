@@ -13,6 +13,35 @@ public sealed class MeshCleanerTests
     };
 
     [Fact]
+    public void RemoveFlatComponents_DropsThinLoosePiecesWhateverTheirAreaAndKeepsSolidOnes()
+    {
+        Mesh body = Tetrahedron(0, 1f);
+        // A flat sheet beside the body, wider than the body (a quad 0.002 thick), and a small solid piece.
+        float[] sheet = [3, 0, 0.001f, 6, 0, 0.002f, 6, 3, 0.003f, 3, 3, 0.002f];
+        Mesh small = Tetrahedron(-2, 0.3f);
+        Mesh joined = new()
+        {
+            Vertices = [.. body.Vertices, .. sheet, .. small.Vertices],
+            Indices = [.. body.Indices, 4, 5, 6, 4, 6, 7, .. small.Indices.Select(i => i + 8)],
+        };
+
+        Mesh cleaned = MeshCleaner.RemoveFlatComponents(joined, 1.5e-2);
+
+        Assert.Equal(8, cleaned.TriangleCount);
+        Assert.Equal(8, cleaned.VertexCount);
+        Assert.DoesNotContain(cleaned.Vertices.Chunk(3), v => v[0] >= 3);
+    }
+
+    [Fact]
+    public void RemoveFlatComponents_KeepsTheLargestPieceEvenWhenItIsFlat()
+    {
+        Mesh flat = new() { Vertices = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], Indices = [0, 1, 2, 0, 2, 3] };
+
+        Assert.Equal(2, MeshCleaner.RemoveFlatComponents(flat, 0.1).TriangleCount);
+        Assert.Equal(2, MeshCleaner.Clean(flat, new MeshCleanOptions { FlatComponentThicknessRatio = 0.1, HoleFillMaxPerimeter = 0 }).TriangleCount);
+    }
+
+    [Fact]
     public void RemoveDuplicateFaces_DropsRepeatsInEitherWinding()
     {
         Mesh tet = Tetrahedron();
