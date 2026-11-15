@@ -281,7 +281,8 @@ public static class MeshCleaner
             for (int e = 0; e < 3; e++)
             {
                 int a = mesh.Indices[f * 3 + e], b = mesh.Indices[f * 3 + (e + 1) % 3];
-                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                // EdgeTable's key, not (a << 32) | b: a long hashes as its two halves XORed, which puts the edges between nearby vertices in a few buckets.
+                long key = EdgeTable.Key(a, b, mesh.VertexCount);
                 if (firstFace.TryGetValue(key, out int other))
                     Union(parent, f, other);
                 else

@@ -803,7 +803,8 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                         return new MeshResult { Data = Trellis2ImageTo3DPipeline.ToGlb(textured), Format = "glb" };
                     }
 
-                    Mesh mesh = runtime.Pipeline.Generate(image, options, report);
+                    Mesh mesh = runtime.Pipeline.Generate(image, options, report, cancel);
+                    cancel.ThrowIfCancellationRequested();
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
                 }
                 finally
@@ -840,7 +841,7 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     cancel,
                     pipeline => options.Texture
                         ? Pixal3DImageTo3DPipeline.ToGlb(pipeline.GenerateTextured(image, options, Report, cancel))
-                        : GlbWriter.Write(pipeline.Generate(image, options, Report)));
+                        : GlbWriter.Write(pipeline.Generate(image, options, Report, cancel)));
             },
             cancel);
     }

@@ -838,6 +838,16 @@ public static class GenerationDispatch
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
             throw new ArgumentException($"3D model '{meshId}' textures a mesh from a reference image; pass the image with --image.");
+        // The paint models take their texture size as the request's grid; --texture-size names it for them when --grid is not given.
+        int grid = parameters.GetInt("grid", 0);
+        int textureSize = parameters.GetInt("texture-size", 0);
+        if (paint && textureSize != 0)
+        {
+            if (grid != 0 && grid != textureSize)
+                throw new ArgumentException($"3D model '{meshId}' takes its texture size from --grid or --texture-size; pass one of them.");
+            grid = textureSize;
+            textureSize = 0;
+        }
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
@@ -846,7 +856,7 @@ public static class GenerationDispatch
             Control = LoadMeshControl(parameters),
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
-            GridResolution = parameters.GetInt("grid", 0),
+            GridResolution = grid,
             Seed = parameters.GetInt("seed", -1),
             FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
             Samples = parameters.GetInt("samples", 1),
@@ -855,7 +865,7 @@ public static class GenerationDispatch
             Chains = parameters.GetBool("no-chains", false) ? false : null,
             Texture = parameters.GetBool("texture", false),
             Remesh = parameters.GetBoolOrNull("remesh"),
-            TextureSize = parameters.GetInt("texture-size", 0),
+            TextureSize = textureSize,
             Mesh = parameters.GetBool("mesh", false),
             Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),
         };

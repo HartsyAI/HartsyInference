@@ -358,12 +358,13 @@ public sealed class HunyuanPaintPipeline
         return HunyuanPaintImages.FromArray(merged, views, 12, latent, latent);
     }
 
-    // u + g s (b - u) per view with s from the azimuth (2.1: b is the full prediction, see Diffuse) and s = 1 for 2.0.
+    // u + g s (b - u) per view with s = 1 (2.1: b is the full prediction, see Diffuse). Upstream's pipeline would scale each view by its azimuth
+    // (ViewScale) only when the caller passes camera_azims, and its texturing pipeline (textureGenPipeline -> multiview_utils.forward_one) never does,
+    // so every view is guided at s = 1. With this and upstream's own geometry maps and starting noise, the generated views match upstream's to 0.4 to 1.5/255 mean.
     private float[] Guide(float[][] branch, IReadOnlyList<PaintViewCandidate> views, float guidance, int n, int latent)
     {
         float[] scales = new float[n];
-        for (int v = 0; v < n; v++)
-            scales[v] = _config.UsePoseRope ? ViewScale(views[v].Azimuth) : 1f;
+        Array.Fill(scales, 1f);
         return Guide(branch, scales, guidance, n, latent);
     }
 
