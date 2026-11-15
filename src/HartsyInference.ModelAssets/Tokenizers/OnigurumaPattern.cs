@@ -21,7 +21,8 @@ internal static class OnigurumaPattern
     {
         ArgumentNullException.ThrowIfNull(pattern);
         StringBuilder sb = new(pattern.Length + 8);
-        Stack<int> groups = new();
+        Stack<(int Start, bool Extended)> groups = new(); // each open group's start in sb and the extended mode outside it
+        bool extended = false; // (?x): whitespace is ignored and '#' starts a comment that runs to the end of the line
         int atom = -1; // where the last complete atom starts in sb; -1 when a quantifier would have nothing to apply to
         int i = 0;
         while (i < pattern.Length)
@@ -41,10 +42,24 @@ internal static class OnigurumaPattern
                 sb.Append(pattern, i, end - i);
                 i = end;
             }
+            else if (extended && c == '#')
+            {
+                // a line comment is copied whole, so nothing in it is read as pattern
+                int end = pattern.IndexOf('\n', i);
+                if (end < 0) end = pattern.Length;
+                sb.Append(pattern, i, end - i);
+                i = end;
+            }
+            else if (extended && char.IsWhiteSpace(c))
+            {
+                // ignored whitespace leaves the atom before it as the one a quantifier repeats
+                sb.Append(c);
+                i++;
+            }
             else if (c == '(' && pattern.AsSpan(i).StartsWith("(?#"))
             {
-                // a comment means nothing, so it is dropped: .NET would end it at an escaped ')' that Oniguruma skips. One never closed
-                // may be text inside a (?x) '#' line comment, so the rest is copied as written for the regex parser to read.
+                // a comment means nothing, so it is dropped: .NET would end it at an escaped ')' that Oniguruma skips. One never closed is
+                // copied as written for the regex parser to report.
                 int length = CommentLength(pattern, i);
                 if (length < 0)
                 {
@@ -56,17 +71,19 @@ internal static class OnigurumaPattern
             }
             else if (c == '(')
             {
-                groups.Push(sb.Length);
-                int length = GroupOpenLength(pattern, i);
+                int start = sb.Length, length = GroupOpenLength(pattern, i);
+                bool inner = ExtendedAfter(pattern.AsSpan(i, length), extended);
                 sb.Append(pattern, i, length);
                 i += length;
                 atom = -1;
-                // an inline option setting like (?i) closes at once and is not an atom
-                if (sb[^1] == ')') groups.Pop();
+                // an inline option setting like (?x) closes at once, is not an atom, and holds to the end of the enclosing group
+                if (sb[^1] != ')') groups.Push((start, extended));
+                extended = inner;
             }
             else if (c == ')')
             {
-                atom = groups.Count > 0 ? groups.Pop() : throw new NotSupportedException($"The pattern '{pattern}' closes a group it never opened.");
+                if (groups.Count == 0) throw new NotSupportedException($"The pattern '{pattern}' closes a group it never opened.");
+                (atom, extended) = groups.Pop();
                 sb.Append(c);
                 i++;
             }
@@ -85,7 +102,7 @@ internal static class OnigurumaPattern
                 i++;
             }
         }
-        // an unbalanced pattern is left for the regex parser to report: under (?x) a '(' in a '#' line comment is not a group
+        // an unbalanced pattern is left for the regex parser to report
         return sb.ToString();
     }
 
@@ -187,6 +204,20 @@ internal static class OnigurumaPattern
             else if (pattern[j] == ')') return j + 1 - start;
         }
         return -1;
+    }
+
+    // Whether (?x) holds after a group opener such as (?x), (?x:, (?i-x: or (?-x); any other opener keeps the current mode.
+    private static bool ExtendedAfter(ReadOnlySpan<char> open, bool current)
+    {
+        if (open.Length < 3 || open[1] != '?' || !(char.IsAsciiLetter(open[2]) || open[2] == '-')) return current;
+        bool on = true;
+        foreach (char ch in open[2..])
+        {
+            if (ch == '-') on = false;
+            else if (ch == 'x') current = on;
+            else if (ch is ':' or ')') break;
+        }
+        return current;
     }
 
     // "(", or a "(?" construct through the character that starts its body: (?: (?= (?! (?> (?<= (?<! (?<name> (?i) (?i-m:.

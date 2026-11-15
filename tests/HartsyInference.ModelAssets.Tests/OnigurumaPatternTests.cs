@@ -20,6 +20,8 @@ public sealed class OnigurumaPatternTests
     // a (?#) comment is dropped: its text is not pattern, and an escaped ')' (which .NET would stop at) does not end it
     [InlineData(@"a(?#[ not a class (x)b+", @"ab+")]
     [InlineData(@"a(?#x\)y)b", @"ab")]
+    // under (?x) whitespace is ignored, so the quantifier still repeats the atom before it
+    [InlineData("(?x)a {3}+", "(?x)(?:a {3})+")]
     public void Rewrites_the_forms_dotnet_reads_differently(string onig, string dotNet)
     {
         Assert.Equal(dotNet, OnigurumaPattern.ToDotNet(onig));
@@ -33,8 +35,15 @@ public sealed class OnigurumaPatternTests
     [InlineData(@"(?<name>a+?)(?i:b)(?<=c)x{2}?\{literal}")]
     // under (?x) a '(' in a '#' line comment is not a group, so the pattern is not refused as unbalanced
     [InlineData("(?x)a # (\nb")]
-    // nor is a '(?#' there a comment opener; one never closed is left for the regex parser
+    // nor is a '(?#' or a quantifier there pattern, closed or not
     [InlineData("(?x)a # (?#\nb")]
+    [InlineData("(?x)(a # (?#\nb)")]
+    [InlineData("(?x:a # x{2}+ (\n)b")]
+    // (?x) ends with its group, and (?-x) turns it off, so a later '#' is literal
+    [InlineData("(?x:a # c\n)#b")]
+    [InlineData("(?x)a # c\n(?-x)#b")]
+    // a capture name containing x is not an option
+    [InlineData("(?<x>a)#b")]
     public void Leaves_patterns_without_those_forms_unchanged(string pattern)
     {
         Assert.Equal(pattern, OnigurumaPattern.ToDotNet(pattern));
