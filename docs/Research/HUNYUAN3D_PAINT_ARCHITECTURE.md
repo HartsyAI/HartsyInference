@@ -148,7 +148,8 @@ materials; the table keyed by sequence length selects the resolution, so the num
 | Scheduler | `DdimVPredScheduler` is the sigmoid schedule, not this one. The scaled-linear zero-SNR beta table, v-prediction and UniPC multistep (and Euler-ancestral for 2.0) are new for a discrete-time model; `UniPcSampler` is the flow-matching variant. |
 | SD UNet blocks (`UNet`, `CrossAttentionBlock`) | Do not fit: the transformer layer is sealed inside `CrossAttentionBlock`, and the 2.5D block needs three extra attentions, per-material weights and a capture mode. A hook would touch the SD1.5 and SDXL hot path, so `HunyuanPaintUnet` composes the public pieces (`UNetResNetBlock`, `TimestepEmbedding`, `AttentionLayer`) in its own block. |
 | Rasterizer, `TextureBaker`, `Inpainter` (Telea), `PbrGlbWriter`, `UvUnwrapper`, `MeshDecimator` | Exist (UV-space raster, post-process). The Paint bake needs a **screen-space depth-buffered rasterizer**, an alpha/normal/position renderer, view selection, the back-projection weights and the merge: new. |
-| Canny edges, Navier-Stokes inpaint, vertex inpaint | Not in the repo; replaced by a depth-gradient edge test and the Telea `Inpainter`, a documented difference. |
+| Canny edges, Navier-Stokes inpaint | Not in the repo; replaced by a depth-gradient edge test and the Telea `Inpainter`, a documented difference. |
+| Vertex inpaint (`meshVerticeInpaint`, smooth) | Ported as `PaintVertexInpaint` (2026-11-15): seeds unpainted vertex texels before the 2D fill. Without it, a surface no view sees (a forehead under a hat brim) was filled from its UV chart alone and came out as coloured streaks. Differences: vertices at one position are one graph vertex, edges go both ways, painted texels are never overwritten. |
 | xatlas, pymeshlab | Replaced by `UvUnwrapper`, `MeshDecimator`, as for TRELLIS.2. |
 
 ## Implementation notes

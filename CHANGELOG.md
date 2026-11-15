@@ -3,6 +3,16 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.431
+
+- **Fixed: Hunyuan3D Paint no longer streaks surfaces that no view sees.** The engine filled unpainted texels from their UV chart alone, so a
+  surface hidden from all six views (a forehead under a hat brim, seen when looking up at the model) came out as coloured vertical streaks.
+  It now runs upstream's mesh-vertex inpaint first (`PaintVertexInpaint`, a port of `meshVerticeInpaint`): unpainted vertices take the
+  colour of the mesh around them, and those seed the 2D fill.
+- **Fixed: the reference picture is only baked onto surfaces that face the front.** It was also pasted onto surfaces turned far from the
+  front camera (a brim's underside), where the front picture has almost no pixels and stretched into a strip of face on the hat. It now
+  applies fully up to about 50 degrees off the view direction and fades out by about 70; the painted views cover the rest.
+
 ## alpha.430
 
 - **Fixed: `MeshCleaner.RemoveFlatComponents` sees a flat piece whatever way it is turned.** Thickness was the thinnest side of the
