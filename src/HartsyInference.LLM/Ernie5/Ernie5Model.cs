@@ -22,8 +22,10 @@ namespace HartsyInference.LLM.Ernie5;
 /// and dropped per forward. Not thread-safe: run one sequence at a time.</para>
 /// <para>A GPU linear reads its weight from the backend's weight cache, or uploads it for the one call. With
 /// <see cref="Ernie5LoadOptions.ResidentWeights"/> the load preloads every layer's per-token weights (<see cref="Ernie5Layer.EnumerateDenseWeights"/>)
-/// and the LM head, in layer order, while there is room; routed experts stay mapped on the host and the backend may keep the ones it sees
-/// reused. Streamed layers are new tensors on every forward, so nothing of theirs stays on the device.</para>
+/// and the LM head, in layer order, up to the device's free memory less a headroom kept for activations and routed-expert uploads; routed
+/// experts stay mapped on the host and the backend may keep the ones it sees reused. The MTP layer is not preloaded, so with
+/// <see cref="Ernie5LoadOptions.Mtp"/> its weights upload per call. Streamed layers are new tensors on every forward, so nothing of theirs
+/// stays on the device.</para>
 /// </remarks>
 public sealed class Ernie5Model : IDisposable
 {
@@ -213,6 +215,8 @@ public sealed class Ernie5Model : IDisposable
                 // TODO(ernie5): a model larger than one device's memory runs its routed experts from host memory. A multi-device path is not
                 // built. Finish it by placing the layers across the devices and reusing them here.
                 long layerStart = Stopwatch.GetTimestamp();
+                // A start with no matching end line is how a stall inside a layer shows up.
+                Logs.Debug($"[ernie5] layer {i + 1}/{_layers.Length} start");
                 Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
                 double layerBuildMs = Stopwatch.GetElapsedTime(layerStart).TotalMilliseconds;
                 long runStart = Stopwatch.GetTimestamp();
@@ -244,15 +248,42 @@ public sealed class Ernie5Model : IDisposable
         return stream;
     }
 
-    // Each layer's per-token weights, then the LM head, into the backend's weight cache; a weight that does not fit stays on the host.
+    // Each layer's per-token weights, then the LM head, into the backend's weight cache, in order, until the next set would cross the budget:
+    // the device's free memory less a headroom for activations and the per-call routed-expert uploads. A layer that does not fit, and every
+    // layer after it, stays on the host. The budget is checked here, not left to the backend's preload, which fails the whole load on an
+    // out-of-memory error where the driver does not report a full device first.
     private void PreloadDense()
     {
         long start = Stopwatch.GetTimestamp();
+        DeviceMemoryUsage usage = _backend.GetDeviceMemoryUsage();
+        long budget = PreloadBudget(usage.FreeBytes, usage.TotalBytes), used = 0;
+        int layers = 0;
         _preloaded = true;
-        foreach (Ernie5Layer? layer in _layers) _backend.PreloadWeights(layer!.EnumerateDenseWeights());
-        _backend.PreloadWeights([_lmHead!]);
-        Logs.Info($"[ernie5] preloaded per-token weights in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s{DeviceSummary()}");
+        foreach (Ernie5Layer? layer in _layers)
+        {
+            List<Tensor> weights = [.. layer!.EnumerateDenseWeights()];
+            long bytes = Bytes(weights);
+            if (used + bytes > budget) break;
+            _backend.PreloadWeights(weights);
+            used += bytes;
+            layers++;
+        }
+        bool head = layers == _layers.Length && used + Bytes([_lmHead!]) <= budget;
+        if (head) _backend.PreloadWeights([_lmHead!]);
+        Logs.Info($"[ernie5] preloaded {layers}/{_layers.Length} layers' per-token weights{(head ? " and the LM head" : "")}, "
+            + $"{used / (1 << 20)} MB of a {Math.Max(budget, 0) / (1 << 20)} MB budget, in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s{DeviceSummary()}");
     }
+
+    /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB.
+    /// Zero when the backend does not report its memory.</summary>
+    internal static long PreloadBudget(long free, long total)
+    {
+        if (free <= 0 || total <= 0) return 0;
+        long headroom = Math.Max(3L << 30, total * 15 / 100);
+        return Math.Max(free - headroom, 0);
+    }
+
+    private static long Bytes(IEnumerable<Tensor> weights) => weights.Sum(t => t.DType.ComputeByteCount(t.ElementCount));
 
     private string DeviceSummary()
     {
