@@ -5,6 +5,10 @@ The semantics every attention kernel, planner row and model-side layer in this e
 executable form, and a kernel that disagrees with it beyond the tolerance of the precision it was permitted is wrong,
 whatever any model's output looks like. Code comments point here instead of restating it.
 
+The [support and admission contract](ATTENTION_SUPPORT.md) distinguishes mandatory common cases, optional
+backend capabilities and current implementation gaps. Normative semantics do not assert that every feature is
+represented by the current API or already verified on every backend.
+
 ## 1. Operands and shapes
 
 One call computes, for every batch `b`, query head `h` and query row `i`:
@@ -194,7 +198,8 @@ unsmoothed one.
 
 The planner reproduces these until the row that owns each is rewritten.
 
-- A fully excluded row gives the mean of V on CUDA's cuDNN and materialized F32 paths, and zero on the flash kernels.
+- CPU dense SIMD softmax still produces NaN for a fully excluded row. PR 02's executed CUDA materialized and
+  cuDNN 9.21 controls return zero; that cohort-specific evidence does not verify every cuDNN release.
 - A sliding window without `Causal` keeps every later key on CUDA and excludes them on Vulkan.
 - CUDA's token-major permute fallback refuses key-only masks, masks with `B ≠ 1` and `B ≠ 1` operands; its cuDNN rows and its
   head-major entry accept them.

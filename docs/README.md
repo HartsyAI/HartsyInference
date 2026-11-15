@@ -8,6 +8,7 @@ git preserves removed history.
 |---|---|
 | Coding rules | [CODE_STYLE.md](CODE_STYLE.md) |
 | Attention semantics, numerical permissions and kernel planning | [ATTENTION_CONTRACT.md](ATTENTION_CONTRACT.md) |
+| Mandatory common attention cases, optional backend capabilities and current admission gaps | [ATTENTION_SUPPORT.md](ATTENTION_SUPPORT.md) |
 | Generic layout ops: strided views, strided copy and accumulate, pad | [BACKEND_OPS.md](BACKEND_OPS.md) |
 | Current model support and model-specific gaps | [Checklists/MODEL_STATUS.md](Checklists/MODEL_STATUS.md) |
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
