@@ -59,9 +59,15 @@ internal static class AttentionEvidenceRunner
             string expectedRoute = registeredBranch ?? initialRoute ?? "";
             if (string.IsNullOrEmpty(expectedRoute) || initialRoute != expectedRoute)
                 throw new InvalidOperationException("Executed branch does not match the requested evidence cell.");
+            string? tracePath = options.GetValueOrDefault("trace-out");
+            if (tracePath is not null && (evidence is not null || boundary != "public"))
+                throw new ArgumentException("--trace-out is a public-boundary diagnostic; it cannot combine with --observe or another boundary.");
             double[] milliseconds = new double[trials];
             using DeviceTimer timer = new(backend, boundary == "resident");
-            for (int i = 0; i < trials; i++)
+            if (tracePath is not null)
+                milliseconds = AttentionTimingTrace.Run(backend, operation, route, expectedRoute, trials, tracePath, boundary,
+                    AttentionTimingTrace.Header(expectedRoute, fixture.ManifestHash, arm.Name));
+            for (int i = 0; i < trials && tracePath is null; i++)
             {
                 backend.Sync();
                 if (boundary == "resident") milliseconds[i] = timer.Measure(operation) / 32;
@@ -103,6 +109,7 @@ internal static class AttentionEvidenceRunner
             writer.WriteString("tool_sha256", Hash(typeof(AttentionEvidenceRunner).Assembly.Location));
             writer.WriteString("case_id", fixture.CaseId);
             writer.WriteString("fixture_sha256", fixture.ManifestHash);
+            writer.WriteString("measurement_mode", tracePath is null ? "acceptance" : "diagnostic-trace");
             writer.WriteString("backend", hardware.Kind.ToString().ToLowerInvariant());
             writer.WriteString("device", backend.Capabilities.DeviceName);
             writer.WriteString("arm", arm.Name);
@@ -114,7 +121,7 @@ internal static class AttentionEvidenceRunner
             writer.WriteBoolean("legacy_asserted_bounded", call.Numerics.LegacyAssertedBounded);
             writer.WriteString("query_key_permissions", call.Numerics.QueryKey.ToString());
             writer.WriteString("prob_value_permissions", call.Numerics.ProbValue.ToString());
-            writer.WriteBoolean("timing_eligible", boundary != "observe" && fixture.AcceptanceReviewed && quality);
+            writer.WriteBoolean("timing_eligible", tracePath is null && boundary != "observe" && fixture.AcceptanceReviewed && quality);
             writer.WriteString("knobs", AttentionArms.Provenance());
             writer.WriteStartObject("resolved_settings");
             foreach ((string key, string value) in settings) writer.WriteString(key, value);
