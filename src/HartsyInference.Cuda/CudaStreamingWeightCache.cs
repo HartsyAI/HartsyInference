@@ -159,6 +159,14 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
 
     private unsafe void UploadOne(Tensor weight, ulong dptr, nuint byteSize, nint staging, ref nuint stagingOffset)
     {
+        // A borrowed mapped view is read with positional reads into the backend's staging buffer, as every other upload of one
+        // is: copying straight from the mapping page-faults inside the copy, which stalled whole runs on a network volume.
+        // That copy is synchronous on the upload stream, so it does not overlap compute.
+        if (_state is not null && Core.Backends.Gpu.MappedUploadStaging.IsMappedView(weight))
+        {
+            GpuTransferHelper.StageMappedUpload(_state, dptr, weight, byteSize, _uploadStream);
+            return;
+        }
         nint hostSrc = (nint)weight.DataPointer;
         if (staging != 0)
         {

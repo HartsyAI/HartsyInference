@@ -80,8 +80,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         if (_packed is not null) throw new NotSupportedException("Packed MXFP4 experts run resident; they cannot be offloaded.");
         ArgumentNullException.ThrowIfNull(offload);
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
-        // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward.
-        _ = HostExpertProgram(_moe.Activation);
+        // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward. An offload
+        // without a host runner runs every miss on the device, where every activation runs.
+        if (offload.Host is not null) _ = HostExpertProgram(_moe.Activation);
         int e = _moe.NumExperts;
         offload.RegisterLayer(layer, e, ResolveExpert);
         _offIds = new int[e * Math.Max(1, _moe.NumExpertsPerTok)];
@@ -316,9 +317,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
     /// <summary>Every weight of the block, the per-token ones (<see cref="EnumerateDenseWeights"/>) first, so a preload that runs out of
     /// room drops routed experts rather than the router.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    public IEnumerable<Tensor> EnumerateWeights() => EnumerateDenseWeights().Concat(EnumerateExpertWeights());
+
+    /// <summary>The routed experts' projections, three per expert in expert order.</summary>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
     {
-        foreach (Tensor t in EnumerateDenseWeights()) yield return t;
         if (_packed is null)
         {
             for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
@@ -676,7 +679,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 }
                 float[] inBuf = hostIn!, outBuf = hostOut!;
                 ExpertAssignment[] plan = _offPlan;
-                IExpertHostRunner runner = offload.Host;
+                IExpertHostRunner runner = offload.Host!;
                 // One expert at a time: the runner spreads each expert's rows across every core, which a layer's three or four
                 // single-row experts at decode could not fill on their own.
                 for (int j = 0; j < hostExperts; j++)

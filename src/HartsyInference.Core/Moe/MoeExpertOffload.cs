@@ -22,7 +22,8 @@ public readonly record struct MoeOffloadStats(long ResidentRows, long StreamedRo
 /// Expert offload for one model: a device cache holds as many routed experts as its budget allows, and the rest run elsewhere.
 /// An expert the cache holds runs on the device; a miss runs on the CPU through <see cref="Host"/>, or, when it serves at least
 /// <see cref="StreamRowThreshold"/> rows in one call (a prefill), on the device from a copy uploaded for that call, since moving its
-/// weights once costs less than computing that many rows on the CPU.
+/// weights once costs less than computing that many rows on the CPU. With no host runner every miss runs on the device that way,
+/// for experts the CPU kernels cannot read.
 /// </summary>
 /// <remarks>
 /// <para><b>Admission.</b> After a layer runs, its misses may be queued for upload so later steps find them resident. Misses fill
@@ -48,13 +49,12 @@ public sealed class MoeExpertOffload : IDisposable
 
     /// <summary>Creates the offload over <paramref name="cache"/>, which must not have been used yet.</summary>
     /// <param name="cache">The device expert cache; its budget is the offload's expert budget.</param>
-    /// <param name="host">Runs experts on the CPU.</param>
+    /// <param name="host">Runs experts on the CPU; null runs every miss on the device from a copy uploaded for that call.</param>
     /// <param name="scores">Recent-use scores: attached to <paramref name="cache"/> to choose eviction victims, and read for admission.</param>
     /// <param name="owned">Disposed with the offload after the cache, for whatever else the caller built for it.</param>
-    public MoeExpertOffload(ExpertCacheBase cache, IExpertHostRunner host, DecayedLfuHysteresisPolicy scores, IDisposable? owned = null)
+    public MoeExpertOffload(ExpertCacheBase cache, IExpertHostRunner? host, DecayedLfuHysteresisPolicy scores, IDisposable? owned = null)
     {
         ArgumentNullException.ThrowIfNull(cache);
-        ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(scores);
         if (cache is not IResidencyAwareExpertCache residency)
             throw new ArgumentException("The offload needs a residency-aware cache.", nameof(cache));
@@ -72,8 +72,8 @@ public sealed class MoeExpertOffload : IDisposable
     /// <summary>The device cache, for prefetching and stats.</summary>
     public ExpertCacheBase CacheBase { get; }
 
-    /// <summary>Runs the experts the device does not hold.</summary>
-    public IExpertHostRunner Host { get; }
+    /// <summary>Runs the experts the device does not hold; null when every miss runs on the device.</summary>
+    public IExpertHostRunner? Host { get; }
 
     /// <summary>Resident experts on the device, misses elsewhere; the planner never uploads.</summary>
     public IMissExecutionPolicy Policy => ResidentFirstPolicy.Instance;
@@ -112,7 +112,7 @@ public sealed class MoeExpertOffload : IDisposable
     }
 
     /// <summary>Whether a miss serving <paramref name="rows"/> pairs runs on the device from an uploaded copy rather than on the CPU.</summary>
-    public bool Streams(int rows) => rows >= StreamRowThreshold;
+    public bool Streams(int rows) => Host is null || rows >= StreamRowThreshold;
 
     /// <summary>Counts one expert's rows by where they ran.</summary>
     public void Record(ExpertPlacement placement, bool streamed, int rows)
