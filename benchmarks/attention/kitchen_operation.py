@@ -18,11 +18,13 @@ def main(argv=None):
     parser.add_argument('--trials', type=int, default=1)
     parser.add_argument('--out', required=True)
     parser.add_argument('--mandatory', action='store_true')
+    parser.add_argument('--diagnostics', action='store_true')
     args = parser.parse_args(argv)
     if args.trials <= 0: raise ValueError('At least one trial is required')
     output = pathlib.Path(args.out)
     if output.exists(): raise ValueError('Results are immutable; choose a fresh output path')
     result = {'schema': 1, 'k0_status': 'Not executed', 'api': args.api, 'boundary': args.boundary,
+              'diagnostics': args.diagnostics, 'timing_eligible': not args.diagnostics,
               'fixture_sha256': sha256(args.fixture), 'environment_sha256': sha256(args.environment)}
     try:
         environment = json.loads(pathlib.Path(args.environment).read_text())
@@ -46,6 +48,12 @@ def main(argv=None):
             storage = torch.frombuffer(bytearray(tensor_path(pathlib.Path(args.fixture).parent, descriptor).read_bytes()), dtype=dtype).to('cuda')
             tensors[name] = torch.as_strided(storage, descriptor['shape'], descriptor['strides'], descriptor['offset'])
         q, k, v = (tensors[name] for name in ('q', 'k', 'v'))
+        result['cuda_extension_available'] = environment['capabilities'].get('extension_available', False)
+        if args.api in ('sage', 'prequantized'):
+            result['native_available'] = sa.is_available(q.device)
+        elif args.api == 'decode': result['native_available'] = fa.is_available(q.device)
+        elif args.api in ('decode-gqa', 'tree-merge', 'step-merge'):
+            result['native_available'] = q.shape[-1] == 256 and fa.flash_attention_decode_gqa_is_available(q.device, q.dtype)
         bias = tensors.get('bias')
         lengths = spec.get('kv_lengths', [spec['kv_length']] * q.shape[0])
         length_tensor = torch.tensor(lengths, device='cuda', dtype=torch.int32)
@@ -53,7 +61,7 @@ def main(argv=None):
         if args.api in ('sage', 'prequantized'):
             if spec['causal']: raise NotImplementedError('Sage needs a frozen explicit mask for causal comparison')
             prepare = lambda: sa.prequantize_int8_attention(q, k, v, scale=spec['scale'], attn_mask=bias)
-            if args.api == 'prequantized': prepared = prepare()
+            if args.api == 'prequantized' and args.boundary != 'preparation': prepared = prepare()
             operation = (lambda: sa.int8_attention(q, k, v, scale=spec['scale'], attn_mask=bias)) if prepared is None else (
                 lambda: sa.int8_attention_from_prequantized(prepared))
             canonical = lambda value: value
@@ -111,31 +119,51 @@ def main(argv=None):
         except (ValueError, TypeError) as error:
             result.update(k0_status='K0-rejected', reason=str(error))
             return 2
-        for _ in range(10): operation()
+        observed = None
+        for _ in range(9): operation()
         torch.cuda.synchronize()
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as trace:
-            operation()
-            torch.cuda.synchronize()
-        result['gpu_kernels'] = sorted({event.name for event in trace.events() if 'CUDA' in str(event.device_type)})
+        called = set()
+        def trace_calls(frame, event, argument):
+            module = frame.f_globals.get('__name__', '')
+            if event == 'call' and module.startswith('comfy_kitchen'):
+                called.add(module + ':' + frame.f_code.co_qualname)
+        if args.diagnostics:
+            previous_profile = sys.getprofile()
+            try:
+                sys.setprofile(trace_calls)
+                with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as trace:
+                    operation()
+                    torch.cuda.synchronize()
+            finally:
+                sys.setprofile(previous_profile)
+            result['executed_python_functions'] = sorted(called)
+            result['gpu_kernels'] = sorted({event.name for event in trace.events() if 'CUDA' in str(event.device_type)})
+            result['aten_operations'] = sorted({event.name for event in trace.events() if event.name.startswith('aten::')})
+            result['kernel_trace_available'] = bool(result['gpu_kernels'])
         start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         elapsed = []
         for _ in range(args.trials):
+            observed = None
             torch.cuda.synchronize()
             if args.boundary == 'resident':
                 start.record()
-                for _ in range(32): observed = operation()
+                for _ in range(32):
+                    observed = None
+                    observed = operation()
                 end.record(); end.synchronize()
                 elapsed.append(start.elapsed_time(end) / 32)
             else:
                 before = time.perf_counter_ns()
                 observed = operation(); torch.cuda.synchronize()
                 elapsed.append((time.perf_counter_ns() - before) / 1e6)
-        if args.boundary == 'preparation': observed = sa.int8_attention_from_prequantized(observed)
-        if prepared is not None:
+        state = observed if args.boundary == 'preparation' else prepared
+        if args.boundary == 'preparation': observed = sa.int8_attention_from_prequantized(state)
+        result['output_device'] = str((observed[0] if isinstance(observed, tuple) else observed).device)
+        if state is not None:
             result['prepared_state'] = {name: {'dtype': str(value.dtype), 'shape': list(value.shape),
                                               'stride': list(value.stride())}
                                         if isinstance(value, torch.Tensor) else str(value)
-                                        for name, value in vars(prepared).items()}
+                                        for name, value in vars(state).items()}
         actual = canonical(observed[0] if isinstance(observed, tuple) else observed).cpu().double()
         if args.api == 'sol' and 'block_len' in spec.get('sol', {}):
             live = torch.tensor(spec['sol']['block_len']).clamp(1, 64)
@@ -163,8 +191,13 @@ def main(argv=None):
                       dtype=str(actual.dtype), output_storage_dtype=str((observed[0] if isinstance(observed, tuple) else observed).dtype))
         return 0 if quality else 1
     except Exception as error:
-        if type(error).__name__ in ('OutOfMemoryError', 'MemoryError'):
+        if type(error).__name__ in ('NoCapableBackendError', 'BackendNotFoundError'):
+            result['k0_status'] = 'K0-rejected'
+        elif type(error).__name__ in ('OutOfMemoryError', 'MemoryError'):
             result['k0_status'] = 'Not executed'
+        elif args.api in ('sage', 'prequantized', 'decode') and result.get('native_available') is False \
+                and isinstance(error, RuntimeError) and 'requires' in str(error):
+            result['k0_status'] = 'K0-rejected'
         result['reason'] = type(error).__name__ + ': ' + str(error)
         return 2 if result['k0_status'] == 'Not executed' else 1
     finally:

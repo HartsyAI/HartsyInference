@@ -27,9 +27,16 @@ def cells(cohort, declarations):
     for dim in (1, 40, 80, 96, 112, 160, 255, 257):
         add(f'sage-padding-d{dim}', 'sage', 'sage-padding',
             dict(batch=1, heads=4, kv_heads=2, sq=16, skv=48, dim=dim, dtype='f16', precision='int8'), sage_native)
+        if dim == 257:
+            result[-1]['expected_admission'] = 'K0-rejected: public maximum head dimension is 256'
+            result[-1]['hartsy_required'] = {'cuda': 'not an execution-parity cell', 'vulkan': 'not an execution-parity cell'}
     for sq, skv in ((16, 48), (48, 16)):
         add(f'sage-length-{sq}-{skv}', 'sage', 'sage-grouping',
             dict(batch=1, heads=4, kv_heads=1, sq=sq, skv=skv, dim=64, dtype='f16', precision='int8'), sage_native)
+    for dim, length, shifted in itertools.product((64, 80, 128, 160, 256), (257, 1025), (False, True)):
+        add(f'sage-rotation-d{dim}-kv{length}-shift{int(shifted)}', 'sage', 'sage-rotation',
+            dict(batch=1, heads=4, kv_heads=2, sq=16, skv=length, dim=dim, dtype='f16', precision='int8',
+                 key_shift=25. if shifted else 0., representative_key_probe=shifted), sage_native)
     for dtype, broadcast in itertools.product(('bool', 'f16', 'bf16', 'f32'), ('key', 'query', 'head', 'batch', 'full')):
         add(f'sage-mask-{dtype}-{broadcast}', 'sage', 'sage-masks',
             dict(batch=2, heads=4, kv_heads=2, sq=16, skv=48, dim=64, dtype='f16', precision='int8',
@@ -51,10 +58,14 @@ def cells(cohort, declarations):
     for routing, tail, partial in itertools.product(('tau', 'topk'), (False, True), (False, True)):
         add(f'sol-{routing}-tail{int(tail)}-partial{int(partial)}', 'sol', 'sol-general',
             dict(batch=1, heads=2, kv_heads=2, sq=257 if partial else 256, skv=257 if partial else 256,
-                 dim=64, dtype='f16', precision='f16', routing=routing, tail=tail),
-            'Pinned registry admission; record native versus eager GPU fallback independently')
+                 dim=128, dtype='bf16', precision='bf16', routing=routing, tail=tail),
+            'Pinned registry: head dimension 128; record native versus eager GPU fallback independently')
     for option in ('key_bias_bool', 'key_bias_additive', 'sink_blocks', 'sink_q', 'block_len', 'coarse_gate', 'token_aug'):
         add('sol-' + option, 'sol', 'sol-general', dict(batch=1, heads=2, kv_heads=2, sq=257, skv=257,
-            dim=64, dtype='f16', precision='f16', option=option),
-            'Pinned registry admission; option-specific public/native restrictions require runtime probes')
+            dim=128, dtype='bf16', precision='bf16', option=option),
+            'Pinned registry: head dimension 128; option-specific public/native restrictions require runtime probes')
+    add('sol-negative-d64', 'sol', 'sol-general', dict(batch=1, heads=2, kv_heads=2, sq=257, skv=257,
+        dim=64, dtype='f16', precision='f16'), 'Common public call rule requires head dimension 128')
+    result[-1]['expected_admission'] = 'K0-rejected: sol_attn_common_call_rule'
+    result[-1]['hartsy_required'] = {'cuda': 'not an execution-parity cell', 'vulkan': 'not an execution-parity cell'}
     return result

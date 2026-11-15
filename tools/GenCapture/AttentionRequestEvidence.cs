@@ -27,8 +27,9 @@ internal static class AttentionRequestEvidence
         string prompt = File.ReadAllText(promptPath);
         string selector = options.GetValueOrDefault("backend", "cuda:0");
         string lane = options.GetValueOrDefault("lane", "paged");
-        if (lane is not ("paged" or "dense" or "graph")) throw new ArgumentException("Unknown request lane.");
-        bool paged = family == "qwen" && options.GetValueOrDefault("lane", "paged") == "paged";
+        if (lane is not ("paged" or "batched" or "dense" or "graph")) throw new ArgumentException("Unknown request lane.");
+        int batchSize = lane == "batched" ? 2 : 1;
+        bool paged = family == "qwen" && (lane is "paged" or "batched");
         bool graph = family == "qwen" && options.GetValueOrDefault("lane", "paged") == "graph";
         Dictionary<string, string> auxiliary = new(StringComparer.Ordinal);
         if (manifest.TryGetProperty("aux", out JsonElement aux))
@@ -71,16 +72,22 @@ internal static class AttentionRequestEvidence
             {
                 for (int i = 0; i < 3; i++)
                 {
-                    if (family == "qwen") Check(await engine.Text.GenerateAsync(spec, text));
+                    if (family == "qwen")
+                    {
+                        if (batchSize == 1) Check(await engine.Text.GenerateAsync(spec, text));
+                        else foreach (TimedRequest result in await BatchAsync(engine, spec, text)) Check(result.Result);
+                    }
                     else _ = await engine.Images.GenerateAsync(spec, image);
                 }
                 long measuredObservationStart = evidence is null ? 0
                     : (long)evidence.GetType().GetProperty("Attempted")!.GetValue(evidence)!;
                 long start = Stopwatch.GetTimestamp();
-                TextResult? completion = family == "qwen" ? await engine.Text.GenerateAsync(spec, text) : null;
+                TextResult? completion = family == "qwen" && batchSize == 1 ? await engine.Text.GenerateAsync(spec, text) : null;
+                TimedRequest[]? batched = family == "qwen" && batchSize > 1 ? await BatchAsync(engine, spec, text) : null;
                 ImageResult? pixels = family == "krea" ? await engine.Images.GenerateAsync(spec, image) : null;
                 double milliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
                 if (completion is not null) Check(completion);
+                if (batched is not null) foreach (TimedRequest result in batched) Check(result.Result);
                 if (pixels is not null && (pixels.Width != 1024 || pixels.Height != 1024))
                     throw new InvalidDataException("The image workload changed dimensions.");
                 if (evidence is not null)
@@ -102,7 +109,7 @@ internal static class AttentionRequestEvidence
                 writer.WriteStartObject("resolved_settings");
                 foreach ((string key, string value) in settings) writer.WriteString(key, value);
                 writer.WriteEndObject();
-                writer.WriteString("lane", family == "krea" ? "image" : paged ? "paged" : graph ? "graph" : "dense");
+                writer.WriteString("lane", family == "krea" ? "image" : lane);
                 writer.WriteString("telemetry", evidence is null ? "disabled" : "enabled");
                 writer.WriteNumber("measured_observation_start", measuredObservationStart);
                 writer.WriteString("observations_include", "model loading, two request warmups, then the measured request");
@@ -117,12 +124,43 @@ internal static class AttentionRequestEvidence
                     writer.WriteNumber("decode_ms", completion.DecodeMilliseconds);
                 }
                 if (pixels is not null) writer.WriteString("rgb_sha256", Convert.ToHexString(SHA256.HashData(pixels.Rgb)));
+                if (batched is not null)
+                {
+                    writer.WriteNumber("batch_size", batched.Length);
+                    writer.WriteNumber("tokens_per_second", 128 * batched.Length / milliseconds * 1000);
+                    writer.WriteStartArray("requests");
+                    foreach (TimedRequest sample in batched)
+                    {
+                        TextResult result = sample.Result;
+                        writer.WriteStartObject();
+                        writer.WriteNumber("milliseconds", sample.Milliseconds);
+                        writer.WriteNumber("prompt_tokens", result.PromptTokens);
+                        writer.WriteNumber("completion_tokens", result.CompletionTokens);
+                        writer.WriteString("text", result.Text);
+                        writer.WriteNumber("prefill_ms", result.PrefillMilliseconds);
+                        writer.WriteNumber("decode_ms", result.DecodeMilliseconds);
+                        writer.WriteEndObject();
+                    }
+                    writer.WriteEndArray();
+                }
                 writer.WriteEndObject();
                 return 0;
             }
             finally { evidence?.Dispose(); }
         }
     }
+
+    private static Task<TimedRequest[]> BatchAsync(InferenceEngine engine, ModelSpec spec, TextRequest request) =>
+        Task.WhenAll(TimedAsync(engine, spec, request), TimedAsync(engine, spec, request));
+
+    private static async Task<TimedRequest> TimedAsync(InferenceEngine engine, ModelSpec spec, TextRequest request)
+    {
+        long start = Stopwatch.GetTimestamp();
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        return new(result, Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+    }
+
+    private readonly record struct TimedRequest(TextResult Result, double Milliseconds);
 
     private static void Check(TextResult result)
     {

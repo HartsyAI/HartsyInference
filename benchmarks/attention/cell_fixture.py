@@ -29,6 +29,11 @@ def materialize(root, cell):
         document['tensors'][name] = {'file': file.name, 'sha256': sha256(file), 'dtype': dtype,
                                       'shape': shape, 'storage_shape': shape, 'strides': strides, 'offset': 0}
 
+    if p.get('key_shift'):
+        descriptor = document['tensors']['k']
+        values = decode((root / descriptor['file']).read_bytes(), descriptor['dtype'])
+        tensor('k', (value + p['key_shift'] for value in values), descriptor['shape'], descriptor['dtype'])
+
     if p.get('layout') == 'strided':
         for name in ('q', 'k', 'v'):
             descriptor = document['tensors'][name]

@@ -94,8 +94,10 @@ isolated environment, retain its hash, then lock:
   --api sage --boundary resident --trials 1 --out /external/evidence/kitchen.json
 ```
 
-An unavailable extension writes a non-ready lock and exits unsuccessfully. It is never a fallback performance
-result. The lock records executable, dependencies, wheels, extension and Torch-native hashes plus runtime GPU
+An unavailable extension records `native_ready: false`; a clean Python-only K0 can still probe public APIs with
+valid GPU fallbacks. An incompatible import, source mismatch or unavailable CUDA writes a non-ready lock and
+exits unsuccessfully. Native availability never establishes execution through a fallback. The lock records
+executable, dependencies, wheels, installed Python source, extension and Torch-native hashes plus runtime GPU
 queries. Before a mandatory campaign, review compiler flags and native identities, validate complete-operation
 versus resident-device timing, prepared-state reuse accounting, and output-format/precision equivalence. An
 unreviewed pilot result cannot establish a matched-quality Kitchen gate. Partial-block Sol rows explicitly marked
@@ -116,8 +118,9 @@ dotnet /external/evidence/b0-request/hartsy-gencapture.dll attention-request \
 
 The request tool loads the model, performs the protocol warmups, then times the public Engine result including
 request-owned scheduler cleanup. It rejects early EOS or changed lengths. `dense` and `graph` lanes are separate;
-verify replay rather than assuming admission. Batched serving and request-level memory/TTFT sampling still need
-the campaign integration before exit. Krea manifests must pin DiT, text encoder, VAE, prompt and auxiliary assets;
+verify replay rather than assuming admission. The separate `batched` lane submits two concurrent ordinary requests
+and records group throughput plus each request's latency; its trace must prove actual batching. Request-level
+memory/TTFT sampling still needs campaign integration before exit. Krea manifests must pin DiT, encoder, VAE and auxiliary assets;
 the request specifies the protocol image settings. Freeze quality gates before comparing candidates.
 
 `telemetry_check.py` compares pristine/disabled/enabled operation results, complete output hashes and existing

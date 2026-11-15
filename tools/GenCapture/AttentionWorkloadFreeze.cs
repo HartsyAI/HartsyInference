@@ -51,19 +51,13 @@ internal static class AttentionWorkloadFreeze
         using (Utf8JsonWriter json = new(identity))
         {
             json.WriteStartObject();
-            foreach (string key in new[] { "tokenizer.ggml.tokens", "tokenizer.ggml.merges" })
+            foreach (string key in loader.Metadata.Keys.Where(key => key.StartsWith("tokenizer.", StringComparison.Ordinal))
+                .Order(StringComparer.Ordinal))
             {
-                json.WriteStartArray(key);
-                foreach (string value in loader.Metadata.GetStringArray(key) ?? []) json.WriteStringValue(value);
-                json.WriteEndArray();
+                loader.Metadata.TryGetValue(key, out object? value);
+                json.WritePropertyName(key);
+                WriteMetadata(json, value);
             }
-            json.WriteStartArray("tokenizer.ggml.token_type");
-            foreach (int value in loader.Metadata.GetIntArray("tokenizer.ggml.token_type") ?? []) json.WriteNumberValue(value);
-            json.WriteEndArray();
-            foreach (string key in new[] { "tokenizer.ggml.model", "tokenizer.ggml.pre", "tokenizer.chat_template" })
-                json.WriteString(key, loader.Metadata.GetString(key));
-            foreach (string key in new[] { "tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id", "tokenizer.ggml.eot_token_id" })
-                json.WriteNumber(key, loader.Metadata.GetInteger(key, -1));
             json.WriteEndObject();
         }
         string tokenizerPath = Path.Combine(directory, "embedded-tokenizer.json");
@@ -85,6 +79,28 @@ internal static class AttentionWorkloadFreeze
         writer.WriteString("status", "candidate; B0 natural 128-token completion and executed-path proof required");
         writer.WriteEndObject();
         return 0;
+    }
+
+    private static void WriteMetadata(Utf8JsonWriter writer, object? value)
+    {
+        switch (value)
+        {
+            case null: writer.WriteNullValue(); break;
+            case string text: writer.WriteStringValue(text); break;
+            case bool boolean: writer.WriteBooleanValue(boolean); break;
+            case byte or ushort or uint or ulong:
+                writer.WriteNumberValue(Convert.ToUInt64(value, System.Globalization.CultureInfo.InvariantCulture)); break;
+            case sbyte or short or int or long:
+                writer.WriteNumberValue(Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)); break;
+            case float single: writer.WriteNumberValue(single); break;
+            case double number: writer.WriteNumberValue(number); break;
+            case Array array:
+                writer.WriteStartArray();
+                foreach (object? item in array) WriteMetadata(writer, item);
+                writer.WriteEndArray();
+                break;
+            default: throw new NotSupportedException("Unknown tokenizer metadata type: " + value.GetType().Name);
+        }
     }
 
     private static string Hash(string path)

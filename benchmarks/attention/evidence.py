@@ -63,6 +63,8 @@ def environment(kitchen, wheelhouse):
     extensions = {}
     reasons = []
     capabilities = {}
+    installed_sources = {}
+    native_ready = False
     try:
         import comfy_kitchen
         from comfy_kitchen.backends import cuda
@@ -73,8 +75,15 @@ def environment(kitchen, wheelhouse):
         capabilities = {'extension_available': cuda._EXT_AVAILABLE,
                         'sage_native': sage.is_available(), 'decode_native': flash.is_available(),
                         'gqa_bf16_native': flash.flash_attention_decode_gqa_is_available()}
-        if not cuda._EXT_AVAILABLE: reasons.append('native Kitchen extension is unavailable')
-    except (ImportError, OSError, RuntimeError) as error:
+        native_ready = bool(cuda._EXT_AVAILABLE and extensions)
+        if cuda._EXT_AVAILABLE and not extensions: reasons.append('native extension hashes are missing')
+        for relative in command('git', '-C', str(kitchen), 'ls-files', 'comfy_kitchen').splitlines():
+            if not relative.endswith('.py'): continue
+            file = installed / pathlib.Path(relative).relative_to('comfy_kitchen')
+            if not file.exists() or sha256(file) != sha256(kitchen / relative):
+                reasons.append('installed Python source differs from K0: ' + relative)
+            else: installed_sources[relative] = sha256(file)
+    except (ImportError, OSError, RuntimeError, ValueError, AttributeError) as error:
         reasons.append('Kitchen import/capability query failed: ' + str(error))
     wheels = {path.name: sha256(path) for path in pathlib.Path(wheelhouse).glob('*.whl')}
     packages = sorted({(dist.metadata['Name'], dist.version) for dist in importlib.metadata.distributions()})
@@ -83,7 +92,6 @@ def environment(kitchen, wheelhouse):
     isolated = isolated and 'include-system-site-packages = false' in config.read_text().lower()
     if not isolated: reasons.append('interpreter is not an isolated user-site-disabled virtual environment')
     if not wheels: reasons.append('dependency wheel hashes are missing')
-    if not extensions: reasons.append('native extension hashes are missing')
     if not torch.cuda.is_available(): reasons.append('CUDA unavailable')
     identities = {}
     for name, args in {'nvcc': ['nvcc', '--version'],
@@ -97,6 +105,8 @@ def environment(kitchen, wheelhouse):
             'torch': torch.__version__, 'torch_cuda': torch.version.cuda,
             'packages': [{'name': name, 'version': version} for name, version in packages],
             'wheel_hashes': wheels, 'extension_hashes': extensions, 'isolated': isolated,
+            'python_source_hashes': installed_sources, 'native_ready': native_ready,
+            'readiness_scope': 'public GPU API probes; native availability is evaluated separately for each cell',
             'toolchain_driver': identities, 'torch_native_hashes': native,
             'cuda_available': torch.cuda.is_available(), 'capabilities': capabilities,
             'gpu': [{'name': torch.cuda.get_device_name(i), 'capability': list(torch.cuda.get_device_capability(i)),

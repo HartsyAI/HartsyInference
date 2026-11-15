@@ -44,6 +44,7 @@
     "continuous_batching": true,
     "kv_pool_bytes_budget": 4294967296,
     "graph_decode": false,
+    "secondary_batch_size": 2,
     "return_token_scores": false,
     "forced_token_ids": null,
     "prefix_cache_key": null,
