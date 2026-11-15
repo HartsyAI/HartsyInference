@@ -18,8 +18,11 @@ public sealed class OnigurumaPatternTests
     // {,n} is {0,n}
     [InlineData(@"a{,3}", @"a{0,3}")]
     // a (?#) comment is dropped: its text is not pattern, and an escaped ')' (which .NET would stop at) does not end it
-    [InlineData(@"a(?#[ not a class (x)b+", @"ab+")]
-    [InlineData(@"a(?#x\)y)b", @"ab")]
+    [InlineData(@"a(?#[ not a class (x)b+", @"a(?#)b+")]
+    [InlineData(@"a(?#x\)y)b", @"a(?#)b")]
+    // an empty comment stands in for it, so its neighbours are not joined into an interval or a longer backreference
+    [InlineData(@"a{(?#x)2}", @"a{(?#)2}")]
+    [InlineData(@"(a)\1(?#x)0", @"(a)\1(?#)0")]
     // under (?x) whitespace is ignored, so the quantifier still repeats the atom before it
     [InlineData("(?x)a {3}+", "(?x)(?:a {3})+")]
     // a non-breaking space is not ignored whitespace, so it is the atom repeated

@@ -59,7 +59,8 @@ internal static class OnigurumaPattern
             }
             else if (c == '(' && pattern.AsSpan(i).StartsWith("(?#"))
             {
-                // a comment means nothing, so it is dropped: .NET would end it at an escaped ')' that Oniguruma skips. One never closed is
+                // a comment means nothing, so its text is dropped (.NET would end it at an escaped ')' that Oniguruma skips) and an empty
+                // (?#) stands in, so the tokens on either side stay apart (a{(?#)2} must not become the interval a{2}). One never closed is
                 // copied as written for the regex parser to report.
                 int length = CommentLength(pattern, i);
                 if (length < 0)
@@ -67,6 +68,7 @@ internal static class OnigurumaPattern
                     sb.Append(pattern, i, pattern.Length - i);
                     break;
                 }
+                sb.Append("(?#)");
                 i += length;
                 atom = -1;
             }
