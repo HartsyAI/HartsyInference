@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Moe;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Cuda;
 using HartsyInference.LLM.Ernie5;
 using HartsyInference.Vulkan;
@@ -13,7 +15,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// <c>ERNIE_REAL_DIR</c> names a directory holding <c>config.json</c> and <c>model.safetensors.index.json</c>, and the shards for
 /// the forward check. Each is reported as skipped (never passed) otherwise.</summary>
 /// <remarks>Environment: <c>ERNIE_REAL_RESIDENT</c> = <c>1</c> builds every layer once and preloads its per-token weights (default: layers
-/// stream per forward); <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed (default 1);
+/// stream per forward); <c>ERNIE_REAL_EXPERT_CACHE</c> = <c>1</c> (with resident, CUDA) attaches the device expert cache before the first
+/// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed (default 1);
 /// <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma
 /// list of token ids (default <c>1,2,3,4,5</c>). The checkpoint is a base model with no chat template, so the forward takes token ids.</remarks>
 [Trait("Category", "Integration")]
@@ -91,12 +94,15 @@ public sealed class Ernie5RealCheckpointTests
         };
 
         bool resident = Environment.GetEnvironmentVariable("ERNIE_REAL_RESIDENT") == "1";
+        bool expertCache = Environment.GetEnvironmentVariable("ERNIE_REAL_EXPERT_CACHE") == "1";
         int decodeSteps = int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1;
         int capacity = tokens.Length + decodeSteps + 1;
         Stopwatch load = Stopwatch.StartNew();
         using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = capacity, ResidentWeights = resident });
         load.Stop();
         using Ernie5SequenceState state = model.CreateState(capacity);
+        // Declared after the model so it is disposed first; attached before the first forward, so no expert is promoted outside it.
+        using MoeExpertOffload? offload = expertCache ? AttachExpertCache(backend, model, resident) : null;
 
         Stopwatch prefill = Stopwatch.StartNew();
         float[] logits = model.Forward(tokens, state);
@@ -114,14 +120,30 @@ public sealed class Ernie5RealCheckpointTests
             float[] step = model.Forward([token], state);
             decode.Stop();
             AssertHealthy(step, model.Config.VocabSize, $"decode {i + 1}");
-            steps.Add($"{decode.Elapsed.TotalSeconds:F2}s");
+            steps.Add(offload is null ? $"{decode.Elapsed.TotalSeconds:F2}s"
+                : $"{decode.Elapsed.TotalSeconds:F2}s@{offload.Stats.ResidentShare:P0}");
             token = Argmax(step);
             generated.Add(token);
         }
 
-        Console.WriteLine($"ERNIE real run on {device} (resident {resident}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
+        if (offload is not null)
+        {
+            MoeOffloadStats stats = offload.Stats;
+            Console.WriteLine($"ERNIE expert cache: resident rows {stats.ResidentRows}, streamed rows {stats.StreamedRows}, admitted {stats.Admitted}, "
+                + $"resident share {stats.ResidentShare:P1}.");
+        }
+        Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"greedy tokens [{string.Join(",", generated)}].");
+    }
+
+    // The device-only expert cache, sized to what the dense preload left free less the same headroom.
+    private static MoeExpertOffload AttachExpertCache(IBackend backend, Ernie5Model model, bool resident)
+    {
+        if (!resident) throw new ArgumentException("ERNIE_REAL_EXPERT_CACHE needs ERNIE_REAL_RESIDENT=1.");
+        DeviceMemoryUsage usage = backend.GetDeviceMemoryUsage();
+        long budget = Ernie5Model.PreloadBudget(usage.FreeBytes, usage.TotalBytes);
+        return ExpertOffloadSetup.AttachDeviceOnly(backend, model, budget, "[ernie5 test]");
     }
 
     private static void AssertHealthy(float[] logits, int vocab, string stage)

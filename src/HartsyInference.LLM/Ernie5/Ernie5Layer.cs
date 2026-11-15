@@ -81,6 +81,9 @@ internal sealed class Ernie5Layer : IDisposable
     /// <summary>Layer index; MTP layers follow the decoder layers.</summary>
     public int Index { get; }
 
+    /// <summary>The latent MoE block, or null for a dense-FFN layer.</summary>
+    internal MoeFeedForward? Moe => _moe;
+
     /// <summary>The weights every token reads: attention, norms, the dense FFN, and the MoE block's routers, latent projections and shared
     /// expert, each FP8 weight followed by its block-scale grid. The routed experts are left out; a token reads ten of them.</summary>
     public IEnumerable<Tensor> EnumerateDenseWeights()

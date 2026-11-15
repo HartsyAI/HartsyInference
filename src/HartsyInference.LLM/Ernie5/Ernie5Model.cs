@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Transformer;
@@ -27,7 +28,7 @@ namespace HartsyInference.LLM.Ernie5;
 /// <see cref="Ernie5LoadOptions.Mtp"/> its weights upload per call. Streamed layers are new tensors on every forward, so nothing of theirs
 /// stays on the device.</para>
 /// </remarks>
-public sealed class Ernie5Model : IDisposable
+public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
 {
     private readonly IBackend _backend;
     private readonly IErnie5WeightSource _source;
@@ -276,7 +277,7 @@ public sealed class Ernie5Model : IDisposable
 
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB.
     /// Zero when the backend does not report its memory.</summary>
-    internal static long PreloadBudget(long free, long total)
+    public static long PreloadBudget(long free, long total)
     {
         if (free <= 0 || total <= 0) return 0;
         long headroom = Math.Max(3L << 30, total * 15 / 100);
@@ -291,6 +292,47 @@ public sealed class Ernie5Model : IDisposable
         DeviceMemoryUsage usage = _backend.GetDeviceMemoryUsage();
         return $"; device weights {usage.WeightBytes / (1 << 20)} MB, activations {usage.ActivationBytes / (1 << 20)} MB, "
             + $"free {usage.FreeBytes / (1 << 20)} of {usage.TotalBytes / (1 << 20)} MB";
+    }
+
+    /// <inheritdoc />
+    /// <remarks>The routed experts read the latent, not the model width.</remarks>
+    public int ExpertHiddenSize => Config.MoeLatentSize > 0 ? Config.MoeLatentSize : Config.HiddenSize;
+
+    /// <inheritdoc />
+    public int ExpertIntermediateSize => Config.MoeIntermediateSize;
+
+    /// <inheritdoc />
+    /// <exception cref="InvalidOperationException">The model streams its layers (<see cref="Ernie5LoadOptions.ResidentWeights"/> off).</exception>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
+    {
+        RequireResidentForOffload();
+        return _layers.Where(l => l!.Moe is not null).SelectMany(l => l!.Moe!.EnumerateExpertWeights());
+    }
+
+    /// <inheritdoc />
+    /// <remarks>Attach before the first forward: a backend that keeps reused weights on its own may already hold experts the cache then
+    /// cannot evict. The MTP layer's experts are not routed through the offload.</remarks>
+    /// <exception cref="InvalidOperationException">The model streams its layers (<see cref="Ernie5LoadOptions.ResidentWeights"/> off): a
+    /// streamed layer's experts are new tensors on every forward, so a cache keyed by them would never hit.</exception>
+    public IReadOnlyList<(int Layer, int ExpertCount)> AttachExpertOffload(MoeExpertOffload offload)
+    {
+        ArgumentNullException.ThrowIfNull(offload);
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        RequireResidentForOffload();
+        List<(int Layer, int ExpertCount)> layers = [];
+        foreach (Ernie5Layer? layer in _layers)
+        {
+            if (layer!.Moe is not { } moe) continue;
+            moe.AttachOffload(offload, layer.Index);
+            layers.Add((layer.Index, moe.NumExperts));
+        }
+        return layers;
+    }
+
+    private void RequireResidentForOffload()
+    {
+        if (!_options.ResidentWeights)
+            throw new InvalidOperationException("Expert offload needs ResidentWeights: streamed layers build new expert tensors on every forward.");
     }
 
     /// <summary>The mHC head read-out and final RMS norm of residual-stream rows from <see cref="ForwardStream"/>, <c>[rows, hidden]</c>.</summary>

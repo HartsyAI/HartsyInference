@@ -1089,8 +1089,9 @@ internal static unsafe class GpuTransferHelper
         CudaMemory.CopyHostToDeviceAsync(destination, host, byteSize, stream);
     }
 
-    /// <summary>Uploads a borrowed mapped tensor through the backend's staging buffer, one chunk per async copy.</summary>
-    private static unsafe void StageMappedUpload(State s, ulong destination, Tensor source, nuint byteSize, nint stream)
+    /// <summary>Uploads a borrowed mapped tensor through the backend's staging buffer, one chunk per async copy on
+    /// <paramref name="stream"/>, waiting for each copy before the buffer is reused; returns once the last copy is done.</summary>
+    internal static unsafe void StageMappedUpload(State s, ulong destination, Tensor source, nuint byteSize, nint stream)
     {
         long total = (long)byteSize;
         lock (s.MappedStaging)
