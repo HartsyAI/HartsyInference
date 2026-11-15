@@ -64,6 +64,35 @@ public sealed class Ernie5ModelGpuParityTests : IDisposable
     public void Vulkan_RealDimensionsFp8_LogitsMatchCpu() => ParityOn(() => new VulkanBackend { EnableF16Gemm = false }, "Vulkan", resident: false,
         Ernie5SyntheticCheckpoint.Storage.Fp8, Ernie5SyntheticCheckpoint.RealDimensionOverrides);
 
+    // The engine's Text service end to end on the device: the slot's backend is the requested GPU (resident layers), and a request generates on the
+    // pipeline and, with continuous batching on, on the scheduler under the device gate. The tokens must match the CPU run of the same request.
+    // FP8 is the real checkpoint's storage, whose resident preload and per-call expert upload the service turns on.
+    [ErnieCudaFact]
+    public Task Cuda_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.F32);
+
+    [ErnieCudaFact]
+    public Task Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("cuda:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    [ErnieVulkanFact]
+    public Task Vulkan_TextService_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.F32);
+
+    [ErnieVulkanFact]
+    public Task Vulkan_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu() => TextServiceOn("vulkan:0", Ernie5SyntheticCheckpoint.Storage.Fp8);
+
+    private async Task TextServiceOn(string device, Ernie5SyntheticCheckpoint.Storage storage)
+    {
+        string dir = Path.Combine(_root, $"service-{storage}-" + device.Replace(':', '-'));
+        Ernie5SyntheticCheckpoint.Write(dir, storage: storage);
+        Ernie5TextPathTests.ServiceRun cpu = await Ernie5TextPathTests.GenerateThroughService(dir, "cpu", continuousBatching: false);
+        foreach (bool batching in new[] { false, true })
+        {
+            Ernie5TextPathTests.ServiceRun run = await Ernie5TextPathTests.GenerateThroughService(dir, device, batching);
+            Assert.True(run.Device.IsGpu, $"{device} loaded on {run.Device}.");
+            Assert.Equal(batching, run.Scheduled);
+            Assert.Equal(cpu.Result.Text, run.Result.Text);
+        }
+    }
+
     // One FP8 linear whose weight spans two row blocks and three column blocks with distinct scales, on the device and the CPU.
     [ErnieCudaFact]
     public void Cuda_Fp8LinearWithMultipleBlocks_MatchesCpu() => LinearParityOn(() => new CudaBackend(0, PtxDirectory()), "CUDA");

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -9,6 +10,8 @@ using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Tests.Services;
 
@@ -91,6 +94,66 @@ public sealed class Ernie5TextPathTests : IDisposable
         HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.RequireSupported(info));
 
         Assert.Contains(named, ex.Message);
+    }
+
+    [Fact]
+    public void Text_path_keeps_layers_resident_on_a_gpu_and_streams_them_on_the_cpu()
+    {
+        Assert.False(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Cpu).ResidentWeights);
+        Assert.True(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Cuda(1)).ResidentWeights);
+        Assert.True(HfTextDirectoryLoader.Ernie5OptionsFor(DeviceKind.Vulkan()).ResidentWeights);
+        Assert.All(new[] { DeviceKind.Cpu, DeviceKind.Cuda() }, d =>
+        {
+            Ernie5LoadOptions options = HfTextDirectoryLoader.Ernie5OptionsFor(d);
+            Assert.Equal(HfTextDirectoryLoader.MaxSequenceTokens, options.MaxSequenceTokens);
+            Assert.False(options.Mtp);
+        });
+    }
+
+    [Fact]
+    public void Text_path_loads_on_one_device_and_refuses_a_split_by_name()
+    {
+        TextService.RequireSingleDeviceErnie5([], tensorParallelDegree: 1);
+
+        NotSupportedException split = Assert.Throws<NotSupportedException>(() => TextService.RequireSingleDeviceErnie5(["cuda:0", "cuda:1"], 1));
+        Assert.Contains("cuda:0 + cuda:1", split.Message);
+        NotSupportedException tp = Assert.Throws<NotSupportedException>(() => TextService.RequireSingleDeviceErnie5([], tensorParallelDegree: 2));
+        Assert.Contains("tensor-parallel degree is 2", tp.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Text_service_loads_on_the_requested_cpu_and_generates(bool continuousBatching)
+    {
+        ServiceRun run = await GenerateThroughService(WriteCheckpoint("service-" + continuousBatching), "cpu", continuousBatching);
+
+        Assert.True(run.Device.IsCpu);
+        Assert.Equal(continuousBatching, run.Scheduled);
+        Assert.InRange(run.Result.CompletionTokens, 1, 4);
+    }
+
+    /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
+    /// the slot's backend runs on.</summary>
+    internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device);
+
+    /// <summary>Loads <paramref name="directory"/> through the engine's Text service on <paramref name="device"/> and generates up to four tokens,
+    /// with the continuous-batching knob pinned for the load and the request.</summary>
+    internal static async Task<ServiceRun> GenerateThroughService(string directory, string device, bool continuousBatching)
+    {
+        using IDisposable knobs = KnobProfileScope.Push(KnobProfile.Create("ernie5-text-service").With(EngineKnobs.ContinuousBatching, continuousBatching));
+        using InferenceEngine engine = new(device);
+        ModelSpec spec = new() { Requested = directory, Modality = Modality.Text, LocalPath = directory };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "Hello" }],
+            Device = device,
+            Temperature = 0,
+            MaxTokens = 4,
+        };
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        TextDeviceSlot slot = ((TextService)engine.Text).SlotFor(device) ?? throw new InvalidOperationException($"No slot ran on '{device}'.");
+        return new ServiceRun(result, slot.Scheduler is not null, slot.Backend!.Device);
     }
 
     [Fact]
