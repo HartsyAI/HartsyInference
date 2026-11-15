@@ -3,9 +3,13 @@ using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Moe;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Cuda;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Ernie5;
+using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Vulkan;
 using Xunit;
 
@@ -18,7 +22,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// stream per forward); <c>ERNIE_REAL_EXPERT_CACHE</c> = <c>1</c> (with resident, CUDA) attaches the device expert cache before the first
 /// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed (default 1);
 /// <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma
-/// list of token ids (default <c>1,2,3,4,5</c>). The checkpoint is a base model with no chat template, so the forward takes token ids.</remarks>
+/// list of token ids (default <c>1,2,3,4,5</c>). The checkpoint is a base model with no chat template, so the forward takes token ids, and the
+/// Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c> is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
 public sealed class Ernie5RealCheckpointTests
 {
@@ -146,6 +151,70 @@ public sealed class Ernie5RealCheckpointTests
         Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"greedy tokens [{string.Join(",", generated)}].");
+    }
+
+    [RealCheckpointFact]
+    public void Real_CompletionPrompt_MatchesTheHfTokenizer()
+    {
+        string dir = Environment.GetEnvironmentVariable(DirVariable)!;
+        (string? bos, string? eos) = HfChatAssets.SpecialTokenLiterals(dir);
+        ILlmTokenizer tokenizer = HfChatAssets.LoadTokenizer(dir, [], bos, eos);
+        RawCompletionTemplate template = HfChatAssets.LoadCompletionTemplate(dir);
+
+        // tokenizer(prompt).input_ids from the Hugging Face tokenizers library on the published tokenizer.json: the post-processor puts
+        // <|ERNIE_MASK|> (id 2) first, and digits group in threes from the right.
+        Assert.Equal([2, 47712, 6057, 6463, 1706], Encode("Large language models are"));
+        Assert.Equal([2, 2029, 10301, 1507, 13573, 1543, 1423, 1880, 17636, 1229], Encode("The capital of France is 12345."));
+
+        // The wider set from tests/python-reference/dump_ernie55_tokenizer_cases.py, when ERNIE_TOKENIZER_CASES names its output.
+        string? casesPath = Environment.GetEnvironmentVariable("ERNIE_TOKENIZER_CASES");
+        if (string.IsNullOrEmpty(casesPath)) return;
+        using JsonDocument cases = JsonDocument.Parse(File.ReadAllBytes(casesPath));
+        int checkedCases = 0;
+        foreach (JsonElement row in cases.RootElement.EnumerateArray())
+        {
+            string text = row.GetProperty("text").GetString()!;
+            int[] expected = [.. row.GetProperty("ids").EnumerateArray().Select(id => id.GetInt32())];
+            Assert.True(expected.SequenceEqual(Encode(text)), $"ids differ for {JsonSerializer.Serialize(text)}.");
+            checkedCases++;
+        }
+        Console.WriteLine($"ERNIE tokenizer: {checkedCases} reference cases match.");
+
+        int[] Encode(string prompt) => template.Encode(tokenizer, [new ChatMessage("user", prompt)], addGenerationPrompt: true);
+    }
+
+    [RealShardsFact]
+    public async Task Real_TextService_GeneratesFromAPlainPrompt()
+    {
+        string dir = Environment.GetEnvironmentVariable(DirVariable)!;
+        string device = (Environment.GetEnvironmentVariable("ERNIE_REAL_DEVICE") ?? "cuda") switch
+        {
+            "cuda" => "cuda:0",
+            "vulkan" => "vulkan:0",
+            string other => other,
+        };
+        int maxTokens = int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 16;
+        using InferenceEngine engine = new(device);
+        ModelSpec spec = new() { Requested = dir, Modality = Modality.Text, LocalPath = dir };
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "Large language models are" }],
+            Device = device,
+            Temperature = 0,
+            MaxTokens = maxTokens,
+        };
+
+        Stopwatch total = Stopwatch.StartNew();
+        TextResult result = await engine.Text.GenerateAsync(spec, request);
+        total.Stop();
+
+        Console.WriteLine($"ERNIE Text service on {device}: {result.PromptTokens} prompt tokens, {result.CompletionTokens} generated, stop {result.Stop}, "
+            + $"prefill {result.PrefillMilliseconds / 1000:F1}s, decode {result.DecodeMilliseconds / 1000:F1}s "
+            + $"({(result.CompletionTokens > 1 ? result.DecodeMilliseconds / (result.CompletionTokens - 1) / 1000 : 0):F2}s/token), "
+            + $"total with load {total.Elapsed.TotalSeconds:F1}s. Text: {JsonSerializer.Serialize(result.Text)}");
+        Assert.Equal(5, result.PromptTokens);
+        Assert.InRange(result.CompletionTokens, 1, maxTokens);
+        Assert.False(string.IsNullOrWhiteSpace(result.Text));
     }
 
     // The device-only expert cache, sized to what the dense preload left free less the same headroom.

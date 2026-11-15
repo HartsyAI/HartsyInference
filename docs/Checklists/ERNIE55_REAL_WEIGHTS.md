@@ -47,4 +47,5 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 ## Open before a paid run
 
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) and the decision to download about 288 GB to a volume.
-- Chat template: the Text path requires `chat_template.jinja`, which this base checkpoint does not ship. The verification run does not use it.
+- Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's
+  `<|ERNIE_MASK|>` first, as `/v1/completions` does. `Real_TextService_GeneratesFromAPlainPrompt` runs it end to end through the Text service.

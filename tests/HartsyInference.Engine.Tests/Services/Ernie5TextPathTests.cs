@@ -133,6 +133,34 @@ public sealed class Ernie5TextPathTests : IDisposable
         Assert.InRange(run.Result.CompletionTokens, 1, 4);
     }
 
+    [Fact]
+    public void Base_checkpoint_without_a_chat_template_prompts_with_the_post_processor_prefix()
+    {
+        string dir = Path.Combine(_root, "base-prefix");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+        using CpuBackend backend = new();
+        using IHostReferenceTextModel model = HfTextDirectoryLoader.LoadHostReference(Probe(dir), backend);
+
+        int[] ids = model.Template.Encode(model.Tokenizer, [new ChatMessage("user", "hi")], addGenerationPrompt: true);
+
+        // tokenizer("hi") on the base layout: the post-processor's end token, then the merged "hi".
+        Assert.IsType<RawCompletionTemplate>(model.Template);
+        Assert.Equal([Ernie5SyntheticCheckpoint.EosId, 258], ids);
+    }
+
+    [Fact]
+    public async Task Base_checkpoint_without_a_chat_template_generates_through_the_text_service()
+    {
+        string dir = Path.Combine(_root, "base-service");
+        Ernie5SyntheticCheckpoint.Write(dir, baseLayout: true);
+
+        ServiceRun run = await GenerateThroughService(dir, "cpu", continuousBatching: false);
+
+        // "Hello" is five byte tokens after the one prefix token.
+        Assert.Equal(6, run.Result.PromptTokens);
+        Assert.InRange(run.Result.CompletionTokens, 1, 4);
+    }
+
     /// <summary>What one request through the engine's Text service did: its result, whether the slot built a batching scheduler, and the device
     /// the slot's backend runs on.</summary>
     internal sealed record ServiceRun(TextResult Result, bool Scheduled, DeviceKind Device);

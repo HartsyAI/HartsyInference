@@ -125,8 +125,10 @@ internal static class Ernie5SyntheticCheckpoint
     /// <paramref name="configOverrides"/> replaces or adds config fields on top of the storage's own. With <paramref name="shards"/> above one
     /// the weights go into <c>model-NNNNN-of-NNNNN.safetensors</c> shards with a <c>model.safetensors.index.json</c>, the layout the real
     /// checkpoint ships and the real-weight harness reads.</summary>
+    /// <remarks>With <paramref name="baseLayout"/> the tokenizer files follow the published base checkpoint instead: no <c>chat_template.jinja</c>,
+    /// and a <c>tokenizer.json</c> post-processor that puts the end token before every raw prompt, as the real one puts <c>&lt;|ERNIE_MASK|&gt;</c>.</remarks>
     internal static void Write(string directory, int seed = 7, Storage storage = Storage.F32, IReadOnlyDictionary<string, string>? configOverrides = null,
-        int shards = 1)
+        int shards = 1, bool baseLayout = false)
     {
         Directory.CreateDirectory(directory);
         Dictionary<string, string> merged = new(StringComparer.Ordinal);
@@ -134,15 +136,22 @@ internal static class Ernie5SyntheticCheckpoint
         if (configOverrides is not null) foreach (KeyValuePair<string, string> kv in configOverrides) merged[kv.Key] = kv.Value;
         string configJson = ConfigJson(merged.Count == 0 ? null : merged);
         File.WriteAllText(Path.Combine(directory, "config.json"), configJson);
-        File.WriteAllText(Path.Combine(directory, "tokenizer.json"), TokenizerJson());
+        File.WriteAllText(Path.Combine(directory, "tokenizer.json"), TokenizerJson(baseLayout ? EosPrefixPostProcessor : null));
         File.WriteAllText(Path.Combine(directory, "tokenizer_config.json"), "{\"bos_token\": \"<s>\", \"eos_token\": \"</s>\"}");
-        File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
+        if (!baseLayout)
+            File.WriteAllText(Path.Combine(directory, "chat_template.jinja"), "{{ bos_token }}{% for message in messages %}{{ message['content'] }}{% endfor %}");
         Ernie5Config config = Ernie5Config.Parse(configJson);
         WriteWeights(directory, config, seed, storage, shards);
     }
 
-    /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials.</summary>
-    internal static string TokenizerJson()
+    /// <summary>The real base checkpoint's post-processor shape, <c>[end token, $A]</c>, with the synthetic end token.</summary>
+    internal const string EosPrefixPostProcessor =
+        "{\"type\":\"TemplateProcessing\",\"single\":[{\"SpecialToken\":{\"id\":\"</s>\",\"type_id\":0}},{\"Sequence\":{\"id\":\"A\",\"type_id\":0}}],"
+        + "\"pair\":[],\"special_tokens\":{\"</s>\":{\"id\":\"</s>\",\"ids\":[257],\"tokens\":[\"</s>\"]}}}";
+
+    /// <summary>A byte-level BPE tokenizer: ids 0..255 are the bytes, then the begin and end specials. <paramref name="postProcessor"/> is the
+    /// <c>post_processor</c> JSON, or null for none.</summary>
+    internal static string TokenizerJson(string? postProcessor = null)
     {
         Dictionary<int, char> map = ByteToUnicode();
         StringBuilder vocab = new();
@@ -154,6 +163,7 @@ internal static class Ernie5SyntheticCheckpoint
         // one merge, so the tokenizer is a BPE and not a bare alphabet: "h" + "i" -> "hi" (id 258)
         vocab.Append(",\"hi\":258");
         return "{\"version\":\"1.0\",\"model\":{\"type\":\"BPE\",\"vocab\":{" + vocab + "},\"merges\":[\"h i\"]},"
+            + (postProcessor is null ? "" : "\"post_processor\":" + postProcessor + ",")
             + "\"added_tokens\":["
             + $"{{\"id\":{BosId},\"content\":\"<s>\",\"special\":true}},{{\"id\":{EosId},\"content\":\"</s>\",\"special\":true}}]}}";
     }

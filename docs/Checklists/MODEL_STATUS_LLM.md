@@ -194,9 +194,14 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   projections, a DSA + latent-MoE block under mHC, its own hc head and `shared_head.norm`, the shared LM head); otherwise its keys
   are skipped. The Text path loads it through `Ernie5TextModel` (tokenizer, chat template, `Ernie5GenerationModel`
   adapter) without MTP, on the one device the request names: resident with the dense preload on a GPU, streamed on the CPU. A split over
-  two or more devices or a tensor-parallel degree above 1 is refused. Scheduler rounds take the device gate. The Text path refuses the base
-  checkpoint, which ships no `chat_template.jinja`, so no real generation has run through it. Missing: MTP speculative decoding in the Text
-  path (draft, verify, MTP cache rollback), a built-in template for the base checkpoint, decode and MTP parity on real weights, and a host or device memory guard. Reference code is in `baidu/vLLM-ERNIE` (`src/vllm_ernie/models/ernie5_5/`). License excludes
+  two or more devices or a tensor-parallel degree above 1 is refused. Scheduler rounds take the device gate. The base checkpoint ships no
+  `chat_template.jinja`; Baidu serves it through `/v1/completions` with a raw prompt, so the Text path prompts it as plain text
+  (`RawCompletionTemplate`, messages joined by a blank line) wrapped in the special ids its `tokenizer.json` post-processor adds
+  (`<|ERNIE_MASK|>`, id 2, first), the ids `tokenizer(prompt)` gives. Tools and the thinking toggle have no slot there and are ignored, as with
+  any template without one. Its tokenizer matches the Hugging Face `tokenizers` library on 13 inputs (`Real_CompletionPrompt_MatchesTheHfTokenizer`
+  with `tests/python-reference/dump_ernie55_tokenizer_cases.py`), including the `\p{Nd}{3}+` digit grouping that `OnigurumaPattern` rewrites
+  for .NET. No real generation has run through the Text path yet. Missing: MTP speculative decoding in the Text
+  path (draft, verify, MTP cache rollback), decode and MTP parity on real weights, and a host or device memory guard. Reference code is in `baidu/vLLM-ERNIE` (`src/vllm_ernie/models/ernie5_5/`). License excludes
   the EU, UK and South Korea.
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types
   it widens to F32, then an A/B against llama.cpp CUDA ([details](#muse-spark-open)).

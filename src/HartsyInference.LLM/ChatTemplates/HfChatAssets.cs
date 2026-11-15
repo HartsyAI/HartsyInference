@@ -4,7 +4,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
-/// <summary>The byte-level BPE tokenizer and Jinja chat template of a Hugging Face directory (<c>tokenizer.json</c>, <c>chat_template.jinja</c>).</summary>
+/// <summary>The byte-level BPE tokenizer and Jinja chat template of a Hugging Face directory (<c>tokenizer.json</c>, <c>chat_template.jinja</c>),
+/// or the plain-text completion template of a base checkpoint that ships no chat template.</summary>
 public static class HfChatAssets
 {
     /// <summary>The begin and end literals the directory's <c>tokenizer_config.json</c> names (<c>bos_token</c>, <c>eos_token</c>), each null when it
@@ -40,8 +41,25 @@ public static class HfChatAssets
     /// <param name="stopIds">Ids that end generation, in addition to the end token.</param>
     public static (ILlmTokenizer Tokenizer, IChatTemplate Template) Load(string directory, IReadOnlyList<int> stopIds, string? bosToken, string? eosToken)
     {
-        using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
-        ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, stopIds, bosToken, eosToken);
+        ILlmTokenizer tokenizer = LoadTokenizer(directory, stopIds, bosToken, eosToken);
         return (tokenizer, new JinjaChatTemplate(File.ReadAllText(Path.Combine(directory, "chat_template.jinja"))));
+    }
+
+    /// <summary>Loads the directory's tokenizer with <paramref name="bosToken"/> and <paramref name="eosToken"/> as its begin and end ids.</summary>
+    /// <param name="stopIds">Ids that end generation, in addition to the end token.</param>
+    public static ILlmTokenizer LoadTokenizer(string directory, IReadOnlyList<int> stopIds, string? bosToken, string? eosToken)
+    {
+        using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
+        return HfTokenizerJson.LoadByteLevelBpe(tokenizerJson, stopIds, bosToken, eosToken);
+    }
+
+    /// <summary>The plain-text template for a base checkpoint with no chat template. The prompt is the message text wrapped in the special ids
+    /// the directory's <c>tokenizer.json</c> post-processor adds, the same ids <c>tokenizer(prompt)</c> gives and a <c>/v1/completions</c>
+    /// endpoint feeds the model.</summary>
+    public static RawCompletionTemplate LoadCompletionTemplate(string directory)
+    {
+        using FileStream tokenizerJson = File.OpenRead(Path.Combine(directory, "tokenizer.json"));
+        (int[] prefix, int[] suffix) = HfTokenizerJson.ReadSingleSequenceSpecials(tokenizerJson);
+        return new RawCompletionTemplate(prefix, suffix);
     }
 }
