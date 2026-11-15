@@ -3,6 +3,13 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N`. The single source of truth is
 `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props`. Dates are UTC.
 
+## alpha.432
+
+- **Fixed: the second background removal after a free memory no longer fails.** `FreeMemory` disposed the vision service's weight mappings
+  but kept its model caches, so the next RMBG cutout (or any cached vision model) reused a model whose weights were closed and threw
+  "Cannot access a disposed object: MmapHandle". In SwarmUI's 3D tab this failed every texturing run after the first one that needed a
+  cutout. The caches are now emptied with the weights, and the next request loads afresh.
+
 ## alpha.431
 
 - **Fixed: Hunyuan3D Paint no longer streaks surfaces that no view sees.** The engine filled unpainted texels from their UV chart alone, so a
