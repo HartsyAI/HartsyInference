@@ -98,6 +98,7 @@ internal static class AttentionEvidenceRunner
             using Utf8JsonWriter writer = new(result, new JsonWriterOptions { Indented = true });
             writer.WriteStartObject();
             writer.WriteNumber("schema", 1);
+            writer.WriteString("tool_sha256", Hash(typeof(AttentionEvidenceRunner).Assembly.Location));
             writer.WriteString("case_id", fixture.CaseId);
             writer.WriteString("fixture_sha256", fixture.ManifestHash);
             writer.WriteString("backend", hardware.Kind.ToString().ToLowerInvariant());

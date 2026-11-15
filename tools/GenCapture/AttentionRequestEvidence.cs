@@ -109,6 +109,7 @@ internal static class AttentionRequestEvidence
                 using Utf8JsonWriter writer = new(output, new JsonWriterOptions { Indented = true });
                 writer.WriteStartObject();
                 writer.WriteNumber("schema", 1);
+                writer.WriteString("tool_sha256", Hash(typeof(AttentionRequestEvidence).Assembly.Location));
                 writer.WriteString("family", family);
                 writer.WriteString("backend", selector);
                 writer.WriteString("workload_sha256", Hash(manifestPath));

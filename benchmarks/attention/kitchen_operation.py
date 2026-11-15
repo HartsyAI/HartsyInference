@@ -26,6 +26,9 @@ def main(argv=None):
     result = {'schema': 1, 'k0_status': 'Not executed', 'api': args.api, 'boundary': args.boundary,
               'diagnostics': args.diagnostics, 'timing_eligible': not args.diagnostics,
               'fixture_sha256': sha256(args.fixture), 'environment_sha256': sha256(args.environment)}
+    directory = pathlib.Path(__file__).resolve().parent
+    result['harness_source_hashes'] = {name: sha256(directory / name) for name in (
+        'kitchen_operation.py', 'fixtures.py', 'operation_oracle.py', 'protocol.json')}
     try:
         environment = json.loads(pathlib.Path(args.environment).read_text())
         if not environment.get('ready') or environment['python_sha256'] != sha256(sys.executable):

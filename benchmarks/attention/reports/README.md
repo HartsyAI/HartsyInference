@@ -10,7 +10,7 @@ No paired performance claim, primary workload speed claim or complete parity cla
 Sol D64 invalid classification is preserved with its correction to negative admission and a versioned matrix
 amendment requiring review. It is not an upstream-correctness exception.
 
-The CPU run has two failures reproduced on pristine B0 and one skip. GPU resource skips and two passed tests
+The CPU run has two failures reproduced on pristine B0 and one skip. GPU resource skips and reported passes
 whose own output says they lacked multiple GPUs are explicitly unvalidated. A successful test-process exit does
 not turn those cases into regression evidence.
 
