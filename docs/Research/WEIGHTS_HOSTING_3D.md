@@ -96,7 +96,7 @@ Caveats on three rows:
 | `Pointcept/Utonia` `utonia.pth` (CoLa3D's encoder, local `Models/Utonia`) | CC BY-NC 4.0: non-commercial. |
 | `briaai/RMBG-2.0` | CC BY-NC (Bria licence), gated, and not used by the engine. |
 | CoLa3D decomposers and flows (`cola3d_*_q8/q20.pt`, `ss_flow`, `slat_flow`, `geometry_decoder.pt`, local `Models/CoLa3D`) | No catalog entry, and the upstream repository and the weights' licence are not recorded in this repository. Revisit once both are known. |
-| Real-ESRGAN `RealESRGAN_x4plus.pth` (67,040,989 B, opt-in Paint view upscaler, local `Models/3D/hunyuan3d-paint21`) | Not in the catalog and not downloaded with a model; the copy comes from `lllyasviel/Annotators`, whose licence tag is `other`. |
+| Real-ESRGAN `RealESRGAN_x4plus.pth` (67,040,989 B, Paint 2.1 view upscaler, on by default, `Models/3D/hunyuan3d-paint21`) | In the `hunyuan3d-paint21` catalog entry, downloaded with the model from `lllyasviel/Annotators`, whose licence tag is `other` (Real-ESRGAN itself is BSD-3-Clause). |
 | `tencent/Hunyuan3D-Omni` `model/pytorch_model_ema.bin` (12.2 GB) | Unused by the engine. |
 | TripoSR, TRELLIS (v1) | No catalog assets and no local files: nothing to inventory. |
 

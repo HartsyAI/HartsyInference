@@ -66,10 +66,11 @@ public static partial class EngineKnobs
         IntOverride("vram.hy3dVaeChunk", KnobScope.Runtime, KnobDomain.Vram,
             "Forces the Hunyuan3D shape-VAE decode chunk size; unset uses the caller's chunk size.");
 
-    /// <summary>Upscales each generated Paint 2.1 view 4x with Real-ESRGAN before it is baked. Off by default: on a 12 GB card it added 232 s to a 116 s run and showed no visible gain.</summary>
+    /// <summary>Upscales each generated Paint 2.1 view 4x with Real-ESRGAN before it is baked, as upstream does. On by default: on the same views it sharpens letter edges, eyes
+    /// and outlines in the baked texture; it costs about 220 s on a 12 GB card.</summary>
     public static readonly Knob<bool> PaintUpscaleViews =
-        Bool("numerics.paintUpscaleViews", false, KnobScope.Construction, KnobDomain.Numerics,
-            "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking; off by default (232 s extra on a 12 GB card, no visible gain).");
+        Bool("numerics.paintUpscaleViews", true, KnobScope.Construction, KnobDomain.Numerics,
+            "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking, as upstream; on by default (sharper edges, about 220 s extra on a 12 GB card).");
 
     /// <summary>Bakes the Paint reference picture itself into the front view where it lines up with the mesh. Off by default, as upstream has no such step: where the picture and the
     /// mesh differ in shape it pastes picture detail onto the wrong surface (a forehead onto a hat brim). Acts only when the reference carries alpha.</summary>

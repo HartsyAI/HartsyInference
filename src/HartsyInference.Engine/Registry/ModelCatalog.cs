@@ -162,7 +162,9 @@ public static class ModelCatalog
             Repack = new AssetRepack { MirrorPath = "hunyuan3d-paint21/vae/diffusion_pytorch_model.safetensors", Sha256 = "ed31a6bcc917e4da1b694281b7242f1246ffb5adba47eb81133d1bbae7a7ac3b" } },
         new() { Repo = "facebook/dinov2-giant", RepoPath = "model.safetensors", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "dino/model.safetensors",
             Role = "image encoder", Sha256 = "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f" },
-        // The Real-ESRGAN view upscaler (lllyasviel/Annotators RealESRGAN_x4plus.pth, 67,040,989 B, sha256 4fa0d389...) is opt-in (knob numerics.paintUpscaleViews) and not downloaded with the model.
+        // The view upscaler upstream runs on every generated view (knob numerics.paintUpscaleViews, on by default). A pickle, read by the safe parser only.
+        new() { Repo = "lllyasviel/Annotators", RepoPath = "RealESRGAN_x4plus.pth", TargetSubdir = "3D/hunyuan3d-paint21", TargetName = "RealESRGAN_x4plus.pth",
+            Role = "upscaler", Sha256 = "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1" },
     ];
 
     /// <summary>Hunyuan3D-Omni (<c>tencent/Hunyuan3D-Omni</c> at <c>70e803bf</c>): the DiT, the VAE and the control encoder (pickles, read by the safe parser only) with their configs, and DINOv2-large (<c>facebook/dinov2-large</c> at
