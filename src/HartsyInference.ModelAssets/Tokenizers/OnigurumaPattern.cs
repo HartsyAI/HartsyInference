@@ -16,7 +16,7 @@ internal static class OnigurumaPattern
     /// <summary>The .NET form of <paramref name="pattern"/>; a pattern with none of the rewritten forms comes back unchanged.</summary>
     /// <exception cref="NotSupportedException">A quantifier that needs rewriting has nothing before it to apply to. That includes a quantifier
     /// that follows another one, such as <c>a{2}{3}+</c> or <c>\d+{2}+</c>: Oniguruma reads those as nested repeats, which this rewrite refuses
-    /// rather than guess at (no known tokenizer uses them).</exception>
+    /// rather than guess at (no known tokenizer uses them). A group or comment left open is refused too.</exception>
     public static string ToDotNet(string pattern)
     {
         ArgumentNullException.ThrowIfNull(pattern);
@@ -72,6 +72,7 @@ internal static class OnigurumaPattern
                 i++;
             }
         }
+        if (groups.Count > 0) throw new NotSupportedException($"The pattern '{pattern}' leaves a group or comment open.");
         return sb.ToString();
     }
 
@@ -173,11 +174,16 @@ internal static class OnigurumaPattern
         if (i >= pattern.Length) return i - start;
         char kind = pattern[i];
         if (kind is ':' or '=' or '!' or '>') return i + 1 - start;
-        // a (?#...) comment runs to the first ')' and is copied whole, so brackets in its text are not read as pattern
+        // a (?#...) comment runs to the first unescaped ')' (Oniguruma skips the character after a '\' in a comment) and is copied
+        // whole, so brackets in its text are not read as pattern
         if (kind == '#')
         {
-            int end = pattern.IndexOf(')', i);
-            return end < 0 ? pattern.Length - start : end + 1 - start;
+            for (int j = i + 1; j < pattern.Length; j++)
+            {
+                if (pattern[j] == '\\') j++;
+                else if (pattern[j] == ')') return j + 1 - start;
+            }
+            return pattern.Length - start;
         }
         if (kind == '<')
         {
