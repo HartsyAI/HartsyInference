@@ -30,8 +30,9 @@ internal static class HfTextDirectoryLoader
     /// <summary>The options the Text path loads with; the RAM guard and the memory profile size against the same ones.</summary>
     internal static DeepSeekV41LoadOptions LoadOptions { get; } = new(MaxSequenceTokens);
 
-    /// <summary>The ERNIE-5.5 options the Text path loads with: layers are dequantized one at a time from the mapped checkpoint on every forward.</summary>
-    internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = false };
+    /// <summary>The ERNIE-5.5 options the Text path loads with: every layer is built once and its per-token weights are preloaded on a GPU;
+    /// the routed experts (about 270 GB of the 288 GB checkpoint) stay mapped from the checkpoint.</summary>
+    internal static Ernie5LoadOptions Ernie5Options { get; } = new() { MaxSequenceTokens = MaxSequenceTokens, ResidentWeights = true };
 
     /// <summary>Whether <paramref name="info"/> is a host reference model (DeepSeek-V4.1, ERNIE-5.5 or Kimi K3.1) that <see cref="LoadHostReference"/> serves.</summary>
     internal static bool IsHostReferenceFamily(HfCheckpointInfo info) =>

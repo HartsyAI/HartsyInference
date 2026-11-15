@@ -20,6 +20,7 @@ internal sealed class Ernie5Layer : IDisposable
     private readonly IBackend _backend;
     private readonly Ernie5Config _cfg;
     private readonly List<Tensor> _owned = [];
+    private readonly HashSet<Tensor> _moeInputs = new(ReferenceEqualityComparer.Instance);
     private readonly HyperConnection _attnHc;
     private readonly HyperConnection _ffnHc;
     private readonly Tensor _attnNorm;
@@ -60,7 +61,12 @@ internal sealed class Ernie5Layer : IDisposable
             else
             {
                 Dictionary<string, Tensor> moe = new(StringComparer.Ordinal);
-                foreach ((string checkpoint, string engine) in Ernie5WeightNames.MoeKeys(cfg, index)) moe[engine] = Own(source.Read(checkpoint));
+                foreach ((string checkpoint, string engine) in Ernie5WeightNames.MoeKeys(cfg, index))
+                {
+                    Tensor t = Own(source.Read(checkpoint));
+                    moe[engine] = t;
+                    _moeInputs.Add(t);
+                }
                 _moe = new MoeFeedForward(MoeSettings(cfg), cfg.HiddenSize, lowVram: false);
                 _moe.LoadWeights(moe, prefix);
             }
@@ -74,6 +80,21 @@ internal sealed class Ernie5Layer : IDisposable
 
     /// <summary>Layer index; MTP layers follow the decoder layers.</summary>
     public int Index { get; }
+
+    /// <summary>The weights every token reads: attention, norms, the dense FFN, and the MoE block's routers, latent projections and shared
+    /// expert, each FP8 weight followed by its block-scale grid. The routed experts are left out; a token reads ten of them.</summary>
+    public IEnumerable<Tensor> EnumerateDenseWeights()
+    {
+        HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
+        IEnumerable<Tensor> dense = _owned.Where(t => !_moeInputs.Contains(t));
+        if (_moe is not null) dense = dense.Concat(_moe.EnumerateDenseWeights());
+        foreach (Tensor t in dense)
+        {
+            if (!seen.Add(t)) continue;
+            yield return t;
+            if (t.QuantInfo?.Fp8BlockScaleInv is { } scale && seen.Add(scale)) yield return scale;
+        }
+    }
 
     /// <summary>Runs the layer on <paramref name="stream"/> (<c>[tokens, hc, hidden]</c>) in place.</summary>
     public void Forward(float[] stream, int tokens, int startPos, Ernie5SequenceState state)
