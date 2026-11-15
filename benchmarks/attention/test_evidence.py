@@ -55,6 +55,9 @@ class StatisticsTests(unittest.TestCase):
         self.sessions[0][0]['valid'] = False
         with self.assertRaises(ValueError):
             analyze(self.sessions, self.confirmation, 'noninferiority')
+        self.sessions[0][0]['valid'] = 'false'
+        with self.assertRaises(ValueError):
+            analyze(self.sessions, self.confirmation, 'noninferiority')
 
     def test_regression_has_a_confidence_requirement(self):
         for session in self.sessions + [self.confirmation]:

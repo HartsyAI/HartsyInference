@@ -20,10 +20,10 @@ def analyze(sessions, confirmation, claim, seed=274019, resamples=20000):
     def logs(pairs):
         result = []
         for pair in pairs:
-            if not pair.get('valid', False):
+            if pair.get('valid') is not True:
                 raise ValueError('Quality, route, memory, or cohort validation failed')
             candidate, reference = pair['candidate_ms'], pair['reference_ms']
-            if not all(math.isfinite(value) and value > 0 for value in (candidate, reference)):
+            if not all(type(value) in (int, float) and math.isfinite(value) and value > 0 for value in (candidate, reference)):
                 raise ValueError('Latency must be positive and finite')
             result.append(math.log(candidate / reference))
         return result
