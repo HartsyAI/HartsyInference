@@ -766,7 +766,9 @@ public sealed class VisionService : IVisionService, IDisposable
     /// <summary>The engine's compute backend, created on first use.</summary>
     private IBackend Backend => _engine.Backend;
 
-    /// <inheritdoc/>
+    /// <summary>Releases every loaded model. The engine's free memory calls this on the live service and keeps using it, so the caches are emptied
+    /// too: a model whose weights mapping is closed must not be handed out again (the next RMBG cutout after a free used to fail with
+    /// "Cannot access a disposed object: MmapHandle"). The next request loads afresh.</summary>
     public void Dispose()
     {
         _rtDetr.Dispose();
@@ -774,9 +776,38 @@ public sealed class VisionService : IVisionService, IDisposable
         _dino.Dispose();
         _clipSeg.Dispose();
         _sam2.Dispose();
-        foreach (BiRefNetMatter matter in _birefnetCache.Values) matter.Dispose();
-        foreach (ClipModelLoader loader in _clipCache.Values) loader.Dispose();
-        foreach (SafeTensorsLoader loader in _embedLoaders) loader.Dispose();
-        foreach (PytorchPickleLoader loader in _annotatorLoaders) loader.Dispose();
+        lock (_embedLock)
+        {
+            foreach (BiRefNetMatter matter in _birefnetCache.Values) matter.Dispose();
+            foreach (ClipModelLoader loader in _clipCache.Values) loader.Dispose();
+            foreach (SafeTensorsLoader loader in _embedLoaders) loader.Dispose();
+            foreach (PytorchPickleLoader loader in _annotatorLoaders) loader.Dispose();
+            _clipCache.Clear();
+            _siglipCache.Clear();
+            _dinov2Cache.Clear();
+            _depthCache.Clear();
+            _hedCache.Clear();
+            _lineartCache.Clear();
+            _normalBaeCache.Clear();
+            _upernetCache.Clear();
+            _rmbgCache.Clear();
+            _birefnetCache.Clear();
+            _upscaleCache.Clear();
+            _embedLoaders.Clear();
+            _annotatorLoaders.Clear();
+        }
+    }
+
+    /// <summary>How many models of all kinds the service holds (a test hook for the release above).</summary>
+    internal int CachedModelCount
+    {
+        get
+        {
+            lock (_embedLock)
+            {
+                return _clipCache.Count + _siglipCache.Count + _dinov2Cache.Count + _depthCache.Count + _hedCache.Count + _lineartCache.Count + _normalBaeCache.Count
+                    + _upernetCache.Count + _rmbgCache.Count + _birefnetCache.Count + _upscaleCache.Count + _embedLoaders.Count + _annotatorLoaders.Count;
+            }
+        }
     }
 }
