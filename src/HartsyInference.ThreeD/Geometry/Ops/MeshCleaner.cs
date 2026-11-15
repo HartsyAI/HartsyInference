@@ -337,8 +337,48 @@ public static class MeshCleaner
         return keep;
     }
 
-    /// <summary>Removes vertex-connected components whose bounding box is thinner, on its thinnest axis, than <paramref name="thicknessRatio"/> of the mesh's bounding-box diagonal (see
-    /// <see cref="MeshCleanOptions.FlatComponentThicknessRatio"/>). The component with the most faces always stays.</summary>
+    /// <summary>The spread of the given vertices along the normal of their best-fitting plane (the least-variance eigenvector of their covariance, by Jacobi rotations): the thickness of a
+    /// piece whatever way it is turned. It is never below the piece's true smallest width, so a solid piece is never taken for a sheet.</summary>
+    internal static double PlaneThickness(float[] v, List<int> vertices)
+    {
+        double mx = 0, my = 0, mz = 0;
+        foreach (int i in vertices) { mx += v[i * 3]; my += v[i * 3 + 1]; mz += v[i * 3 + 2]; }
+        mx /= vertices.Count; my /= vertices.Count; mz /= vertices.Count;
+        double[,] a = new double[3, 3];
+        foreach (int i in vertices)
+        {
+            double[] d = [v[i * 3] - mx, v[i * 3 + 1] - my, v[i * 3 + 2] - mz];
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++)
+                    a[r, c] += d[r] * d[c];
+        }
+        double[,] e = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        for (int sweep = 0; sweep < 50 && Math.Abs(a[0, 1]) + Math.Abs(a[0, 2]) + Math.Abs(a[1, 2]) > 1e-15; sweep++)
+            for (int p = 0; p < 2; p++)
+                for (int q = p + 1; q < 3; q++)
+                {
+                    if (Math.Abs(a[p, q]) < 1e-300) continue;
+                    double theta = (a[q, q] - a[p, p]) / (2 * a[p, q]);
+                    double t = (theta >= 0 ? 1 : -1) / (Math.Abs(theta) + Math.Sqrt(theta * theta + 1));
+                    double cos = 1 / Math.Sqrt(t * t + 1), sin = t * cos;
+                    for (int k = 0; k < 3; k++) (a[k, p], a[k, q]) = (cos * a[k, p] - sin * a[k, q], sin * a[k, p] + cos * a[k, q]);
+                    for (int k = 0; k < 3; k++) (a[p, k], a[q, k]) = (cos * a[p, k] - sin * a[q, k], sin * a[p, k] + cos * a[q, k]);
+                    for (int k = 0; k < 3; k++) (e[k, p], e[k, q]) = (cos * e[k, p] - sin * e[k, q], sin * e[k, p] + cos * e[k, q]);
+                }
+        int least = a[0, 0] <= a[1, 1] ? (a[0, 0] <= a[2, 2] ? 0 : 2) : (a[1, 1] <= a[2, 2] ? 1 : 2);
+        double nx = e[0, least], ny = e[1, least], nz = e[2, least], low = double.MaxValue, high = double.MinValue;
+        foreach (int i in vertices)
+        {
+            double along = v[i * 3] * nx + v[i * 3 + 1] * ny + v[i * 3 + 2] * nz;
+            low = Math.Min(low, along);
+            high = Math.Max(high, along);
+        }
+        return (high - low) / Math.Max(1e-300, Math.Sqrt(nx * nx + ny * ny + nz * nz));
+    }
+
+    /// <summary>Removes vertex-connected components thinner than <paramref name="thicknessRatio"/> of the mesh's bounding-box diagonal, measured along the component's best-fitting plane
+    /// normal (see <see cref="PlaneThickness"/>) or its thinnest axis, so a tilted sheet counts the same as an axis-aligned one (see <see cref="MeshCleanOptions.FlatComponentThicknessRatio"/>).
+    /// The component with the most faces always stays.</summary>
     public static Mesh RemoveFlatComponents(Mesh mesh, double thicknessRatio)
     {
         Validate(mesh);
@@ -380,10 +420,24 @@ public static class MeshCleaner
         int biggest = boxes.Keys.MaxBy(root => count[root]);
         double dx = whole[3] - whole[0], dy = whole[4] - whole[1], dz = whole[5] - whole[2];
         double limit = Math.Sqrt(dx * dx + dy * dy + dz * dz) * thicknessRatio;
+        Dictionary<int, List<int>> members = [];
+        bool[] used = new bool[mesh.VertexCount];
+        foreach (int i in mesh.Indices) used[i] = true;
+        for (int vertex = 0; vertex < used.Length; vertex++)
+        {
+            if (!used[vertex]) continue;
+            int root = Find(parent, vertex);
+            if (!members.TryGetValue(root, out List<int>? list)) members[root] = list = [];
+            list.Add(vertex);
+        }
         HashSet<int> flat = [];
         foreach ((int root, double[] box) in boxes)
-            if (root != biggest && Math.Min(box[3] - box[0], Math.Min(box[4] - box[1], box[5] - box[2])) < limit)
+        {
+            if (root == biggest) continue;
+            double axisAligned = Math.Min(box[3] - box[0], Math.Min(box[4] - box[1], box[5] - box[2]));
+            if (Math.Min(axisAligned, PlaneThickness(v, members[root])) < limit)
                 flat.Add(root);
+        }
         bool[] keep = new bool[faces];
         for (int f = 0; f < faces; f++)
             keep[f] = !flat.Contains(Find(parent, mesh.Indices[f * 3]));
