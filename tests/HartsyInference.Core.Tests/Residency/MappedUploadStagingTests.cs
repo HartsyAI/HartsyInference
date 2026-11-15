@@ -188,6 +188,27 @@ public sealed unsafe class MappedUploadStagingTests : IDisposable
         Assert.Equal(replacement, second);
     }
 
+    [Fact]
+    public void StageChunk_CheckpointAtomicallyReplacedAfterMapping_ReadsTheMappedFile()
+    {
+        // Windows refuses to replace a mapped file, so the scenario only arises on POSIX; this returns early elsewhere.
+        if (OperatingSystem.IsWindows())
+            return;
+        byte[] original = File.ReadAllBytes(_path);
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor tensor = MappedTensor(handle, 2500);
+        TensorFileExtents.Register(tensor, handle, 0);
+        string replacementPath = Path.Combine(Path.GetTempPath(), $"mapped-staging-replacement-{Guid.NewGuid():N}.bin");
+        _extraFiles.Add(replacementPath);
+        byte[] replacement = new byte[2500];
+        new Random(13).NextBytes(replacement);
+        File.WriteAllBytes(replacementPath, replacement);
+        File.Move(replacementPath, _path, overwrite: true);
+        using MappedUploadStaging staging = new(ChunkBytes);
+
+        Assert.Equal(original, StageAll(staging, tensor));
+    }
+
     private static byte[] StageMappedFile(MappedUploadStaging staging, string path)
     {
         using MmapHandle handle = MmapHandle.OpenRead(path);
