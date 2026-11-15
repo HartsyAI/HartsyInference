@@ -6,8 +6,8 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Reads a borrowed memory-mapped tensor into one reusable host buffer, a chunk at a time, before its device upload.</summary>
-/// <remarks>A demand-paged mapping on a network volume faults one page at a time, far below sequential read speed. The
-/// chunk range is advised as needed first, so the kernel fetches it in one request rather than per fault. A staged
+/// <remarks>A tensor with a registered file extent is read with positional reads, since faulting its pages through a
+/// mapping on a network volume is slow. Other borrowed views are read through the mapping. A staged
 /// chunk stays in use until the caller reports its copy complete with <see cref="MarkCopyComplete"/>; the next
 /// <see cref="StageChunk"/> and <see cref="Dispose"/> refuse to run before that.</remarks>
 public sealed unsafe class MappedUploadStaging : IDisposable
@@ -52,10 +52,17 @@ public sealed unsafe class MappedUploadStaging : IDisposable
 
         int count = (int)Math.Min(remaining, _chunkBytes);
         Grow(count);
-        byte* src = (byte*)source.DataPointer + offset;
-        AdviseWillNeed(source, src, count);
-        fixed (byte* dst = _buffer)
-            Buffer.MemoryCopy(src, dst, count, count);
+        if (TensorFileExtents.TryGet(source, out MmapHandle? owner, out long fileStart))
+        {
+            owner.ReadAt(fileStart + offset, _buffer.AsSpan(0, count));
+        }
+        else
+        {
+            byte* src = (byte*)source.DataPointer + offset;
+            AdviseWillNeed(source, src, count);
+            fixed (byte* dst = _buffer)
+                Buffer.MemoryCopy(src, dst, count, count);
+        }
         host = Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_buffer));
         _copyPending = true;
         return count;

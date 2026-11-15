@@ -1,5 +1,7 @@
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Exceptions;
+using Microsoft.Win32.SafeHandles;
 
 namespace HartsyInference.Core.Memory.Host;
 
@@ -9,11 +11,15 @@ public sealed unsafe class MmapHandle : IDisposable
     private nint _basePointer;
     private MemoryMappedFile? _mmf;
     private MemoryMappedViewAccessor? _accessor;
+    private readonly SafeFileHandle _fileHandle;
+    private readonly object _gate = new();
 
-    private MmapHandle(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, byte* basePointer, long byteLength, string filePath)
+    private MmapHandle(MemoryMappedFile mmf, MemoryMappedViewAccessor accessor, SafeFileHandle fileHandle, byte* basePointer,
+        long byteLength, string filePath)
     {
         _mmf = mmf;
         _accessor = accessor;
+        _fileHandle = fileHandle;
         _basePointer = (nint)basePointer;
         ByteLength = byteLength;
         FilePath = filePath;
@@ -56,7 +62,8 @@ public sealed unsafe class MmapHandle : IDisposable
         byte* pointer = null;
         accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
 
-        return new MmapHandle(mmf, accessor, pointer, fileLength, filePath);
+        // The mapping owns fs and closes it with mmf, so this handle serves positional reads of the same inode.
+        return new MmapHandle(mmf, accessor, fs.SafeFileHandle, pointer, fileLength, filePath);
     }
 
     /// <summary>Returns a pointer offset from the base; allows an offset equal to <see cref="ByteLength"/> so trailing zero-byte marker tensors resolve to a valid past-the-end pointer.</summary>
@@ -74,6 +81,26 @@ public sealed unsafe class MmapHandle : IDisposable
             throw new ArgumentOutOfRangeException(nameof(byteOffset));
 
         return (byte*)ptr + byteOffset;
+    }
+
+    /// <summary>Reads bytes of the mapped file by positional read through the handle that created the mapping, bypassing the mapping itself.</summary>
+    public void ReadAt(long offset, Span<byte> destination)
+    {
+        lock (_gate)
+        {
+            if (_basePointer == 0)
+                throw new ObjectDisposedException(nameof(MmapHandle));
+            if (offset < 0 || offset > ByteLength - destination.Length)
+                throw new ArgumentOutOfRangeException(nameof(offset), $"Read of {destination.Length} bytes at {offset} is outside the {ByteLength}-byte mapping.");
+            int done = 0;
+            while (done < destination.Length)
+            {
+                int read = RandomAccess.Read(_fileHandle, destination[done..], offset + done);
+                if (read == 0)
+                    throw new HartsyInferenceException($"'{FilePath}' ended after {done} of {destination.Length} bytes at offset {offset}; the file changed while it was mapped.");
+                done += read;
+            }
+        }
     }
 
     /// <summary>Hints the kernel about access to a byte range; false where madvise is unavailable or refuses, and never load-bearing.</summary>
@@ -106,14 +133,18 @@ public sealed unsafe class MmapHandle : IDisposable
     /// <summary>Releases the memory-mapped view and file via atomic pointer exchange.</summary>
     public void Dispose()
     {
-        nint ptr = Interlocked.Exchange(ref _basePointer, 0);
-        if (ptr != 0)
+        // Under the gate so an in-flight ReadAt finishes before the file handle that it reads from is closed.
+        lock (_gate)
         {
-            _accessor?.SafeMemoryMappedViewHandle.ReleasePointer();
-            _accessor?.Dispose();
-            _accessor = null;
-            _mmf?.Dispose();
-            _mmf = null;
+            nint ptr = Interlocked.Exchange(ref _basePointer, 0);
+            if (ptr != 0)
+            {
+                _accessor?.SafeMemoryMappedViewHandle.ReleasePointer();
+                _accessor?.Dispose();
+                _accessor = null;
+                _mmf?.Dispose();
+                _mmf = null;
+            }
         }
         GC.SuppressFinalize(this);
     }
