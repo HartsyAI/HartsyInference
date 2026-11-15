@@ -65,6 +65,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private int[] _offHostPlan = [];
     private int[] _offHostOffset = [];
     private readonly ExpertLease _offLease = new();
+    private readonly ExpertLease _offAdmitLease = new();
+    private readonly List<ExpertKey> _offAdmit = [];
+    private readonly List<ExpertKey> _offAdmitMissed = [];
 
     /// <summary>
     /// Routes this layer's experts through <paramref name="offload"/>: the experts its device cache holds run on the device as before,
@@ -613,10 +616,21 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
         int distinct = ExpertScheduler.Plan(offload.Cache, _offIds.AsSpan(0, pairs), _offloadLayer, 0, e, offload.Policy, _offCounts,
             _offResident, _offKeys, _offPlan, _offMisses, _offLease);
+        bool admitBeforeRun = offload.Host is null;
         float[]? hostIn = null, hostOut = null;
         int[]? hostIndex = null;
         try
         {
+            // With no host runner every miss is uploaded anyway, so the ones admission takes are uploaded into the cache before they run
+            // and run from that copy: one read each, not a per-call copy now and a second read for admission after the layer. The second
+            // lease pins them (waiting for their uploads) so nothing evicts them before they run; one that did not upload stays a per-call
+            // miss. Pinning notes one more access for each, which the eviction scores count.
+            if (admitBeforeRun && offload.AdmitNow(_offMisses, _offAdmit) > 0)
+            {
+                _offAdmitMissed.Clear();
+                offload.Cache.AcquireResident(CollectionsMarshal.AsSpan(_offAdmit), _offAdmitMissed, _offAdmitLease);
+            }
+
             // Host experts: those planned on the CPU that serve too few rows to be worth an upload.
             int hostExperts = 0, hostRows = 0;
             for (int i = 0; i < distinct; i++)
@@ -705,11 +719,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         finally
         {
             _offLease.Dispose();
+            _offAdmitLease.Dispose();
             if (hostIndex is not null) ArrayPool<int>.Shared.Return(hostIndex);
             if (hostIn is not null) ArrayPool<float>.Shared.Return(hostIn);
             if (hostOut is not null) ArrayPool<float>.Shared.Return(hostOut);
         }
-        offload.AfterLayer(_offMisses);
+        if (!admitBeforeRun) offload.AfterLayer(_offMisses);
     }
 
 

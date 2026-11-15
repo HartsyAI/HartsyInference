@@ -123,35 +123,59 @@ public sealed class MoeExpertOffload : IDisposable
     }
 
     /// <summary>Queues some of a layer's misses for upload, by the admission rule in the type remarks. Call after the layer's lease is
-    /// released.</summary>
+    /// released. An offload with no host runner admits before the layer runs instead (<see cref="AdmitNow"/>).</summary>
     public void AfterLayer(List<ExpertKey> misses)
     {
         ArgumentNullException.ThrowIfNull(misses);
         if (misses.Count == 0) return;
+        SelectAdmissions(misses, _admit);
+        if (_admit.Count == 0) return;
+        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_admit));
+        Interlocked.Add(ref _admitted, started);
+    }
+
+    /// <summary>Uploads the misses the admission rule admits into the cache now, before the layer runs them, so an admitted expert is read
+    /// once and then runs from its cached copy, rather than from a per-call copy and again for admission after the layer. For an offload
+    /// with no host runner, whose every miss is uploaded anyway. The caller pins <paramref name="admitted"/> with a lease before running
+    /// them; a key whose upload did not start stays a miss there.</summary>
+    /// <returns>Uploads started.</returns>
+    public int AdmitNow(List<ExpertKey> misses, List<ExpertKey> admitted)
+    {
+        ArgumentNullException.ThrowIfNull(misses);
+        ArgumentNullException.ThrowIfNull(admitted);
+        admitted.Clear();
+        if (misses.Count == 0) return 0;
+        SelectAdmissions(misses, admitted);
+        if (admitted.Count == 0) return 0;
+        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(admitted));
+        Interlocked.Add(ref _admitted, started);
+        return started;
+    }
+
+    // The admission rule: whole experts that fit the free room first, then hot misses that may displace a resident expert.
+    private void SelectAdmissions(List<ExpertKey> misses, List<ExpertKey> into)
+    {
+        into.Clear();
         ExpertCacheStats stats = CacheBase.Stats;
         // Free room is whole experts that fit without evicting anything; past that, only a hot miss may displace a resident one.
         long expertBytes = ExpertBytes(misses[0]);
         long free = stats.BudgetBytes - stats.ResidentBytes;
         int fills = expertBytes > 0 ? (int)Math.Min(MaxFillsPerLayer, Math.Max(0, free / expertBytes)) : 0;
         int swaps = MaxSwapsPerLayer;
-        _admit.Clear();
         foreach (ExpertKey key in misses)
         {
             if (fills > 0)
             {
-                _admit.Add(key);
+                into.Add(key);
                 fills--;
             }
             else if (swaps > 0 && _scores.ScoreOf(key) >= AdmitMinScore)
             {
-                _admit.Add(key);
+                into.Add(key);
                 swaps--;
             }
             if (fills == 0 && swaps == 0) break;
         }
-        if (_admit.Count == 0) return;
-        int started = CacheBase.Prefetch(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_admit));
-        Interlocked.Add(ref _admitted, started);
     }
 
     /// <summary>Bytes one expert of <paramref name="key"/>'s layer occupies; every expert of a layer has the same shape.</summary>
