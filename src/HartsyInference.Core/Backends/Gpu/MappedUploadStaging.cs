@@ -1,13 +1,14 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Backends.Gpu;
 
 /// <summary>Reads a borrowed memory-mapped tensor into one reusable host buffer, a chunk at a time, before its device upload.</summary>
-/// <remarks>A demand-paged mapping on a network volume faults one page at a time, far below sequential read speed. The
-/// chunk range is advised as needed first, so the kernel fetches it in one request rather than per fault. A staged
+/// <remarks>A tensor with a registered file extent is read with positional reads, since faulting its pages through a
+/// mapping on a network volume is slow. Other borrowed views are read through the mapping. A staged
 /// chunk stays in use until the caller reports its copy complete with <see cref="MarkCopyComplete"/>; the next
 /// <see cref="StageChunk"/> and <see cref="Dispose"/> refuse to run before that.</remarks>
 public sealed unsafe class MappedUploadStaging : IDisposable
@@ -16,6 +17,7 @@ public sealed unsafe class MappedUploadStaging : IDisposable
     public const long DefaultChunkBytes = 64L << 20;
 
     private readonly long _chunkBytes;
+    private readonly Dictionary<string, PreadByteSource> _files = new(StringComparer.Ordinal);
     private byte[] _buffer = [];
     private bool _disposed;
     private bool _copyPending;
@@ -52,10 +54,17 @@ public sealed unsafe class MappedUploadStaging : IDisposable
 
         int count = (int)Math.Min(remaining, _chunkBytes);
         Grow(count);
-        byte* src = (byte*)source.DataPointer + offset;
-        AdviseWillNeed(source, src, count);
-        fixed (byte* dst = _buffer)
-            Buffer.MemoryCopy(src, dst, count, count);
+        if (TensorFileExtents.TryGet(source, out string path, out long fileStart))
+        {
+            FileFor(path).ReadAt(fileStart + offset, _buffer.AsSpan(0, count));
+        }
+        else
+        {
+            byte* src = (byte*)source.DataPointer + offset;
+            AdviseWillNeed(source, src, count);
+            fixed (byte* dst = _buffer)
+                Buffer.MemoryCopy(src, dst, count, count);
+        }
         host = Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_buffer));
         _copyPending = true;
         return count;
@@ -64,7 +73,7 @@ public sealed unsafe class MappedUploadStaging : IDisposable
     /// <summary>Reports that the device copy reading the last staged chunk has finished, so the buffer may be reused.</summary>
     public void MarkCopyComplete() => _copyPending = false;
 
-    /// <summary>Releases the staging buffer. Idempotent.</summary>
+    /// <summary>Releases the staging buffer and the shard files it read from. Idempotent.</summary>
     /// <exception cref="InvalidOperationException">A staged chunk is still being read by a copy.</exception>
     public void Dispose()
     {
@@ -72,6 +81,9 @@ public sealed unsafe class MappedUploadStaging : IDisposable
             throw new InvalidOperationException("The staged chunk is still being read by a copy; call MarkCopyComplete before disposing.");
         _disposed = true;
         _buffer = [];
+        foreach (PreadByteSource file in _files.Values)
+            file.Dispose();
+        _files.Clear();
     }
 
     private void Grow(int count)
@@ -81,6 +93,17 @@ public sealed unsafe class MappedUploadStaging : IDisposable
         // Pinned on the object heap so the pointer StageChunk returns cannot move under the caller.
         long size = Math.Min(_chunkBytes, Math.Max(count, (long)_buffer.Length * 2));
         _buffer = GC.AllocateUninitializedArray<byte>((int)size, pinned: true);
+    }
+
+    /// <summary>Returns the positional-read handle for a file, opening it on first use so each file is opened once.</summary>
+    private PreadByteSource FileFor(string path)
+    {
+        if (!_files.TryGetValue(path, out PreadByteSource? file))
+        {
+            file = new PreadByteSource(path);
+            _files.Add(path, file);
+        }
+        return file;
     }
 
     private static void AdviseWillNeed(Tensor source, byte* src, int count)
