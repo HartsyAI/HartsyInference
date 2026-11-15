@@ -277,7 +277,7 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
 
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB.
     /// Zero when the backend does not report its memory.</summary>
-    public static long PreloadBudget(long free, long total)
+    internal static long PreloadBudget(long free, long total)
     {
         if (free <= 0 || total <= 0) return 0;
         long headroom = Math.Max(3L << 30, total * 15 / 100);
@@ -306,7 +306,8 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
     public IEnumerable<Tensor> EnumerateExpertWeights()
     {
         RequireResidentForOffload();
-        return _layers.Where(l => l!.Moe is not null).SelectMany(l => l!.Moe!.EnumerateExpertWeights());
+        // Every slot is built once ResidentWeights holds.
+        return _layers.Select(l => l?.Moe).OfType<MoeFeedForward>().SelectMany(m => m.EnumerateExpertWeights());
     }
 
     /// <inheritdoc />
@@ -322,7 +323,7 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         List<(int Layer, int ExpertCount)> layers = [];
         foreach (Ernie5Layer? layer in _layers)
         {
-            if (layer!.Moe is not { } moe) continue;
+            if (layer?.Moe is not { } moe) continue;
             moe.AttachOffload(offload, layer.Index);
             layers.Add((layer.Index, moe.NumExperts));
         }

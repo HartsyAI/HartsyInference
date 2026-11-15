@@ -114,14 +114,25 @@ public sealed class Ernie5RealCheckpointTests
         List<string> steps = [];
         List<int> generated = [];
         int token = next;
+        MoeOffloadStats before = offload?.Stats ?? default;
         for (int i = 0; i < decodeSteps; i++)
         {
             Stopwatch decode = Stopwatch.StartNew();
             float[] step = model.Forward([token], state);
             decode.Stop();
             AssertHealthy(step, model.Config.VocabSize, $"decode {i + 1}");
-            steps.Add(offload is null ? $"{decode.Elapsed.TotalSeconds:F2}s"
-                : $"{decode.Elapsed.TotalSeconds:F2}s@{offload.Stats.ResidentShare:P0}");
+            if (offload is null)
+            {
+                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s");
+            }
+            else
+            {
+                // This step's own hit share and admissions, not the running total since attach (which includes the prefill).
+                MoeOffloadStats now = offload.Stats;
+                long hit = now.ResidentRows - before.ResidentRows, all = hit + now.StreamedRows - before.StreamedRows + now.HostRows - before.HostRows;
+                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s hit {(all == 0 ? 0 : (double)hit / all):P0} +{now.Admitted - before.Admitted}");
+                before = now;
+            }
             token = Argmax(step);
             generated.Add(token);
         }

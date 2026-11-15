@@ -382,6 +382,7 @@ public sealed class Ernie5MoeTests
         Assert.Equal(0, stats.HostRows);
         Assert.Equal(2 * n * dims.TopK, stats.ResidentRows + stats.StreamedRows);
         Assert.True(stats.ResidentRows > 0, "the cache admitted nothing");
+        Assert.True(stats.StreamedRows > 0, "no miss ran from a per-call copy");
     }
 
     [Fact]
