@@ -228,10 +228,12 @@ The planner reproduces these until the row that owns each is rewritten.
   quarter of free VRAM in F32 scores and never fewer than 128 MB (unless `numerics.sdpaTile` or the query length asks for less, or the 128 MB
   does not fit, in which case the tile is halved until it does and later calls start from that height, doubling it back after a run of calls that fit at it), because `cuMemGetInfo` reads far too low on a card a process has filled past about
   8 GiB (Windows), and a one-row tile is minutes per layer at 32 thousand tokens.
-- CUDA's materialized row addresses at most 2^32 score elements (B·H·Sq·Skv; its softmax forms row offsets in 32 bits), and
-  so does each query tile. Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
+- CUDA's declared materialized and per-query-tile budget remains at most 2^32 score elements (B·H·Sq·Skv). The
+  attention-specific softmax now uses wide row offsets; other preparation/GEMM/index limits have not been relaxed.
+  Past that an unmasked F16 or BF16 call runs the query-tiled core on exact F32 widenings, an
   unmasked or key-masked F32 call the tiled F32 rows, and any other call is refused at planning, naming the budget.
-- Vulkan's scalar kernel reads a per-head or per-batch mask as one `[Sq,Skv]` block, and its naive kernel mis-addresses
-  a per-batch one.
-- `FlashAttention` runs on the host on Vulkan when the call has a softcap, sinks, ALiBi or a head dim above 128, and on
-  CUDA when the head dim is above 1024.
+- Vulkan's scalar/tiled mask shaders carry batch/head/query bias strides; the naive path uses the same layout to
+  offset each block and expands key-only masks. Source indexing is not a complete executed mask-conformance campaign.
+- Vulkan `FlashAttention` uses host reference when neither its scalar admission nor its restricted wide-sink row
+  admits the call. The wide row covers unmasked F32 sinks with optional softcap, no ALiBi, up to D1024; it is not a
+  general replacement for every logit-term/large-D call. CUDA Flash above D1024 still runs on the host.
