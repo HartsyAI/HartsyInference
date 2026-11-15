@@ -16,6 +16,7 @@ public sealed partial class CudaKernels : IDisposable
     private readonly CudaModule _depthwiseConv2dModule;
     private readonly CudaModule _msdaModule;
     private readonly CudaModule _softmaxModule;
+    private readonly CudaModule _attentionSoftmaxModule;
     private readonly CudaModule _transposeModule;
     private readonly CudaModule _wanVaeConv3dModule;
     private readonly CudaModule _broadcastAddModule;
@@ -223,6 +224,8 @@ public sealed partial class CudaKernels : IDisposable
     // ── Softmax function handles ─────────────────────────────────────────
     private readonly nint _softmaxF32;
     private readonly nint _softmaxF16;
+    private readonly nint _attentionSoftmaxF32;
+    private readonly nint _attentionSoftmaxF16;
 
     // ── Transpose/Permute function handles ───────────────────────────────
     private readonly nint _transpose2dF32;
@@ -651,6 +654,9 @@ public sealed partial class CudaKernels : IDisposable
 
         _softmaxModule = LoadOwnedModule(Ptx("softmax_f32"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
+        _attentionSoftmaxModule = LoadOwnedModule(Ptx("attention_softmax"));
+        _attentionSoftmaxF32 = _attentionSoftmaxModule.GetFunction("attention_softmax_f32");
+        _attentionSoftmaxF16 = _attentionSoftmaxModule.GetFunction("attention_softmax_f16");
 
         _transposeModule = LoadOwnedModule(Ptx("transpose_f32"));
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
@@ -3274,6 +3280,21 @@ public sealed partial class CudaKernels : IDisposable
     /// <summary>Launches in-place per-row softmax with F16 I/O, FP32 accumulation.</summary>
     public void LaunchSoftmaxF16(ulong data, int rowLen, int totalRows, nint stream)
         => LaunchSoftmaxImpl(_softmaxF16, data, rowLen, totalRows, stream);
+
+    /// <summary>Attention row softmax with optional contiguous F32 bias, zero excluded rows and NaN propagation.</summary>
+    public unsafe void LaunchAttentionSoftmax(ulong data, ulong bias, int rowLen, int totalRows, bool half, nint stream)
+    {
+        uint columns = (uint)rowLen;
+        uint rows = (uint)totalRows;
+        void** args = stackalloc void*[4];
+        args[0] = &data;
+        args[1] = &bias;
+        args[2] = &columns;
+        args[3] = &rows;
+        CudaDriverApi.cuLaunchKernel(
+            half ? _attentionSoftmaxF16 : _attentionSoftmaxF32, rows, 1, 1, BlockSize, 1, 1,
+            BlockSize * sizeof(float), stream, (nint)args, 0).ThrowOnError();
+    }
 
     // ── Transpose/Permute Launches ──────────────────────────────────────
 

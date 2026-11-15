@@ -9,7 +9,7 @@
 // positions are valid, so a fixed-capacity KV buffer can be read in place). out: [B, Hq, Tq, D].
 // Query head h reads kv head h / kvGroup. Causal: query row r (abs pos qOffset+r) attends keys 0..qOffset+r.
 //
-// Build:  ../lm/build.sh   (nvcc --ptx -arch=sm_80)
+// Build: ../lm/build.sh (the pinned NVRTC compiler, sm_80 and sm_75).
 
 #include <cuda_fp16.h>
 
@@ -82,6 +82,8 @@ extern "C" __global__ void lm_flash_attn_f32(
         }
         __syncthreads();
         float score = sdata[0] * scale;
+        // Softcap applies to the scaled dot product, before additive positional bias.
+        if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
         // ALiBi: per-head distance penalty. Causal decoders (BLOOM/MPT) use the linear slope·(k_pos − q_pos) (≤ 0
         // since k ≤ q). Bidirectional encoders (jina-bert-v2) use the SYMMETRIC form −slope·|k_pos − q_pos| (both
         // directions penalized; reduces to the causal form when k ≤ q). Selected by !causal. No RoPE on these models.
@@ -90,8 +92,6 @@ extern "C" __global__ void lm_flash_attn_f32(
             int rel = k - (int)(qOffset + r);
             score += alibiSlopes[h] * (causal ? (float)rel : -(float)(rel < 0 ? -rel : rel));
         }
-        // Gemma-2 attention-logit soft-cap: cap·tanh(score/cap), applied to each logit before the softmax.
-        if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
         float newM = fmaxf(m, score);
         float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
@@ -117,7 +117,7 @@ extern "C" __global__ void lm_flash_attn_f32(
         m = newM;
     }
 
-    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : (isnan(l) ? l : 0.0f);
 }
 
 // F16-storage KV variant: identical to lm_flash_attn_f32 above (same online-softmax algorithm, same F32
@@ -179,12 +179,12 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
         }
         __syncthreads();
         float score = sdata[0] * scale;
+        if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
         if (alibiSlopes != nullptr)
         {
             int rel = k - (int)(qOffset + r);
             score += alibiSlopes[h] * (causal ? (float)rel : -(float)(rel < 0 ? -rel : rel));
         }
-        if (softcap > 0.0f) score = softcap * tanhf(score / softcap);
 
         float newM = fmaxf(m, score);
         float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
@@ -207,5 +207,5 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
         m = newM;
     }
 
-    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : 0.0f;
+    if (tid < D) out[qBase + tid] = l > 0.0f ? acc / l : (isnan(l) ? l : 0.0f);
 }

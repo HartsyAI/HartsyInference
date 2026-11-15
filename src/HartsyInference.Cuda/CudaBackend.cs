@@ -5413,7 +5413,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         long skv = key.Shape[2];
         long totalHeads = b * h;
 
-        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pMaskClamped = 0, pMaskCast = 0, pOut = 0, scoresBuf = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pMask = 0, pOut = 0, scoresBuf = 0;
         ulong pQCast = 0, pKCast = 0, pVCast = 0, pOutCast = 0, pMaskBroadcast = 0, pMaskOnes = 0;
         bool cachedOutput = false;
         try
@@ -5421,17 +5421,15 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             pQ = GpuTransferHelper.CopyToDevice(query);
             pK = GpuTransferHelper.CopyToDevice(key);
             pV = GpuTransferHelper.CopyToDevice(value);
-            long maskElemCount = 0;
             if (mask is not null)
             {
                 pMask = GpuTransferHelper.CopyToDevice(mask);
-                maskElemCount = mask.ElementCount;
                 if (MaskIsKeyOnly(mask, sq))
                 {
                     // This path indexes the mask per query row, so expand the stored [.., 1, Skv] into the
                     // [.., Sq, Skv] it stands for. Only small/medium shapes reach here — the large ones took the
                     // tiled branch above — so the expansion is bounded by the same budget as the score matrix.
-                    long maskBlocks = maskElemCount / skv;
+                    long maskBlocks = mask.ElementCount / skv;
                     pMaskBroadcast = CudaMemory.Allocate((nuint)(maskBlocks * sq * skv * sizeof(float)));
                     pMaskOnes = CudaMemory.Allocate((nuint)(sq * sizeof(float)));
                     CudaMemory.Fill32(pMaskOnes, 0x3F80_0000u, (nuint)sq);   // 1.0f
@@ -5442,7 +5440,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                             pMask + (ulong)(blk * skv * sizeof(float)),
                             pMaskOnes, sq, skv, skv, beta: 0f);
                     }
-                    maskElemCount = maskBlocks * sq * skv;
                 }
             }
             nuint outBytes = GpuTransferHelper.ByteSize(output);
@@ -5516,22 +5513,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             t_attentionRoute = query.DType == DType.BF16 ? "S.12" : isF16 ? (query.DType == DType.F32 ? "S.13" : "S.15") : "S.14";
             int elemSize = opDtype.SizeInBytes;
             ulong opMask = pMaskBroadcast != 0 ? pMaskBroadcast : pMask;
-            int maskElemSize = sizeof(float);
-            if (mask is not null && isF16)
-            {
-                // Scores live in F16 on the native-F16/fallback path, while the public additive-mask contract is
-                // F32. Convert once rather than reinterpreting packed float bytes as half values. Clamp to half the
-                // F16 range so a finite sentinel such as -1e30 plus a score within that range stays finite in the F16
-                // add: a fully masked row averages its highest-scoring keys instead of reaching -Inf and NaN in softmax,
-                // and a masked entry in a partly masked row still gets zero weight.
-                pMaskClamped = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(float)));
-                _kernels!.LaunchClamp(
-                    pMaskClamped, opMask, -32_752f, 32_752f, (int)maskElemCount, _stream.Handle);
-                pMaskCast = CudaMemory.Allocate((nuint)(maskElemCount * sizeof(ushort)));
-                _kernels!.LaunchCastF32ToF16(pMaskCast, pMaskClamped, (int)maskElemCount, _stream.Handle);
-                opMask = pMaskCast;
-                maskElemSize = sizeof(ushort);
-            }
 
             nuint scoresBytes = (nuint)(totalHeads * sq * skv * elemSize);
             scoresBuf = CudaMemory.Allocate(scoresBytes);
@@ -5596,18 +5577,16 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                         _ => throw new InvalidOperationException("Validated SDPA mask rank changed before dispatch."),
                     };
                     ulong scorePointer = scoresBuf + (ulong)(bh * strideScores * elemSize);
-                    ulong maskPointer = opMask + (ulong)(maskBlock * maskHeadStride * maskElemSize);
-                    if (isF16)
-                        _kernels!.LaunchAddF16(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
-                    else
-                        _kernels!.LaunchAdd(scorePointer, scorePointer, maskPointer, (int)maskHeadStride, _stream.Handle);
+                    ulong maskPointer = opMask + (ulong)(maskBlock * maskHeadStride * sizeof(float));
+                    // Fuse F32 bias addition into softmax: -infinity remains exclusion and finite bias
+                    // keeps its public precision even when the score/probability storage is F16.
+                    _kernels!.LaunchAttentionSoftmax(
+                        scorePointer, maskPointer, (int)skv, (int)sq, isF16, _stream.Handle);
                 }
             }
-
-            if (isF16)
-                _kernels!.LaunchSoftmaxF16(scoresBuf, (int)skv, (int)(totalHeads * sq), _stream.Handle);
             else
-                _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * sq), _stream.Handle);
+                _kernels!.LaunchAttentionSoftmax(
+                    scoresBuf, 0, (int)skv, (int)(totalHeads * sq), isF16, _stream.Handle);
 
             // attn_weights @ V, all heads in one strided-batched launch (see the QK^T comment above — same
             // per-call-launch-overhead problem, same fix).
@@ -5667,8 +5646,6 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             GpuTransferHelper.FreeDevice(pV);
             GpuTransferHelper.FreeDevice(pMask);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
-            if (pMaskCast != 0) CudaMemory.FreeAsync(pMaskCast, _stream.Handle);
-            if (pMaskClamped != 0) CudaMemory.FreeAsync(pMaskClamped, _stream.Handle);
             if (pMaskBroadcast != 0) CudaMemory.FreeAsync(pMaskBroadcast, _stream.Handle);
             if (pMaskOnes != 0) CudaMemory.FreeAsync(pMaskOnes, _stream.Handle);
             if (scoresBuf != 0) CudaMemory.FreeAsync(scoresBuf, _stream.Handle);
@@ -6415,7 +6392,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 }
 
                 // Row-softmax over Skv for the (totalHeads·curBr) packed rows.
-                _kernels!.LaunchSoftmax(scoresBuf, (int)skv, (int)(totalHeads * curBr), _stream.Handle);
+                _kernels!.LaunchAttentionSoftmax(scoresBuf, 0, (int)skv, (int)(totalHeads * curBr), false, _stream.Handle);
 
                 // scores·V per head → out[q0:q0+curBr]
                 for (long bh = 0; bh < totalHeads; bh++)
