@@ -39,18 +39,30 @@ Use an external artifact directory. The example creates a pilot, **unreviewed** 
 
 ```bash
 python benchmarks/attention/evidence.py fixture --id pilot --heads 2 --kv-heads 2 \
-  --sq 32 --skv 48 --dim 64 --dtype f16 --precision f16 --out /external/evidence/pilot
+  --sq 32 --skv 48 --dim 64 --dtype f16 --precision f16 --legacy-asserted-bounded --out /external/evidence/pilot
 python benchmarks/attention/evidence.py verify-fixture /external/evidence/pilot/fixture.json
 dotnet /external/evidence/diagnostic-operation/HartsyInference.GpuBenchmarks.dll attention-table \
-  --fixture /external/evidence/pilot/fixture.json --boundary public --trials 1 --cohort COHORT \
+  --fixture /external/evidence/pilot/fixture.json --arm def-f16 --boundary observe --trials 1 --cohort COHORT \
   --out /external/evidence/result.json
 ```
 
 Set `HARTSYINFERENCE_BENCH_BACKEND=vulkan` for Vulkan and its existing device selector when needed. Both
 `attention-table --fixture` and `attention-evidence` use the shared runner. `--boundary resident` uses device
 timestamps; `--observe /external/evidence/observations.json` enables the lightweight collector **during warmups**.
-After recording the initial route, pass `--expect-branch ID` for later arms. Use fresh output paths; evidence is
+`--boundary observe` discovers the executed branch and reports `timing_eligible: false`. Register the expected
+branch from reviewed path evidence before timing; `public` and `resident` require `--expect-branch ID` and cannot
+learn their acceptance branch from the candidate. Unreviewed acceptance or failed quality also makes
+`timing_eligible` false; measured pilot timings remain descriptive. Cohort, memory and campaign checks still apply.
+Use fresh output paths; evidence is
 immutable. Oracle comparisons, tensor loading and all hashing occur outside timed regions.
+
+The fixture must match the catalog arm's entry, Q/O dtype, K/V dtype and legacy assertion; explicit catalog grants
+must also match. The runner rejects mismatches before backend creation and never rewrites fixtures or casts their
+operands to satisfy an arm label. Fixture permissions remain authoritative; an arm's knobs do not grant precision.
+For example, freeze a separate F32-Q/F16-KV Flash fixture with `--route Flash --dtype f32 --kv-dtype f16` for
+`fa-f16kv`; add `--causal` for bottom-right causality. `--query-offset` overrides the default alignment explicitly.
+Every fixture remains unreviewed until its numerical definition passes review. A forced split name alone does not
+prove split execution: register and assert the actual split branch on eligible hardware/shapes.
 
 OpParity consumes the identical bytes:
 

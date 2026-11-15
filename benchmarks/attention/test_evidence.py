@@ -10,6 +10,29 @@ from kitchen_operation import verify_locked_python_sources
 
 
 class FixtureTests(unittest.TestCase):
+    def test_flash_fixture_preserves_declared_route_cache_dtype_and_positions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = create(pathlib.Path(temporary) / 'flash', 'flash', heads=4, kv_heads=1, sq=1, skv=3,
+                          dim=4, dtype='f32', kv_dtype='f16', route='Flash', causal=True, precision='f32')
+            document = load(path)
+            self.assertEqual('Flash', document['call']['route'])
+            self.assertTrue(document['call']['causal'])
+            self.assertEqual(2, document['call']['query_offset'])
+            self.assertEqual('f32', document['tensors']['q']['dtype'])
+            for name in ('k', 'v'):
+                self.assertEqual('f16', document['tensors'][name]['dtype'])
+                self.assertEqual(12, len(logical_values(path.parent, document['tensors'][name])))
+            self.assertFalse(document['acceptance']['reviewed'])
+            self.assertEqual(2e-5, document['acceptance']['rel_l2'])
+
+    def test_fixture_requires_explicit_legacy_assertion_and_keeps_position_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = create(pathlib.Path(temporary) / 'legacy', 'legacy', heads=1, kv_heads=1, sq=1, skv=2,
+                          dim=4, route='Flash', query_offset=0, legacy_asserted_bounded=True)
+            document = load(path)
+            self.assertTrue(document['call']['legacy_asserted_bounded'])
+            self.assertEqual(0, document['call']['query_offset'])
+
     def test_all_storage_types_are_shared_exactly_and_hash_checked(self):
         with tempfile.TemporaryDirectory() as temporary:
             for dtype in ('f32', 'f16', 'bf16'):

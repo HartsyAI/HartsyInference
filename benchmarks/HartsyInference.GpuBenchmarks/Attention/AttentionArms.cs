@@ -26,6 +26,7 @@ public static class AttentionArms
         () => KnobStore.Clear(EngineKnobs.FlashF16), () => KnobStore.Clear(EngineKnobs.SageF16MinSkv),
         () => KnobStore.Clear(EngineKnobs.SdpaForceTiled), () => KnobStore.Clear(EngineKnobs.SdpaF16),
         () => KnobStore.Clear(EngineKnobs.SdpaNoF16), () => KnobStore.Clear(EngineKnobs.NoTf32),
+        () => KnobStore.Clear(EngineKnobs.SdpaNoTf32),
         () => KnobStore.Clear(EngineKnobs.Fa2Prefill), () => KnobStore.Clear(EngineKnobs.FlashDecodeGqa),
         () => KnobStore.Clear(EngineKnobs.FlashSplitOff), () => KnobStore.Clear(EngineKnobs.FlashSplitForce),
         () => KnobStore.Clear(EngineKnobs.Profile), () => KnobStore.Clear(EngineKnobs.ProfileShapes),
@@ -37,7 +38,7 @@ public static class AttentionArms
     public static readonly string[] ReportedKnobIds =
     [
         EngineKnobs.SageAttn.Id, EngineKnobs.SdpaCudnn.Id, EngineKnobs.FlashF16.Id, EngineKnobs.SageF16MinSkv.Id,
-        EngineKnobs.SdpaForceTiled.Id, EngineKnobs.SdpaF16.Id, EngineKnobs.SdpaNoF16.Id, EngineKnobs.NoTf32.Id,
+        EngineKnobs.SdpaForceTiled.Id, EngineKnobs.SdpaF16.Id, EngineKnobs.SdpaNoF16.Id, EngineKnobs.NoTf32.Id, EngineKnobs.SdpaNoTf32.Id,
         EngineKnobs.Fa2Prefill.Id, EngineKnobs.FlashDecodeGqa.Id, EngineKnobs.FlashSplitOff.Id, EngineKnobs.FlashSplitForce.Id,
         EngineKnobs.Int8AttnV2.Id, EngineKnobs.Int8AttnV2VTile.Id, EngineKnobs.Int8AttnV2MinTokens.Id,
     ];
@@ -80,6 +81,14 @@ public static class AttentionArms
             "native F16 through the materialized cuBLAS score matrix"),
         new("def-f32", "sdpa", DType.F32, DType.F32, false, null, () => { },
             "F32 I/O, allowF16=false: the unbounded-score caller"),
+        new("mat-f32-strict", "sdpa", DType.F32, DType.F32, false, "materialized",
+            () =>
+            {
+                KnobStore.Set(EngineKnobs.SageAttn, false);
+                KnobStore.Set(EngineKnobs.SdpaCudnn, false);
+                KnobStore.Set(EngineKnobs.FlashF16, false);
+                KnobStore.Set(EngineKnobs.SdpaNoTf32, true);
+            }, "materialized F32 operands and compute, without TF32"),
         new("tiled-f32", "sdpa", DType.F32, DType.F32, false, "tiled",
             () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true),
             "F32 I/O through the query-tiled core"),
