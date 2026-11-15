@@ -41,6 +41,11 @@ def main(argv=None):
         if args.mandatory and not fixture['acceptance']['reviewed']:
             raise RuntimeError('Mandatory measurement requires reviewed numerical acceptance')
         spec = fixture['call']
+        if args.api == 'prequantized' and 'reuse_count' in spec:
+            result['timing_eligible'] = False
+            result['measurement_limitation'] = 'Finite reuse-count groups are not modeled; this pilot retains one prepared state across warmups/trials'
+            if args.mandatory:
+                raise NotImplementedError('Finite reuse-count timing needs validated group-state accounting')
         tensors = {}
         for name, descriptor in fixture['tensors'].items():
             dtype = {'f32': torch.float32, 'f16': torch.float16, 'bf16': torch.bfloat16,
