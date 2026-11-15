@@ -3277,7 +3277,7 @@ public sealed partial class CudaKernels : IDisposable
     public void LaunchSoftmax(ulong data, int rowLen, int totalRows, nint stream)
         => LaunchSoftmaxImpl(_softmaxF32, data, rowLen, totalRows, stream);
 
-    /// <summary>Launches in-place per-row softmax with F16 I/O, FP32 accumulation.</summary>
+    /// <summary>Public compatibility launch for general F16 softmax; attention uses LaunchAttentionSoftmax.</summary>
     public void LaunchSoftmaxF16(ulong data, int rowLen, int totalRows, nint stream)
         => LaunchSoftmaxImpl(_softmaxF16, data, rowLen, totalRows, stream);
 

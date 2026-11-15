@@ -13,6 +13,7 @@
 
 #include <cuda_fp16.h>
 
+// A finite sentinel keeps an absent (-infinity) sink's mass at zero on an empty row.
 #define INF_F 3.402823466e+38f
 
 extern "C" __global__ void lm_flash_attn_f32(

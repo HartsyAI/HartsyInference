@@ -20,10 +20,20 @@ remains incomplete. This report does not freeze Bfix, approve later work, or cla
   cohort-specific evidence, not a guarantee about untested cuDNN versions.
 - Vulkan scalar F32 passes the exclusion and finite/non-finite bias controls without source or SPIR-V changes.
   These assertions require the executed GPU implementation; a host fallback cannot satisfy them.
+- Review controls reproduced NaN-to-zero loss in split decode with both KV formats and in both standalone/fused
+  combine kernels. The combine now preserves NaN, including in the fused Q8 scale/sum metadata consumed by the
+  next projection. Direct finite/empty controls and a NaN in only one value channel verify the sidecar boundary.
+- Both native half-prefill epilogues now explicitly preserve a NaN denominator. The tested NaN query already
+  propagated through their accumulators before this guard; it was not a reproduced zero-output defect there.
+- Finite mask sentinels are additive biases, not exclusions. With nonzero scores plus a constant `-1e30` or
+  `-float.MaxValue` F32 bias, addition rounds these scores equal and the row returns the uniform mean.
+  Removing the old F16 clamp can change those outputs; do not treat them as an identity-preserving refactor.
+  Only actual negative infinity represents the exclusion tested here. New F32/F16/BF16 controls pin finite
+  sentinel behavior and separate nonzero-score/ordinary-bias mixing at the existing dtype tolerances.
 
 ## Local validation
 
-The new GPU semantic class covers 26 cases: softcap/ALiBi ordering, empty local windows with non-finite sinks,
+The new GPU semantic class covers 45 cases: softcap/ALiBi ordering, empty local windows with non-finite sinks,
 mixed excluded/visible rows, large F32 biases, NaN/+infinity, and multiple batches/heads with a 516-key reduction
 tail. Existing dtype tolerances are preserved; these analytic controls do not establish model quality.
 
@@ -32,7 +42,7 @@ Full affected GPU categories run sequentially on Windows 11, RTX 3060 (SM86), dr
 | Project | Reported passes | Failures | Resource skips |
 |---|---:|---:|---:|
 | Core | 19 | 0 | 0 |
-| LLM | 82 | 0 | 19 |
+| LLM | 101 | 0 | 19 |
 | Diffusion | 18 | 0 | 2 |
 | Engine | 12 | 0 | 10 |
 
@@ -47,6 +57,10 @@ net10.0 and the benchmark build pass without warnings. These results do not cove
 checks below.
 
 ## Descriptive operation timing
+
+This table measures the earlier production candidate `e4ff1d1a0` with the strict-F32 harness later committed
+as `930daa625`. The sibling-kernel review fixes require a fresh registered hardware campaign; these numbers
+are retained history, not measurements of the latest artifacts.
 
 The initial default-arm F32 probe failed its unchanged strict-F32 tolerance on B0: that arm used TF32
 (`rel_l2 = 3.03e-4`, versus `2e-5`). Its failed output remains in `smoke/`. The new explicit
@@ -87,6 +101,18 @@ An unmodified SM80 Flash source rebuild exactly matched shipped PTX after line-e
 arithmetic edits. Changed Flash and new attention softmax ship both SM80 and SM75 PTX at ISA 9.0, generated
 with CUDA 13.0.88 NVRTC. Both modules assemble without spills for SM75 and SM86. Only SM86 executed here;
 SM75 hardware remains unverified.
+
+The review rebuild uses the cached Linux CUDA 13.0.88 NVCC image
+`nvidia/cuda@sha256:7d2f6a8c2071d911524f95061a0db363e24d27aa51ec831fcccf9e76eb72bc92` for the two
+NVCC-owned modules. Before edits it reproduced the shipped fused PTX exactly after newline normalization.
+NVRTC-owned modules and the fused SM75 floor keep their prescribed frontend. The helper now prints the loaded
+NVRTC major/minor and target on every compile; the emitted header records the exact compiler build.
+
+The public `LaunchSoftmaxF16` adapter and its module remain for external `CudaKernels` consumers. Removing a
+public method because in-tree attention no longer calls it would break compatibility. Further per-head launch
+fusion/register retention is proposed optimization work, not a correctness fix: mask fusion already replaces
+the old per-head adds and shared softmax with per-head softmax calls. The timing concern above remains open;
+do not attribute it to one mechanism without a controlled profile or mark that suggestion performance-validated.
 
 Raw logs, assembly diagnostics, fixtures, binaries and smoke output are outside version control under
 `artifacts/attention-pr02` in the PR worktree. Retain that directory through review and the hardware handoff.

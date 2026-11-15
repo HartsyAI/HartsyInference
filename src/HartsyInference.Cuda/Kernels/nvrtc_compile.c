@@ -34,6 +34,7 @@ typedef nvrtcResult (*fn_getptx)(nvrtcProgram, char*);
 typedef nvrtcResult (*fn_logsize)(nvrtcProgram, size_t*);
 typedef nvrtcResult (*fn_getlog)(nvrtcProgram, char*);
 typedef const char* (*fn_errstr)(nvrtcResult);
+typedef nvrtcResult (*fn_version)(int*, int*);
 
 static char* read_file(const char* path, size_t* outLen)
 {
@@ -67,6 +68,15 @@ int main(int argc, char** argv)
     if (!lib) lib = dlopen("libnvrtc.so.12", RTLD_NOW);
 #endif
     if (!lib) { fprintf(stderr, "dlopen libnvrtc failed: %s\n", dlerror()); return 3; }
+
+    fn_version nvrtcVersion = (fn_version)dlsym(lib, "nvrtcVersion");
+    int major = 0, minor = 0;
+    if (!nvrtcVersion || nvrtcVersion(&major, &minor) != 0)
+    {
+        fprintf(stderr, "cannot query loaded NVRTC version\n");
+        return 3;
+    }
+    fprintf(stderr, "NVRTC %d.%d, target %s; exact compiler build is recorded in the emitted PTX header\n", major, minor, arch);
 
     fn_create  nvrtcCreateProgram   = (fn_create)  dlsym(lib, "nvrtcCreateProgram");
     fn_compile nvrtcCompileProgram  = (fn_compile) dlsym(lib, "nvrtcCompileProgram");

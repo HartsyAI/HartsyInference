@@ -223,8 +223,8 @@ __device__ __forceinline__ void fa2_causal(
     l0 += __shfl_xor_sync(0xffffffffu, l0, 2);
     l1 += __shfl_xor_sync(0xffffffffu, l1, 1);
     l1 += __shfl_xor_sync(0xffffffffu, l1, 2);
-    const float inv0 = l0 > 0.0f ? 1.0f / l0 : 0.0f;
-    const float inv1 = l1 > 0.0f ? 1.0f / l1 : 0.0f;
+    const float inv0 = l0 > 0.0f ? 1.0f / l0 : (isnan(l0) ? l0 : 0.0f);
+    const float inv1 = l1 > 0.0f ? 1.0f / l1 : (isnan(l1) ? l1 : 0.0f);
     const int qi0 = q0 + rowLocal0, qi1 = qi0 + 8;
     float* Oh = out + ((size_t)b * Hq + h) * (size_t)Tq * HD;
     #pragma unroll
