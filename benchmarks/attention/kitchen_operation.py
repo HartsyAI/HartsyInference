@@ -9,6 +9,23 @@ from fixtures import load, sha256, tensor_path
 from operation_oracle import dense, merge, sol
 
 
+def verify_locked_python_sources(environment, imported_package_file):
+    hashes = environment.get('python_source_hashes')
+    if not hashes or 'comfy_kitchen/__init__.py' not in hashes:
+        raise RuntimeError('The environment lock has no complete Kitchen Python source identity')
+    imported = pathlib.Path(imported_package_file).resolve()
+    if imported.name != '__init__.py':
+        raise RuntimeError('The imported Kitchen package has no verifiable Python source entry point')
+    package = imported.parent
+    for relative, expected in hashes.items():
+        name = pathlib.PurePosixPath(relative)
+        if '..' in name.parts or not name.parts or name.parts[0] != 'comfy_kitchen':
+            raise RuntimeError('Invalid locked Kitchen source path: ' + relative)
+        file = package.joinpath(*name.parts[1:]).resolve()
+        if not file.is_relative_to(package) or not file.is_file() or sha256(file) != expected:
+            raise RuntimeError('Imported Kitchen Python source differs from the environment lock: ' + relative)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--fixture', required=True)
@@ -37,6 +54,7 @@ def main(argv=None):
             if sha256(path) != expected: raise RuntimeError('A locked Kitchen extension changed')
         import torch
         import comfy_kitchen as ck
+        verify_locked_python_sources(environment, ck.__file__)
         import comfy_kitchen.sage_attention as sa
         import comfy_kitchen.flash_attention as fa
         if torch.__version__ != environment['torch']: raise RuntimeError('PyTorch differs from the lock')

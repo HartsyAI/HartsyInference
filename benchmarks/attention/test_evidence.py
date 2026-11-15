@@ -2,10 +2,11 @@ import copy
 import pathlib
 import tempfile
 import unittest
-from fixtures import create, load, logical_values
+from fixtures import create, load, logical_values, sha256
 from statistics_protocol import analyze
 from telemetry_check import compare
 from cell_fixture import materialize
+from kitchen_operation import verify_locked_python_sources
 
 
 class FixtureTests(unittest.TestCase):
@@ -35,6 +36,42 @@ class FixtureTests(unittest.TestCase):
             mask = logical_values(path.parent, document['tensors']['bias'])
             self.assertFalse(any(mask[:3]))
             self.assertEqual(32, len(logical_values(path.parent, document['tensors']['q'])))
+
+
+class KitchenLockTests(unittest.TestCase):
+    def test_python_only_package_source_changes_fail_before_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary) / 'comfy_kitchen'
+            package.mkdir()
+            entry = package / '__init__.py'
+            entry.write_text('# pinned entry\n')
+            fallback = package / 'flash_attention.py'
+            fallback.write_text('# pinned fallback\n')
+            lock = {'extension_hashes': {}, 'python_source_hashes': {
+                'comfy_kitchen/__init__.py': sha256(entry),
+                'comfy_kitchen/flash_attention.py': sha256(fallback)}}
+            verify_locked_python_sources(lock, entry)
+            fallback.write_text('# modified after environment locking\n')
+            with self.assertRaisesRegex(RuntimeError, 'source differs.*flash_attention.py'):
+                verify_locked_python_sources(lock, entry)
+            fallback.unlink()
+            with self.assertRaisesRegex(RuntimeError, 'source differs.*flash_attention.py'):
+                verify_locked_python_sources(lock, entry)
+
+    def test_checks_imported_package_root_and_rejects_missing_source_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = [pathlib.Path(temporary) / name for name in ('locked', 'imported')]
+            for root in roots:
+                root.mkdir()
+                (root / '__init__.py').write_text('# pinned entry\n')
+                (root / 'flash_attention.py').write_text('# ' + root.name + '\n')
+            lock = {'python_source_hashes': {'comfy_kitchen/' + name: sha256(roots[0] / name)
+                                            for name in ('__init__.py', 'flash_attention.py')}}
+            verify_locked_python_sources(lock, roots[0] / '__init__.py')
+            with self.assertRaisesRegex(RuntimeError, 'source differs.*flash_attention.py'):
+                verify_locked_python_sources(lock, roots[1] / '__init__.py')
+            with self.assertRaisesRegex(RuntimeError, 'source identity'):
+                verify_locked_python_sources({}, roots[0] / '__init__.py')
 
 
 class StatisticsTests(unittest.TestCase):
