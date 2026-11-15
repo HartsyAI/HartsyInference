@@ -1,0 +1,678 @@
+{
+  "schema": 1,
+  "status": "PR 01 incomplete; draft, not eligible for exit review",
+  "recorded_utc": "2026-11-15T02:39:32.467864+00:00",
+  "authorized": "PR 01 only; no PR 02 semantic changes or optimization work",
+  "source_commit": "03b6a8bb482dcdaaba65011038213ba6aeebfbd1",
+  "baseline_commit": "a6c465bc8aa9121aadcb9d088ddc72e815ae4288",
+  "cohort": {
+    "id": "windows-rtx3060",
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "sm": "8.6",
+    "vram_bytes": 12884377600,
+    "driver": "610.88",
+    "os": "Windows 11",
+    "dotnet_sdk": "10.0.403",
+    "timing_status": "interactive desktop pilots; full idle-device/quiet-window campaign not completed"
+  },
+  "authoritative_speed_claims": false,
+  "full_regression_passed": false,
+  "cpu": [
+    {
+      "first_test": "HartsyInference.World.Tests.Camera.CameraRayFrameTests.FromCameraToWorld_RejectsShortPose",
+      "passed_reported": 75,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_32_26_net10.0.trx",
+        "sha256": "90549633cfe9a59691d63e75331d3e4752848fe3284a423edbc51f1192a60b9e",
+        "bytes": 120213
+      }
+    },
+    {
+      "first_test": "HartsyInference.LLM.Tests.DenseTextWeightPolicyTests.PrecisionNamesParse(name: \"q8_0\", expected: \"Q8_0\")",
+      "passed_reported": 323,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_32_41_net10.0.trx",
+        "sha256": "51e02529a40e847493baeaa0e43eda461b8fb38404cb982526448d9ceb5e296d",
+        "bytes": 516209
+      }
+    },
+    {
+      "first_test": "HartsyInference.WorldViewer.Avalonia.Tests.WorldViewerWindowTests.Escape_and_closing_request_the_stop_once",
+      "passed_reported": 3,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_32_53_net10.0.trx",
+        "sha256": "f430f43c196570fad2c38b394c51be136a5e54d2750bd69b56bb08fbf2e4586c",
+        "bytes": 6718
+      }
+    },
+    {
+      "first_test": "HartsyInference.WorldViewer.Tests.WorldFrameStreamTests.Cancelling_ends_the_stream_as_cancelled",
+      "passed_reported": 34,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_32_56_net10.0.trx",
+        "sha256": "7e6e40029190eb4f309b7330f5c1e01a7122ac804e493da1eb7243e0c450d60d",
+        "bytes": 56544
+      }
+    },
+    {
+      "first_test": "HartsyInference.Cli.Tests.MergeCommandTests.ListedShardFilesMergeAndAFolderSiblingIsLeftOut",
+      "passed_reported": 8,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_33_05_net10.0.trx",
+        "sha256": "5984b66551640c61a06e75432f1369829e9b1c6e717644f3dd441a40aef986b5",
+        "bytes": 15136
+      }
+    },
+    {
+      "first_test": "HartsyInference.API.Tests.RealtimeRouteTests.ASessionTakesFramesAndPromptsAndStreamsItsEvents",
+      "passed_reported": 64,
+      "failed": 1,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [
+        "HartsyInference.API.Tests.MeshOperateRouteTests.OperationsListsEveryOperationWithItsParameters"
+      ],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_33_07_net10.0.trx",
+        "sha256": "8691347fa4da0e3ab0d9d43ac0ecbb2bf863d8086e33f364a502361995f995a8",
+        "bytes": 174594
+      }
+    },
+    {
+      "first_test": "HartsyInference.ModelAssets.Tests.MiniMaxH3ImageDetectionTests.WrappedPrefixesResolveToImage(prefix: \"diffusion_model.\")",
+      "passed_reported": 87,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_00_net10.0.trx",
+        "sha256": "b26cadd58c9448451d494b2511df0f94f981a98438d245fe20ba802e01b5466b",
+        "bytes": 145776
+      }
+    },
+    {
+      "first_test": "HartsyInference.Engine.Tests.Services.MeshPlanningTests.ARejectedFieldFailsTheValidator(id: \"hunyuan3d-xpart\")",
+      "passed_reported": 834,
+      "failed": 1,
+      "skipped": 1,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [
+        "HartsyInference.Engine.Tests.MiniMaxH3FlatLayoutResolutionTests.ImageResolverFindsTheVaeAndEncoderInTheModelsRootLayout"
+      ],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_13_net10.0.trx",
+        "sha256": "518d1647ca45653dd08e2c82d0ea3ca782b5e2c0cc112ecb6ecf8863e2f960dd",
+        "bytes": 1396509
+      }
+    },
+    {
+      "first_test": "HartsyInference.Diffusion.Tests.IrisZRecipePipelineTests.ADenoiseModeInitImageIsRefused",
+      "passed_reported": 303,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [
+        "HartsyInference.Diffusion.Tests.T5StandaloneParityTests.T5XXL_UnmaskedMatchesDiffusersReference_Cpu"
+      ],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_28_net10.0.trx",
+        "sha256": "89827915b1c41baebe03198c54fcaf0a82c5ea221fc11a98f5dbe2af1e5d40f9",
+        "bytes": 492012
+      }
+    },
+    {
+      "first_test": "HartsyInference.Vision.Tests.Segmentation.Sam3.Sam3ConverterTests.Convert_RoutesEverySpecKeyToItsGroupWithRelativeName",
+      "passed_reported": 65,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_36_net10.0.trx",
+        "sha256": "d59788721e0f2c9c65f2925eeedd37ecf1f44082dfb74cd165cdb2819c594327",
+        "bytes": 105325
+      }
+    },
+    {
+      "first_test": "HartsyInference.Vision.Dinov3.Tests.Dinov3RopeTests.CellCentres_AreSymmetricAboutZero",
+      "passed_reported": 26,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_45_net10.0.trx",
+        "sha256": "3cc023c941aebb4e6b262001fe29d23285ed5fd104ceb9afed8e90224efff0b6",
+        "bytes": 42701
+      }
+    },
+    {
+      "first_test": "HartsyInference.ThreeD.Tests.Export.MeshExportTests.ObjRecordsItDoesNotReadAreNotedAndAMaskedMaterialIsNotWrittenAsTransparent",
+      "passed_reported": 1225,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_45_56_net10.0.trx",
+        "sha256": "72104ab905d1f4021c508bd4cda108df06860ef31f2c2baec415367205a05cd4",
+        "bytes": 1964650
+      }
+    },
+    {
+      "first_test": "HartsyInference.Core.Tests.Distributed.UniqueIdRendezvousTests.InvalidOptions_AreRejectedBeforeAnyNetworkUse",
+      "passed_reported": 160,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "cpu-final/AI_Overlord_OFFICE-DESKTOP_2026-11-14_21_04_44_net10.0.trx",
+        "sha256": "35ddfc42132028900c283221f5b7d0c7ee94d4000eedecb74125a8b1f1a87b2e",
+        "bytes": 261498
+      }
+    }
+  ],
+  "gpu": [
+    {
+      "first_test": "HartsyInference.Diffusion.Tests.SanaWmDeviceParityGpuTests.Dit_SyntheticLayout_CudaMatchesCpu(batch: 1)",
+      "passed_reported": 18,
+      "failed": 0,
+      "skipped": 2,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "gpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_47_16_net10.0.trx",
+        "sha256": "e6c6d1a82f1de9b08502d6abc5b0da73a937a831aef9e3941577e29656d9c0e3",
+        "bytes": 52948
+      }
+    },
+    {
+      "first_test": "HartsyInference.Engine.Tests.MiniMaxH3ImageGpuTests.DenoiseStepVelocityMatchesExactComfyUiAtStepZero",
+      "passed_reported": 12,
+      "failed": 0,
+      "skipped": 10,
+      "resource_guarded_passes_not_validated": [],
+      "failures": [],
+      "raw": {
+        "path": "gpu-tests/AI_Overlord_OFFICE-DESKTOP_2026-11-14_20_47_24_net10.0.trx",
+        "sha256": "a843bc2e6beb56c72ccc393901aaf9a1c5aad3fde0b8bf514eba5fb449fc0247",
+        "bytes": 63745
+      }
+    },
+    {
+      "first_test": "HartsyInference.Core.Tests.Elementwise.ElementwiseMathGpuTests.Kernel_MatchesHostReference(function: Reciprocal, bf16Input: False, bf16Output: True)",
+      "passed_reported": 19,
+      "failed": 0,
+      "skipped": 0,
+      "resource_guarded_passes_not_validated": [
+        "HartsyInference.Core.Tests.Distributed.NcclAllToAllTests.EightGpus_AllToAll_DeliversEveryChunk",
+        "HartsyInference.Core.Tests.Distributed.NcclAllToAllTests.TwoGpus_AllToAll_DeliversEveryChunk"
+      ],
+      "failures": [],
+      "raw": {
+        "path": "gpu-final/AI_Overlord_OFFICE-DESKTOP_2026-11-14_21_15_32_net10.0.trx",
+        "sha256": "ba32a67eb402045821031b80dc3bbe89bf554a5a59cc72a7cb9292132c62e365",
+        "bytes": 43440
+      }
+    },
+    {
+      "first_test": "HartsyInference.LLM.Tests.MossVlVisionParityTests.GgufTowerOnVulkanMatchesTheReference",
+      "passed_reported": 56,
+      "failed": 0,
+      "skipped": 19,
+      "resource_guarded_passes_not_validated": [
+        "HartsyInference.LLM.Tests.Kimi.KimiK31ShardedCudaTests.TwoRanks_CudaShardedCheckpoint_MatchesTheCpuLogits",
+        "HartsyInference.LLM.Tests.Kimi.KimiK31ShardedCudaTests.EightRanks_CudaShardedCheckpoint_MatchesTheCpuLogits"
+      ],
+      "failures": [],
+      "raw": {
+        "path": "gpu-final/AI_Overlord_OFFICE-DESKTOP_2026-11-14_21_16_12_net10.0.trx",
+        "sha256": "d2fd7d3921ff810e5481f50bdfd81be25b0e8f7d81b54cad5699b5a5838586b7",
+        "bytes": 147592
+      }
+    }
+  ],
+  "python": {
+    "passed": 14,
+    "skipped": 0,
+    "raw": {
+      "path": "python-tests-final4.log",
+      "sha256": "964f48ee63a6e5cb254de4c4c49f6a90b23c40769b9f7782f7d0fa22b4d69fa3",
+      "bytes": 2179
+    }
+  },
+  "known_baseline_failures": [
+    {
+      "test": "HartsyInference.API.Tests.MeshOperateRouteTests.OperationsListsEveryOperationWithItsParameters",
+      "reason": "Expected operation inventory omits remesh; reproduced on pristine B0",
+      "raw": {
+        "path": "b0-api-repro.log",
+        "sha256": "521eeab1378a9eb4cdbd0e9d39e5f278d5a9bca5f9375c7bdfc530105513242d",
+        "bytes": 8131
+      }
+    },
+    {
+      "test": "HartsyInference.Engine.Tests.MiniMaxH3FlatLayoutResolutionTests.ImageResolverFindsTheVaeAndEncoderInTheModelsRootLayout",
+      "reason": "Windows VAE/vae path-case mismatch; reproduced on pristine B0",
+      "raw": {
+        "path": "b0-engine-repro.log",
+        "sha256": "041bba72222def1247db2a1173229e49f4d8f7a8e0a4418a1b4859bebb18e113",
+        "bytes": 4498
+      }
+    }
+  ],
+  "telemetry_equivalence": [
+    {
+      "exact_output_identity": true,
+      "top_level_route_identity": true,
+      "observed_executions": 15,
+      "mean_ms": {
+        "pristine": 0.08552000000000001,
+        "disabled": 0.08528,
+        "enabled": 0.08512
+      },
+      "disabled_over_pristine": 0.9971936389148736,
+      "enabled_over_disabled": 0.9981238273921201,
+      "claim": "descriptive overhead only; not a registered paired statistical campaign",
+      "limitations": [
+        "B0 exposes its top-level route only; this does not prove every nested path",
+        "This case does not establish memory-pressure or real-generation equivalence"
+      ],
+      "inputs_sha256": {
+        "artifacts/attention-pr01/warm-mha-cuda-b0.json": "b65333c1b58313ba3258f00e7fb70260c3871c0f682d0122875fe2da83b7df34",
+        "artifacts/attention-pr01/warm-mha-cuda-disabled.json": "74c0c272142dc8243ff9de2b391a97fd6b1f1309ac5bce36396a58b0603a4a22",
+        "artifacts/attention-pr01/warm-mha-cuda-enabled.json": "f2317d0a93bf29ed1de9cd619d393a9850ce65a8819c0e958ae38c37a6e51627",
+        "artifacts/attention-pr01/warm-mha-cuda-observations.json": "a0b6aec23d4364387a7cb1632965e8b0ba436766b1f4c2b3278ede6a862b034c"
+      },
+      "raw": {
+        "path": "warm-mha-cuda-equivalence.json",
+        "sha256": "99bf2ceaeb496e9bf44348ed2ee33a89ff45ccdaeb23f86aae1eb1875a7740bb",
+        "bytes": 1130
+      },
+      "case": "pilot MHA F16 B1 H2 Sq32 Skv48 D64; five trials per configuration, one session",
+      "backend": "cuda",
+      "production_assemblies": {
+        "b0": {
+          "core_sha256": "3ec2d5007e7a5716f6f9613e4757c7391fb280abe33e35364455df1fedcea459",
+          "backend_sha256": "a7d1616e0aa389334c8e924ab597640e79ffccf0122399ca2df81c72ca9758c5",
+          "branch": "S.3",
+          "output_sha256": "f547951eab080baf8c18587a316036b7ab5aa5e3aa03ff7fc9db986429729044",
+          "raw": {
+            "path": "warm-mha-cuda-b0.json",
+            "sha256": "b65333c1b58313ba3258f00e7fb70260c3871c0f682d0122875fe2da83b7df34",
+            "bytes": 53105
+          }
+        },
+        "disabled": {
+          "core_sha256": "a1246d9e2712c96cde75df4eb8c71b22db362c038beb0d9b29f57d59868c2e0d",
+          "backend_sha256": "2fcbe2b50a72e9c4988dc097cce0295ce0c0f04b54b41f8768a978e86b0c31d9",
+          "branch": "S.3",
+          "output_sha256": "f547951eab080baf8c18587a316036b7ab5aa5e3aa03ff7fc9db986429729044",
+          "raw": {
+            "path": "warm-mha-cuda-disabled.json",
+            "sha256": "74c0c272142dc8243ff9de2b391a97fd6b1f1309ac5bce36396a58b0603a4a22",
+            "bytes": 53107
+          }
+        },
+        "enabled": {
+          "core_sha256": "a1246d9e2712c96cde75df4eb8c71b22db362c038beb0d9b29f57d59868c2e0d",
+          "backend_sha256": "2fcbe2b50a72e9c4988dc097cce0295ce0c0f04b54b41f8768a978e86b0c31d9",
+          "branch": "S.3",
+          "output_sha256": "f547951eab080baf8c18587a316036b7ab5aa5e3aa03ff7fc9db986429729044",
+          "raw": {
+            "path": "warm-mha-cuda-enabled.json",
+            "sha256": "f2317d0a93bf29ed1de9cd619d393a9850ce65a8819c0e958ae38c37a6e51627",
+            "bytes": 53106
+          }
+        }
+      }
+    },
+    {
+      "exact_output_identity": true,
+      "top_level_route_identity": true,
+      "observed_executions": 15,
+      "mean_ms": {
+        "pristine": 0.1525,
+        "disabled": 0.16392,
+        "enabled": 0.1824
+      },
+      "disabled_over_pristine": 1.0748852459016394,
+      "enabled_over_disabled": 1.1127379209370425,
+      "claim": "descriptive overhead only; not a registered paired statistical campaign",
+      "limitations": [
+        "B0 exposes its top-level route only; this does not prove every nested path",
+        "This case does not establish memory-pressure or real-generation equivalence"
+      ],
+      "inputs_sha256": {
+        "artifacts/attention-pr01/warm-mha-vulkan-b0.json": "77477d3a2979f6e42753fde00a7f56bcf81e435450a7f6c74d0092f94d1164d7",
+        "artifacts/attention-pr01/warm-mha-vulkan-disabled.json": "7e24a847881437b00d652e3414fea816d817def465fad77a6377c65b11dea8f4",
+        "artifacts/attention-pr01/warm-mha-vulkan-enabled.json": "4298986fe25039301ae99ad220e1bfa67ba0ec570b9d8fd27a69a80a9084734d",
+        "artifacts/attention-pr01/warm-mha-vulkan-observations.json": "4c34bacc588f9db3a633dde0b1a2f9e3ba82709521417277e5739b695eb9e338"
+      },
+      "raw": {
+        "path": "warm-mha-vulkan-equivalence.json",
+        "sha256": "c041a57898f275bda8cb143a32d51e77a95086e68618a31487d7f8fd0cd883f2",
+        "bytes": 1124
+      },
+      "case": "pilot MHA F16 B1 H2 Sq32 Skv48 D64; five trials per configuration, one session",
+      "backend": "vulkan",
+      "production_assemblies": {
+        "b0": {
+          "core_sha256": "3ec2d5007e7a5716f6f9613e4757c7391fb280abe33e35364455df1fedcea459",
+          "backend_sha256": "0e56571fa8f6a9abca10b6444b050c32975ac592c3e993f1a183ba48d319e78e",
+          "branch": "A.1",
+          "output_sha256": "507dd7670674305b63449c8638b9da7a9f9dfe0f3288ce2f6c30f1d8567af4ae",
+          "raw": {
+            "path": "warm-mha-vulkan-b0.json",
+            "sha256": "77477d3a2979f6e42753fde00a7f56bcf81e435450a7f6c74d0092f94d1164d7",
+            "bytes": 51393
+          }
+        },
+        "disabled": {
+          "core_sha256": "a1246d9e2712c96cde75df4eb8c71b22db362c038beb0d9b29f57d59868c2e0d",
+          "backend_sha256": "90cd36351a6a7dfbda33b4c178db181d8f3461d68decf1d6cc398d802e65e434",
+          "branch": "A.1",
+          "output_sha256": "507dd7670674305b63449c8638b9da7a9f9dfe0f3288ce2f6c30f1d8567af4ae",
+          "raw": {
+            "path": "warm-mha-vulkan-disabled.json",
+            "sha256": "7e24a847881437b00d652e3414fea816d817def465fad77a6377c65b11dea8f4",
+            "bytes": 51392
+          }
+        },
+        "enabled": {
+          "core_sha256": "a1246d9e2712c96cde75df4eb8c71b22db362c038beb0d9b29f57d59868c2e0d",
+          "backend_sha256": "90cd36351a6a7dfbda33b4c178db181d8f3461d68decf1d6cc398d802e65e434",
+          "branch": "A.1",
+          "output_sha256": "507dd7670674305b63449c8638b9da7a9f9dfe0f3288ce2f6c30f1d8567af4ae",
+          "raw": {
+            "path": "warm-mha-vulkan-enabled.json",
+            "sha256": "4298986fe25039301ae99ad220e1bfa67ba0ec570b9d8fd27a69a80a9084734d",
+            "bytes": 51393
+          }
+        }
+      }
+    }
+  ],
+  "resident_timing_pilots": [
+    {
+      "backend": "cuda",
+      "milliseconds": [
+        0.1505880057811737,
+        0.07295999675989151,
+        0.0689919963479042
+      ],
+      "iterations": 32,
+      "empty_region_ms": 0.002047999994829297,
+      "timestamp_period_ns": null,
+      "timestamp_valid_bits": null,
+      "quality_passed": true,
+      "raw": {
+        "path": "mha-cuda-resident-v4.json",
+        "sha256": "0654975f03c8ca012149055c9806f8c162b979f2cce2e0d26dcb4b12815cc103",
+        "bytes": 53140
+      },
+      "status": "positive device intervals only; not a completed clock validation campaign"
+    },
+    {
+      "backend": "vulkan",
+      "milliseconds": [
+        0.151222,
+        0.087695,
+        0.080344
+      ],
+      "iterations": 32,
+      "empty_region_ms": 6.4e-05,
+      "timestamp_period_ns": 1,
+      "timestamp_valid_bits": 64,
+      "quality_passed": true,
+      "raw": {
+        "path": "mha-vulkan-resident-v4.json",
+        "sha256": "4d47f3b321334198f266964bae8b8b5dc87a3f52afa8e5949593353d6e1fc210",
+        "bytes": 51443
+      },
+      "status": "positive device intervals only; not a completed clock validation campaign"
+    }
+  ],
+  "kitchen_comparison_pilots": [
+    {
+      "case": "BF16 MHA B1 H2 Sq32 Skv48 D64; public decode-gqa API",
+      "boundary": "public",
+      "fixture_sha256": "ff42b26be470a1a87a2f344f16fbe598c1fd09430ce3275ed0ca22c5c2e86aee",
+      "k0_milliseconds": [
+        0.7883,
+        0.7964,
+        0.7728
+      ],
+      "k0_outcome": "K0-valid",
+      "k0_native_available": false,
+      "k0_raw": {
+        "path": "k0-gqa-fallback-public-clean.json",
+        "sha256": "acaf9b80ea091da227070eabf91c8c6fd407a885394bd37f3f3e1e3a7f5f4ac7",
+        "bytes": 838
+      },
+      "hartsy_b0": {
+        "cuda": {
+          "milliseconds": [
+            0.2251,
+            0.1016,
+            0.087
+          ],
+          "quality_passed": true,
+          "branch": "S.3",
+          "raw": {
+            "path": "b0-bf16-cuda-public.json",
+            "sha256": "1e7ff5dd1b93a05048cf54ce5071c2336cf292682d3050aa3897a1e740fd314d",
+            "bytes": 53086
+          }
+        },
+        "vulkan": {
+          "milliseconds": [
+            0.2452,
+            0.22,
+            0.2268
+          ],
+          "quality_passed": true,
+          "branch": "A.2",
+          "raw": {
+            "path": "b0-bf16-vulkan-public.json",
+            "sha256": "1239fc43bd9c6784355f28f094062e57958065bc2dcfb512ae0c50d842ccc87d",
+            "bytes": 51374
+          }
+        }
+      },
+      "matched_quality_eligible": false,
+      "reason": "unreviewed numerical admission; three unpaired trials, no inference/confirmation campaign"
+    },
+    {
+      "case": "BF16 MHA B1 H2 Sq32 Skv48 D64; public decode-gqa API",
+      "boundary": "resident",
+      "fixture_sha256": "ff42b26be470a1a87a2f344f16fbe598c1fd09430ce3275ed0ca22c5c2e86aee",
+      "k0_milliseconds": [
+        0.7625920176506042,
+        0.7478079795837402,
+        0.7486969828605652
+      ],
+      "k0_outcome": "K0-valid",
+      "k0_native_available": false,
+      "k0_raw": {
+        "path": "k0-gqa-fallback-resident-clean.json",
+        "sha256": "dc87f97236dc72528fe9042a8d875ac1fffa9f0fdb061bcc657569611064801c",
+        "bytes": 877
+      },
+      "hartsy_b0": {
+        "cuda": {
+          "milliseconds": [
+            0.1634880006313324,
+            0.1526080071926117,
+            0.11673600226640701
+          ],
+          "quality_passed": true,
+          "branch": "S.3",
+          "raw": {
+            "path": "b0-bf16-cuda-resident.json",
+            "sha256": "5923694f536f37b13cca4f3f9dc95aa917c4d5d2f7d1d006af30c48ca59169a4",
+            "bytes": 53146
+          }
+        },
+        "vulkan": {
+          "milliseconds": [
+            0.113998,
+            0.101075,
+            0.100437
+          ],
+          "quality_passed": true,
+          "branch": "A.2",
+          "raw": {
+            "path": "b0-bf16-vulkan-resident.json",
+            "sha256": "a452a28f62d13c5d385ad10fe46d3bbf73cb40c0af6800134273464c39dfdac6",
+            "bytes": 51451
+          }
+        }
+      },
+      "matched_quality_eligible": false,
+      "reason": "unreviewed numerical admission; three unpaired trials, no inference/confirmation campaign"
+    }
+  ],
+  "pending_exit_work": [
+    "Move primary workload work to the 4090; prove Qwen natural 128-token completion and actual paged scheduler admission.",
+    "Freeze Krea Turbo checkpoint, encoder, VAE, prompt/settings and predeclared image quality gates; run complete generations.",
+    "Prove all secondary Qwen lanes including fixed cache, actual graph replay and concurrent paged batches.",
+    "Complete lightweight observation coverage review, nested-route and memory-sensitive disabled/enabled/pristine equivalence.",
+    "Integrate primary-request peak VRAM and TTFT diagnostics without changing the timed request endpoint.",
+    "Build native K0 on a supported toolchain; enumerate and review complete per-cohort source/runtime capability cells.",
+    "Complete required C# fixture/oracle adapters beyond the sampled dense pilot; absent APIs remain explicit gaps.",
+    "Review numerical definitions before candidate work, complete independent quantized-algorithm accuracy evidence.",
+    "Validate longer controlled device-clock workloads and prepared/reuse accounting; non-64-bit Vulkan clocks remain unmeasured.",
+    "Complete frozen B0/K0 campaigns with registered inferential/confirmation sessions, quality/cache/route/memory guards and idle GPU evidence.",
+    "Review all three commit groups, explicit matrix amendments and exceptions before PR 02 begins.",
+    "Finite prequantized reuse-count groups are not modeled; those cells are explicitly ineligible and mandatory runs fail before measurement."
+  ],
+  "qwen_candidate": {
+    "schema": 1,
+    "family": "qwen",
+    "model_id": "Qwen/Qwen3-4B-GGUF",
+    "model_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+    "prompt_sha256": "dcd8cc318e27658facf20ecbd3ef7b0a8efb2ef23254047674d7f1b545064255",
+    "embedded_tokenizer_sha256": "fbbe7052cd80244d79f87fac7fba241b53c6e13b2e309a7f8959cbd30e005eef",
+    "rendered_prompt_tokens": 8192,
+    "rendered_tokens_sha256": "77b1324c1ab3c9f22c35843ebac1bf067f652ed54b6c3ce068aab08507055470",
+    "status": "candidate; B0 natural 128-token completion and executed-path proof required",
+    "B0_outcome": "placement rejected: 11.0 GB free versus 11.1 GB required",
+    "natural_completion_proven": false,
+    "scheduler_path_proven": false,
+    "raw": {
+      "path": "b0-qwen-primary.log",
+      "sha256": "448637d39170557bbe32585e8afcaba6b7ee32873950809ba63ef3c37fa8bd84",
+      "bytes": 3810
+    },
+    "tokenizer_identity_scope": "all tokenizer.* metadata, ordinal key order, canonical Utf8JsonWriter encoding"
+  },
+  "kitchen_environment": {
+    "commit": "7d6a22ae8281cd1053a8449530fa0e764a2e51cb",
+    "torch": "2.9.1+cu130",
+    "torch_cuda": "13.0",
+    "python_source_matches_pinned_checkout": true,
+    "public_probe_ready": true,
+    "native_ready": false,
+    "lock": {
+      "path": "k0-torch29-environment-v2.json",
+      "sha256": "b164e3b0ab3340752256f36aff70523bf9b74779f9525249d6026326bc8d6353",
+      "bytes": 15852
+    },
+    "native_build_failure": "CUDA 13.0/MSVC 19.51 compiler identification: unsupported compiler; override causes cudafe access violation",
+    "build_log": {
+      "path": "kitchen-clean-ninja-build.log",
+      "sha256": "f976270b9ee87304eb530523040929919ae99c41e1072aaa709ffbdf05d7c4fd",
+      "bytes": 42054
+    },
+    "native_build_flags": [
+      "Ninja",
+      "COMFY_CUDA_ARCHS=86",
+      "CUDAFLAGS=-allow-unsupported-compiler"
+    ],
+    "python_build_flags": [
+      "setup.py bdist_wheel --no-cuda"
+    ],
+    "native_kernel_trace_status": "CUPTI GPU kernel trace unavailable in this environment; executed Python fallback functions and CUDA output device recorded"
+  },
+  "matrix_amendment": {
+    "review_required": true,
+    "prior": {
+      "path": "k0-matrix-v2.json",
+      "sha256": "ba1a84120d403a80aa1f4517ed470aecc15f210d6e95956e2ac7221f968f6853",
+      "bytes": 213423
+    },
+    "current": {
+      "path": "k0-matrix-v4.json",
+      "sha256": "dd2854d51840368e58be46828dc2c3a72555d4494c5fb2f60eac85d489459fe7",
+      "bytes": 243866
+    },
+    "reason": "Apply pinned public Sol head dimension 128 constraint; preserve D64 as explicit negative cell; add long-key rotation probes.",
+    "classification_correction": {
+      "old": {
+        "path": "k0-sol-partial-public.json",
+        "sha256": "4781029b29864980be5facc2f4be1eb35c7bf3bc4bbb0ec70b0f1f0fae3fb223",
+        "bytes": 417
+      },
+      "corrected": {
+        "path": "k0-sol-negative-d64.json",
+        "sha256": "123d5739d1c082bd2e1c8e9c3583b19ae5d353a20a7de95d6f8a5df4a4f85756",
+        "bytes": 471
+      },
+      "reason": "NoCapableBackendError is negative admission, not an admitted upstream failure; no performance data discarded."
+    }
+  },
+  "raw_artifact_root": "artifacts/attention-pr01 in the retained PR worktree; raw files and model/fixture bytes are not tracked",
+  "transfer": "Keep the raw directory intact for transfer/review. Recreate platform-specific Kitchen environments on the VPS; do not pool cohorts.",
+  "runtime_index": "k0-runtime-index.json",
+  "required_source_probe_cells": 161,
+  "build_checks": [
+    {
+      "path": "build-gencapture-final3.log",
+      "sha256": "e4178cab173c044a9947e8433681031a42fb1fa2a148b6d7d35f5ca6661f92e0",
+      "bytes": 82
+    },
+    {
+      "path": "build-gpu-final2.log",
+      "sha256": "a87eeb430e20c4d64a061018813bad8ddfea98482608b5659f2ac309e02d5b83",
+      "bytes": 82
+    },
+    {
+      "path": "build-opparity-final2.log",
+      "sha256": "f452dc77740298c30556af7e5c24b68ed9646bbc77130551d0fb6ce6b4287cf4",
+      "bytes": 82
+    },
+    {
+      "path": "build-engine-net8-final.log",
+      "sha256": "0d274ca1eefcdd20c8f66d88bdd67a8c58a1582f32e5dd52c1d58bac3fd28b3f",
+      "bytes": 82
+    },
+    {
+      "path": "build-benchmark-runner-final.log",
+      "sha256": "3e80e0eaf9ee89498d95f9d24991aa2414771a6f74346b839984c86d9b812c7e",
+      "bytes": 82
+    }
+  ]
+}
