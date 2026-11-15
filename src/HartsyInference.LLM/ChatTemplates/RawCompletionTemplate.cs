@@ -6,13 +6,32 @@ using HartsyInference.ModelAssets.Tokenizers;
 namespace HartsyInference.LLM.ChatTemplates;
 
 /// <summary>Least-common-denominator fallback for tokenizers with no usable chat template and no ChatML control tokens (base/completion models like GPT-2, StarCoder2); concatenates message contents as plain text via <see cref="ILlmTokenizer.EncodeOrdinary"/> so a bare <see cref="Generation.GenerationRequest.Prompt"/> never throws — not a substitute for a model's real turn format when one exists (e.g. LLaVA's Vicuna-v1 template lives in <c>MultimodalGenerator</c>).</summary>
+/// <remarks>The text may be wrapped in fixed special ids, such as the ones a Hugging Face <c>tokenizer.json</c> post-processor adds to a raw prompt
+/// (<see cref="HfTokenizerJson.ReadSingleSequenceSpecials"/>), so the prompt matches what a serving <c>/v1/completions</c> endpoint feeds the model.</remarks>
 public sealed class RawCompletionTemplate : IChatTemplate
 {
+    private readonly int[] _prefix;
+    private readonly int[] _suffix;
+
+    /// <summary>A template that adds no special ids.</summary>
+    public RawCompletionTemplate() : this([], [])
+    {
+    }
+
+    /// <summary>A template that puts <paramref name="prefixIds"/> before the text and <paramref name="suffixIds"/> after it.</summary>
+    public RawCompletionTemplate(IReadOnlyList<int> prefixIds, IReadOnlyList<int> suffixIds)
+    {
+        ArgumentNullException.ThrowIfNull(prefixIds);
+        ArgumentNullException.ThrowIfNull(suffixIds);
+        _prefix = [.. prefixIds];
+        _suffix = [.. suffixIds];
+    }
+
     /// <inheritdoc/>
     public string Name => "raw";
 
     /// <inheritdoc/>
-    /// <remarks>No chat structure to speak of — <paramref name="addGenerationPrompt"/> and <paramref name="enableThinking"/> are accepted for interface parity but ignored.</remarks>
+    /// <remarks>No chat structure to speak of — <paramref name="addGenerationPrompt"/> and <paramref name="enableThinking"/> are accepted for interface parity but ignored. Messages, the system prompt included, are joined with a blank line.</remarks>
     public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
@@ -24,6 +43,8 @@ public sealed class RawCompletionTemplate : IChatTemplate
             if (i > 0) sb.Append("\n\n");
             sb.Append(messages[i].Content);
         }
-        return tokenizer.EncodeOrdinary(sb.ToString());
+        int[] text = tokenizer.EncodeOrdinary(sb.ToString());
+        if (_prefix.Length == 0 && _suffix.Length == 0) return text;
+        return [.. _prefix, .. text, .. _suffix];
     }
 }
