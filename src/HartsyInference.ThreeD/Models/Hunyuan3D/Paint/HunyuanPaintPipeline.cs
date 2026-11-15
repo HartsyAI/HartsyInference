@@ -16,8 +16,6 @@ public sealed class HunyuanPaintPipeline
 {
     private const int FixedViews = 6;
 
-    // Share of the distrusted edge band kept for a front view that carries the reference picture.
-    private const double ProjectedBoundaryShare = 0.25;
     private readonly IBackend _backend;
     private readonly HunyuanPaintConfig _config;
     private readonly HunyuanPaintUnet _unet, _reference;
@@ -97,9 +95,12 @@ public sealed class HunyuanPaintPipeline
 
         Stage($"frame and views ({views.Count})");
         PaintReferenceProjection? projection = null;
+        ReferencePicture? picture = null;
         if (options.ProjectReference && !referenceAlpha.IsEmpty)
         {
-            projection = PaintReferenceProjector.Project(renderer, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, options.RenderResolution, cancellationToken);
+            // Only the placement is used: the bake samples the picture itself, at its own resolution, for every texel the front camera sees.
+            projection = PaintReferenceProjector.Project(renderer, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, PlacementResolution, cancellationToken);
+            picture = new ReferencePicture(referenceRgb.ToArray(), referenceAlpha.ToArray(), referenceWidth, referenceHeight);
             Stage(projection is null ? "reference projection (no subject or silhouette)"
                 : $"reference projection (fit {projection.Fit:F3}, mirrored {projection.MirroredFit:F3}, scale {projection.Scale:F1}, offset {projection.OffsetX:F1} {projection.OffsetY:F1})");
             if (projection is not null && projection.Fit < PaintReferenceProjector.MinimumFit)
@@ -114,7 +115,7 @@ public sealed class HunyuanPaintPipeline
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
         Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
-        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, projection, cancellationToken);
+        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, projection is null ? null : picture, projection, cancellationToken);
         Stage("bake");
         return warnings.Count == 0 ? baked : baked with { Warnings = warnings };
     }
@@ -411,8 +412,14 @@ public sealed class HunyuanPaintPipeline
                     texture[i * 3 + c] = (float)(mean[c] / surface.Count);
     }
 
+    // The reference picture kept for the bake: RGB on white and its subject mask, at its own size.
+    private sealed record ReferencePicture(byte[] Rgb, byte[] Alpha, int Width, int Height);
+
+    // Side of the front view the picture's placement is fitted on; the placement is in view units, so this sets only the fit's precision.
+    private const int PlacementResolution = 512;
+
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
-        HunyuanPaintOptions o, PaintReferenceProjection? projection, CancellationToken cancellationToken)
+        HunyuanPaintOptions o, ReferencePicture? picture, PaintReferenceProjection? projection, CancellationToken cancellationToken)
     {
         int n = views.Count, materials = _config.MaterialCount, size = o.TextureSize, render = o.RenderResolution;
         PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, size, size, cancellationToken);
@@ -432,19 +439,17 @@ public sealed class HunyuanPaintPipeline
                 float[] image = new float[view.Length];
                 for (int i = 0; i < image.Length; i++)
                     image[i] = view[i] / 255f;
-                // The picture replaces the front view's albedo where it lines up; metal and roughness stay as generated. Its pixels are sharp up to a depth edge (a brim over a face),
-                // so the band the bake distrusts around such edges, sized for the blurrier generated views, is narrowed for it.
-                PaintBakeOptions bakeOptions = o.Bake;
-                if (projection is not null && m == 0 && views[v].Elevation == 0 && views[v].Azimuth == 0)
-                {
-                    int full = PaintReferenceProjector.Overlay(projection, image);
-                    StageLog?.Invoke($"reference overlay: {full} px from the picture, {projection.Covered.Count(c => c) - full} blended or kept as generated");
-                    bakeOptions = o.Bake with { UnreliableBoundaryScale = o.Bake.UnreliableBoundaryScale * ProjectedBoundaryShare };
-                }
-                PaintViewBake bake = PaintBackProjector.Project(renderer, surface, image, render, 3, views[v].Elevation, views[v].Azimuth, bakeOptions, cancellationToken);
+                PaintViewBake bake = PaintBackProjector.Project(renderer, surface, image, render, 3, views[v].Elevation, views[v].Azimuth, o.Bake, cancellationToken);
                 merger.Add(bake, views[v].Weight);
             }
             (float[] texture, bool[] known) = merger.Finish();
+            // The picture replaces the merged views' albedo on the surfaces the front camera sees; metal and roughness stay as generated.
+            if (m == 0 && picture is not null && projection is not null)
+            {
+                int fromPicture = PaintReferenceProjector.ApplyToTexels(projection, renderer, surface, texture, known, picture.Rgb, picture.Alpha, picture.Width, picture.Height,
+                    o.Bake.DepthThreshold, cancellationToken);
+                StageLog?.Invoke($"reference projection: {fromPicture} texels from the picture");
+            }
             if (m == 0)
                 painted = known.Count(k => k);
             // Upstream's uv_inpaint: colours spread over the mesh's vertices first, so a surface no view saw takes the colour around it on the mesh, then the 2D fill.

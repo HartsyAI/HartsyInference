@@ -642,14 +642,16 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     }
 
     /// <summary>Texturing: one GLB holding the input mesh with a baked PBR material painted from the reference image. <see cref="MeshRequest.Steps"/> is the sampler step
-    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
+    /// count (0 takes the checkpoint default), <see cref="MeshRequest.GridResolution"/> the texture size (0 is 4096 when the reference picture is baked in, so a face gets as
+    /// many texels as the picture has pixels, else 2048) and <see cref="MeshRequest.Seed"/> the noise seed.</summary>
     private Task<MeshResult> GeneratePaintAsync(ModelSpec spec, string id, MeshRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {
         Mesh input = SceneMeshReader.Read(request.SceneMesh!.Data, request.SceneMesh.Format);
+        bool project = EngineKnobs.PaintProjectReference.Value && request.Image is { HasAlpha: true };
         HunyuanPaintOptions options = new()
         {
             Steps = request.Steps == 0 ? null : request.Steps,
-            TextureSize = request.GridResolution == 0 ? 2048 : request.GridResolution,
+            TextureSize = request.GridResolution != 0 ? request.GridResolution : project ? 4096 : 2048,
             Seed = MeshSeed.ForSampler(request.Seed),
             ProjectReference = EngineKnobs.PaintProjectReference.Value,
         };

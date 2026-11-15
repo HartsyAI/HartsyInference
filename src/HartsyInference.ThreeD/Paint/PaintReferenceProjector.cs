@@ -14,9 +14,9 @@ namespace HartsyInference.ThreeD.Paint;
 /// <param name="Facing">Per pixel, how squarely the surface there faces the front camera: the cosine between its face normal and the view direction (0 to 1). Null treats every pixel as facing it.</param>
 public sealed record PaintReferenceProjection(float[] Image, bool[] Covered, int Resolution, double Fit, double MirroredFit, double Scale, double OffsetX, double OffsetY, float[]? Facing = null);
 
-/// <summary>Places the reference picture on the mesh's front view so its pixels can be baked at their own resolution. Paint repaints every view at 512 px, so
+/// <summary>Bakes the reference picture onto the surfaces the front camera sees, at the picture's own resolution. Paint repaints every view at 512 px, so
 /// on a full figure a face is a few dozen pixels wide and its eyes, nose and brows are lost; the front view is the one the picture was drawn from, so the
-/// picture itself can stand in for that view wherever the mesh and the picture's subject overlap.
+/// picture itself stands in for it wherever the mesh and the picture's subject overlap (<see cref="Project"/> places it, <see cref="ApplyToTexels"/> bakes it).
 /// The subject's outline (from the picture's alpha) is fitted to the mesh's front silhouette: the boxes are matched by height and centre, then a small
 /// search on the overlap refines the scale and offset, which keeps a staff or a hat brim the mesh lost from pulling the fit off.</summary>
 public static class PaintReferenceProjector
@@ -94,12 +94,199 @@ public static class PaintReferenceProjector
         return new PaintReferenceProjection(image, covered, resolution, fit, mirroredFit, scale, offsetX, offsetY, facing);
     }
 
-    /// <summary>The picture is used fully on surfaces facing the front camera at least this squarely (cosine; about 50 degrees off the view direction).</summary>
-    public const float FacingFull = 0.65f;
+    /// <summary>Writes the picture into the albedo texels the front camera sees, at the picture's own resolution: each texel is placed in the picture through the front
+    /// camera and <paramref name="placement"/>'s scale and offset, depth-tested against the front view so only the first surface takes it, and sampled once (bicubic).
+    /// The picture replaces the merged views on surfaces facing the camera at least <see cref="TexelFacingFull"/> and fades out by facing alone down to <see cref="TexelFacingNone"/>,
+    /// so no texel mixes the picture's features with the generated views' differently placed ones; along the subject's outline it needs a squarer facing, so the picture's drawn
+    /// outline is not stretched over surfaces turning away. A texel no view painted takes the picture outright.
+    /// Returns how many texels took the picture.</summary>
+    /// <param name="texture">The merged albedo, three floats per texel in [0, 1], <c>surface.Width * surface.Height</c> texels; changed in place.</param>
+    /// <param name="known">Which texels the views painted; texels the picture paints are set.</param>
+    /// <param name="rgb">The picture, RGB bytes, row 0 first, at its own size (<paramref name="width"/> by <paramref name="height"/>).</param>
+    /// <param name="alpha">The picture's subject mask, one byte per pixel.</param>
+    public static int ApplyToTexels(PaintReferenceProjection placement, PaintViewRenderer renderer, PaintTexelSurface surface, float[] texture, bool[] known,
+        byte[] rgb, byte[] alpha, int width, int height, double depthThreshold, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(placement);
+        ArgumentNullException.ThrowIfNull(renderer);
+        ArgumentNullException.ThrowIfNull(surface);
+        if (texture.Length != surface.Width * surface.Height * 3 || known.Length != surface.Width * surface.Height)
+            throw new ArgumentException("The texture does not match the surface.");
+        if (rgb.Length != width * height * 3 || alpha.Length != width * height)
+            throw new ArgumentException("The picture's colour and alpha planes do not match its size.");
 
-    /// <summary>Surfaces turned further from the front camera than this (cosine; about 70 degrees) do not take the picture: the front picture has almost no pixels for them, so it
-    /// would be stretched into streaks (a brim's underside, the sides of a face recessed under it). The painted views cover them. In between, the two are blended.</summary>
-    public const float FacingNone = 0.35f;
+        // The front depth buffer at least as fine as the texture, so a texel's visibility is decided at its own scale.
+        int side = Math.Max(2048, Math.Max(surface.Width, surface.Height));
+        PaintViewProjection front = renderer.Project(0, 0);
+        int[] indices = renderer.Frame.Indices;
+        ViewRaster raster = ViewRasterizer.Rasterize(front.Clip, indices, side, side, cancellationToken);
+        float[] z = new float[front.Camera.Length / 3];
+        for (int i = 0; i < z.Length; i++)
+            z[i] = front.Camera[i * 3 + 2];
+        float[] depth = raster.Interpolate(z, indices, 1);
+        float[] faceFacing = SmoothFacing(front.Camera, indices, FacingSmoothingPasses);
+
+        bool[] subject = new bool[width * height];
+        for (int i = 0; i < subject.Length; i++)
+            subject[i] = alpha[i] >= SubjectAlpha;
+        bool[] inner = Erode(subject, width, height, Math.Max(1, Math.Max(width, height) / 512));
+        // A drawn picture outlines its subject with a dark line a few pixels wide. Where the surface turns away near the silhouette (the sides of a head), that line would be stretched
+        // across it, so near the outline only surfaces facing the camera squarely take the picture.
+        bool[] deep = Erode(subject, width, height, Math.Max(2, Math.Max(width, height) / OutlineShare));
+
+        double toView = 1.0 / (PaintCamera.OrthoScale * 0.5);
+        double[] w2c = front.WorldToCamera;
+        int written = 0;
+        Parallel.For(0, surface.Count, new ParallelOptions { CancellationToken = cancellationToken }, i =>
+        {
+            (double cx, double cy, double cz, _) = PaintCamera.Transform(w2c, surface.Positions[i * 3], surface.Positions[i * 3 + 1], surface.Positions[i * 3 + 2]);
+            double u = cx * toView * 0.5 + 0.5, v = cy * toView * 0.5 + 0.5;
+            if (u < 0 || u >= 1 || v < 0 || v >= 1)
+                return;
+            int pixel = (int)(v * side) * side + (int)(u * side);
+            int face = raster.FaceIds[pixel];
+            if (face == 0 || !VisibleNear(raster.FaceIds, depth, side, pixel, cz, depthThreshold))
+                return;
+            float weight = Math.Clamp((faceFacing[face - 1] - TexelFacingNone) / (TexelFacingFull - TexelFacingNone), 0f, 1f);
+            if (weight <= 0f)
+                return;
+            // The same mapping Project fitted: picture pixel = Scale * view coordinate + Offset, at pixel centres.
+            double x = placement.Scale * u + placement.OffsetX - 0.5, y = placement.Scale * v + placement.OffsetY - 0.5;
+            int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height || !inner[ny * width + nx]
+                || (!deep[ny * width + nx] && faceFacing[face - 1] < OutlineFacing))
+                return;
+            int texel = surface.Texels[i];
+            Span<float> colour = stackalloc float[3];
+            SampleBicubic(rgb, width, height, x, y, colour);
+            if (!known[texel])
+                weight = 1f;
+            for (int c = 0; c < 3; c++)
+                texture[texel * 3 + c] += weight * (colour[c] - texture[texel * 3 + c]);
+            known[texel] = true;
+            Interlocked.Increment(ref written);
+        });
+        return written;
+    }
+
+    // Passes of neighbour averaging on the vertex facing in ApplyToTexels.
+    private const int FacingSmoothingPasses = 3;
+
+    /// <summary>In <see cref="ApplyToTexels"/>, the picture fully replaces the views on surfaces facing the front camera at least this squarely (smoothed cosine; about 63 degrees off
+    /// the view axis, where the picture is stretched about twice).</summary>
+    public const float TexelFacingFull = 0.45f;
+
+    /// <summary>In <see cref="ApplyToTexels"/>, surfaces turned further than this (about 78 degrees) keep the views: the picture would be a streak there.</summary>
+    public const float TexelFacingNone = 0.2f;
+
+    // The band along the subject's outline, as a share of the picture's longer side (about 11 px on a 1400 px picture), where only surfaces facing the camera at least
+    // OutlineFacing (about 45 degrees) take the picture.
+    private const int OutlineShare = 128;
+    private const float OutlineFacing = 0.7f;
+
+    // A texel is visible when its depth matches the front depth buffer at its pixel or at one of the eight around it: on a fold the nearest pixel can belong to the other side of the
+    // edge while the texel itself is in plain view.
+    private static bool VisibleNear(int[] faceIds, float[] depth, int side, int pixel, double z, double threshold)
+    {
+        int px = pixel % side, py = pixel / side;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                int x = px + dx, y = py + dy;
+                if (x < 0 || y < 0 || x >= side || y >= side)
+                    continue;
+                int p = y * side + x;
+                if (faceIds[p] > 0 && Math.Abs(z - depth[p]) < threshold)
+                    return true;
+            }
+        return false;
+    }
+
+    // How squarely each triangle faces the camera, from vertex normals (area-weighted face normals) averaged with their neighbours over a few passes: the shape models' meshes are
+    // bumpy at the scale of a few triangles, and a per-triangle facing turns small creases (an eyelid, a brow line) into slivers that drop out of the projection.
+    private static float[] SmoothFacing(float[] camera, int[] indices, int passes)
+    {
+        int vertices = camera.Length / 3, faces = indices.Length / 3;
+        float[] nx = new float[vertices], ny = new float[vertices], nz = new float[vertices];
+        for (int t = 0; t < faces; t++)
+        {
+            int a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+            float e1x = camera[b * 3] - camera[a * 3], e1y = camera[b * 3 + 1] - camera[a * 3 + 1], e1z = camera[b * 3 + 2] - camera[a * 3 + 2];
+            float e2x = camera[c * 3] - camera[a * 3], e2y = camera[c * 3 + 1] - camera[a * 3 + 1], e2z = camera[c * 3 + 2] - camera[a * 3 + 2];
+            float fx = e1y * e2z - e1z * e2y, fy = e1z * e2x - e1x * e2z, fz = e1x * e2y - e1y * e2x;
+            // A drawn triangle faces the camera whatever its winding, so every face normal is turned toward it before summing.
+            if (fz < 0)
+                (fx, fy, fz) = (-fx, -fy, -fz);
+            foreach (int v in (ReadOnlySpan<int>)[a, b, c])
+            {
+                nx[v] += fx;
+                ny[v] += fy;
+                nz[v] += fz;
+            }
+        }
+        float[] facing = new float[vertices];
+        for (int v = 0; v < vertices; v++)
+        {
+            float length = MathF.Sqrt(nx[v] * nx[v] + ny[v] * ny[v] + nz[v] * nz[v]);
+            facing[v] = length > 1e-12f ? MathF.Abs(nz[v]) / length : 0f;
+        }
+        float[] sum = new float[vertices];
+        int[] count = new int[vertices];
+        for (int pass = 0; pass < passes; pass++)
+        {
+            Array.Clear(sum);
+            Array.Clear(count);
+            for (int t = 0; t < faces; t++)
+            {
+                int a = indices[t * 3], b = indices[t * 3 + 1], c = indices[t * 3 + 2];
+                float mean = (facing[a] + facing[b] + facing[c]) / 3f;
+                foreach (int v in (ReadOnlySpan<int>)[a, b, c])
+                {
+                    sum[v] += mean;
+                    count[v]++;
+                }
+            }
+            for (int v = 0; v < vertices; v++)
+                if (count[v] > 0)
+                    facing[v] = sum[v] / count[v];
+        }
+        float[] faceFacing = new float[faces];
+        for (int t = 0; t < faces; t++)
+            faceFacing[t] = (facing[indices[t * 3]] + facing[indices[t * 3 + 1]] + facing[indices[t * 3 + 2]]) / 3f;
+        return faceFacing;
+    }
+
+    // Catmull-Rom bicubic sample of an RGB byte image at a continuous pixel position (integers are pixel centres), edges clamped; colours in [0, 1].
+    private static void SampleBicubic(byte[] rgb, int width, int height, double x, double y, Span<float> target)
+    {
+        int x0 = (int)Math.Floor(x), y0 = (int)Math.Floor(y);
+        double fx = x - x0, fy = y - y0;
+        Span<double> wx = stackalloc double[4], wy = stackalloc double[4];
+        CatmullRom(fx, wx);
+        CatmullRom(fy, wy);
+        for (int c = 0; c < 3; c++)
+        {
+            double sum = 0;
+            for (int j = 0; j < 4; j++)
+            {
+                int row = Math.Clamp(y0 - 1 + j, 0, height - 1) * width;
+                double line = 0;
+                for (int k = 0; k < 4; k++)
+                    line += wx[k] * rgb[(row + Math.Clamp(x0 - 1 + k, 0, width - 1)) * 3 + c];
+                sum += wy[j] * line;
+            }
+            target[c] = (float)Math.Clamp(sum / 255.0, 0, 1);
+        }
+    }
+
+    private static void CatmullRom(double t, Span<double> w)
+    {
+        double t2 = t * t, t3 = t2 * t;
+        w[0] = 0.5 * (-t3 + 2 * t2 - t);
+        w[1] = 0.5 * (3 * t3 - 5 * t2 + 2);
+        w[2] = 0.5 * (-3 * t3 + 4 * t2 + t);
+        w[3] = 0.5 * (t3 - t2);
+    }
 
     // How squarely each triangle faces the camera: |cos| of the angle between its normal and the view axis (camera space looks down -z). A triangle that is drawn faces the camera,
     // whatever its winding, so the sign is dropped.
@@ -116,239 +303,6 @@ public static class PaintReferenceProjector
             facing[t] = length > 1e-12f ? MathF.Abs(nz) / length : 0f;
         }
         return facing;
-    }
-
-    /// <summary>Blurred colours farther apart than this (RGB distance, channels in [0, 1]) after alignment are different surfaces (skin where the mesh has a hat brim): the generated view is kept there.</summary>
-    public const float DisagreeDistance = 0.5f;
-
-    /// <summary>Largest local shift, in pixels at 512, that <see cref="Overlay"/> applies to line the picture's features up with the generated view's.</summary>
-    public const int MaxShift = 10;
-
-    /// <summary>Puts the picture over the generated front view (RGB floats at the projection's resolution). The silhouette fit places the picture as a whole; inside, the mesh follows it only
-    /// roughly (a hat brim the mesh brings lower than drawn covers the eyes), while the generated view was painted on the mesh's own geometry. So the picture is first moved locally onto the
-    /// generated view: a displacement of up to <see cref="MaxShift"/> px at 512 per 8 px block, found by matching blurred patches and smoothed, pulls its features to where the mesh has them.
-    /// Its small details stay its own (the generated view's are the 512 px repaint the picture is here to replace). Where the aligned picture still shows a different surface than the
-    /// generated view (blurred colours further apart than <see cref="DisagreeDistance"/>, widened by 2 px at 512 and softened by 1 px), the generated view is kept.
-    /// Returns how many pixels took the picture fully.</summary>
-    public static int Overlay(PaintReferenceProjection projection, float[] view)
-    {
-        ArgumentNullException.ThrowIfNull(projection);
-        ArgumentNullException.ThrowIfNull(view);
-        if (view.Length != projection.Image.Length)
-            throw new ArgumentException("The view image does not match the projection's resolution.", nameof(view));
-        int size = projection.Resolution;
-        (float[] image, bool[] covered) = Align(projection, view);
-        int radius = Math.Max(1, size / 128);
-        float[] picture = BoxBlur(image, size, radius);
-        float[] generated = BoxBlur(view, size, radius);
-        bool[] rejected = new bool[size * size];
-        for (int p = 0; p < covered.Length; p++)
-        {
-            if (!covered[p])
-                continue;
-            float sum = 0;
-            for (int c = 0; c < 3; c++)
-            {
-                float d = picture[p * 3 + c] - generated[p * 3 + c];
-                sum += d * d;
-            }
-            rejected[p] = MathF.Sqrt(sum) > DisagreeDistance;
-        }
-        rejected = PaintImageFilters.Dilate(rejected, size, size, Math.Max(1, size / 256));
-        float[] keep = new float[size * size * 3];
-        for (int p = 0; p < rejected.Length; p++)
-            keep[p * 3] = keep[p * 3 + 1] = keep[p * 3 + 2] = rejected[p] ? 0f : 1f;
-        keep = BoxBlur(keep, size, Math.Max(1, size / 512));
-        int full = 0;
-        for (int p = 0; p < covered.Length; p++)
-        {
-            if (!covered[p])
-                continue;
-            float weight = keep[p * 3];
-            if (projection.Facing is { } facing)
-                weight *= Math.Clamp((facing[p] - FacingNone) / (FacingFull - FacingNone), 0f, 1f);
-            if (weight >= 1f)
-                full++;
-            for (int c = 0; c < 3; c++)
-                view[p * 3 + c] += weight * (image[p * 3 + c] - view[p * 3 + c]);
-        }
-        return full;
-    }
-
-    // Side of the grid the alignment matches on, the block step, the patch radius (all in pixels of that grid), and the cost of a shift: matching is on colours in [0, 1], so a block
-    // moved MaxShift px must explain about 0.06 of mean colour difference more than staying put.
-    private const int AlignResolution = 512, AlignStep = 8, AlignPatch = 7;
-    private const double ShiftCost = 0.06 * 0.06 / (MaxShift * MaxShift);
-
-    // The picture moved locally onto the generated view, with its coverage moved alike. See Overlay.
-    internal static (float[] Image, bool[] Covered) Align(PaintReferenceProjection projection, float[] view)
-    {
-        int size = projection.Resolution, factor = Math.Max(1, size / AlignResolution), small = size / factor;
-        // Outside the picture's coverage the generated view stands in, so a patch at the silhouette compares like with like.
-        float[] filled = (float[])view.Clone();
-        for (int p = 0; p < projection.Covered.Length; p++)
-            if (projection.Covered[p])
-                for (int c = 0; c < 3; c++)
-                    filled[p * 3 + c] = projection.Image[p * 3 + c];
-        float[] picture = BoxBlur(Downsample(filled, size, factor), small, 1);
-        float[] generated = BoxBlur(Downsample(view, size, factor), small, 1);
-        bool[] coveredSmall = new bool[small * small];
-        for (int y = 0; y < small; y++)
-            for (int x = 0; x < small; x++)
-                coveredSmall[y * small + x] = projection.Covered[(y * factor + factor / 2) * size + x * factor + factor / 2];
-
-        int blocks = (small + AlignStep - 1) / AlignStep;
-        float[] shiftX = new float[blocks * blocks], shiftY = new float[blocks * blocks];
-        Parallel.For(0, blocks * blocks, block =>
-        {
-            int cx = block % blocks * AlignStep + AlignStep / 2, cy = block / blocks * AlignStep + AlignStep / 2;
-            if (cx >= small || cy >= small || !coveredSmall[cy * small + cx])
-                return;
-            double best = double.MaxValue;
-            int bestX = 0, bestY = 0;
-            for (int dy = -MaxShift; dy <= MaxShift; dy++)
-                for (int dx = -MaxShift; dx <= MaxShift; dx++)
-                {
-                    double cost = PatchCost(generated, picture, small, cx, cy, dx, dy);
-                    if (double.IsNaN(cost))
-                        continue;
-                    cost += ShiftCost * (dx * dx + dy * dy);
-                    if (cost < best)
-                        (best, bestX, bestY) = (cost, dx, dy);
-                }
-            shiftX[block] = bestX;
-            shiftY[block] = bestY;
-        });
-        shiftX = Median3(shiftX, blocks);
-        shiftY = Median3(shiftY, blocks);
-
-        float[] image = new float[projection.Image.Length];
-        bool[] covered = new bool[projection.Covered.Length];
-        Parallel.For(0, size, row =>
-        {
-            for (int column = 0; column < size; column++)
-            {
-                int p = row * size + column;
-                if (!projection.Covered[p])
-                    continue;
-                // The block grid's value at this pixel, bilinear between block centres, scaled from the alignment grid to this one.
-                double gx = Math.Clamp(((column + 0.5) / factor - AlignStep / 2.0) / AlignStep, 0, blocks - 1);
-                double gy = Math.Clamp(((row + 0.5) / factor - AlignStep / 2.0) / AlignStep, 0, blocks - 1);
-                double sx = Bilinear(shiftX, blocks, gx, gy) * factor, sy = Bilinear(shiftY, blocks, gx, gy) * factor;
-                double x = column + sx, y = row + sy;
-                int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
-                if (nx < 0 || ny < 0 || nx >= size || ny >= size || !projection.Covered[ny * size + nx])
-                    continue;
-                for (int c = 0; c < 3; c++)
-                    image[p * 3 + c] = (float)BilinearChannel(projection.Image, size, x, y, c);
-                covered[p] = true;
-            }
-        });
-        return (image, covered);
-    }
-
-    // Mean squared colour difference between the generated patch at (cx, cy) and the picture patch shifted by (dx, dy); NaN when the shifted patch leaves the grid.
-    private static double PatchCost(float[] generated, float[] picture, int size, int cx, int cy, int dx, int dy)
-    {
-        if (cx - AlignPatch + dx < 0 || cy - AlignPatch + dy < 0 || cx + AlignPatch + dx >= size || cy + AlignPatch + dy >= size
-            || cx - AlignPatch < 0 || cy - AlignPatch < 0 || cx + AlignPatch >= size || cy + AlignPatch >= size)
-            return double.NaN;
-        double sum = 0;
-        for (int y = -AlignPatch; y <= AlignPatch; y++)
-        {
-            int g = ((cy + y) * size + cx - AlignPatch) * 3, q = ((cy + y + dy) * size + cx - AlignPatch + dx) * 3;
-            for (int k = 0; k < (2 * AlignPatch + 1) * 3; k++)
-            {
-                double d = generated[g + k] - picture[q + k];
-                sum += d * d;
-            }
-        }
-        return sum / ((2 * AlignPatch + 1) * (2 * AlignPatch + 1) * 3);
-    }
-
-    private static float[] Downsample(float[] image, int size, int factor)
-    {
-        int small = size / factor;
-        float[] result = new float[small * small * 3];
-        for (int y = 0; y < small; y++)
-            for (int x = 0; x < small; x++)
-                for (int c = 0; c < 3; c++)
-                {
-                    double sum = 0;
-                    for (int j = 0; j < factor; j++)
-                        for (int i = 0; i < factor; i++)
-                            sum += image[((y * factor + j) * size + x * factor + i) * 3 + c];
-                    result[(y * small + x) * 3 + c] = (float)(sum / (factor * factor));
-                }
-        return result;
-    }
-
-    private static float[] Median3(float[] grid, int side)
-    {
-        float[] result = new float[grid.Length];
-        float[] window = new float[9];
-        for (int y = 0; y < side; y++)
-            for (int x = 0; x < side; x++)
-            {
-                int n = 0;
-                for (int j = -1; j <= 1; j++)
-                    for (int i = -1; i <= 1; i++)
-                        window[n++] = grid[Math.Clamp(y + j, 0, side - 1) * side + Math.Clamp(x + i, 0, side - 1)];
-                Array.Sort(window);
-                result[y * side + x] = window[4];
-            }
-        return result;
-    }
-
-    private static double Bilinear(float[] grid, int side, double x, double y)
-    {
-        int x0 = (int)Math.Floor(x), y0 = (int)Math.Floor(y), x1 = Math.Min(x0 + 1, side - 1), y1 = Math.Min(y0 + 1, side - 1);
-        double wx = x - x0, wy = y - y0;
-        return (grid[y0 * side + x0] * (1 - wx) + grid[y0 * side + x1] * wx) * (1 - wy) + (grid[y1 * side + x0] * (1 - wx) + grid[y1 * side + x1] * wx) * wy;
-    }
-
-    private static double BilinearChannel(float[] image, int size, double x, double y, int channel)
-    {
-        int x0 = Math.Clamp((int)Math.Floor(x), 0, size - 1), y0 = Math.Clamp((int)Math.Floor(y), 0, size - 1);
-        int x1 = Math.Min(x0 + 1, size - 1), y1 = Math.Min(y0 + 1, size - 1);
-        double wx = Math.Clamp(x - x0, 0, 1), wy = Math.Clamp(y - y0, 0, 1);
-        return (image[(y0 * size + x0) * 3 + channel] * (1 - wx) + image[(y0 * size + x1) * 3 + channel] * wx) * (1 - wy)
-            + (image[(y1 * size + x0) * 3 + channel] * (1 - wx) + image[(y1 * size + x1) * 3 + channel] * wx) * wy;
-    }
-
-    // Box blur of a square RGB float image, separable, edges clamped.
-    internal static float[] BoxBlur(float[] image, int size, int radius)
-    {
-        float[] across = new float[image.Length], result = new float[image.Length];
-        Parallel.For(0, size, row =>
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                double sum = 0;
-                for (int k = -radius; k <= radius; k++)
-                    sum += image[(row * size + Math.Clamp(k, 0, size - 1)) * 3 + c];
-                for (int x = 0; x < size; x++)
-                {
-                    across[(row * size + x) * 3 + c] = (float)(sum / (2 * radius + 1));
-                    sum += image[(row * size + Math.Min(x + radius + 1, size - 1)) * 3 + c] - image[(row * size + Math.Max(x - radius, 0)) * 3 + c];
-                }
-            }
-        });
-        Parallel.For(0, size, column =>
-        {
-            for (int c = 0; c < 3; c++)
-            {
-                double sum = 0;
-                for (int k = -radius; k <= radius; k++)
-                    sum += across[(Math.Clamp(k, 0, size - 1) * size + column) * 3 + c];
-                for (int y = 0; y < size; y++)
-                {
-                    result[(y * size + column) * 3 + c] = (float)(sum / (2 * radius + 1));
-                    sum += across[(Math.Min(y + radius + 1, size - 1) * size + column) * 3 + c] - across[(Math.Max(y - radius, 0) * size + column) * 3 + c];
-                }
-            }
-        });
-        return result;
     }
 
     // Pattern search on the overlap: each step tries the scale and both offsets one step up and down and keeps any gain; when none gains, the steps halve.
