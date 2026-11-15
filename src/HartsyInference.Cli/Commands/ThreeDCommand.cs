@@ -30,7 +30,7 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
 
         /// <summary>hunyuan3d-omni: the control kind.</summary>
         [CommandOption("--control")]
-        [Description("hunyuan3d-omni: the control signal beside the image: point (--control-file: obj, glb or a ply point cloud; its vertices are the points), voxel (--control-file: an obj or glb mesh with faces), bbox (--control-values: length,height,width, each in (0, 1]) or pose (--control-file: a bone file, or --control-values: six numbers per bone).")]
+        [Description("hunyuan3d-omni: the control signal beside the image: point (--control-file: obj, glb or a ply point cloud; its vertices are the points), voxel (--control-file: an obj or glb mesh with faces), bbox (--control-values: length,height,width, each in (0, 1]]) or pose (--control-file: a bone file, or --control-values: six numbers per bone).")]
         public string? Control { get; init; }
 
         /// <summary>hunyuan3d-omni: geometry or bone file of the control.</summary>
@@ -88,9 +88,9 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("Skip the closed-shell rebuild of the surface before baking the texture (it is on by default for textured trellis2 and pixal3d output at grid 512 or 1024; it costs about 10 s and 3.6 GiB of host memory at 512 and thickens thin features by a voxel).")]
         public bool NoRemesh { get; init; }
 
-        /// <summary>Baked texture edge in texels (TRELLIS.2 and Pixal3D with --texture).</summary>
+        /// <summary>Baked texture edge in texels (TRELLIS.2 and Pixal3D with --texture, and the paint models).</summary>
         [CommandOption("--texture-size")]
-        [Description("Baked texture size in texels, 16 to 8192 (trellis2 and pixal3d with --texture; 0 = 2048).")]
+        [Description("Baked texture size in texels, 16 to 8192 (trellis2 and pixal3d with --texture, and the paint models, where it is the same as --grid; 0 = 2048).")]
         public int TextureSize { get; init; }
 
         /// <summary>A named bundle of quality settings.</summary>

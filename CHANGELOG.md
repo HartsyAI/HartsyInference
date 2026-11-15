@@ -5,10 +5,7 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.433
 
-- **Fixed: Hunyuan3D Paint 2.1 guides every view at the same strength, as upstream does.** The engine scaled each view's guidance by its
-  azimuth (side and back views at twice the strength). Upstream's pipeline applies that scale only when its caller passes `camera_azims`,
-  and its texturing pipeline never does. Checked by feeding upstream's own reference, geometry maps and starting noise (captured from a run
-  of the official Python pipeline) to the engine: the twelve generated views match upstream's to 0.4 to 1.5/255 mean.
+- Hunyuan3D Paint 2.1 views match upstream's, and 3D shape runs stop promptly when cancelled.
 
 ## alpha.432
 
