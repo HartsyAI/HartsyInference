@@ -1,5 +1,8 @@
 # Continue PR 01 on the 4090
 
+For the current PR 01 + PR 02 test assignment and copy/paste report contract, start with the
+[GPU-agent handoff](gpu-agent-handoff.md). The notes below explain the original outstanding evidence.
+
 The local 3060 cannot admit the frozen Qwen candidate on B0: its placement check requires more free memory than
 the card reports. Krea primary generation and native K0 also remain unverified. The user will move execution to
 the 4090 VPS; no SSH connection details or rental authorization are assumed here.
@@ -71,7 +74,8 @@ not exist until an independently authorized PR 02 is reviewed and completed.
 Run all affected CPU/GPU suites sequentially and retain resource guards as unvalidated. Complete all affected
 real-generation correctness checks, baseline results, explicit exceptions and matrix amendment review. Keep this
 PR 01 draft until all three groups pass the exit review. See the [implementation queue](proposed-queue.md) for
-the user's subsequent PR 02 authorization; Blackwell provisioning and PR 03+ remain unauthorized.
+the user's subsequent authorization and the required merge-before-next-PR sequence. Blackwell provisioning
+still requires a separate hardware/spending decision.
 
 For the stacked `codex/attention-semantic-correctness-pr02` branch, also carry the
 [PR 02 progress report](reports/pr02-semantic-progress.md) and its external `artifacts/attention-pr02` directory.
