@@ -19,9 +19,9 @@ public sealed class MeshServicePaintUpscalerTests : IDisposable
     }
 
     [Fact]
-    public void TheReferenceProjectionKnobIsOnByDefaultAndReadPerRun()
+    public void TheReferenceProjectionKnobIsOffByDefaultAndReadPerRun()
     {
-        Assert.True(EngineKnobs.PaintProjectReference.Default);
+        Assert.False(EngineKnobs.PaintProjectReference.Default);
         Assert.Equal(KnobScope.Runtime, EngineKnobs.PaintProjectReference.Scope);
         Assert.Equal("numerics.paintProjectReference", EngineKnobs.PaintProjectReference.Id);
     }

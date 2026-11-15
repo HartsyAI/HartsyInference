@@ -71,11 +71,11 @@ public static partial class EngineKnobs
         Bool("numerics.paintUpscaleViews", false, KnobScope.Construction, KnobDomain.Numerics,
             "Upscales each generated Paint 2.1 view 4x with Real-ESRGAN (RealESRGAN_x4plus.pth in the model folder) before baking; off by default (232 s extra on a 12 GB card, no visible gain).");
 
-    /// <summary>Bakes the Paint reference picture itself into the front view where it lines up with the mesh, so faces keep the picture's detail. On by default; acts only when the
-    /// reference carries alpha.</summary>
+    /// <summary>Bakes the Paint reference picture itself into the front view where it lines up with the mesh. Off by default, as upstream has no such step: where the picture and the
+    /// mesh differ in shape it pastes picture detail onto the wrong surface (a forehead onto a hat brim). Acts only when the reference carries alpha.</summary>
     public static readonly Knob<bool> PaintProjectReference =
-        Bool("numerics.paintProjectReference", true, KnobScope.Runtime, KnobDomain.Numerics,
-            "Bakes the Paint reference picture into the front view where it lines up with the mesh (needs the picture's alpha); off paints the front from the generated view only.");
+        Bool("numerics.paintProjectReference", false, KnobScope.Runtime, KnobDomain.Numerics,
+            "Bakes the Paint reference picture into the front view where it lines up with the mesh (needs the picture's alpha); off by default, as upstream, which paints the front from the generated view only.");
 
     /// <summary>Decodes each X-Part part with the hierarchical FlashVDM decoder instead of the dense grid. Off by default: upstream decodes densely, FlashVDM approximates that field (0.4 to 0.7 percent of the part's extent on the test bust).</summary>
     public static readonly Knob<bool> XPartFastDecode =
