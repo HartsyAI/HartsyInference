@@ -88,8 +88,17 @@ internal static class AttentionRequestEvidence
                 double milliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
                 if (completion is not null) Check(completion);
                 if (batched is not null) foreach (TimedRequest result in batched) Check(result.Result);
-                if (pixels is not null && (pixels.Width != 1024 || pixels.Height != 1024))
-                    throw new InvalidDataException("The image workload changed dimensions.");
+                if (pixels is not null && (pixels.Width != 1024 || pixels.Height != 1024 || pixels.Seed != 42))
+                    throw new InvalidDataException("The image workload changed dimensions or seed.");
+                if (pixels is not null && (pixels.Recipe?.FamilyId != "krea2" || pixels.Recipe.VariantId != "turbo"))
+                    throw new InvalidDataException("The frozen image workload must execute the Krea2 Turbo recipe variant.");
+                string? imageCapture = null;
+                if (pixels is not null)
+                {
+                    imageCapture = Path.ChangeExtension(options["out"], ".png");
+                    using FileStream capture = new(imageCapture, FileMode.CreateNew);
+                    capture.Write(PngEncoder.Encode(pixels.Rgb, pixels.Width, pixels.Height));
+                }
                 if (evidence is not null)
                 {
                     evidence.Dispose();
@@ -123,7 +132,18 @@ internal static class AttentionRequestEvidence
                     writer.WriteNumber("prefill_ms", completion.PrefillMilliseconds);
                     writer.WriteNumber("decode_ms", completion.DecodeMilliseconds);
                 }
-                if (pixels is not null) writer.WriteString("rgb_sha256", Convert.ToHexString(SHA256.HashData(pixels.Rgb)));
+                if (pixels is not null)
+                {
+                    writer.WriteString("rgb_sha256", Convert.ToHexString(SHA256.HashData(pixels.Rgb)));
+                    writer.WriteString("png_path", imageCapture);
+                    writer.WriteString("png_sha256", Hash(imageCapture!));
+                    writer.WriteString("recipe", pixels.Recipe?.ToString());
+                    writer.WriteNumber("actual_seed", pixels.Seed);
+                    writer.WriteStartObject("resolved_image_settings");
+                    foreach ((string key, HartsyInference.Engine.Planning.ResolvedParameter value) in pixels.Provenance)
+                        writer.WriteString(key, value.ToString());
+                    writer.WriteEndObject();
+                }
                 if (batched is not null)
                 {
                     writer.WriteNumber("batch_size", batched.Length);

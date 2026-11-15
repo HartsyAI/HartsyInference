@@ -121,7 +121,8 @@ request-owned scheduler cleanup. It rejects early EOS or changed lengths. `dense
 verify replay rather than assuming admission. The separate `batched` lane submits two concurrent ordinary requests
 and records group throughput plus each request's latency; its trace must prove actual batching. Request-level
 memory/TTFT sampling still needs campaign integration before exit. Krea manifests must pin DiT, encoder, VAE and auxiliary assets;
-the request specifies the protocol image settings. Freeze quality gates before comparing candidates.
+the request specifies the protocol image settings and rejects a different recipe variant or seed. Its PNG is
+saved beside the result after timing, with pixel and artifact hashes. Freeze quality gates before comparing candidates.
 
 `telemetry_check.py` compares pristine/disabled/enabled operation results, complete output hashes and existing
 top-level route fields. It rejects divergence; its small-run overhead ratios are descriptive. It cannot establish
@@ -139,6 +140,11 @@ include host gaps. Never substitute wall timing for an invalid device interval.
 `evidence.py statistics --pairs FILE --out FILE` runs the fixed bootstrap. Its `valid` pair flags must come from
 reviewed quality/route/cache/memory/cohort evidence. The calculator does not collect or certify those facts.
 An inconclusive campaign requires a separately registered replication; keep failed confirmation sessions.
+
+Kitchen timing runs omit `--diagnostics`. A separate diagnostic run records executed Python functions, ATen
+operations and GPU kernel names when CUPTI is available; it is marked ineligible for timing acceptance. Returned
+outputs are released before replacement; the final output is retained for untimed validation. Prepared state is
+retained only in declared reuse calls, and preparation measurements do not retain an unrelated prepared copy.
 
 On the 4090, use the existing GPU lock through `run_attention_table.sh`, its quiet-window wait/watcher and foreign
 client checks. Quiet evidence must bracket every timed arm without gaps. Activity invalidates rows before table
