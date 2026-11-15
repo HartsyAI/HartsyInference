@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Transformer;
@@ -136,11 +138,17 @@ public sealed class Ernie5Model : IDisposable
     public static Ernie5Model Load(string directory, IBackend backend, Ernie5LoadOptions options)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
+        Stopwatch clock = Stopwatch.StartNew();
+        Logs.Info($"[ernie5] load start: dir={directory} ResidentWeights={options.ResidentWeights} "
+            + $"MaxSequenceTokens={options.MaxSequenceTokens}");
         Ernie5Config config = Ernie5Config.Load(Path.Combine(directory, "config.json"));
         Ernie5CheckpointWeights weights = Ernie5CheckpointWeights.Open(directory, config.QuantBlock is [int block, _] ? block : 128);
+        Logs.Info($"[ernie5] index read: {weights.Names.Count()} tensors");
         try
         {
-            return new Ernie5Model(backend, config, weights, options, weights);
+            Ernie5Model model = new(backend, config, weights, options, weights);
+            Logs.Info($"[ernie5] load returned in {clock.Elapsed.TotalSeconds:F1} s");
+            return model;
         }
         catch
         {
@@ -198,6 +206,8 @@ public sealed class Ernie5Model : IDisposable
             {
                 // TODO(ernie5): with ResidentWeights off, every layer is read from the volume on each forward. A resident multi-device path is not
                 // built. Finish it by building _layers once across the devices and reusing them here.
+                long layerStart = Stopwatch.GetTimestamp();
+                Logs.Info($"[ernie5] layer {i + 1}/{_layers.Length} start (weights {(_layers[i] is null ? "streamed" : "resident")})");
                 Ernie5Layer layer = _layers[i] ?? new Ernie5Layer(_backend, Config, i, _source, _hcaRope, _dsaRope);
                 try
                 {
@@ -207,6 +217,7 @@ public sealed class Ernie5Model : IDisposable
                 {
                     if (!ReferenceEquals(layer, _layers[i])) layer.Dispose();
                 }
+                Logs.Info($"[ernie5] layer {i + 1}/{_layers.Length} done in {Stopwatch.GetElapsedTime(layerStart).TotalMilliseconds:F0} ms");
             }
             completed = true;
         }
