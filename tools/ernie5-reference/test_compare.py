@@ -279,7 +279,9 @@ class DecodeStitchTests(unittest.TestCase):
             np.random.default_rng(3).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
                 root / "eng" / f"layer01_pos4_t1_hc{HC}_h{HIDDEN}.f32")
             self.assertEqual(run(root / "ref", root / "eng", "--threshold", "0.5").returncode, 1)
-            result = run(root / "ref", root / "eng", "--threshold", "0.5", "--tie-margin", "1e-4", "--max-tie-fraction", "0.2")
+            # --tie-margin covers the indexer only; the router has its own margin.
+            self.assertEqual(run(root / "ref", root / "eng", "--threshold", "0.5", "--tie-margin", "1e-4").returncode, 1)
+            result = run(root / "ref", root / "eng", "--threshold", "0.5", "--router-tie-margin", "1e-4", "--max-tie-fraction", "0.2")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("router near ties below 0.0001: 1 of 6 positions", result.stdout)
 
@@ -288,16 +290,21 @@ class DecodeStitchTests(unittest.TestCase):
             root = Path(tmp)
             write_ref(root / "ref", range(3), positions=6)
             write_engine(root / "eng", range(3), self.PARTS, positions=6)
-            (root / "ref" / "router_gaps.json").write_text(
-                json.dumps({"1": {str(p): (1e-6 if p == 4 else 0.3) for p in range(6)}}), encoding="utf-8")
-            for layer in (1, 2):
+            # Position 4 has the smallest router gap in layer 1, and a smaller one still in layer 0, two layers before its first drop
+            # at layer 2 (layer 1 is clean): only layers 1 and 2 can explain that drop, so layer 0's gap is not the one named.
+            (root / "ref" / "router_gaps.json").write_text(json.dumps({
+                "0": {str(p): (1e-9 if p == 4 else 0.3) for p in range(6)},
+                "1": {str(p): (1e-6 if p == 4 else 0.3) for p in range(6)},
+                "2": {str(p): 0.3 for p in range(6)}}), encoding="utf-8")
+            for layer in (2,):
                 np.random.default_rng(11 + layer).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
                     root / "eng" / f"layer{layer:02d}_pos4_t1_hc{HC}_h{HIDDEN}.f32")
             result = run(root / "ref", root / "eng", "--threshold", "0.5", "--explain")
             self.assertIn("positions below 0.5: 1", result.stdout)
             line = next(l for l in result.stdout.splitlines() if l.startswith("position 4:"))
-            self.assertIn("first below at layer 1", line)
+            self.assertIn("first below at layer 2", line)
             self.assertIn("router gap 1.00e-06 at layer 1 (smallest 16.7% there)", line)
+            self.assertNotIn("1.00e-09", line)
 
     def test_tie_margin_without_index_gaps_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

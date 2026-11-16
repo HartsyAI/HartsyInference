@@ -19,19 +19,24 @@ With --strict it exits 1 on a flagged layer, a layer-set mismatch, a stitching o
 mismatch. --expect-layers N requires exactly layers 0..N-1 on both sides; --expect-tokens N requires the reference to cover N
 positions (use the prompt plus decode length, so a prefill-only reference cannot pass a decode check).
 
---tie-margin M is a diagnostic for a flagged position. It reads the reference's top-k gap files: index_gaps.json (per DSA query, the
-gap between the last key the indexer kept and the first it dropped) and router_gaps.json (per MoE token, the gap between the last
-expert routed to and the first left out), each over the spread of that choice's candidate scores. It leaves out of the per-position
-check every position whose gap is below M in a layer at or before the layer being checked: there a rounding difference can pick a
-different key or expert. The positions left out are printed per layer, and the whole-stream cosine still covers them.
+The reference writes two top-k gap files: index_gaps.json (per DSA query, the gap between the last key the indexer kept and the first
+it dropped) and router_gaps.json (per MoE token, the gap between the last expert routed to and the first left out), each over the
+spread of that choice's candidate scores.
+
+--tie-margin M (indexer) and --router-tie-margin M (router) are diagnostics for a flagged position. Each leaves out of the per-position
+check every position whose gap of that kind is below M in a layer at or before the layer being checked: there a rounding difference
+can pick a different key or expert. The router margin is separate because every token routes in every MoE layer: a margin that is
+rare in one layer catches a large share of positions over 36 layers. The positions left out are printed per layer, and the whole-stream cosine still covers them.
 Only the near-tie position itself is left out: from the next layer on, later positions read its changed state (window, compressor,
 indexer), so one of them can still be flagged; the note then names the nearest earlier near tie from a strictly earlier layer,
 "(after near-tie at N)". A flag in the tie's own layer gets no note, since that layer's later positions read only its inputs.
 When more than --max-tie-fraction (default 0.05) of either file's positions would be left out, it is an error: the margin would
 skip the selection test instead of explaining a few positions.
 
---explain lists every position that falls below the per-position threshold, at the first layer it does, with the indexer and router
-gaps there and how small each is among that layer's gaps. A first drop with no small gap at its layer is not a near tie.
+--explain lists every position that falls below the per-position threshold, at the first layer L it does, with its smallest gap of
+each kind at layer L or L-1 and that gap's rank within its own layer. Only those two layers can explain a first drop at L: a flip
+further back would have pulled the position down earlier. (A minimum over many layers would rank low by chance alone.) A first drop
+with no small gap at L or L-1 is not a near tie.
 
 Engine files are named layer{LL}_pos{startPos}_t{tokens}_hc{hc}_h{hidden}.f32 (little-endian float32, row-major
 [tokens, hc, hidden]).
@@ -111,11 +116,15 @@ def load_gaps(ref_dir: Path) -> dict[str, dict[int, dict[int, float]]]:
     return out
 
 
-def near_ties(gaps: dict[str, dict[int, dict[int, float]]], margin: float) -> tuple[dict[int, set[int]], dict[str, tuple[int, int]]]:
-    """(layer -> positions with a top-k gap below `margin` in that layer, kind -> (tied positions, positions with a gap))."""
+def near_ties(gaps: dict[str, dict[int, dict[int, float]]], margins: dict[str, float]) -> tuple[dict[int, set[int]], dict[str, tuple[int, int]]]:
+    """(layer -> positions with a top-k gap below its kind's margin in that layer, kind -> (tied positions, positions with a gap)), over
+    the kinds that have a margin."""
     ties: dict[int, set[int]] = {}
     counts: dict[str, tuple[int, int]] = {}
     for kind, by_layer in gaps.items():
+        if kind not in margins:
+            continue
+        margin = margins[kind]
         tied: set[int] = set()
         every: set[int] = set()
         for layer, by_pos in by_layer.items():
@@ -128,17 +137,21 @@ def near_ties(gaps: dict[str, dict[int, dict[int, float]]], margin: float) -> tu
 
 
 def explain(first_drop: dict[int, tuple[int, float]], gaps: dict[str, dict[int, dict[int, float]]]) -> list[str]:
-    """One line per position that fell below the per-position threshold: its first such layer, the cosine there, and for each kind
-    the position's smallest top-k gap at or before that layer (a tie a layer earlier can show only once it has propagated), with the
-    share of that layer's positions whose gap is as small or smaller."""
+    """One line per position that fell below the per-position threshold: its first such layer L, the cosine there, and for each kind
+    the position's gap at L or L-1, whichever ranks lower within its own layer, with that rank (the share of the layer's positions whose
+    gap is as small or smaller). A tie at L-1 shows only once it has propagated; one further back would have dropped the position
+    earlier, and a minimum over many layers would rank low by chance."""
     lines = []
     for pos, (layer, cos) in sorted(first_drop.items(), key=lambda item: (item[1][0], item[0])):
         parts = []
         for kind, by_layer in gaps.items():
-            seen = [(by_pos[pos], at) for at, by_pos in by_layer.items() if at <= layer and pos in by_pos]
-            if seen:
-                gap, at = min(seen)
-                share = sum(g <= gap for g in by_layer[at].values()) / len(by_layer[at])
+            ranked = []
+            for at in (layer - 1, layer):
+                by_pos = by_layer.get(at, {})
+                if pos in by_pos:
+                    ranked.append((sum(g <= by_pos[pos] for g in by_pos.values()) / len(by_pos), by_pos[pos], at))
+            if ranked:
+                share, gap, at = min(ranked)
                 parts.append(f"{kind} gap {gap:.2e} at layer {at} (smallest {share:.1%} there)")
         lines.append(f"position {pos}: first below at layer {layer} (cosine {cos:.6f}); "
                      + ("; ".join(parts) or "no top-k gap recorded there"))
@@ -225,9 +238,11 @@ def main() -> int:
                    help="cosine every single position must reach (default: --threshold). One position holds only hc*hidden values, "
                         "so a looser bound can be set here without loosening the whole-stream check")
     p.add_argument("--tie-margin", type=float, default=None,
-                   help="leave out of the per-position check the positions where a DSA indexer or MoE router at or before the layer "
-                        "kept and dropped a candidate within this gap, as a fraction of that choice's candidate-score spread (the "
-                        "reference's index_gaps.json and router_gaps.json); a diagnostic for a flagged position, printed per layer")
+                   help="leave out of the per-position check the positions where a DSA indexer at or before the layer "
+                        "kept and dropped a key within this gap, as a fraction of the query's candidate-score spread (the reference's "
+                        "index_gaps.json); a diagnostic for a flagged position, printed per layer")
+    p.add_argument("--router-tie-margin", type=float, default=None,
+                   help="the same for MoE routing (router_gaps.json); separate because every token routes in every MoE layer")
     p.add_argument("--max-tie-fraction", type=float, default=0.05,
                    help="with --tie-margin, an error when more than this fraction of either gap file's positions would be left out")
     p.add_argument("--explain", action="store_true",
@@ -240,14 +255,15 @@ def main() -> int:
     tie_notes: list[str] = []
     tie_errors: list[str] = []
     gaps = load_gaps(ref_dir)
-    if args.tie_margin is not None:
-        if not gaps:
-            print(f"--tie-margin needs {' or '.join(GAP_FILES.values())} in {ref_dir}; rerun reference.py, which writes them",
-                  file=sys.stderr)
+    margins = {kind: m for kind, m in (("indexer", args.tie_margin), ("router", args.router_tie_margin)) if m is not None}
+    if margins:
+        missing = [GAP_FILES[kind] for kind in margins if kind not in gaps]
+        if missing:
+            print(f"the tie margins need {' and '.join(missing)} in {ref_dir}; rerun reference.py, which writes them", file=sys.stderr)
             return 1
-        ties, counts = near_ties(gaps, args.tie_margin)
+        ties, counts = near_ties(gaps, margins)
         for kind, (tied, every) in counts.items():
-            tie_notes.append(f"{kind} near ties below {args.tie_margin}: {tied} of {every} positions")
+            tie_notes.append(f"{kind} near ties below {margins[kind]}: {tied} of {every} positions")
             if every and tied > args.max_tie_fraction * every:
                 tie_errors.append(f"{tied} of {every} {kind} positions are near ties, more than --max-tie-fraction "
                                   f"{args.max_tie_fraction}: the margin would skip the selection check")

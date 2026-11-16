@@ -410,11 +410,15 @@ def moe(ck: Checkpoint, layer: int, blk: str, h: torch.Tensor) -> torch.Tensor:
         scores = scores + torch.sigmoid(h @ ck.read(f"{blk}.gate.weight_1").T)
     bias = ck.read(f"{blk}.e_score_correction_bias")
     routing = scores + bias
-    top = torch.topk(routing, k + 1, dim=-1).values
-    spread = routing.max(dim=-1).values - routing.min(dim=-1).values
-    gaps = torch.where(spread > 0, (top[:, k - 1] - top[:, k]) / spread, torch.zeros_like(spread))
-    ROUTER_GAPS[layer] = {t: float(g) for t, g in enumerate(gaps)}
-    sel = torch.topk(routing, k, dim=-1, sorted=False).indices
+    if k < routing.shape[-1]:
+        # One sorted top-(k+1): the first k are the selection, and the gap is measured at exactly that boundary.
+        top, order = torch.topk(routing, k + 1, dim=-1)
+        spread = routing.max(dim=-1).values - routing.min(dim=-1).values
+        gaps = torch.where(spread > 0, (top[:, k - 1] - top[:, k]) / spread, torch.zeros_like(spread))
+        ROUTER_GAPS[layer] = {t: float(g) for t, g in enumerate(gaps)}
+        sel = order[:, :k]
+    else:  # every expert is routed to, so nothing is left out and there is no boundary gap
+        sel = torch.topk(routing, k, dim=-1).indices
     w = scores.gather(1, sel)
     if cfg.get("norm_topk_prob", True):
         w = w / w.sum(-1, keepdim=True).clamp_min(1e-20)
