@@ -7,16 +7,20 @@ Two modes, one set of integrity rules.
                the registered branch, route, arm, telemetry state, cohort and device; quality passed;
                timing_eligible true and acceptance_reviewed true; the registered fixture, tool, production-library
                (core and backend), kernel (PTX and SPIR-V), resolved-settings, knob-provenance and native-library
-               identities for its role; exactly the registered number of finite, positive samples; and memory evidence:
-               the campaign status records a quiet verify and a zero job exit, and no process log shows an
-               out-of-memory or allocator-retry event.
+               identities for its role; exactly the registered number of finite, positive samples; and no
+               out-of-memory or allocator-retry event in its process log. The campaign must also show batch evidence in
+               status.txt: one job line with rc 0, one watcher line with rc 0, exactly one quiet verify pass, no quiet
+               verify failure, exactly one BATCH DONE, and no line of unrecognised form.
 
-  descriptive  The same integrity rules without the eligibility, review and memory-evidence rules. The numbers stay
+  descriptive  The same integrity rules without the eligibility, review, memory and status rules. The numbers stay
                visible, every result is labelled descriptive, and no acceptance claim is made.
 
-Diagnostic traces, failed quality, missing or wrong identities, malformed samples, missing exit status and an
-incomplete layout are refused in both modes. Validity is derived from these checks. A successful process exit never
-makes a pair valid. Outputs are write-once: the output path must not exist and must not lie inside an input folder.
+Integrity rules apply in both modes. They cover the exit ledger, which must be a complete and unambiguous record of this
+job: each process appears at most once with an integer status, every line has a recognised form, no line belongs to
+another job or names an unexpected process, and the ledger records one JOB DONE. A diagnostic trace, failed quality, a
+missing or wrong identity, malformed samples and an incomplete layout are also refused in both modes. The A/A control
+must bind identical candidate and reference identities. Validity is derived from these checks. A successful process exit
+never makes a pair valid. Outputs are write-once: the output path must not exist and must not lie inside an input folder.
 
 The registration is an input written before the campaign ran. This module never writes a registration.
 """
@@ -44,7 +48,17 @@ CLAIMS = ('noninferiority', 'regression')
 
 MEMORY_EVENT = re.compile(r'OOM|OutOfVram|Out of VRAM|async retry|cast-cache eviction|FreeAllDeviceMemory|'
                           r'\[WRN\] \[CudaMemory\]')
-EXIT_LINE = re.compile(r'^(\S+) (s\d-p\d-(?:cand|ref)) (-?\d+) ')
+# Ledger lines. Each is matched in full. A line that matches none of these is a finding, never skipped.
+LEDGER_JOB_START = re.compile(r'job start(?: \S+)?')
+LEDGER_JOB_DONE = re.compile(r'(\S+) JOB DONE(?: \S+)?')
+LEDGER_ENTRY = re.compile(r'(\S+) (\S+) (\S+)(?: .*)?')
+INTEGER = re.compile(r'-?\d+')
+# Status lines written by the batch script, matched in full. The watcher and the verifier append their own output to the
+# same file, so any other line is a finding, never skipped.
+STATUS_JOB = re.compile(r'job rc=(-?\d+) watch rc=(-?\d+)(?: \S+)?')
+STATUS_STEP_PASSED = re.compile(r'(?:lock acquired|quiet wait passed)(?: \S+)?')
+STATUS_STEP_FAILED = re.compile(r'(?:lock failed|quiet wait failed|watcher not ready)(?: \S+)?')
+STATUS_BATCH_DONE = re.compile(r'BATCH DONE(?: \S+)?')
 REQUIRED_TOP = ('schema', 'registration_id', 'trials', 'statistic', 'seed', 'resamples', 'thresholds', 'expected', 'campaigns')
 REQUIRED_EXPECTED = ('measurement_mode', 'boundary', 'branch', 'route', 'telemetry', 'cohort', 'device', 'arm',
                      'legacy_asserted_bounded', 'query_key_permissions', 'prob_value_permissions', 'fixture_sha256',
@@ -64,6 +78,9 @@ class OutputRefused(RuntimeError):
 
 def process_names():
     return [f's{session}-p{pair}-{role}' for session in SESSIONS for pair in PAIRS for role in ROLES]
+
+
+PROCESS_NAMES = frozenset(process_names())
 
 
 def canonical_sha256(value):
@@ -119,38 +136,135 @@ def load_registration(path):
         for role in ('candidate', 'reference'):
             for field in REQUIRED_IDENTITY:
                 require(field in campaign[role], f'campaign {key} {role} lacks {field}')
+    control = data['campaigns']['control']
+    require(all(control['candidate'][field] == control['reference'][field] for field in REQUIRED_IDENTITY),
+            'the control campaign must bind identical candidate and reference identities (an A/A control)')
     return data
 
 
-def read_campaign(folder, job_id):
-    """Reads the exit ledger and the status file of one campaign folder. Missing files read as empty."""
-    folder = Path(folder)
-    exits_path = folder / 'timing-exits.txt'
-    exits_text = exits_path.read_text(encoding='utf-8') if exits_path.exists() else ''
-    exits = {}
-    for line in exits_text.splitlines():
-        match = EXIT_LINE.match(line)
-        if match and match.group(1) == job_id:
-            exits[match.group(2)] = int(match.group(3))
-    status_path = folder / 'status.txt'
-    status_text = status_path.read_text(encoding='utf-8') if status_path.exists() else ''
-    status_lines = [line.strip() for line in status_text.splitlines()]
-    return exits, status_lines
+def read_ledger(folder, job_id):
+    """Parses one campaign's exit ledger. Returns the statuses recorded for each process name and the ledger findings.
+    Every non-blank line must have a recognised form, and nothing is skipped. Findings refuse in both modes."""
+    path = Path(folder) / 'timing-exits.txt'
+    if not path.exists():
+        return {'statuses': {}, 'findings': ['timing-exits.txt is missing (exit evidence)']}
+    findings = []
+    statuses = {}
+    job_starts = job_done = 0
+    for number, raw in enumerate(path.read_text(encoding='utf-8', errors='replace').splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        if LEDGER_JOB_START.fullmatch(line):
+            job_starts += 1
+            continue
+        done = LEDGER_JOB_DONE.fullmatch(line)
+        if done:
+            if done.group(1) == job_id:
+                job_done += 1
+            else:
+                findings.append(f'ledger line {number} is a JOB DONE for another job ({done.group(1)})')
+            continue
+        entry = LEDGER_ENTRY.fullmatch(line)
+        if not entry:
+            findings.append(f'ledger line {number} has no recognised form')
+            continue
+        job, name, status = entry.groups()
+        if job != job_id:
+            findings.append(f'ledger line {number} is an entry for another job ({job})')
+        elif name not in PROCESS_NAMES:
+            findings.append(f'ledger line {number} names an unexpected process ({name})')
+        elif not INTEGER.fullmatch(status):
+            findings.append(f'ledger line {number} for {name} has a non-integer status ({status})')
+        else:
+            statuses.setdefault(name, []).append(int(status))
+    if job_starts > 1:
+        findings.append(f'ledger has {job_starts} job start lines')
+    if job_done == 0:
+        findings.append('ledger has no JOB DONE line for this job')
+    elif job_done > 1:
+        findings.append(f'ledger has {job_done} JOB DONE lines for this job')
+    for name in sorted(statuses):
+        if len(statuses[name]) > 1:
+            findings.append(f'duplicate ledger entries for {name} with statuses {statuses[name]}')
+    return {'statuses': statuses, 'findings': findings}
+
+
+def exit_findings(statuses):
+    """Process-level findings from the ledger entries recorded for one process name."""
+    if len(statuses) > 1:
+        return ['ledger entries are ambiguous (statuses ' + ', '.join(str(status) for status in statuses) + ')']
+    if not statuses:
+        return ['no exit status recorded']
+    if statuses[0] != 0:
+        return [f'exit status {statuses[0]}']
+    return []
+
+
+def read_status(folder):
+    """The non-blank lines of status.txt, or None when the file is missing."""
+    path = Path(folder) / 'status.txt'
+    if not path.exists():
+        return None
+    return [line.strip() for line in path.read_text(encoding='utf-8', errors='replace').splitlines() if line.strip()]
+
+
+def status_findings(lines):
+    """Acceptance findings from status.txt. They refuse acceptance only: the descriptive numbers do not depend on the batch
+    evidence. The file also holds the watcher's and the verifier's own output, so an unrecognised line is a finding."""
+    if lines is None:
+        return ['status.txt is missing (batch evidence)']
+    findings = []
+    job_rc, watch_rc, unrecognised = [], [], []
+    passed = failed = done = 0
+    for line in lines:
+        job = STATUS_JOB.fullmatch(line)
+        if job:
+            job_rc.append(int(job.group(1)))
+            watch_rc.append(int(job.group(2)))
+        elif line == 'quiet verify passed':
+            passed += 1
+        elif line == 'quiet verify FAILED':
+            failed += 1
+        elif STATUS_BATCH_DONE.fullmatch(line):
+            done += 1
+        elif STATUS_STEP_PASSED.fullmatch(line):
+            pass
+        elif STATUS_STEP_FAILED.fullmatch(line):
+            findings.append(f'batch step failed: {line}')
+        else:
+            unrecognised.append(line)
+    if not job_rc:
+        findings.append('status has no job rc line (job exit evidence)')
+    elif len(job_rc) > 1:
+        findings.append(f'status has {len(job_rc)} job rc lines (ambiguous job exit)')
+    else:
+        if job_rc[0] != 0:
+            findings.append(f'job rc={job_rc[0]} (job exit evidence)')
+        if watch_rc[0] != 0:
+            findings.append(f'watch rc={watch_rc[0]} (watcher evidence)')
+    if failed:
+        findings.append('quiet verify FAILED (cohort evidence)')
+    elif passed != 1:
+        findings.append(f'quiet verify passed {passed} times (expected once)')
+    if done != 1:
+        findings.append(f'BATCH DONE recorded {done} times (expected once)')
+    if unrecognised:
+        findings.append(f'status has {len(unrecognised)} line(s) without a recognised form '
+                        f'(first: {unrecognised[0][:60]!r})')
+    return findings
 
 
 def same(value, expected):
     return value is expected if isinstance(expected, bool) else value == expected
 
 
-def integrity_reasons(record, exit_code, campaign, role, expected, trials):
-    """Checks that apply in both modes. An empty list means the process is intact for this role."""
-    reasons = []
-    if exit_code is None:
-        reasons.append('no exit status recorded')
-    elif exit_code != 0:
-        reasons.append(f'exit status {exit_code}')
+def integrity_reasons(record, campaign, role, expected, trials):
+    """Checks that apply in both modes to one process record. An empty list means the record is intact for this role.
+    The exit status is checked against the ledger by exit_findings."""
     if not isinstance(record, dict):
-        return reasons + ['record is not a JSON object']
+        return ['record is not a JSON object']
+    reasons = []
     for field in REQUIRED_EXPECTED:
         if field not in record:
             reasons.append(f'{field} is missing')
@@ -169,9 +283,13 @@ def integrity_reasons(record, exit_code, campaign, role, expected, trials):
             reasons.append(f'{field} is missing')
         elif record[field] != campaign[role][field]:
             reasons.append(f'{field} is not the registered production library for this role')
-    digests = identities_from_record(record)
+    try:
+        digests = identities_from_record(record)
+    except (TypeError, ValueError):
+        reasons.append('identity fields are not canonical JSON')
+        digests = {}
     for field in ('resolved_settings_sha256', 'knobs_sha256', 'native_libraries_sha256', 'ptx_sha256', 'spirv_sha256'):
-        if digests[field] != campaign[role][field]:
+        if field in digests and digests[field] != campaign[role][field]:
             reasons.append(f'{field} differs from the registered identity for this role')
     samples = record.get('milliseconds')
     if not isinstance(samples, list):
@@ -203,20 +321,29 @@ def acceptance_reasons(record, log_text):
     return reasons
 
 
-def campaign_reasons(mode, status_lines):
-    reasons = []
+def read_record(path):
+    """Returns (record, None), or (None, reason) when the record is missing or is not valid JSON."""
+    if not path.exists():
+        return None, 'process record is missing'
+    try:
+        return json.loads(path.read_text(encoding='utf-8')), None
+    except ValueError:
+        return None, 'process record is not valid JSON'
+
+
+def campaign_findings(mode, ledger, status_lines):
+    """Campaign-level refusals for one mode. Ledger findings refuse in both modes; status findings refuse acceptance only."""
+    reasons = list(ledger['findings'])
     if mode == 'acceptance':
-        if 'quiet verify passed' not in status_lines:
-            reasons.append('status has no quiet verify passed (cohort and memory evidence)')
-        if not any(line.startswith('job rc=0') for line in status_lines):
-            reasons.append('status has no job rc=0 (job exit evidence)')
+        reasons += status_findings(status_lines)
     return reasons
 
 
 def evaluate_campaign(folder, campaign, expected, trials, statistic, mode):
-    """Evaluates every process of one campaign. Returns per-process reasons, values and the verdicts for each level."""
+    """Evaluates every process of one campaign and the campaign-level findings for the requested mode."""
     folder = Path(folder)
-    exits, status_lines = read_campaign(folder, campaign['job_id'])
+    ledger = read_ledger(folder, campaign['job_id'])
+    status_lines = read_status(folder)
     per_process = {}
     values = {}
     integrity_ok = {}
@@ -225,18 +352,15 @@ def evaluate_campaign(folder, campaign, expected, trials, statistic, mode):
         role = 'candidate' if name.endswith('-cand') else 'reference'
         record_path = folder / f'{name}.json'
         log_path = folder / f'{name}.log'
+        statuses = ledger['statuses'].get(name, [])
         entry = {'input_sha256': sha256_file(record_path) if record_path.exists() else None,
-                 'exit_status': exits.get(name), 'integrity_reasons': [], 'acceptance_reasons': []}
-        record = None
-        if not record_path.exists():
-            entry['integrity_reasons'].append('process record is missing')
+                 'exit_status': statuses[0] if len(statuses) == 1 else None,
+                 'integrity_reasons': exit_findings(statuses), 'acceptance_reasons': []}
+        record, load_reason = read_record(record_path)
+        if load_reason is not None:
+            entry['integrity_reasons'].append(load_reason)
         else:
-            try:
-                record = json.loads(record_path.read_text(encoding='utf-8'))
-            except ValueError:
-                entry['integrity_reasons'].append('process record is not valid JSON')
-        if record is not None:
-            entry['integrity_reasons'] += integrity_reasons(record, exits.get(name), campaign, role, expected, trials)
+            entry['integrity_reasons'] += integrity_reasons(record, campaign, role, expected, trials)
         log_text = log_path.read_text(encoding='utf-8', errors='replace') if log_path.exists() else None
         if mode == 'acceptance':
             entry['acceptance_reasons'] = acceptance_reasons(record, log_text)
@@ -247,7 +371,7 @@ def evaluate_campaign(folder, campaign, expected, trials, statistic, mode):
             values[name] = statistics.fmean(samples) if statistic == 'mean' else statistics.median(samples)
         per_process[name] = entry
     return {'per_process': per_process, 'values': values, 'integrity_ok': integrity_ok, 'acceptance_ok': acceptance_ok,
-            'campaign_reasons': campaign_reasons(mode, status_lines)}
+            'campaign_reasons': campaign_findings(mode, ledger, status_lines)}
 
 
 def descriptive_statistics(sessions, confirmation, claim, seed=SEED, resamples=RESAMPLES):
@@ -366,7 +490,7 @@ def write_fresh(path, payload, input_folders):
         if target == folder or folder in target.parents:
             raise OutputRefused(f'output path lies inside input folder {folder}')
     text = json.dumps(payload, indent=2, allow_nan=False) + '\n'
-    with open(target, 'x', encoding='utf-8') as handle:
+    with open(target, 'x', encoding='utf-8', newline='\n') as handle:
         handle.write(text)
     return target
 
@@ -382,7 +506,7 @@ def main(argv=None):
     try:
         report = build_report(args.registration, args.control_dir, args.campaign_dir, args.mode)
         write_fresh(args.out, report, (args.control_dir, args.campaign_dir))
-    except (RegistrationError, OutputRefused, OSError, ValueError) as error:
+    except (RegistrationError, OutputRefused, OSError, ValueError, KeyError, TypeError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 1
     print(f"{report['claim_status']}: {args.out}")

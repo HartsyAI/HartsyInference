@@ -11,6 +11,9 @@ from statistics_protocol import analyze
 FIXTURE = '5439493c9d92847a3be8ae32dceb830e91c08e405f1bab3faaaecd3dea4b20a3'
 TOOL = 'b' * 64
 JOB = 'TEST-AA-v4'
+CONTROL_JOB = JOB + '-control'
+CAMPAIGN_JOB = JOB + '-campaign'
+STAMP = '2026-11-16T00:00:00-05:00'
 EVIDENCE = Path('/home/hartsy/evidence/attention-4090/diag-20261115-c/v3')
 ELIGIBILITY_REASONS = {'timing_eligible is not true', 'acceptance_reviewed is not true'}
 SETTINGS = {'numerics.sageAttn': 'False', 'numerics.fa2Prefill': 'True', 'vram.mempoolKeep': 'True'}
@@ -19,6 +22,9 @@ NATIVE = {'/usr/lib/libcublasLt.so.13': 'c' * 64}
 PTX = {'softmax_f16.ptx': 'd' * 64}
 CORE = {'candidate': 'e' * 64, 'reference': 'f' * 64}
 BACKEND = {'candidate': '1' * 64, 'reference': '2' * 64}
+# The status lines the batch script writes for a clean run, as in the stored v3.1 campaigns.
+STATUS_OK = (f'lock acquired {STAMP}\nquiet wait passed {STAMP}\njob rc=0 watch rc=0 {STAMP}\n'
+             f'quiet verify passed\nBATCH DONE {STAMP}\n')
 
 
 def samples_for(role, seed):
@@ -27,14 +33,15 @@ def samples_for(role, seed):
     return [centre * (1 + rng.uniform(-0.05, 0.05)) for _ in range(200)]
 
 
-def base_record(role, **changes):
+def base_record(role, *, identity_role=None, **changes):
+    identity = identity_role or role
     record = {
         'measurement_mode': 'acceptance', 'boundary': 'public', 'branch': 'S.15', 'route': 'Dense',
         'telemetry': 'disabled', 'cohort': 'linux-4090', 'device': 'NVIDIA GeForce RTX 4090',
         'arm': 'mat-f16-unasserted', 'legacy_asserted_bounded': False,
         'query_key_permissions': 'F16', 'prob_value_permissions': 'F16',
         'fixture_sha256': FIXTURE, 'tool_sha256': TOOL,
-        'core_sha256': CORE[role], 'backend_sha256': BACKEND[role],
+        'core_sha256': CORE[identity], 'backend_sha256': BACKEND[identity],
         'resolved_settings': dict(SETTINGS), 'knobs': KNOBS, 'native_libraries': dict(NATIVE),
         'ptx_sha256': dict(PTX), 'spirv_sha256': {},
         'quality_passed': True, 'timing_eligible': True, 'acceptance_reviewed': True,
@@ -44,31 +51,62 @@ def base_record(role, **changes):
     return record
 
 
-def records_for_layout(seed=1, **changes_for_every_process):
-    """Synthetic eligible records for all 40 processes. Changes apply to every process."""
+def records_for_layout(seed=1, *, same_binary=False, **changes_for_every_process):
+    """Synthetic eligible records for all 40 processes. Changes apply to every process. With same_binary, both roles
+    bind the candidate identities, as an A/A control does."""
     records = {}
     for index, name in enumerate(v4.process_names()):
         role = 'candidate' if name.endswith('-cand') else 'reference'
-        record = base_record(role, milliseconds=samples_for(role, seed * 1000 + index))
+        record = base_record(role, identity_role='candidate' if same_binary else role,
+                             milliseconds=samples_for(role, seed * 1000 + index))
         record.update(changes_for_every_process)
         records[name] = record
     return records
 
 
+def aa_records(seed=1, **changes_for_every_process):
+    """Control-campaign records. The control runs one binary, so its two roles bind identical identities."""
+    return records_for_layout(seed, same_binary=True, **changes_for_every_process)
+
+
 def registration_document():
     candidate = base_record('candidate')
     reference = base_record('reference')
-    identities = {'candidate': v4.identities_from_record(candidate), 'reference': v4.identities_from_record(reference)}
+    control_identity = v4.identities_from_record(candidate)
     expected = {key: candidate[key] for key in v4.REQUIRED_EXPECTED}
     return {
         'schema': 'timing-registration-v4', 'registration_id': 'TEST-v4', 'trials': 200, 'statistic': 'mean',
         'seed': 274019, 'resamples': 20000, 'thresholds': {'noninferiority': 1.03, 'regression': 1.03},
         'expected': expected,
         'campaigns': {
-            'control': {'job_id': JOB + '-control', **identities},
-            'campaign': {'job_id': JOB + '-campaign', **identities},
+            'control': {'job_id': CONTROL_JOB, 'candidate': control_identity, 'reference': dict(control_identity)},
+            'campaign': {'job_id': CAMPAIGN_JOB, 'candidate': v4.identities_from_record(candidate),
+                         'reference': v4.identities_from_record(reference)},
         },
     }
+
+
+def default_ledger(job, exit_codes=None, extra=(), job_done=True):
+    """The exit ledger of a clean run: a job start line, one line per process, then JOB DONE. Extra lines go before JOB DONE."""
+    lines = [f'job start {STAMP}']
+    for name in v4.process_names():
+        code = (exit_codes or {}).get(name, 0)
+        if code is not None:
+            lines.append(f'{job} {name} {code} 1.0 2.0 load=0.0 0.0 0.0')
+    lines.extend(extra)
+    if job_done:
+        lines.append(f'{job} JOB DONE {STAMP}')
+    return lines
+
+
+def campaign_reasons_of(report, key):
+    """The campaign-level reasons of one campaign, split from its joined refusal line."""
+    prefix = f'{key}: '
+    reasons = []
+    for line in report['refusals']:
+        if line.startswith(prefix):
+            reasons += line[len(prefix):].split('; ')
+    return reasons
 
 
 class Scratch:
@@ -81,20 +119,13 @@ class Scratch:
         self.registration = self.root / 'registration.json'
         self.registration.write_text(json.dumps(registration_document(), indent=2), encoding='utf-8')
 
-    def campaign(self, key, records, *, exit_codes=None, status=None, logs=None, job_id=None):
+    def campaign(self, key, records, *, exit_codes=None, status=None, logs=None, job_id=None, ledger=None):
         folder = self.root / key
         folder.mkdir()
         job = job_id or registration_document()['campaigns'][key]['job_id']
-        ledger = ['job start 2026-11-16T00:00:00-05:00']
-        for name in v4.process_names():
-            code = (exit_codes or {}).get(name, 0)
-            if code is not None:
-                ledger.append(f'{job} {name} {code} 1.0 2.0 load=0.0 0.0 0.0')
-        (folder / 'timing-exits.txt').write_text('\n'.join(ledger) + '\n', encoding='utf-8')
-        status_text = status if status is not None else (
-            'job start 2026-11-16T00:00:00-05:00\nquiet wait passed 2026-11-16T00:00:30-05:00\n'
-            'job rc=0 watch rc=0 2026-11-16T00:02:00-05:00\nquiet verify passed\nBATCH DONE 2026-11-16T00:02:00-05:00\n')
-        (folder / 'status.txt').write_text(status_text, encoding='utf-8')
+        lines = ledger if ledger is not None else default_ledger(job, exit_codes)
+        (folder / 'timing-exits.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        (folder / 'status.txt').write_text(STATUS_OK if status is None else status, encoding='utf-8')
         for name, record in records.items():
             if record is None:
                 continue
@@ -104,7 +135,7 @@ class Scratch:
         return folder
 
     def eligible_pair(self, control_records=None, campaign_records=None, **kwargs):
-        control = self.campaign('control', control_records if control_records is not None else records_for_layout(1), **kwargs)
+        control = self.campaign('control', control_records if control_records is not None else aa_records(1), **kwargs)
         campaign = self.campaign('campaign', campaign_records if campaign_records is not None else records_for_layout(2), **kwargs)
         return control, campaign
 
@@ -113,24 +144,38 @@ class Scratch:
 
 
 class RegistrationTests(unittest.TestCase):
+    def write_registration(self, document):
+        path = Path(tempfile.mkdtemp()) / 'registration.json'
+        path.write_text(json.dumps(document), encoding='utf-8')
+        return path
+
     def test_rejects_seed_or_threshold_changes(self):
         for field, value in (('seed', 1), ('resamples', 2000), ('thresholds', {'noninferiority': 1.05, 'regression': 1.03})):
             with self.subTest(field=field):
                 document = registration_document()
                 document[field] = value
-                scratch = Path(tempfile.mkdtemp())
-                path = scratch / 'registration.json'
-                path.write_text(json.dumps(document), encoding='utf-8')
                 with self.assertRaises(v4.RegistrationError):
-                    v4.load_registration(path)
+                    v4.load_registration(self.write_registration(document))
 
     def test_rejects_missing_identity_fields(self):
         document = registration_document()
         del document['campaigns']['campaign']['candidate']['core_sha256']
-        path = Path(tempfile.mkdtemp()) / 'registration.json'
-        path.write_text(json.dumps(document), encoding='utf-8')
         with self.assertRaises(v4.RegistrationError):
-            v4.load_registration(path)
+            v4.load_registration(self.write_registration(document))
+
+    def test_control_must_bind_identical_identities_in_every_field(self):
+        for field in v4.REQUIRED_IDENTITY:
+            with self.subTest(field=field):
+                document = registration_document()
+                document['campaigns']['control']['reference'] = dict(document['campaigns']['control']['reference'],
+                                                                     **{field: 'a' * 64})
+                with self.assertRaisesRegex(v4.RegistrationError, 'identical'):
+                    v4.load_registration(self.write_registration(document))
+
+    def test_campaign_may_bind_different_candidate_and_reference_identities(self):
+        loaded = v4.load_registration(self.write_registration(registration_document()))
+        campaign = loaded['campaigns']['campaign']
+        self.assertNotEqual(campaign['candidate']['core_sha256'], campaign['reference']['core_sha256'])
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -147,8 +192,8 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_ineligible_records_are_refused_for_acceptance_and_remain_descriptive(self):
         scratch = Scratch(self)
-        ineligible = records_for_layout(1, timing_eligible=False, acceptance_reviewed=False)
-        control, campaign = scratch.eligible_pair(control_records=ineligible, campaign_records=records_for_layout(2, timing_eligible=False, acceptance_reviewed=False))
+        control, campaign = scratch.eligible_pair(control_records=aa_records(1, timing_eligible=False, acceptance_reviewed=False),
+                                                  campaign_records=records_for_layout(2, timing_eligible=False, acceptance_reviewed=False))
         acceptance = scratch.report('acceptance', control, campaign)
         self.assertEqual('refused', acceptance['claim_status'])
         self.assertFalse(acceptance['acceptance_eligible'])
@@ -156,6 +201,8 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(80, len(acceptance['refusals']))
         for line in acceptance['refusals']:
             self.assertTrue(any(reason in line for reason in ELIGIBILITY_REASONS), line)
+        self.assertEqual([], campaign_reasons_of(acceptance, 'control'))
+        self.assertEqual([], campaign_reasons_of(acceptance, 'campaign'))
 
         descriptive = scratch.report('descriptive', control, campaign)
         self.assertEqual('descriptive only', descriptive['claim_status'])
@@ -164,7 +211,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_acceptance_reviewed_false_alone_refuses_acceptance(self):
         scratch = Scratch(self)
-        control, campaign = scratch.eligible_pair(control_records=records_for_layout(1, acceptance_reviewed=False))
+        control, campaign = scratch.eligible_pair(control_records=aa_records(1, acceptance_reviewed=False))
         self.assertEqual('refused', scratch.report('acceptance', control, campaign)['claim_status'])
         self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
 
@@ -176,13 +223,193 @@ class AcceptanceTests(unittest.TestCase):
         self.assertTrue(any('memory event' in line for line in acceptance['refusals']))
         self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
 
-    def test_missing_quiet_verify_or_job_exit_refuses_acceptance_only(self):
-        for status in ('job rc=0 watch rc=0\nBATCH DONE\n', 'quiet verify passed\nBATCH DONE\n'):
-            with self.subTest(status=status):
+    def test_missing_quiet_verify_or_job_line_refuses_acceptance_only(self):
+        cases = {
+            'no quiet verify': (f'job rc=0 watch rc=0 {STAMP}\nBATCH DONE {STAMP}\n', 'quiet verify passed 0 times'),
+            'no job line': (f'quiet verify passed\nBATCH DONE {STAMP}\n', 'status has no job rc line'),
+        }
+        for label, (status, fragment) in cases.items():
+            with self.subTest(case=label):
                 scratch = Scratch(self)
-                control, campaign = scratch.eligible_pair(status=status)
-                self.assertEqual('refused', scratch.report('acceptance', control, campaign)['claim_status'])
+                control = scratch.campaign('control', aa_records(1))
+                campaign = scratch.campaign('campaign', records_for_layout(2), status=status)
+                acceptance = scratch.report('acceptance', control, campaign)
+                self.assertEqual('refused', acceptance['claim_status'])
+                reasons = campaign_reasons_of(acceptance, 'campaign')
+                self.assertEqual(1, len(reasons), reasons)
+                self.assertIn(fragment, reasons[0])
                 self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+    def test_failed_watcher_refuses_acceptance_even_with_a_passed_verify(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=(
+            f'lock acquired {STAMP}\nquiet wait passed {STAMP}\njob rc=0 watch rc=1 {STAMP}\n'
+            f'quiet verify passed\nBATCH DONE {STAMP}\n'))
+        acceptance = scratch.report('acceptance', control, campaign)
+        self.assertEqual('refused', acceptance['claim_status'])
+        self.assertEqual(['watch rc=1 (watcher evidence)'], campaign_reasons_of(acceptance, 'campaign'))
+        self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+    def test_failed_job_refuses_acceptance_only(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=(
+            f'job rc=1 watch rc=0 {STAMP}\nquiet verify passed\nBATCH DONE {STAMP}\n'))
+        acceptance = scratch.report('acceptance', control, campaign)
+        self.assertEqual(['job rc=1 (job exit evidence)'], campaign_reasons_of(acceptance, 'campaign'))
+        self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+    def test_quiet_verify_failure_refuses_acceptance_and_keeps_the_descriptive_numbers(self):
+        traceback = ('Traceback (most recent call last):\n'
+                     '  File "quiet_window.py", line 91, in main\n'
+                     'ValueError: Swarm activity or observation failure invalidated the operation\n')
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=(
+            f'lock acquired {STAMP}\nquiet wait passed {STAMP}\njob rc=0 watch rc=0 {STAMP}\n'
+            f'{traceback}quiet verify FAILED\nBATCH DONE {STAMP}\n'))
+        acceptance = scratch.report('acceptance', control, campaign)
+        reasons = campaign_reasons_of(acceptance, 'campaign')
+        self.assertEqual('refused', acceptance['claim_status'])
+        self.assertIn('quiet verify FAILED (cohort evidence)', reasons)
+        self.assertEqual(2, len(reasons), reasons)
+        self.assertIn('without a recognised form', reasons[1])
+        descriptive = scratch.report('descriptive', control, campaign)
+        self.assertEqual('descriptive only', descriptive['claim_status'])
+        self.assertEqual([], campaign_reasons_of(descriptive, 'campaign'))
+
+    def test_two_job_lines_refuse_acceptance_as_ambiguous(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        line = f'job rc=0 watch rc=0 {STAMP}'
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=(
+            f'{line}\n{line}\nquiet verify passed\nBATCH DONE {STAMP}\n'))
+        acceptance = scratch.report('acceptance', control, campaign)
+        self.assertEqual(['status has 2 job rc lines (ambiguous job exit)'], campaign_reasons_of(acceptance, 'campaign'))
+        self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+    def test_unrecognised_status_line_refuses_acceptance_only(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=STATUS_OK + 'something unexpected\n')
+        acceptance = scratch.report('acceptance', control, campaign)
+        reasons = campaign_reasons_of(acceptance, 'campaign')
+        self.assertEqual(1, len(reasons), reasons)
+        self.assertIn('status has 1 line(s) without a recognised form', reasons[0])
+        self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+    def test_malformed_job_line_is_unrecognised_not_a_pass(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=(
+            f'job rc=zero watch rc=0 {STAMP}\nquiet verify passed\nBATCH DONE {STAMP}\n'))
+        acceptance = scratch.report('acceptance', control, campaign)
+        reasons = campaign_reasons_of(acceptance, 'campaign')
+        self.assertIn('status has no job rc line (job exit evidence)', reasons)
+        self.assertTrue(any('without a recognised form' in reason for reason in reasons), reasons)
+
+    def test_failed_batch_step_refuses_acceptance(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), status=f'lock acquired {STAMP}\nquiet wait failed {STAMP}\n')
+        acceptance = scratch.report('acceptance', control, campaign)
+        self.assertEqual('refused', acceptance['claim_status'])
+        self.assertIn(f'batch step failed: quiet wait failed {STAMP}', campaign_reasons_of(acceptance, 'campaign'))
+        self.assertEqual('descriptive only', scratch.report('descriptive', control, campaign)['claim_status'])
+
+
+class LedgerTests(unittest.TestCase):
+    """The exit ledger is integrity evidence. Each finding below refuses in both modes, with exactly one campaign reason."""
+
+    def assert_one_campaign_reason_in_both_modes(self, scratch, control, campaign, fragment):
+        for mode in ('acceptance', 'descriptive'):
+            with self.subTest(mode=mode):
+                report = scratch.report(mode, control, campaign)
+                self.assertEqual('refused', report['claim_status'])
+                self.assertIsNone(report['results'])
+                reasons = campaign_reasons_of(report, 'campaign')
+                self.assertEqual(1, len(reasons), reasons)
+                self.assertIn(fragment, reasons[0])
+
+    def test_failed_then_successful_duplicate_is_refused_in_both_modes(self):
+        # The coordinator's reproduction: a failed s1-p1-cand entry followed by a successful duplicate. The clean ledger already
+        # holds a success, so the statuses are 0, 1, 0. A later success must not erase the failed attempt.
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=[f'{CAMPAIGN_JOB} s1-p1-cand 1 1.0 2.0 load=0.0 0.0 0.0',
+                                                    f'{CAMPAIGN_JOB} s1-p1-cand 0 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign,
+                                                      'duplicate ledger entries for s1-p1-cand with statuses [0, 1, 0]')
+        report = scratch.report('acceptance', control, campaign)
+        self.assertTrue(any('ledger entries are ambiguous (statuses 0, 1, 0)' in line for line in report['refusals']))
+
+    def test_success_then_failed_duplicate_is_refused_in_both_modes(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=[f'{CAMPAIGN_JOB} s1-p1-cand 1 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign,
+                                                      'duplicate ledger entries for s1-p1-cand with statuses [0, 1]')
+
+    def test_identical_duplicates_are_refused_in_both_modes(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=[f'{CAMPAIGN_JOB} s1-p1-cand 0 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign,
+                                                      'duplicate ledger entries for s1-p1-cand with statuses [0, 0]')
+
+    def test_unexpected_process_name_is_refused(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=[f'{CAMPAIGN_JOB} s9-p9-cand 0 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'names an unexpected process (s9-p9-cand)')
+
+    def test_non_integer_status_is_refused(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=[f'{CAMPAIGN_JOB} s1-p2-cand ok 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'has a non-integer status (ok)')
+
+    def test_entry_for_another_job_is_refused(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=['OTHER-JOB s1-p3-cand 0 1.0 2.0 load=0.0 0.0 0.0'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'is an entry for another job (OTHER-JOB)')
+
+    def test_unrecognised_ledger_line_is_refused(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = default_ledger(CAMPAIGN_JOB, extra=['garbage'])
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'has no recognised form')
+
+    def test_missing_job_done_is_refused_in_both_modes(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=default_ledger(CAMPAIGN_JOB, job_done=False))
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'ledger has no JOB DONE line for this job')
+
+    def test_missing_ledger_file_is_refused_in_both_modes(self):
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        campaign = scratch.campaign('campaign', records_for_layout(2))
+        (campaign / 'timing-exits.txt').unlink()
+        self.assert_one_campaign_reason_in_both_modes(scratch, control, campaign, 'timing-exits.txt is missing (exit evidence)')
+
+    def test_process_lines_without_trailing_fields_are_read_not_skipped(self):
+        # A line of the form "<job> <name> <status>" is a complete entry. Every process must be read, so the campaign accepts.
+        scratch = Scratch(self)
+        control = scratch.campaign('control', aa_records(1))
+        ledger = [f'job start {STAMP}'] + [f'{CAMPAIGN_JOB} {name} 0' for name in v4.process_names()] + [f'{CAMPAIGN_JOB} JOB DONE {STAMP}']
+        campaign = scratch.campaign('campaign', records_for_layout(2), ledger=ledger)
+        report = scratch.report('acceptance', control, campaign)
+        self.assertEqual('acceptance', report['claim_status'], report['refusals'][:3])
 
 
 class IntegrityRefusalTests(unittest.TestCase):
@@ -198,20 +425,19 @@ class IntegrityRefusalTests(unittest.TestCase):
 
     def test_diagnostic_trace_is_refused(self):
         scratch = Scratch(self)
-        records = records_for_layout(1)
+        records = aa_records(1)
         records['s1-p1-cand']['measurement_mode'] = 'diagnostic-trace'
         control, campaign = scratch.eligible_pair(control_records=records)
         self.assert_refused_both(scratch, control, campaign, 'diagnostic trace')
 
     def test_observe_boundary_is_refused(self):
         scratch = Scratch(self)
-        records = records_for_layout(1, boundary='observe')
-        control, campaign = scratch.eligible_pair(control_records=records)
+        control, campaign = scratch.eligible_pair(control_records=aa_records(1, boundary='observe'))
         self.assert_refused_both(scratch, control, campaign, 'boundary is')
 
     def test_telemetry_enabled_is_refused(self):
         scratch = Scratch(self)
-        control, campaign = scratch.eligible_pair(control_records=records_for_layout(1, telemetry='enabled'))
+        control, campaign = scratch.eligible_pair(control_records=aa_records(1, telemetry='enabled'))
         self.assert_refused_both(scratch, control, campaign, 'telemetry is')
 
     def test_failed_quality_is_refused(self):
@@ -256,6 +482,13 @@ class IntegrityRefusalTests(unittest.TestCase):
         records['s4-p5-cand']['core_sha256'] = 'b' * 64
         control, campaign = scratch.eligible_pair(campaign_records=records)
         self.assert_refused_both(scratch, control, campaign, 's4-p5-cand: core_sha256')
+
+    def test_an_aa_control_with_a_different_binary_is_refused(self):
+        scratch = Scratch(self)
+        records = aa_records(1)
+        records['s2-p2-ref']['core_sha256'] = 'a' * 64
+        control, campaign = scratch.eligible_pair(control_records=records)
+        self.assert_refused_both(scratch, control, campaign, 's2-p2-ref: core_sha256')
 
     def test_missing_fields_are_refused_in_both_modes(self):
         for field in ('measurement_mode', 'boundary', 'branch', 'route', 'telemetry', 'cohort', 'device', 'arm',
@@ -313,6 +546,12 @@ class IntegrityRefusalTests(unittest.TestCase):
         (campaign / 's2-p2-ref.json').write_text('{not json', encoding='utf-8')
         self.assert_refused_both(scratch, control, campaign, 'not valid JSON')
 
+    def test_a_json_null_record_is_refused_not_treated_as_missing(self):
+        scratch = Scratch(self)
+        control, campaign = scratch.eligible_pair()
+        (campaign / 's2-p2-ref.json').write_text('null', encoding='utf-8')
+        self.assert_refused_both(scratch, control, campaign, 's2-p2-ref: record is not a JSON object')
+
 
 class OutputTests(unittest.TestCase):
     def test_output_is_write_once(self):
@@ -327,6 +566,14 @@ class OutputTests(unittest.TestCase):
             v4.write_fresh(target, report, (control, campaign))
         self.assertEqual(original, target.read_bytes())
 
+    def test_output_uses_lf_line_endings(self):
+        scratch = Scratch(self)
+        control, campaign = scratch.eligible_pair()
+        report = scratch.report('descriptive', control, campaign)
+        target = scratch.root / 'derived.json'
+        v4.write_fresh(target, report, (control, campaign))
+        self.assertNotIn(b'\r', target.read_bytes())
+
     def test_output_inside_an_input_folder_is_refused(self):
         scratch = Scratch(self)
         control, campaign = scratch.eligible_pair()
@@ -337,7 +584,7 @@ class OutputTests(unittest.TestCase):
 
     def test_command_line_returns_refusal_code_and_writes_a_report(self):
         scratch = Scratch(self)
-        control, campaign = scratch.eligible_pair(control_records=records_for_layout(1, timing_eligible=False))
+        control, campaign = scratch.eligible_pair(control_records=aa_records(1, timing_eligible=False))
         out = scratch.root / 'out.json'
         code = v4.main(['--registration', str(scratch.registration), '--control-dir', str(control),
                         '--campaign-dir', str(campaign), '--mode', 'acceptance', '--out', str(out)])
@@ -404,6 +651,8 @@ class RealV31RecordTests(unittest.TestCase):
         for line in acceptance['refusals']:
             reasons = set(line.split(': ', 1)[1].split('; '))
             self.assertEqual(ELIGIBILITY_REASONS, reasons, line)
+        self.assertEqual([], campaign_reasons_of(acceptance, 'control'))
+        self.assertEqual([], campaign_reasons_of(acceptance, 'campaign'))
         self.assertEqual('descriptive only', descriptive['claim_status'])
         stored = json.loads((EVIDENCE / 'analysis-v3.json').read_text(encoding='utf-8'))
         for key, campaign_key in (('control', 'control'), ('campaign', 'campaign')):
