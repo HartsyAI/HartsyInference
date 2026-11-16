@@ -5,7 +5,8 @@ All notable changes to HartsyInference are recorded here. Versions follow `2.0.0
 
 ## alpha.436
 
-- Hunyuan3D Paint 2.1's reference projection no longer paints the face onto a hat brim the shape model put lower than drawn: the brim takes the picture's own brim and outline, and the face under it stays in place.
+- Hunyuan3D Paint 2.1's reference projection no longer paints the face onto a hat brim the shape model put lower than
+  drawn: the brim takes the picture's own brim and outline, and the face under it stays in place.
 
 ## alpha.435
 
