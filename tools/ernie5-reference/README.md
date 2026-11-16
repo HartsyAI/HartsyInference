@@ -7,7 +7,7 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` leaves indexer near-tie positions out of the per-position check (see Long-input parity). |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` is a diagnostic that leaves indexer near-tie positions out of the per-position check (see Long-input parity). |
 | `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: the strict layer-set checks, decode stitching (pass, gap, overlap, short engine), the token and argmax checks, and a single bad position being flagged and named. |
 | `../parity/compressed_kv.py` | Shared with any model that has the DeepSeek-V4 compressor: pooling with the APE score bias, the RMS norm, each latent's RoPE position and which queries see it. Tests: `python -I tools/parity/test_compressed_kv.py`. |
 | `../parity/quant_sim.py` | Shared Hadamard rotation and FP8 E4M3 round trip with UE8M0 scales per 128 values, for indexer queries and keys. Tests: `python -I tools/parity/test_quant_sim.py`. |
@@ -47,9 +47,10 @@ Sources the reference follows (fetched for this change, not from the engine):
   `sum_h w_h * relu(q_h . k)`. The indexer scores the keys before the sliding window (128), but keeps all of them until there are more
   than `index_topk` (2048), so its selection changes the result only past 2,176 tokens.
 - **Indexer FP8 in the reference is from vLLM's call sites, not its kernels.** `per_token_group_quant_fp8(q, 128, use_ue8m0=True)` and
-  `SparseAttnIndexer(..., 128, "ue8m0")` give the format; the round-to-nearest of `torch.float8_e4m3fn` and the orthonormal scaling of
-  `hadacore_transform` are assumed. A near-tie between the 2048th and 2049th key can still pick differently from a GPU kernel. Without
-  the rounding, one of the 9 selecting queries in the small dry run below (position 31) picked a different key than the engine.
+  `SparseAttnIndexer(..., 128, "ue8m0")` give the format. `hadacore_transform` is orthonormal (vllm `tests/kernels/quantization/test_hadacore.py`
+  checks it against the Sylvester matrix over sqrt(n)); its bf16 output and the kernel's FP8 rounding mode are not simulated. A near
+  tie between the last kept and the first dropped key can still pick differently from a GPU kernel (see Long-input parity). Without
+  the FP8 rounding, one of the 9 selecting queries in the small dry run below (position 31) picked a different key than the engine.
 - **MTP layer** (`num_nextn_predict_layers = 1`). Not run. The reference stops at `num_hidden_layers`.
 - **Shared-expert combine order.** The reference adds the shared expert after the latent `fc2` of the routed branch. That is
   read from the `routed_output_transform` naming, not from a line of the source.
@@ -175,14 +176,14 @@ ERNIE_DUMP_LAYERS="$RUN/engine-long" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cu
 python tools/ernie5-reference/reference.py --ckpt "$CKPT" --tokens "$LONG,$FEED" --out "$RUN/reference-long" --logits 2>&1 \
   | tee "$RUN/reference-long.log"
 python tools/ernie5-reference/compare.py --ref "$RUN/reference-long" --engine "$RUN/engine-long" --threshold 0.999 --strict \
-  --expect-layers 43 --expect-tokens 2308 --tie-margin 1e-3 2>&1 | tee "$RUN/compare-long.txt"
+  --expect-layers 43 --expect-tokens 2308 2>&1 | tee "$RUN/compare-long.txt"
 ```
 
-`--tie-margin 1e-3` leaves out of the per-position check the positions where a DSA layer's indexer kept and dropped keys within 0.1
-percent of each other (`index_gaps.json`, written by the reference). There, a rounding difference between the engine and the reference
-can pick a different key, which is not a defect. The positions left out are printed per layer, and the whole-stream cosine still
-includes them. Rerun without the flag to see their cosines; many near-tie positions, or a flagged position that is not a near tie, need
-a look.
+The strict run is the check. If it flags a DSA layer (or a later one) only at a few selecting positions, rerun the comparison with
+`--tie-margin 1e-4` to see whether those are near ties: positions where a DSA indexer kept and dropped keys within 1e-4 of that
+query's candidate-score spread (`index_gaps.json`, written by the reference), so that rounding alone can pick a different key. The
+positions it leaves out are printed per layer, the whole-stream cosine still includes them, and more than 5 percent of the selecting
+positions left out is an error (`--max-tie-fraction`). A flagged position that is not a near tie is a real difference.
 
 Not run on the real weights yet. The reference reads nearly every routed expert at this length, so it makes about one full pass over
 the checkpoint; its indexer scores are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
@@ -233,7 +234,12 @@ Long-input dry runs (CPU engine, 2026-11-16):
   where its 16th and 17th indexer candidates are 8 percent apart.
 - Real dimensions (ratio 128, window 128, top-k 64); 250 prompt tokens plus 12 fed tokens (262 positions: one group completes in the
   prefill and one at position 255 during decode, and DSA selection runs from position 192): the HCA layer before the DSA layer
-  (layer 0) reaches cosine 1.00000000 at every position. Three DSA queries (225, 248, 259) kept and dropped keys within 0.03 percent of
-  each other. Two of them (225 and 248) picked a different key than the engine, giving cosines of 0.9949 and 0.9965 for that
-  position's attention output. With `--tie-margin 1e-3` those three positions are left out of the per-position check, and the rest
-  reach 0.9998 or more. The argmax after the last position is 1965 on both sides. The CPU engine took 10 minutes, the reference 17 s.
+  (layer 0) reaches cosine 1.00000000 at every position. Strict, the DSA layer is flagged at 2 of its 70 selecting positions: at
+  225 and 248 the engine kept a different key, and the cosine of that layer's whole contribution there (attention and MoE) is 0.9965
+  and 0.9949. Those two queries' last kept and first dropped keys are 2.6e-5 and 1.8e-5 of the candidate-score spread apart, the
+  two smallest gaps of all 70. With `--tie-margin 1e-4` they and one more near tie (259) are left out, and every other position
+  reaches 0.9998 or more. The argmax after the last position is 1965 on both sides. The CPU engine took 10 minutes, the reference 17 s.
+- Real dimensions with window 8 and top-k 120, so each selecting query keeps nearly all of its candidates, as the real checkpoint's
+  2048 of about 2,180 does; 132 prompt tokens plus 8 fed tokens (140 positions, selection from position 128): strict, all 3 layers
+  reach cosine 0.99999996 or more at every position, and the argmax after the last position is 3625 on both sides. None of the 12
+  selecting queries is a near tie at 1e-4 (the smallest gap is 1.1e-3 of the spread). The CPU engine took 3 minutes.

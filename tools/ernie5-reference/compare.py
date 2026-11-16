@@ -19,10 +19,12 @@ With --strict it exits 1 on a flagged layer, a layer-set mismatch, a stitching o
 mismatch. --expect-layers N requires exactly layers 0..N-1 on both sides; --expect-tokens N requires the reference to cover N
 positions (use the prompt plus decode length, so a prefill-only reference cannot pass a decode check).
 
---tie-margin M reads the reference's index_gaps.json (the relative gap between the last key a DSA indexer kept and the first it
-dropped, per query) and leaves out of the per-position check every position whose gap is below M in a DSA layer at or before the
-layer being checked: there a rounding difference can legitimately pick a different key. The positions left out are printed per
-layer, and the whole-stream cosine still covers them.
+--tie-margin M is a diagnostic for a flagged position. It reads the reference's index_gaps.json (per DSA query, the gap between the
+last key the indexer kept and the first it dropped, over the spread of that query's candidate scores) and leaves out of the
+per-position check every position whose gap is below M in a DSA layer at or before the layer being checked: there a rounding
+difference can pick a different key. The positions left out are printed per layer, and the whole-stream cosine still covers them.
+When more than --max-tie-fraction (default 0.05) of the selecting positions would be left out, it is an error: the margin would
+skip the selection test instead of explaining a few positions.
 
 Engine files are named layer{LL}_pos{startPos}_t{tokens}_hc{hc}_h{hidden}.f32 (little-endian float32, row-major
 [tokens, hc, hidden]).
@@ -88,13 +90,14 @@ def load_ref(folder: Path) -> dict[int, Path]:
     return out
 
 
-def near_ties(ref_dir: Path, margin: float) -> dict[int, set[int]]:
-    """DSA layer -> query positions whose indexer kept and dropped a key within `margin` (relative) of each other."""
+def near_ties(ref_dir: Path, margin: float) -> tuple[dict[int, set[int]], set[int]]:
+    """(DSA layer -> query positions whose indexer kept and dropped a key within `margin` of each other, every selecting position)."""
     path = ref_dir / "index_gaps.json"
     if not path.exists():
         raise FileNotFoundError(f"--tie-margin needs {path}; rerun reference.py, which writes it")
     gaps = json.loads(path.read_text(encoding="utf-8"))
-    return {int(layer): {int(pos) for pos, gap in by_pos.items() if gap < margin} for layer, by_pos in gaps.items()}
+    selecting = {int(pos) for by_pos in gaps.values() for pos in by_pos}
+    return {int(layer): {int(pos) for pos, gap in by_pos.items() if gap < margin} for layer, by_pos in gaps.items()}, selecting
 
 
 def metrics(a: np.ndarray, b: np.ndarray) -> tuple[float, float, float]:
@@ -178,19 +181,28 @@ def main() -> int:
                         "so a looser bound can be set here without loosening the whole-stream check")
     p.add_argument("--tie-margin", type=float, default=None,
                    help="leave out of the per-position check the positions where a DSA indexer at or before the layer kept and dropped "
-                        "keys within this relative score gap (from the reference's index_gaps.json); they are printed")
+                        "keys within this gap, as a fraction of the query's candidate-score spread (from the reference's "
+                        "index_gaps.json); a diagnostic for a flagged position, and the positions left out are printed")
+    p.add_argument("--max-tie-fraction", type=float, default=0.05,
+                   help="with --tie-margin, an error when more than this fraction of the selecting positions would be left out")
     args = p.parse_args()
     position_threshold = args.threshold if args.position_threshold is None else args.position_threshold
 
     ref_dir, eng_dir = Path(args.ref), Path(args.engine)
     ties: dict[int, set[int]] = {}
+    tie_notes: list[str] = []
+    tie_errors: list[str] = []
     if args.tie_margin is not None:
         try:
-            ties = near_ties(ref_dir, args.tie_margin)
+            ties, selecting = near_ties(ref_dir, args.tie_margin)
         except FileNotFoundError as ex:
             print(ex, file=sys.stderr)
             return 1
-    tie_notes: list[str] = []
+        tied = set().union(*ties.values()) if ties else set()
+        tie_notes.append(f"near ties below {args.tie_margin}: {len(tied)} of {len(selecting)} selecting positions")
+        if selecting and len(tied) > args.max_tie_fraction * len(selecting):
+            tie_errors.append(f"{len(tied)} of {len(selecting)} selecting positions are near ties, more than --max-tie-fraction "
+                              f"{args.max_tie_fraction}: the margin would skip the selection check")
     ref = load_ref(ref_dir)
     eng = load_engine(eng_dir)
     if not ref:
@@ -249,6 +261,7 @@ def main() -> int:
                 note += " (first)"
         print(f"{layer:>5}  {max_abs:>12.6g}  {rel:>12.6g}  {cos:>12.8f}  {pre_cos:>12.8f}  {per_pos[worst]:>14.8f}  {worst:>4}  {note}")
 
+    errors += tie_errors
     errors += layer_set_errors(set(ref), set(eng), args.expect_layers)
     # Every reference layer must cover the same positions: an interrupted shorter rerun into the same folder leaves a mix, and the
     # shorter layers would compare fewer engine positions.

@@ -38,7 +38,8 @@ import compressed_kv  # noqa: E402  (shared DeepSeek-V4-family compressor, tools
 import quant_sim  # noqa: E402  (shared Hadamard and FP8 round trip, tools/parity)
 
 INDEXER_QUANT = "fp8"  # --indexer-quant: "fp8" rounds the DSA indexer's queries and keys as serving does, "f32" keeps them exact
-# DSA layer -> {query position: (last kept score - first dropped score) / |last kept score|}, for every query that drops keys.
+# DSA layer -> {query position: (last kept score - first dropped score) / (max - min candidate score)}, for every query that
+# drops keys.
 # Written to index_gaps.json; compare.py --tie-margin uses it to name positions where a near-tie can pick a different key.
 INDEX_GAPS: dict[int, dict[int, float]] = {}
 
@@ -368,9 +369,11 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
         elif n_c <= topk:
             sel = torch.arange(n_c)
         else:
-            vals, sel = torch.topk(logits[t, :n_c], topk + 1)
-            last_kept, first_dropped = float(vals[topk - 1]), float(vals[topk])
-            INDEX_GAPS.setdefault(int(attn.split(".")[2]), {})[t] = (last_kept - first_dropped) / max(abs(last_kept), 1e-12)
+            candidates = logits[t, :n_c]
+            vals, sel = torch.topk(candidates, topk + 1)
+            spread = float(candidates.max() - candidates.min())
+            gap = float(vals[topk - 1] - vals[topk])
+            INDEX_GAPS.setdefault(int(attn.split(".")[2]), {})[t] = gap / spread if spread > 0 else 0.0
             sel = sel[:topk]
         keys = torch.cat([sel, torch.arange(seq - min(seq, window), seq)])
         scores = (torch.einsum("hd,khd->hk", q[t, :, :nope], k_nope[keys])
