@@ -38,6 +38,9 @@ import compressed_kv  # noqa: E402  (shared DeepSeek-V4-family compressor, tools
 import quant_sim  # noqa: E402  (shared Hadamard and FP8 round trip, tools/parity)
 
 INDEXER_QUANT = "fp8"  # --indexer-quant: "fp8" rounds the DSA indexer's queries and keys as serving does, "f32" keeps them exact
+# DSA layer -> {query position: (last kept score - first dropped score) / |last kept score|}, for every query that drops keys.
+# Written to index_gaps.json; compare.py --tie-margin uses it to name positions where a near-tie can pick a different key.
+INDEX_GAPS: dict[int, dict[int, float]] = {}
 
 F32 = torch.float32
 SCALE_SUFFIX = "_scale_inv"  # Ernie5WeightNames.ScaleSuffix
@@ -365,7 +368,10 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
         elif n_c <= topk:
             sel = torch.arange(n_c)
         else:
-            sel = torch.topk(logits[t, :n_c], topk).indices
+            vals, sel = torch.topk(logits[t, :n_c], topk + 1)
+            last_kept, first_dropped = float(vals[topk - 1]), float(vals[topk])
+            INDEX_GAPS.setdefault(int(attn.split(".")[2]), {})[t] = (last_kept - first_dropped) / max(abs(last_kept), 1e-12)
+            sel = sel[:topk]
         keys = torch.cat([sel, torch.arange(seq - min(seq, window), seq)])
         scores = (torch.einsum("hd,khd->hk", q[t, :, :nope], k_nope[keys])
                   + torch.einsum("hr,kr->hk", q[t, :, nope:], k_pe[keys])) * scale
@@ -509,8 +515,11 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     timings = forward(ck, tokens, out, args.max_layers, args.logits)
-    meta = {"tokens": tokens, "checkpoint": str(args.ckpt), "total_s": round(time.time() - t0, 3), **timings}
+    meta = {"tokens": tokens, "checkpoint": str(args.ckpt), "indexer_quant": INDEXER_QUANT, "total_s": round(time.time() - t0, 3),
+            **timings}
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    gaps = {str(layer): {str(pos): gap for pos, gap in by_pos.items()} for layer, by_pos in sorted(INDEX_GAPS.items())}
+    (out / "index_gaps.json").write_text(json.dumps(gaps), encoding="utf-8")
     print(f"wrote {out} in {meta['total_s']} s")
 
 

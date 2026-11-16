@@ -217,6 +217,39 @@ class DecodeStitchTests(unittest.TestCase):
             self.assertIn("FLAG", row)
             self.assertEqual(row.split()[6], "4", row)
 
+    def test_tie_margin_leaves_out_only_near_tie_positions_from_their_dsa_layer_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(3), positions=6)
+            write_engine(root / "eng", range(3), self.PARTS, positions=6)
+            # Layer 1 is a DSA layer whose query 4 kept and dropped keys 1e-4 apart; query 5's gap is wide.
+            (root / "ref" / "index_gaps.json").write_text(json.dumps({"1": {"4": 1e-4, "5": 0.2}}), encoding="utf-8")
+            for layer in (0, 1, 2):
+                np.random.default_rng(99 + layer).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
+                    root / "eng" / f"layer{layer:02d}_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            # Position 4 is wrong in every layer: layer 0 precedes the DSA layer, so it stays flagged.
+            result = run(root / "ref", root / "eng", "--tie-margin", "1e-3", "--threshold", "0.5")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("first layer below cosine 0.5: 0", result.stdout)
+            self.assertIn("layer 1: left out 1 near-tie positions [4]", result.stdout)
+            self.assertNotIn("layer 0: left out", result.stdout)
+            # Correct layer 0: layers 1 and 2 then pass because position 4 is a near tie from layer 1 on.
+            stream(0, 6)[4:5].tofile(root / "eng" / f"layer00_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            result = run(root / "ref", root / "eng", "--tie-margin", "1e-3", "--threshold", "0.5")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("layer 2: left out 1 near-tie positions [4]", result.stdout)
+            # A margin below the gap leaves nothing out.
+            self.assertEqual(run(root / "ref", root / "eng", "--tie-margin", "1e-5", "--threshold", "0.5").returncode, 1)
+
+    def test_tie_margin_without_index_gaps_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=6)
+            write_engine(root / "eng", range(1), self.PARTS, positions=6)
+            result = run(root / "ref", root / "eng", "--tie-margin", "1e-3")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("index_gaps.json", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

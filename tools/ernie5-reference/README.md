@@ -7,7 +7,7 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` leaves indexer near-tie positions out of the per-position check (see Long-input parity). |
 | `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: the strict layer-set checks, decode stitching (pass, gap, overlap, short engine), the token and argmax checks, and a single bad position being flagged and named. |
 | `../parity/compressed_kv.py` | Shared with any model that has the DeepSeek-V4 compressor: pooling with the APE score bias, the RMS norm, each latent's RoPE position and which queries see it. Tests: `python -I tools/parity/test_compressed_kv.py`. |
 | `../parity/quant_sim.py` | Shared Hadamard rotation and FP8 E4M3 round trip with UE8M0 scales per 128 values, for indexer queries and keys. Tests: `python -I tools/parity/test_quant_sim.py`. |
@@ -175,8 +175,14 @@ ERNIE_DUMP_LAYERS="$RUN/engine-long" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cu
 python tools/ernie5-reference/reference.py --ckpt "$CKPT" --tokens "$LONG,$FEED" --out "$RUN/reference-long" --logits 2>&1 \
   | tee "$RUN/reference-long.log"
 python tools/ernie5-reference/compare.py --ref "$RUN/reference-long" --engine "$RUN/engine-long" --threshold 0.999 --strict \
-  --expect-layers 43 --expect-tokens 2308 2>&1 | tee "$RUN/compare-long.txt"
+  --expect-layers 43 --expect-tokens 2308 --tie-margin 1e-3 2>&1 | tee "$RUN/compare-long.txt"
 ```
+
+`--tie-margin 1e-3` leaves out of the per-position check the positions where a DSA layer's indexer kept and dropped keys within 0.1
+percent of each other (`index_gaps.json`, written by the reference). There, a rounding difference between the engine and the reference
+can pick a different key, which is not a defect. The positions left out are printed per layer, and the whole-stream cosine still
+includes them. Rerun without the flag to see their cosines; many near-tie positions, or a flagged position that is not a near tie, need
+a look.
 
 Not run on the real weights yet. The reference reads nearly every routed expert at this length, so it makes about one full pass over
 the checkpoint; its indexer scores are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
@@ -225,4 +231,9 @@ Long-input dry runs (CPU engine, 2026-11-16):
   and DSA selection runs at positions 24 to 32): all 3 layers reach cosine 0.99999995 or more at every position, and the argmax
   after the last position is 3372 on both sides. With `--indexer-quant f32` the DSA layer is flagged at position 31 (cosine 0.9951),
   where its 16th and 17th indexer candidates are 8 percent apart.
-- REAL_DIM_RESULT
+- Real dimensions (ratio 128, window 128, top-k 64); 250 prompt tokens plus 12 fed tokens (262 positions: one group completes in the
+  prefill and one at position 255 during decode, and DSA selection runs from position 192): the HCA layer before the DSA layer
+  (layer 0) reaches cosine 1.00000000 at every position. Three DSA queries (225, 248, 259) kept and dropped keys within 0.03 percent of
+  each other. Two of them (225 and 248) picked a different key than the engine, giving cosines of 0.9949 and 0.9965 for that
+  position's attention output. With `--tie-margin 1e-3` those three positions are left out of the per-position check, and the rest
+  reach 0.9998 or more. The argmax after the last position is 1965 on both sides. The CPU engine took 10 minutes, the reference 17 s.
