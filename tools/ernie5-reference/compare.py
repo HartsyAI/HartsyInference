@@ -23,8 +23,9 @@ positions (use the prompt plus decode length, so a prefill-only reference cannot
 last key the indexer kept and the first it dropped, over the spread of that query's candidate scores) and leaves out of the
 per-position check every position whose gap is below M in a DSA layer at or before the layer being checked: there a rounding
 difference can pick a different key. The positions left out are printed per layer, and the whole-stream cosine still covers them.
-Only the near-tie position itself is left out: later positions read its changed state (window, compressor, indexer), so one of them
-can still be flagged; the note then names the nearest earlier near tie, "(after near-tie at N)".
+Only the near-tie position itself is left out: from the next layer on, later positions read its changed state (window, compressor,
+indexer), so one of them can still be flagged; the note then names the nearest earlier near tie from a strictly earlier DSA layer,
+"(after near-tie at N)". A flag in the tie's own DSA layer gets no note, since that layer's later positions read only its inputs.
 When more than --max-tie-fraction (default 0.05) of the selecting positions would be left out, it is an error: the margin would
 skip the selection test instead of explaining a few positions.
 
@@ -261,8 +262,10 @@ def main() -> int:
             if first_flag is None:
                 first_flag = layer
                 note += " (first)"
-            # A different key at a near tie changes that position's state, which later positions read: name the nearest one.
-            earlier = [t for t in skipped if t < worst]
+            # A different key at a near tie changes that position's output, which later positions read only from the next layer on
+            # (within its own DSA layer they read that layer's inputs): name the nearest tie from a strictly earlier DSA layer.
+            upstream = set().union(*(pos for dsa, pos in ties.items() if dsa < layer))
+            earlier = [t for t in upstream if t < worst]
             if earlier:
                 note += f" (after near-tie at {max(earlier)})"
         print(f"{layer:>5}  {max_abs:>12.6g}  {rel:>12.6g}  {cos:>12.8f}  {pre_cos:>12.8f}  {per_pos[worst]:>14.8f}  {worst:>4}  {note}")

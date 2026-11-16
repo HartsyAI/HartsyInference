@@ -183,9 +183,9 @@ The strict run is the check. If it flags a DSA layer (or a later one) only at a 
 `--tie-margin 1e-4` to see whether those are near ties: positions where a DSA indexer kept and dropped keys within 1e-4 of that
 query's candidate-score spread (`index_gaps.json`, written by the reference), so that rounding alone can pick a different key. The
 positions it leaves out are printed per layer, the whole-stream cosine still includes them, and more than 5 percent of the selecting
-positions left out is an error (`--max-tie-fraction`). Only the near-tie positions themselves are left out; a later position reads
-their changed state, so it can still be flagged, and the note then names the nearest earlier near tie (`after near-tie at N`). A
-flagged position with no near tie before it is a real difference.
+positions left out is an error (`--max-tie-fraction`). Only the near-tie positions themselves are left out; from the next layer on, a
+later position reads their changed state, so it can still be flagged, and the note then names the nearest earlier near tie from an
+earlier DSA layer (`after near-tie at N`). A flagged position with no such note is a real difference.
 
 Not run on the real weights yet. The reference reads nearly every routed expert at this length, so it makes about one full pass over
 the checkpoint; its indexer scores are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).

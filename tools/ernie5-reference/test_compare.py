@@ -244,15 +244,18 @@ class DecodeStitchTests(unittest.TestCase):
     def test_a_flag_after_a_near_tie_names_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_ref(root / "ref", range(2), positions=6)
-            write_engine(root / "eng", range(2), self.PARTS, positions=6)
+            write_ref(root / "ref", range(3), positions=6)
+            write_engine(root / "eng", range(3), self.PARTS, positions=6)
             (root / "ref" / "index_gaps.json").write_text(json.dumps({"1": {"3": 1e-6, "4": 0.2, "5": 0.3}}), encoding="utf-8")
-            np.random.default_rng(7).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
-                root / "eng" / f"layer01_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            # Position 4 is wrong in the tie's own DSA layer (1) and in the next layer (2).
+            for layer in (1, 2):
+                np.random.default_rng(7 + layer).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
+                    root / "eng" / f"layer{layer:02d}_pos4_t1_hc{HC}_h{HIDDEN}.f32")
             result = run(root / "ref", root / "eng", "--tie-margin", "1e-4", "--threshold", "0.5", "--max-tie-fraction", "1")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            row = next(line for line in result.stdout.splitlines() if line.strip().startswith("1 "))
-            self.assertIn("(after near-tie at 3)", row)
+            rows = {line.split()[0]: line for line in result.stdout.splitlines() if line.strip()[:1].isdigit() and "FLAG" in line}
+            self.assertNotIn("near-tie", rows["1"])   # layer 1's later positions read its inputs, not position 3's output
+            self.assertIn("(after near-tie at 3)", rows["2"])
 
     def test_too_many_near_ties_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
