@@ -100,6 +100,30 @@ public sealed class Ernie5MoeTests
         AssertClose(actual, loudMoe.Run(x, n), 1e-6f, "output with the idle expert scaled");
     }
 
+    [Fact]
+    public void Prefetch_ListsOnlyTheSelectedExpertsThatAreNotOnTheDevice()
+    {
+        using Loaded moe = new(Weights.Create(41, Small, new Flags()));
+        List<Tensor> experts = [.. moe.Block.EnumerateExpertWeights()];   // gate, up, down per expert, in expert order
+        List<int>[] tokens = new List<int>[Small.Experts];
+        for (int e = 0; e < tokens.Length; e++) tokens[e] = [];
+        tokens[1].Add(0);
+        tokens[3].AddRange([0, 2]);
+
+        List<Tensor> pending = [experts[0]];   // a stale entry, cleared by the call
+
+        moe.Block.RoutedPrefetchSet(tokens, _ => false, pending);
+        Assert.Equal(experts.Skip(3).Take(3).Concat(experts.Skip(9).Take(3)), pending);
+
+        // Expert 3's up projection is already on the device, so it is not read again.
+        moe.Block.RoutedPrefetchSet(tokens, w => ReferenceEquals(w, experts[10]), pending);
+        Assert.Equal(5, pending.Count);
+        Assert.DoesNotContain(experts[10], pending);
+
+        moe.Block.RoutedPrefetchSet(tokens, _ => true, pending);
+        Assert.Empty(pending);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(2)]

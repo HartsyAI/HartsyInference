@@ -45,6 +45,12 @@ layer is eligible: flat softmax or sigmoid routing (no expert groups, no logit-s
 quantized type per projection that the backend can read. Everything else keeps the host-routed per-expert loop in
 `MoeFeedForward.Forward`.
 
+Before that loop runs, the selected experts that are not on the device are read from the mapped checkpoint into the page cache by
+parallel readers (`MappedTensorPrefetch`, `numerics.moeExpertPrefetchThreads`, default 16, 0 turns it off), so each expert's upload
+copies from memory. A network volume serves one reader far slower than several: on a RunPod MooseFS volume a 4 MiB read runs at about
+95 MB/s from one thread and 600 to 800 MB/s across 16 to 30. ERNIE-5.5 takes this loop (split-feature routing and SiTU keep it off the
+device-routed path), and its decode was almost entirely serial expert reads before the prefetch.
+
 **Small batches (at most 16 tokens: decode, speculative verify).**
 `router GEMV → MoeRoute → MoeExpertGateUp → MoeExpertDown → MoeCombineSlots`. The expert ids stay on the device. The
 gate/up kernel reads the expert id of every (token, slot) pair from device memory, dots both projection rows against the

@@ -84,14 +84,21 @@ public sealed unsafe class MmapHandle : IDisposable
     }
 
     /// <summary>Reads bytes of the mapped file by positional read through the handle that created the mapping, bypassing the mapping itself.</summary>
+    /// <remarks>Safe from several threads at once, and the reads overlap: a network volume serves one reader far slower than several.</remarks>
+    /// <exception cref="ObjectDisposedException">The handle was disposed before the read started.</exception>
     public void ReadAt(long offset, Span<byte> destination)
     {
-        lock (_gate)
+        // A fast path only: Dispose can run right after this check, and the handle reference below is what guards the read.
+        if (Volatile.Read(ref _basePointer) == 0)
+            throw new ObjectDisposedException(nameof(MmapHandle));
+        if (offset < 0 || offset > ByteLength - destination.Length)
+            throw new ArgumentOutOfRangeException(nameof(offset), $"Read of {destination.Length} bytes at {offset} is outside the {ByteLength}-byte mapping.");
+        // A reference on the file handle, not a lock, keeps it open for this read: Dispose's close takes effect once the last reader
+        // releases it, and a read that starts after the close throws ObjectDisposedException here.
+        bool referenced = false;
+        try
         {
-            if (_basePointer == 0)
-                throw new ObjectDisposedException(nameof(MmapHandle));
-            if (offset < 0 || offset > ByteLength - destination.Length)
-                throw new ArgumentOutOfRangeException(nameof(offset), $"Read of {destination.Length} bytes at {offset} is outside the {ByteLength}-byte mapping.");
+            _fileHandle.DangerousAddRef(ref referenced);
             int done = 0;
             while (done < destination.Length)
             {
@@ -100,6 +107,10 @@ public sealed unsafe class MmapHandle : IDisposable
                     throw new HartsyInferenceException($"'{FilePath}' ended after {done} of {destination.Length} bytes at offset {offset}; the file changed while it was mapped.");
                 done += read;
             }
+        }
+        finally
+        {
+            if (referenced) _fileHandle.DangerousRelease();
         }
     }
 
@@ -133,7 +144,8 @@ public sealed unsafe class MmapHandle : IDisposable
     /// <summary>Releases the memory-mapped view and file via atomic pointer exchange.</summary>
     public void Dispose()
     {
-        // Under the gate so an in-flight ReadAt finishes before the file handle that it reads from is closed.
+        // In-flight ReadAt calls hold a reference on the file handle, so its close here takes effect when the last of them releases it; the
+        // gate only orders concurrent Dispose calls.
         lock (_gate)
         {
             nint ptr = Interlocked.Exchange(ref _basePointer, 0);
