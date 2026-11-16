@@ -130,7 +130,13 @@ def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int) -> tuple[list
     else:
         notes.append("no meta.json in the reference folder: the tokens were not checked")
     logits_path = ref_dir / "logits_last.npy"
-    if logits_path.exists() and "argmax_after_last" in fed and len(fed_tokens) == ref_tokens:
+    if not logits_path.exists():
+        notes.append("argmax not compared: the reference has no logits_last.npy (run reference.py with --logits)")
+    elif "argmax_after_last" not in fed:
+        notes.append("argmax not compared: tokens.json has no argmax_after_last")
+    elif len(fed_tokens) != ref_tokens:
+        notes.append(f"argmax not compared: the engine was fed {len(fed_tokens)} tokens, the reference ran on {ref_tokens}")
+    else:
         ref_argmax = int(np.argmax(np.load(logits_path)))
         eng_argmax = int(fed["argmax_after_last"])
         if ref_argmax == eng_argmax:
@@ -148,8 +154,13 @@ def main() -> int:
     p.add_argument("--strict", action="store_true", help="exit 1 on a flagged layer or any set, length, token or argmax error")
     p.add_argument("--expect-layers", type=int, default=None,
                    help="require both folders to hold exactly layers 0..N-1 (43 for the real checkpoint)")
-    p.add_argument("--expect-tokens", type=int, default=None, help="require the reference to cover exactly N positions")
+    p.add_argument("--expect-tokens", type=int, default=None,
+                   help="require every reference layer to cover exactly N positions")
+    p.add_argument("--position-threshold", type=float, default=None,
+                   help="cosine every single position must reach (default: --threshold). One position holds only hc*hidden values, "
+                        "so a looser bound can be set here without loosening the whole-stream check")
     args = p.parse_args()
+    position_threshold = args.threshold if args.position_threshold is None else args.position_threshold
 
     ref_dir, eng_dir = Path(args.ref), Path(args.engine)
     ref = load_ref(ref_dir)
@@ -166,9 +177,11 @@ def main() -> int:
     first_flag: int | None = None
     ref_tokens = None
     prefill_len = None
+    ref_lengths: dict[int, int] = {}
     for layer in sorted(ref):
         b = np.load(ref[layer]).astype(np.float32)
         ref_tokens = b.shape[0]
+        ref_lengths[layer] = ref_tokens
         if layer not in eng:
             print(f"{layer:>5}  missing engine dump")
             errors.append(f"layer {layer}: no engine dump")
@@ -196,7 +209,7 @@ def main() -> int:
         per_pos = [metrics(a[t], b[t])[2] for t in range(b.shape[0])]
         worst = int(np.nanargmin(per_pos)) if not any(np.isnan(per_pos)) else int(np.argmax(np.isnan(per_pos)))
         note = ""
-        if not (cos >= args.threshold) or not all(c >= args.threshold for c in per_pos):  # also flags NaN
+        if not (cos >= args.threshold) or not all(c >= position_threshold for c in per_pos):  # also flags NaN
             note = "FLAG cosine below threshold"
             if first_flag is None:
                 first_flag = layer
@@ -204,9 +217,19 @@ def main() -> int:
         print(f"{layer:>5}  {max_abs:>12.6g}  {rel:>12.6g}  {cos:>12.8f}  {pre_cos:>12.8f}  {per_pos[worst]:>14.8f}  {worst:>4}  {note}")
 
     errors += layer_set_errors(set(ref), set(eng), args.expect_layers)
+    # Every reference layer must cover the same positions: an interrupted shorter rerun into the same folder leaves a mix, and the
+    # shorter layers would compare fewer engine positions.
+    if len(set(ref_lengths.values())) > 1:
+        by_length: dict[int, list[int]] = {}
+        for layer, length in ref_lengths.items():
+            by_length.setdefault(length, []).append(layer)
+        errors.append("reference layers cover different numbers of positions: "
+                      + "; ".join(f"{length} positions in layers {layers}" for length, layers in sorted(by_length.items())))
+    if args.expect_tokens is not None:
+        short = sorted(layer for layer, length in ref_lengths.items() if length != args.expect_tokens)
+        if short:
+            errors.append(f"reference layers {short} do not cover {args.expect_tokens} positions")
     if ref_tokens is not None:
-        if args.expect_tokens is not None and ref_tokens != args.expect_tokens:
-            errors.append(f"the reference covers {ref_tokens} positions; expected {args.expect_tokens}")
         seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens)
         errors += seq_errors
         decode = ref_tokens - (prefill_len or ref_tokens)
@@ -216,7 +239,7 @@ def main() -> int:
     for err in errors:
         print(err)
     if first_flag is None and not errors:
-        print(f"all {len(ref)} layers have cosine >= {args.threshold} at every position")
+        print(f"all {len(ref)} layers have cosine >= {args.threshold}, and >= {position_threshold} at every position")
     elif first_flag is not None:
         print(f"first layer below cosine {args.threshold}: {first_flag}")
     if args.strict and (first_flag is not None or errors):

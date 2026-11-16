@@ -154,6 +154,41 @@ class DecodeStitchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("argmax mismatch", result.stdout)
 
+    def test_reference_layers_of_mixed_length_fail(self) -> None:
+        # An interrupted shorter rerun into the same folder: layer 0 holds the 3-token prefill, layer 1 the full 6 positions.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=3)
+            np.save(root / "ref" / "layer_01_all.npy", stream(1, 6))
+            write_engine(root / "eng", range(2), self.PARTS, positions=6)
+            result = run(root / "ref", root / "eng", "--expect-tokens", "6")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("reference layers cover different numbers of positions", result.stdout)
+            self.assertIn("reference layers [0] do not cover 6 positions", result.stdout)
+
+    def test_a_skipped_argmax_check_says_why(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=6, tokens=self.FED)   # no --logits
+            write_engine(root / "eng", range(1), self.PARTS, positions=6)
+            write_fed(root / "eng", self.FED, argmax=7)
+            result = run(root / "ref", root / "eng")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("argmax not compared: the reference has no logits_last.npy", result.stdout)
+
+    def test_position_threshold_loosens_only_the_per_position_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=6)
+            write_engine(root / "eng", range(1), self.PARTS, positions=6)
+            # Nudge position 4 so its cosine falls a little below 0.999 while the whole stream stays above it.
+            ref4 = stream(0, 6)[4]
+            noisy = ref4 + 0.06 * np.random.default_rng(5).standard_normal(ref4.shape).astype("<f4")
+            noisy.astype("<f4").tofile(root / "eng" / f"layer00_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            self.assertEqual(run(root / "ref", root / "eng").returncode, 1)
+            result = run(root / "ref", root / "eng", "--position-threshold", "0.99")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_one_bad_decode_position_is_flagged_and_named(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

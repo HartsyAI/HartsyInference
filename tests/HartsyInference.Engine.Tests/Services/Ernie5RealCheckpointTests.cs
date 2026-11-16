@@ -26,7 +26,7 @@ namespace HartsyInference.Engine.Tests.Services;
 /// token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per phase
 /// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
 /// <c>numerics.moeExpertPrefetchThreads=32</c>); <c>ERNIE_REAL_DECODE_FEED</c> = a comma list of token ids fed at the decode steps instead
-/// of the argmax (one step each; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
+/// of the argmax (one step each, so <c>ERNIE_REAL_DECODE_STEPS</c> is ignored; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
 /// comparison). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
@@ -97,6 +97,7 @@ public sealed class Ernie5RealCheckpointTests
         // Decode parity feeds fixed tokens, so the engine and the reference see the same sequence whatever the engine's argmax.
         string? feedText = Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_FEED");
         int[]? feed = string.IsNullOrWhiteSpace(feedText) ? null : ParseIds(feedText);
+        if (feed is { Length: 0 }) throw new ArgumentException($"ERNIE_REAL_DECODE_FEED='{feedText}' holds no token ids.");
         // Reference precision, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
         using IBackend backend = device switch
         {
@@ -171,7 +172,7 @@ public sealed class Ernie5RealCheckpointTests
         }
         Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
-            + $"greedy tokens [{string.Join(",", generated)}].");
+            + $"{(feed is null ? "greedy tokens" : "argmax per step")} [{string.Join(",", generated)}].");
         if (feed is not null)
         {
             // Each fed token against the engine's own choice at that position: the argmax after prefill, then after each fed token.

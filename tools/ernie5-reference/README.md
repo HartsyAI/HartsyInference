@@ -125,6 +125,13 @@ python tools/ernie5-reference/compare.py --ref "$RUN/reference-decode" --engine 
   --expect-layers 43 --expect-tokens 13 2>&1 | tee "$RUN/compare-decode.txt"
 ```
 
+Use a fresh `ERNIE_DUMP_LAYERS` folder per run: the dump overwrites files of the same name but never clears the folder, so a shorter run
+into a used folder leaves the longer run's decode files behind (`compare.py` refuses most such mixes, but not every one).
+
+Every position must reach the threshold, not only the whole stream. That applies to the prefill-only command above too, which before
+checked only the whole-stream cosine. One position holds only `hc*hidden` values; `--position-threshold` sets a looser bound for single
+positions without loosening the whole-stream check.
+
 What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
 up to 127 tokens. What it does not: the DSA indexer's key selection and the HCA compressor, which start past 128 tokens (and the
 reference refuses the compressor), and MTP.
