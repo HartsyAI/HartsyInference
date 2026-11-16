@@ -62,59 +62,70 @@ public static partial class HostMemoryInfo
     }
 
     /// <summary>What the memory cgroup lets the process still take, in bytes, or <c>null</c> when no limit applies.</summary>
-    /// <remarks>cgroup v2: the process's own group (the <c>0::</c> line of <c>/proc/self/cgroup</c>) and each ancestor up to
-    /// <paramref name="root"/> that sets <c>memory.max</c>; the tightest wins. cgroup v1: <c>memory/memory.limit_in_bytes</c> under
-    /// <paramref name="root"/>. Each level counts its limit minus its working set, the usage less the inactive file cache
-    /// (<c>inactive_file</c>, <c>total_inactive_file</c> on v1), which the kernel reclaims before it OOM-kills; that is the
-    /// working set the kubelet evicts on. A container with its own cgroup namespace sees its group as the root.</remarks>
+    /// <remarks>The process's group and each ancestor up to the mount are read, and the tightest level wins; a group the mount does not
+    /// show (a container whose own group is mounted as the root) is skipped. cgroup v2: the <c>0::</c> line of <c>/proc/self/cgroup</c>
+    /// and <c>memory.max</c> under <paramref name="root"/>. cgroup v1, also on a hybrid host whose v2 tree sets no limit: the
+    /// <c>memory</c> controller's line and <c>memory.limit_in_bytes</c> under <c>root/memory</c>, capped by <c>memory.stat</c>'s
+    /// <c>hierarchical_memory_limit</c>. Each level counts its limit minus its working set, the usage less the inactive file cache
+    /// (<c>inactive_file</c>, <c>total_inactive_file</c> on v1), which the kernel reclaims before it OOM-kills; that is the working set
+    /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer.</remarks>
     /// <param name="root">The cgroup mount, <c>/sys/fs/cgroup</c> on Linux.</param>
     /// <param name="selfCgroup">The text of <c>/proc/self/cgroup</c>.</param>
     internal static long? CgroupAvailableBytes(string root, string selfCgroup)
     {
-        long? tightest = null;
-        string? relative = null;
+        string? v2Group = null, v1Group = null;
         foreach (string line in selfCgroup.Split('\n'))
         {
-            if (line.StartsWith("0::", StringComparison.Ordinal))
-            {
-                relative = line[3..].Trim().Trim('/');
-                break;
-            }
+            string[] parts = line.Trim().Split(':', 3);
+            if (parts.Length != 3) continue;
+            if (parts[0] == "0" && parts[1].Length == 0) v2Group = parts[2];
+            else if (parts[1].Split(',').Contains("memory")) v1Group = parts[2];
         }
-        if (relative is not null)
-        {
-            // cgroup v2: walk from the process's group up to the root; a group the mount does not show is skipped.
-            string dir = relative.Length == 0 ? root : Path.Combine(root, relative);
-            while (true)
-            {
-                tightest = Smaller(tightest, LevelAvailable(Path.Combine(dir, "memory.max"), Path.Combine(dir, "memory.current"),
-                    Path.Combine(dir, "memory.stat"), "inactive_file"));
-                if (string.Equals(Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar), Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar),
-                    StringComparison.Ordinal))
-                {
-                    break;
-                }
-                dir = Path.GetDirectoryName(dir) ?? root;
-            }
-            if (tightest is not null) return tightest;
-        }
-        string v1 = Path.Combine(root, "memory");
-        return LevelAvailable(Path.Combine(v1, "memory.limit_in_bytes"), Path.Combine(v1, "memory.usage_in_bytes"),
-            Path.Combine(v1, "memory.stat"), "total_inactive_file");
+        if (v2Group is not null && Walk(root, v2Group, "memory.max", "memory.current", "inactive_file", null) is { } v2) return v2;
+        return Walk(Path.Combine(root, "memory"), v1Group ?? "/", "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file",
+            "hierarchical_memory_limit");
     }
 
     // A limit at or above 2^60 bytes is v1's "no limit" (PAGE_COUNTER_MAX in pages); v2 writes "max".
     private const long NoLimitBytes = 1L << 60;
 
-    private static long? LevelAvailable(string limitFile, string usageFile, string statFile, string inactiveKey)
+    /// <summary>The tightest level from the group at <paramref name="group"/> (relative to <paramref name="mount"/>) up to the mount. A group
+    /// outside the cgroup namespace's root shows as a path with <c>..</c>; it is read as the mount itself.</summary>
+    private static long? Walk(string mount, string group, string limitName, string usageName, string inactiveKey, string? hierarchicalKey)
     {
-        if (!File.Exists(limitFile) || !File.Exists(usageFile)) return null;
-        string limitText = File.ReadAllText(limitFile).Trim();
-        if (!long.TryParse(limitText, out long limit) || limit >= NoLimitBytes) return null;
-        if (!long.TryParse(File.ReadAllText(usageFile).Trim(), out long usage)) return null;
-        long inactive = File.Exists(statFile) ? StatValue(File.ReadAllText(statFile), inactiveKey) : 0;
-        long workingSet = Math.Max(0, usage - Math.Min(inactive, usage));
-        return Math.Max(0, limit - workingSet);
+        string relative = group.Trim().Trim('/');
+        if (relative.Split('/').Contains("..")) relative = "";
+        string top = Path.GetFullPath(mount).TrimEnd(Path.DirectorySeparatorChar);
+        string dir = relative.Length == 0 ? top : Path.GetFullPath(Path.Combine(top, relative));
+        long? tightest = null;
+        while (true)
+        {
+            tightest = Smaller(tightest, LevelAvailable(dir, limitName, usageName, inactiveKey, hierarchicalKey));
+            if (dir.Length <= top.Length) return tightest;
+            dir = Path.GetDirectoryName(dir) ?? top;
+        }
+    }
+
+    private static long? LevelAvailable(string dir, string limitName, string usageName, string inactiveKey, string? hierarchicalKey)
+    {
+        try
+        {
+            string limitFile = Path.Combine(dir, limitName), usageFile = Path.Combine(dir, usageName), statFile = Path.Combine(dir, "memory.stat");
+            if (!File.Exists(limitFile) || !File.Exists(usageFile)) return null;
+            string? stat = File.Exists(statFile) ? File.ReadAllText(statFile) : null;
+            long limit = long.TryParse(File.ReadAllText(limitFile).Trim(), out long parsed) ? parsed : long.MaxValue;   // "max": no limit
+            if (hierarchicalKey is not null && stat is not null && StatValue(stat, hierarchicalKey) is > 0 and var inherited)
+                limit = Math.Min(limit, inherited);
+            if (limit >= NoLimitBytes || !long.TryParse(File.ReadAllText(usageFile).Trim(), out long usage)) return null;
+            long inactive = stat is null ? 0 : StatValue(stat, inactiveKey);
+            long workingSet = Math.Max(0, usage - Math.Min(inactive, usage));
+            return Math.Max(0, limit - workingSet);
+        }
+        catch (Exception)
+        {
+            // One unreadable level (EACCES on an ancestor, say) must not discard the levels already read.
+            return null;
+        }
     }
 
     private static long StatValue(string stat, string key)

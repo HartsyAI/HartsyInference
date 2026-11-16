@@ -338,7 +338,7 @@ internal sealed class AudioRuntime
         }
         long availableKb = ReadAvailableMemoryKb();
         (long freeVramBytes, long totalVramBytes) = SafeVramInfo(backend);
-        bool hostLow = availableKb > 0 && availableKb < EvictBelowAvailableKb;
+        bool hostLow = availableKb >= 0 && availableKb < EvictBelowAvailableKb;
         // Gated on the TOTAL, not on free being non-zero: a backend that reports honestly can say zero free, and
         // testing free itself skipped eviction in precisely the case it was written for.
         long needBytes = totalVramBytes > 0 ? EstimateNeedBytes(job) : 0;
@@ -458,14 +458,14 @@ internal sealed class AudioRuntime
     private static string Describe(IReadOnlyList<string> evicted) =>
         evicted.Count == 0 ? "nothing (no other unpinned model was resident)" : string.Join(", ", evicted);
 
-    /// <summary>Free host memory in KiB on Linux (<see cref="HostMemoryInfo.AvailableBytes"/>, capped by the cgroup), or 0 elsewhere or
-    /// when unreadable (no host eviction).</summary>
+    /// <summary>Free host memory in KiB on Linux (<see cref="HostMemoryInfo.AvailableBytes"/>, capped by the cgroup), or -1 elsewhere or
+    /// when unreadable (no host eviction). Zero is a known, exhausted budget and counts as low.</summary>
     private static long ReadAvailableMemoryKb()
     {
-        if (!OperatingSystem.IsLinux()) return 0;
+        if (!OperatingSystem.IsLinux()) return -1;
         long? bytes = HostMemoryInfo.AvailableBytes();
         if (bytes is null) Logs.Debug("[Audio] Free host memory is unreadable; host-memory eviction disabled.");
-        return (bytes ?? 0) / 1024;
+        return bytes is { } b ? b / 1024 : -1;
     }
 
     /// <summary>Free and total device memory, or <c>(0, 0)</c> when this backend does not report it.</summary>

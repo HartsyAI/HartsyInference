@@ -1,7 +1,7 @@
 using HartsyInference.Core.Memory.Host;
 using Xunit;
 
-namespace HartsyInference.Core.Tests.Runtime;
+namespace HartsyInference.Core.Tests.Memory;
 
 /// <summary>Free host memory under a cgroup limit, read from fake cgroup trees.</summary>
 public sealed class HostMemoryInfoTests : IDisposable
@@ -53,6 +53,33 @@ public sealed class HostMemoryInfoTests : IDisposable
     }
 
     [Fact]
+    public void V2_ALevelWithoutUsage_IsSkippedAndTheAncestorCounts()
+    {
+        WriteV2(_root, $"{46 * GiB}", 6 * GiB, 0);
+        string app = Path.Combine(_root, "app");
+        Directory.CreateDirectory(app);
+        File.WriteAllText(Path.Combine(app, "memory.max"), $"{GiB}\n");   // no memory.current
+        Assert.Equal(40 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/app\n"));
+    }
+
+    [Fact]
+    public void V2_APathOutsideTheNamespaceRoot_IsReadAsTheRoot()
+    {
+        WriteV2(_root, $"{46 * GiB}", 6 * GiB, 0);
+        Assert.Equal(40 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/../../user.slice\n"));
+    }
+
+    [Fact]
+    public void AnUnreadableLevel_KeepsTheLevelsAlreadyRead()
+    {
+        WriteV2(_root, $"{64 * GiB}", 4 * GiB, 0);
+        WriteV2(Path.Combine(_root, "app"), $"{8 * GiB}", 6 * GiB, 0);
+        // Hold the root's stat file exclusively, so reading that level throws; the app's 2 GiB, read first, must survive.
+        using FileStream locked = new(Path.Combine(_root, "memory.stat"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.Equal(2 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/app\n"));
+    }
+
+    [Fact]
     public void Usage_OverTheLimit_IsZeroNotNegative()
     {
         WriteV2(_root, $"{4 * GiB}", 5 * GiB, 0);
@@ -62,22 +89,38 @@ public sealed class HostMemoryInfoTests : IDisposable
     [Fact]
     public void V1_LimitAndTotalInactiveFile()
     {
-        string v1 = Path.Combine(_root, "memory");
-        Directory.CreateDirectory(v1);
-        File.WriteAllText(Path.Combine(v1, "memory.limit_in_bytes"), $"{32 * GiB}\n");
-        File.WriteAllText(Path.Combine(v1, "memory.usage_in_bytes"), $"{30 * GiB}\n");
-        File.WriteAllText(Path.Combine(v1, "memory.stat"), $"cache 1\ninactive_file 1\ntotal_inactive_file {6 * GiB}\n");
+        WriteV1(Path.Combine(_root, "memory"), 32 * GiB, 30 * GiB, $"cache 1\ninactive_file 1\ntotal_inactive_file {6 * GiB}\n");
         Assert.Equal(8 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "12:memory:/\n"));
+    }
+
+    [Fact]
+    public void V1_TheProcessGroupUnderAnUnlimitedRoot_IsRead()
+    {
+        WriteV1(Path.Combine(_root, "memory"), 9223372036854771712, 30 * GiB, "");
+        WriteV1(Path.Combine(_root, "memory", "system.slice", "app.service"), 16 * GiB, 10 * GiB, "");
+        Assert.Equal(6 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "12:cpu,memory:/system.slice/app.service\n"));
+    }
+
+    [Fact]
+    public void V1_HierarchicalLimitCapsTheGroupsOwn()
+    {
+        // The group sets no limit of its own, but an ancestor the mount does not show does: memory.stat carries it down.
+        WriteV1(Path.Combine(_root, "memory"), 9223372036854771712, 10 * GiB, $"hierarchical_memory_limit {12 * GiB}\n");
+        Assert.Equal(2 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "12:memory:/\n"));
     }
 
     [Fact]
     public void V1_UnlimitedSentinel_IsNull()
     {
-        string v1 = Path.Combine(_root, "memory");
-        Directory.CreateDirectory(v1);
-        File.WriteAllText(Path.Combine(v1, "memory.limit_in_bytes"), "9223372036854771712\n");
-        File.WriteAllText(Path.Combine(v1, "memory.usage_in_bytes"), $"{30 * GiB}\n");
+        WriteV1(Path.Combine(_root, "memory"), 9223372036854771712, 30 * GiB, "");
         Assert.Null(HostMemoryInfo.CgroupAvailableBytes(_root, "12:memory:/\n"));
+    }
+
+    [Fact]
+    public void Hybrid_WithNoV2Limit_FallsBackToTheV1Controller()
+    {
+        WriteV1(Path.Combine(_root, "memory"), 20 * GiB, 5 * GiB, "");
+        Assert.Equal(15 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "12:memory:/\n0::/\n"));
     }
 
     [Fact]
@@ -89,5 +132,13 @@ public sealed class HostMemoryInfoTests : IDisposable
         File.WriteAllText(Path.Combine(dir, "memory.max"), max + "\n");
         File.WriteAllText(Path.Combine(dir, "memory.current"), $"{current}\n");
         File.WriteAllText(Path.Combine(dir, "memory.stat"), $"anon {current - inactiveFile}\nfile {inactiveFile}\ninactive_file {inactiveFile}\n");
+    }
+
+    private static void WriteV1(string dir, long limit, long usage, string stat)
+    {
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "memory.limit_in_bytes"), $"{limit}\n");
+        File.WriteAllText(Path.Combine(dir, "memory.usage_in_bytes"), $"{usage}\n");
+        File.WriteAllText(Path.Combine(dir, "memory.stat"), stat);
     }
 }
