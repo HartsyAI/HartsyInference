@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "case_id": "f16-mat",
+  "tensors": {
+    "q": {
+      "file": "q.bin",
+      "sha256": "ea2a5095d850e9cfe2055926c07b465a70071c14d1c91fbf964b7bbe0d1f5db3",
+      "dtype": "f16",
+      "shape": [
+        1,
+        4,
+        256,
+        64
+      ],
+      "storage_shape": [
+        1,
+        4,
+        256,
+        64
+      ],
+      "strides": [
+        65536,
+        16384,
+        64,
+        1
+      ],
+      "offset": 0
+    },
+    "k": {
+      "file": "k.bin",
+      "sha256": "2fdba471f092579efeb8892f8ecd2392360b9077ee124ec9f553e7704aa60c2c",
+      "dtype": "f16",
+      "shape": [
+        1,
+        4,
+        516,
+        64
+      ],
+      "storage_shape": [
+        1,
+        4,
+        516,
+        64
+      ],
+      "strides": [
+        132096,
+        33024,
+        64,
+        1
+      ],
+      "offset": 0
+    },
+    "v": {
+      "file": "v.bin",
+      "sha256": "5291c26c9a900dcecb05d7d2bc44aafa006064c3b7f724bbf8f477a47c3d94f4",
+      "dtype": "f16",
+      "shape": [
+        1,
+        4,
+        516,
+        64
+      ],
+      "storage_shape": [
+        1,
+        4,
+        516,
+        64
+      ],
+      "strides": [
+        132096,
+        33024,
+        64,
+        1
+      ],
+      "offset": 0
+    }
+  },
+  "call": {
+    "route": "Dense",
+    "scale": 0.125,
+    "causal": false,
+    "kv_length": 516,
+    "query_offset": 0,
+    "legacy_asserted_bounded": false,
+    "precision": "f16"
+  },
+  "acceptance": {
+    "source": "docs/ATTENTION_CONTRACT.md section 8",
+    "rel_l2": 0.003,
+    "mean_abs": null,
+    "reviewed": false
+  },
+  "generator": {
+    "seed": 1234,
+    "implementation": "Python random.Random; persisted bytes are authoritative"
+  }
+}

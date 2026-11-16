@@ -148,6 +148,7 @@ internal static class AttentionRequestEvidence
                 using Utf8JsonWriter writer = new(output, new JsonWriterOptions { Indented = true });
                 writer.WriteStartObject();
                 writer.WriteNumber("schema", 1);
+                writer.WriteNumber("report_schema", 2);
                 writer.WriteString("tool_sha256", Hash(typeof(AttentionRequestEvidence).Assembly.Location));
                 writer.WriteString("protocol_sha256", protocolHash);
                 writer.WriteString("family", family);
@@ -216,31 +217,14 @@ internal static class AttentionRequestEvidence
                 if (proof is not null)
                 {
                     int pageSize = new EngineOptions().KvPageSize;
-                    int[] headDimPerLayer = Enumerable.Repeat(proof.PagedHeadDim, proof.PagedLayers).ToArray();
-                    int poolPages = proof.PagedLayers == 0 ? 0
-                        : HartsyInference.LLM.Transformer.PagedKvPool.PageCountForBudget(proof.PagedKvHeads, headDimPerLayer, pageSize, poolBytes);
-                    long pagesPerRequest = (expectPrompt + (long)GeneratedTokens + 1 + pageSize - 1) / pageSize;
-                    writer.WriteStartObject("batch_proof");
-                    writer.WriteBoolean("required", requireBatchedDecode);
-                    writer.WriteBoolean("proven", batchProven);
-                    writer.WriteNumber("decode_batch_events_total", proof.DecodeEvents);
-                    writer.WriteNumber("decode_batch_events_measured", proof.MeasuredDecodeEvents);
-                    writer.WriteNumber("max_active_sequences_measured", proof.MaxCountMeasured);
-                    writer.WriteNumber("decode_steps_with_two_or_more_measured", proof.StepsWithTwoOrMoreMeasured);
-                    writer.WriteNumber("decode_steps_with_two_or_more_warmup", proof.WarmupStepsWithTwoOrMore);
-                    writer.WriteStartObject("measured_count_histogram");
-                    foreach ((int count, int steps) in proof.MeasuredCountHistogram) writer.WriteNumber(count.ToString(CultureInfo.InvariantCulture), steps);
-                    writer.WriteEndObject();
+                    proof.WriteBatchProof(writer, requireBatchedDecode, batchProven);
+                    writer.WriteStartObject("paged_observations");
                     writer.WriteNumber("paged_admission_events", proof.PagedAdmissionEvents);
                     writer.WriteNumber("paged_layers_observed", proof.PagedLayers);
-                    writer.WriteNumber("paged_kv_heads_observed", proof.PagedKvHeads);
-                    writer.WriteNumber("paged_head_dim_observed", proof.PagedHeadDim);
-                    writer.WriteNumber("kv_page_size", pageSize);
-                    writer.WriteNumber("kv_pool_pages_expected", poolPages);
-                    writer.WriteNumber("pages_per_request_expected", pagesPerRequest);
-                    writer.WriteNumber("pages_two_requests_expected", pagesPerRequest * 2);
-                    writer.WriteNumber("pages_spare_after_two_requests_expected", poolPages - pagesPerRequest * 2);
+                    writer.WriteString("geometry_in_payload_events", KvCapacity.ObservedEventsReason(proof));
                     writer.WriteEndObject();
+                    writer.WritePropertyName("kv_capacity");
+                    KvCapacityFor(model, poolBytes, pageSize, expectPrompt).WriteJson(writer);
                 }
                 writer.WriteEndObject();
                 if (requireBatchedDecode && !batchProven)
@@ -282,6 +266,16 @@ internal static class AttentionRequestEvidence
             "false" => false,
             _ => throw new ArgumentException($"--{name} takes true or false."),
         };
+
+    /// <summary>KV capacity from the model's GGUF header, identified by the hash the run records. Unknown geometry is reported as
+    /// unavailable with its reason; no page figure is written.</summary>
+    private static KvCapacity KvCapacityFor(string model, long poolBytes, int pageSize, long promptTokens)
+    {
+        (KvGeometry? geometry, string? reason) = KvCapacity.ReadGgufGeometry(model, Hash(model));
+        return geometry is null
+            ? KvCapacity.Unavailable(reason!, poolBytes, pageSize)
+            : KvCapacity.Compute(geometry, poolBytes, pageSize, promptTokens, GeneratedTokens);
+    }
 
     private static void Verify(string path, string expected)
     {

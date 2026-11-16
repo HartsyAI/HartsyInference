@@ -28,6 +28,7 @@ return command switch
 {
     "attention-freeze-qwen" => HartsyInference.GenCapture.AttentionWorkloadFreeze.Run(opts),
     "attention-request" => HartsyInference.GenCapture.AttentionRequestEvidence.RunAsync(opts).GetAwaiter().GetResult(),
+    "attention-capacity-derive" => HartsyInference.GenCapture.AttentionCapacityDerive.Run(opts),
     "manifest" => WriteManifest(opts),
     "compare" => Compare(opts),
     _ => Usage(),

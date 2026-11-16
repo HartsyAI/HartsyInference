@@ -19,6 +19,24 @@ internal sealed record AttentionDecodeProof(
 {
     public bool Proven => StepsWithTwoOrMoreMeasured > 0;
 
+    /// <summary>Writes the decode-batch proof object. It holds decode evidence only; capacity is reported separately.</summary>
+    public void WriteBatchProof(Utf8JsonWriter writer, bool required, bool proven)
+    {
+        writer.WriteStartObject("batch_proof");
+        writer.WriteBoolean("required", required);
+        writer.WriteBoolean("proven", proven);
+        writer.WriteNumber("decode_batch_events_total", DecodeEvents);
+        writer.WriteNumber("decode_batch_events_measured", MeasuredDecodeEvents);
+        writer.WriteNumber("max_active_sequences_measured", MaxCountMeasured);
+        writer.WriteNumber("decode_steps_with_two_or_more_measured", StepsWithTwoOrMoreMeasured);
+        writer.WriteNumber("decode_steps_with_two_or_more_warmup", WarmupStepsWithTwoOrMore);
+        writer.WriteStartObject("measured_count_histogram");
+        foreach ((int count, int steps) in MeasuredCountHistogram)
+            writer.WriteNumber(count.ToString(System.Globalization.CultureInfo.InvariantCulture), steps);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+    }
+
     /// <summary>Reads <paramref name="path"/>. Events at or after <paramref name="measuredStart"/> belong to the measured request;
     /// the caller must confirm that the session dropped nothing, because indices are only valid for an undropped capture.</summary>
     public static AttentionDecodeProof Read(string path, long measuredStart)

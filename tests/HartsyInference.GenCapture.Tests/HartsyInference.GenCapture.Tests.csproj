@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../tools/GenCapture/KvCapacity.cs" Link="GenCapture/KvCapacity.cs" />
+    <Compile Include="../../tools/GenCapture/AttentionDecodeProof.cs" Link="GenCapture/AttentionDecodeProof.cs" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\HartsyInference.LLM\HartsyInference.LLM.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
+  </ItemGroup>
+
+</Project>
