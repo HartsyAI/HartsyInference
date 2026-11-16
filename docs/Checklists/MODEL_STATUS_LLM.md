@@ -202,8 +202,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   with `tests/python-reference/dump_ernie55_tokenizer_cases.py`), including the `\p{Nd}{3}+` digit grouping that `OnigurumaPattern` rewrites
   for .NET. Real generation through the Text service on CUDA (RTX 4090, 24 GB; `Real_TextService_GeneratesFromAPlainPrompt`, greedy, 16
   tokens): "Large language models are" continues as " a type of artificial intelligence that can generate human-like text. They are trained on".
-  Load 140.5 s, prefill of 5 tokens 174.5 s, decode 13.9 s per token (5.5 to 17.8 s), peak VRAM about 22.5 GB; see
-  `ERNIE55_REAL_WEIGHTS.md` for the run record. Decode speed is not tuned. Missing: MTP speculative decoding in the Text
+  Timings and the run record are in `ERNIE55_REAL_WEIGHTS.md`; decode speed is not tuned. Missing: MTP speculative decoding in the Text
   path (draft, verify, MTP cache rollback), decode and MTP parity on real weights, and a host or device memory guard. Reference code is in `baidu/vLLM-ERNIE` (`src/vllm_ernie/models/ernie5_5/`). License excludes
   the EU, UK and South Korea.
 - [ ] Muse Spark Open on real weights and GPU: graph decode for the gated residual block, CUDA kernels for the quant types

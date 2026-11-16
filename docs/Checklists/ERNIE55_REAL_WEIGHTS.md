@@ -1,7 +1,8 @@
 # ERNIE-5.5-Flash-Base real-weight run
 
 Checkpoint: `baidu/ERNIE-5.5-Flash-Base` at revision `028544b2ffceea189b2d8768ed2b9d09b06f2343`. FP8 e4m3 with 128x128 F32
-`weight_scale_inv` grids, 128 shards, 288,434,400,632 bytes. Base model: no chat template in the repo, so the run feeds token ids.
+`weight_scale_inv` grids, 128 shards, 288,434,400,632 bytes. Base model: no chat template in the repo, so the harness test below feeds token ids and the Text path
+sends a plain completion prompt.
 
 ## What is verified without the weights
 
@@ -16,13 +17,17 @@ Checkpoint: `baidu/ERNIE-5.5-Flash-Base` at revision `028544b2ffceea189b2d8768ed
 
 ## Real-weight runs (CUDA)
 
-RTX 4090 (24 GB), driver 595.91.07, CUDA 13.2, 251 GB host RAM, checkpoint on a RunPod network volume, repo at `1779786fb`.
+An earlier run compared prefill numerics: every decoder layer's residual stream matched a CPU torch reference at cosine >= 0.999 for a
+5-token prefill (`tools/ernie5-reference`). It is not repeated here.
 
-- Prefill numerics: every decoder layer's residual stream matches a CPU torch reference at cosine >= 0.999 for a 5-token prefill
-  (`tools/ernie5-reference`).
+The Text-service run below used the CUDA tests directly, not `scripts/ernie55_pod_run.sh`, so the runbook's size and SHA check and its
+`Real_PrefillAndDecode_ProduceFiniteLogits` timing line were not run. RunPod EU-RO-1, image `kalebbroo/hartsy-gpu-runner:cuda13.0-ssh`,
+RTX 4090 (24 GB, sm_89), driver 595.91.07, CUDA 13.2, 251 GB host RAM, checkpoint on the network volume, repo at `1779786fb`. Host RSS
+was not measured.
+
 - Tokenizer: `Real_CompletionPrompt_MatchesTheHfTokenizer` matches the Hugging Face `tokenizers` ids on all 12 cases from
   `tests/python-reference/dump_ernie55_tokenizer_cases.py`.
-- FP8 on the device: all 8 `Ernie5ModelGpuParityTests` CUDA tests pass, including `Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu`.
+- GPU parity: all 8 `Ernie5ModelGpuParityTests` CUDA tests pass (F32 and FP8), including `Cuda_TextService_Fp8_LoadsOnTheDeviceAndMatchesCpu`.
 - Generation: `Real_TextService_GeneratesFromAPlainPrompt` (greedy, 16 tokens, stop reason Length) continues "Large language models are"
   (5 prompt ids) with " a type of artificial intelligence that can generate human-like text. They are trained on".
 
@@ -31,16 +36,19 @@ RTX 4090 (24 GB), driver 595.91.07, CUDA 13.2, 251 GB host RAM, checkpoint on a 
 | Load (dense preload 7644 MB of a 20025 MB budget, 48.5 s of it) | 140.5 s |
 | Prefill, 5 tokens | 174.5 s |
 | Decode, 15 steps | 208.8 s (13.9 s per token, 5.5 to 17.8 s) |
-| Total with load | 525 s |
+| Total with load (measured; includes about 1 s outside the stages above) | 525 s |
 
-Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 20 GB during decode as routed experts were uploaded. Decode
-time is spent in the layer forwards (build time 0 ms); routed-expert upload is the likely cost, but no profile has confirmed it. Not tuned yet.
+Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 20 GB during decode as routed experts were uploaded. The
+preload budget applies only at load, so nothing bounds that growth: a longer generation or a smaller card can run out of device memory
+mid-decode. Prefill takes about 12 decode steps' time for 5 tokens, likely because it is the first read of every layer's experts from the
+network volume; not profiled. Decode time is spent in the layer forwards (build time 0 ms); routed-expert upload is the likely cost, but no
+profile has confirmed it. Not tuned yet.
 
 ## What is not verified
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Decode and MTP numerics on real weights. Only the 5-token prefill is compared against a reference (below).
+- Decode and MTP numerics on real weights. Only the 5-token prefill is compared against a reference (above).
 - Production precision. CUDA GEMMs default to TF32 and Vulkan GEMMs round inputs to F16 (`EnableF16Gemm`), about 1e-3 relative
   to F32. `Ernie5RealCheckpointTests` pins the same two settings as the `reference` knob profile
   (`KnobProfiles.Reference`: `HighPrecisionGemm` on, `VkF16Gemm` off), so the verification run needs no extra configuration. Production
@@ -70,6 +78,7 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 
 - Decode speed: profile a decode step and tune routed-expert residency.
 - MTP speculative decoding in the Text path, and decode and MTP parity on real weights.
-- A host or device memory guard before the load.
+- A host or device memory guard before the load, and a bound on routed-expert device memory during decode.
+- License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
 - Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's
   `<|ERNIE_MASK|>` first, as `/v1/completions` does.
