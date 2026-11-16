@@ -1,8 +1,8 @@
 # ERNIE-5.5-Flash-Base real-weight run
 
 Checkpoint: `baidu/ERNIE-5.5-Flash-Base` at revision `028544b2ffceea189b2d8768ed2b9d09b06f2343`. FP8 e4m3 with 128x128 F32
-`weight_scale_inv` grids, 128 shards, 288,434,400,632 bytes. Base model: no chat template in the repo, so the harness test below feeds token ids and the Text path
-sends a plain completion prompt.
+`weight_scale_inv` grids, 128 shards, 288,434,400,632 bytes. Base model: no chat template in the repo, so the harness test below feeds
+token ids and the Text path sends a plain completion prompt.
 
 ## What is verified without the weights
 
@@ -40,9 +40,11 @@ was not measured.
 
 Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 20 GB during decode. The Text service attaches no expert
 cache, so this is the CUDA backend's auto-promotion: a routed expert uploaded a second time is kept on the device while free memory stays
-above `vram.autopromoteHeadroomMb`, and after that it uploads on every use. The growth stops at that floor, not at the preload budget. Prefill takes about 12 decode steps' time for 5 tokens, likely because it is the first read of every layer's experts from the
-network volume; not profiled. Decode time is spent in the layer forwards (build time 0 ms); routed-expert upload is the likely cost, but no
-profile has confirmed it. Not tuned yet.
+above `vram.autopromoteHeadroomMb` (default 1536 MB, which matches the 22.5 GB peak), and after that it uploads on every use. The growth
+stops at that floor, not at the preload budget. Promoted weights are not evicted under memory pressure, so a longer prompt whose
+activations exceed the floor can still run out of device memory. Prefill takes about 12 decode steps' time for 5 tokens, likely because it
+is the first read of every layer's experts from the network volume; not profiled. Decode time is spent in the layer forwards (build time
+0 ms); routed-expert upload is the likely cost, but no profile has confirmed it. Not tuned yet.
 
 ## What is not verified
 
