@@ -17,6 +17,8 @@ internal static class AttentionWorkloadFreeze
     {
         string model = Path.GetFullPath(options["model"]);
         string directory = Path.GetFullPath(options["out"]);
+        int target = options.TryGetValue("target-tokens", out string? targetText) ? int.Parse(targetText!, System.Globalization.CultureInfo.InvariantCulture) : 8192;
+        if (target < 64) throw new ArgumentException("target-tokens must be at least 64.");
         if (Directory.Exists(directory)) throw new IOException("Workload directories are immutable; choose a fresh path.");
         using GgufLoader loader = new();
         loader.Load(model);
@@ -35,15 +37,15 @@ internal static class AttentionWorkloadFreeze
         string suffix = "\nNow write the essay. Begin with the team's measurement process and continue with its review process.\n";
         int Count(string content) => template.Encode(tokenizer, [ChatMessage.User(content)], true, false).Length;
         StringBuilder body = new(introduction);
-        while (Count(body.ToString() + paragraph + suffix) < 8192) body.Append(paragraph);
+        while (Count(body.ToString() + paragraph + suffix) < target) body.Append(paragraph);
         string prompt = body.ToString() + suffix;
-        while (Count(prompt) < 8192)
+        while (Count(prompt) < target)
         {
             body.Append(" detail");
             prompt = body.ToString() + suffix;
         }
         int[] ids = template.Encode(tokenizer, [ChatMessage.User(prompt)], true, false);
-        if (ids.Length != 8192) throw new InvalidOperationException("Unable to reach the frozen token count exactly.");
+        if (ids.Length != target) throw new InvalidOperationException("Unable to reach the frozen token count exactly.");
         Directory.CreateDirectory(directory);
         string promptPath = Path.Combine(directory, "prompt.txt");
         File.WriteAllText(promptPath, prompt, new UTF8Encoding(false));
