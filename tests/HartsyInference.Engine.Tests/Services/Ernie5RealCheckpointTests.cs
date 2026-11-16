@@ -27,8 +27,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
 /// <c>numerics.moeExpertPrefetchThreads=32</c>); <c>ERNIE_REAL_DECODE_FEED</c> = a comma list of token ids fed at the decode steps instead
 /// of the argmax (one step each, so <c>ERNIE_REAL_DECODE_STEPS</c> is ignored; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
-/// comparison); <c>ERNIE_REAL_PRECISION</c> = <c>reference</c> (default: F32 GEMMs, as the <c>reference</c> knob profile) or <c>production</c>
-/// (each backend's default: TF32 on CUDA, F16 GEMM inputs on Vulkan). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// comparison); <c>ERNIE_REAL_PRECISION</c> = <c>reference</c> (default: F32 GEMMs, the GEMM pins of the <c>reference</c> knob profile) or
+/// <c>production</c> (each GPU backend's default GEMM: TF32 on CUDA, F16 inputs on Vulkan); other knobs keep their defaults in both. On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
@@ -99,8 +99,9 @@ public sealed class Ernie5RealCheckpointTests
         string? feedText = Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_FEED");
         int[]? feed = string.IsNullOrWhiteSpace(feedText) ? null : ParseIds(feedText);
         if (feed is { Length: 0 }) throw new ArgumentException($"ERNIE_REAL_DECODE_FEED='{feedText}' holds no token ids.");
-        // Reference precision by default, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
-        // ERNIE_REAL_PRECISION=production keeps each backend's own default instead (TF32 on CUDA, F16 GEMM inputs on Vulkan).
+        // GEMM precision only (the GEMM pins of the `reference` knob profile): by default F32 GEMMs without TF32 or F16 inputs;
+        // ERNIE_REAL_PRECISION=production keeps each backend's own default (TF32 on CUDA, F16 GEMM inputs on Vulkan; the CPU has no
+        // reduced-precision GEMM, so it ignores the switch). Every other knob, attention and KV numerics included, is the default in both.
         string precision = (Environment.GetEnvironmentVariable("ERNIE_REAL_PRECISION") ?? "reference").ToLowerInvariant();
         bool production = precision switch
         {
@@ -108,6 +109,9 @@ public sealed class Ernie5RealCheckpointTests
             "production" => true,
             _ => throw new ArgumentException($"ERNIE_REAL_PRECISION must be reference or production, not '{precision}'."),
         };
+        string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
+        // Pushed before the backend is built, so construction-scope pins (numerics.noTf32, numerics.vkF16Gemm, ...) reach it.
+        using IDisposable? knobs = PushKnobs(profileDir, Environment.GetEnvironmentVariable("ERNIE_REAL_SET"));
         using IBackend backend = device switch
         {
             "cuda" => production ? new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory())
@@ -120,8 +124,6 @@ public sealed class Ernie5RealCheckpointTests
         bool resident = Environment.GetEnvironmentVariable("ERNIE_REAL_RESIDENT") == "1";
         bool expertCache = Environment.GetEnvironmentVariable("ERNIE_REAL_EXPERT_CACHE") == "1";
         int decodeSteps = feed?.Length ?? (int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1);
-        string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
-        using IDisposable? knobs = PushKnobs(profileDir, Environment.GetEnvironmentVariable("ERNIE_REAL_SET"));
         int capacity = tokens.Length + decodeSteps + 1;
         Stopwatch load = Stopwatch.StartNew();
         using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = capacity, ResidentWeights = resident });
