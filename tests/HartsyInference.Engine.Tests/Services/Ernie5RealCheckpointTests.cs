@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Cpu;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Moe;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
@@ -20,10 +21,12 @@ namespace HartsyInference.Engine.Tests.Services;
 /// the forward check. Each is reported as skipped (never passed) otherwise.</summary>
 /// <remarks>Environment: <c>ERNIE_REAL_RESIDENT</c> = <c>1</c> builds every layer once and preloads its per-token weights (default: layers
 /// stream per forward); <c>ERNIE_REAL_EXPERT_CACHE</c> = <c>1</c> (with resident, CUDA) attaches the device expert cache before the first
-/// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed (default 1);
-/// <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma
-/// list of token ids (default <c>1,2,3,4,5</c>). The checkpoint is a base model with no chat template, so the forward takes token ids, and the
-/// Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c> is its token limit there, default 16).</remarks>
+/// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed
+/// (default 1); <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma list of
+/// token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per phase
+/// (prefill, decode). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
+/// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
 public sealed class Ernie5RealCheckpointTests
 {
@@ -101,6 +104,8 @@ public sealed class Ernie5RealCheckpointTests
         bool resident = Environment.GetEnvironmentVariable("ERNIE_REAL_RESIDENT") == "1";
         bool expertCache = Environment.GetEnvironmentVariable("ERNIE_REAL_EXPERT_CACHE") == "1";
         int decodeSteps = int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1;
+        string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
+        using IDisposable? knobs = string.IsNullOrEmpty(profileDir) ? null : PushProfiling(profileDir);
         int capacity = tokens.Length + decodeSteps + 1;
         Stopwatch load = Stopwatch.StartNew();
         using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = capacity, ResidentWeights = resident });
@@ -109,9 +114,13 @@ public sealed class Ernie5RealCheckpointTests
         // Declared after the model so it is disposed first; attached before the first forward, so no expert is promoted outside it.
         using MoeExpertOffload? offload = expertCache ? AttachExpertCache(backend, model, resident) : null;
 
+        ResetProfiles(backend);
+        ProcessIo io = ProcessIo.Read();
         Stopwatch prefill = Stopwatch.StartNew();
         float[] logits = model.Forward(tokens, state);
         prefill.Stop();
+        string prefillIo = ProcessIo.Read().Since(io);
+        DumpProfiles(backend, profileDir, "prefill");
         AssertHealthy(logits, model.Config.VocabSize, "prefill");
         int next = Argmax(logits);
 
@@ -122,25 +131,28 @@ public sealed class Ernie5RealCheckpointTests
         MoeOffloadStats before = offload?.Stats ?? default;
         for (int i = 0; i < decodeSteps; i++)
         {
+            io = ProcessIo.Read();
             Stopwatch decode = Stopwatch.StartNew();
             float[] step = model.Forward([token], state);
             decode.Stop();
+            string stepIo = ProcessIo.Read().Since(io);
             AssertHealthy(step, model.Config.VocabSize, $"decode {i + 1}");
             if (offload is null)
             {
-                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s");
+                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s{stepIo}");
             }
             else
             {
                 // This step's own hit share and admissions, not the running total since attach (which includes the prefill).
                 MoeOffloadStats now = offload.Stats;
                 long hit = now.ResidentRows - before.ResidentRows, all = hit + now.StreamedRows - before.StreamedRows + now.HostRows - before.HostRows;
-                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s hit {(all == 0 ? 0 : (double)hit / all):P0} +{now.Admitted - before.Admitted}");
+                steps.Add($"{decode.Elapsed.TotalSeconds:F2}s{stepIo} hit {(all == 0 ? 0 : (double)hit / all):P0} +{now.Admitted - before.Admitted}");
                 before = now;
             }
             token = Argmax(step);
             generated.Add(token);
         }
+        DumpProfiles(backend, profileDir, "decode");
 
         if (offload is not null)
         {
@@ -149,7 +161,7 @@ public sealed class Ernie5RealCheckpointTests
                 + $"resident share {stats.ResidentShare:P1}.");
         }
         Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
-            + $"{prefill.Elapsed.TotalSeconds:F1}s, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
+            + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"greedy tokens [{string.Join(",", generated)}].");
     }
 
@@ -215,6 +227,83 @@ public sealed class Ernie5RealCheckpointTests
         Assert.Equal(5, result.PromptTokens);
         Assert.InRange(result.CompletionTokens, 1, maxTokens);
         Assert.False(string.IsNullOrWhiteSpace(result.Text));
+    }
+
+    // The CUDA per-op table (diagnostics.profile; expert uploads show as H2D_BIG) and the model stage timer (diagnostics.stageProfile), written
+    // under profileDir. Both are off unless ERNIE_REAL_PROFILE names that directory. The stage timer syncs around each stage, so profiled
+    // totals run slower than an unprofiled pass.
+    private static IDisposable PushProfiling(string profileDir)
+    {
+        Directory.CreateDirectory(profileDir);
+        return KnobProfileScope.Push(KnobProfile.Create("ernie5-real-profile")
+            .With(EngineKnobs.Profile, true)
+            .With(EngineKnobs.StageProfile, true)
+            .With<string?>(EngineKnobs.ProfileOut, Path.Combine(profileDir, "ops")));
+    }
+
+    private static void ResetProfiles(IBackend backend)
+    {
+        backend.ResetOpProfile();
+        StageProfiler.Reset();
+    }
+
+    // Writes ops.<phase> and stages.<phase>.tsv, then starts the next phase from zero.
+    private static void DumpProfiles(IBackend backend, string? profileDir, string phase)
+    {
+        if (string.IsNullOrEmpty(profileDir)) return;
+        backend.DumpOpProfile(phase);
+        File.WriteAllText(Path.Combine(profileDir, $"stages.{phase}.tsv"), StageProfiler.Report());
+        ResetProfiles(backend);
+    }
+
+    /// <summary>The process's major page faults and storage reads on Linux, where routed experts are read from the mapped checkpoint. A
+    /// fault per step shows an expert read from disk rather than from the page cache. An unavailable counter is -1; nothing is reported
+    /// off Linux.</summary>
+    /// <remarks><c>read_bytes</c> counts block-layer reads, so a FUSE or NFS network volume can report about 0 MB while every expert comes
+    /// off the network; major faults still count those reads. High faults with about 0 MB read means the volume is not counted, not that
+    /// the page cache served the reads.</remarks>
+    private readonly record struct ProcessIo(long MajorFaults, long ReadBytes)
+    {
+        // Each counter is read on its own, -1 when unavailable, so a kernel without /proc/self/io still reports the faults.
+        public static ProcessIo Read() => OperatingSystem.IsLinux() ? new ProcessIo(Counter(MajorFaultCount), Counter(ReadByteCount)) : new ProcessIo(-1, -1);
+
+        private static long Counter(Func<long> read)
+        {
+            try
+            {
+                return read();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or IndexOutOfRangeException
+                or ArgumentOutOfRangeException or OverflowException)
+            {
+                return -1;
+            }
+        }
+
+        // /proc/self/stat: the command is in parentheses and may hold spaces, so count fields after the last ')'; majflt is field 12.
+        private static long MajorFaultCount()
+        {
+            string stat = File.ReadAllText("/proc/self/stat");
+            string[] fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+            return long.Parse(fields[9], System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static long ReadByteCount()
+        {
+            string? line = File.ReadLines("/proc/self/io").FirstOrDefault(l => l.StartsWith("read_bytes:", StringComparison.Ordinal));
+            if (line is null) throw new FormatException("/proc/self/io has no read_bytes line.");
+            return long.Parse(line["read_bytes:".Length..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>" (N major faults, M MB read)" since <paramref name="start"/>, with n/a for a counter either sample could not read;
+        /// empty off Linux.</summary>
+        public string Since(ProcessIo start)
+        {
+            if (!OperatingSystem.IsLinux()) return "";
+            string faults = MajorFaults < 0 || start.MajorFaults < 0 ? "n/a" : (MajorFaults - start.MajorFaults).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string read = ReadBytes < 0 || start.ReadBytes < 0 ? "n/a" : ((ReadBytes - start.ReadBytes) >> 20).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $" ({faults} major faults, {read} MB read)";
+        }
     }
 
     // The device-only expert cache, sized to what the dense preload left free less the same headroom.

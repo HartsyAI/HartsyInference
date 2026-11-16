@@ -102,14 +102,21 @@ internal sealed class Ernie5Layer : IDisposable
     /// <summary>Runs the layer on <paramref name="stream"/> (<c>[tokens, hc, hidden]</c>) in place.</summary>
     public void Forward(float[] stream, int tokens, int startPos, Ernie5SequenceState state)
     {
+        // The whole layer, so the hyper-connection mixes and norms show as this less the attn and ffn stages.
+        using StageProfiler.Scope layerScope = StageProfiler.Begin(_backend, "ernie5", "layer");
         int d = _cfg.HiddenSize;
         float[] x = new float[tokens * d], sub = new float[tokens * d];
         RunSublayer(_attnHc, _attnNorm, stream, tokens, x, sub, (input, output) =>
         {
+            using StageProfiler.Scope _ = StageProfiler.Begin(_backend, "ernie5", _hca is not null ? "attn.hca" : "attn.dsa");
             if (_hca is not null) _hca.Forward(input, tokens, startPos, state.Hca(Index), output);
             else _dsa!.Forward(input, tokens, startPos, state.Dsa(Index), output);
         });
-        RunSublayer(_ffnHc, _ffnNorm, stream, tokens, x, sub, (input, output) => Ffn(input, tokens, output));
+        RunSublayer(_ffnHc, _ffnNorm, stream, tokens, x, sub, (input, output) =>
+        {
+            using StageProfiler.Scope _ = StageProfiler.Begin(_backend, "ernie5", _moe is not null ? "ffn.moe" : "ffn.dense");
+            Ffn(input, tokens, output);
+        });
     }
 
     /// <summary>Shape of layer <paramref name="index"/>'s HCA attention.</summary>
