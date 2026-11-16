@@ -162,16 +162,13 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
         first.Dispose();
         first.Dispose();   // already ended: no second release of the gate
 
-        long read = -1;
-        Thread other = new(() =>
+        long read = OnThreadWithin(() =>
         {
             using MappedTensorPrefetch.Batch next = MappedTensorPrefetch.Begin(tensors, threads: 2);
             copy.Dispose();     // a stale copy must not end the running batch
             copy.WaitFor(0);    // nor read its state
-            read = next.Finish();
-        });
-        other.Start();
-        Assert.True(other.Join(TimeSpan.FromSeconds(30)), "the second batch did not start or finish");
+            return next.Finish();
+        }, "the second batch did not start or finish");
         Assert.Equal(FileBytes, read);
         Assert.Equal(FileBytes, ReadWithin(tensors, threads: 2));
     }
@@ -190,12 +187,31 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
 
     // Read on another thread, failing after 30 s rather than hanging the run if a batch left the gate held.
     private static long ReadWithin(IReadOnlyList<Tensor> tensors, int threads)
+        => OnThreadWithin(() => MappedTensorPrefetch.Read(tensors, threads), "the prefetch gate was still held");
+
+    // Runs work on its own thread with a 30 s bound. An exception there is rethrown here, so a regression fails this test instead of
+    // ending the test host as an unhandled exception on a background thread.
+    private static long OnThreadWithin(Func<long> work, string timeoutMessage)
     {
-        long read = -1;
-        Thread reader = new(() => read = MappedTensorPrefetch.Read(tensors, threads));
-        reader.Start();
-        Assert.True(reader.Join(TimeSpan.FromSeconds(30)), "the prefetch gate was still held");
-        return read;
+        long result = -1;
+        Exception? error = null;
+        Thread thread = new(() =>
+        {
+            try
+            {
+                result = work();
+            }
+#pragma warning disable CA1031 // Rethrown on the test thread below.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                error = ex;
+            }
+        });
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(30)), timeoutMessage);
+        if (error is not null) throw new InvalidOperationException("The work thread failed.", error);
+        return result;
     }
 
     [Fact]

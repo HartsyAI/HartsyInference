@@ -98,7 +98,13 @@ public static class MappedTensorPrefetch
         }
         finally
         {
-            if (!started) BatchGate.Release();
+            if (!started)
+            {
+                // Drop the chunks gathered before the failure, as Dispose does, so their mappings are not kept reachable.
+                Array.Clear(_chunks, 0, _chunkCount);
+                _chunkCount = 0;
+                BatchGate.Release();
+            }
         }
     }
 
