@@ -122,6 +122,112 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
     }
 
     [Fact]
+    public void Begin_WaitForEachTensorInTurn_ReturnsOnceItIsRead_AndDisposeFinishesTheRest()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        List<Tensor> tensors = [];
+        int[] offsets = [0, MappedTensorPrefetch.ChunkBytes, MappedTensorPrefetch.ChunkBytes * 2];
+        foreach (int offset in offsets)
+        {
+            Tensor tensor = new(handle.PointerAt(offset), new TensorShape(4096), DType.U8);
+            tensor.SetKeepAlive(handle);
+            TensorFileExtents.Register(tensor, handle, offset);
+            tensors.Add(tensor);
+        }
+        nint block = (nint)NativeMemory.AlignedAlloc(64, 64);
+        _ownedNative.Add(block);
+        tensors.Add(new Tensor((void*)block, new TensorShape(64), DType.U8));   // no file extent: nothing to wait for
+
+        using (MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin(tensors, threads: 2))
+        {
+            for (int i = 0; i < tensors.Count; i++) batch.WaitFor(i);
+            Assert.Throws<ArgumentOutOfRangeException>(() => batch.WaitFor(tensors.Count));
+        }
+
+        // The batch ended, so the next one starts rather than waiting on it (bounded, so a gate left held fails instead of hanging).
+        Assert.Equal(4096 * 3, ReadWithin(tensors, threads: 2));
+    }
+
+    [Fact]
+    public void Batch_DisposedTwiceOrThroughAStaleCopy_LeavesTheNextBatchAlone()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+        List<Tensor> tensors = [registered];
+
+        MappedTensorPrefetch.Batch first = MappedTensorPrefetch.Begin(tensors, threads: 2);
+        MappedTensorPrefetch.Batch copy = first;
+        first.Dispose();
+        first.Dispose();   // already ended: no second release of the gate
+
+        long read = OnThreadWithin(() =>
+        {
+            using MappedTensorPrefetch.Batch next = MappedTensorPrefetch.Begin(tensors, threads: 2);
+            copy.Dispose();     // a stale copy must not end the running batch
+            copy.WaitFor(0);    // nor read its state
+            return next.Finish();
+        }, "the second batch did not start or finish");
+        Assert.Equal(FileBytes, read);
+        Assert.Equal(FileBytes, ReadWithin(tensors, threads: 2));
+    }
+
+    [Fact]
+    public void Begin_WhileThisThreadHoldsABatch_Throws()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(4096), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+
+        using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin([registered], threads: 1);
+        Assert.Throws<InvalidOperationException>(() => MappedTensorPrefetch.Begin([registered], threads: 1));
+    }
+
+    // Read on another thread, failing after 30 s rather than hanging the run if a batch left the gate held.
+    private static long ReadWithin(IReadOnlyList<Tensor> tensors, int threads)
+        => OnThreadWithin(() => MappedTensorPrefetch.Read(tensors, threads), "the prefetch gate was still held");
+
+    // Runs work on its own thread with a 30 s bound. An exception there is rethrown here, so a regression fails this test instead of
+    // ending the test host as an unhandled exception on a background thread.
+    private static long OnThreadWithin(Func<long> work, string timeoutMessage)
+    {
+        long result = -1;
+        Exception? error = null;
+        Thread thread = new(() =>
+        {
+            try
+            {
+                result = work();
+            }
+#pragma warning disable CA1031 // Rethrown on the test thread below.
+            catch (Exception ex)
+#pragma warning restore CA1031
+            {
+                error = ex;
+            }
+        });
+        thread.Start();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(30)), timeoutMessage);
+        if (error is not null) throw new InvalidOperationException("The work thread failed.", error);
+        return result;
+    }
+
+    [Fact]
+    public void Begin_ZeroThreads_IsAnEmptyBatchThatWaitsForNothing()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+
+        using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin([registered], threads: 0);
+        batch.WaitFor(0);
+        batch.WaitFor(99);   // an empty batch has no tensors to check
+    }
+
+    [Fact]
     public void Read_ZeroThreads_ReadsNothing()
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);
