@@ -31,7 +31,9 @@ was not measured.
 - Generation: `Real_TextService_GeneratesFromAPlainPrompt` (greedy, 16 tokens, stop reason Length) continues "Large language models are"
   (5 prompt ids) with " a type of artificial intelligence that can generate human-like text. They are trained on".
 
-| Stage | Time |
+Timings before the routed-expert prefetch (#926); the next section has the comparison.
+
+| Stage | Time (before #926) |
 | --- | --- |
 | Load (dense preload 7644 MB of a 20025 MB budget, 48.5 s of it) | 140.5 s |
 | Prefill, 5 tokens | 174.5 s |
@@ -42,9 +44,33 @@ Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 2
 cache, so this is the CUDA backend's auto-promotion: a routed expert uploaded a second time is kept on the device while free memory stays
 above `vram.autopromoteHeadroomMb` (default 1536 MB, which matches the 22.5 GB peak), and after that it uploads on every use. The growth
 stops at that floor, not at the preload budget. Promoted weights are not evicted under memory pressure, so a longer prompt whose
-activations exceed the floor can still run out of device memory. Prefill takes about 12 decode steps' time for 5 tokens, likely because it
-is the first read of every layer's experts from the network volume; not profiled. Decode time is spent in the layer forwards (build time
-0 ms); routed-expert upload is the likely cost, but no profile has confirmed it. Not tuned yet.
+activations exceed the floor can still run out of device memory.
+
+### Decode profile and the expert prefetch
+
+`Real_PrefillAndDecode_ProduceFiniteLogits` with `ERNIE_REAL_RESIDENT=1 ERNIE_REAL_DECODE_STEPS=16 ERNIE_REAL_PROFILE=<dir>` (reference
+precision, tokens `1,2,3,4,5`), same pod type, before (`564d824da`) and after (`f1b226734`) the routed-expert prefetch of #926. The pod's
+container memory is capped at 46 GB, so the page cache cannot hold the experts between steps. The volume reads about 800 MB/s in one
+sequential `dd` stream but about 95 MB/s from one thread in 4 MiB reads; 8 to 30 parallel 4 MiB readers measured 550 to 790 MB/s while
+another run shared the volume.
+
+ERNIE takes the host-routed per-expert MoE loop (split-feature routing and SiTU keep it off the device-routed path). Before the prefetch,
+routed experts were 168.5 of 171 s of the 16 decode steps, almost all of it 9,576 serial expert uploads at 17.2 ms each; attention, the
+router, the shared expert and the latent projections were under 1 s together. A warm rerun with the same tokens was only 8% faster.
+
+| Cold run | Before | With the prefetch |
+| --- | --- | --- |
+| Prefill, 5 tokens | 172.7 s | 36.2 s |
+| Decode, 16 steps (layer time) | 171.2 s | 49.3 s |
+| Decode steps 1 to 8 | 22.7, 20.4, 16.4, 10.1, 10.6, 17.7, 11.2, 8.1 s | 5.9, 5.3, 4.6, 3.1, 3.1, 4.4, 3.2, 2.6 s |
+| Decode steps 15 and 16 | 2.9, 2.7 s | 1.3, 1.2 s |
+| Expert upload (`H2D_BIG` average) | 17.2 ms | 0.52 ms |
+
+The greedy tokens are identical. The tokens repeat from step 9, so the late steps reuse experts already on the device or in the page
+cache; compare position by position, not the 16-step mean. With the prefetch, `moe.prefetch` is 38.6 of the 49.3 s: about 37 GiB read at
+about 1 GB/s with 16 readers, the highest rate seen on this volume (the separate reader tests ran while another run shared it, and some
+late repeated-token reads hit the page cache), so decode is now bound by its read speed. The prefetch runs
+before each layer's expert loop, so its reads and the uploads and GEMMs do not overlap.
 
 ## What is not verified
 
@@ -78,7 +104,8 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 
 ## Open
 
-- Decode speed: profile a decode step and tune routed-expert residency.
+- Decode speed: overlap the expert reads with the expert loop. Beyond that, decode is bound by how fast the experts' storage reads; a
+  local disk, more page cache, or several GPUs holding the experts are the next steps.
 - MTP speculative decoding in the Text path, and decode and MTP parity on real weights.
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
