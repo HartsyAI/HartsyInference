@@ -257,7 +257,8 @@ public sealed class Ernie5RealCheckpointTests
     }
 
     /// <summary>The process's major page faults and storage reads on Linux, where routed experts are read from the mapped checkpoint. A
-    /// fault per step shows an expert read from disk rather than from the page cache. Zero and unreported elsewhere.</summary>
+    /// fault per step shows an expert read from disk rather than from the page cache. An unavailable counter is -1; nothing is reported
+    /// off Linux.</summary>
     /// <remarks><c>read_bytes</c> counts block-layer reads, so a FUSE or NFS network volume can report about 0 MB while every expert comes
     /// off the network; major faults still count those reads. High faults with about 0 MB read means the volume is not counted, not that
     /// the page cache served the reads.</remarks>
@@ -272,7 +273,8 @@ public sealed class Ernie5RealCheckpointTests
             {
                 return read();
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or IndexOutOfRangeException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or IndexOutOfRangeException
+                or ArgumentOutOfRangeException or OverflowException)
             {
                 return -1;
             }
