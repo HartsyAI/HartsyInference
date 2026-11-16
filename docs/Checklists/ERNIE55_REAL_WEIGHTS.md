@@ -20,6 +20,12 @@ token ids and the Text path sends a plain completion prompt.
 An earlier run compared prefill numerics: every decoder layer's residual stream matched a CPU torch reference at cosine >= 0.999 for a
 5-token prefill (`tools/ernie5-reference`). It is not repeated here.
 
+Decode parity (2026-11-16, RTX 4090, `580cd2a7d`, reference precision): the 5-token prompt `1,2,3,4,5`, then 8 fixed decode tokens
+`2551,7479,2811,1230,2810,4357,1298,36326`, one forward each through the KV caches, against the CPU torch reference on the same 13
+tokens. All 43 layers reach cosine >= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6), and the
+argmax after the last position is 1232 on both sides. That covers the HCA and DSA KV caches, RoPE at later positions and the one-token MoE
+path. Commands and the full result are in `tools/ernie5-reference/README.md` (Decode parity).
+
 The Text-service run below used the CUDA tests directly, not `scripts/ernie55_pod_run.sh`, so the runbook's size and SHA check and its
 `Real_PrefillAndDecode_ProduceFiniteLogits` timing line were not run. RunPod EU-RO-1, image `kalebbroo/hartsy-gpu-runner:cuda13.0-ssh`,
 RTX 4090 (24 GB, sm_89), driver 595.91.07, CUDA 13.2, 251 GB host RAM, checkpoint on the network volume, repo at `1779786fb`. Host RSS
@@ -92,7 +98,14 @@ running the commits before and after #928 back to back on one pod, after a warm-
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Decode and MTP numerics on real weights. Only the 5-token prefill is compared against a reference (above).
+- Sequences of 128 tokens or more (the HCA compressor), and past 2,176 tokens (the DSA indexer selection). 37 of the 43 layers are HCA layers whose compressor's first block completes at the 128th token, and
+  `reference.py` refuses it, so almost every real prompt runs compressor code that no reference has checked. The source is public:
+  vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py` and its
+  Triton kernels), and the engine shares `KvCompressorState` with DeepSeek-V4.1. The DSA indexer's key selection drops keys only past
+  2,176 tokens (`sliding_window` 128 plus `index_topk` 2048); the reference implements it, but no run has been that long.
+- `csa_dense_mode: true` in the config. Neither the engine nor the vLLM-ERNIE files read for this port (`config.py`,
+  `nvidia/attention.py`, `model.py`, `moe.py`, `mtp.py`) read it.
+- MTP numerics on real weights.
 - Production precision. CUDA GEMMs default to TF32 and Vulkan GEMMs round inputs to F16 (`EnableF16Gemm`), about 1e-3 relative
   to F32. `Ernie5RealCheckpointTests` pins the same two settings as the `reference` knob profile
   (`KnobProfiles.Reference`: `HighPrecisionGemm` on, `VkF16Gemm` off), so the verification run needs no extra configuration. Production
@@ -123,7 +136,8 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 - Decode speed: decode is bound by how fast the experts' storage reads (the reads overlap the expert loop since #928; 32 readers did not
   speed up decode on one pod, while prefill gained about 9%). A local disk, more page cache, or several GPUs holding the experts are the
   next steps.
-- MTP speculative decoding in the Text path, and decode and MTP parity on real weights.
+- MTP speculative decoding in the Text path, and MTP parity on real weights.
+- Parity past 128 tokens (the compressor and the indexer selection; see What is not verified).
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
 - Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's

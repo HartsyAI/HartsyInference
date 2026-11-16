@@ -33,12 +33,13 @@ Sources the reference follows (fetched for this change, not from the engine):
 
 ## Not covered (the reference says so or refuses)
 
-- **HCA compressor.** Pooling, gating and the APE row index are not in the sources. `reference.py` raises
-  `NotImplementedError` once a block of `compress_ratio` tokens completes, i.e. at token 128 for the real checkpoint. Any run
-  of 127 tokens or fewer is unaffected, and the pod run feeds 5 tokens.
+- **HCA compressor.** Not implemented here. `reference.py` raises `NotImplementedError` once a block of `compress_ratio` tokens
+  completes, i.e. at token 128 for the real checkpoint; any run of 127 tokens or fewer is unaffected. The source to port is public:
+  vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py`; the
+  pooling, APE and norm run in its Triton kernels `_SAVE_PARTIAL_STATES_KERNEL` and `compress_norm_rope_store_triton`).
 - **Indexer ReLU and scoring.** The DeepGEMM score kernels are not in the sources. The reference uses the standard form
-  `sum_h w_h * relu(q_h . k)`. The indexer only selects keys once a sequence is longer than `sliding_window` (128), so the
-  5-token pod run does not exercise it.
+  `sum_h w_h * relu(q_h . k)`. The indexer scores the keys before the sliding window (128), but keeps all of them until there are more
+  than `index_topk` (2048), so its selection changes the result only past 2,176 tokens.
 - **MTP layer** (`num_nextn_predict_layers = 1`). Not run. The reference stops at `num_hidden_layers`.
 - **Shared-expert combine order.** The reference adds the shared expert after the latent `fc2` of the routed branch. That is
   read from the `routed_output_transform` naming, not from a line of the source.
@@ -114,7 +115,7 @@ file per forward call (`pos0_t5`, then `pos5_t1`, `pos6_t1`, ...) and `tokens.js
 position, and with `--logits` checks the last argmax.
 
 ```bash
-export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # the greedy path every real run has produced from 1,2,3,4,5
+export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # any ids work; these are the 2026-11-16 run's (see below)
 ERNIE_DUMP_LAYERS="$RUN/engine-decode" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_RESIDENT=1 ERNIE_REAL_TOKENS="$TOKENS" \
   ERNIE_REAL_DECODE_FEED="$FEED" dotnet test tests/HartsyInference.Engine.Tests \
   --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits" \
@@ -132,9 +133,19 @@ Every position must reach the threshold, not only the whole stream. That applies
 checked only the whole-stream cosine. One position holds only `hc*hidden` values; `--position-threshold` sets a looser bound for single
 positions without loosening the whole-stream check.
 
+The fed ids need not be the engine's greedy choices: the reference runs on the same ids, so the check holds for any sequence. The ids
+above are a 16-step greedy run's outputs. That run's own first decode input was the prefill argmax, 1298, which the feed leaves out, so
+every fed id sits one position early against the greedy path and the engine's argmax agrees with 6 of the 8.
+
 What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
-up to 127 tokens. What it does not: the DSA indexer's key selection and the HCA compressor, which start past 128 tokens (and the
-reference refuses the compressor), and MTP.
+up to 127 tokens. What it does not: the HCA compressor, whose first 128-token block completes at the 128th token (the reference refuses
+it; see Not covered); the DSA indexer's key selection, which drops keys only past 2,176 tokens (`sliding_window` 128 plus `index_topk`
+2048); and MTP.
+
+Real checkpoint, 2026-11-16 (RTX 4090, `580cd2a7d`, prompt `1,2,3,4,5` plus the feed above, 13 positions): all 43 layers reach
+cosine >= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6, max abs 2.8e-2 at layer 42), and the argmax
+after the last position is 1232 on both sides. The engine took 150 s to load, 33 s for the prefill and 4.1 to 7.1 s per decode step; the
+CPU reference took 238 s.
 
 Local dry run on the real-dimension synthetic checkpoint (CPU engine, 5 prompt tokens plus feed `6,7,8`): all 3 layers have cosine
 1.0000 at every position (relative error 4.9e-6 to 2.0e-5), and the argmax after the last position is 781 on both sides. With one
