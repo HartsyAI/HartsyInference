@@ -6,6 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
@@ -537,6 +538,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 if (!routed) output.Dispose();
             }
         }
+        PrefetchRoutedExperts(backend, expertTokens);
         for (int ex = 0; ex < e; ex++)
         {
             int ne = expertTokens[ex].Count;
@@ -552,6 +554,41 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             expOut.Dispose();
         }
         return output;
+    }
+
+    /// <summary>Reads the selected routed experts that are not on the device into the page cache with parallel readers
+    /// (<see cref="MappedTensorPrefetch"/>), so the per-expert loop's uploads copy from memory instead of waiting on storage one expert at a
+    /// time. Off when <c>numerics.moeExpertPrefetchThreads</c> is 0.</summary>
+    private void PrefetchRoutedExperts(IBackend backend, List<int>[] expertTokens)
+    {
+        int threads = HartsyInference.Core.Configuration.EngineKnobs.MoeExpertPrefetchThreads.Value;
+        if (threads == 0) return;
+        List<Tensor> pending = RoutedPrefetchSet(expertTokens, backend.IsWeightResident);
+        if (pending.Count == 0) return;
+        using (StageProfiler.Begin(backend, "moe", "prefetch"))
+            MappedTensorPrefetch.Read(pending, threads);
+    }
+
+    /// <summary>The gate, up and down weights of every expert with at least one token that <paramref name="resident"/> does not report on
+    /// the device. Packed experts read through their own recipe, so none are listed for them.</summary>
+    internal List<Tensor> RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident)
+    {
+        List<Tensor> pending = [];
+        if (_packed is not null) return pending;
+        for (int ex = 0; ex < expertTokens.Length; ex++)
+        {
+            if (expertTokens[ex].Count == 0) continue;
+            int local = ex - _firstExpert;
+            AddIfHostOnly(_gateW[local]);
+            AddIfHostOnly(_upW[local]);
+            AddIfHostOnly(_downW[local]);
+        }
+        return pending;
+
+        void AddIfHostOnly(Tensor weight)
+        {
+            if (!resident(weight)) pending.Add(weight);
+        }
     }
 
     /// <summary>One routed expert over <paramref name="rows"/> gathered tokens, including the per-expert output norm when configured.</summary>
