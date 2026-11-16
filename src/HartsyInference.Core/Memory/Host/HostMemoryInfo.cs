@@ -69,10 +69,10 @@ public static partial class HostMemoryInfo
     /// <c>hierarchical_memory_limit</c>. Each level counts its limit minus its working set, the usage less the inactive file cache
     /// (<c>inactive_file</c>, <c>total_inactive_file</c> on v1), which the kernel reclaims before it OOM-kills; that is the working set
     /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer. The mounts come from
-    /// <c>/proc/self/mountinfo</c>, the last matching line (the visible one when mounts stack), and the membership path is made relative
-    /// to the tree's root as mounted (that line's fourth field): a mount of the subtree <c>/docker/abc</c> shows the group
-    /// <c>/docker/abc/worker</c> at <c>worker</c>. A group outside the mounted subtree, or a mount root outside the cgroup namespace,
-    /// reads as the mount itself, which may be an ancestor with a looser limit: the figure is then an upper bound.</remarks>
+    /// <c>/proc/self/mountinfo</c> (the last line where mounts stack at one point), and every mount whose tree root contains the group is
+    /// read, the membership path made relative to that root (the line's fourth field): a mount of the subtree <c>/docker/abc</c> shows the
+    /// group <c>/docker/abc/worker</c> at <c>worker</c>. When no mount contains the group (or a mount root lies outside the cgroup
+    /// namespace), the mount itself is read, which may be an ancestor with a looser limit: the figure is then an upper bound.</remarks>
     /// <param name="root">Where the cgroup tree is mounted when <paramref name="mountInfo"/> lists no cgroup mount: <c>/sys/fs/cgroup</c>
     /// for v2 and its <c>memory</c> directory for v1.</param>
     /// <param name="selfCgroup">The text of <c>/proc/self/cgroup</c>.</param>
@@ -87,37 +87,81 @@ public static partial class HostMemoryInfo
             if (parts[0] == "0" && parts[1].Length == 0) v2Group = parts[2];
             else if (parts[1].Split(',').Contains("memory")) v1Group = parts[2];
         }
-        (string Point, string Root) v2Mount = FindMount(mountInfo, "cgroup2", null) ?? (root, "/");
         if (v2Group is not null
-            && Walk(v2Mount.Point, MountRelative(v2Group, v2Mount.Root), "memory.max", "memory.current", "inactive_file", null) is { } v2)
+            && WalkMounts(FindMounts(mountInfo, "cgroup2", null, root), v2Group, "memory.max", "memory.current", "inactive_file", null) is { } v2)
         {
             return v2;
         }
-        (string Point, string Root) v1Mount = FindMount(mountInfo, "cgroup", "memory") ?? (Path.Combine(root, "memory"), "/");
-        return Walk(v1Mount.Point, MountRelative(v1Group ?? "/", v1Mount.Root), "memory.limit_in_bytes", "memory.usage_in_bytes",
-            "total_inactive_file", "hierarchical_memory_limit");
+        return WalkMounts(FindMounts(mountInfo, "cgroup", "memory", Path.Combine(root, "memory")), v1Group ?? "/", "memory.limit_in_bytes",
+            "memory.usage_in_bytes", "total_inactive_file", "hierarchical_memory_limit");
     }
 
     // A limit at or above 2^60 bytes is v1's "no limit" (PAGE_COUNTER_MAX in pages); v2 writes "max".
     private const long NoLimitBytes = 1L << 60;
 
-    /// <summary>The last <c>mountinfo</c> line of filesystem type <paramref name="fsType"/> whose super options name
-    /// <paramref name="controller"/> (any, when null): its mount point and the tree path mounted there, or <c>null</c> when none is listed.</summary>
-    /// <remarks>A line reads <c>id parent dev root point options [optional...] - fstype source superoptions</c>; paths write a space as
-    /// <c>\040</c>.</remarks>
-    private static (string Point, string Root)? FindMount(string? mountInfo, string fsType, string? controller)
+    /// <summary>The visible mounts of filesystem type <paramref name="fsType"/> whose super options name <paramref name="controller"/>
+    /// (any, when null): each mount point with the tree path mounted there, the last line winning where mounts stack at one point. With
+    /// no <paramref name="mountInfo"/> or no such line, <paramref name="fallbackPoint"/> as the tree's root.</summary>
+    /// <remarks>A line reads <c>id parent dev root point options [optional...] - fstype source superoptions</c>; paths escape a space,
+    /// tab, newline or backslash as three octal digits (<c>\040</c>, <c>\011</c>, <c>\012</c>, <c>\134</c>).</remarks>
+    private static List<(string Point, string Root)> FindMounts(string? mountInfo, string fsType, string? controller, string fallbackPoint)
     {
-        if (mountInfo is null) return null;
-        (string, string)? found = null;
-        foreach (string line in mountInfo.Split('\n'))
+        List<(string Point, string Root)> mounts = [];
+        foreach (string line in (mountInfo ?? "").Split('\n'))
         {
             string[] fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             int dash = Array.IndexOf(fields, "-");
             if (dash < 6 || fields.Length < dash + 4 || fields[dash + 1] != fsType) continue;
             if (controller is not null && !fields[dash + 3].Split(',').Contains(controller)) continue;
-            found = (fields[4].Replace("\\040", " "), fields[3].Replace("\\040", " "));
+            string point = Unescape(fields[4]);
+            mounts.RemoveAll(m => m.Point == point);
+            mounts.Add((point, Unescape(fields[3])));
         }
-        return found;
+        if (mounts.Count == 0) mounts.Add((fallbackPoint, "/"));
+        return mounts;
+    }
+
+    /// <summary>The tightest figure over every mount whose tree root contains <paramref name="group"/>; when none does, the last mount
+    /// read at its own root (an upper bound).</summary>
+    private static long? WalkMounts(List<(string Point, string Root)> mounts, string group, string limitName, string usageName, string inactiveKey,
+        string? hierarchicalKey)
+    {
+        long? tightest = null;
+        bool exposed = false;
+        foreach ((string point, string mountRoot) in mounts)
+        {
+            if (!Exposes(mountRoot, group)) continue;
+            exposed = true;
+            tightest = Smaller(tightest, Walk(point, MountRelative(group, mountRoot), limitName, usageName, inactiveKey, hierarchicalKey));
+        }
+        return exposed ? tightest : Walk(mounts[^1].Point, "/", limitName, usageName, inactiveKey, hierarchicalKey);
+    }
+
+    /// <summary>A <c>mountinfo</c> path with each <c>\ooo</c> octal escape decoded.</summary>
+    private static string Unescape(string field)
+    {
+        if (!field.Contains('\\')) return field;
+        System.Text.StringBuilder text = new(field.Length);
+        for (int i = 0; i < field.Length; i++)
+        {
+            if (field[i] == '\\' && i + 3 < field.Length
+                && field[i + 1] is >= '0' and <= '7' && field[i + 2] is >= '0' and <= '7' && field[i + 3] is >= '0' and <= '7')
+            {
+                text.Append((char)(((field[i + 1] - '0') << 6) | ((field[i + 2] - '0') << 3) | (field[i + 3] - '0')));
+                i += 3;
+            }
+            else
+            {
+                text.Append(field[i]);
+            }
+        }
+        return text.ToString();
+    }
+
+    private static bool Exposes(string mountRoot, string group)
+    {
+        string g = "/" + group.Trim().Trim('/'), r = "/" + mountRoot.Trim().Trim('/');
+        return r == "/" || g == r || g.StartsWith(r + "/", StringComparison.Ordinal);
     }
 
     /// <summary><paramref name="group"/> relative to the mounted tree's root <paramref name="mountRoot"/>; a group outside it (one the

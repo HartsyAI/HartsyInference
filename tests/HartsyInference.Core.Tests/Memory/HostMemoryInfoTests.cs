@@ -149,6 +149,19 @@ public sealed class HostMemoryInfoTests : IDisposable
     }
 
     [Fact]
+    public void AnUnrelatedLaterBindMount_DoesNotHideTheMountThatShowsTheGroup()
+    {
+        // The full tree at the root shows /app/worker (4 GiB, 1 used); a later bind of /other elsewhere has a looser limit of its own.
+        WriteV2(_root, $"{64 * GiB}", 2 * GiB, 0);
+        WriteV2(Path.Combine(_root, "app", "worker"), $"{4 * GiB}", 1 * GiB, 0);
+        string monitor = Path.Combine(_root, "monitor");
+        WriteV2(monitor, $"{32 * GiB}", 2 * GiB, 0);
+        string mountInfo = $"30 25 0:26 / {Escaped(_root)} rw - cgroup2 cgroup2 rw\n"
+            + $"60 25 0:26 /other {Escaped(monitor)} rw - cgroup2 cgroup2 rw\n";
+        Assert.Equal(3 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/app/worker\n", mountInfo));
+    }
+
+    [Fact]
     public void V1_UnlimitedSentinel_IsNull()
     {
         WriteV1(Path.Combine(_root, "memory"), 9223372036854771712, 30 * GiB, "");
@@ -165,8 +178,8 @@ public sealed class HostMemoryInfoTests : IDisposable
     [Fact]
     public void NoCgroupFiles_IsNull() => Assert.Null(HostMemoryInfo.CgroupAvailableBytes(_root, "0::/\n"));
 
-    // mountinfo writes a space in a path as \040.
-    private static string Escaped(string path) => path.Replace(" ", "\\040");
+    // mountinfo escapes a backslash, space and tab in a path as three octal digits.
+    private static string Escaped(string path) => path.Replace("\\", "\\134").Replace(" ", "\\040").Replace("\t", "\\011");
 
     private static void WriteV2(string dir, string max, long current, long inactiveFile)
     {
