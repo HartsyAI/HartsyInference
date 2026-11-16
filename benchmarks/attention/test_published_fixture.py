@@ -14,6 +14,15 @@ class PublishedFixtureTests(unittest.TestCase):
     def test_manifest_bytes_are_the_pinned_bytes(self):
         self.assertEqual(PINNED_SHA256, hashlib.sha256(PUBLISHED.read_bytes()).hexdigest())
 
+    def test_manifest_uses_lf_line_endings_only(self):
+        data = PUBLISHED.read_bytes()
+        self.assertNotIn(b'\r', data)
+        self.assertTrue(data.endswith(b'\n'))
+
+    def test_gitattributes_keeps_the_published_folder_byte_exact(self):
+        attributes = (PUBLISHED.parents[4] / '.gitattributes').read_text(encoding='utf-8')
+        self.assertIn('benchmarks/attention/published-fixtures/** -text', attributes.splitlines())
+
     def test_acceptance_stays_unreviewed_with_the_contract_tolerance(self):
         document = json.loads(PUBLISHED.read_text(encoding='utf-8'))
         self.assertFalse(document['acceptance']['reviewed'])

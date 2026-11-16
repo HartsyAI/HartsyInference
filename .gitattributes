@@ -4,3 +4,5 @@
 # must never be line-ending-normalized on checkout.
 tests/HartsyInference.Engine.Tests/Fixtures/ChatTemplates/*.jinja -text
 benchmarks/attention/cases/*.json -text
+# Published fixture manifests are pinned by SHA-256 over their stored bytes, so no checkout may convert their line endings.
+benchmarks/attention/published-fixtures/** -text

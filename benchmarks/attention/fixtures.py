@@ -113,7 +113,8 @@ def create(root, case_id, batch=1, heads=4, kv_heads=4, sq=32, skv=48, dim=64, d
                                'reviewed': False},
                 'generator': {'seed': seed, 'implementation': 'Python random.Random; persisted bytes are authoritative'}}
     path = root / 'fixture.json'
-    path.write_text(json.dumps(document, indent=2) + '\n')
+    # Written as UTF-8 with LF line endings on every platform: the published manifest is pinned by its bytes.
+    path.write_bytes((json.dumps(document, indent=2) + '\n').encode('utf-8'))
     return path
 
 

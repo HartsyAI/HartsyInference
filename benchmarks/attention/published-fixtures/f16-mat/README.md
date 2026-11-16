@@ -3,6 +3,10 @@
 `fixture.json` is the original R10 fixture manifest, byte for byte. Its SHA-256 is
 `5439493c9d92847a3be8ae32dceb830e91c08e405f1bab3faaaecd3dea4b20a3`.
 
+The manifest is stored with LF line endings. `.gitattributes` marks `benchmarks/attention/published-fixtures/**` as `-text`, so no
+checkout converts its line endings and the SHA-256 above holds on every platform. A checkout made before that attribute existed
+must be refreshed (`git checkout -- benchmarks/attention/published-fixtures`) before the hash is compared.
+
 No tensor binaries are stored here. The manifest names `q.bin`, `k.bin` and `v.bin` and records their SHA-256 values. The original
 tensors on the evidence machine match those values (checked 2026-11-16).
 
