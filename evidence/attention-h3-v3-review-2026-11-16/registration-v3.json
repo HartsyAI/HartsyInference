@@ -1,0 +1,109 @@
+{
+ "registration": "TIMING-V3",
+ "version": "3.0",
+ "written_before_any_v3_run": true,
+ "question": "P1 versus B0 under the complete-call mean (R10 fixture, unasserted arm), with an identical-binary control run first",
+ "harness": {
+  "base_commit": "1894b4b6b794018a5cd7a612f6fcdf12e31b1462",
+  "H3_commit": "28dfa3b2b7749bfaab5815a2e693568149812626",
+  "op_tool_dll_sha256": {
+   "b0_net10.0": "bb709fdd0625b49aecab1fd94508ca6c144125038897e368a755554ecd05582e",
+   "p1_net10.0": "bb709fdd0625b49aecab1fd94508ca6c144125038897e368a755554ecd05582e"
+  },
+  "production_roots": {
+   "B0": "attn-b0 a6c465bc8",
+   "P1": "attn-p1 3ee783e76"
+  }
+ },
+ "fixture": {
+  "path": "/home/hartsy/evidence/attention-4090/run-20261115-a/fixtures/f16-mat/fixture.json",
+  "sha256": "5439493c9d92847a3be8ae32dceb830e91c08e405f1bab3faaaecd3dea4b20a3",
+  "legacy_asserted_bounded": false,
+  "unchanged": true
+ },
+ "arm": {
+  "name": "mat-f16-unasserted",
+  "allow_f16": false,
+  "knobs": "same as mat-f16 (sageAttn, sdpaCudnn, flashF16 off)",
+  "route_verified": "S.15 on net10.0 for B0 and P1 (final H3 binaries; route, quality and output identity checked). The net8.0 builds compile but were not executed: the .NET 8 runtime is not installed on this machine (only 10.0.15), so net8.0 routes are unverified and are not used by this registration."
+ },
+ "boundary": "public",
+ "expected_branch": "S.15",
+ "cohort": "linux-4090",
+ "device": "RTX 4090 (CUDA_VISIBLE_DEVICES=1, PCI order)",
+ "trials_per_process": 200,
+ "warmups": "harness default (10)",
+ "gating_statistic": "per-process arithmetic mean of the 200 retained public calls",
+ "reported_not_gating": [
+  "median",
+  "p90",
+  "p99",
+  "max",
+  "share of calls above 2x median",
+  "share of total time above the median"
+ ],
+ "layout": {
+  "inferential_sessions": 3,
+  "pairs_per_session": 5,
+  "confirmation_pairs": 5,
+  "processes_per_campaign": 40,
+  "order_rule": "candidate first on odd pairs of sessions 1, 3, 4 and on even pairs of session 2 (as v2)"
+ },
+ "analysis": {
+  "module": "/home/hartsy/Desktop/HartsyInference/.claude/worktrees/attn-h3/benchmarks/attention/statistics_protocol.py",
+  "module_sha256": "ff5cdeb49df32e0d4941e7685586571d4209f731421a0a6537278e8fe89c84fd",
+  "seed": 274019,
+  "resamples": 20000,
+  "noninferiority": "upper95 one-sided <= 1.03 and confirmation ratio <= 1.03",
+  "regression": "lower95 one-sided > 1.03 and confirmation ratio > 1.03",
+  "pair_ratio": "candidate per-process mean / reference per-process mean"
+ },
+ "validity_per_process": [
+  "exit 0",
+  "branch S.15",
+  "quality_passed true",
+  "telemetry disabled",
+  "exactly 200 finite positive latencies"
+ ],
+ "control": {
+  "id": "AA-v3-mean200",
+  "candidate": "B0 H3 operation build",
+  "reference": "byte-identical copy of the same build",
+  "run_first": true,
+  "campaign_invalid_if_control_invalid": true,
+  "control_nominal_outcome_is_reported_not_gating": true
+ },
+ "campaign": {
+  "id": "P1-vs-B0-v3-mean200",
+  "candidate": "P1 H3 operation build",
+  "reference": "B0 H3 operation build"
+ },
+ "no_resampling": true,
+ "no_additional_pairs": true,
+ "no_reruns_after_a_result": true,
+ "failed_or_invalid_processes": "preserved and reported; not re-sampled",
+ "preserved_original": {
+  "R10 campaign record": "/home/hartsy/evidence/attention-4090/run-20261115-a/ops/routes/p1-f16-mat-mat-f16.json",
+  "branch": "S.15",
+  "fixture_sha256": "5439493c9d92847a3be8ae32dceb830e91c08e405f1bab3faaaecd3dea4b20a3",
+  "displayed_ratio_in_original_report": 1.26,
+  "use_in_v3": "reference only; not a gate"
+ },
+ "expectations_registered_in_advance": {
+  "source": "h3/analysis/sim-designs.json (2,000 resamples, 1,000 campaigns per cell; mean200 row)",
+  "P_noninferiority_passed_at_1.00": 0.237,
+  "P_regression_passed_at_1.00": 0.002,
+  "P_regression_passed_at_1.03": 0.038,
+  "P_regression_passed_at_1.05": 0.141,
+  "P_regression_passed_at_1.10": 0.678
+ },
+ "job_sha256": {
+  "control": "e70cd371f836c5e3ccf6f2b4df4b8e1ed0ababc5a8c17ba55623f655ec58ecbb",
+  "campaign": "a5a47f9c5edf6672f6acc4e8e878dfd0e580bc65113f15379618b56a543779f8"
+ },
+ "written_utc": "2026-11-16T01:16:57.644296+00:00",
+ "refusal_check": {
+  "arm": "mat-f16 (AllowF16=true) on the same fixture",
+  "result": "refused by the contract before timing: 'Arm mat-f16 and fixture disagree on the legacy numerical assertion.' (net10.0 B0)"
+ }
+}

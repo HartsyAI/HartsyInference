@@ -1,0 +1,61 @@
+{
+ "name": "batch-proof-1k-4GiB",
+ "frozen_utc": "2026-11-16T01:16:20.126463+00:00",
+ "role": "separate secondary configuration; it does not replace or re-label the failed 8k two-request case",
+ "source": {
+  "harness_base": "1894b4b6b794018a5cd7a612f6fcdf12e31b1462 (H2, codex/attention-h2)",
+  "harness_H3": "28dfa3b2b7749bfaab5815a2e693568149812626",
+  "production_root": "attn-p1 (3ee783e76)"
+ },
+ "primary_unchanged": {
+  "workload": "/home/hartsy/evidence/attention-4090/run-20261115-a/qwen-candidate/workload.json",
+  "sha256": "1d7c8184d23958772345f05f6c576b1585690a11dcd1aee5fa7b01423465cc7f",
+  "stored_result": "/home/hartsy/evidence/attention-4090/run-20261115-a/qwen/b0-paged-cuda.json"
+ },
+ "workload": {
+  "path": "/home/hartsy/evidence/attention-4090/diag-20261115-c/h3/workload-1k/freeze/workload.json",
+  "sha256": "5dd752f80048d3195b7d4424e9813579d6e8ff9e1dde2c14f4ec2ae2c3389961",
+  "prompt_path": "/home/hartsy/evidence/attention-4090/diag-20261115-c/h3/workload-1k/freeze/prompt.txt",
+  "prompt_sha256": "9c860f0a75964ec2f6cd0f344373152bb2918d43834985bb5cf2ab3252ca45a4",
+  "embedded_tokenizer_sha256": "fbbe7052cd80244d79f87fac7fba241b53c6e13b2e309a7f8959cbd30e005eef",
+  "model_sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+  "rendered_prompt_tokens_declared": 1024,
+  "generated_tokens_declared": 128,
+  "sampling": "greedy (as the primary)"
+ },
+ "binary": {
+  "path": "/home/hartsy/evidence/attention-4090/diag-20261115-c/h3/bin/p1-net10.0-request/hartsy-gencapture.dll",
+  "sha256": "79cbb55b9d33b6d73f5954e9d2326c28234f96d0d245d3d2ac36f9404909f127"
+ },
+ "job": {
+  "script": "/home/hartsy/evidence/attention-4090/diag-20261115-c/h3/scripts/job_batch_1k.sh",
+  "sha256": "f7fe0252a9f1231547df51279162baae65caec5c01117db725380eaac1e2ee8f"
+ },
+ "pool": {
+  "kv_pool_bytes": 4294967296,
+  "pages_total": 910,
+  "pages_per_request": 73,
+  "pages_two_requests": 146,
+  "prefill_logits_buffer_MiB_predicted": 593.5
+ },
+ "runs": [
+  "batched-1k-4GiB: --lane batched --observe --require-batched-decode (two requests)",
+  "single-1k-4GiB-control: --lane paged (informational, same pool)"
+ ],
+ "required_checks": [
+  "both requests complete (rc 0, two completions)",
+  "prompt_tokens 1024 for each completion",
+  "completion_tokens 128 for each completion (stop Length)",
+  "the two batched texts identical",
+  "at least one scheduler.decode.batch event with Count 2 in the measured window, zero dropped telemetry",
+  "preflight passed; quiet-window verify passed (gpu_batch status.txt)"
+ ],
+ "informational": [
+  "single-request control text compared with the batched texts",
+  "per-request latency if recorded",
+  "executed routes from the observation file",
+  "VRAM samples (vram_sampler, about 0.2 s)"
+ ],
+ "failure_policy": "failures are preserved; no retry, no reconfiguration in this round",
+ "procedure": "gpu_batch.sh: flock on /tmp/claude-1000/gpu4090.lock, Swarm quiet-window wait, watch, verify"
+}

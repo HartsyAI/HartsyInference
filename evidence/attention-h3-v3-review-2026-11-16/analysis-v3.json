@@ -1,0 +1,863 @@
+{
+ "registration_sha256": "see sha256 of registration-v3.json",
+ "control": {
+  "id": "AA-v3.1-mean200",
+  "valid_processes": 40,
+  "problems": [],
+  "gating_statistic": {
+   "noninferiority": {
+    "ratio": 0.9636272724392588,
+    "ci95_two_sided": [
+     0.9196631608000013,
+     1.0108936623285898
+    ],
+    "upper95_one_sided": 1.0029676659987377,
+    "lower95_one_sided": 0.9264709575904247,
+    "confirmation_ratio": 0.987299827823457,
+    "claim": "noninferiority",
+    "passed": true,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   },
+   "regression": {
+    "ratio": 0.9636272724392588,
+    "ci95_two_sided": [
+     0.9196631608000013,
+     1.0108936623285898
+    ],
+    "upper95_one_sided": 1.0029676659987377,
+    "lower95_one_sided": 0.9264709575904247,
+    "confirmation_ratio": 0.987299827823457,
+    "claim": "regression",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   }
+  },
+  "noninferiority_passed": true,
+  "regression_passed": false,
+  "outcome": "noninferiority established (upper95 <= 1.03 and confirmation <= 1.03)",
+  "secondary_median_pairs": {
+   "noninferiority": {
+    "ratio": 0.9810788461411221,
+    "ci95_two_sided": [
+     0.9441924722766615,
+     1.0205368119884597
+    ],
+    "upper95_one_sided": 1.0142848483533125,
+    "lower95_one_sided": 0.9495573571403356,
+    "confirmation_ratio": 0.9810165051689159,
+    "claim": "noninferiority",
+    "passed": true,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   },
+   "regression": {
+    "ratio": 0.9810788461411221,
+    "ci95_two_sided": [
+     0.9441924722766615,
+     1.0205368119884597
+    ],
+    "upper95_one_sided": 1.0142848483533125,
+    "lower95_one_sided": 0.9495573571403356,
+    "confirmation_ratio": 0.9810165051689159,
+    "claim": "regression",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   }
+  },
+  "secondary_per_process": {
+   "s1-p1-cand": {
+    "mean": 0.152856,
+    "median": 0.1387,
+    "p90": 0.15448,
+    "p99": 0.4968409999999954,
+    "max": 1.0264,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.11265831894070238
+   },
+   "s1-p1-ref": {
+    "mean": 0.17154550000000002,
+    "median": 0.14905000000000002,
+    "p90": 0.20714999999999997,
+    "p99": 0.5335859999999968,
+    "max": 1.0215,
+    "stall_rate_gt2x_median": 0.055,
+    "tail_time_share": 0.15634919015654733
+   },
+   "s1-p2-cand": {
+    "mean": 0.1502185,
+    "median": 0.13590000000000002,
+    "p90": 0.16093,
+    "p99": 0.32308199999999465,
+    "max": 0.909,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.11810129910763313
+   },
+   "s1-p2-ref": {
+    "mean": 0.1877865,
+    "median": 0.1613,
+    "p90": 0.23874,
+    "p99": 0.42868999999999596,
+    "max": 1.0121,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.15349612458829576
+   },
+   "s1-p3-cand": {
+    "mean": 0.14947649999999998,
+    "median": 0.1302,
+    "p90": 0.20514,
+    "p99": 0.4395139999999959,
+    "max": 0.8935,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.1536261552819339
+   },
+   "s1-p3-ref": {
+    "mean": 0.171547,
+    "median": 0.1525,
+    "p90": 0.18914999999999998,
+    "p99": 0.41460499999999545,
+    "max": 1.0687,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.1326196319376031
+   },
+   "s1-p4-cand": {
+    "mean": 0.155135,
+    "median": 0.13524999999999998,
+    "p90": 0.17191,
+    "p99": 0.5070649999999964,
+    "max": 1.0244,
+    "stall_rate_gt2x_median": 0.055,
+    "tail_time_share": 0.14960195958358855
+   },
+   "s1-p4-ref": {
+    "mean": 0.14190250000000001,
+    "median": 0.13005,
+    "p90": 0.14887,
+    "p99": 0.35932599999999854,
+    "max": 0.8643,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.10769366290234492
+   },
+   "s1-p5-cand": {
+    "mean": 0.1475055,
+    "median": 0.13105,
+    "p90": 0.15553999999999998,
+    "p99": 0.3299739999999951,
+    "max": 0.8865,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12919518255251497
+   },
+   "s1-p5-ref": {
+    "mean": 0.168474,
+    "median": 0.1464,
+    "p90": 0.19677999999999998,
+    "p99": 0.6096699999999976,
+    "max": 0.8829,
+    "stall_rate_gt2x_median": 0.05,
+    "tail_time_share": 0.15033180193976517
+   },
+   "s2-p1-cand": {
+    "mean": 0.18269200000000002,
+    "median": 0.16805,
+    "p90": 0.20984,
+    "p99": 0.5192609999999966,
+    "max": 0.9143,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.10633470540581962
+   },
+   "s2-p1-ref": {
+    "mean": 0.15088200000000002,
+    "median": 0.1347,
+    "p90": 0.15794,
+    "p99": 0.32752699999999385,
+    "max": 1.4307,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.1347211728370515
+   },
+   "s2-p2-cand": {
+    "mean": 0.1694565,
+    "median": 0.15439999999999998,
+    "p90": 0.1829299999999999,
+    "p99": 0.37478499999999526,
+    "max": 0.8955,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.11918102875959322
+   },
+   "s2-p2-ref": {
+    "mean": 0.149024,
+    "median": 0.1326,
+    "p90": 0.14901999999999999,
+    "p99": 0.3293309999999949,
+    "max": 0.993,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12033296650203995
+   },
+   "s2-p3-cand": {
+    "mean": 0.1770025,
+    "median": 0.1591,
+    "p90": 0.19154999999999991,
+    "p99": 0.4457939999999961,
+    "max": 0.8976,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.10461716642420306
+   },
+   "s2-p3-ref": {
+    "mean": 0.20084600000000002,
+    "median": 0.16595,
+    "p90": 0.28369,
+    "p99": 0.9347929999999991,
+    "max": 1.1837,
+    "stall_rate_gt2x_median": 0.075,
+    "tail_time_share": 0.19823894924469496
+   },
+   "s2-p4-cand": {
+    "mean": 0.1476675,
+    "median": 0.13265,
+    "p90": 0.15558999999999998,
+    "p99": 0.3366329999999951,
+    "max": 0.885,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.1221561955067974
+   },
+   "s2-p4-ref": {
+    "mean": 0.1445205,
+    "median": 0.1321,
+    "p90": 0.14867,
+    "p99": 0.29098499999999955,
+    "max": 1.3768,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.10099259274635781
+   },
+   "s2-p5-cand": {
+    "mean": 0.15262,
+    "median": 0.13774999999999998,
+    "p90": 0.15761,
+    "p99": 0.3081779999999937,
+    "max": 1.0052,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.10657187786659683
+   },
+   "s2-p5-ref": {
+    "mean": 0.154091,
+    "median": 0.13524999999999998,
+    "p90": 0.17376,
+    "p99": 0.34528199999999476,
+    "max": 1.0095,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13380405085306743
+   },
+   "s3-p1-cand": {
+    "mean": 0.145367,
+    "median": 0.13055,
+    "p90": 0.16272999999999996,
+    "p99": 0.330453999999995,
+    "max": 0.9919,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12984033515171944
+   },
+   "s3-p1-ref": {
+    "mean": 0.148536,
+    "median": 0.1335,
+    "p90": 0.16324,
+    "p99": 0.330504999999995,
+    "max": 0.8964,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.1234683847686756
+   },
+   "s3-p2-cand": {
+    "mean": 0.1641195,
+    "median": 0.1496,
+    "p90": 0.17985999999999996,
+    "p99": 0.37082699999999547,
+    "max": 0.8794,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.11775261318734212
+   },
+   "s3-p2-ref": {
+    "mean": 0.19308350000000002,
+    "median": 0.17045,
+    "p90": 0.21691999999999997,
+    "p99": 0.883052,
+    "max": 1.0699,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.12291832290174977
+   },
+   "s3-p3-cand": {
+    "mean": 0.14327299999999998,
+    "median": 0.1321,
+    "p90": 0.14512,
+    "p99": 0.3508389999999999,
+    "max": 0.9135,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.0903938634634579
+   },
+   "s3-p3-ref": {
+    "mean": 0.144203,
+    "median": 0.12985,
+    "p90": 0.15051,
+    "p99": 0.3311589999999951,
+    "max": 0.8673,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12718875474157962
+   },
+   "s3-p4-cand": {
+    "mean": 0.1427465,
+    "median": 0.1309,
+    "p90": 0.14893,
+    "p99": 0.3355739999999986,
+    "max": 0.8604,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.09451370086131713
+   },
+   "s3-p4-ref": {
+    "mean": 0.148032,
+    "median": 0.13235,
+    "p90": 0.15501,
+    "p99": 0.5066909999999964,
+    "max": 0.908,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.13045152399481194
+   },
+   "s3-p5-cand": {
+    "mean": 0.149741,
+    "median": 0.1342,
+    "p90": 0.15563,
+    "p99": 0.32896199999999504,
+    "max": 0.9198,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.11246418816489802
+   },
+   "s3-p5-ref": {
+    "mean": 0.1518765,
+    "median": 0.137,
+    "p90": 0.15115,
+    "p99": 0.49959599999999643,
+    "max": 1.0093,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.1173947253195853
+   },
+   "s4-p1-cand": {
+    "mean": 0.14726,
+    "median": 0.1303,
+    "p90": 0.15413,
+    "p99": 0.4735859999999962,
+    "max": 1.0076,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13624202091538773
+   },
+   "s4-p1-ref": {
+    "mean": 0.144205,
+    "median": 0.1342,
+    "p90": 0.15424,
+    "p99": 0.324014,
+    "max": 0.8937,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.09466384660726045
+   },
+   "s4-p2-cand": {
+    "mean": 0.147203,
+    "median": 0.13135,
+    "p90": 0.14716,
+    "p99": 0.352598999999995,
+    "max": 0.9934,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13123034177292583
+   },
+   "s4-p2-ref": {
+    "mean": 0.143564,
+    "median": 0.1344,
+    "p90": 0.15483999999999998,
+    "p99": 0.2554939999999994,
+    "max": 0.8662,
+    "stall_rate_gt2x_median": 0.01,
+    "tail_time_share": 0.09194157309631944
+   },
+   "s4-p3-cand": {
+    "mean": 0.14328149999999998,
+    "median": 0.1298,
+    "p90": 0.14873,
+    "p99": 0.34535399999999533,
+    "max": 0.8971,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.11261398017189939
+   },
+   "s4-p3-ref": {
+    "mean": 0.141173,
+    "median": 0.13095,
+    "p90": 0.15131,
+    "p99": 0.3196179999999997,
+    "max": 1.0321,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.09994829039547219
+   },
+   "s4-p4-cand": {
+    "mean": 0.1417815,
+    "median": 0.13335,
+    "p90": 0.15133,
+    "p99": 0.2863409999999997,
+    "max": 1.0035,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.086876637643134
+   },
+   "s4-p4-ref": {
+    "mean": 0.1492435,
+    "median": 0.13355,
+    "p90": 0.15206,
+    "p99": 0.3915369999999954,
+    "max": 1.0038,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12797207248556888
+   },
+   "s4-p5-cand": {
+    "mean": 0.1545805,
+    "median": 0.13535,
+    "p90": 0.17956999999999992,
+    "p99": 0.48919099999999655,
+    "max": 0.9089,
+    "stall_rate_gt2x_median": 0.05,
+    "tail_time_share": 0.1391799094969935
+   },
+   "s4-p5-ref": {
+    "mean": 0.16635950000000002,
+    "median": 0.1399,
+    "p90": 0.20867,
+    "p99": 0.45043799999999595,
+    "max": 1.0142,
+    "stall_rate_gt2x_median": 0.06,
+    "tail_time_share": 0.16693966981146252
+   }
+  }
+ },
+ "campaign": {
+  "id": "P1-vs-B0-v3-mean200",
+  "valid_processes": 40,
+  "problems": [],
+  "gating_statistic": {
+   "noninferiority": {
+    "ratio": 1.0469434486760756,
+    "ci95_two_sided": [
+     1.0068906534505848,
+     1.0918484103295516
+    ],
+    "upper95_one_sided": 1.083612844562158,
+    "lower95_one_sided": 1.0126204247352513,
+    "confirmation_ratio": 0.9609676648569622,
+    "claim": "noninferiority",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   },
+   "regression": {
+    "ratio": 1.0469434486760756,
+    "ci95_two_sided": [
+     1.0068906534505848,
+     1.0918484103295516
+    ],
+    "upper95_one_sided": 1.083612844562158,
+    "lower95_one_sided": 1.0126204247352513,
+    "confirmation_ratio": 0.9609676648569622,
+    "claim": "regression",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   }
+  },
+  "noninferiority_passed": false,
+  "regression_passed": false,
+  "outcome": "inconclusive (neither rule met)",
+  "secondary_median_pairs": {
+   "noninferiority": {
+    "ratio": 1.054981105938729,
+    "ci95_two_sided": [
+     1.01369352345072,
+     1.101466187435319
+    ],
+    "upper95_one_sided": 1.0934125054053825,
+    "lower95_one_sided": 1.019349817741533,
+    "confirmation_ratio": 0.9759419233492264,
+    "claim": "noninferiority",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   },
+   "regression": {
+    "ratio": 1.054981105938729,
+    "ci95_two_sided": [
+     1.01369352345072,
+     1.101466187435319
+    ],
+    "upper95_one_sided": 1.0934125054053825,
+    "lower95_one_sided": 1.019349817741533,
+    "confirmation_ratio": 0.9759419233492264,
+    "claim": "regression",
+    "passed": false,
+    "inferential_pairs": 15,
+    "confirmation_pairs": 5
+   }
+  },
+  "secondary_per_process": {
+   "s1-p1-cand": {
+    "mean": 0.1646155,
+    "median": 0.1475,
+    "p90": 0.17223,
+    "p99": 0.3482189999999937,
+    "max": 1.4391,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.12414991297903298
+   },
+   "s1-p1-ref": {
+    "mean": 0.1482635,
+    "median": 0.13165,
+    "p90": 0.15031999999999998,
+    "p99": 0.48597599999999636,
+    "max": 0.8883,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13291201138513528
+   },
+   "s1-p2-cand": {
+    "mean": 0.1488045,
+    "median": 0.1337,
+    "p90": 0.14511000000000002,
+    "p99": 0.5770269999999975,
+    "max": 0.8797,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.11081654116642974
+   },
+   "s1-p2-ref": {
+    "mean": 0.14952,
+    "median": 0.1328,
+    "p90": 0.15278,
+    "p99": 0.4974419999999967,
+    "max": 0.8717,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.12721040663456393
+   },
+   "s1-p3-cand": {
+    "mean": 0.1722945,
+    "median": 0.157,
+    "p90": 0.17778,
+    "p99": 0.4458629999999957,
+    "max": 1.0216,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.10416176952833665
+   },
+   "s1-p3-ref": {
+    "mean": 0.1556605,
+    "median": 0.1392,
+    "p90": 0.15754,
+    "p99": 0.34081699999999504,
+    "max": 0.8775,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.1160988176191134
+   },
+   "s1-p4-cand": {
+    "mean": 0.1647295,
+    "median": 0.15025,
+    "p90": 0.19670999999999997,
+    "p99": 0.3612359999999952,
+    "max": 0.89,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.11880385723261469
+   },
+   "s1-p4-ref": {
+    "mean": 0.147643,
+    "median": 0.13155,
+    "p90": 0.15095999999999998,
+    "p99": 0.49678599999999645,
+    "max": 0.8856,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.1325663932594163
+   },
+   "s1-p5-cand": {
+    "mean": 0.1617905,
+    "median": 0.1481,
+    "p90": 0.17812999999999998,
+    "p99": 0.3428029999999951,
+    "max": 1.0082,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.11558156999329376
+   },
+   "s1-p5-ref": {
+    "mean": 0.1464525,
+    "median": 0.1355,
+    "p90": 0.15517999999999998,
+    "p99": 0.3476419999999998,
+    "max": 0.9012,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.09998122258070019
+   },
+   "s2-p1-cand": {
+    "mean": 0.1854595,
+    "median": 0.16244999999999998,
+    "p90": 0.23961999999999992,
+    "p99": 0.4694999999999962,
+    "max": 1.0168,
+    "stall_rate_gt2x_median": 0.055,
+    "tail_time_share": 0.15412799020810478
+   },
+   "s2-p1-ref": {
+    "mean": 0.147408,
+    "median": 0.13075,
+    "p90": 0.15273,
+    "p99": 0.3797789999999956,
+    "max": 0.8913,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13158715944860522
+   },
+   "s2-p2-cand": {
+    "mean": 0.1487205,
+    "median": 0.134,
+    "p90": 0.15525,
+    "p99": 0.37339399999999556,
+    "max": 0.8983,
+    "stall_rate_gt2x_median": 0.02,
+    "tail_time_share": 0.11005880157745566
+   },
+   "s2-p2-ref": {
+    "mean": 0.1503195,
+    "median": 0.1334,
+    "p90": 0.15829,
+    "p99": 0.3421969999999951,
+    "max": 1.0113,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.1319722324781549
+   },
+   "s2-p3-cand": {
+    "mean": 0.1511585,
+    "median": 0.1335,
+    "p90": 0.15927,
+    "p99": 0.35194599999999504,
+    "max": 0.9993,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.1290268162227066
+   },
+   "s2-p3-ref": {
+    "mean": 0.14441800000000002,
+    "median": 0.1294,
+    "p90": 0.14821,
+    "p99": 0.4936099999999992,
+    "max": 0.9274,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.12073633480591066
+   },
+   "s2-p4-cand": {
+    "mean": 0.156593,
+    "median": 0.1419,
+    "p90": 0.16441999999999998,
+    "p99": 0.3392799999999951,
+    "max": 1.0054,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.11885588755563786
+   },
+   "s2-p4-ref": {
+    "mean": 0.148214,
+    "median": 0.1332,
+    "p90": 0.15342999999999998,
+    "p99": 0.33026099999999514,
+    "max": 0.8893,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.11942866395887024
+   },
+   "s2-p5-cand": {
+    "mean": 0.168421,
+    "median": 0.15255000000000002,
+    "p90": 0.18681,
+    "p99": 0.5089349999999964,
+    "max": 1.0068,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12200378812618373
+   },
+   "s2-p5-ref": {
+    "mean": 0.1474375,
+    "median": 0.1325,
+    "p90": 0.1475,
+    "p99": 0.3376559999999947,
+    "max": 1.246,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12919372615515046
+   },
+   "s3-p1-cand": {
+    "mean": 0.15358850000000002,
+    "median": 0.134,
+    "p90": 0.19154,
+    "p99": 0.3515689999999953,
+    "max": 0.8846,
+    "stall_rate_gt2x_median": 0.04,
+    "tail_time_share": 0.13840554468596278
+   },
+   "s3-p1-ref": {
+    "mean": 0.16722650000000003,
+    "median": 0.15125,
+    "p90": 0.17162,
+    "p99": 0.5164659999999964,
+    "max": 1.0374,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.12320116727910949
+   },
+   "s3-p2-cand": {
+    "mean": 0.1483595,
+    "median": 0.1315,
+    "p90": 0.15591999999999998,
+    "p99": 0.36720499999999523,
+    "max": 0.8882,
+    "stall_rate_gt2x_median": 0.04,
+    "tail_time_share": 0.1374532807134022
+   },
+   "s3-p2-ref": {
+    "mean": 0.1488585,
+    "median": 0.132,
+    "p90": 0.16168,
+    "p99": 0.36799699999999536,
+    "max": 0.8782,
+    "stall_rate_gt2x_median": 0.045,
+    "tail_time_share": 0.1377045986624882
+   },
+   "s3-p3-cand": {
+    "mean": 0.142903,
+    "median": 0.1317,
+    "p90": 0.1505,
+    "p99": 0.32710799999999834,
+    "max": 0.8676,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.10469339342071192
+   },
+   "s3-p3-ref": {
+    "mean": 0.16754549999999999,
+    "median": 0.15125,
+    "p90": 0.18528999999999995,
+    "p99": 0.41279999999999584,
+    "max": 1.0159,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12310984180416665
+   },
+   "s3-p4-cand": {
+    "mean": 0.1375865,
+    "median": 0.12915,
+    "p90": 0.14631,
+    "p99": 0.3247969999999999,
+    "max": 0.8904,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.0875703648250374
+   },
+   "s3-p4-ref": {
+    "mean": 0.14755000000000001,
+    "median": 0.1323,
+    "p90": 0.15275,
+    "p99": 0.37637099999999546,
+    "max": 0.8893,
+    "stall_rate_gt2x_median": 0.04,
+    "tail_time_share": 0.12922738054896643
+   },
+   "s3-p5-cand": {
+    "mean": 0.169955,
+    "median": 0.15389999999999998,
+    "p90": 0.17940999999999996,
+    "p99": 0.449846999999996,
+    "max": 0.9012,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.12512429760819047
+   },
+   "s3-p5-ref": {
+    "mean": 0.147385,
+    "median": 0.12975,
+    "p90": 0.15183,
+    "p99": 0.36545899999999404,
+    "max": 1.4559,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.1414933677104183
+   },
+   "s4-p1-cand": {
+    "mean": 0.15007500000000001,
+    "median": 0.13415,
+    "p90": 0.15586999999999998,
+    "p99": 0.3489199999999952,
+    "max": 0.8905,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.12301515908712313
+   },
+   "s4-p1-ref": {
+    "mean": 0.1619545,
+    "median": 0.1461,
+    "p90": 0.16951999999999998,
+    "p99": 0.4386959999999957,
+    "max": 1.0029,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12309321445220724
+   },
+   "s4-p2-cand": {
+    "mean": 0.1468365,
+    "median": 0.12885,
+    "p90": 0.15259,
+    "p99": 0.5208349999999967,
+    "max": 0.8996,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.1406292032294423
+   },
+   "s4-p2-ref": {
+    "mean": 0.1736945,
+    "median": 0.14784999999999998,
+    "p90": 0.23539999999999997,
+    "p99": 0.5458839999999969,
+    "max": 0.9049,
+    "stall_rate_gt2x_median": 0.055,
+    "tail_time_share": 0.174380881375058
+   },
+   "s4-p3-cand": {
+    "mean": 0.15931,
+    "median": 0.14555,
+    "p90": 0.16702999999999998,
+    "p99": 0.47482299999999633,
+    "max": 0.8758,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.11478563806415161
+   },
+   "s4-p3-ref": {
+    "mean": 0.16021950000000001,
+    "median": 0.1439,
+    "p90": 0.17723,
+    "p99": 0.42303199999999586,
+    "max": 0.8993,
+    "stall_rate_gt2x_median": 0.025,
+    "tail_time_share": 0.12704446088022991
+   },
+   "s4-p4-cand": {
+    "mean": 0.16506900000000002,
+    "median": 0.14935,
+    "p90": 0.17451999999999998,
+    "p99": 0.36769999999999525,
+    "max": 0.8842,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.12280016235634791
+   },
+   "s4-p4-ref": {
+    "mean": 0.150131,
+    "median": 0.1331,
+    "p90": 0.15345,
+    "p99": 0.423690999999996,
+    "max": 0.9105,
+    "stall_rate_gt2x_median": 0.035,
+    "tail_time_share": 0.13143854367185992
+   },
+   "s4-p5-cand": {
+    "mean": 0.1388075,
+    "median": 0.12985,
+    "p90": 0.1458,
+    "p99": 0.2670209999999984,
+    "max": 0.9976,
+    "stall_rate_gt2x_median": 0.015,
+    "tail_time_share": 0.08904057777857827
+   },
+   "s4-p5-ref": {
+    "mean": 0.14506249999999998,
+    "median": 0.1332,
+    "p90": 0.15034999999999998,
+    "p99": 0.32551799999999964,
+    "max": 1.0004,
+    "stall_rate_gt2x_median": 0.03,
+    "tail_time_share": 0.10018785006462728
+   }
+  }
+ }
+}

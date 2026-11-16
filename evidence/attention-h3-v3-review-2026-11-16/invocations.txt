@@ -1,0 +1,26 @@
+# Timing v3.1: exact invocations, expanded from the job scripts. Record only; nothing here was re-run.
+#
+# Environment. gpu_batch.sh exports these before it runs a job script (run-20261115-a/scripts/gpu_batch.sh):
+#   CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+# gpu_batch.sh takes /tmp/claude-1000/gpu4090.lock, waits for Swarm quiet (attn-p2 quiet_window.py wait),
+# watches Swarm during the job, then verifies the window (quiet_window.py verify).
+# hermetic_exec.sh runs under `unshare -rn`, brings up loopback, then execs its arguments.
+#
+# 1. Drivers
+#   Control (logged in v3/run_v3_1.sh line 7):
+bash /home/hartsy/evidence/attention-4090/run-20261115-a/scripts/gpu_batch.sh /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/aa-v3.1-mean200 /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/job_aa_v3_1_mean200.sh
+#   Campaign (launched by hand after the valid control; the typed command line was not logged; status.txt shows this procedure):
+bash /home/hartsy/evidence/attention-4090/run-20261115-a/scripts/gpu_batch.sh /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/p1-vs-b0-v3-mean200 /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/job_p1_vs_b0_v3_mean200.sh
+#
+# 2. Control process s1-p1-cand (candidate role = B0 build). Line 10 of job_aa_v3_1_mean200.sh; the job first cd's to runroot.
+cd /home/hartsy/evidence/attention-4090/diag-20261115-c/runroot && unshare -rn /home/hartsy/evidence/attention-4090/diag-20261115-c/scripts/hermetic_exec.sh dotnet /home/hartsy/evidence/attention-4090/diag-20261115-c/h3/bin/b0-net10.0-op/HartsyInference.GpuBenchmarks.dll attention-table --fixture /home/hartsy/evidence/attention-4090/run-20261115-a/fixtures/f16-mat/fixture.json --arm mat-f16-unasserted --boundary public --trials 200 --expect-branch S.15 --cohort linux-4090 --out /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/aa-v3.1-mean200/s1-p1-cand.json
+#   Control process s1-p1-ref (reference role = byte-identical B0 copy). Line 11:
+cd /home/hartsy/evidence/attention-4090/diag-20261115-c/runroot && unshare -rn /home/hartsy/evidence/attention-4090/diag-20261115-c/scripts/hermetic_exec.sh dotnet /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/ref-bin-b0-net10.0-op-full/HartsyInference.GpuBenchmarks.dll attention-table --fixture /home/hartsy/evidence/attention-4090/run-20261115-a/fixtures/f16-mat/fixture.json --arm mat-f16-unasserted --boundary public --trials 200 --expect-branch S.15 --cohort linux-4090 --out /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/aa-v3.1-mean200/s1-p1-ref.json
+#
+# 3. Campaign process s1-p1-cand (candidate = P1 build). Line 10 of job_p1_vs_b0_v3_mean200.sh:
+cd /home/hartsy/evidence/attention-4090/diag-20261115-c/runroot && unshare -rn /home/hartsy/evidence/attention-4090/diag-20261115-c/scripts/hermetic_exec.sh dotnet /home/hartsy/evidence/attention-4090/diag-20261115-c/h3/bin/p1-net10.0-op/HartsyInference.GpuBenchmarks.dll attention-table --fixture /home/hartsy/evidence/attention-4090/run-20261115-a/fixtures/f16-mat/fixture.json --arm mat-f16-unasserted --boundary public --trials 200 --expect-branch S.15 --cohort linux-4090 --out /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/p1-vs-b0-v3-mean200/s1-p1-cand.json
+#   Campaign process s1-p1-ref (reference = B0 build). Line 11:
+cd /home/hartsy/evidence/attention-4090/diag-20261115-c/runroot && unshare -rn /home/hartsy/evidence/attention-4090/diag-20261115-c/scripts/hermetic_exec.sh dotnet /home/hartsy/evidence/attention-4090/diag-20261115-c/h3/bin/b0-net10.0-op/HartsyInference.GpuBenchmarks.dll attention-table --fixture /home/hartsy/evidence/attention-4090/run-20261115-a/fixtures/f16-mat/fixture.json --arm mat-f16-unasserted --boundary public --trials 200 --expect-branch S.15 --cohort linux-4090 --out /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/p1-vs-b0-v3-mean200/s1-p1-ref.json
+#
+# 4. Analysis (run_v3_1.sh lines 9 and 14; both write analysis-v3.json with control and campaign):
+python3 /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/analyze_v3.py /home/hartsy/evidence/attention-4090/diag-20261115-c/v3/aa-v3.1-mean200 AA-v3.1-mean200
