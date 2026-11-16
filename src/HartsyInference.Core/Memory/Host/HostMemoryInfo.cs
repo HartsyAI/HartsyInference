@@ -34,17 +34,15 @@ public static partial class HostMemoryInfo
 
     private static long? AvailableBytesLinux()
     {
-        long? machine = MemAvailableBytes(File.ReadAllText("/proc/meminfo"));
-        long? cgroup = null;
-        try
-        {
-            string? mountInfo = File.Exists("/proc/self/mountinfo") ? File.ReadAllText("/proc/self/mountinfo") : null;
-            cgroup = CgroupAvailableBytes("/sys/fs/cgroup", File.ReadAllText("/proc/self/cgroup"), mountInfo);
-        }
-        catch (Exception)
-        {
-            // Unreadable cgroup files: the machine figure stands alone rather than losing both.
-        }
+        // Each read stands alone: a sandboxed /proc that refuses one file must not throw away a figure another file gave.
+        long? machine = null, cgroup = null;
+        string? mountInfo = null;
+        try { machine = MemAvailableBytes(File.ReadAllText("/proc/meminfo")); }
+        catch (Exception) { /* the cgroup figure, if any, stands alone */ }
+        try { mountInfo = File.ReadAllText("/proc/self/mountinfo"); }
+        catch (Exception) { /* each mount is then taken as its tree's root at the usual place */ }
+        try { cgroup = CgroupAvailableBytes("/sys/fs/cgroup", File.ReadAllText("/proc/self/cgroup"), mountInfo); }
+        catch (Exception) { /* the machine figure stands alone */ }
         return Smaller(machine, cgroup);
     }
 
@@ -65,16 +63,20 @@ public static partial class HostMemoryInfo
     /// <summary>What the memory cgroup lets the process still take, in bytes, or <c>null</c> when no limit applies.</summary>
     /// <remarks>The process's group and each ancestor up to the mount are read, and the tightest level wins; a group the mount does not
     /// show (a container whose own group is mounted as the root) is skipped. cgroup v2: the <c>0::</c> line of <c>/proc/self/cgroup</c>
-    /// and <c>memory.max</c> under <paramref name="root"/>. cgroup v1, also on a hybrid host whose v2 tree sets no limit: the
-    /// <c>memory</c> controller's line and <c>memory.limit_in_bytes</c> under <c>root/memory</c>, capped by <c>memory.stat</c>'s
+    /// and <c>memory.max</c> under the <c>cgroup2</c> mount. cgroup v1, also on a hybrid host whose v2 tree sets no limit: the
+    /// <c>memory</c> controller's line and <c>memory.limit_in_bytes</c> under the <c>cgroup</c> mount whose options name <c>memory</c>
+    /// (<c>/sys/fs/cgroup/memory</c>, or a co-mount such as <c>cpu,memory</c>), capped by <c>memory.stat</c>'s
     /// <c>hierarchical_memory_limit</c>. Each level counts its limit minus its working set, the usage less the inactive file cache
     /// (<c>inactive_file</c>, <c>total_inactive_file</c> on v1), which the kernel reclaims before it OOM-kills; that is the working set
-    /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer. The membership path is made relative to
-    /// the cgroup tree's root as mounted (the fourth field of the mount's <c>/proc/self/mountinfo</c> line): a mount of the subtree
-    /// <c>/docker/abc</c> shows the group <c>/docker/abc/worker</c> at <c>worker</c>.</remarks>
-    /// <param name="root">The cgroup mount, <c>/sys/fs/cgroup</c> on Linux.</param>
+    /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer. The mounts come from
+    /// <c>/proc/self/mountinfo</c>, the last matching line (the visible one when mounts stack), and the membership path is made relative
+    /// to the tree's root as mounted (that line's fourth field): a mount of the subtree <c>/docker/abc</c> shows the group
+    /// <c>/docker/abc/worker</c> at <c>worker</c>. A group outside the mounted subtree, or a mount root outside the cgroup namespace,
+    /// reads as the mount itself, which may be an ancestor with a looser limit: the figure is then an upper bound.</remarks>
+    /// <param name="root">Where the cgroup tree is mounted when <paramref name="mountInfo"/> lists no cgroup mount: <c>/sys/fs/cgroup</c>
+    /// for v2 and its <c>memory</c> directory for v1.</param>
     /// <param name="selfCgroup">The text of <c>/proc/self/cgroup</c>.</param>
-    /// <param name="mountInfo">The text of <c>/proc/self/mountinfo</c>, or <c>null</c> to take each mount as the tree's root.</param>
+    /// <param name="mountInfo">The text of <c>/proc/self/mountinfo</c>, or <c>null</c> to use <paramref name="root"/> as each tree's root.</param>
     internal static long? CgroupAvailableBytes(string root, string selfCgroup, string? mountInfo = null)
     {
         string? v2Group = null, v1Group = null;
@@ -85,30 +87,37 @@ public static partial class HostMemoryInfo
             if (parts[0] == "0" && parts[1].Length == 0) v2Group = parts[2];
             else if (parts[1].Split(',').Contains("memory")) v1Group = parts[2];
         }
-        string v1Mount = Path.Combine(root, "memory");
+        (string Point, string Root) v2Mount = FindMount(mountInfo, "cgroup2", null) ?? (root, "/");
         if (v2Group is not null
-            && Walk(root, MountRelative(v2Group, MountRoot(mountInfo, root)), "memory.max", "memory.current", "inactive_file", null) is { } v2)
+            && Walk(v2Mount.Point, MountRelative(v2Group, v2Mount.Root), "memory.max", "memory.current", "inactive_file", null) is { } v2)
         {
             return v2;
         }
-        return Walk(v1Mount, MountRelative(v1Group ?? "/", MountRoot(mountInfo, v1Mount)), "memory.limit_in_bytes", "memory.usage_in_bytes",
+        (string Point, string Root) v1Mount = FindMount(mountInfo, "cgroup", "memory") ?? (Path.Combine(root, "memory"), "/");
+        return Walk(v1Mount.Point, MountRelative(v1Group ?? "/", v1Mount.Root), "memory.limit_in_bytes", "memory.usage_in_bytes",
             "total_inactive_file", "hierarchical_memory_limit");
     }
 
     // A limit at or above 2^60 bytes is v1's "no limit" (PAGE_COUNTER_MAX in pages); v2 writes "max".
     private const long NoLimitBytes = 1L << 60;
 
-    /// <summary>The cgroup path mounted at <paramref name="mountPoint"/> (the fourth field of its <c>mountinfo</c> line), or <c>/</c> when
-    /// the mount is not listed.</summary>
-    private static string MountRoot(string? mountInfo, string mountPoint)
+    /// <summary>The last <c>mountinfo</c> line of filesystem type <paramref name="fsType"/> whose super options name
+    /// <paramref name="controller"/> (any, when null): its mount point and the tree path mounted there, or <c>null</c> when none is listed.</summary>
+    /// <remarks>A line reads <c>id parent dev root point options [optional...] - fstype source superoptions</c>; paths write a space as
+    /// <c>\040</c>.</remarks>
+    private static (string Point, string Root)? FindMount(string? mountInfo, string fsType, string? controller)
     {
-        if (mountInfo is null) return "/";
+        if (mountInfo is null) return null;
+        (string, string)? found = null;
         foreach (string line in mountInfo.Split('\n'))
         {
             string[] fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (fields.Length > 4 && fields[4].Replace("\\040", " ") == mountPoint) return fields[3].Replace("\\040", " ");
+            int dash = Array.IndexOf(fields, "-");
+            if (dash < 6 || fields.Length < dash + 4 || fields[dash + 1] != fsType) continue;
+            if (controller is not null && !fields[dash + 3].Split(',').Contains(controller)) continue;
+            found = (fields[4].Replace("\\040", " "), fields[3].Replace("\\040", " "));
         }
-        return "/";
+        return found;
     }
 
     /// <summary><paramref name="group"/> relative to the mounted tree's root <paramref name="mountRoot"/>; a group outside it (one the

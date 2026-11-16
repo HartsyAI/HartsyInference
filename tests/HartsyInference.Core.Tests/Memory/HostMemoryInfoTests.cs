@@ -128,6 +128,27 @@ public sealed class HostMemoryInfoTests : IDisposable
     }
 
     [Fact]
+    public void V1_ACoMountedMemoryController_IsFoundFromMountInfo()
+    {
+        string coMount = Path.Combine(_root, "cpu,memory");
+        WriteV1(coMount, 16 * GiB, 4 * GiB, "");
+        string mountInfo = $"40 25 0:30 / {Escaped(coMount)} rw,nosuid shared:9 - cgroup cgroup rw,cpu,memory\n"
+            + $"41 25 0:31 / {Escaped(Path.Combine(_root, "pids"))} rw shared:10 - cgroup cgroup rw,pids\n";
+        Assert.Equal(12 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "9:cpu,memory:/\n", mountInfo));
+    }
+
+    [Fact]
+    public void StackedMounts_TheLastLineIsTheVisibleOne()
+    {
+        // An outer cgroup2 mount of the whole tree is covered by a later mount of the container's subtree at the same point.
+        WriteV2(_root, $"{32 * GiB}", 2 * GiB, 0);
+        WriteV2(Path.Combine(_root, "worker"), $"{4 * GiB}", 1 * GiB, 0);
+        string mountInfo = $"30 25 0:26 / {Escaped(_root)} rw - cgroup2 cgroup2 rw\n"
+            + $"50 30 0:26 /docker/abc {Escaped(_root)} rw - cgroup2 cgroup2 rw\n";
+        Assert.Equal(3 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/docker/abc/worker\n", mountInfo));
+    }
+
+    [Fact]
     public void V1_UnlimitedSentinel_IsNull()
     {
         WriteV1(Path.Combine(_root, "memory"), 9223372036854771712, 30 * GiB, "");
