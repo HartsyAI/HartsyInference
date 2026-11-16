@@ -64,8 +64,18 @@ public sealed class HunyuanPaintPipeline
     /// With the mask and <see cref="HunyuanPaintOptions.ProjectReference"/>, the picture itself is baked into the front view; it should then be square, as the diffusion
     /// sees it resized to the view size, and as large as it comes (it is sampled at the render resolution).</summary>
     public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, ReadOnlySpan<byte> referenceAlpha, int referenceWidth, int referenceHeight,
-        HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default)
+        HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+        Generate(mesh, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, [], options, progress, cancellationToken);
+
+    /// <summary>Paints <paramref name="mesh"/> as the overload without <paramref name="sides"/> does, and with <see cref="HunyuanPaintOptions.ProjectReference"/>
+    /// also bakes each side picture onto the surfaces its own camera sees. The diffusion is conditioned on the front picture alone.</summary>
+    /// <param name="sides">Pictures of the subject from other cameras, each with its subject mask; a side whose subject does not overlap the mesh's
+    /// silhouette from its camera by <see cref="PaintReferenceProjector.MinimumFit"/> is left out with a warning.</param>
+    public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, ReadOnlySpan<byte> referenceAlpha, int referenceWidth, int referenceHeight,
+        IReadOnlyList<PaintSideReference> sides, HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(sides);
         ArgumentNullException.ThrowIfNull(mesh);
         options ??= new HunyuanPaintOptions();
         Validate(options);
@@ -94,13 +104,12 @@ public sealed class HunyuanPaintPipeline
             : PaintViewCandidate.Fixed;
 
         Stage($"frame and views ({views.Count})");
+        List<PaintReferencePicture> pictures = [];
         PaintReferenceProjection? projection = null;
-        ReferencePicture? picture = null;
         if (options.ProjectReference && !referenceAlpha.IsEmpty)
         {
             // Only the placement is used: the bake samples the picture itself, at its own resolution, for every texel the front camera sees.
             projection = PaintReferenceProjector.Project(renderer, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, PlacementResolution, cancellationToken);
-            picture = new ReferencePicture(referenceRgb.ToArray(), referenceAlpha.ToArray(), referenceWidth, referenceHeight);
             Stage(projection is null ? "reference projection (no subject or silhouette)"
                 : $"reference projection (fit {projection.Fit:F3}, mirrored {projection.MirroredFit:F3}, scale {projection.Scale:F1}, offset {projection.OffsetX:F1} {projection.OffsetY:F1})");
             if (projection is not null && projection.Fit < PaintReferenceProjector.MinimumFit)
@@ -111,11 +120,17 @@ public sealed class HunyuanPaintPipeline
                 warnings.Add(poor);
                 projection = null;
             }
+            if (projection is not null)
+                pictures.Add(new PaintReferencePicture(projection, referenceRgb.ToArray(), referenceAlpha.ToArray(), referenceWidth, referenceHeight));
         }
+        if (options.ProjectReference)
+            foreach (PaintSideReference side in sides)
+                if (ProjectSide(renderer, side, warnings, cancellationToken) is { } placed)
+                    pictures.Add(placed);
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
         Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
-        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, projection is null ? null : picture, projection, cancellationToken);
+        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, pictures, cancellationToken);
         Stage("bake");
         return warnings.Count == 0 ? baked : baked with { Warnings = warnings };
     }
@@ -412,14 +427,29 @@ public sealed class HunyuanPaintPipeline
                     texture[i * 3 + c] = (float)(mean[c] / surface.Count);
     }
 
-    // The reference picture kept for the bake: RGB on white and its subject mask, at its own size.
-    private sealed record ReferencePicture(byte[] Rgb, byte[] Alpha, int Width, int Height);
+    // Fits a side picture on its own camera; null, with a warning, when it has no subject or does not overlap the mesh's silhouette from there closely enough.
+    private PaintReferencePicture? ProjectSide(PaintViewRenderer renderer, PaintSideReference side, List<string> warnings, CancellationToken cancellationToken)
+    {
+        PaintReferenceProjection? placed = PaintReferenceProjector.Project(renderer, side.Rgb, side.Alpha, side.Width, side.Height, PlacementResolution,
+            0, side.Azimuth, cancellationToken);
+        Stage(placed is null ? $"side picture at {side.Azimuth:F0} degrees (no subject or silhouette)"
+            : $"side picture at {side.Azimuth:F0} degrees (fit {placed.Fit:F3}, mirrored {placed.MirroredFit:F3}, scale {placed.Scale:F1})");
+        if (placed is not null && placed.Fit >= PaintReferenceProjector.MinimumFit)
+            return new PaintReferencePicture(placed, side.Rgb, side.Alpha, side.Width, side.Height);
+        string poor = placed is null
+            ? $"The picture for {side.Azimuth:F0} degrees has no subject the mesh's silhouette from there overlaps, so that side was painted from the generated views only."
+            : $"The picture for {side.Azimuth:F0} degrees overlaps the model's silhouette from there by {placed.Fit:P0}, under the {PaintReferenceProjector.MinimumFit:P0} "
+                + "needed to bake it in place, so that side was painted from the generated views only.";
+        StageLog?.Invoke(poor);
+        warnings.Add(poor);
+        return null;
+    }
 
     // Side of the front view the picture's placement is fitted on; the placement is in view units, so this sets only the fit's precision.
     private const int PlacementResolution = 512;
 
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
-        HunyuanPaintOptions o, ReferencePicture? picture, PaintReferenceProjection? projection, CancellationToken cancellationToken)
+        HunyuanPaintOptions o, IReadOnlyList<PaintReferencePicture> pictures, CancellationToken cancellationToken)
     {
         int n = views.Count, materials = _config.MaterialCount, size = o.TextureSize, render = o.RenderResolution;
         PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, size, size, cancellationToken);
@@ -443,12 +473,11 @@ public sealed class HunyuanPaintPipeline
                 merger.Add(bake, views[v].Weight);
             }
             (float[] texture, bool[] known) = merger.Finish();
-            // The picture replaces the merged views' albedo on the surfaces the front camera sees; metal and roughness stay as generated.
-            if (m == 0 && picture is not null && projection is not null)
+            // The pictures replace the merged views' albedo on the surfaces their cameras see; metal and roughness stay as generated.
+            if (m == 0 && pictures.Count > 0)
             {
-                int fromPicture = PaintReferenceProjector.ApplyToTexels(projection, renderer, surface, texture, known, picture.Rgb, picture.Alpha, picture.Width, picture.Height,
-                    o.Bake.DepthThreshold, cancellationToken);
-                StageLog?.Invoke($"reference projection: {fromPicture} texels from the picture");
+                int fromPicture = PaintReferenceProjector.ApplyToTexels(pictures, renderer, surface, texture, known, o.Bake.DepthThreshold, cancellationToken);
+                StageLog?.Invoke($"reference projection: {fromPicture} texels from {(pictures.Count == 1 ? "the picture" : $"{pictures.Count} pictures")}");
             }
             if (m == 0)
                 painted = known.Count(k => k);

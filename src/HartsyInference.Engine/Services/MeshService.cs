@@ -301,21 +301,42 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                 ImageData image = request.Image!;
                 if (request.Preprocess == MeshPreprocess.Auto)
                     image = _engine.MeshPreparationInternal.Prepare(id, image, cancel).Image;
+                // The extra views of a multiview build are prepared like the front, before the shape model loads for the same reason.
+                List<Hunyuan3DViewImage>? views = id == MeshModelIds.Hunyuan3DMultiView
+                    ? [new Hunyuan3DViewImage(Hunyuan3DView.Front, image.Rgb, image.Width, image.Height), .. PrepareViews(id, request, cancel)
+                        .Select(view => new Hunyuan3DViewImage(MeshViews.ToHunyuan(view.View), view.Image.Rgb, view.Image.Width, view.Image.Height))]
+                    : null;
                 LoadedMesh loaded = GetOrLoad(spec, id);
-                ImageTo3DRequest job = new ImageTo3DRequest
-                {
-                    ImageRgb = image.Rgb,
-                    Width = image.Width,
-                    Height = image.Height,
-                    GridResolution = request.GridResolution,
-                    Steps = request.Steps,
-                    Seed = MeshSeed.ForSampler(request.Seed),
-                };
-                ThreeDResult result = loaded.Generate(job, p =>
+                Action<GenerationProgress> report = p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
-                }, cancel);
+                };
+                ThreeDResult result;
+                if (views is not null)
+                {
+                    Hunyuan3DMultiViewRequest multiView = new()
+                    {
+                        Views = views,
+                        GridResolution = request.GridResolution,
+                        Steps = request.Steps,
+                        Seed = MeshSeed.ForSampler(request.Seed),
+                    };
+                    result = ((Hunyuan3DShapePipeline)loaded.Pipeline).GenerateMultiView(multiView, report, cancel);
+                }
+                else
+                {
+                    ImageTo3DRequest job = new ImageTo3DRequest
+                    {
+                        ImageRgb = image.Rgb,
+                        Width = image.Width,
+                        Height = image.Height,
+                        GridResolution = request.GridResolution,
+                        Steps = request.Steps,
+                        Seed = MeshSeed.ForSampler(request.Seed),
+                    };
+                    result = loaded.Generate(job, report, cancel);
+                }
                 if (result.Mesh is { TriangleCount: > 0 } mesh)
                 {
                     return new MeshResult { Data = GlbWriter.Write(mesh), Format = "glb" };
@@ -665,14 +686,34 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
                     ProjectReference = projectReference,
                 };
                 byte[] rgb = reference.HasAlpha ? CompositeOnWhite(reference) : reference.Rgb;
+                // A side picture is baked by its subject mask, so one without alpha (and without Preprocess Auto to cut it out) cannot be placed.
+                List<string> warnings = [];
+                List<PaintSideReference> sides = [];
+                foreach (MeshViewImage view in PrepareViews(id, request, cancel))
+                {
+                    if (view.Image.HasAlpha)
+                    {
+                        sides.Add(new PaintSideReference(MeshViews.PaintAzimuth(view.View), CompositeOnWhite(view.Image), view.Image.Alpha!, view.Image.Width,
+                            view.Image.Height));
+                    }
+                    else
+                    {
+                        warnings.Add($"The {view.View} picture has no alpha plane, so it was not baked; send it with alpha or set Preprocess Auto to cut it out.");
+                    }
+                }
                 HunyuanPaintLoader loader = GetOrLoadPaint(spec, id);
                 ThreeD.Geometry.Ops.PbrPostProcessResult result = loader.Pipeline.Generate(input, rgb, reference.HasAlpha ? reference.Alpha : default, reference.Width,
-                    reference.Height, options, p =>
+                    reference.Height, sides, options, p =>
                 {
                     cancel.ThrowIfCancellationRequested();
                     progress?.Report(MeshProgress.Plain(p.Step, p.TotalSteps));
                 }, cancel);
-                return new MeshResult { Data = PbrGlbWriter.Write(result.Mesh, result.Material), Format = "glb", Warnings = result.Warnings };
+                return new MeshResult
+                {
+                    Data = PbrGlbWriter.Write(result.Mesh, result.Material),
+                    Format = "glb",
+                    Warnings = warnings.Count == 0 ? result.Warnings : [.. warnings, .. result.Warnings],
+                };
             },
             cancel);
     }
@@ -680,6 +721,18 @@ public sealed class MeshService : IMeshService, IMeshLifecycleService, IDisposab
     /// <summary>The Paint texture size: the request's grid when set, else 4096 when the reference picture is baked in (a full figure's face then gets as many texels as the picture
     /// has pixels), else 2048.</summary>
     internal static int PaintTextureSize(int gridResolution, bool bakesReference) => gridResolution != 0 ? gridResolution : bakesReference ? 4096 : 2048;
+
+    /// <summary>The request's extra views, each prepared like the front picture when <see cref="MeshRequest.Preprocess"/> is Auto; empty when there are none.</summary>
+    private List<MeshViewImage> PrepareViews(string id, MeshRequest request, CancellationToken cancel)
+    {
+        List<MeshViewImage> views = [];
+        foreach (MeshViewImage view in request.Views ?? [])
+        {
+            cancel.ThrowIfCancellationRequested();
+            views.Add(request.Preprocess == MeshPreprocess.Auto ? view with { Image = _engine.MeshPreparationInternal.Prepare(id, view.Image, cancel).Image } : view);
+        }
+        return views;
+    }
 
     /// <summary>The reference composited on white, as the Paint pipelines expect.</summary>
     private static byte[] CompositeOnWhite(ImageData image)

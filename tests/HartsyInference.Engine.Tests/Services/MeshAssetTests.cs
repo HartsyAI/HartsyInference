@@ -261,7 +261,7 @@ public sealed class MeshAssetTests : IDisposable
         Assert.Empty(status.Assets);
         Assert.Equal(MeshAssetBlockerKind.NoCatalogEntry, status.ModelBlocker!.Value.Kind);
         Assert.False(status.Complete);
-        Assert.Throws<NotSupportedException>(() => new MeshAssetService().GetStatus(Spec("hunyuan3d-mv")));
+        Assert.Throws<NotSupportedException>(() => new MeshAssetService().GetStatus(Spec("hunyuan3d-mv-turbo")));
     }
 
     [Fact]

@@ -189,7 +189,7 @@ internal static class MeshModelProfiles
             Id = id,
             Input = input,
             Outputs = outputs,
-            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), QualityField(presets), .. OutputFields(outputs)],
+            Fields = [.. fields, MeshField(id), PreprocessField(id), ControlField(id), ViewsField(id), QualityField(presets), .. OutputFields(outputs)],
             Licence = licence,
             Cost = cost,
             PeakGiB = peak,
@@ -243,6 +243,12 @@ internal static class MeshModelProfiles
         ? Used(nameof(MeshRequest.Control), "required", null, null, null, "The control signal that goes with the image: a point cloud (obj, glb or ply, one token per distinct point, at most 8,192: a denser cloud is subsampled with the seed), a voxel mesh (obj or glb, sampled and quantised to 16 per axis), a bounding box (length, height, width in (0, 1]) or a skeleton (six values per bone).")
         : Rejected(nameof(MeshRequest.Control));
 
+    private static MeshFieldSpec ViewsField(string id) => id == MeshModelIds.Hunyuan3DMultiView
+        ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once; the shape is built from all of them. The same subject, pose and framing in every picture, each prepared like the front (Preprocess Auto does it).")
+        : MeshModelIds.PaintMesh.Contains(id)
+            ? Used(nameof(MeshRequest.Views), "none", null, null, null, "Pictures of the subject's left, back and right besides the front Image, each at most once: with the reference projection on, each picture with alpha is baked onto the surfaces its camera sees (a picture that does not line up with the mesh's silhouette from there is left out with a warning). The generated views are conditioned on the front picture alone.")
+            : Rejected(nameof(MeshRequest.Views));
+
     private static MeshFieldSpec PreprocessField(string id) => MeshPreparationService.UsesPreparation(id)
         ? new()
         {
@@ -287,7 +293,7 @@ internal static class MeshModelProfiles
         nameof(MeshRequest.Samples) => "1",
         nameof(MeshRequest.Rigged) or nameof(MeshRequest.Texture) or nameof(MeshRequest.Mesh) or nameof(MeshRequest.Remesh) => "false",
         nameof(MeshRequest.Quality) => nameof(MeshQuality.Default),
-        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) => "unset",
+        nameof(MeshRequest.Colors) or nameof(MeshRequest.Chains) or nameof(MeshRequest.FieldOfViewRadians) or nameof(MeshRequest.Control) or nameof(MeshRequest.Views) => "unset",
         _ => "0",
     };
 

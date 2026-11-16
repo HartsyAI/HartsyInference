@@ -70,6 +70,7 @@ public sealed class MeshPlanningTests
         nameof(MeshRequest.Control) => request with { Control = Box() },
         nameof(MeshRequest.Quality) => request with { Quality = MeshQuality.Max },
         nameof(MeshRequest.Remesh) => request with { Remesh = true, Texture = true },
+        nameof(MeshRequest.Views) => request with { Views = [new MeshViewImage { View = MeshView.Left, Image = Image() }] },
         _ => throw new ArgumentOutOfRangeException(nameof(field), field, "No sample value."),
     };
 
@@ -650,10 +651,25 @@ public sealed class MeshPlanningTests
     }
 
     [Fact]
+    public void ViewsAreTakenByTheMultiviewShapeBuildAndThePaintModelsOnly()
+    {
+        MeshViewImage left = new() { View = MeshView.Left, Image = Image() };
+        MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [left, left with { View = MeshView.Back }] }, matterAvailable: false);
+        MeshRequestValidator.Validate("hunyuan3d-paint21", Valid("hunyuan3d-paint21") with { Views = [left] }, matterAvailable: false);
+
+        Exception single = Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d", Valid("hunyuan3d") with { Views = [left] }, matterAvailable: false));
+        Assert.Equal(nameof(MeshRequest.Views), MeshFieldTag.FieldOf(single));
+        Assert.Throws<ArgumentException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [left, left] }, matterAvailable: false));
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", new MeshRequest { Views = [left] }, matterAvailable: false));
+        MeshViewImage torn = new() { View = MeshView.Right, Image = new ImageData { Rgb = new byte[5], Width = 4, Height = 4 } };
+        Assert.Throws<ArgumentException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("hunyuan3d-mv") with { Views = [torn] }, matterAvailable: false));
+    }
+
+    [Fact]
     public void AnUnknownModelHasNoProfileAndFailsTheValidator()
     {
-        Assert.Null(MeshModelProfiles.Find("hunyuan3d-mv"));
-        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv", Valid("trellis2"), matterAvailable: false));
+        Assert.Null(MeshModelProfiles.Find("hunyuan3d-mv-turbo"));
+        Assert.Throws<NotSupportedException>(() => MeshRequestValidator.Validate("hunyuan3d-mv-turbo", Valid("trellis2"), matterAvailable: false));
     }
 
     [Theory]
@@ -682,7 +698,7 @@ public sealed class MeshPlanningTests
         Assert.Empty(engine.MeshPlanning.Describe("hunyuan3d").Licence.GatedRepos);
         Assert.Equal(MeshOutputKinds.Splats | MeshOutputKinds.Mesh, engine.MeshPlanning.Describe("sam3d-objects").Outputs);
         Assert.Equal(MeshInputKind.ImageWithMask, engine.MeshPlanning.Describe("sam3d-objects").Input);
-        Assert.Throws<NotSupportedException>(() => engine.MeshPlanning.Describe("hunyuan3d-mv"));
+        Assert.Throws<NotSupportedException>(() => engine.MeshPlanning.Describe("hunyuan3d-mv-turbo"));
     }
 
     [Fact]
