@@ -1,13 +1,15 @@
 namespace HartsyInference.ThreeD.Paint;
 
 /// <summary>Shifts the reference picture on a nearer part the shape model put off the drawing (a hat brim lower than drawn) so the picture's own edge
-/// lands on the part's front-view depth step; the surface behind keeps the placement, and steps without clear evidence keep it too.</summary>
+/// lands on the part's front-view depth step; the surface behind keeps the placement, and steps without clear evidence keep it too. Only a part
+/// the mesh made larger than drawn is moved; one it made smaller shows the surface behind on the surface behind, as drawn.</summary>
 internal sealed class PaintOccluderAlignment
 {
     /// <summary>Side of the grid the steps and the shift field are worked out on.</summary>
     internal const int GridSize = 1024;
 
-    // Depth jump between neighbouring grid pixels, beyond the surface's own slope, that puts one surface in front of another.
+    // Depth jump between neighbouring grid pixels, beyond the surface's own slope, that puts one surface in front of another (camera units of the
+    // normalised mesh frame, whose diameter is PaintMeshFrame.DefaultScaleFactor).
     private const float Step = 0.03f;
 
     // Search reach across a step, and the strip past it that gives each side's typical colours, as shares of the view.
@@ -101,7 +103,8 @@ internal sealed class PaintOccluderAlignment
         if (!any)
             return null;
 
-        float[] field = Spread(d, edge, bounded, edges, normals, offsets, decided, 3 * reach, cancellationToken);
+        float[] along = Along(d, edges, normals, offsets, decided);
+        float[] field = Spread(d, edge, bounded, edges, along, 3 * reach, cancellationToken);
         return new PaintOccluderAlignment(d, field);
     }
 
@@ -278,11 +281,8 @@ internal sealed class PaintOccluderAlignment
     private static float[] Decide(List<int> edges, bool[] evidence, int[] behind, float[] profiles, int reach, int strip, out bool[] decided)
     {
         const int g = GridSize;
-        int radius = Math.Max(1, (int)(Pool * g)), length = 2 * reach + 1, cells = (g + radius - 1) / radius;
-        List<int>[] buckets = new List<int>[cells * cells];
-        for (int i = 0; i < edges.Count; i++)
-            if (evidence[i])
-                (buckets[edges[i] / g / radius * cells + edges[i] % g / radius] ??= []).Add(i);
+        int radius = Math.Max(1, (int)(Pool * g)), length = 2 * reach + 1;
+        List<int>[] buckets = Buckets(edges, evidence, radius, out int cells);
         float[] offsets = new float[edges.Count];
         bool[] done = new bool[edges.Count];
         Parallel.For(0, edges.Count, () => new double[length + 1], (i, _, pooled) =>
@@ -326,7 +326,7 @@ internal sealed class PaintOccluderAlignment
             double nearer = best < edgeT && best > 0 ? (pooled[best] - pooled[from]) / (best - from) / count : 0;
             if (nearer >= MinNearer && behind[i] >= reach)
             {
-                offsets[i] = Math.Min(best - reach, reach) - 1;
+                offsets[i] = best - reach - 1;
                 done[i] = true;
             }
             return pooled;
@@ -335,9 +335,93 @@ internal sealed class PaintOccluderAlignment
         return offsets;
     }
 
-    // Shift field (two floats per grid pixel, view units) over the nearer parts, faded with distance from the step and toward their other ends.
-    private static float[] Spread(float[] d, bool[] edge, bool[] bounded, List<int> edges, float[] normals, float[] offsets, bool[] decided,
-        int reach, CancellationToken cancellationToken)
+    // Each step pixel's shift (grid pixels): its offset along its normal, a little past the picture's boundary so the rim takes the nearer part's
+    // own drawn outline, averaged twice over the step pixels of the same step within twice Pool, weighted by evidence.
+    private static float[] Along(float[] d, List<int> edges, float[] normals, float[] offsets, bool[] decided)
+    {
+        const int g = GridSize;
+        // Steps are told apart as 8-connected runs of step pixels at continuing depth, so a brim's step never averages with the face's behind it.
+        int[] index = new int[g * g], run = new int[edges.Count];
+        Array.Fill(index, -1);
+        Array.Fill(run, -1);
+        for (int i = 0; i < edges.Count; i++)
+            index[edges[i]] = i;
+        Stack<int> stack = new();
+        for (int i = 0; i < edges.Count; i++)
+        {
+            if (run[i] >= 0)
+                continue;
+            run[i] = i;
+            stack.Push(i);
+            while (stack.Count > 0)
+            {
+                int k = stack.Pop(), x = edges[k] % g, y = edges[k] / g;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        if (x + dx < 0 || y + dy < 0 || x + dx >= g || y + dy >= g)
+                            continue;
+                        int j = index[(y + dy) * g + x + dx];
+                        if (j >= 0 && run[j] < 0 && Math.Abs(d[edges[j]] - d[edges[k]]) <= Step)
+                        {
+                            run[j] = i;
+                            stack.Push(j);
+                        }
+                    }
+            }
+        }
+
+        float[] shift = new float[edges.Count * 2], weight = new float[edges.Count];
+        for (int i = 0; i < edges.Count; i++)
+        {
+            float offset = offsets[i] < -1 ? offsets[i] - Math.Max(1f, 0.1f * -offsets[i]) : 0f;
+            weight[i] = decided[i] ? 1f : SilentWeight;
+            shift[i * 2] = offset * normals[i * 2];
+            shift[i * 2 + 1] = offset * normals[i * 2 + 1];
+        }
+        int radius = (int)(2 * Pool * g);
+        List<int>[] buckets = Buckets(edges, null, radius, out int cells);
+        for (int pass = 0; pass < 2; pass++)
+        {
+            float[] source = shift, next = new float[edges.Count * 2];
+            Parallel.For(0, edges.Count, i =>
+            {
+                int x = edges[i] % g, y = edges[i] / g;
+                double sx = 0, sy = 0, sw = 0;
+                for (int cy = Math.Max(0, y / radius - 1); cy <= Math.Min(cells - 1, y / radius + 1); cy++)
+                    for (int cx = Math.Max(0, x / radius - 1); cx <= Math.Min(cells - 1, x / radius + 1); cx++)
+                        if (buckets[cy * cells + cx] is { } bucket)
+                            foreach (int j in bucket)
+                                if (run[j] == run[i] && Math.Abs(edges[j] % g - x) <= radius && Math.Abs(edges[j] / g - y) <= radius)
+                                {
+                                    sx += weight[j] * source[j * 2];
+                                    sy += weight[j] * source[j * 2 + 1];
+                                    sw += weight[j];
+                                }
+                next[i * 2] = (float)(sx / sw);
+                next[i * 2 + 1] = (float)(sy / sw);
+            });
+            shift = next;
+        }
+        return shift;
+    }
+
+    // Step pixels (those `include` marks, or all) bucketed by cells of the given side, for neighbour searches within that distance.
+    private static List<int>[] Buckets(List<int> edges, bool[]? include, int radius, out int cells)
+    {
+        const int g = GridSize;
+        cells = (g + radius - 1) / radius;
+        List<int>[] buckets = new List<int>[cells * cells];
+        for (int i = 0; i < edges.Count; i++)
+            if (include is null || include[i])
+                (buckets[edges[i] / g / radius * cells + edges[i] % g / radius] ??= []).Add(i);
+        return buckets;
+    }
+
+    // Shift field (two floats per grid pixel, view units) over the nearer parts: each pixel takes the shift of the step it is nearest to over its
+    // own surface, faded with distance from the step and toward the part's other ends.
+    private static float[] Spread(float[] d, bool[] edge, bool[] bounded, List<int> edges, float[] along, int reach,
+        CancellationToken cancellationToken)
     {
         const int g = GridSize;
         int[] source = new int[g * g];
@@ -350,40 +434,13 @@ internal sealed class PaintOccluderAlignment
         float[] toBoundary = Distances(d, boundary, reach, null, null);
         cancellationToken.ThrowIfCancellationRequested();
 
-        float[] x = new float[g * g], y = new float[g * g], weight = new float[g * g], seedWeight = new float[g * g];
-        bool[] region = new bool[g * g];
+        float[] shift = new float[g * g * 2];
         for (int p = 0; p < source.Length; p++)
         {
             int i = source[p];
             if (i < 0)
                 continue;
-            // A little past the boundary, so the rim takes the nearer part's own drawn outline.
-            float offset = offsets[i] < -1 ? offsets[i] - Math.Max(1f, 0.1f * -offsets[i]) : 0f;
-            seedWeight[p] = decided[i] ? 1f : SilentWeight;
-            x[p] = offset * normals[i * 2] * seedWeight[p];
-            y[p] = offset * normals[i * 2 + 1] * seedWeight[p];
-            weight[p] = seedWeight[p];
-            region[p] = true;
-        }
-        int radius = (int)(2 * Pool * g);
-        for (int pass = 0; pass < 2; pass++)
-        {
-            float[] bx = Box(x, radius), by = Box(y, radius), bw = Box(weight, radius);
-            for (int p = 0; p < x.Length; p++)
-            {
-                double mean = region[p] ? seedWeight[p] / Math.Max(bw[p], 1e-9) : 0;
-                x[p] = (float)(bx[p] * mean);
-                y[p] = (float)(by[p] * mean);
-            }
-            Array.Copy(seedWeight, weight, weight.Length);
-        }
-
-        float[] shift = new float[g * g * 2];
-        for (int p = 0; p < x.Length; p++)
-        {
-            if (!region[p])
-                continue;
-            double fx = x[p] / seedWeight[p], fy = y[p] / seedWeight[p];
+            double fx = along[i * 2], fy = along[i * 2 + 1];
             double magnitude = Math.Sqrt(fx * fx + fy * fy), near = Math.Min(distance[p], 1e6), far = Math.Min(toBoundary[p], 1e6);
             double fade = Math.Clamp(1 - near / Math.Max(3 * magnitude, 1e-6), 0, 1) * far / (near + far + 1e-9);
             shift[p * 2] = (float)(fx * fade / g);
@@ -429,31 +486,5 @@ internal sealed class PaintOccluderAlignment
                 }
         }
         return distance;
-    }
-
-    // Separable box sum over a square of the given radius, zero outside the grid.
-    private static float[] Box(float[] values, int radius)
-    {
-        const int g = GridSize;
-        float[] rows = new float[g * g], result = new float[g * g];
-        Parallel.For(0, g, y => Line(values, rows, y * g, 1, radius));
-        Parallel.For(0, g, x => Line(rows, result, x, g, radius));
-        return result;
-    }
-
-    private static void Line(float[] source, float[] target, int start, int stride, int radius)
-    {
-        const int g = GridSize;
-        double sum = 0;
-        for (int k = 0; k < Math.Min(radius, g); k++)
-            sum += source[start + k * stride];
-        for (int k = 0; k < g; k++)
-        {
-            if (k + radius < g)
-                sum += source[start + (k + radius) * stride];
-            if (k - radius - 1 >= 0)
-                sum -= source[start + (k - radius - 1) * stride];
-            target[start + k * stride] = (float)sum;
-        }
     }
 }
