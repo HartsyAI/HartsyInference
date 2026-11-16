@@ -10,7 +10,8 @@ namespace HartsyInference.Core.Memory.Host;
 /// the failure. The bytes read are discarded, so on storage that is already cached this costs one memory copy per tensor.
 /// <para>The readers are dedicated background threads, started on first use and kept for the process, each with its own
 /// <see cref="ChunkBytes"/> buffer: blocking reads on thread-pool workers would hold the pool near one reader per core, and a call allocates
-/// nothing once the readers and the chunk table have grown to its size. Calls are serialized.</para></remarks>
+/// nothing once the readers and the chunk table have grown to its size. Calls are serialized process-wide, and a read that hangs on stalled
+/// storage holds its caller as the upload read would.</para></remarks>
 public static class MappedTensorPrefetch
 {
     /// <summary>The unit of work one reader takes, so one large tensor still spreads over several readers.</summary>

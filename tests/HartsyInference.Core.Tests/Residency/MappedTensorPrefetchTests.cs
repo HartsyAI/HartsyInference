@@ -85,7 +85,7 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
     }
 
     [Fact]
-    public void Read_SecondCallOfTheSameSize_AllocatesNothingOnTheCaller()
+    public void Read_SecondCallOfTheSameSize_AllocatesNothingOnTheCallerThread()
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);
         Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
