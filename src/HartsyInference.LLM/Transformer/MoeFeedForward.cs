@@ -410,7 +410,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             using (Tensor latent = new(new TensorShape(1, n, _hidden), DType.F32))
             {
-                using (StageProfiler.Begin(backend, "moe", "latent"))
+                using (StageProfiler.Begin(backend, "moe", "latent.down"))
                     GenericTransformer.Project(backend, latent, x, _latentDown, null, _lowVram);
                 using StageProfiler.Scope routedScope = StageProfiler.Begin(backend, "moe", "routed");
                 if (_moe.LatentNorm == MoeLatentNorm.BeforeExperts)
@@ -425,12 +425,13 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             }
             if (_moe.LatentNorm == MoeLatentNorm.AfterCombine)
             {
+                using StageProfiler.Scope _ = StageProfiler.Begin(backend, "moe", "latent.norm");
                 Tensor normed = LatentRmsNorm(backend, expertSum);
                 expertSum.Dispose();
                 expertSum = normed;
             }
             Tensor output = new(new TensorShape(1, n, _modelHidden), DType.F32);
-            using (StageProfiler.Begin(backend, "moe", "latent"))
+            using (StageProfiler.Begin(backend, "moe", "latent.up"))
                 GenericTransformer.Project(backend, output, expertSum, _latentUp!, null, _lowVram);
             if (_shGateW is not null)
             {

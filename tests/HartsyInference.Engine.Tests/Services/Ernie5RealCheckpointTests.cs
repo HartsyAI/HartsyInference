@@ -21,11 +21,12 @@ namespace HartsyInference.Engine.Tests.Services;
 /// the forward check. Each is reported as skipped (never passed) otherwise.</summary>
 /// <remarks>Environment: <c>ERNIE_REAL_RESIDENT</c> = <c>1</c> builds every layer once and preloads its per-token weights (default: layers
 /// stream per forward); <c>ERNIE_REAL_EXPERT_CACHE</c> = <c>1</c> (with resident, CUDA) attaches the device expert cache before the first
-/// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed (default 1);
-/// <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma
-/// list of token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per
-/// phase (prefill, decode). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no chat template, so the forward takes token ids, and the
-/// Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c> is its token limit there, default 16).</remarks>
+/// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed
+/// (default 1); <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma list of
+/// token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per phase
+/// (prefill, decode). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
+/// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
 public sealed class Ernie5RealCheckpointTests
 {
@@ -257,6 +258,9 @@ public sealed class Ernie5RealCheckpointTests
 
     /// <summary>The process's major page faults and storage reads on Linux, where routed experts are read from the mapped checkpoint. A
     /// fault per step shows an expert read from disk rather than from the page cache. Zero and unreported elsewhere.</summary>
+    /// <remarks><c>read_bytes</c> counts block-layer reads, so a FUSE or NFS network volume can report about 0 MB while every expert comes
+    /// off the network; major faults still count those reads. High faults with about 0 MB read means the volume is not counted, not that
+    /// the page cache served the reads.</remarks>
     private readonly record struct ProcessIo(long MajorFaults, long ReadBytes)
     {
         public static ProcessIo Read()

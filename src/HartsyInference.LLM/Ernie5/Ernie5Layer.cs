@@ -102,6 +102,8 @@ internal sealed class Ernie5Layer : IDisposable
     /// <summary>Runs the layer on <paramref name="stream"/> (<c>[tokens, hc, hidden]</c>) in place.</summary>
     public void Forward(float[] stream, int tokens, int startPos, Ernie5SequenceState state)
     {
+        // The whole layer, so the hyper-connection mixes and norms show as this less the attn and ffn stages.
+        using StageProfiler.Scope layerScope = StageProfiler.Begin(_backend, "ernie5", "layer");
         int d = _cfg.HiddenSize;
         float[] x = new float[tokens * d], sub = new float[tokens * d];
         RunSublayer(_attnHc, _attnNorm, stream, tokens, x, sub, (input, output) =>
