@@ -53,6 +53,24 @@ public sealed class HostMemoryInfoTests : IDisposable
     }
 
     [Fact]
+    public void V2_ASubtreeMount_ResolvesTheMembershipAgainstTheMountRoot()
+    {
+        // The mount shows /docker/abc; the process sits in /docker/abc/worker, capped at 4 GiB under the container's 32.
+        WriteV2(_root, $"{32 * GiB}", 2 * GiB, 0);
+        WriteV2(Path.Combine(_root, "worker"), $"{4 * GiB}", 1 * GiB, 0);
+        string mountInfo = $"30 25 0:26 /docker/abc {Escaped(_root)} rw,nosuid shared:4 - cgroup2 cgroup2 rw\n";
+        Assert.Equal(3 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/docker/abc/worker\n", mountInfo));
+    }
+
+    [Fact]
+    public void V2_AMembershipOutsideTheMountRoot_ReadsTheMount()
+    {
+        WriteV2(_root, $"{32 * GiB}", 2 * GiB, 0);
+        string mountInfo = $"30 25 0:26 /docker/abc {Escaped(_root)} rw - cgroup2 cgroup2 rw\n";
+        Assert.Equal(30 * GiB, HostMemoryInfo.CgroupAvailableBytes(_root, "0::/system.slice/other\n", mountInfo));
+    }
+
+    [Fact]
     public void V2_ALevelWithoutUsage_IsSkippedAndTheAncestorCounts()
     {
         WriteV2(_root, $"{46 * GiB}", 6 * GiB, 0);
@@ -125,6 +143,9 @@ public sealed class HostMemoryInfoTests : IDisposable
 
     [Fact]
     public void NoCgroupFiles_IsNull() => Assert.Null(HostMemoryInfo.CgroupAvailableBytes(_root, "0::/\n"));
+
+    // mountinfo writes a space in a path as \040.
+    private static string Escaped(string path) => path.Replace(" ", "\\040");
 
     private static void WriteV2(string dir, string max, long current, long inactiveFile)
     {

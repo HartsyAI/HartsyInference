@@ -38,7 +38,8 @@ public static partial class HostMemoryInfo
         long? cgroup = null;
         try
         {
-            cgroup = CgroupAvailableBytes("/sys/fs/cgroup", File.ReadAllText("/proc/self/cgroup"));
+            string? mountInfo = File.Exists("/proc/self/mountinfo") ? File.ReadAllText("/proc/self/mountinfo") : null;
+            cgroup = CgroupAvailableBytes("/sys/fs/cgroup", File.ReadAllText("/proc/self/cgroup"), mountInfo);
         }
         catch (Exception)
         {
@@ -68,10 +69,13 @@ public static partial class HostMemoryInfo
     /// <c>memory</c> controller's line and <c>memory.limit_in_bytes</c> under <c>root/memory</c>, capped by <c>memory.stat</c>'s
     /// <c>hierarchical_memory_limit</c>. Each level counts its limit minus its working set, the usage less the inactive file cache
     /// (<c>inactive_file</c>, <c>total_inactive_file</c> on v1), which the kernel reclaims before it OOM-kills; that is the working set
-    /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer.</remarks>
+    /// the kubelet evicts on. A level that cannot be read is skipped, never the whole answer. The membership path is made relative to
+    /// the cgroup tree's root as mounted (the fourth field of the mount's <c>/proc/self/mountinfo</c> line): a mount of the subtree
+    /// <c>/docker/abc</c> shows the group <c>/docker/abc/worker</c> at <c>worker</c>.</remarks>
     /// <param name="root">The cgroup mount, <c>/sys/fs/cgroup</c> on Linux.</param>
     /// <param name="selfCgroup">The text of <c>/proc/self/cgroup</c>.</param>
-    internal static long? CgroupAvailableBytes(string root, string selfCgroup)
+    /// <param name="mountInfo">The text of <c>/proc/self/mountinfo</c>, or <c>null</c> to take each mount as the tree's root.</param>
+    internal static long? CgroupAvailableBytes(string root, string selfCgroup, string? mountInfo = null)
     {
         string? v2Group = null, v1Group = null;
         foreach (string line in selfCgroup.Split('\n'))
@@ -81,13 +85,41 @@ public static partial class HostMemoryInfo
             if (parts[0] == "0" && parts[1].Length == 0) v2Group = parts[2];
             else if (parts[1].Split(',').Contains("memory")) v1Group = parts[2];
         }
-        if (v2Group is not null && Walk(root, v2Group, "memory.max", "memory.current", "inactive_file", null) is { } v2) return v2;
-        return Walk(Path.Combine(root, "memory"), v1Group ?? "/", "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file",
-            "hierarchical_memory_limit");
+        string v1Mount = Path.Combine(root, "memory");
+        if (v2Group is not null
+            && Walk(root, MountRelative(v2Group, MountRoot(mountInfo, root)), "memory.max", "memory.current", "inactive_file", null) is { } v2)
+        {
+            return v2;
+        }
+        return Walk(v1Mount, MountRelative(v1Group ?? "/", MountRoot(mountInfo, v1Mount)), "memory.limit_in_bytes", "memory.usage_in_bytes",
+            "total_inactive_file", "hierarchical_memory_limit");
     }
 
     // A limit at or above 2^60 bytes is v1's "no limit" (PAGE_COUNTER_MAX in pages); v2 writes "max".
     private const long NoLimitBytes = 1L << 60;
+
+    /// <summary>The cgroup path mounted at <paramref name="mountPoint"/> (the fourth field of its <c>mountinfo</c> line), or <c>/</c> when
+    /// the mount is not listed.</summary>
+    private static string MountRoot(string? mountInfo, string mountPoint)
+    {
+        if (mountInfo is null) return "/";
+        foreach (string line in mountInfo.Split('\n'))
+        {
+            string[] fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length > 4 && fields[4].Replace("\\040", " ") == mountPoint) return fields[3].Replace("\\040", " ");
+        }
+        return "/";
+    }
+
+    /// <summary><paramref name="group"/> relative to the mounted tree's root <paramref name="mountRoot"/>; a group outside it (one the
+    /// mount does not show) reads as the mount itself.</summary>
+    private static string MountRelative(string group, string mountRoot)
+    {
+        string g = "/" + group.Trim().Trim('/'), r = "/" + mountRoot.Trim().Trim('/');
+        if (r == "/") return g;
+        if (g == r) return "/";
+        return g.StartsWith(r + "/", StringComparison.Ordinal) ? g[r.Length..] : "/";
+    }
 
     /// <summary>The tightest level from the group at <paramref name="group"/> (relative to <paramref name="mount"/>) up to the mount. A group
     /// outside the cgroup namespace's root shows as a path with <c>..</c>; it is read as the mount itself.</summary>
