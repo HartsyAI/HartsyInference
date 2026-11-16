@@ -33,6 +33,11 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("An extra picture of the subject as side=path.png, side one of left, back or right (repeatable, each side once): hunyuan3d-mv builds the shape from the input image (the front) and these; hunyuan3d-paint and hunyuan3d-paint21 bake each picture with alpha onto the surfaces its camera sees. left is the subject's own left side.")]
         public string[]? Views { get; init; }
 
+        /// <summary>Input preparation: none (default) or auto.</summary>
+        [CommandOption("--preprocess")]
+        [Description("none (default) uses the input image and --view pictures as given; auto mattes a picture without alpha and frames each picture the way the model expects (the Hunyuan3D shape builds: the subject recentred on white with a 15 % border).")]
+        public string? Preprocess { get; init; }
+
         /// <summary>hunyuan3d-omni: the control kind.</summary>
         [CommandOption("--control")]
         [Description("hunyuan3d-omni: the control signal beside the image: point (--control-file: obj, glb or a ply point cloud; its vertices are the points), voxel (--control-file: an obj or glb mesh with faces), bbox (--control-values: length,height,width, each in (0, 1]]) or pose (--control-file: a bone file, or --control-values: six numbers per bone).")]
@@ -190,6 +195,8 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
             parameters.Put("prompt-point", string.Join('\n', settings.PromptPoints));
         if (settings.Image is not null)
             parameters.Put("image", settings.Image);
+        if (settings.Preprocess is not null)
+            parameters.Put("preprocess", settings.Preprocess);
         if (settings.Views is { Length: > 0 })
             parameters.Put("view", string.Join('\n', settings.Views));
         if (settings.Mask is not null)

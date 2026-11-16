@@ -869,6 +869,7 @@ public static class GenerationDispatch
             TextureSize = textureSize,
             Mesh = parameters.GetBool("mesh", false),
             Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),
+            Preprocess = ParseMeshPreprocess(parameters.GetStringOrNull("preprocess")),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -1712,6 +1713,11 @@ public static class GenerationDispatch
         text is null ? MeshQuality.Default
         : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
         : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
+
+    /// <summary>The <c>--preprocess</c> value: none (the default) or auto.</summary>
+    internal static MeshPreprocess ParseMeshPreprocess(string? text) => string.IsNullOrWhiteSpace(text) ? MeshPreprocess.None
+        : !int.TryParse(text, out _) && Enum.TryParse(text, ignoreCase: true, out MeshPreprocess preprocess) && Enum.IsDefined(preprocess) ? preprocess
+        : throw new ArgumentException($"--preprocess must be none or auto; got '{text}'.");
 
     /// <summary>The extra views from <c>--view side=path</c> (one per line), or null when none are given; the engine checks the sides are distinct and that the model takes views.</summary>
     internal static IReadOnlyList<MeshViewImage>? LoadMeshViews(string? text)
