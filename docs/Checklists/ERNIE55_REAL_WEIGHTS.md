@@ -38,9 +38,9 @@ was not measured.
 | Decode, 15 steps | 208.8 s (13.9 s per token, 5.5 to 17.8 s) |
 | Total with load (measured; includes about 1 s outside the stages above) | 525 s |
 
-Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 20 GB during decode as routed experts were uploaded. The
-preload budget applies only at load, so nothing bounds that growth: a longer generation or a smaller card can run out of device memory
-mid-decode. Prefill takes about 12 decode steps' time for 5 tokens, likely because it is the first read of every layer's experts from the
+Peak VRAM was about 22.5 GB; the device weight total grew from 9216 MB to over 20 GB during decode. The Text service attaches no expert
+cache, so this is the CUDA backend's auto-promotion: a routed expert uploaded a second time is kept on the device while free memory stays
+above `vram.autopromoteHeadroomMb`, and after that it uploads on every use. The growth stops at that floor, not at the preload budget. Prefill takes about 12 decode steps' time for 5 tokens, likely because it is the first read of every layer's experts from the
 network volume; not profiled. Decode time is spent in the layer forwards (build time 0 ms); routed-expert upload is the likely cost, but no
 profile has confirmed it. Not tuned yet.
 
@@ -78,7 +78,7 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 
 - Decode speed: profile a decode step and tune routed-expert residency.
 - MTP speculative decoding in the Text path, and decode and MTP parity on real weights.
-- A host or device memory guard before the load, and a bound on routed-expert device memory during decode.
+- A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
 - Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's
   `<|ERNIE_MASK|>` first, as `/v1/completions` does.
