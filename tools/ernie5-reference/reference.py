@@ -42,6 +42,9 @@ INDEXER_QUANT = "fp8"  # --indexer-quant: "fp8" rounds the DSA indexer's queries
 # drops keys.
 # Written to index_gaps.json; compare.py --tie-margin uses it to name positions where a near-tie can pick a different key.
 INDEX_GAPS: dict[int, dict[int, float]] = {}
+# MoE layer -> {position: (k-th routing score - (k+1)-th) / (max - min score over the experts)}, routing score = scores + bias.
+# Written to router_gaps.json: a near tie there can route a token to a different expert under rounding alone.
+ROUTER_GAPS: dict[int, dict[int, float]] = {}
 
 F32 = torch.float32
 SCALE_SUFFIX = "_scale_inv"  # Ernie5WeightNames.ScaleSuffix
@@ -391,7 +394,7 @@ def dsa_attention(ck: Checkpoint, layer: int, attn: str, qr: torch.Tensor, x: to
 # --------------------------------------------------------------------------- FFN
 
 
-def moe(ck: Checkpoint, blk: str, h: torch.Tensor) -> torch.Tensor:
+def moe(ck: Checkpoint, layer: int, blk: str, h: torch.Tensor) -> torch.Tensor:
     """Latent MoE with split-feature routing and a shared expert (vllm-ernie nvidia/moe.py).
 
     scores = sigmoid(h W0^T) + sigmoid(h W1^T); top-k of scores + bias, weights = scores (renormalized when
@@ -406,7 +409,16 @@ def moe(ck: Checkpoint, blk: str, h: torch.Tensor) -> torch.Tensor:
     if cfg.get("moe_split_feature_routing"):
         scores = scores + torch.sigmoid(h @ ck.read(f"{blk}.gate.weight_1").T)
     bias = ck.read(f"{blk}.e_score_correction_bias")
-    sel = torch.topk(scores + bias, k, dim=-1, sorted=False).indices
+    routing = scores + bias
+    if k < routing.shape[-1]:
+        # One sorted top-(k+1): the first k are the selection, and the gap is measured at exactly that boundary.
+        top, order = torch.topk(routing, k + 1, dim=-1)
+        spread = routing.max(dim=-1).values - routing.min(dim=-1).values
+        gaps = torch.where(spread > 0, (top[:, k - 1] - top[:, k]) / spread, torch.zeros_like(spread))
+        ROUTER_GAPS[layer] = {t: float(g) for t, g in enumerate(gaps)}
+        sel = order[:, :k]
+    else:  # every expert is routed to, so nothing is left out and there is no boundary gap
+        sel = torch.topk(routing, k, dim=-1).indices
     w = scores.gather(1, sel)
     if cfg.get("norm_topk_prob", True):
         w = w / w.sum(-1, keepdim=True).clamp_min(1e-20)
@@ -460,7 +472,7 @@ def decoder_layer(ck: Checkpoint, i: int, stream: torch.Tensor, positions: torch
     if i < int(cfg["first_k_dense_replace"]):
         out = dense_ffn(ck, prefix, x)
     else:
-        out = moe(ck, f"{prefix}.block_sparse_moe", x)
+        out = moe(ck, i, f"{prefix}.block_sparse_moe", x)
     return mhc_post(out, stream, post, comb)
 
 
@@ -476,6 +488,7 @@ def forward(ck: Checkpoint, tokens: list[int], out: Path, max_layers: int | None
     n_layers = int(cfg["num_hidden_layers"]) if max_layers is None else min(max_layers, int(cfg["num_hidden_layers"]))
     timings = {}
     INDEX_GAPS.clear()  # one forward's gaps only, when a caller runs forward more than once
+    ROUTER_GAPS.clear()
     for i in range(n_layers):
         t0 = time.time()
         stream = decoder_layer(ck, i, stream, positions)
@@ -522,8 +535,9 @@ def main() -> None:
     meta = {"tokens": tokens, "checkpoint": str(args.ckpt), "indexer_quant": INDEXER_QUANT, "total_s": round(time.time() - t0, 3),
             **timings}
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    gaps = {str(layer): {str(pos): gap for pos, gap in by_pos.items()} for layer, by_pos in sorted(INDEX_GAPS.items())}
-    (out / "index_gaps.json").write_text(json.dumps(gaps), encoding="utf-8")
+    for name, table in (("index_gaps.json", INDEX_GAPS), ("router_gaps.json", ROUTER_GAPS)):
+        gaps = {str(layer): {str(pos): gap for pos, gap in by_pos.items()} for layer, by_pos in sorted(table.items())}
+        (out / name).write_text(json.dumps(gaps), encoding="utf-8")
     print(f"wrote {out} in {meta['total_s']} s")
 
 
