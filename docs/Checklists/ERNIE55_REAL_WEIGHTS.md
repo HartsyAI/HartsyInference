@@ -72,6 +72,21 @@ about 1 GB/s with 16 readers, the highest rate seen on this volume (the separate
 late repeated-token reads hit the page cache), so decode is now bound by its read speed. The prefetch runs
 before each layer's expert loop, so its reads and the uploads and GEMMs do not overlap.
 
+#928 lets each expert run as soon as its own weights are read. A third pod (`339aa8517`, same harness, no stage profiling for the wall
+clock) had a slower volume, 490 MB/s in one `dd` stream against 750 to 800 MB/s before, so its times are not comparable with the table
+above; the arms within it are:
+
+| Unprofiled run, 16 decode steps | Prefill | Decode total | Steps 1 to 8 |
+| --- | --- | --- | --- |
+| 16 readers (first run on the pod) | 36.6 s | 68.5 s | 7.4, 8.6, 6.2, 4.1, 4.0, 6.0, 4.2, 3.5 s |
+| 32 readers | 32.9 s | 61.8 s | 6.9, 6.5, 5.2, 3.7, 3.7, 5.3, 3.9, 3.3 s |
+| 16 readers again | 36.1 s | 62.2 s | 7.1, 6.4, 5.3, 3.8, 3.9, 5.3, 4.1, 3.3 s |
+
+32 readers match 16 on decode; the first run's extra time is the pod warming up, not the reader count. Prefill, which reads more experts
+per layer, is about 9% faster with 32. The greedy tokens match in every run. The profiled run puts 41.5 of 65 s of decode in
+`moe.prefetch.wait`, so decode stays bound by the volume's read speed; how much the overlap saves is within the volume's run-to-run
+variation and was not isolated.
+
 ## What is not verified
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
@@ -104,8 +119,8 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
 
 ## Open
 
-- Decode speed: overlap the expert reads with the expert loop. Beyond that, decode is bound by how fast the experts' storage reads; a
-  local disk, more page cache, or several GPUs holding the experts are the next steps.
+- Decode speed: decode is bound by how fast the experts' storage reads (the reads overlap the expert loop since #928, and more readers
+  do not help). A local disk, more page cache, or several GPUs holding the experts are the next steps.
 - MTP speculative decoding in the Text path, and decode and MTP parity on real weights.
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
