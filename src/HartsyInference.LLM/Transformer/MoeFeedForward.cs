@@ -63,6 +63,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertKey[] _offKeys = [];
     private ExpertAssignment[] _offPlan = [];
     private List<ExpertKey> _offMisses = [];
+
+    // Routed-expert prefetch scratch (PrefetchRoutedExperts), reused from call to call.
+    private readonly List<Tensor> _prefetchPending = [];
+    private IBackend? _prefetchBackend;
+    private Func<Tensor, bool>? _prefetchResident;
     private int[] _offHostPlan = [];
     private int[] _offHostOffset = [];
     private readonly ExpertLease _offLease = new();
@@ -563,31 +568,39 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     {
         int threads = HartsyInference.Core.Configuration.EngineKnobs.MoeExpertPrefetchThreads.Value;
         if (threads == 0) return;
-        List<Tensor> pending = RoutedPrefetchSet(expertTokens, backend.IsWeightResident);
-        if (pending.Count == 0) return;
-        using (StageProfiler.Begin(backend, "moe", "prefetch"))
-            MappedTensorPrefetch.Read(pending, threads);
+        // The delegate and the list are kept from call to call, so the prefetch adds no allocation to a forward.
+        if (!ReferenceEquals(_prefetchBackend, backend))
+        {
+            _prefetchBackend = backend;
+            _prefetchResident = backend.IsWeightResident;
+        }
+        RoutedPrefetchSet(expertTokens, _prefetchResident!, _prefetchPending);
+        if (_prefetchPending.Count == 0) return;
+        try
+        {
+            using (StageProfiler.Begin(backend, "moe", "prefetch"))
+                MappedTensorPrefetch.Read(_prefetchPending, threads);
+        }
+        finally
+        {
+            _prefetchPending.Clear();
+        }
     }
 
-    /// <summary>The gate, up and down weights of every expert with at least one token that <paramref name="resident"/> does not report on
-    /// the device. Packed experts read through their own recipe, so none are listed for them.</summary>
-    internal List<Tensor> RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident)
+    /// <summary>Fills <paramref name="pending"/> (cleared first) with the gate, up and down weights of every expert with at least one token
+    /// that <paramref name="resident"/> does not report on the device. Packed experts read through their own recipe, so none are listed for
+    /// them.</summary>
+    internal void RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident, List<Tensor> pending)
     {
-        List<Tensor> pending = [];
-        if (_packed is not null) return pending;
+        pending.Clear();
+        if (_packed is not null) return;
         for (int ex = 0; ex < expertTokens.Length; ex++)
         {
             if (expertTokens[ex].Count == 0) continue;
             int local = ex - _firstExpert;
-            AddIfHostOnly(_gateW[local]);
-            AddIfHostOnly(_upW[local]);
-            AddIfHostOnly(_downW[local]);
-        }
-        return pending;
-
-        void AddIfHostOnly(Tensor weight)
-        {
-            if (!resident(weight)) pending.Add(weight);
+            if (!resident(_gateW[local])) pending.Add(_gateW[local]);
+            if (!resident(_upW[local])) pending.Add(_upW[local]);
+            if (!resident(_downW[local])) pending.Add(_downW[local]);
         }
     }
 

@@ -88,7 +88,8 @@ public sealed unsafe class MmapHandle : IDisposable
     /// <exception cref="ObjectDisposedException">The handle was disposed before the read started.</exception>
     public void ReadAt(long offset, Span<byte> destination)
     {
-        if (_basePointer == 0)
+        // A fast path only: Dispose can run right after this check, and the handle reference below is what guards the read.
+        if (Volatile.Read(ref _basePointer) == 0)
             throw new ObjectDisposedException(nameof(MmapHandle));
         if (offset < 0 || offset > ByteLength - destination.Length)
             throw new ArgumentOutOfRangeException(nameof(offset), $"Read of {destination.Length} bytes at {offset} is outside the {ByteLength}-byte mapping.");

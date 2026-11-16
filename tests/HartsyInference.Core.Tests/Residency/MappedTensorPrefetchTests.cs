@@ -50,6 +50,59 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
     }
 
     [Fact]
+    public void ReadAt_DisposedWhileReadsRun_EachReadCompletesOrIsRefused()
+    {
+        MmapHandle handle = MmapHandle.OpenRead(_path);
+        using ManualResetEventSlim started = new(false);
+        int refusedReaders = 0, wrongReads = 0;
+        // Each reader reads until Dispose refuses it; every read before that must return the file's bytes.
+        Thread[] readers = Enumerable.Range(0, 8).Select(r => new Thread(() =>
+        {
+            byte[] read = new byte[MappedTensorPrefetch.ChunkBytes];
+            for (int k = 0; k < 100_000; k++)
+            {
+                started.Set();
+                try
+                {
+                    handle.ReadAt(0, read);
+                }
+                catch (ObjectDisposedException)
+                {
+                    Interlocked.Increment(ref refusedReaders);
+                    return;
+                }
+                if (!_bytes.AsSpan(0, read.Length).SequenceEqual(read)) Interlocked.Increment(ref wrongReads);
+            }
+        })).ToArray();
+        foreach (Thread reader in readers) reader.Start();
+
+        started.Wait();
+        handle.Dispose();
+        foreach (Thread reader in readers) reader.Join();
+
+        Assert.Equal(0, wrongReads);
+        Assert.Equal(8, refusedReaders);
+    }
+
+    [Fact]
+    public void Read_SecondCallOfTheSameSize_AllocatesNothingOnTheCaller()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+        List<Tensor> tensors = [registered];
+        MappedTensorPrefetch.Read(tensors, threads: 4);   // starts the readers and sizes the chunk table
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        long read = MappedTensorPrefetch.Read(tensors, threads: 4);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(FileBytes, read);
+        Assert.Equal(0, allocated);
+    }
+
+    [Fact]
     public void Read_RegisteredTensor_ReadsEveryByte_AndSkipsUnregisteredOnes()
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);

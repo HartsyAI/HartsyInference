@@ -110,15 +110,18 @@ public sealed class Ernie5MoeTests
         tokens[1].Add(0);
         tokens[3].AddRange([0, 2]);
 
-        List<Tensor> none = moe.Block.RoutedPrefetchSet(tokens, _ => false);
-        Assert.Equal(experts.Skip(3).Take(3).Concat(experts.Skip(9).Take(3)), none);
+        List<Tensor> pending = [experts[0]];   // a stale entry, cleared by the call
+
+        moe.Block.RoutedPrefetchSet(tokens, _ => false, pending);
+        Assert.Equal(experts.Skip(3).Take(3).Concat(experts.Skip(9).Take(3)), pending);
 
         // Expert 3's up projection is already on the device, so it is not read again.
-        List<Tensor> partly = moe.Block.RoutedPrefetchSet(tokens, w => ReferenceEquals(w, experts[10]));
-        Assert.Equal(5, partly.Count);
-        Assert.DoesNotContain(experts[10], partly);
+        moe.Block.RoutedPrefetchSet(tokens, w => ReferenceEquals(w, experts[10]), pending);
+        Assert.Equal(5, pending.Count);
+        Assert.DoesNotContain(experts[10], pending);
 
-        Assert.Empty(moe.Block.RoutedPrefetchSet(tokens, _ => true));
+        moe.Block.RoutedPrefetchSet(tokens, _ => true, pending);
+        Assert.Empty(pending);
     }
 
     [Theory]
