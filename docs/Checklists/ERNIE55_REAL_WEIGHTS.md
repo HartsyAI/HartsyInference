@@ -72,9 +72,9 @@ about 1 GB/s with 16 readers, the highest rate seen on this volume (the separate
 late repeated-token reads hit the page cache), so decode is now bound by its read speed. In #926 the prefetch ran before each layer's
 expert loop, so its reads and the uploads and GEMMs did not overlap.
 
-#928 lets each expert run as soon as its own weights are read. A third pod (`339aa8517`, same harness; the table's runs were
-unprofiled) had a slower volume, 490 MB/s in one `dd` stream against 750 to 800 MB/s before, so its times are not comparable with the
-table above; the arms within it are:
+#928 lets each expert run as soon as its own weights are read. A third pod (`339aa8517`, same harness) had a slower
+volume, 490 MB/s in one `dd` stream against 750 to 800 MB/s before, so its times are not comparable with the table above; the arms
+within it are:
 
 | Unprofiled run, 16 decode steps | Prefill | Decode, sum of the 16 step wall times | Steps 1 to 8 |
 | --- | --- | --- | --- |
@@ -82,8 +82,8 @@ table above; the arms within it are:
 | 32 readers | 32.9 s | 61.8 s | 6.9, 6.5, 5.2, 3.7, 3.7, 5.3, 3.9, 3.3 s |
 | 16 readers again | 36.1 s | 62.2 s | 7.1, 6.4, 5.3, 3.8, 3.9, 5.3, 4.1, 3.3 s |
 
-32 readers match 16 on decode; the first run's extra time is the pod warming up, not the reader count. Prefill, which reads more experts
-per layer, is about 9% faster with 32. The greedy tokens match in every run. A fourth, profiled run (16 readers, after the three above;
+32 readers match 16 on decode; the first run's extra time is the pod warming up, not the reader count. Prefill is about
+9% faster with 32, likely because its 5 tokens select more experts per layer. The greedy tokens match in every run. A fourth, profiled run (16 readers, after the three above;
 the stage timer's syncs add time, so it is not a table arm) puts 41.5 of 65 s of layer time in `moe.prefetch.wait`, so decode stays
 bound by the volume's read speed. How much the overlap itself saves is within the volume's run-to-run variation and was not isolated;
 running the commits before and after #928 back to back on one pod, after a warm-up run, would isolate it.
