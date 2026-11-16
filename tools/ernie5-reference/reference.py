@@ -316,7 +316,7 @@ def hca_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
     return z @ ck.read(f"{attn}.o_proj.weight").T
 
 
-def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+def dsa_attention(ck: Checkpoint, layer: int, attn: str, qr: torch.Tensor, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
     """DSA layer (vllm-ernie nvidia/attention.py Ernie5_5DSAAttention): non-absorbed MLA, a lightning indexer, a sink.
 
     The indexer scores the keys before the sliding window (positions < seq - window) and keeps index_topk of them.
@@ -355,7 +355,7 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
     if INDEXER_QUANT == "fp8":
         iq = quant_sim.fp8_roundtrip_ue8m0(quant_sim.hadamard(iq))
         ik = quant_sim.fp8_roundtrip_ue8m0(quant_sim.hadamard(ik))
-    iw =(x @ ck.read(f"{idx}.weights_proj.weight").T) * (idx_dim ** -0.5 * n_idx ** -0.5)
+    iw = (x @ ck.read(f"{idx}.weights_proj.weight").T) * (idx_dim ** -0.5 * n_idx ** -0.5)
     logits = (torch.relu(torch.einsum("thd,jd->thj", iq, ik)) * iw[:, :, None]).sum(dim=1)  # [T, T]
 
     sink = ck.read(f"{attn}.core_attention.softmax_offset")
@@ -373,7 +373,7 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
             vals, sel = torch.topk(candidates, topk + 1)
             spread = float(candidates.max() - candidates.min())
             gap = float(vals[topk - 1] - vals[topk])
-            INDEX_GAPS.setdefault(int(attn.split(".")[2]), {})[t] = gap / spread if spread > 0 else 0.0
+            INDEX_GAPS.setdefault(layer, {})[t] = gap / spread if spread > 0 else 0.0
             sel = sel[:topk]
         keys = torch.cat([sel, torch.arange(seq - min(seq, window), seq)])
         scores = (torch.einsum("hd,khd->hk", q[t, :, :nope], k_nope[keys])
@@ -448,7 +448,7 @@ def decoder_layer(ck: Checkpoint, i: int, stream: torch.Tensor, positions: torch
     attn = f"{prefix}.self_attn"
     if ratio <= 0:  # is_dsa_layer: compress_ratios[i] <= 0 (config.py)
         qr = rms_norm(x @ ck.read(f"{attn}.q_a_proj.weight").T, ck.read(f"{attn}.q_a_layernorm.weight"), eps)
-        out = dsa_attention(ck, attn, qr, x, positions)
+        out = dsa_attention(ck, i, attn, qr, x, positions)
     else:
         qr = rms_norm(x @ ck.read(f"{attn}.linear_q_down_proj.weight").T, ck.read(f"{attn}.q_layernorm.weight"), eps)
         out = hca_attention(ck, attn, qr, x, positions, ratio)
@@ -475,6 +475,7 @@ def forward(ck: Checkpoint, tokens: list[int], out: Path, max_layers: int | None
 
     n_layers = int(cfg["num_hidden_layers"]) if max_layers is None else min(max_layers, int(cfg["num_hidden_layers"]))
     timings = {}
+    INDEX_GAPS.clear()  # one forward's gaps only, when a caller runs forward more than once
     for i in range(n_layers):
         t0 = time.time()
         stream = decoder_layer(ck, i, stream, positions)

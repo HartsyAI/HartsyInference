@@ -241,6 +241,19 @@ class DecodeStitchTests(unittest.TestCase):
             # A margin below the gap leaves nothing out.
             self.assertEqual(run(root / "ref", root / "eng", "--tie-margin", "1e-5", "--threshold", "0.5", "--max-tie-fraction", "1").returncode, 1)
 
+    def test_a_flag_after_a_near_tie_names_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(2), positions=6)
+            write_engine(root / "eng", range(2), self.PARTS, positions=6)
+            (root / "ref" / "index_gaps.json").write_text(json.dumps({"1": {"3": 1e-6, "4": 0.2, "5": 0.3}}), encoding="utf-8")
+            np.random.default_rng(7).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
+                root / "eng" / f"layer01_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            result = run(root / "ref", root / "eng", "--tie-margin", "1e-4", "--threshold", "0.5", "--max-tie-fraction", "1")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            row = next(line for line in result.stdout.splitlines() if line.strip().startswith("1 "))
+            self.assertIn("(after near-tie at 3)", row)
+
     def test_too_many_near_ties_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
