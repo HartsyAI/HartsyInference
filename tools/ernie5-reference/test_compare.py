@@ -166,6 +166,20 @@ class DecodeStitchTests(unittest.TestCase):
             self.assertIn("reference layers cover different numbers of positions", result.stdout)
             self.assertIn("reference layers [0] do not cover 6 positions", result.stdout)
 
+    def test_extra_fed_tokens_fail_expect_tokens(self) -> None:
+        # The engine ran 6 positions; a 3-position reference passes as a prefill check, but not when 3 positions are the declared total.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(1), positions=3, tokens=self.FED[:3])
+            write_engine(root / "eng", range(1), self.PARTS, positions=6)
+            write_fed(root / "eng", self.FED, argmax=7)
+            loose = run(root / "ref", root / "eng")
+            self.assertEqual(loose.returncode, 0, loose.stdout + loose.stderr)
+            self.assertIn("the engine covers 6 positions; compared the first 3", loose.stdout)
+            result = run(root / "ref", root / "eng", "--expect-tokens", "3")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("the engine was fed 6 tokens, the reference ran on 3", result.stdout)
+
     def test_a_skipped_argmax_check_says_why(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -113,8 +113,9 @@ def layer_set_errors(ref_layers: set[int], eng_layers: set[int], expect: int | N
     return errors
 
 
-def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int) -> tuple[list[str], list[str]]:
-    """Token and argmax checks against tokens.json and meta.json; returns (errors, notes)."""
+def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int, exact_length: bool) -> tuple[list[str], list[str]]:
+    """Token and argmax checks against tokens.json and meta.json; returns (errors, notes). With exact_length (--expect-tokens),
+    a fed sequence longer or shorter than the reference is an error rather than a note."""
     errors: list[str] = []
     notes: list[str] = []
     fed_path, meta_path = eng_dir / "tokens.json", ref_dir / "meta.json"
@@ -123,6 +124,8 @@ def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int) -> tuple[list
         return errors, notes
     fed = json.loads(fed_path.read_text(encoding="utf-8"))
     fed_tokens = list(fed.get("tokens") or [])
+    if exact_length and len(fed_tokens) != ref_tokens:
+        errors.append(f"the engine was fed {len(fed_tokens)} tokens, the reference ran on {ref_tokens}")
     if meta_path.exists():
         ref_ids = list(json.loads(meta_path.read_text(encoding="utf-8")).get("tokens") or [])
         if fed_tokens[:ref_tokens] != ref_ids:
@@ -178,6 +181,7 @@ def main() -> int:
     ref_tokens = None
     prefill_len = None
     ref_lengths: dict[int, int] = {}
+    engine_longest = 0
     for layer in sorted(ref):
         b = np.load(ref[layer]).astype(np.float32)
         ref_tokens = b.shape[0]
@@ -192,6 +196,7 @@ def main() -> int:
             print(f"{layer:>5}  {ex}")
             errors.append(f"layer {layer}: {ex}")
             continue
+        engine_longest = max(engine_longest, a.shape[0])
         if a.shape[0] < b.shape[0]:
             msg = f"engine covers {a.shape[0]} positions, the reference {b.shape[0]}"
             print(f"{layer:>5}  {msg}")
@@ -230,7 +235,9 @@ def main() -> int:
         if short:
             errors.append(f"reference layers {short} do not cover {args.expect_tokens} positions")
     if ref_tokens is not None:
-        seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens)
+        seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens, exact_length=args.expect_tokens is not None)
+        if engine_longest > ref_tokens:
+            notes.append(f"the engine covers {engine_longest} positions; compared the first {ref_tokens}")
         errors += seq_errors
         decode = ref_tokens - (prefill_len or ref_tokens)
         print(f"compared positions 0..{ref_tokens - 1}: prefill {min(prefill_len or ref_tokens, ref_tokens)}, decode {max(decode, 0)}")
