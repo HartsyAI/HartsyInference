@@ -87,7 +87,7 @@ public static class PaintReferenceProjector
                 int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
                 if (nx < 0 || ny < 0 || nx >= width || ny >= height || !inner[ny * width + nx])
                     continue;
-                Sample(colors, width, height, x, y, image, pixel * 3);
+                SampleBilinear(colors, width, height, x, y, image.AsSpan(pixel * 3, 3));
                 covered[pixel] = true;
             }
         });
@@ -133,6 +133,8 @@ public static class PaintReferenceProjector
         // A drawn picture outlines its subject with a dark line a few pixels wide. Where the surface turns away near the silhouette (the sides of a head), that line would be stretched
         // across it, so near the outline only surfaces facing the camera squarely take the picture.
         bool[] deep = Erode(subject, width, height, Math.Max(2, Math.Max(width, height) / OutlineShare));
+        PaintOccluderAlignment? alignment = PaintOccluderAlignment.Create(depth, raster.FaceIds, side, rgb, subject, width, height, placement,
+            cancellationToken);
 
         double toView = 1.0 / (PaintCamera.OrthoScale * 0.5);
         double[] w2c = front.WorldToCamera;
@@ -151,7 +153,9 @@ public static class PaintReferenceProjector
             if (weight <= 0f)
                 return;
             // The same mapping Project fitted: picture pixel = Scale * view coordinate + Offset, at pixel centres.
-            double x = placement.Scale * u + placement.OffsetX - 0.5, y = placement.Scale * v + placement.OffsetY - 0.5;
+            // A nearer part the mesh put off the drawing samples it shifted onto its own edge.
+            (double du, double dv) = alignment is null ? (0, 0) : alignment.Shift(u, v, cz);
+            double x = placement.Scale * (u + du) + placement.OffsetX - 0.5, y = placement.Scale * (v + dv) + placement.OffsetY - 0.5;
             int nx = (int)Math.Round(x), ny = (int)Math.Round(y);
             if (nx < 0 || ny < 0 || nx >= width || ny >= height || !inner[ny * width + nx]
                 || (!deep[ny * width + nx] && faceFacing[face - 1] < OutlineFacing))
@@ -407,7 +411,8 @@ public static class PaintReferenceProjector
         return grown;
     }
 
-    private static void Sample(byte[] rgb, int width, int height, double x, double y, float[] target, int offset)
+    /// <summary>Bilinear sample of an RGB byte image at a pixel position (integers are pixel centres), edges clamped, in [0, 1].</summary>
+    internal static void SampleBilinear(byte[] rgb, int width, int height, double x, double y, Span<float> target)
     {
         int x0 = Math.Clamp((int)Math.Floor(x), 0, width - 1), y0 = Math.Clamp((int)Math.Floor(y), 0, height - 1);
         int x1 = Math.Min(x0 + 1, width - 1), y1 = Math.Min(y0 + 1, height - 1);
@@ -416,7 +421,7 @@ public static class PaintReferenceProjector
         {
             double top = rgb[(y0 * width + x0) * 3 + c] * (1 - wx) + rgb[(y0 * width + x1) * 3 + c] * wx;
             double bottom = rgb[(y1 * width + x0) * 3 + c] * (1 - wx) + rgb[(y1 * width + x1) * 3 + c] * wx;
-            target[offset + c] = (float)((top * (1 - wy) + bottom * wy) / 255.0);
+            target[c] = (float)((top * (1 - wy) + bottom * wy) / 255.0);
         }
     }
 }

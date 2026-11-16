@@ -162,6 +162,93 @@ public sealed class PaintReferenceProjectorTests
     }
 
     [Fact]
+    public void ApplyToTexels_GivesANearerPartTheDrawnEdgeWhereTheMeshPutItLowerThanDrawn()
+    {
+        // A brim over a face: the picture's subject is the square [60, 240) with the brim colour above row 140 and the face colour below; the mesh's
+        // brim, in front of the face, reaches down to row 144.
+        const int size = 300, atlas = 256;
+        byte[] rgb = new byte[size * size * 3], alpha = new byte[size * size];
+        (byte R, byte G, byte B) brim = (60, 50, 110), face = (230, 180, 150);
+        for (int y = 60; y < 240; y++)
+            for (int x = 60; x < 240; x++)
+            {
+                int p = y * size + x;
+                alpha[p] = 255;
+                (rgb[p * 3], rgb[p * 3 + 1], rgb[p * 3 + 2]) = y < 140 ? brim : face;
+            }
+        List<float> vertices = [], uvs = [];
+        List<int> indices = [];
+        float edge = 1 - (144 - 60) / 180f * 2;
+        Quad(vertices, indices, uvs, -1, -1, 1, 1, 0, 0, 0.5f);
+        Quad(vertices, indices, uvs, -1, edge, 1, 1, 0.3f, 0.5f, 1);
+        Mesh mesh = new() { Vertices = [.. vertices], Indices = [.. indices], Uvs = [.. uvs] };
+        PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
+        PaintViewRenderer renderer = new(frame);
+        PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, atlas, atlas);
+        PaintReferenceProjection placement = PaintReferenceProjector.Project(renderer, rgb, alpha, size, size, 256)!;
+        float[] texture = new float[atlas * atlas * 3];
+        bool[] known = new bool[atlas * atlas];
+
+        PaintReferenceProjector.ApplyToTexels(placement, renderer, surface, texture, known, rgb, alpha, size, size, 3e-3);
+
+        // The brim's texels just above its lower edge (drawn as face) take the brim colour; the face below the brim keeps the face colour.
+        int rim = (int)(atlas * 0.985) * atlas + atlas * 3 / 4, chin = atlas * 3 / 4 * atlas + atlas / 4;
+        Assert.True(known[rim] && known[chin]);
+        Assert.Equal(brim.R / 255f, texture[rim * 3], 0.08f);
+        Assert.Equal(brim.B / 255f, texture[rim * 3 + 2], 0.08f);
+        Assert.Equal(face.R / 255f, texture[chin * 3], 0.02f);
+    }
+
+    [Fact]
+    public void ApplyToTexels_LeavesTheSurfaceBehindANearerPartInPlaceWhenItHasStepsOfItsOwn()
+    {
+        // A brim drawn down to row 139 but meshed down to row 144, over a narrow face (columns [132, 168)) in front of a farther backdrop, so the
+        // face has steps of its own next to the brim. The face's red rises one level per picture row, so any shift on it shows.
+        const int size = 300, atlas = 256;
+        byte[] rgb = new byte[size * size * 3], alpha = new byte[size * size];
+        for (int y = 60; y < 240; y++)
+            for (int x = 60; x < 240; x++)
+            {
+                int p = y * size + x;
+                alpha[p] = 255;
+                (rgb[p * 3], rgb[p * 3 + 1], rgb[p * 3 + 2]) = y < 140 ? ((byte)60, (byte)50, (byte)110)
+                    : x >= 132 && x < 168 ? ((byte)(100 + y - 140), (byte)170, (byte)140) : ((byte)40, (byte)140, (byte)60);
+            }
+        List<float> vertices = [], uvs = [];
+        List<int> indices = [];
+        float edge = 1 - (144 - 60) / 180f * 2;
+        Quad(vertices, indices, uvs, -1, -1, 1, 1, -0.3f, 0, 1 / 3f);
+        Quad(vertices, indices, uvs, -0.2f, -1, 0.2f, 1, 0, 1 / 3f, 2 / 3f);
+        Quad(vertices, indices, uvs, -1, edge, 1, 1, 0.3f, 2 / 3f, 1);
+        Mesh mesh = new() { Vertices = [.. vertices], Indices = [.. indices], Uvs = [.. uvs] };
+        PaintMeshFrame frame = PaintMeshFrame.Create(mesh);
+        PaintViewRenderer renderer = new(frame);
+        PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, atlas, atlas);
+        PaintReferenceProjection placement = PaintReferenceProjector.Project(renderer, rgb, alpha, size, size, 256)!;
+        float[] texture = new float[atlas * atlas * 3];
+        bool[] known = new bool[atlas * atlas];
+
+        PaintReferenceProjector.ApplyToTexels(placement, renderer, surface, texture, known, rgb, alpha, size, size, 3e-3);
+
+        // The brim's rim takes the brim colour; the face's texels in the rows just under the brim (clear of the bicubic ringing at its sides) read
+        // the picture's row they sit on.
+        int rim = (int)(atlas * 0.985) * atlas + atlas * 5 / 6;
+        Assert.True(known[rim]);
+        Assert.Equal(110 / 255f, texture[rim * 3 + 2], 0.08f);
+        int checkedTexels = 0;
+        for (int t = 0; t < atlas; t++)
+            for (int c = atlas / 3 + 6; c < atlas * 2 / 3 - 6; c++)
+            {
+                double y = 1 - (t + 0.5) / atlas * 2, row = 60 + (1 - y) / 2 * 180 - 0.5;
+                if (row < 145 || row > 152 || !known[t * atlas + c])
+                    continue;
+                checkedTexels++;
+                Assert.Equal((100 + row - 140) / 255, texture[(t * atlas + c) * 3], 0.75 / 255);
+            }
+        Assert.True(checkedTexels > 50);
+    }
+
+    [Fact]
     public void ApplyToTexels_SkipsSurfacesTurnedAwayFromTheFront()
     {
         // A strip turned 85 degrees about the vertical axis beside the square: the front picture would be a streak on it.
