@@ -5,17 +5,31 @@ using HartsyInference.ModelAssets.Gguf;
 
 namespace HartsyInference.GenCapture;
 
-/// <summary>KV-cache geometry of the model whose KV pool a batched run used.</summary>
-internal sealed record KvGeometry(int Layers, int KvHeads, int HeadDim, string Architecture, string ModelSha256);
+/// <summary>KV-cache geometry of the model whose KV pool a batched run used: the head dimension of each decoder layer, as the
+/// engine sizes its GGUF pool (<c>CreateGgufScheduler</c> reads <c>HeadDimFor</c> per layer), and the KV head count.</summary>
+internal sealed record KvGeometry(int[] HeadDimPerLayer, int KvHeads, string Architecture, string ModelSha256)
+{
+    /// <summary>Decoder layers, counted as the engine counts them: next-token-prediction layers are excluded.</summary>
+    public int Layers => HeadDimPerLayer.Length;
 
-/// <summary>Batch KV capacity. A page figure exists only when the geometry comes from an authoritative, identifiable
-/// source: the model's GGUF header, identified by its SHA-256 and read with the keys the engine's GGUF loader uses
-/// (<c>{arch}.block_count</c>, <c>{arch}.attention.head_count_kv</c>, <c>{arch}.attention.key_length</c>). Pages come from the
-/// engine's own formula, <see cref="PagedKvPool.PageCountForBudget"/>. Observed payload events are never a source: the
-/// <c>paged.keys</c> events carry no KV geometry (KvHeads and QkHeadDim are 0). When the geometry cannot be established the
-/// report states the reason and writes no page figure, neither zero nor negative.</summary>
+    /// <summary>True when every layer has the same head dimension.</summary>
+    public bool UniformHeadDim => HeadDimPerLayer.Length > 0 && HeadDimPerLayer.All(dim => dim == HeadDimPerLayer[0]);
+
+    /// <summary>Geometry with one head dimension on every layer.</summary>
+    public static KvGeometry Uniform(int layers, int kvHeads, int headDim, string architecture, string modelSha256) =>
+        new(Enumerable.Repeat(headDim, Math.Max(layers, 0)).ToArray(), kvHeads, architecture, modelSha256);
+}
+
+/// <summary>Batch KV capacity. A page figure exists only when the geometry comes from the model's GGUF header, read by the
+/// engine's own config reader (<c>GgufConfigFactory.FromGguf</c>) for an architecture this derive has been verified against.
+/// Pages come from the engine's own formula, <see cref="PagedKvPool.PageCountForBudget"/>. Observed payload events are never a
+/// source: the <c>paged.keys</c> events carry no KV geometry (KvHeads and QkHeadDim are 0). When the geometry cannot be
+/// established the report states the reason and writes no page figure, neither zero nor negative.</summary>
 internal sealed class KvCapacity
 {
+    /// <summary>Architectures whose GGUF layout has been checked against a recorded run. Any other is reported unavailable.</summary>
+    private static readonly string[] VerifiedArchitectures = ["qwen3"];
+
     private KvCapacity(bool available, string? reason, KvGeometry? geometry, long poolBudgetBytes, int pageSize,
         int poolPages, int pagesPerRequest)
     {
@@ -42,15 +56,14 @@ internal sealed class KvCapacity
     public static KvCapacity Unavailable(string reason, long poolBudgetBytes, int pageSize) =>
         new(false, reason, null, poolBudgetBytes, pageSize, 0, 0);
 
-    /// <summary>Capacity for known geometry. Uses the engine's page formula and the same request-page arithmetic as the run.</summary>
+    /// <summary>Capacity for known geometry. Uses the engine's page formula, per layer, and the same request-page arithmetic as the run.</summary>
     public static KvCapacity Compute(KvGeometry geometry, long poolBudgetBytes, int pageSize, long promptTokens, int generatedTokens)
     {
-        if (geometry.Layers <= 0 || geometry.KvHeads <= 0 || geometry.HeadDim <= 0)
+        if (geometry.Layers <= 0 || geometry.KvHeads <= 0 || geometry.HeadDimPerLayer.Any(dim => dim <= 0))
             return Unavailable("KV geometry is not positive", poolBudgetBytes, pageSize);
         if (poolBudgetBytes <= 0 || pageSize <= 0)
             return Unavailable("pool budget or page size is not positive", poolBudgetBytes, pageSize);
-        int[] headDimPerLayer = Enumerable.Repeat(geometry.HeadDim, geometry.Layers).ToArray();
-        int pool = PagedKvPool.PageCountForBudget(geometry.KvHeads, headDimPerLayer, pageSize, poolBudgetBytes);
+        int pool = PagedKvPool.PageCountForBudget(geometry.KvHeads, geometry.HeadDimPerLayer, pageSize, poolBudgetBytes);
         long perRequest = (promptTokens + generatedTokens + 1 + pageSize - 1) / pageSize;
         return new KvCapacity(true, null, geometry, poolBudgetBytes, pageSize, pool, checked((int)perRequest));
     }
@@ -61,27 +74,42 @@ internal sealed class KvCapacity
         + " and QkHeadDim=" + proof.PagedHeadDim.ToString(System.Globalization.CultureInfo.InvariantCulture)
         + "; payload events are not a geometry source";
 
-    /// <summary>Reads the KV geometry from the model's GGUF header. The file must match <paramref name="expectedSha256"/>.
-    /// Mirrors the keys in <c>GgufLanguageModel</c>: head_count defaults the KV head count, key_length defaults to
-    /// embedding_length / head_count.</summary>
+    /// <summary>Reads the KV geometry from the model's GGUF header through the engine's own config reader. The file must match
+    /// <paramref name="expectedSha256"/>. The architecture is checked before the reader runs, so no other model class's
+    /// loader path is exercised. Nothing throws: any failure is returned as the reason, so a caller's write-once output is
+    /// always completed.</summary>
     public static (KvGeometry? Geometry, string? Reason) ReadGgufGeometry(string modelPath, string expectedSha256)
     {
-        if (!File.Exists(modelPath)) return (null, "model file is not present at the recorded path");
-        if (Sha256Hex(modelPath) != expectedSha256) return (null, "model file SHA-256 differs from the recorded model_sha256");
-        using GgufLoader loader = new();
-        loader.Load(modelPath);
-        GgufMetadata meta = loader.Metadata;
-        string? arch = meta.GetString("general.architecture");
-        if (string.IsNullOrEmpty(arch)) return (null, "GGUF header has no general.architecture");
-        int layers = meta.GetInteger(arch + ".block_count");
-        if (layers <= 0) return (null, "GGUF header has no positive " + arch + ".block_count");
-        int heads = meta.GetInteger(arch + ".attention.head_count");
-        int kvHeads = meta.GetInteger(arch + ".attention.head_count_kv", heads);
-        if (kvHeads <= 0) return (null, "GGUF header gives no KV head count");
-        int headDim = meta.GetInteger(arch + ".attention.key_length");
-        if (headDim <= 0 && heads > 0) headDim = meta.GetInteger(arch + ".embedding_length") / heads;
-        if (headDim <= 0) return (null, "GGUF header gives no key length");
-        return (new KvGeometry(layers, kvHeads, headDim, arch, expectedSha256), null);
+        try
+        {
+            if (!File.Exists(modelPath)) return (null, "model file is not present at the recorded path");
+            if (Sha256Hex(modelPath) != expectedSha256) return (null, "model file SHA-256 differs from the recorded model_sha256");
+            using GgufModelLoader.LoadedGgufModel model = GgufModelLoader.Load(modelPath);
+            string? declared = model.Metadata.GetString("general.architecture");
+            if (declared is null || Array.IndexOf(VerifiedArchitectures, declared) < 0)
+                return (null, $"architecture '{declared ?? "(none)"}' has no verified KV capacity reader (verified: {string.Join(", ", VerifiedArchitectures)})");
+            TransformerConfig config = GgufConfigFactory.FromGguf(model.Metadata, model.Weights);
+            return FromEngineConfig(config, declared, expectedSha256);
+        }
+        catch (Exception error)
+        {
+            return (null, $"engine GGUF reader refused the header ({error.GetType().Name}): {error.Message}");
+        }
+    }
+
+    /// <summary>The geometry the engine's pool is sized from, read from its config: one head dimension per decoder layer and the
+    /// KV head count. A layout whose cache is not a plain per-layer K/V pool is reported with its reason, not sized.</summary>
+    public static (KvGeometry? Geometry, string? Reason) FromEngineConfig(TransformerConfig config, string architecture, string modelSha256)
+    {
+        if (config.Mla is not null)
+            return (null, "multi-head latent attention keeps a latent KV cache, which this derive does not model");
+        if (config.CrossAttnLayers is { Count: > 0 })
+            return (null, "cross-attention layers keep their own cache, which this derive does not model");
+        if (config.NumLayers <= 0) return (null, "engine config reports no decoder layers");
+        if (config.NumKvHeads <= 0) return (null, "engine config reports no KV heads");
+        int[] headDims = config.HeadDimsPerLayer();
+        if (headDims.Any(dim => dim <= 0)) return (null, "engine config reports a non-positive head dimension");
+        return (new KvGeometry(headDims, config.NumKvHeads, architecture, modelSha256), null);
     }
 
     /// <summary>Creates <paramref name="path"/> and refuses an existing file. Derived reports are write-once.</summary>
@@ -110,11 +138,21 @@ internal sealed class KvCapacity
             writer.WriteStartObject("geometry");
             writer.WriteNumber("layers", geometry.Layers);
             writer.WriteNumber("kv_heads", geometry.KvHeads);
-            writer.WriteNumber("head_dim", geometry.HeadDim);
+            if (geometry.UniformHeadDim)
+            {
+                writer.WriteNumber("head_dim", geometry.HeadDimPerLayer[0]);
+            }
+            else
+            {
+                writer.WriteStartArray("head_dim_per_layer");
+                foreach (int dim in geometry.HeadDimPerLayer) writer.WriteNumberValue(dim);
+                writer.WriteEndArray();
+            }
             writer.WriteNumber("page_element_bytes", sizeof(float));
             writer.WriteEndObject();
             writer.WriteStartObject("source");
             writer.WriteString("kind", "gguf-header");
+            writer.WriteString("reader", "HartsyInference.LLM.Transformer.GgufConfigFactory.FromGguf");
             writer.WriteString("architecture", geometry.Architecture);
             writer.WriteString("model_sha256", geometry.ModelSha256);
             writer.WriteString("keys", geometry.Architecture + ".block_count, " + geometry.Architecture
