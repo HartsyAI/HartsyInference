@@ -15,8 +15,9 @@ internal static class MeshViews
         _ => throw new ArgumentOutOfRangeException(nameof(view), view, "Not a side view."),
     };
 
-    /// <summary>The Paint camera azimuth (degrees, elevation 0) a side's picture is taken from. Paint's front camera (azimuth 0) looks along world -y with
-    /// +z up, so its screen right is world -x, where a subject facing the camera has its left hand; azimuth 90 puts the camera at world -x.</summary>
+    /// <summary>The Paint camera azimuth (degrees, elevation 0) a side's picture is taken from. With the subject's front toward the front camera
+    /// (azimuth 0), the camera at azimuth 90 sees its own left side (PaintReferenceProjectorTests: a box's +x side takes the azimuth-90 picture
+    /// when its front faces +z).</summary>
     public static double PaintAzimuth(MeshView view) => view switch
     {
         MeshView.Left => 90,
