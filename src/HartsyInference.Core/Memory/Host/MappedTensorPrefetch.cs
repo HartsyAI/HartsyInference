@@ -34,6 +34,9 @@ public static class MappedTensorPrefetch
     private static int _busyReaders;
     private static long _bytesRead;
     private static int _readerThreads;
+    private static int _generations;     // batches begun, so a stale Batch copy never matches a later one
+    private static int _liveGeneration;  // the running batch's generation, 0 when none
+    [ThreadStatic] private static bool _threadHoldsBatch;
 
     /// <summary>Reads every registered tensor of <paramref name="tensors"/> with up to <paramref name="threads"/> readers (at most
     /// <see cref="MaxReaders"/>) and returns when they finish.</summary>
@@ -46,13 +49,17 @@ public static class MappedTensorPrefetch
 
     /// <summary>Starts reading every registered tensor of <paramref name="tensors"/> with up to <paramref name="threads"/> readers and
     /// returns at once. Wait for tensor <c>i</c> with <see cref="Batch.WaitFor"/>; disposing the batch waits for the rest.</summary>
-    /// <remarks>The list must not change until the batch is disposed. Only one batch runs at a time: a second <see cref="Begin"/> waits for
-    /// the first to be disposed, so a thread must not begin two.</remarks>
+    /// <remarks>The list must not change until the batch is disposed. Only one batch runs at a time, process-wide, from <see cref="Begin"/>
+    /// until its <see cref="Batch.Dispose"/>, including whatever the caller does between waits: another thread's <see cref="Begin"/> waits
+    /// for it, so dispose the batch as soon as the last tensor needed has been waited on. Dispose it on the thread that began it.</remarks>
+    /// <exception cref="InvalidOperationException">This thread already holds a batch it has not disposed.</exception>
     public static Batch Begin(IReadOnlyList<Tensor> tensors, int threads)
     {
         ArgumentNullException.ThrowIfNull(tensors);
         ArgumentOutOfRangeException.ThrowIfNegative(threads);
         if (threads == 0 || tensors.Count == 0) return default;
+        // The gate is not reentrant, so a nested Begin on this thread would wait on itself forever.
+        if (_threadHoldsBatch) throw new InvalidOperationException("This thread already holds a prefetch batch; dispose it before beginning another.");
         BatchGate.Wait();
         bool started = false;
         try
@@ -82,8 +89,12 @@ public static class MappedTensorPrefetch
                 Finished.Reset();
                 Wake.Release(readers);
             }
+            int generation = ++_generations;
+            if (generation == 0) generation = ++_generations;
+            Volatile.Write(ref _liveGeneration, generation);
+            _threadHoldsBatch = true;
             started = true;
-            return new Batch(active: true);
+            return new Batch(generation);
         }
         finally
         {
@@ -92,17 +103,23 @@ public static class MappedTensorPrefetch
     }
 
     /// <summary>A running prefetch; dispose it to wait for its readers and let the next batch start.</summary>
+    /// <remarks>Only the first <see cref="Dispose"/> of a batch, through any copy, ends it. A copy kept past that does nothing: its
+    /// <see cref="WaitFor"/> returns at once (every read finished before the batch ended) and its <see cref="Dispose"/> cannot touch a later
+    /// batch.</remarks>
     public readonly struct Batch : IDisposable
     {
-        private readonly bool _active;
+        private readonly int _generation;
 
-        internal Batch(bool active) => _active = active;
+        internal Batch(int generation) => _generation = generation;
+
+        private bool IsLive => _generation != 0 && Volatile.Read(ref _liveGeneration) == _generation;
 
         /// <summary>Returns once tensor <paramref name="index"/> of the list given to <see cref="Begin"/> is read (or its read failed, or it
-        /// had no file extent). Returns at once on an empty batch.</summary>
+        /// had no file extent). Returns at once, without checking <paramref name="index"/>, on an empty or ended batch.</summary>
+        /// <exception cref="ArgumentOutOfRangeException">The batch is running and <paramref name="index"/> is outside its list.</exception>
         public void WaitFor(int index)
         {
-            if (!_active) return;
+            if (!IsLive) return;
             ArgumentOutOfRangeException.ThrowIfNegative(index);
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _tensorCount);
             if (Volatile.Read(ref _tensorChunksLeft[index]) == 0) return;
@@ -112,22 +129,24 @@ public static class MappedTensorPrefetch
             }
         }
 
-        /// <summary>Waits for every read and returns the bytes read. Call once, before <see cref="Dispose"/>.</summary>
+        /// <summary>Waits for every read and returns the bytes read; zero on an empty or ended batch.</summary>
         internal long Finish()
         {
-            if (!_active) return 0;
+            if (!IsLive) return 0;
             if (_chunkCount > 0) Finished.Wait();
             return Interlocked.Read(ref _bytesRead);
         }
 
-        /// <summary>Waits for every read and ends the batch.</summary>
+        /// <summary>Waits for every read and ends the batch. Later calls, through this or any copy, do nothing.</summary>
         public void Dispose()
         {
-            if (!_active) return;
+            // Claim the end atomically, so only one Dispose of this batch releases the gate.
+            if (_generation == 0 || Interlocked.CompareExchange(ref _liveGeneration, 0, _generation) != _generation) return;
             if (_chunkCount > 0) Finished.Wait();
             // Drop the handles so a finished prefetch does not keep a disposed model's mappings reachable.
             Array.Clear(_chunks, 0, _chunkCount);
             _chunkCount = 0;
+            _threadHoldsBatch = false;
             BatchGate.Release();
         }
     }

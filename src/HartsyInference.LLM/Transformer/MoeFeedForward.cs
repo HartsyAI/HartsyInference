@@ -69,6 +69,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private readonly List<Tensor> _prefetchPending = [];
     private int[] _prefetchFirst = [];
     private int[] _prefetchEnd = [];
+    private int _prefetchLast = -1;   // the last expert in loop order with something to wait for
     private IBackend? _prefetchBackend;
     private Func<Tensor, bool>? _prefetchResident;
     private int[] _offHostPlan = [];
@@ -558,8 +559,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
                 // The readers work through the experts in this loop's order, so expert ex is usually read by the time the one before it
                 // has run, and the rest keep reading while it does.
-                using (StageProfiler.Begin(backend, "moe", "prefetch.wait"))
-                    for (int p = _prefetchFirst[ex]; p < _prefetchEnd[ex]; p++) prefetch.WaitFor(p);
+                if (_prefetchFirst[ex] < _prefetchEnd[ex])
+                {
+                    using (StageProfiler.Begin(backend, "moe", "prefetch.wait"))
+                        for (int p = _prefetchFirst[ex]; p < _prefetchEnd[ex]; p++) prefetch.WaitFor(p);
+                    // Nothing later waits on the batch, so end it now rather than holding the process-wide prefetch gate through the
+                    // remaining experts' compute.
+                    if (ex == _prefetchLast) prefetch.Dispose();
+                }
 
                 Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
                 backend.GatherRows(gathered, x, idx);
@@ -602,6 +609,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             _prefetchResident = backend.IsWeightResident;
         }
         RoutedPrefetchSet(expertTokens, _prefetchResident!, _prefetchPending, _prefetchFirst, _prefetchEnd);
+        _prefetchLast = -1;
+        for (int ex = expertTokens.Length - 1; ex >= 0 && _prefetchLast < 0; ex--)
+            if (_prefetchFirst[ex] < _prefetchEnd[ex]) _prefetchLast = ex;
         return _prefetchPending.Count == 0 ? default : MappedTensorPrefetch.Begin(_prefetchPending, threads);
     }
 

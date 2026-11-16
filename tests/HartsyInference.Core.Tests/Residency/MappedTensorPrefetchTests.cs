@@ -144,8 +144,58 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
             Assert.Throws<ArgumentOutOfRangeException>(() => batch.WaitFor(tensors.Count));
         }
 
-        // The batch ended, so the next one starts rather than waiting on it.
-        Assert.Equal(4096 * 3, MappedTensorPrefetch.Read(tensors, threads: 2));
+        // The batch ended, so the next one starts rather than waiting on it (bounded, so a gate left held fails instead of hanging).
+        Assert.Equal(4096 * 3, ReadWithin(tensors, threads: 2));
+    }
+
+    [Fact]
+    public void Batch_DisposedTwiceOrThroughAStaleCopy_LeavesTheNextBatchAlone()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+        List<Tensor> tensors = [registered];
+
+        MappedTensorPrefetch.Batch first = MappedTensorPrefetch.Begin(tensors, threads: 2);
+        MappedTensorPrefetch.Batch copy = first;
+        first.Dispose();
+        first.Dispose();   // already ended: no second release of the gate
+
+        long read = -1;
+        Thread other = new(() =>
+        {
+            using MappedTensorPrefetch.Batch next = MappedTensorPrefetch.Begin(tensors, threads: 2);
+            copy.Dispose();     // a stale copy must not end the running batch
+            copy.WaitFor(0);    // nor read its state
+            read = next.Finish();
+        });
+        other.Start();
+        Assert.True(other.Join(TimeSpan.FromSeconds(30)), "the second batch did not start or finish");
+        Assert.Equal(FileBytes, read);
+        Assert.Equal(FileBytes, ReadWithin(tensors, threads: 2));
+    }
+
+    [Fact]
+    public void Begin_WhileThisThreadHoldsABatch_Throws()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(4096), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+
+        using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin([registered], threads: 1);
+        Assert.Throws<InvalidOperationException>(() => MappedTensorPrefetch.Begin([registered], threads: 1));
+    }
+
+    // Read on another thread, failing after 30 s rather than hanging the run if a batch left the gate held.
+    private static long ReadWithin(IReadOnlyList<Tensor> tensors, int threads)
+    {
+        long read = -1;
+        Thread reader = new(() => read = MappedTensorPrefetch.Read(tensors, threads));
+        reader.Start();
+        Assert.True(reader.Join(TimeSpan.FromSeconds(30)), "the prefetch gate was still held");
+        return read;
     }
 
     [Fact]
