@@ -24,7 +24,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// forward and prints its hit share per decode step; <c>ERNIE_REAL_DECODE_STEPS</c> = greedy decode steps after the prefill, each timed
 /// (default 1); <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma list of
 /// token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per phase
-/// (prefill, decode). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
+/// <c>numerics.moeExpertPrefetchThreads=32</c>). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
@@ -105,7 +106,7 @@ public sealed class Ernie5RealCheckpointTests
         bool expertCache = Environment.GetEnvironmentVariable("ERNIE_REAL_EXPERT_CACHE") == "1";
         int decodeSteps = int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1;
         string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
-        using IDisposable? knobs = string.IsNullOrEmpty(profileDir) ? null : PushProfiling(profileDir);
+        using IDisposable? knobs = PushKnobs(profileDir, Environment.GetEnvironmentVariable("ERNIE_REAL_SET"));
         int capacity = tokens.Length + decodeSteps + 1;
         Stopwatch load = Stopwatch.StartNew();
         using Ernie5Model model = Ernie5Model.Load(dir, backend, new Ernie5LoadOptions { MaxSequenceTokens = capacity, ResidentWeights = resident });
@@ -230,15 +231,28 @@ public sealed class Ernie5RealCheckpointTests
     }
 
     // The CUDA per-op table (diagnostics.profile; expert uploads show as H2D_BIG) and the model stage timer (diagnostics.stageProfile), written
-    // under profileDir. Both are off unless ERNIE_REAL_PROFILE names that directory. The stage timer syncs around each stage, so profiled
-    // totals run slower than an unprofiled pass.
-    private static IDisposable PushProfiling(string profileDir)
+    // under profileDir, plus the knobs ERNIE_REAL_SET pins ("id=value,id=value", the CLI --set form). Both are off unless their variable is set.
+    // The stage timer syncs around each stage, so profiled totals run slower than an unprofiled pass.
+    private static IDisposable? PushKnobs(string? profileDir, string? pins)
     {
-        Directory.CreateDirectory(profileDir);
-        return KnobProfileScope.Push(KnobProfile.Create("ernie5-real-profile")
-            .With(EngineKnobs.Profile, true)
-            .With(EngineKnobs.StageProfile, true)
-            .With<string?>(EngineKnobs.ProfileOut, Path.Combine(profileDir, "ops")));
+        if (string.IsNullOrEmpty(profileDir) && string.IsNullOrEmpty(pins)) return null;
+        KnobProfile profile = KnobProfile.Create("ernie5-real");
+        if (!string.IsNullOrEmpty(profileDir))
+        {
+            Directory.CreateDirectory(profileDir);
+            profile = profile.With(EngineKnobs.Profile, true)
+                .With(EngineKnobs.StageProfile, true)
+                .With<string?>(EngineKnobs.ProfileOut, Path.Combine(profileDir, "ops"));
+        }
+        foreach (string pin in (pins ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] parts = pin.Split('=', 2, StringSplitOptions.TrimEntries);
+            if (parts.Length != 2)
+                throw new ArgumentException($"ERNIE_REAL_SET entry '{pin}' is not a knob=value pin.");
+            if (!profile.TrySet(parts[0], parts[1], out profile, out string? error))
+                throw new ArgumentException($"ERNIE_REAL_SET entry '{pin}' was refused: {error}");
+        }
+        return KnobProfileScope.Push(profile);
     }
 
     private static void ResetProfiles(IBackend backend)

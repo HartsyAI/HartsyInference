@@ -122,6 +122,46 @@ public sealed unsafe class MappedTensorPrefetchTests : IDisposable
     }
 
     [Fact]
+    public void Begin_WaitForEachTensorInTurn_ReturnsOnceItIsRead_AndDisposeFinishesTheRest()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        List<Tensor> tensors = [];
+        int[] offsets = [0, MappedTensorPrefetch.ChunkBytes, MappedTensorPrefetch.ChunkBytes * 2];
+        foreach (int offset in offsets)
+        {
+            Tensor tensor = new(handle.PointerAt(offset), new TensorShape(4096), DType.U8);
+            tensor.SetKeepAlive(handle);
+            TensorFileExtents.Register(tensor, handle, offset);
+            tensors.Add(tensor);
+        }
+        nint block = (nint)NativeMemory.AlignedAlloc(64, 64);
+        _ownedNative.Add(block);
+        tensors.Add(new Tensor((void*)block, new TensorShape(64), DType.U8));   // no file extent: nothing to wait for
+
+        using (MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin(tensors, threads: 2))
+        {
+            for (int i = 0; i < tensors.Count; i++) batch.WaitFor(i);
+            Assert.Throws<ArgumentOutOfRangeException>(() => batch.WaitFor(tensors.Count));
+        }
+
+        // The batch ended, so the next one starts rather than waiting on it.
+        Assert.Equal(4096 * 3, MappedTensorPrefetch.Read(tensors, threads: 2));
+    }
+
+    [Fact]
+    public void Begin_ZeroThreads_IsAnEmptyBatchThatWaitsForNothing()
+    {
+        using MmapHandle handle = MmapHandle.OpenRead(_path);
+        Tensor registered = new(handle.PointerAt(0), new TensorShape(FileBytes), DType.U8);
+        registered.SetKeepAlive(handle);
+        TensorFileExtents.Register(registered, handle, 0);
+
+        using MappedTensorPrefetch.Batch batch = MappedTensorPrefetch.Begin([registered], threads: 0);
+        batch.WaitFor(0);
+        batch.WaitFor(99);   // an empty batch has no tensors to check
+    }
+
+    [Fact]
     public void Read_ZeroThreads_ReadsNothing()
     {
         using MmapHandle handle = MmapHandle.OpenRead(_path);

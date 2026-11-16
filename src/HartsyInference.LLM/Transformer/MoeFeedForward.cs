@@ -64,8 +64,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertAssignment[] _offPlan = [];
     private List<ExpertKey> _offMisses = [];
 
-    // Routed-expert prefetch scratch (PrefetchRoutedExperts), reused from call to call.
+    // Routed-expert prefetch scratch (BeginRoutedPrefetch), reused from call to call: the tensors to read, and each expert's [first, end)
+    // range in that list.
     private readonly List<Tensor> _prefetchPending = [];
+    private int[] _prefetchFirst = [];
+    private int[] _prefetchEnd = [];
     private IBackend? _prefetchBackend;
     private Func<Tensor, bool>? _prefetchResident;
     private int[] _offHostPlan = [];
@@ -543,64 +546,83 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 if (!routed) output.Dispose();
             }
         }
-        PrefetchRoutedExperts(backend, expertTokens);
-        for (int ex = 0; ex < e; ex++)
+        MappedTensorPrefetch.Batch prefetch = BeginRoutedPrefetch(backend, expertTokens);
+        try
         {
-            int ne = expertTokens[ex].Count;
-            if (ne == 0) continue;
-            int[] idx = [.. expertTokens[ex]];
-            float[] wts = [.. expertWeights[ex]];
+            for (int ex = 0; ex < e; ex++)
+            {
+                int ne = expertTokens[ex].Count;
+                if (ne == 0) continue;
+                int[] idx = [.. expertTokens[ex]];
+                float[] wts = [.. expertWeights[ex]];
 
-            Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
-            backend.GatherRows(gathered, x, idx);
-            Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
-            gathered.Dispose();
-            backend.ScatterAddRows(output, expOut, idx, wts);
-            expOut.Dispose();
+                // The readers work through the experts in this loop's order, so expert ex is usually read by the time the one before it
+                // has run, and the rest keep reading while it does.
+                using (StageProfiler.Begin(backend, "moe", "prefetch.wait"))
+                    for (int p = _prefetchFirst[ex]; p < _prefetchEnd[ex]; p++) prefetch.WaitFor(p);
+
+                Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
+                backend.GatherRows(gathered, x, idx);
+                Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
+                gathered.Dispose();
+                backend.ScatterAddRows(output, expOut, idx, wts);
+                expOut.Dispose();
+            }
+        }
+        finally
+        {
+            prefetch.Dispose();
+            _prefetchPending.Clear();
         }
         return output;
     }
 
-    /// <summary>Reads the selected routed experts that are not on the device into the page cache with parallel readers
+    /// <summary>Starts reading the selected routed experts that are not on the device into the page cache with parallel readers
     /// (<see cref="MappedTensorPrefetch"/>), so the per-expert loop's uploads copy from memory instead of waiting on storage one expert at a
-    /// time. Off when <c>numerics.moeExpertPrefetchThreads</c> is 0.</summary>
-    private void PrefetchRoutedExperts(IBackend backend, List<int>[] expertTokens)
+    /// time. An empty batch when <c>numerics.moeExpertPrefetchThreads</c> is 0 or nothing needs reading. Fills
+    /// <see cref="_prefetchFirst"/> and <see cref="_prefetchEnd"/> for every selected expert.</summary>
+    private MappedTensorPrefetch.Batch BeginRoutedPrefetch(IBackend backend, List<int>[] expertTokens)
     {
         int threads = HartsyInference.Core.Configuration.EngineKnobs.MoeExpertPrefetchThreads.Value;
-        if (threads == 0) return;
-        // The delegate and the list are kept from call to call, so the prefetch adds no allocation to a forward.
+        if (_prefetchFirst.Length != expertTokens.Length)
+        {
+            _prefetchFirst = new int[expertTokens.Length];
+            _prefetchEnd = new int[expertTokens.Length];
+        }
+        if (threads == 0)
+        {
+            Array.Clear(_prefetchFirst);
+            Array.Clear(_prefetchEnd);
+            return default;
+        }
+        // The delegate, the list and the range arrays are kept from call to call, so the prefetch adds no allocation to a forward.
         if (!ReferenceEquals(_prefetchBackend, backend))
         {
             _prefetchBackend = backend;
             _prefetchResident = backend.IsWeightResident;
         }
-        RoutedPrefetchSet(expertTokens, _prefetchResident!, _prefetchPending);
-        if (_prefetchPending.Count == 0) return;
-        try
-        {
-            using (StageProfiler.Begin(backend, "moe", "prefetch"))
-                MappedTensorPrefetch.Read(_prefetchPending, threads);
-        }
-        finally
-        {
-            _prefetchPending.Clear();
-        }
+        RoutedPrefetchSet(expertTokens, _prefetchResident!, _prefetchPending, _prefetchFirst, _prefetchEnd);
+        return _prefetchPending.Count == 0 ? default : MappedTensorPrefetch.Begin(_prefetchPending, threads);
     }
 
     /// <summary>Fills <paramref name="pending"/> (cleared first) with the gate, up and down weights of every expert with at least one token
-    /// that <paramref name="resident"/> does not report on the device. Packed experts read through their own recipe, so none are listed for
-    /// them.</summary>
-    internal void RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident, List<Tensor> pending)
+    /// that <paramref name="resident"/> does not report on the device, in expert order, and sets <paramref name="first"/> and
+    /// <paramref name="end"/> to each expert's range in it (empty for an expert with no tokens or nothing to read). Packed experts read
+    /// through their own recipe, so none are listed for them.</summary>
+    internal void RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident, List<Tensor> pending, int[] first, int[] end)
     {
         pending.Clear();
-        if (_packed is not null) return;
         for (int ex = 0; ex < expertTokens.Length; ex++)
         {
-            if (expertTokens[ex].Count == 0) continue;
-            int local = ex - _firstExpert;
-            if (!resident(_gateW[local])) pending.Add(_gateW[local]);
-            if (!resident(_upW[local])) pending.Add(_upW[local]);
-            if (!resident(_downW[local])) pending.Add(_downW[local]);
+            first[ex] = pending.Count;
+            if (_packed is null && expertTokens[ex].Count > 0)
+            {
+                int local = ex - _firstExpert;
+                if (!resident(_gateW[local])) pending.Add(_gateW[local]);
+                if (!resident(_upW[local])) pending.Add(_upW[local]);
+                if (!resident(_downW[local])) pending.Add(_downW[local]);
+            }
+            end[ex] = pending.Count;
         }
     }
 
