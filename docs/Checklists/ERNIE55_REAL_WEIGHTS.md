@@ -31,7 +31,9 @@ was not measured.
 - Generation: `Real_TextService_GeneratesFromAPlainPrompt` (greedy, 16 tokens, stop reason Length) continues "Large language models are"
   (5 prompt ids) with " a type of artificial intelligence that can generate human-like text. They are trained on".
 
-| Stage | Time |
+Timings before the routed-expert prefetch (#926); the next section has the comparison.
+
+| Stage | Time (before #926) |
 | --- | --- |
 | Load (dense preload 7644 MB of a 20025 MB budget, 48.5 s of it) | 140.5 s |
 | Prefill, 5 tokens | 174.5 s |
@@ -48,8 +50,9 @@ activations exceed the floor can still run out of device memory.
 
 `Real_PrefillAndDecode_ProduceFiniteLogits` with `ERNIE_REAL_RESIDENT=1 ERNIE_REAL_DECODE_STEPS=16 ERNIE_REAL_PROFILE=<dir>` (reference
 precision, tokens `1,2,3,4,5`), same pod type, before (`564d824da`) and after (`f1b226734`) the routed-expert prefetch of #926. The pod's
-container memory is capped at 46 GB, so the page cache cannot hold the experts between steps; the volume reads about 800 MB/s sequentially
-but about 95 MB/s from one thread in 4 MiB reads.
+container memory is capped at 46 GB, so the page cache cannot hold the experts between steps. The volume reads about 800 MB/s in one
+sequential `dd` stream but about 95 MB/s from one thread in 4 MiB reads; 8 to 30 parallel 4 MiB readers measured 550 to 790 MB/s while
+another run shared the volume.
 
 ERNIE takes the host-routed per-expert MoE loop (split-feature routing and SiTU keep it off the device-routed path). Before the prefetch,
 routed experts were 168.5 of 171 s of the 16 decode steps, almost all of it 9,576 serial expert uploads at 17.2 ms each; attention, the
@@ -65,7 +68,8 @@ router, the shared expert and the latent projections were under 1 s together. A 
 
 The greedy tokens are identical. The tokens repeat from step 9, so the late steps reuse experts already on the device or in the page
 cache; compare position by position, not the 16-step mean. With the prefetch, `moe.prefetch` is 38.6 of the 49.3 s: about 37 GiB read at
-about 1 GB/s, the volume's limit. The prefetch runs before each layer's expert loop, so its reads and the uploads and GEMMs do not overlap.
+about 1 GB/s with 16 readers, near the highest rate measured on this volume, so decode is now bound by its read speed. The prefetch runs
+before each layer's expert loop, so its reads and the uploads and GEMMs do not overlap.
 
 ## What is not verified
 
