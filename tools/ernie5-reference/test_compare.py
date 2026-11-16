@@ -265,8 +265,39 @@ class DecodeStitchTests(unittest.TestCase):
             (root / "ref" / "index_gaps.json").write_text(json.dumps({"0": {"4": 1e-4, "5": 0.2}}), encoding="utf-8")
             result = run(root / "ref", root / "eng", "--tie-margin", "1e-3")   # 1 of 2 selecting positions, above 0.05
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            self.assertIn("near ties below 0.001: 1 of 2 selecting positions", result.stdout)
-            self.assertIn("more than --max-tie-fraction 0.05", result.stdout)
+            self.assertIn("indexer near ties below 0.001: 1 of 2 positions", result.stdout)
+            self.assertIn("1 of 2 indexer positions are near ties, more than --max-tie-fraction 0.05", result.stdout)
+
+    def test_a_router_near_tie_is_left_out_like_an_indexer_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(2), positions=6)
+            write_engine(root / "eng", range(2), self.PARTS, positions=6)
+            # Every position routes; position 4's last kept and first dropped experts are 1e-6 apart in layer 1.
+            gaps = {"1": {str(p): (1e-6 if p == 4 else 0.3) for p in range(6)}}
+            (root / "ref" / "router_gaps.json").write_text(json.dumps(gaps), encoding="utf-8")
+            np.random.default_rng(3).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
+                root / "eng" / f"layer01_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            self.assertEqual(run(root / "ref", root / "eng", "--threshold", "0.5").returncode, 1)
+            result = run(root / "ref", root / "eng", "--threshold", "0.5", "--tie-margin", "1e-4", "--max-tie-fraction", "0.2")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("router near ties below 0.0001: 1 of 6 positions", result.stdout)
+
+    def test_explain_names_the_first_drop_and_its_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_ref(root / "ref", range(3), positions=6)
+            write_engine(root / "eng", range(3), self.PARTS, positions=6)
+            (root / "ref" / "router_gaps.json").write_text(
+                json.dumps({"1": {str(p): (1e-6 if p == 4 else 0.3) for p in range(6)}}), encoding="utf-8")
+            for layer in (1, 2):
+                np.random.default_rng(11 + layer).standard_normal((1, HC, HIDDEN)).astype("<f4").tofile(
+                    root / "eng" / f"layer{layer:02d}_pos4_t1_hc{HC}_h{HIDDEN}.f32")
+            result = run(root / "ref", root / "eng", "--threshold", "0.5", "--explain")
+            self.assertIn("positions below 0.5: 1", result.stdout)
+            line = next(l for l in result.stdout.splitlines() if l.startswith("position 4:"))
+            self.assertIn("first below at layer 1", line)
+            self.assertIn("router gap 1.00e-06 at layer 1 (smallest 16.7% there)", line)
 
     def test_tie_margin_without_index_gaps_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

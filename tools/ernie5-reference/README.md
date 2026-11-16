@@ -7,7 +7,7 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` is a diagnostic that leaves indexer near-tie positions out of the per-position check (see Long-input parity). |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` is a diagnostic that leaves indexer and MoE-router near-tie positions out of the per-position check, and `--explain` lists each position's first drop with the smallest top-k gaps at or before it (see Long-input parity). |
 | `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: the strict layer-set checks, decode stitching (pass, gap, overlap, short engine), the token and argmax checks, and a single bad position being flagged and named. |
 | `../parity/compressed_kv.py` | Shared with any model that has the DeepSeek-V4 compressor: pooling with the APE score bias, the RMS norm, each latent's RoPE position and which queries see it. Tests: `python -I tools/parity/test_compressed_kv.py`. |
 | `../parity/quant_sim.py` | Shared Hadamard rotation and FP8 E4M3 round trip with UE8M0 scales per 128 values, for indexer queries and keys. Tests: `python -I tools/parity/test_quant_sim.py`. |
@@ -179,16 +179,19 @@ python tools/ernie5-reference/compare.py --ref "$RUN/reference-long" --engine "$
   --expect-layers 43 --expect-tokens 2308 2>&1 | tee "$RUN/compare-long.txt"
 ```
 
-The strict run is the check. If it flags a DSA layer (or a later one) only at a few selecting positions, rerun the comparison with
-`--tie-margin 1e-4` to see whether those are near ties: positions where a DSA indexer kept and dropped keys within 1e-4 of that
-query's candidate-score spread (`index_gaps.json`, written by the reference), so that rounding alone can pick a different key. The
-positions it leaves out are printed per layer, the whole-stream cosine still includes them, and more than 5 percent of the selecting
-positions left out is an error (`--max-tie-fraction`). Only the near-tie positions themselves are left out; from the next layer on, a
-later position reads their changed state, so it can still be flagged, and the note then names the nearest earlier near tie from an
-earlier DSA layer (`after near-tie at N`). A flagged position with no such note is a real difference.
+The strict run is the check. If it flags only a few single positions, rerun the comparison with `--explain`: it lists each position
+that falls below the per-position threshold at the first layer it does, with that position's smallest top-k gaps at or before that
+layer. Two top-k choices can flip under rounding alone: the DSA indexer's keys (`index_gaps.json`) and the MoE router's experts
+(`router_gaps.json`, every MoE token), each gap measured as a fraction of that choice's candidate-score spread. A first drop whose
+smallest gap is among the smallest few percent of its layer is a near tie; one with no small gap is a real difference.
 
-Not run on the real weights yet. The reference reads nearly every routed expert at this length, so it makes about one full pass over
-the checkpoint; its indexer scores are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
+`--tie-margin M` then leaves the positions with a gap below M out of the per-position check from that layer on, prints them per layer,
+keeps them in the whole-stream cosine, and is an error when more than 5 percent of either file's positions would be left out
+(`--max-tie-fraction`). Only the tie positions themselves are left out; from the next layer on, a later position reads their changed
+state, so it can still be flagged, and the note then names the nearest earlier near tie from an earlier layer (`after near-tie at N`).
+
+The reference reads nearly every routed expert at this length, so it makes about one full pass over the checkpoint; its indexer scores
+are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
 
 ### Expected behaviour on the real checkpoint
 

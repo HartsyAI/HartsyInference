@@ -19,15 +19,19 @@ With --strict it exits 1 on a flagged layer, a layer-set mismatch, a stitching o
 mismatch. --expect-layers N requires exactly layers 0..N-1 on both sides; --expect-tokens N requires the reference to cover N
 positions (use the prompt plus decode length, so a prefill-only reference cannot pass a decode check).
 
---tie-margin M is a diagnostic for a flagged position. It reads the reference's index_gaps.json (per DSA query, the gap between the
-last key the indexer kept and the first it dropped, over the spread of that query's candidate scores) and leaves out of the
-per-position check every position whose gap is below M in a DSA layer at or before the layer being checked: there a rounding
-difference can pick a different key. The positions left out are printed per layer, and the whole-stream cosine still covers them.
+--tie-margin M is a diagnostic for a flagged position. It reads the reference's top-k gap files: index_gaps.json (per DSA query, the
+gap between the last key the indexer kept and the first it dropped) and router_gaps.json (per MoE token, the gap between the last
+expert routed to and the first left out), each over the spread of that choice's candidate scores. It leaves out of the per-position
+check every position whose gap is below M in a layer at or before the layer being checked: there a rounding difference can pick a
+different key or expert. The positions left out are printed per layer, and the whole-stream cosine still covers them.
 Only the near-tie position itself is left out: from the next layer on, later positions read its changed state (window, compressor,
-indexer), so one of them can still be flagged; the note then names the nearest earlier near tie from a strictly earlier DSA layer,
-"(after near-tie at N)". A flag in the tie's own DSA layer gets no note, since that layer's later positions read only its inputs.
-When more than --max-tie-fraction (default 0.05) of the selecting positions would be left out, it is an error: the margin would
+indexer), so one of them can still be flagged; the note then names the nearest earlier near tie from a strictly earlier layer,
+"(after near-tie at N)". A flag in the tie's own layer gets no note, since that layer's later positions read only its inputs.
+When more than --max-tie-fraction (default 0.05) of either file's positions would be left out, it is an error: the margin would
 skip the selection test instead of explaining a few positions.
+
+--explain lists every position that falls below the per-position threshold, at the first layer it does, with the indexer and router
+gaps there and how small each is among that layer's gaps. A first drop with no small gap at its layer is not a near tie.
 
 Engine files are named layer{LL}_pos{startPos}_t{tokens}_hc{hc}_h{hidden}.f32 (little-endian float32, row-major
 [tokens, hc, hidden]).
@@ -93,14 +97,52 @@ def load_ref(folder: Path) -> dict[int, Path]:
     return out
 
 
-def near_ties(ref_dir: Path, margin: float) -> tuple[dict[int, set[int]], set[int]]:
-    """(DSA layer -> query positions whose indexer kept and dropped a key within `margin` of each other, every selecting position)."""
-    path = ref_dir / "index_gaps.json"
-    if not path.exists():
-        raise FileNotFoundError(f"--tie-margin needs {path}; rerun reference.py, which writes it")
-    gaps = json.loads(path.read_text(encoding="utf-8"))
-    selecting = {int(pos) for by_pos in gaps.values() for pos in by_pos}
-    return {int(layer): {int(pos) for pos, gap in by_pos.items() if gap < margin} for layer, by_pos in gaps.items()}, selecting
+GAP_FILES = {"indexer": "index_gaps.json", "router": "router_gaps.json"}
+
+
+def load_gaps(ref_dir: Path) -> dict[str, dict[int, dict[int, float]]]:
+    """kind -> layer -> position -> top-k gap, for each gap file the reference wrote."""
+    out: dict[str, dict[int, dict[int, float]]] = {}
+    for kind, name in GAP_FILES.items():
+        path = ref_dir / name
+        if path.exists():
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            out[kind] = {int(layer): {int(pos): float(gap) for pos, gap in by_pos.items()} for layer, by_pos in raw.items()}
+    return out
+
+
+def near_ties(gaps: dict[str, dict[int, dict[int, float]]], margin: float) -> tuple[dict[int, set[int]], dict[str, tuple[int, int]]]:
+    """(layer -> positions with a top-k gap below `margin` in that layer, kind -> (tied positions, positions with a gap))."""
+    ties: dict[int, set[int]] = {}
+    counts: dict[str, tuple[int, int]] = {}
+    for kind, by_layer in gaps.items():
+        tied: set[int] = set()
+        every: set[int] = set()
+        for layer, by_pos in by_layer.items():
+            low = {pos for pos, gap in by_pos.items() if gap < margin}
+            ties.setdefault(layer, set()).update(low)
+            tied |= low
+            every |= set(by_pos)
+        counts[kind] = (len(tied), len(every))
+    return ties, counts
+
+
+def explain(first_drop: dict[int, tuple[int, float]], gaps: dict[str, dict[int, dict[int, float]]]) -> list[str]:
+    """One line per position that fell below the per-position threshold: its first such layer, the cosine there, and for each kind
+    the position's smallest top-k gap at or before that layer (a tie a layer earlier can show only once it has propagated), with the
+    share of that layer's positions whose gap is as small or smaller."""
+    lines = []
+    for pos, (layer, cos) in sorted(first_drop.items(), key=lambda item: (item[1][0], item[0])):
+        parts = []
+        for kind, by_layer in gaps.items():
+            seen = [(by_pos[pos], at) for at, by_pos in by_layer.items() if at <= layer and pos in by_pos]
+            if seen:
+                gap, at = min(seen)
+                share = sum(g <= gap for g in by_layer[at].values()) / len(by_layer[at])
+                parts.append(f"{kind} gap {gap:.2e} at layer {at} (smallest {share:.1%} there)")
+        lines.append(f"position {pos}: first below at layer {layer} (cosine {cos:.6f}); "
+                     + ("; ".join(parts) or "no top-k gap recorded there"))
+    return lines
 
 
 def metrics(a: np.ndarray, b: np.ndarray) -> tuple[float, float, float]:
@@ -183,11 +225,13 @@ def main() -> int:
                    help="cosine every single position must reach (default: --threshold). One position holds only hc*hidden values, "
                         "so a looser bound can be set here without loosening the whole-stream check")
     p.add_argument("--tie-margin", type=float, default=None,
-                   help="leave out of the per-position check the positions where a DSA indexer at or before the layer kept and dropped "
-                        "keys within this gap, as a fraction of the query's candidate-score spread (from the reference's "
-                        "index_gaps.json); a diagnostic for a flagged position, and the positions left out are printed")
+                   help="leave out of the per-position check the positions where a DSA indexer or MoE router at or before the layer "
+                        "kept and dropped a candidate within this gap, as a fraction of that choice's candidate-score spread (the "
+                        "reference's index_gaps.json and router_gaps.json); a diagnostic for a flagged position, printed per layer")
     p.add_argument("--max-tie-fraction", type=float, default=0.05,
-                   help="with --tie-margin, an error when more than this fraction of the selecting positions would be left out")
+                   help="with --tie-margin, an error when more than this fraction of either gap file's positions would be left out")
+    p.add_argument("--explain", action="store_true",
+                   help="list each position that falls below the per-position threshold, at its first such layer, with the top-k gaps there")
     args = p.parse_args()
     position_threshold = args.threshold if args.position_threshold is None else args.position_threshold
 
@@ -195,17 +239,19 @@ def main() -> int:
     ties: dict[int, set[int]] = {}
     tie_notes: list[str] = []
     tie_errors: list[str] = []
+    gaps = load_gaps(ref_dir)
     if args.tie_margin is not None:
-        try:
-            ties, selecting = near_ties(ref_dir, args.tie_margin)
-        except FileNotFoundError as ex:
-            print(ex, file=sys.stderr)
+        if not gaps:
+            print(f"--tie-margin needs {' or '.join(GAP_FILES.values())} in {ref_dir}; rerun reference.py, which writes them",
+                  file=sys.stderr)
             return 1
-        tied = set().union(*ties.values()) if ties else set()
-        tie_notes.append(f"near ties below {args.tie_margin}: {len(tied)} of {len(selecting)} selecting positions")
-        if selecting and len(tied) > args.max_tie_fraction * len(selecting):
-            tie_errors.append(f"{len(tied)} of {len(selecting)} selecting positions are near ties, more than --max-tie-fraction "
-                              f"{args.max_tie_fraction}: the margin would skip the selection check")
+        ties, counts = near_ties(gaps, args.tie_margin)
+        for kind, (tied, every) in counts.items():
+            tie_notes.append(f"{kind} near ties below {args.tie_margin}: {tied} of {every} positions")
+            if every and tied > args.max_tie_fraction * every:
+                tie_errors.append(f"{tied} of {every} {kind} positions are near ties, more than --max-tie-fraction "
+                                  f"{args.max_tie_fraction}: the margin would skip the selection check")
+    first_drop: dict[int, tuple[int, float]] = {}
     ref = load_ref(ref_dir)
     eng = load_engine(eng_dir)
     if not ref:
@@ -251,10 +297,14 @@ def main() -> int:
         max_abs, rel, cos = metrics(a, b)
         pre = min(prefill_len, b.shape[0])
         _, _, pre_cos = metrics(a[:pre], b[:pre])
-        skipped = set().union(*(pos for dsa, pos in ties.items() if dsa <= layer)) & set(range(b.shape[0]))
+        skipped = set().union(*(pos for tie_layer, pos in ties.items() if tie_layer <= layer)) & set(range(b.shape[0]))
         if skipped:
             tie_notes.append(f"layer {layer}: left out {len(skipped)} near-tie positions {sorted(skipped)}")
-        per_pos = [np.inf if t in skipped else metrics(a[t], b[t])[2] for t in range(b.shape[0])]
+        raw = [metrics(a[t], b[t])[2] for t in range(b.shape[0])]
+        for t, c in enumerate(raw):
+            if not (c >= position_threshold) and t not in first_drop:
+                first_drop[t] = (layer, c)
+        per_pos = [np.inf if t in skipped else c for t, c in enumerate(raw)]
         worst = int(np.nanargmin(per_pos)) if not any(np.isnan(per_pos)) else int(np.argmax(np.isnan(per_pos)))
         note = ""
         if not (cos >= args.threshold) or not all(c >= position_threshold for c in per_pos):  # also flags NaN
@@ -262,9 +312,9 @@ def main() -> int:
             if first_flag is None:
                 first_flag = layer
                 note += " (first)"
-            # A different key at a near tie changes that position's output, which later positions read only from the next layer on
-            # (within its own DSA layer they read that layer's inputs): name the nearest tie from a strictly earlier DSA layer.
-            upstream = set().union(*(pos for dsa, pos in ties.items() if dsa < layer))
+            # A different key or expert at a near tie changes that position's output, which later positions read only from the next
+            # layer on (within its own layer they read that layer's inputs): name the nearest tie from a strictly earlier layer.
+            upstream = set().union(*(pos for tie_layer, pos in ties.items() if tie_layer < layer))
             earlier = [t for t in upstream if t < worst]
             if earlier:
                 note += f" (after near-tie at {max(earlier)})"
@@ -293,6 +343,11 @@ def main() -> int:
         print(f"compared positions 0..{ref_tokens - 1}: prefill {min(prefill_len or ref_tokens, ref_tokens)}, decode {max(decode, 0)}")
         for note in notes + tie_notes:
             print(note)
+        if args.explain:
+            lines = explain(first_drop, gaps)
+            print(f"positions below {position_threshold}: {len(lines)}" + ("" if gaps else " (no gap files in the reference folder)"))
+            for line in lines:
+                print(line)
     for err in errors:
         print(err)
     if first_flag is None and not errors:
