@@ -7,8 +7,10 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. `--tie-margin M` is a diagnostic that leaves indexer near-tie positions out of the per-position check (see Long-input parity). |
 | `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: the strict layer-set checks, decode stitching (pass, gap, overlap, short engine), the token and argmax checks, and a single bad position being flagged and named. |
+| `../parity/compressed_kv.py` | Shared with any model that has the DeepSeek-V4 compressor: pooling with the APE score bias, the RMS norm, each latent's RoPE position and which queries see it. Tests: `python -I tools/parity/test_compressed_kv.py`. |
+| `../parity/quant_sim.py` | Shared Hadamard rotation and FP8 E4M3 round trip with UE8M0 scales per 128 values, for indexer queries and keys. Tests: `python -I tools/parity/test_quant_sim.py`. |
 
 Sources the reference follows (fetched for this change, not from the engine):
 - `baidu/vLLM-ERNIE` at `b8414da6b703579814c2009c5a63bac101916bbe`, `src/vllm_ernie/models/ernie5_5/` (`nvidia/model.py`,
@@ -16,35 +18,42 @@ Sources the reference follows (fetched for this change, not from the engine):
 - `vllm-project/vllm` at tag `v0.32.0` (the version `vllm-ernie` pins): `kernels/mhc/torch.py`, `kernels/mhc/tilelang_kernels.py`
   (hc head), `models/deepseek_v4/attention.py`, `compressor.py`, `common/rope.py`, `layers/rotary_embedding/*` (YaRN),
   `layers/activation.py` (SiTU).
+- `deepseek-ai/DeepSeek-V4-Flash` at `60d8d70770c6776ff598c94bb586a859a38244f1`, `inference/model.py` (`Compressor`,
+  `get_compress_topk_idxs`, `rotate_activation`) and `inference/kernel.py` (`act_quant`): the plain-torch form of the compressor that
+  vLLM's `DeepseekCompressor` runs in Triton, which vLLM-ERNIE's `Ernie5_5Compressor` subclasses unchanged.
 - Checkpoint: `baidu/ERNIE-5.5-Flash-Base` at `028544b2ffceea189b2d8768ed2b9d09b06f2343`. The key names are the engine's
   `Ernie5WeightNames`, which the engine already maps against the real index.
 
 ## What the reference covers
 
 - Embedding broadcast to `hc_mult` streams; mHC pre (ERNIE's `1/(sqrt(mean)+eps)` RMS factor), mHC post, sinkhorn.
-- DSA layers (`compress_ratios <= 0`): non-absorbed MLA, the lightning indexer (top-k over keys before the sliding window),
+- DSA layers (`compress_ratios <= 0`): non-absorbed MLA, the lightning indexer (top-k over keys before the sliding window, with
+  the queries and keys Hadamard-rotated and rounded through FP8 as vLLM-ERNIE stores them; `--indexer-quant f32` turns that off),
   the attention sink (denominator only), VHA, the sigmoid gate, `o_proj`.
-- HCA layers (`compress_ratios > 0`) while the sequence is shorter than the ratio: q/kv projections and norms, per-head query
-  RMS, RoPE at `compress_rope_theta` with the real config's YaRN frequencies, the sink, VHA (BF16 fold), inverse RoPE, the
-  grouped `wo_a`, the gate, `wo_b`.
+- HCA layers (`compress_ratios > 0`) at any length: q/kv projections and norms, per-head query RMS, RoPE at
+  `compress_rope_theta` with the real config's YaRN frequencies, the window rows, the compressor (one latent per completed group
+  of `compress_ratio` tokens: softmax gate with the APE bias, RMS norm, RoPE at the group's first position, visible from the
+  group's last token on), the sink, VHA (BF16 fold), inverse RoPE, the grouped `wo_a`, the gate, `wo_b`.
 - Dense SiTU MLP and latent MoE (split-feature routing, learned per-expert scale, latent norm, `fc1`/`fc2`, shared expert).
 - FP8 128x128 block dequantization to F32, one tensor at a time. Experts are read only when a token selects them.
 - Final hc head read-out, final RMS norm, and optionally the LM head with multimax (`--logits`).
 
 ## Not covered (the reference says so or refuses)
 
-- **HCA compressor.** Not implemented here. `reference.py` raises `NotImplementedError` once a block of `compress_ratio` tokens
-  completes, i.e. at token 128 for the real checkpoint; any run of 127 tokens or fewer is unaffected. The source to port is public:
-  vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py`; the
-  pooling, APE and norm run in its Triton kernels `_SAVE_PARTIAL_STATES_KERNEL` and `compress_norm_rope_store_triton`).
+- **Compressor storage precision.** DeepSeek's plain-torch source casts each pooled latent to bf16 before the norm and rounds the
+  non-rope dims through FP8 after RoPE (`act_quant`, simulating the FP8 cache). The reference skips both and keeps latents in F32,
+  as the engine's host path does. Overlapping windows (DeepSeek-V4's ratio-4 layers) are refused; ERNIE has none.
 - **Indexer ReLU and scoring.** The DeepGEMM score kernels are not in the sources. The reference uses the standard form
   `sum_h w_h * relu(q_h . k)`. The indexer scores the keys before the sliding window (128), but keeps all of them until there are more
   than `index_topk` (2048), so its selection changes the result only past 2,176 tokens.
+- **Indexer FP8 in the reference is from vLLM's call sites, not its kernels.** `per_token_group_quant_fp8(q, 128, use_ue8m0=True)` and
+  `SparseAttnIndexer(..., 128, "ue8m0")` give the format. `hadacore_transform` is orthonormal (vllm `tests/kernels/quantization/test_hadacore.py`
+  checks it against the Sylvester matrix over sqrt(n)); its bf16 output and the kernel's FP8 rounding mode are not simulated. A near
+  tie between the last kept and the first dropped key can still pick differently from a GPU kernel (see Long-input parity). Without
+  the FP8 rounding, one of the 9 selecting queries in the small dry run below (position 31) picked a different key than the engine.
 - **MTP layer** (`num_nextn_predict_layers = 1`). Not run. The reference stops at `num_hidden_layers`.
 - **Shared-expert combine order.** The reference adds the shared expert after the latent `fc2` of the routed branch. That is
   read from the `routed_output_transform` naming, not from a line of the source.
-- **Indexer Hadamard and FP8 quantization.** Skipped. An orthonormal transform on both q and k leaves q.k unchanged, and the
-  scores are kept in F32.
 - **Engine precision.** The reference is F32, apart from the BF16 VHA fold (see below). The engine's CUDA GEMMs default to
   TF32 and its Vulkan GEMMs round inputs to F16. The pod run pins the engine's `reference` knob profile, as
   `Ernie5RealCheckpointTests` does.
@@ -69,9 +78,8 @@ layer       max_abs       rel_err        cosine      last_cos      last_rel
 all 3 layers have cosine >= 0.999
 ```
 
-The reference refuses at 130 tokens (`NotImplementedError: HCA compressor ...`), as designed. The dry run proves that the
-pipeline runs end to end and that the engine and the reference agree on this synthetic model. It does not prove the real
-weights match.
+The dry run proves that the pipeline runs end to end and that the engine and the reference agree on this synthetic model. It does
+not prove the real weights match. The long-input dry runs are under Local dry run below.
 
 ## Pod commands
 
@@ -137,10 +145,10 @@ The fed ids need not be the engine's greedy choices: the reference runs on the s
 above are a 16-step greedy run's outputs. That run's own first decode input was the prefill argmax, 1298, which the feed leaves out, so
 every fed id sits one position early against the greedy path and the engine's argmax agrees with 6 of the 8.
 
-What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
-up to 127 tokens. What it does not: the HCA compressor, whose first 128-token block completes at the 128th token (the reference refuses
-it; see Not covered); the DSA indexer's key selection, which drops keys only past 2,176 tokens (`sliding_window` 128 plus `index_topk`
-2048); and MTP.
+What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax. With 13
+positions it does not reach the HCA compressor, whose first 128-token group completes at the 128th token, or the DSA indexer's key
+selection, which drops keys only past 2,176 tokens (`sliding_window` 128 plus `index_topk` 2048); the long-input run below does. MTP is
+not covered.
 
 Real checkpoint, 2026-11-16 (RTX 4090, `580cd2a7d`, prompt `1,2,3,4,5` plus the feed above, 13 positions): all 43 layers reach
 cosine >= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6, max abs 2.8e-2 at layer 42), and the argmax
@@ -152,10 +160,40 @@ Local dry run on the real-dimension synthetic checkpoint (CPU engine, 5 prompt t
 wrong token in the reference (`...,6,9,8`), the comparison fails: every layer is flagged from position 6, and the token and argmax
 checks both fail.
 
+### Long-input parity
+
+The same decode check with a prompt long enough for both long-context paths: 2,300 prompt tokens complete 17 compressor groups in
+every HCA layer and put every DSA query past position 2,175 into top-k selection; the 8 fed tokens then cross the group boundary at
+position 2,303 during decode. Any ids work, as above.
+
+```bash
+export LONG=$(python -c "print(','.join(str(1000 + (37 * i) % 90000) for i in range(2300)))")
+export FEED=2551,7479,2811,1230,2810,4357,1298,36326
+ERNIE_DUMP_LAYERS="$RUN/engine-long" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_RESIDENT=1 ERNIE_REAL_TOKENS="$LONG" \
+  ERNIE_REAL_DECODE_FEED="$FEED" dotnet test tests/HartsyInference.Engine.Tests \
+  --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits" \
+  --logger "console;verbosity=normal" 2>&1 | tee "$RUN/engine-long.log"
+python tools/ernie5-reference/reference.py --ckpt "$CKPT" --tokens "$LONG,$FEED" --out "$RUN/reference-long" --logits 2>&1 \
+  | tee "$RUN/reference-long.log"
+python tools/ernie5-reference/compare.py --ref "$RUN/reference-long" --engine "$RUN/engine-long" --threshold 0.999 --strict \
+  --expect-layers 43 --expect-tokens 2308 2>&1 | tee "$RUN/compare-long.txt"
+```
+
+The strict run is the check. If it flags a DSA layer (or a later one) only at a few selecting positions, rerun the comparison with
+`--tie-margin 1e-4` to see whether those are near ties: positions where a DSA indexer kept and dropped keys within 1e-4 of that
+query's candidate-score spread (`index_gaps.json`, written by the reference), so that rounding alone can pick a different key. The
+positions it leaves out are printed per layer, the whole-stream cosine still includes them, and more than 5 percent of the selecting
+positions left out is an error (`--max-tie-fraction`). Only the near-tie positions themselves are left out; from the next layer on, a
+later position reads their changed state, so it can still be flagged, and the note then names the nearest earlier near tie from an
+earlier DSA layer (`after near-tie at N`). A flagged position with no such note is a real difference.
+
+Not run on the real weights yet. The reference reads nearly every routed expert at this length, so it makes about one full pass over
+the checkpoint; its indexer scores are one `[2308, 64, 2308]` F32 tensor per DSA layer (about 1.4 GB).
+
 ### Expected behaviour on the real checkpoint
 
-- Step 1 refuses only if the run is longer than 127 tokens. For 5 tokens it runs layers 0 to 42. A layer that uses an
-  unsupported rope type raises `NotImplementedError` with the reason.
+- Step 1 runs layers 0 to 42 at any length. A layer that uses an unsupported rope type raises `NotImplementedError` with the
+  reason.
 - Step 2 is the existing runbook test, with `ERNIE_DUMP_LAYERS` set; the runbook's VRAM and timing expectations apply.
 - Step 3 reports one row per layer. A first flagged layer is the place to look; the layer types are in
   `config.json` (`compress_ratios`, `-2` for DSA, `128` for HCA).
@@ -181,3 +219,29 @@ python tools/ernie5-reference/compare.py --ref /tmp/ref_synth --engine /tmp/eng_
 ```
 
 (On Windows, use a folder under the scratchpad and `cygpath -m` paths for Python.) The synthetic checkpoint is about 0.9 GB.
+
+`ERNIE_WRITE_SYNTHETIC_OVERRIDES` adds config fields on top of the real dimensions (`key=json` pairs split by `;`). A small ratio,
+window and top-k reach the compressor and the indexer's selection in a few dozen tokens:
+
+```bash
+ERNIE_WRITE_SYNTHETIC_DIR=/tmp/ernie_small ERNIE_WRITE_SYNTHETIC_OVERRIDES="compress_ratios=[8, -2, 8];sliding_window=8;index_topk=16" \
+  dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5ReferenceFixtureTests"
+```
+
+Long-input dry runs (CPU engine, 2026-11-16):
+
+- Ratio 8, window 8, top-k 16; 21 prompt tokens plus 12 fed tokens (33 positions, so 4 groups complete, one of them during decode,
+  and DSA selection runs at positions 24 to 32): all 3 layers reach cosine 0.99999995 or more at every position, and the argmax
+  after the last position is 3372 on both sides. With `--indexer-quant f32` the DSA layer is flagged at position 31 (cosine 0.9951),
+  where its 16th and 17th indexer candidates are 8 percent apart.
+- Real dimensions (ratio 128, window 128, top-k 64); 250 prompt tokens plus 12 fed tokens (262 positions: one group completes in the
+  prefill and one at position 255 during decode, and DSA selection runs from position 192): the HCA layer before the DSA layer
+  (layer 0) reaches cosine 1.00000000 at every position. Strict, the DSA layer is flagged at 2 of its 70 selecting positions: at
+  225 and 248 the engine kept a different key, and the cosine of that layer's whole contribution there (attention and MoE) is 0.9965
+  and 0.9949. Those two queries' last kept and first dropped keys are 2.6e-5 and 1.8e-5 of the candidate-score spread apart, the
+  two smallest gaps of all 70. With `--tie-margin 1e-4` they and one more near tie (259) are left out, and every other position
+  reaches 0.9998 or more. The argmax after the last position is 1965 on both sides. The CPU engine took 10 minutes, the reference 17 s.
+- Real dimensions with window 8 and top-k 120, so each selecting query keeps nearly all of its candidates, as the real checkpoint's
+  2048 of about 2,180 does; 132 prompt tokens plus 8 fed tokens (140 positions, selection from position 128): strict, all 3 layers
+  reach cosine 0.99999996 or more at every position, and the argmax after the last position is 3625 on both sides. None of the 12
+  selecting queries is a near tie at 1e-4 (the smallest gap is 1.1e-3 of the spread). The CPU engine took 3 minutes.

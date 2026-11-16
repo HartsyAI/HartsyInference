@@ -98,11 +98,12 @@ running the commits before and after #928 back to back on one pod, after a warm-
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Sequences of 128 tokens or more (the HCA compressor), and past 2,176 tokens (the DSA indexer selection). 37 of the 43 layers are HCA layers whose compressor's first block completes at the 128th token, and
-  `reference.py` refuses it, so almost every real prompt runs compressor code that no reference has checked. The source is public:
-  vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py` and its
-  Triton kernels), and the engine shares `KvCompressorState` with DeepSeek-V4.1. The DSA indexer's key selection drops keys only past
-  2,176 tokens (`sliding_window` 128 plus `index_topk` 2048); the reference implements it, but no run has been that long.
+- Sequences of 128 tokens or more on the real weights (the HCA compressor), and past 2,176 tokens (the DSA indexer selection). 37 of
+  the 43 layers are HCA layers whose compressor's first group completes at the 128th token. The reference now runs the compressor
+  (`tools/parity/compressed_kv.py`, ported from DeepSeek-V4-Flash's `inference/model.py`; vLLM-ERNIE's `Ernie5_5Compressor`
+  subclasses vLLM's `DeepseekCompressor` unchanged) and rounds the indexer's queries and keys through FP8 as serving does. On the
+  real-dimension synthetic checkpoint the engine matches it past both thresholds (`tools/ernie5-reference/README.md`, Local dry run).
+  The long-input pod run in that README has not been run on the real weights.
 - `csa_dense_mode: true` in the config. Neither the engine nor the vLLM-ERNIE files read for this port (`config.py`,
   `nvidia/attention.py`, `model.py`, `moe.py`, `mtp.py`) read it.
 - MTP numerics on real weights.
@@ -137,7 +138,8 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
   speed up decode on one pod, while prefill gained about 9%). A local disk, more page cache, or several GPUs holding the experts are the
   next steps.
 - MTP speculative decoding in the Text path, and MTP parity on real weights.
-- Parity past 128 tokens (the compressor and the indexer selection; see What is not verified).
+- Parity past 128 tokens on the real weights (the compressor and the indexer selection; the pod command is ready, see What is not
+  verified).
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
 - Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's
