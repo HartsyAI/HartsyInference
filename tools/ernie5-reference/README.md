@@ -114,7 +114,7 @@ file per forward call (`pos0_t5`, then `pos5_t1`, `pos6_t1`, ...) and `tokens.js
 position, and with `--logits` checks the last argmax.
 
 ```bash
-export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # the greedy path every real run has produced from 1,2,3,4,5
+export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # any ids work; these are the 2026-11-16 run's (see below)
 ERNIE_DUMP_LAYERS="$RUN/engine-decode" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_RESIDENT=1 ERNIE_REAL_TOKENS="$TOKENS" \
   ERNIE_REAL_DECODE_FEED="$FEED" dotnet test tests/HartsyInference.Engine.Tests \
   --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits" \
@@ -132,9 +132,19 @@ Every position must reach the threshold, not only the whole stream. That applies
 checked only the whole-stream cosine. One position holds only `hc*hidden` values; `--position-threshold` sets a looser bound for single
 positions without loosening the whole-stream check.
 
+The fed ids need not be the engine's greedy choices: the reference runs on the same ids, so the check holds for any sequence. The ids
+above are the greedy tokens a 16-step run printed, which start after its first decode input (1298), so the engine's own argmax agrees
+with 6 of the 8.
+
 What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
-up to 127 tokens. What it does not: the DSA indexer's key selection and the HCA compressor, which start past 128 tokens (and the
-reference refuses the compressor), and MTP.
+up to 127 tokens. What it does not: the HCA compressor, whose first 128-token block completes at the 128th token (the reference refuses
+it: its pooling and gating are not in the public sources); the DSA indexer's key selection, which drops keys only past 2,176 tokens
+(`sliding_window` 128 plus `index_topk` 2048); and MTP.
+
+Real checkpoint, 2026-11-16 (RTX 4090, `580cd2a7d`, prompt `1,2,3,4,5` plus the feed above, 13 positions): all 43 layers reach cosine
+>= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6, max abs 2.8e-2 at layer 42), and the argmax
+after the last position is 1232 on both sides. The engine took 150 s to load, 33 s for the prefill and 4.1 to 7.1 s per decode step; the
+CPU reference took 238 s.
 
 Local dry run on the real-dimension synthetic checkpoint (CPU engine, 5 prompt tokens plus feed `6,7,8`): all 3 layers have cosine
 1.0000 at every position (relative error 4.9e-6 to 2.0e-5), and the argmax after the last position is 781 on both sides. With one
