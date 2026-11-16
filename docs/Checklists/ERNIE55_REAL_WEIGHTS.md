@@ -68,7 +68,8 @@ router, the shared expert and the latent projections were under 1 s together. A 
 
 The greedy tokens are identical. The tokens repeat from step 9, so the late steps reuse experts already on the device or in the page
 cache; compare position by position, not the 16-step mean. With the prefetch, `moe.prefetch` is 38.6 of the 49.3 s: about 37 GiB read at
-about 1 GB/s with 16 readers, near the highest rate measured on this volume, so decode is now bound by its read speed. The prefetch runs
+about 1 GB/s with 16 readers, the highest rate seen on this volume (the separate reader tests ran while another run shared it, and some
+late repeated-token reads hit the page cache), so decode is now bound by its read speed. The prefetch runs
 before each layer's expert loop, so its reads and the uploads and GEMMs do not overlap.
 
 ## What is not verified
