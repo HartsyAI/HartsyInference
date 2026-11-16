@@ -134,16 +134,16 @@ checked only the whole-stream cosine. One position holds only `hc*hidden` values
 positions without loosening the whole-stream check.
 
 The fed ids need not be the engine's greedy choices: the reference runs on the same ids, so the check holds for any sequence. The ids
-above are the greedy tokens a 16-step run printed, which start after its first decode input (1298), so the engine's own argmax agrees
-with 6 of the 8.
+above are a 16-step greedy run's outputs. That run's own first decode input was the prefill argmax, 1298, which the feed leaves out, so
+every fed id sits one position early against the greedy path and the engine's argmax agrees with 6 of the 8.
 
 What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
 up to 127 tokens. What it does not: the HCA compressor, whose first 128-token block completes at the 128th token (the reference refuses
 it; see Not covered); the DSA indexer's key selection, which drops keys only past 2,176 tokens (`sliding_window` 128 plus `index_topk`
 2048); and MTP.
 
-Real checkpoint, 2026-11-16 (RTX 4090, `580cd2a7d`, prompt `1,2,3,4,5` plus the feed above, 13 positions): all 43 layers reach cosine
->= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6, max abs 2.8e-2 at layer 42), and the argmax
+Real checkpoint, 2026-11-16 (RTX 4090, `580cd2a7d`, prompt `1,2,3,4,5` plus the feed above, 13 positions): all 43 layers reach
+cosine >= 0.999 at every position (printed 1.00000000 everywhere; relative error 1.6e-6 to 9.1e-6, max abs 2.8e-2 at layer 42), and the argmax
 after the last position is 1232 on both sides. The engine took 150 s to load, 33 s for the prefill and 4.1 to 7.1 s per decode step; the
 CPU reference took 238 s.
 

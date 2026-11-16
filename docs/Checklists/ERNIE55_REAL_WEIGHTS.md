@@ -98,7 +98,7 @@ running the commits before and after #928 back to back on one pod, after a warm-
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Sequences of 128 tokens or more. 37 of the 43 layers are HCA layers whose compressor's first block completes at the 128th token, and
+- Sequences of 128 tokens or more (the HCA compressor), and past 2,176 tokens (the DSA indexer selection). 37 of the 43 layers are HCA layers whose compressor's first block completes at the 128th token, and
   `reference.py` refuses it, so almost every real prompt runs compressor code that no reference has checked. The source is public:
   vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py` and its
   Triton kernels), and the engine shares `KvCompressorState` with DeepSeek-V4.1. The DSA indexer's key selection drops keys only past
