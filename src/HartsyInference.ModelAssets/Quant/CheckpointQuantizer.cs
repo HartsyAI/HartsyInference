@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
@@ -274,26 +275,10 @@ public static class CheckpointQuantizer
     /// <summary>Memory this process could actually get, not what the machine has.
     /// <para><c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> is the wrong number here: with no cgroup limit
     /// it reports total physical RAM, so on a box with several GB already resident it promises a fit it cannot
-    /// deliver and the caller is OOM-killed anyway — the failure this check exists to replace. Linux publishes
-    /// the honest figure as <c>MemAvailable</c>; elsewhere the GC's number is used with the same caveat, which is
-    /// why passing this check is a necessary condition rather than a guarantee.</para></summary>
-    private static long AvailableMemoryBytes()
-    {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/meminfo"))
-            {
-                if (!line.StartsWith("MemAvailable:", StringComparison.Ordinal)) continue;
-                string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length >= 2 && long.TryParse(parts[1], out long kb)) return kb * 1024;
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            // Not Linux, or /proc is not readable. Fall through.
-        }
-        return GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-    }
+    /// deliver and the caller is OOM-killed anyway — the failure this check exists to replace. <see cref="HostMemoryInfo"/>
+    /// gives the free figure (on Linux also capped by the cgroup); the GC's number is the fallback where it has none, which
+    /// is why passing this check is a necessary condition rather than a guarantee.</para></summary>
+    private static long AvailableMemoryBytes() => HostMemoryInfo.AvailableBytes() ?? GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
 
     /// <summary>Writes the two ComfyUI safetensors shapes. Both quantize only what they can: a weight that is not
     /// an eligible rank-2 <c>.weight</c>, or is too small to be worth it, is written wide rather than forced — the

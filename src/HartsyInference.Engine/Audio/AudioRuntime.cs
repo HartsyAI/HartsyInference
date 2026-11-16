@@ -3,6 +3,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Memory.Vram;
 
 namespace HartsyInference.Engine.Audio;
@@ -457,25 +458,14 @@ internal sealed class AudioRuntime
     private static string Describe(IReadOnlyList<string> evicted) =>
         evicted.Count == 0 ? "nothing (no other unpinned model was resident)" : string.Join(", ", evicted);
 
-    /// <summary>MemAvailable from <c>/proc/meminfo</c> in KiB, or 0 when unavailable (non-Linux → no host eviction).</summary>
+    /// <summary>Free host memory in KiB on Linux (<see cref="HostMemoryInfo.AvailableBytes"/>, capped by the cgroup), or 0 elsewhere or
+    /// when unreadable (no host eviction).</summary>
     private static long ReadAvailableMemoryKb()
     {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/meminfo"))
-            {
-                if (line.StartsWith("MemAvailable:", StringComparison.Ordinal))
-                {
-                    string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    return parts.Length > 1 && long.TryParse(parts[1], out long kb) ? kb : 0;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Debug($"[Audio] Could not read /proc/meminfo ({ex.Message}) — host-memory eviction disabled.");
-        }
-        return 0;
+        if (!OperatingSystem.IsLinux()) return 0;
+        long? bytes = HostMemoryInfo.AvailableBytes();
+        if (bytes is null) Logs.Debug("[Audio] Free host memory is unreadable; host-memory eviction disabled.");
+        return (bytes ?? 0) / 1024;
     }
 
     /// <summary>Free and total device memory, or <c>(0, 0)</c> when this backend does not report it.</summary>

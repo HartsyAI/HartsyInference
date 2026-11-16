@@ -1983,7 +1983,7 @@ public sealed partial class TextService : ITextService, IDisposable
         return bytes;
     }
 
-    /// <summary>MemAvailable from /proc/meminfo in KiB, or 0 when unavailable (non-Linux).</summary>
+    /// <summary>Free host memory in KiB (<see cref="HostMemoryInfo.AvailableBytes"/>: on Linux the smaller of MemAvailable and the cgroup's room), or 0 when unknown.</summary>
     private static long ReadAvailableMemoryKb()
         => (HostMemoryInfo.AvailableBytes() ?? 0) / 1024;
 
