@@ -27,7 +27,8 @@ namespace HartsyInference.Engine.Tests.Services;
 /// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
 /// <c>numerics.moeExpertPrefetchThreads=32</c>); <c>ERNIE_REAL_DECODE_FEED</c> = a comma list of token ids fed at the decode steps instead
 /// of the argmax (one step each, so <c>ERNIE_REAL_DECODE_STEPS</c> is ignored; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
-/// comparison). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// comparison); <c>ERNIE_REAL_PRECISION</c> = <c>reference</c> (default: F32 GEMMs, as the <c>reference</c> knob profile) or <c>production</c>
+/// (each backend's default: TF32 on CUDA, F16 GEMM inputs on Vulkan). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
@@ -98,11 +99,20 @@ public sealed class Ernie5RealCheckpointTests
         string? feedText = Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_FEED");
         int[]? feed = string.IsNullOrWhiteSpace(feedText) ? null : ParseIds(feedText);
         if (feed is { Length: 0 }) throw new ArgumentException($"ERNIE_REAL_DECODE_FEED='{feedText}' holds no token ids.");
-        // Reference precision, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
+        // Reference precision by default, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
+        // ERNIE_REAL_PRECISION=production keeps each backend's own default instead (TF32 on CUDA, F16 GEMM inputs on Vulkan).
+        string precision = (Environment.GetEnvironmentVariable("ERNIE_REAL_PRECISION") ?? "reference").ToLowerInvariant();
+        bool production = precision switch
+        {
+            "reference" => false,
+            "production" => true,
+            _ => throw new ArgumentException($"ERNIE_REAL_PRECISION must be reference or production, not '{precision}'."),
+        };
         using IBackend backend = device switch
         {
-            "cuda" => new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true },
-            "vulkan" => new VulkanBackend { EnableF16Gemm = false },
+            "cuda" => production ? new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory())
+                : new CudaBackend(0, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true },
+            "vulkan" => production ? new VulkanBackend() : new VulkanBackend { EnableF16Gemm = false },
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"ERNIE_REAL_DEVICE must be cuda, vulkan or cpu, not '{device}'."),
         };
@@ -170,7 +180,7 @@ public sealed class Ernie5RealCheckpointTests
             Console.WriteLine($"ERNIE expert cache: resident rows {stats.ResidentRows}, streamed rows {stats.StreamedRows}, admitted {stats.Admitted}, "
                 + $"resident share {stats.ResidentShare:P1}.");
         }
-        Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
+        Console.WriteLine($"ERNIE real run on {device} ({precision} precision, resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"{(feed is null ? "greedy tokens" : "argmax per step")} [{string.Join(",", generated)}].");
         if (feed is not null)
