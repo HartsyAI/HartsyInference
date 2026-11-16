@@ -256,7 +256,7 @@ def hca_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
     Covered: q/kv projections and norms, per-head query RMS (inferred, see README), interleaved RoPE at
     compress_rope_theta (YaRN when the config sets it), window keys (inclusive, last sliding_window tokens), the sink, VHA, inverse RoPE on the
     rope slice, the grouped wo_a, the sigmoid gate from qr, and wo_b.
-    Not covered: the compressor (pooling and gating are not in the sources). It refuses to run once a block of
+    Not covered: the compressor (vllm DeepseekCompressor, not ported yet; README: Not covered). It refuses to run once a block of
     `ratio` tokens completes, because those keys would be missing.
     """
     cfg = ck.cfg

@@ -98,10 +98,13 @@ running the commits before and after #928 back to back on one pod, after a warm-
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Sequences of 128 tokens or more. The HCA compressor's first block completes at the 128th token, and its pooling and gating are not in
-  the public sources, so the reference refuses it. The DSA indexer's key selection drops keys only past 2,176 tokens (`sliding_window`
-  128 plus `index_topk` 2048); the reference implements it, but no run has been that long.
-- `csa_dense_mode: true` in the config. Neither the engine nor the vLLM-ERNIE sources we have read it.
+- Sequences of 128 tokens or more. 37 of the 43 layers are HCA layers whose compressor's first block completes at the 128th token, and
+  `reference.py` refuses it, so almost every real prompt runs compressor code that no reference has checked. The source is public:
+  vLLM-ERNIE's `Ernie5_5Compressor` subclasses vLLM's DeepSeek-V4 `DeepseekCompressor` (`vllm/models/deepseek_v4/compressor.py` and its
+  Triton kernels), and the engine shares `KvCompressorState` with DeepSeek-V4.1. The DSA indexer's key selection drops keys only past
+  2,176 tokens (`sliding_window` 128 plus `index_topk` 2048); the reference implements it, but no run has been that long.
+- `csa_dense_mode: true` in the config. Neither the engine nor the vLLM-ERNIE files read for this port (`config.py`,
+  `nvidia/attention.py`, `model.py`, `moe.py`, `mtp.py`) read it.
 - MTP numerics on real weights.
 - Production precision. CUDA GEMMs default to TF32 and Vulkan GEMMs round inputs to F16 (`EnableF16Gemm`), about 1e-3 relative
   to F32. `Ernie5RealCheckpointTests` pins the same two settings as the `reference` knob profile
