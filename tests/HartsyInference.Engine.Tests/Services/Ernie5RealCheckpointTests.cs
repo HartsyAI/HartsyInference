@@ -25,7 +25,9 @@ namespace HartsyInference.Engine.Tests.Services;
 /// (default 1); <c>ERNIE_REAL_DEVICE</c> = <c>cuda</c> (default), <c>vulkan</c> or <c>cpu</c>; <c>ERNIE_REAL_TOKENS</c> = a comma list of
 /// token ids (default <c>1,2,3,4,5</c>); <c>ERNIE_REAL_PROFILE</c> = a directory for the CUDA per-op table and the stage timer, per phase
 /// (prefill, decode); <c>ERNIE_REAL_SET</c> = knob pins for the run, <c>id=value</c> separated by commas (for example
-/// <c>numerics.moeExpertPrefetchThreads=32</c>). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
+/// <c>numerics.moeExpertPrefetchThreads=32</c>); <c>ERNIE_REAL_DECODE_FEED</c> = a comma list of token ids fed at the decode steps instead
+/// of the argmax (one step each; with <c>ERNIE_DUMP_LAYERS</c> the whole fed sequence goes to <c>tokens.json</c> for the reference
+/// comparison). On Linux each forward also reports its major page faults and storage reads. The checkpoint is a base model with no
 /// chat template, so the forward takes token ids, and the Text service check sends a plain completion prompt (<c>ERNIE_REAL_DECODE_STEPS</c>
 /// is its token limit there, default 16).</remarks>
 [Trait("Category", "Integration")]
@@ -91,8 +93,10 @@ public sealed class Ernie5RealCheckpointTests
     {
         string dir = Environment.GetEnvironmentVariable(DirVariable)!;
         string device = (Environment.GetEnvironmentVariable("ERNIE_REAL_DEVICE") ?? "cuda").ToLowerInvariant();
-        int[] tokens = (Environment.GetEnvironmentVariable("ERNIE_REAL_TOKENS") ?? "1,2,3,4,5")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse).ToArray();
+        int[] tokens = ParseIds(Environment.GetEnvironmentVariable("ERNIE_REAL_TOKENS") ?? "1,2,3,4,5");
+        // Decode parity feeds fixed tokens, so the engine and the reference see the same sequence whatever the engine's argmax.
+        string? feedText = Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_FEED");
+        int[]? feed = string.IsNullOrWhiteSpace(feedText) ? null : ParseIds(feedText);
         // Reference precision, the same settings as the `reference` knob profile: F32 GEMMs without TF32 or F16 inputs.
         using IBackend backend = device switch
         {
@@ -104,7 +108,7 @@ public sealed class Ernie5RealCheckpointTests
 
         bool resident = Environment.GetEnvironmentVariable("ERNIE_REAL_RESIDENT") == "1";
         bool expertCache = Environment.GetEnvironmentVariable("ERNIE_REAL_EXPERT_CACHE") == "1";
-        int decodeSteps = int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1;
+        int decodeSteps = feed?.Length ?? (int.TryParse(Environment.GetEnvironmentVariable("ERNIE_REAL_DECODE_STEPS"), out int n) && n > 0 ? n : 1);
         string? profileDir = Environment.GetEnvironmentVariable("ERNIE_REAL_PROFILE");
         using IDisposable? knobs = PushKnobs(profileDir, Environment.GetEnvironmentVariable("ERNIE_REAL_SET"));
         int capacity = tokens.Length + decodeSteps + 1;
@@ -125,14 +129,16 @@ public sealed class Ernie5RealCheckpointTests
         AssertHealthy(logits, model.Config.VocabSize, "prefill");
         int next = Argmax(logits);
 
-        // Greedy decode; the first step pays every first-touch cost, so later steps are the steady state.
+        // Greedy decode, or the fed tokens; the first step pays every first-touch cost, so later steps are the steady state.
         List<string> steps = [];
         List<int> generated = [];
-        int token = next;
+        List<int> fed = [.. tokens];
+        int token = feed is null ? next : feed[0];
         MoeOffloadStats before = offload?.Stats ?? default;
         for (int i = 0; i < decodeSteps; i++)
         {
             io = ProcessIo.Read();
+            fed.Add(token);
             Stopwatch decode = Stopwatch.StartNew();
             float[] step = model.Forward([token], state);
             decode.Stop();
@@ -150,10 +156,12 @@ public sealed class Ernie5RealCheckpointTests
                 steps.Add($"{decode.Elapsed.TotalSeconds:F2}s{stepIo} hit {(all == 0 ? 0 : (double)hit / all):P0} +{now.Admitted - before.Admitted}");
                 before = now;
             }
-            token = Argmax(step);
-            generated.Add(token);
+            int argmax = Argmax(step);
+            generated.Add(argmax);
+            token = feed is null || i + 1 >= feed.Length ? argmax : feed[i + 1];
         }
         DumpProfiles(backend, profileDir, "decode");
+        WriteFedTokens(fed, generated[^1]);
 
         if (offload is not null)
         {
@@ -164,6 +172,28 @@ public sealed class Ernie5RealCheckpointTests
         Console.WriteLine($"ERNIE real run on {device} (resident {resident}, expert cache {expertCache}): load {load.Elapsed.TotalSeconds:F1}s, prefill {tokens.Length} tokens "
             + $"{prefill.Elapsed.TotalSeconds:F1}s{prefillIo}, argmax after prefill {next}, decode steps [{string.Join(", ", steps)}], "
             + $"greedy tokens [{string.Join(",", generated)}].");
+        if (feed is not null)
+        {
+            // Each fed token against the engine's own choice at that position: the argmax after prefill, then after each fed token.
+            int[] choices = [next, .. generated.Take(feed.Length - 1)];
+            int agree = feed.Zip(choices).Count(p => p.First == p.Second);
+            Console.WriteLine($"ERNIE decode feed [{string.Join(",", feed)}]: the engine's argmax matched {agree} of {feed.Length} fed tokens; "
+                + $"argmax after the last fed token {generated[^1]}.");
+        }
+    }
+
+    private static int[] ParseIds(string text) =>
+        text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse).ToArray();
+
+    // With the layer dump on, records every token fed to the model in order (prompt, then each decode input) and the argmax after the
+    // last one as tokens.json beside the dumps, so compare.py can check the reference ran on the same sequence and chose the same token.
+    private static void WriteFedTokens(List<int> fed, int argmaxAfterLast)
+    {
+        string? dumpDir = Ernie5LayerDump.DirectoryFromEnvironment();
+        if (dumpDir is null) return;
+        Directory.CreateDirectory(dumpDir);
+        File.WriteAllText(Path.Combine(dumpDir, "tokens.json"),
+            JsonSerializer.Serialize(new Dictionary<string, object> { ["tokens"] = fed, ["argmax_after_last"] = argmaxAfterLast }));
     }
 
     [RealCheckpointFact]

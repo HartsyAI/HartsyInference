@@ -7,8 +7,8 @@ checkpoint on a rented pod. Nothing here runs on the engine's inference path. Th
 | File | Role |
 |---|---|
 | `reference.py` | CPU torch forward, one layer at a time. Writes the stream after every decoder layer (`layer_LL_all.npy`, `layer_LL_last.npy`). |
-| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps. Reports per layer: max abs diff, relative error, cosine, last-token cosine. Flags the first layer below cosine 0.999. `--strict` also fails when the two layer sets differ; `--expect-layers N` requires exactly layers 0..N-1 on both sides. |
-| `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: strict mode fails on an incomplete reference and passes on a complete one. |
+| `compare.py` | Loads the reference `.npy` and the engine `.f32` dumps, stitching the engine's prefill and decode-step files by position. Reports per layer: max abs diff, relative error, cosine, the prefill block's cosine, and the worst position's cosine. Flags the first layer below cosine 0.999 overall or at any position. `--strict` also fails on a layer-set difference, a gap or overlap in the engine's positions, an engine dump shorter than the reference, a fed-token mismatch (`tokens.json` against `meta.json`) or a last-argmax mismatch; `--expect-layers N` requires exactly layers 0..N-1 on both sides and `--expect-tokens N` a reference over N positions. |
+| `test_compare.py` | `python -I tools/ernie5-reference/test_compare.py`: the strict layer-set checks, decode stitching (pass, gap, overlap, short engine), the token and argmax checks, and a single bad position being flagged and named. |
 
 Sources the reference follows (fetched for this change, not from the engine):
 - `baidu/vLLM-ERNIE` at `b8414da6b703579814c2009c5a63bac101916bbe`, `src/vllm_ernie/models/ernie5_5/` (`nvidia/model.py`,
@@ -88,8 +88,10 @@ mkdir -p "$RUN"
 python tools/ernie5-reference/reference.py --ckpt "$CKPT" --tokens "$TOKENS" --out "$RUN/reference" --logits 2>&1 | tee "$RUN/reference.log"
 
 # 2. Engine dump on the same tokens (CUDA, the runbook's test with the dump on). Writes $RUN/engine/layerLL_pos0_t5_hc4_h4096.f32.
+#    Filter on the one test: the class's Text-service test also runs ForwardStream on another 5-token prompt and would overwrite
+#    the pos0_t5 dumps.
 ERNIE_DUMP_LAYERS="$RUN/engine" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_TOKENS="$TOKENS" \
-  dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests" \
+  dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits" \
   --logger "console;verbosity=normal" 2>&1 | tee "$RUN/engine.log"
 
 # 3. Compare. Exit 1 on the first layer below cosine 0.999, or when either folder is not exactly layers 0..42.
@@ -102,6 +104,35 @@ dump folder must hold `layerLL_pos0_t5_*.f32` for every layer. A run without the
 
 `ERNIE_REAL_DEVICE=cpu` is valid too, for a run without a GPU. The engine's CPU path is F32 throughout, so it should sit
 closer to the reference than CUDA does; use it to separate engine precision from a real divergence (not measured on the real weights).
+
+### Decode parity
+
+The reference is a causal forward over every position, so feeding it the prompt plus the decoded tokens gives the stream the engine
+must reach at each decode step through its KV caches. The harness feeds fixed decode tokens (`ERNIE_REAL_DECODE_FEED`), writes one dump
+file per forward call (`pos0_t5`, then `pos5_t1`, `pos6_t1`, ...) and `tokens.json` (every fed token and the argmax after the last).
+`compare.py` stitches the files by position, checks the tokens against the reference's `meta.json`, applies the threshold to every
+position, and with `--logits` checks the last argmax.
+
+```bash
+export FEED=2551,7479,2811,1230,2810,4357,1298,36326   # the greedy path every real run has produced from 1,2,3,4,5
+ERNIE_DUMP_LAYERS="$RUN/engine-decode" ERNIE_REAL_DIR="$CKPT" ERNIE_REAL_DEVICE=cuda ERNIE_REAL_RESIDENT=1 ERNIE_REAL_TOKENS="$TOKENS" \
+  ERNIE_REAL_DECODE_FEED="$FEED" dotnet test tests/HartsyInference.Engine.Tests \
+  --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits" \
+  --logger "console;verbosity=normal" 2>&1 | tee "$RUN/engine-decode.log"
+python tools/ernie5-reference/reference.py --ckpt "$CKPT" --tokens "$TOKENS,$FEED" --out "$RUN/reference-decode" --logits 2>&1 \
+  | tee "$RUN/reference-decode.log"
+python tools/ernie5-reference/compare.py --ref "$RUN/reference-decode" --engine "$RUN/engine-decode" --threshold 0.999 --strict \
+  --expect-layers 43 --expect-tokens 13 2>&1 | tee "$RUN/compare-decode.txt"
+```
+
+What it covers: decode through the HCA and DSA KV caches, RoPE at offsets, the one-token MoE path, and the head's argmax, for sequences
+up to 127 tokens. What it does not: the DSA indexer's key selection and the HCA compressor, which start past 128 tokens (and the
+reference refuses the compressor), and MTP.
+
+Local dry run on the real-dimension synthetic checkpoint (CPU engine, 5 prompt tokens plus feed `6,7,8`): all 3 layers have cosine
+1.0000 at every position (relative error 4.9e-6 to 2.0e-5), and the argmax after the last position is 781 on both sides. With one
+wrong token in the reference (`...,6,9,8`), the comparison fails: every layer is flagged from position 6, and the token and argmax
+checks both fail.
 
 ### Expected behaviour on the real checkpoint
 
@@ -127,7 +158,7 @@ closer to the reference than CUDA does; use it to separate engine precision from
 ERNIE_WRITE_SYNTHETIC_DIR=/tmp/ernie_synth dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5ReferenceFixtureTests"
 python tools/ernie5-reference/reference.py --ckpt /tmp/ernie_synth --tokens 1,2,3,4,5 --out /tmp/ref_synth --logits
 ERNIE_DUMP_LAYERS=/tmp/eng_synth ERNIE_REAL_DIR=/tmp/ernie_synth ERNIE_REAL_DEVICE=cpu ERNIE_REAL_TOKENS=1,2,3,4,5 \
-  dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests"
+  dotnet test tests/HartsyInference.Engine.Tests --filter "FullyQualifiedName~Ernie5RealCheckpointTests.Real_PrefillAndDecode_ProduceFiniteLogits"
 python tools/ernie5-reference/compare.py --ref /tmp/ref_synth --engine /tmp/eng_synth --strict
 ```
 

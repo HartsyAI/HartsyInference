@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
 """Compare the engine's per-layer residual stream (ERNIE_DUMP_LAYERS) with reference.py's .npy output.
 
-For every decoder layer present in both folders, it reports over all tokens and over the last token:
-max absolute difference, relative error ||a - b|| / ||b||, and cosine similarity. It flags the first layer
-whose cosine falls below --threshold (default 0.999). With --strict it exits 1 when any layer is flagged,
-when the reference and engine layer sets differ in either direction, or (with --expect-layers N) when either
-set is not exactly layers 0..N-1. An incomplete reference run therefore cannot pass against a full engine dump.
+The engine writes one file per forward call, so a prefill and N decode steps give one prefill file and N one-token files per
+layer. They are stitched by position into one [tokens, hc, hidden] stream (a gap, an overlap or a repeated position is refused)
+and compared with the reference's causal forward over the same tokens: incremental decode through the KV caches must equal the
+full-sequence forward at every position.
 
-Engine files are named layer{LL}_pos{startPos}_t{tokens}_hc{hc}_h{hidden}.f32 (little-endian float32,
-row-major [tokens, hc, hidden]). Only the prefill dump (startPos 0) is compared; the reference is one prefill.
+For every decoder layer present in both folders, it reports over the compared positions: max absolute difference, relative
+error ||a - b|| / ||b||, cosine similarity, the prefill block's cosine, and the worst single position's cosine (named). A layer is
+flagged when the whole-stream cosine or any single position's cosine falls below --threshold (default 0.999).
+
+The reference defines the positions compared: the first T engine positions, where T is the reference's token count. An engine dump
+that is shorter than the reference is an error. When the engine folder holds tokens.json (the harness writes it), its first T
+tokens must equal the reference's meta.json tokens, and when the reference ran with --logits over exactly the fed sequence, the
+reference's last-position argmax must equal the engine's argmax after its last fed token.
+
+With --strict it exits 1 on a flagged layer, a layer-set mismatch, a stitching or length error, a token mismatch or an argmax
+mismatch. --expect-layers N requires exactly layers 0..N-1 on both sides; --expect-tokens N requires the reference to cover N
+positions (use the prompt plus decode length, so a prefill-only reference cannot pass a decode check).
+
+Engine files are named layer{LL}_pos{startPos}_t{tokens}_hc{hc}_h{hidden}.f32 (little-endian float32, row-major
+[tokens, hc, hidden]).
 
 Usage:
-  python compare.py --ref DIR --engine DIR [--threshold 0.999] [--strict] [--expect-layers N]
+  python compare.py --ref DIR --engine DIR [--threshold 0.999] [--strict] [--expect-layers N] [--expect-tokens N]
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -27,15 +40,38 @@ ENGINE_RE = re.compile(r"^layer(\d{2})_pos(\d+)_t(\d+)_hc(\d+)_h(\d+)\.f32$")
 REF_RE = re.compile(r"^layer_(\d{2})_all\.npy$")
 
 
-def load_engine(folder: Path) -> dict[tuple[int, int], tuple[Path, int, int, int, int]]:
-    """(layer, startPos) -> (path, tokens, hc, hidden)."""
-    out: dict[tuple[int, int], tuple[Path, int, int, int, int]] = {}
+class StitchError(Exception):
+    pass
+
+
+def load_engine(folder: Path) -> dict[int, list[tuple[int, Path, int, int, int]]]:
+    """layer -> [(startPos, path, tokens, hc, hidden)] sorted by startPos."""
+    out: dict[int, list[tuple[int, Path, int, int, int]]] = {}
     for p in folder.iterdir():
         m = ENGINE_RE.match(p.name)
         if m:
             layer, pos, tokens, hc, hidden = (int(g) for g in m.groups())
-            out[(layer, pos)] = (p, tokens, hc, hidden)
+            out.setdefault(layer, []).append((pos, p, tokens, hc, hidden))
+    for parts in out.values():
+        parts.sort(key=lambda part: part[0])
     return out
+
+
+def stitch(parts: list[tuple[int, Path, int, int, int]]) -> tuple[np.ndarray, int]:
+    """The layer's stream over positions 0..T-1 and the prefill length (the first file's token count)."""
+    if not parts or parts[0][0] != 0:
+        raise StitchError("no prefill (pos0) file")
+    hc, hidden = parts[0][3], parts[0][4]
+    rows, expected = [], 0
+    for pos, path, tokens, part_hc, part_hidden in parts:
+        if pos != expected:
+            kind = "gap" if pos > expected else "overlap or repeated position"
+            raise StitchError(f"{kind}: a file starts at position {pos}, expected {expected}")
+        if (part_hc, part_hidden) != (hc, hidden):
+            raise StitchError(f"file at position {pos} is hc{part_hc}_h{part_hidden}, not hc{hc}_h{hidden}")
+        rows.append(np.fromfile(path, dtype="<f4").reshape(tokens, hc, hidden))
+        expected = pos + tokens
+    return np.concatenate(rows, axis=0), parts[0][2]
 
 
 def load_ref(folder: Path) -> dict[int, Path]:
@@ -77,58 +113,113 @@ def layer_set_errors(ref_layers: set[int], eng_layers: set[int], expect: int | N
     return errors
 
 
+def sequence_errors(ref_dir: Path, eng_dir: Path, ref_tokens: int) -> tuple[list[str], list[str]]:
+    """Token and argmax checks against tokens.json and meta.json; returns (errors, notes)."""
+    errors: list[str] = []
+    notes: list[str] = []
+    fed_path, meta_path = eng_dir / "tokens.json", ref_dir / "meta.json"
+    if not fed_path.exists():
+        notes.append("no tokens.json in the engine folder: the fed tokens were not checked against the reference")
+        return errors, notes
+    fed = json.loads(fed_path.read_text(encoding="utf-8"))
+    fed_tokens = list(fed.get("tokens") or [])
+    if meta_path.exists():
+        ref_ids = list(json.loads(meta_path.read_text(encoding="utf-8")).get("tokens") or [])
+        if fed_tokens[:ref_tokens] != ref_ids:
+            errors.append(f"token mismatch: the engine was fed {fed_tokens[:ref_tokens]}, the reference ran on {ref_ids}")
+    else:
+        notes.append("no meta.json in the reference folder: the tokens were not checked")
+    logits_path = ref_dir / "logits_last.npy"
+    if logits_path.exists() and "argmax_after_last" in fed and len(fed_tokens) == ref_tokens:
+        ref_argmax = int(np.argmax(np.load(logits_path)))
+        eng_argmax = int(fed["argmax_after_last"])
+        if ref_argmax == eng_argmax:
+            notes.append(f"argmax after the last position: {eng_argmax} on both sides")
+        else:
+            errors.append(f"argmax mismatch after the last position: engine {eng_argmax}, reference {ref_argmax}")
+    return errors, notes
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ref", required=True, help="reference.py output folder")
     p.add_argument("--engine", required=True, help="ERNIE_DUMP_LAYERS folder")
     p.add_argument("--threshold", type=float, default=0.999)
-    p.add_argument("--strict", action="store_true", help="exit 1 on a flagged layer or a layer-set mismatch")
+    p.add_argument("--strict", action="store_true", help="exit 1 on a flagged layer or any set, length, token or argmax error")
     p.add_argument("--expect-layers", type=int, default=None,
                    help="require both folders to hold exactly layers 0..N-1 (43 for the real checkpoint)")
+    p.add_argument("--expect-tokens", type=int, default=None, help="require the reference to cover exactly N positions")
     args = p.parse_args()
 
-    ref = load_ref(Path(args.ref))
-    eng = load_engine(Path(args.engine))
+    ref_dir, eng_dir = Path(args.ref), Path(args.engine)
+    ref = load_ref(ref_dir)
+    eng = load_engine(eng_dir)
     if not ref:
         print(f"no layer_LL_all.npy files in {args.ref}", file=sys.stderr)
         return 1
-    if not any(pos == 0 for (_, pos) in eng):
+    if not any(parts and parts[0][0] == 0 for parts in eng.values()):
         print(f"no prefill (pos0) dump files in {args.engine}", file=sys.stderr)
         return 1
 
-    print(f"{'layer':>5}  {'max_abs':>12}  {'rel_err':>12}  {'cosine':>12}  {'last_cos':>12}  {'last_rel':>12}  note")
+    errors: list[str] = []
+    print(f"{'layer':>5}  {'max_abs':>12}  {'rel_err':>12}  {'cosine':>12}  {'prefill_cos':>12}  {'worst_pos_cos':>14}  {'at':>4}  note")
     first_flag: int | None = None
-    missing = 0
+    ref_tokens = None
+    prefill_len = None
     for layer in sorted(ref):
-        if (layer, 0) not in eng:
-            print(f"{layer:>5}  missing engine dump")
-            missing += 1
-            continue
-        path, tokens, hc, hidden = eng[(layer, 0)]
-        a = np.fromfile(path, dtype="<f4").reshape(tokens, hc, hidden)
         b = np.load(ref[layer]).astype(np.float32)
-        if b.shape != a.shape:
-            print(f"{layer:>5}  shape mismatch: engine {a.shape} vs reference {b.shape}")
-            missing += 1
+        ref_tokens = b.shape[0]
+        if layer not in eng:
+            print(f"{layer:>5}  missing engine dump")
+            errors.append(f"layer {layer}: no engine dump")
+            continue
+        try:
+            a, prefill_len = stitch(eng[layer])
+        except StitchError as ex:
+            print(f"{layer:>5}  {ex}")
+            errors.append(f"layer {layer}: {ex}")
+            continue
+        if a.shape[0] < b.shape[0]:
+            msg = f"engine covers {a.shape[0]} positions, the reference {b.shape[0]}"
+            print(f"{layer:>5}  {msg}")
+            errors.append(f"layer {layer}: {msg}")
+            continue
+        a = a[:b.shape[0]]
+        if a.shape != b.shape:
+            msg = f"shape mismatch: engine {a.shape} vs reference {b.shape}"
+            print(f"{layer:>5}  {msg}")
+            errors.append(f"layer {layer}: {msg}")
             continue
         max_abs, rel, cos = metrics(a, b)
-        _, last_rel, last_cos = metrics(a[-1], b[-1])
+        pre = min(prefill_len, b.shape[0])
+        _, _, pre_cos = metrics(a[:pre], b[:pre])
+        per_pos = [metrics(a[t], b[t])[2] for t in range(b.shape[0])]
+        worst = int(np.nanargmin(per_pos)) if not any(np.isnan(per_pos)) else int(np.argmax(np.isnan(per_pos)))
         note = ""
-        if not (cos >= args.threshold):  # also flags NaN
+        if not (cos >= args.threshold) or not all(c >= args.threshold for c in per_pos):  # also flags NaN
             note = "FLAG cosine below threshold"
             if first_flag is None:
                 first_flag = layer
                 note += " (first)"
-        print(f"{layer:>5}  {max_abs:>12.6g}  {rel:>12.6g}  {cos:>12.8f}  {last_cos:>12.8f}  {last_rel:>12.6g}  {note}")
+        print(f"{layer:>5}  {max_abs:>12.6g}  {rel:>12.6g}  {cos:>12.8f}  {pre_cos:>12.8f}  {per_pos[worst]:>14.8f}  {worst:>4}  {note}")
 
-    set_errors = layer_set_errors(set(ref), {layer for (layer, pos) in eng if pos == 0}, args.expect_layers)
-    for err in set_errors:
+    errors += layer_set_errors(set(ref), set(eng), args.expect_layers)
+    if ref_tokens is not None:
+        if args.expect_tokens is not None and ref_tokens != args.expect_tokens:
+            errors.append(f"the reference covers {ref_tokens} positions; expected {args.expect_tokens}")
+        seq_errors, notes = sequence_errors(ref_dir, eng_dir, ref_tokens)
+        errors += seq_errors
+        decode = ref_tokens - (prefill_len or ref_tokens)
+        print(f"compared positions 0..{ref_tokens - 1}: prefill {min(prefill_len or ref_tokens, ref_tokens)}, decode {max(decode, 0)}")
+        for note in notes:
+            print(note)
+    for err in errors:
         print(err)
-    if first_flag is None and missing == 0 and not set_errors:
-        print(f"all {len(ref)} layers have cosine >= {args.threshold}")
+    if first_flag is None and not errors:
+        print(f"all {len(ref)} layers have cosine >= {args.threshold} at every position")
     elif first_flag is not None:
         print(f"first layer below cosine {args.threshold}: {first_flag}")
-    if args.strict and (first_flag is not None or missing or set_errors):
+    if args.strict and (first_flag is not None or errors):
         return 1
     return 0
 
