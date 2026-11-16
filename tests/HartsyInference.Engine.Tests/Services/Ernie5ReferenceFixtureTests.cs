@@ -21,12 +21,28 @@ public sealed class Ernie5ReferenceFixtureTests
         }
     }
 
+    /// <summary>Optional config fields on top of the real dimensions, as <c>key=json</c> pairs split by <c>;</c>, for example
+    /// <c>compress_ratios=[8, -2, 8];sliding_window=8;index_topk=16</c> to reach the compressor and the indexer's selection in a few tokens.</summary>
+    private const string OverridesVariable = "ERNIE_WRITE_SYNTHETIC_OVERRIDES";
+
     [WriteFact]
     public void WriteRealDimensionSyntheticCheckpoint()
     {
         string dir = Environment.GetEnvironmentVariable(DirVariable)!;
         Ernie5SyntheticCheckpoint.Write(dir, seed: 7, storage: Ernie5SyntheticCheckpoint.Storage.Fp8,
-            configOverrides: Ernie5SyntheticCheckpoint.RealDimensionOverrides, shards: 3);
+            configOverrides: WithExtraOverrides(Environment.GetEnvironmentVariable(OverridesVariable)), shards: 3);
         Assert.True(File.Exists(Path.Combine(dir, "model.safetensors.index.json")));
+    }
+
+    private static Dictionary<string, string> WithExtraOverrides(string? extra)
+    {
+        Dictionary<string, string> all = new(Ernie5SyntheticCheckpoint.RealDimensionOverrides, StringComparer.Ordinal);
+        foreach (string pair in (extra ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0) throw new ArgumentException($"{OverridesVariable}: expected key=json, got '{pair}'.");
+            all[pair[..eq].Trim()] = pair[(eq + 1)..].Trim();
+        }
+        return all;
     }
 }

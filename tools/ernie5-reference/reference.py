@@ -25,12 +25,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from safetensors import safe_open
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "parity"))
+import compressed_kv  # noqa: E402  (shared DeepSeek-V4-family compressor, tools/parity)
+import quant_sim  # noqa: E402  (shared Hadamard and FP8 round trip, tools/parity)
+
+INDEXER_QUANT = "fp8"  # --indexer-quant: "fp8" rounds the DSA indexer's queries and keys as serving does, "f32" keeps them exact
 
 F32 = torch.float32
 SCALE_SUFFIX = "_scale_inv"  # Ernie5WeightNames.ScaleSuffix
@@ -254,18 +261,13 @@ def hca_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
     """HCA layer (vllm-ernie nvidia/attention.py Ernie5_5HCAAttentionMixin on vllm DeepseekV4Attention).
 
     Covered: q/kv projections and norms, per-head query RMS (inferred, see README), interleaved RoPE at
-    compress_rope_theta (YaRN when the config sets it), window keys (inclusive, last sliding_window tokens), the sink, VHA, inverse RoPE on the
-    rope slice, the grouped wo_a, the sigmoid gate from qr, and wo_b.
-    Not covered: the compressor (vllm DeepseekCompressor, not ported yet; README: Not covered). It refuses to run once a block of
-    `ratio` tokens completes, because those keys would be missing.
+    compress_rope_theta (YaRN when the config sets it), window keys (inclusive, last sliding_window tokens), the compressed
+    latents (tools/parity/compressed_kv.py: one per completed group of `ratio` tokens, rotated at the group's first position,
+    visible from the group's last token), the sink, VHA, inverse RoPE on the rope slice, the grouped wo_a, the sigmoid gate
+    from qr, and wo_b.
     """
     cfg = ck.cfg
     T = x.shape[0]
-    if T >= ratio:
-        raise NotImplementedError(
-            f"HCA compressor (compress_ratio {ratio}) is not implemented: a block completes at token {ratio - 1}. "
-            "Use fewer tokens than the ratio, or implement the compressor first (README: Not covered)."
-        )
     eps = float(cfg["rms_norm_eps"])
     heads, head_dim, rope = int(cfg["num_attention_heads"]), int(cfg["head_dim"]), int(cfg["qk_rope_head_dim"])
     nope, groups, o_lora = head_dim - rope, int(cfg["o_groups"]), int(cfg["o_lora_rank"])
@@ -280,14 +282,21 @@ def hca_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
     q = torch.cat([q[..., :nope], rope_interleaved(q[..., nope:], cos, sin)], dim=-1)
     kv = torch.cat([kv[:, :nope], rope_interleaved(kv[:, nope:], cos, sin)], dim=-1)  # one KV head: K = V (inferred)
 
+    comp = f"{attn}.core_attention.compressor"
+    latent = compressed_kv.compress(x, ck.read(f"{comp}.linear_wkv.weight"), ck.read(f"{comp}.linear_wgate.weight"), ratio,
+                                    ck.read(f"{comp}.norm.weight"), eps, ape=ck.read(f"{comp}.ape").reshape(ratio, head_dim))
+    if latent.shape[0]:
+        lcos, lsin = hca_rope_angles(cfg, compressed_kv.group_starts(latent.shape[0], ratio), rope)
+        latent = torch.cat([latent[:, :nope], rope_interleaved(latent[:, nope:], lcos, lsin)], dim=-1)
+
     sink = ck.read(f"{attn}.core_attention.attn_sink")
     scale = head_dim ** -0.5
     o = torch.zeros(T, heads, head_dim, dtype=F32)
     for t in range(T):
         seq = t + 1
-        keys = torch.arange(seq - min(seq, window), seq)
-        scores = torch.einsum("hd,kd->hk", q[t], kv[keys]) * scale
-        o[t] = torch.einsum("hk,kd->hd", sink_weights(scores, sink), kv[keys])
+        rows = torch.cat([latent[:compressed_kv.visible(t, ratio)], kv[seq - min(seq, window):seq]])
+        scores = torch.einsum("hd,kd->hk", q[t], rows) * scale
+        o[t] = torch.einsum("hk,kd->hd", sink_weights(scores, sink), rows)
 
     if cfg.get("use_vha_attention"):
         o = vha(o, ck.read(f"{attn}.vha_postmix_U"), ck.read(f"{attn}.vha_postmix_V"))
@@ -308,8 +317,9 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
 
     The indexer scores the keys before the sliding window (positions < seq - window) and keeps index_topk of them.
     Its ReLU is the standard form sum_h w_h * relu(q_h . k) (README: Not covered, the kernel is not in the sources).
-    Query and key Hadamard transforms are skipped: an orthonormal transform on both sides leaves q.k unchanged.
-    The indexer's FP8 quantization is skipped, so the scores are F32.
+    With INDEXER_QUANT "fp8" (the default, vLLM-ERNIE's non-FP4 path), queries and keys are Hadamard-rotated and round-tripped
+    through FP8 E4M3 with a UE8M0 scale per 128 values (tools/parity/quant_sim.py) before scoring, as serving stores them;
+    the selection then follows the same rounding. With "f32" both steps are skipped (the rotation alone leaves q.k unchanged).
     """
     cfg = ck.cfg
     T = x.shape[0]
@@ -338,7 +348,10 @@ def dsa_attention(ck: Checkpoint, attn: str, qr: torch.Tensor, x: torch.Tensor, 
         x @ ck.read(f"{idx}.wk.weight").T, (idx_dim,),
         weight=ck.read(f"{idx}.k_norm.weight"), bias=ck.read(f"{idx}.k_norm.bias"), eps=1e-6)
     ik = torch.cat([rope_neox(ik[:, :rope], cos, sin), ik[:, rope:]], dim=-1)
-    iw = (x @ ck.read(f"{idx}.weights_proj.weight").T) * (idx_dim ** -0.5 * n_idx ** -0.5)
+    if INDEXER_QUANT == "fp8":
+        iq = quant_sim.fp8_roundtrip_ue8m0(quant_sim.hadamard(iq))
+        ik = quant_sim.fp8_roundtrip_ue8m0(quant_sim.hadamard(ik))
+    iw =(x @ ck.read(f"{idx}.weights_proj.weight").T) * (idx_dim ** -0.5 * n_idx ** -0.5)
     logits = (torch.relu(torch.einsum("thd,jd->thj", iq, ik)) * iw[:, :, None]).sum(dim=1)  # [T, T]
 
     sink = ck.read(f"{attn}.core_attention.softmax_offset")
@@ -482,7 +495,11 @@ def main() -> None:
     p.add_argument("--out", required=True, help="output directory (created)")
     p.add_argument("--max-layers", type=int, default=None)
     p.add_argument("--logits", action="store_true", help="also write the last token's logits (full LM head, about 3.3 GB F32)")
+    p.add_argument("--indexer-quant", choices=["fp8", "f32"], default="fp8",
+                   help="DSA indexer queries and keys: Hadamard plus FP8 UE8M0 round trip as served (fp8), or exact (f32)")
     args = p.parse_args()
+    global INDEXER_QUANT
+    INDEXER_QUANT = args.indexer_quant
 
     tokens = [int(t) for t in args.tokens.split(",") if t.strip()]
     ck = Checkpoint(args.ckpt)
