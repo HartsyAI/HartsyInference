@@ -1089,9 +1089,11 @@ public sealed partial class TextService : ITextService, IDisposable
     /// <summary>Loads a MiniMax-M3 directory as a transformer model on the CPU backend: its block-sparse indexer selects on the host, so other backends refuse it. Batched decode refuses it too, so the slot has no scheduler.</summary>
     private void LoadMiniMaxM3Directory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
-        long availableBytes = ReadAvailableMemoryKb() * 1024;
-        if (availableBytes <= 0)
+        long availableKb = ReadAvailableMemoryKb();
+        if (availableKb < 0)
             Logs.Warning("[TextService] Free host memory is unknown, so the MiniMax-M3 memory guard is off; a load larger than RAM will not be refused.");
+        // The loader reads a budget of 0 as no limit, so a known, exhausted budget is passed as one byte: every load is then refused.
+        long availableBytes = availableKb < 0 ? 0 : Math.Max(1, availableKb * 1024);
         IBackend backend = ReplaceWithHostBackend(slot, deviceKey, "MiniMax-M3");
         GgufLanguageModel? model = null;
         try
@@ -1135,11 +1137,12 @@ public sealed partial class TextService : ITextService, IDisposable
     private static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory) => EnsureRamHeadroomForDeepSeekV41(directory, ReadAvailableMemoryKb());
 
     /// <summary>The guard with the free host RAM supplied, so a test can judge synthetic memory. Plans from the checkpoint headers only, before any weight is mapped.</summary>
-    /// <param name="availableKb">Free host RAM in KiB; zero or less means unknown, and the plan is not made and the load is not refused.</param>
+    /// <param name="availableKb">Free host RAM in KiB; below zero means unknown, and the plan is not made and the load is not refused. Zero is a
+    /// known, exhausted budget.</param>
     /// <returns>The residency plan, or null when the free memory is unknown.</returns>
     internal static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory, long availableKb)
     {
-        if (availableKb <= 0)
+        if (availableKb < 0)
             return null;
         ResidencyPlan plan = DeepSeekV41HostPlanner.Plan(directory, availableKb * 1024);
         if (plan.Verdict == MemoryFitVerdict.Infeasible)
@@ -1931,7 +1934,7 @@ public sealed partial class TextService : ITextService, IDisposable
     private static void EnsureRamHeadroomFor(string path, bool dequantizesEverything, IReadOnlySet<DType>? keepQuantized = null)
     {
         long availableKb = ReadAvailableMemoryKb();
-        if (availableKb <= 0)
+        if (availableKb < 0)
             return;
         long fileBytes;
         try { fileBytes = new FileInfo(path).Length; }
@@ -1983,9 +1986,10 @@ public sealed partial class TextService : ITextService, IDisposable
         return bytes;
     }
 
-    /// <summary>MemAvailable from /proc/meminfo in KiB, or 0 when unavailable (non-Linux).</summary>
+    /// <summary>Free host memory in KiB (<see cref="HostMemoryInfo.AvailableBytes"/>: on Linux the smaller of MemAvailable and the cgroup's room),
+    /// or -1 when unknown. Zero is a known, exhausted budget (a full cgroup), so callers refuse on it rather than skip their check.</summary>
     private static long ReadAvailableMemoryKb()
-        => (HostMemoryInfo.AvailableBytes() ?? 0) / 1024;
+        => HostMemoryInfo.AvailableBytes() is { } bytes ? bytes / 1024 : -1;
 
     /// <summary>Cheap <c>general.architecture</c> read (metadata only) to route a GGUF to the transformer or SSM loader.</summary>
     private static string PeekArchitecture(string path)

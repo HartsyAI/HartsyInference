@@ -119,8 +119,8 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
     {
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(path);
         MemoryEstimate estimate = TextMemoryProfile.Estimate(checkpoint);
-        long availableBytes = HostMemoryInfo.AvailableBytes() ?? 0;
-        if (availableBytes <= 0)
+        // Null is unreadable; zero is a full cgroup, a known fit question the planner answers.
+        if (HostMemoryInfo.AvailableBytes() is not { } availableBytes)
         {
             return new MemoryFit
             {
