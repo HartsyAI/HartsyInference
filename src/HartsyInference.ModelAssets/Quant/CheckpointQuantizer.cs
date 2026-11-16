@@ -222,7 +222,8 @@ public static class CheckpointQuantizer
         // size is not this run's memory: a 64 GB BF16 source makes an fp8 output of about 33 GB.
         long needed = widestTensorBytes + EstimateOutputBytes(source, job.Target);
         long available = AvailableMemoryBytes();
-        if (available <= 0 || needed <= available)
+        // Zero is a known, exhausted budget (a full cgroup) and refuses; only a negative reading would mean unknown.
+        if (available < 0 || needed <= available)
         {
             return;
         }
