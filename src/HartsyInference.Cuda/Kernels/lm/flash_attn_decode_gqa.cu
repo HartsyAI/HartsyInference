@@ -5,7 +5,7 @@
 //   partialM[idx*G + g]            running max of the (scaled, soft-capped) scores of chunk g
 //   partialL[idx*G + g]            sum of exp(score - m)
 //   partialAcc[(idx*G + g)*D + d]  sum of exp(score - m) * V, un-normalized
-// An empty chunk writes m = -INF, l = 0, acc = 0, which the combine weighs as zero.
+// An empty chunk writes l = 0 and acc = 0, which the combine weighs as zero. Emptiness is tested with l == 0, never m, since a real score can equal -FLT_MAX.
 //
 // Causal for the single row at absolute position qOffset (keys 0..qOffset), optionally windowed to the last `window` keys and soft-capped.
 // dPos, when non-null, supplies {kvLen, qOffset} from device memory so one captured CUDA graph replays at every position.
@@ -148,7 +148,7 @@ __device__ __forceinline__ void fa_decode_gqa(
             #pragma unroll
             for (int o = 16; o > 0; o >>= 1) tm = fmaxf(tm, __shfl_xor_sync(0xffffffffu, tm, o));
             const float mNew = fmaxf(m[j], tm);
-            const float corr = m[j] <= -DEC_INF ? 0.0f : __expf(m[j] - mNew);
+            const float corr = l[j] == 0.0f ? 0.0f : __expf(m[j] - mNew);
             const float p = valid ? __expf(s - mNew) : 0.0f;
             float ps = p;
             #pragma unroll
