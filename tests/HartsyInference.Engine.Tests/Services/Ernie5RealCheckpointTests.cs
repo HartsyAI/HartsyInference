@@ -263,29 +263,45 @@ public sealed class Ernie5RealCheckpointTests
     /// the page cache served the reads.</remarks>
     private readonly record struct ProcessIo(long MajorFaults, long ReadBytes)
     {
-        public static ProcessIo Read()
+        // Each counter is read on its own, -1 when unavailable, so a kernel without /proc/self/io still reports the faults.
+        public static ProcessIo Read() => OperatingSystem.IsLinux() ? new ProcessIo(Counter(MajorFaultCount), Counter(ReadByteCount)) : new ProcessIo(-1, -1);
+
+        private static long Counter(Func<long> read)
         {
-            if (!OperatingSystem.IsLinux()) return default;
             try
             {
-                // /proc/self/stat: the command is in parentheses and may hold spaces, so count fields after the last ')'; majflt is field 12.
-                string stat = File.ReadAllText("/proc/self/stat");
-                string[] fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
-                long faults = long.Parse(fields[9], System.Globalization.CultureInfo.InvariantCulture);
-                string? line = File.ReadLines("/proc/self/io").FirstOrDefault(l => l.StartsWith("read_bytes:", StringComparison.Ordinal));
-                long read = line is null ? 0 : long.Parse(line["read_bytes:".Length..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
-                return new ProcessIo(faults, read);
+                return read();
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or IndexOutOfRangeException)
             {
-                return default;
+                return -1;
             }
         }
 
-        /// <summary>" (N major faults, M MB read)" since <paramref name="start"/>, or empty off Linux.</summary>
-        public string Since(ProcessIo start) => OperatingSystem.IsLinux()
-            ? $" ({MajorFaults - start.MajorFaults} major faults, {(ReadBytes - start.ReadBytes) >> 20} MB read)"
-            : "";
+        // /proc/self/stat: the command is in parentheses and may hold spaces, so count fields after the last ')'; majflt is field 12.
+        private static long MajorFaultCount()
+        {
+            string stat = File.ReadAllText("/proc/self/stat");
+            string[] fields = stat[(stat.LastIndexOf(')') + 2)..].Split(' ');
+            return long.Parse(fields[9], System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private static long ReadByteCount()
+        {
+            string? line = File.ReadLines("/proc/self/io").FirstOrDefault(l => l.StartsWith("read_bytes:", StringComparison.Ordinal));
+            if (line is null) throw new FormatException("/proc/self/io has no read_bytes line.");
+            return long.Parse(line["read_bytes:".Length..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>" (N major faults, M MB read)" since <paramref name="start"/>, with n/a for a counter either sample could not read;
+        /// empty off Linux.</summary>
+        public string Since(ProcessIo start)
+        {
+            if (!OperatingSystem.IsLinux()) return "";
+            string faults = MajorFaults < 0 || start.MajorFaults < 0 ? "n/a" : (MajorFaults - start.MajorFaults).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string read = ReadBytes < 0 || start.ReadBytes < 0 ? "n/a" : ((ReadBytes - start.ReadBytes) >> 20).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return $" ({faults} major faults, {read} MB read)";
+        }
     }
 
     // The device-only expert cache, sized to what the dense preload left free less the same headroom.
