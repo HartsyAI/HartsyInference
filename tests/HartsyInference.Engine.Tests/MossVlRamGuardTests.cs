@@ -21,7 +21,9 @@ public sealed class MossVlRamGuardTests
                 () => TextService.EnsureRamHeadroomForMossVlFolderOnCpu(folder, availableKb: 5L << 20));
             Assert.Contains("F32", error.Message);
             TextService.EnsureRamHeadroomForMossVlFolderOnCpu(folder, availableKb: 7L << 20);
-            TextService.EnsureRamHeadroomForMossVlFolderOnCpu(folder, availableKb: 0);
+            TextService.EnsureRamHeadroomForMossVlFolderOnCpu(folder, availableKb: -1);   // unknown: nothing is refused
+            // A full cgroup reads a known 0, which must refuse rather than switch the guard off.
+            Assert.Throws<HartsyInferenceException>(() => TextService.EnsureRamHeadroomForMossVlFolderOnCpu(folder, availableKb: 0));
         }
         finally
         {

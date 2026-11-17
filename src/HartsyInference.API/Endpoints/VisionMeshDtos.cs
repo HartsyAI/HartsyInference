@@ -70,18 +70,41 @@ public sealed class NativeMeshRequest : NativeArtifactRequest
     /// Set this or <c>Request.Image</c>, not both.</summary>
     public string? ImagePng { get; set; }
 
-    /// <summary>The request the engine runs: <see cref="Request"/>, with <see cref="ImagePng"/> decoded into its image when it is set.</summary>
-    /// <exception cref="ArgumentException">Both <see cref="ImagePng"/> and <c>Request.Image</c> are set, or the PNG is not valid base64 or not PNG.</exception>
+    /// <summary>Extra pictures of the subject as base64 PNG (alpha kept), keyed by side: <c>left</c>, <c>back</c> or <c>right</c> (any case). They become
+    /// <c>Request.Views</c>; set this or <c>Request.Views</c>, not both.</summary>
+    public Dictionary<string, string>? ViewPngs { get; set; }
+
+    /// <summary>The request the engine runs: <see cref="Request"/>, with <see cref="ImagePng"/> decoded into its image and <see cref="ViewPngs"/> into its
+    /// views when they are set.</summary>
+    /// <exception cref="ArgumentException">An image is sent both ways, a side name is unknown, or a PNG is not valid base64 or not PNG.</exception>
     public MeshRequest ToMeshRequest()
     {
-        if (ImagePng is null)
+        MeshRequest request = Request;
+        if (ImagePng is not null)
         {
-            return Request;
+            if (Request.Image is not null)
+            {
+                throw new ArgumentException("Send the image as ImagePng or as Request.Image, not both.");
+            }
+            request = request with { Image = ImageDataCodec.DecodeBase64WithAlpha(ImagePng) };
         }
-        if (Request.Image is not null)
+        if (ViewPngs is { Count: > 0 })
         {
-            throw new ArgumentException("Send the image as ImagePng or as Request.Image, not both.");
+            if (Request.Views is { Count: > 0 })
+            {
+                throw new ArgumentException("Send the views as ViewPngs or as Request.Views, not both.");
+            }
+            List<MeshViewImage> views = [];
+            foreach ((string side, string png) in ViewPngs)
+            {
+                if (!Enum.TryParse(side, ignoreCase: true, out MeshView view) || !Enum.IsDefined(view) || int.TryParse(side, out _))
+                {
+                    throw new ArgumentException($"Unknown view '{side}' in ViewPngs; use left, back or right.");
+                }
+                views.Add(new MeshViewImage { View = view, Image = ImageDataCodec.DecodeBase64WithAlpha(png) });
+            }
+            request = request with { Views = views };
         }
-        return Request with { Image = ImageDataCodec.DecodeBase64WithAlpha(ImagePng) };
+        return request;
     }
 }

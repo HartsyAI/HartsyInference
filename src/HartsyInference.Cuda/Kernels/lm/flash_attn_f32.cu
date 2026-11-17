@@ -95,7 +95,7 @@ extern "C" __global__ void lm_flash_attn_f32(
         }
 
         float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? V[kvBase + tid] : 0.0f;
@@ -111,7 +111,7 @@ extern "C" __global__ void lm_flash_attn_f32(
     {
         float sv = sink[h];
         float newM = fmaxf(m, sv);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(sv - newM);
         l = l * corr + p;
         acc = acc * corr;   // sink value is implicitly zero
@@ -188,7 +188,7 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
         }
 
         float newM = fmaxf(m, score);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(score - newM);
         l = l * corr + p;
         float vval = (tid < D) ? __half2float(V[kvBase + tid]) : 0.0f;
@@ -201,7 +201,7 @@ extern "C" __global__ void lm_flash_attn_f16kv_f32(
     {
         float sv = sink[h];
         float newM = fmaxf(m, sv);
-        float corr = (m <= -INF_F) ? 0.0f : __expf(m - newM);
+        float corr = (l == 0.0f) ? 0.0f : __expf(m - newM);
         float p = __expf(sv - newM);
         l = l * corr + p;
         acc = acc * corr;
