@@ -25,8 +25,15 @@ public static class GaussianSplatActivations
         return 0.5f * MathF.Log(sp * sp + minKernel * minKernel);
     }
 
-    /// <summary>The rotation <c>q_R ⊗ (w, x, y, z)</c> that turns a z-up splat to the y-up convention viewers use (a 90° turn about
-    /// x, matching <c>(x, y, z) → (x, −z, y)</c> for positions), in the same w-first order.</summary>
+    /// <summary>The Hamilton product <c>q_R ⊗ q</c> of the y-up turn <c>q_R = (√½, √½, 0, 0)</c> (a 90° turn about x, the rotation that
+    /// takes positions <c>(x, y, z)</c> to <c>(x, −z, y)</c>) and a splat orientation <c>(w, x, y, z)</c>: the orientation of the same splat
+    /// in the turned frame. Idol's PLY uses this product.</summary>
     public static (float W, float X, float Y, float Z) TurnToYUp(float w, float x, float y, float z)
+        => (C45 * w - C45 * x, C45 * x + C45 * w, C45 * y - C45 * z, C45 * z + C45 * y);
+
+    /// <summary>The product <c>q ⊗ q_R</c> in the other order, which the TRELLIS and SAM 3D splat builders have always written. It
+    /// differs from <see cref="TurnToYUp"/> in the sign of the y and z mixing, so the two agree only for orientations about x.
+    /// Kept so those outputs do not change; whether it is the right order for them is not settled here.</summary>
+    public static (float W, float X, float Y, float Z) TurnToYUpAfter(float w, float x, float y, float z)
         => (C45 * w - C45 * x, C45 * x + C45 * w, C45 * y + C45 * z, C45 * z - C45 * y);
 }

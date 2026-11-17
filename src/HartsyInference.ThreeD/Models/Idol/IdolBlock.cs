@@ -120,14 +120,14 @@ internal sealed class IdolBlock : IDisposable
             using Tensor h = Normed(backend, x, m?[1], m?[0], _norm1W, _norm1B);
             using Tensor qkv = new(new TensorShape(1, n, 3L * _width), DType.F32);
             backend.Linear(qkv, h, _qkvW, _qkvB);
-            Tensor q = TokenMajor(backend, qkv, 0, n);
-            Tensor k = TokenMajor(backend, qkv, _width, n);
-            Tensor v = TokenMajor(backend, qkv, 2 * _width, n);
+            Tensor q = IdolAttention.Slice(backend, qkv, 0, n, _heads, _headDim);
+            Tensor k = IdolAttention.Slice(backend, qkv, _width, n, _heads, _headDim);
+            Tensor v = IdolAttention.Slice(backend, qkv, 2 * _width, n, _heads, _headDim);
             repo.Apply(backend, q, cos, sin);
             repo.Apply(backend, k, cos, sin);
             Tensor qn = _headNorm.Apply(backend, q, _qGamma, new TensorShape(1, n, _width));
             Tensor kn = _headNorm.Apply(backend, k, _kGamma, new TensorShape(1, n, _width));
-            using Tensor ctx = Attend(backend, qn, kn, v, n);
+            using Tensor ctx = IdolAttention.Attend(backend, qn, kn, v, n, n, _heads, _headDim, _scale);
             using Tensor proj = Linear(backend, ctx, _outW, _outB, _width);
             Tensor x1 = new(x.Shape, DType.F32);
             if (_modulated)
@@ -162,36 +162,6 @@ internal sealed class IdolBlock : IDisposable
     {
         Tensor o = new(new TensorShape(1, x.Shape[1], outDim), DType.F32);
         backend.Linear(o, x, weight, bias);
-        return o;
-    }
-
-    /// <summary>Columns <c>[offset, offset + C)</c> of a packed <c>[1, tokens, k·C]</c> tensor as token-major <c>[1, tokens, heads, headDim]</c>.</summary>
-    private Tensor TokenMajor(IBackend backend, Tensor packed, int offset, int tokens)
-    {
-        Tensor o = new(new TensorShape(1, tokens, _heads, _headDim), DType.F32);
-        backend.SliceLastDim(o, packed, offset);
-        return o;
-    }
-
-    /// <summary>Attention over the token-major operands, returned flat as <c>[1, tokens, C]</c>; consumes q, k and v.</summary>
-    private Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int tokens)
-    {
-        using Tensor qh = ToHeadMajor(backend, q, tokens);
-        using Tensor kh = ToHeadMajor(backend, k, tokens);
-        using Tensor vh = ToHeadMajor(backend, v, tokens);
-        Tensor att = new(new TensorShape(1, _heads, tokens, _headDim), DType.F32);
-        backend.ScaledDotProductAttention(att, qh, kh, vh, null, _scale);
-        Tensor flat = new(new TensorShape(1, tokens, _width), DType.F32);
-        backend.Permute0213(flat, att, _heads, tokens, _headDim);
-        att.Dispose();
-        return flat;
-    }
-
-    private Tensor ToHeadMajor(IBackend backend, Tensor tokenMajor, int tokens)
-    {
-        Tensor o = new(new TensorShape(1, _heads, tokens, _headDim), DType.F32);
-        backend.Permute0213(o, tokenMajor, tokens, _heads, _headDim);
-        tokenMajor.Dispose();
         return o;
     }
 
