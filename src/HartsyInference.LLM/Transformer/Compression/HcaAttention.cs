@@ -13,11 +13,14 @@ namespace HartsyInference.LLM.Transformer.Compression;
 /// mix, the inverse RoPE, a grouped low-rank output with an optional sigmoid gate, and the output projection.</summary>
 /// <remarks>
 /// <para>Each query at position <c>p</c> attends the positions <c>max(p - Window + 1, 0) .. p</c> and the latents
-/// <c>0 .. (p + 1) / CompressRatio - 1</c>, as DeepSeek V4's <c>fill_short_context_topk_indices</c> builds them for C128 layers. On a GPU
+/// <c>0 .. (p + 1) / CompressRatio - 1</c>, as DeepSeek V4's <c>fill_short_context_topk_indices</c> builds them for C128 layers. On CUDA
 /// every chunk runs all its queries in one <see cref="IBackend.SparseLatentAttention"/> call over the window rows and the compressed latents,
-/// the op DeepSeek-V4.1 attention uses; the CPU runs <see cref="IBackend.Attention"/> per query over its gathered rows. Each query row holds
+/// the op DeepSeek-V4.1 attention uses; the CPU and Vulkan run <see cref="IBackend.Attention"/> per query over its gathered rows (Vulkan's
+/// sparse latent kernel drifts past 1e-3 in the logits at head dim 512). Each query row holds
 /// <c>min(p + 1, Window) + (end of chunk) / CompressRatio</c> indices, which a backend caps (CUDA 12,288, Vulkan 3,800): at ERNIE's window
-/// and ratio of 128 that is about 470K tokens on Vulkan, and a small-ratio configuration reaches it far sooner.</para>
+/// and ratio of 128 that is about 470K tokens on Vulkan, and a small-ratio configuration reaches it far sooner. The index is
+/// <c>tokens</c> rows of that width, so it grows with the square of the chunk length: about 145 columns for a 2,300-token prefill at ERNIE's
+/// settings, but about 168 MB for one 64K-token chunk, where early queries' columns are mostly -1. Send very long prompts in chunks.</para>
 /// <para>Any chunk length works; a call at position 0 starts a new sequence. Rows are cached in F32; the reference stores them as
 /// BF16 or FP8 depending on the serving KV-cache dtype.</para>
 /// </remarks>
@@ -135,18 +138,20 @@ public sealed class HcaAttention : IDisposable
     }
 
     // Every query of the chunk in one SparseLatentAttention call. Window source: the ring as it stood before this chunk (the last Window
-    // positions before startPos, position j at slot j % Window), then the chunk's own rows, so any chunk at any position is described.
-    // Query at position p sees positions max(p - Window + 1, 0) .. p: a position before startPos is its ring slot, one in the chunk is
-    // Window + (j - startPos). Then latent j as windowRows + j where p sees it ((p + 1) / ratio), -1 where it does not yet. Each row is both
+    // positions before startPos, position j at slot j % Window; none for a chunk from position 0), then the chunk's own rows, so any chunk at
+    // any position is described. Query at position p sees positions max(p - Window + 1, 0) .. p: a position before startPos is its ring
+    // slot, one in the chunk is ringRows + (j - startPos). Then latent j as windowRows + j where p sees it ((p + 1) / ratio), -1 where it does not yet. Each row is both
     // key and value (MQA, one KV head).
     private float[] Attend(float[] q, float[] kv, int tokens, int startPos, HcaAttentionState state)
     {
-        // The CPU's SparseLatentAttention is the scalar reference, slower than its SIMD attention, so the CPU keeps the per-query path
-        // unless a test asks for the batched one.
-        if (!_backend.Device.IsGpu && !BatchedOnCpu) return AttendPerQuery(q, kv, tokens, startPos, state);
+        // CUDA only. The CPU's SparseLatentAttention is the scalar reference, slower than its SIMD attention; Vulkan's drifts about 1.1e-3 in
+        // the logits of the real-dimension synthetic model (head dim 512) where its per-query attention stays within 1e-3. Both keep the
+        // per-query path unless a test asks for the batched one on the CPU.
+        if (!_backend.Device.IsCuda && !BatchedOnCpu) return AttendPerQuery(q, kv, tokens, startPos, state);
         HcaAttentionSettings s = _s;
         int h = s.Heads, hd = s.HeadDim, win = s.Window, ratio = s.CompressRatio;
-        int windowRows = win + tokens, windowCols = Math.Min(startPos + tokens, win);
+        // A chunk from position 0 reads no ring row, so its window source is the chunk alone.
+        int ringRows = startPos == 0 ? 0 : win, windowRows = ringRows + tokens, windowCols = Math.Min(startPos + tokens, win);
         int compressed = (startPos + tokens) / ratio, cols = windowCols + compressed;
         using Tensor indexT = new(new TensorShape(tokens, cols), DType.I32);
         Span<int> index = indexT.AsSpan<int>();
@@ -155,14 +160,14 @@ public sealed class HcaAttention : IDisposable
         {
             Span<int> row = index.Slice(t * cols, cols);
             int pos = startPos + t, first = Math.Max(pos - win + 1, 0), c = 0;
-            for (int j = first; j <= pos; j++) row[c++] = j >= startPos ? win + (j - startPos) : j % win;
+            for (int j = first; j <= pos; j++) row[c++] = j >= startPos ? ringRows + (j - startPos) : j % win;
             int visible = (pos + 1) / ratio;
             for (int j = 0; j < visible; j++) row[windowCols + j] = windowRows + j;
         }
         using Tensor windowCodes = new(new TensorShape(windowRows, hd), DType.F32);
         Span<float> rows = windowCodes.AsSpan<float>();
-        state.Window.AsSpan(0, win * hd).CopyTo(rows);
-        kv.AsSpan(0, tokens * hd).CopyTo(rows.Slice(win * hd));
+        state.Window.AsSpan(0, ringRows * hd).CopyTo(rows);
+        kv.AsSpan(0, tokens * hd).CopyTo(rows.Slice(ringRows * hd));
         using Tensor? mainCodes = compressed > 0 ? HostMath.Tensor(state.Compressed.AsSpan(0, compressed * hd), compressed, hd) : null;
         LatentSource window = new(LatentEncoding.F32, windowCodes, null, windowRows, hd);
         LatentSource main = mainCodes is null ? LatentSource.Empty : new LatentSource(LatentEncoding.F32, mainCodes, null, compressed, hd);
@@ -173,7 +178,7 @@ public sealed class HcaAttention : IDisposable
     }
 
     // Each query attends its own window rows plus every visible compressed latent through IBackend.Attention, one call per query: the CPU's
-    // path.
+    // and Vulkan's path.
     private float[] AttendPerQuery(float[] q, float[] kv, int tokens, int startPos, HcaAttentionState state)
     {
         HcaAttentionSettings s = _s;
