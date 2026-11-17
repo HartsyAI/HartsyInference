@@ -33,6 +33,10 @@ internal sealed class HaruMeanFlowHead : IDisposable
     /// <summary>Reads the <c>head.*</c> tensors of <paramref name="weights"/> as stored; they must outlive the head.</summary>
     internal void LoadWeights(IReadOnlyDictionary<string, Tensor> weights)
     {
+        if (_stack is not null)
+        {
+            throw new InvalidOperationException("The Haru head weights are already loaded.");
+        }
         int h = _config.HiddenSize;
         _latentProj = Weight(weights, "latent_proj.weight", h, _config.LatentDim);
         _condProj = Weight(weights, "cond_proj.weight", h, h);
@@ -66,11 +70,11 @@ internal sealed class HaruMeanFlowHead : IDisposable
         {
             throw new InvalidOperationException("The Haru head weights are not loaded.");
         }
-        int n = (int)hidden.Shape[1];
         if (hidden.Shape.Rank != 3 || hidden.Shape[0] != 1 || hidden.Shape[2] != _config.HiddenSize)
         {
             throw new ArgumentException($"hidden must be [1, N, {_config.HiddenSize}], got {hidden.Shape}.", nameof(hidden));
         }
+        int n = (int)hidden.Shape[1];
         if (noise.Shape.Rank != 3 || noise.Shape[0] != 1 || noise.Shape[1] != n || noise.Shape[2] != _config.LatentDim)
         {
             throw new ArgumentException($"noise must be [1, {n}, {_config.LatentDim}], got {noise.Shape}.", nameof(noise));
