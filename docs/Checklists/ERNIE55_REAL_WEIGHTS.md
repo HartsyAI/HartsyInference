@@ -94,23 +94,60 @@ the stage timer's syncs add time, so it is not a table arm) puts 41.5 of 65 s of
 bound by the volume's read speed. How much the overlap itself saves is within the volume's run-to-run variation and was not isolated;
 running the commits before and after #928 back to back on one pod, after a warm-up run, would isolate it.
 
+## Long-input parity and production precision (real weights)
+
+2026-11-16, RTX 4090 (24 GB), driver 595.91.07, CUDA 13.2, `main` at `2317bb2e3`; the commands are in
+`tools/ernie5-reference/README.md` (Long-input parity). Prompt: 2,300 ids, plus the 8-token decode feed (2,308 positions), so every HCA
+layer completes 18 compressor groups and every DSA query from position 2,176 selects 2,048 keys.
+
+- Engine (CUDA, reference precision): load 138.7 s, prefill of 2,300 tokens 512.1 s, decode steps 4.5 to 10.1 s.
+- Reference (CPU): 1,621 s on 48 vCPUs. It was rerun at `f58204e00` on a 16-vCPU CPU pod (3,746 s) to record the top-k gap files.
+- Layers 0 to 6, the compressor included, reach cosine 1.00000000 at every position. The argmax after the last position is 1232 on
+  both sides. The whole-stream cosine is at least 0.99996 in every layer.
+- From layer 7 on, 22 of the 2,308 positions fall below cosine 0.999 in some layer. The lowest is 0.924, at position 2062 in layer 42,
+  the last layer, whose activations are largest. `compare.py --explain` traces them to one MoE routing near tie: at layer 7, position
+  1919's last routed and first unrouted experts are 1.3e-6 of the routing-score spread apart (the smallest 0.1% of that layer).
+- Median relative error per position band, engine against reference (a subset of the 9 bands and 14 layers computed):
+
+  | Layer | 0-127 | 512-1023 | 1536-1791 | 1792-1919 | 1920-2047 | 2048-2175 | 2176-2307 |
+  |---|---|---|---|---|---|---|---|
+  | 0 | 4.5e-6 | 4.3e-6 | 4.8e-6 | 4.6e-6 | 4.3e-6 | 4.6e-6 | 4.8e-6 |
+  | 7 | 5.1e-6 | 5.3e-6 | 6.7e-6 | 6.8e-6 | 6.7e-6 | 6.8e-6 | 7.3e-6 |
+  | 8 | 5.1e-6 | 5.1e-6 | 6.7e-6 | 6.7e-6 | 4.7e-4 | 9.6e-5 | 8.6e-5 |
+  | 22 | 7.6e-6 | 6.8e-6 | 7.3e-6 | 7.2e-6 | 1.5e-3 | 1.3e-3 | 4.0e-4 |
+  | 28 | 6.0e-6 | 5.8e-6 | 7.2e-6 | 9.8e-6 | 1.9e-3 | 1.6e-3 | 8.2e-4 |
+  | 35 | 4.9e-6 | 4.5e-6 | 6.1e-6 | 2.3e-5 | 1.9e-3 | 1.7e-3 | 1.0e-3 |
+
+  - **Before the tie:** up to layer 7 the error stays within 1.5x across all 9 bands (a slow rise with length, 5.1e-6 to 7.3e-6 at
+    layer 7), so nothing breaks with length.
+  - **After the tie:** from layer 8, every position after 1919 reads that position's changed state through attention, and those
+    positions jump to about 9e-5 to 2e-3. Positions before 1920 stay below 1e-5 through layer 28. At layer 35 the 1792-1919 band rises to
+    2.3e-5; causal attention means position 1919 can't reach them, so something else does. That rise is not traced. It may be
+    smaller routing flips that stay above cosine 0.999, which `--explain` does not list.
+  - **Later dips:** that small extra error then tips a few more routing near ties after position 1919. That is why every dip is at
+    1919 or later. 13 of the 22 first drops have a router gap within the smallest 5.1% of their layer, at the drop's layer or the one
+    before. The other 9 all come after earlier ties, which fits propagation.
+  - **Indexer selection:** positions 2,176 and later show no error beyond what that band already inherits.
+- **Indexer near ties are common at this scale.** 76 of the 132 selecting positions have a kept/dropped gap below 1e-4 of the spread,
+  so `--tie-margin` refuses (`--max-tie-fraction`); read `--explain` instead.
+- **Production precision** (`ERNIE_REAL_PRECISION=production`, TF32 GEMMs, #935), on the 13-position decode parity: all 43 layers reach
+  cosine 0.9999989 or more at every single position (the whole-stream relative error per layer is 9e-5 to 5e-4), and the argmax
+  after the last position is 1232 on both sides. Without `ERNIE_REAL_PRECISION` the harness runs the `reference` GEMM pins, so every
+  other run above needs no extra configuration.
+
 ## What is not verified
 
 - The indexer ReLU. The DeepGEMM `fp8_mqa_logits` kernel is not in the reference sources. The code takes the standard
   `sum_h w_h * ReLU(q_h . k)` form.
-- Sequences of 128 tokens or more on the real weights (the HCA compressor), and past 2,176 tokens (the DSA indexer selection). 37 of
-  the 43 layers are HCA layers whose compressor's first group completes at the 128th token. The reference now runs the compressor
-  (`tools/parity/compressed_kv.py`, ported from DeepSeek-V4-Flash's `inference/model.py`; vLLM-ERNIE's `Ernie5_5Compressor`
-  subclasses vLLM's `DeepseekCompressor` unchanged) and rounds the indexer's queries and keys through FP8 as serving does. On the
-  real-dimension synthetic checkpoint the engine matches it past both thresholds (`tools/ernie5-reference/README.md`, Local dry run).
-  The long-input pod run in that README has not been run on the real weights.
+- Inputs longer than 2,308 tokens. The run above covers the compressor and the indexer selection up to that length. It doesn't
+  cover long contexts such as 32K or 128K.
+- The compressor's storage precision. The DeepSeek-V4 source stores latents as bf16 with FP8 non-rope dims; the reference and the
+  engine's host path keep F32. The bf16 output of vLLM's Hadamard kernel is not simulated either.
 - `csa_dense_mode: true` in the config. Neither the engine nor the vLLM-ERNIE files read for this port (`config.py`,
   `nvidia/attention.py`, `model.py`, `moe.py`, `mtp.py`) read it.
 - MTP numerics on real weights.
-- Production precision. CUDA GEMMs default to TF32 and Vulkan GEMMs round inputs to F16 (`EnableF16Gemm`), about 1e-3 relative
-  to F32. `Ernie5RealCheckpointTests` pins the same two settings as the `reference` knob profile
-  (`KnobProfiles.Reference`: `HighPrecisionGemm` on, `VkF16Gemm` off), so the verification run needs no extra configuration. Production
-  defaults (TF32, F16 GEMM) are not measured by this harness.
+- Production precision on Vulkan (F16 GEMM inputs), and at long input. CUDA's TF32 default is measured on the 13-position decode parity
+  above; attention and KV-cache numerics keep their defaults in both arms.
 
 ## Run
 
@@ -138,8 +175,6 @@ For a rented pod (volume size, the pinned download, the GPU and PTX checks, and 
   speed up decode on one pod, while prefill gained about 9%). A local disk, more page cache, or several GPUs holding the experts are the
   next steps.
 - MTP speculative decoding in the Text path, and MTP parity on real weights.
-- Parity past 128 tokens on the real weights (the compressor and the indexer selection; the pod command is ready, see What is not
-  verified).
 - A host or device memory guard before the load.
 - License confirmation (EU/UK/South Korea exclusion, US$50M commercial threshold) for any use beyond this verification.
 - Chat template: this base checkpoint ships none, so the Text path sends a plain completion prompt with the `tokenizer.json` post-processor's
