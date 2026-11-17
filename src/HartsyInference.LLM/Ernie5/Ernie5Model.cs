@@ -287,7 +287,7 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         IBackend backend = stage.Backend;
         bool last = ReferenceEquals(stage, _placement.Stages[^1]);
         DeviceMemoryUsage usage = backend.GetDeviceMemoryUsage();
-        long budget = PreloadBudget(usage.FreeBytes, usage.TotalBytes), used = 0;
+        long budget = PreloadBudget(usage.FreeBytes, usage.TotalBytes, _options.PreloadExperts), used = 0;
         List<Tensor> placed = [];
         _preloaded.Add((backend, placed));
         int count = stage.EndLayer - stage.StartLayer, layers = 0;
@@ -350,12 +350,14 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         return bytes;
     }
 
-    /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB.
-    /// Zero when the backend does not report its memory.</summary>
-    internal static long PreloadBudget(long free, long total)
+    /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB, kept
+    /// for activations and the routed experts uploaded per call. With <paramref name="allWeights"/> (every routed expert preloaded, so none is
+    /// uploaded during a forward) the headroom is 5%, at least 4 GiB: the residual stream and the attention caches are host arrays, so the
+    /// device holds only each op's transient buffers. That lets four 80 GB cards hold the real checkpoint's 280 GB of layer weights. Zero when the backend does not report its memory.</summary>
+    internal static long PreloadBudget(long free, long total, bool allWeights = false)
     {
         if (free <= 0 || total <= 0) return 0;
-        long headroom = Math.Max(3L << 30, total * 15 / 100);
+        long headroom = allWeights ? Math.Max(4L << 30, total * 5 / 100) : Math.Max(3L << 30, total * 15 / 100);
         return Math.Max(free - headroom, 0);
     }
 

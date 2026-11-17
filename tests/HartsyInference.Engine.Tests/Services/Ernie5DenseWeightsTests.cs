@@ -68,6 +68,13 @@ public sealed partial class Ernie5DenseWeightsTests : IDisposable
     public void Preload_budget_keeps_headroom(long free, long total, long expected) =>
         Assert.Equal(expected, Ernie5Model.PreloadBudget(free, total));
 
+    [Theory]
+    [InlineData(79L << 30, 80L << 30, (79L << 30) - (80L << 30) * 5 / 100)]    // 5% of 80 GiB is above the 4 GiB floor
+    [InlineData(22L << 30, 24L << 30, (22L << 30) - (4L << 30))]                // the 4 GiB floor
+    [InlineData(3L << 30, 24L << 30, 0L)]                                        // less free than the headroom
+    public void Preload_budget_with_every_weight_keeps_a_smaller_headroom(long free, long total, long expected) =>
+        Assert.Equal(expected, Ernie5Model.PreloadBudget(free, total, allWeights: true));
+
     [GeneratedRegex(@"\.experts\.\d+\.")]
     private static partial Regex RoutedExpert();
 
