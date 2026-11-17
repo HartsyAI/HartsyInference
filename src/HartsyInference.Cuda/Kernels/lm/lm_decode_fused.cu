@@ -262,7 +262,7 @@ extern "C" __global__ void lm_flash_attn_f32_combine_q8_1(
     float l = 0.0f, acc = 0.0f;
     for (unsigned int g = 0; g < G; g++) {
         float mg = partialM[idx * G + g];
-        float w = (mg <= -INF_FC) ? 0.0f : __expf(mg - m);
+        float w = (partialL[idx * G + g] == 0.0f) ? 0.0f : __expf(mg - m);
         l += partialL[idx * G + g] * w;
         if (tid < D) acc += partialAcc[(size_t)(idx * G + g) * D + tid] * w;
     }

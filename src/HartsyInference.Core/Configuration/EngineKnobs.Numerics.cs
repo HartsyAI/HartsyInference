@@ -263,6 +263,13 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> MoeIndexed =
         Bool("numerics.moeIndexed", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the routed experts of a small MoE batch (decode) entirely on the device with expert-indexed GEMVs; =0 returns to the host-routed per-expert loop.");
 
+    /// <summary>Readers that bring a layer's routed experts from a memory-mapped checkpoint into the page cache before the host-routed
+    /// per-expert loop uploads them (<see cref="Memory.Host.MappedTensorPrefetch"/>); 0 turns the prefetch off.</summary>
+    public static readonly Knob<int> MoeExpertPrefetchThreads =
+        Int("numerics.moeExpertPrefetchThreads", 16, KnobScope.Runtime, KnobDomain.Numerics,
+            "Threads that read a layer's selected routed experts from the mapped checkpoint in parallel before the host-routed per-expert loop runs them; =0 turns it off. A network volume serves one reader far slower than several.",
+            static v => Math.Clamp(v, 0, 64));
+
     /// <summary>Runs cuDNN convolutions channels-last, transposing activations and weights around the call; 0 keeps them
     /// NCHW.</summary>
     public static readonly Knob<bool> ConvChannelsLast =

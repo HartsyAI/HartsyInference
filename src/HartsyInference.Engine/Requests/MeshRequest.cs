@@ -12,6 +12,11 @@ public sealed record MeshRequest
     /// <summary>Input image for image-to-3D; null for text-to-3D and for scene models.</summary>
     public ImageData? Image { get; init; }
 
+    /// <summary>Extra pictures of the subject from its left, back and right, each side at most once, alongside the front picture in <see cref="Image"/>.
+    /// Hunyuan3D-2mv (<c>hunyuan3d-mv</c>) builds the shape from all of them; Hunyuan3D Paint bakes each onto the surfaces its camera sees. Null or empty
+    /// for one picture; every other model rejects them.</summary>
+    public IReadOnlyList<MeshViewImage>? Views { get; init; }
+
     /// <summary>Input triangle scene for scene-decomposition models (cola3d); null for image models.</summary>
     public SceneMeshData? SceneMesh { get; init; }
 

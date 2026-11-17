@@ -8,7 +8,7 @@ namespace HartsyInference.ThreeD.Geometry.Ops;
 public static class MeshCleaner
 {
     /// <summary>Runs the steps enabled in <paramref name="options"/> in the order: weld, degenerate, duplicate, small components by face count, non-manifold, small
-    /// components by area, holes (perimeter, then width), orientation.</summary>
+    /// components by area, flat components, holes (perimeter, then width), orientation.</summary>
     public static Mesh Clean(Mesh mesh, MeshCleanOptions? options = null)
     {
         Validate(mesh);
@@ -21,6 +21,7 @@ public static class MeshCleaner
         if (options.SmallComponentFaceRatio > 0) m = RemoveSmallComponentsByFaceCount(m, options.SmallComponentFaceRatio);
         if (options.RepairNonManifoldEdges) m = RepairNonManifoldEdges(m);
         if (options.SmallComponentAreaRatio > 0) m = RemoveSmallComponents(m, options.SmallComponentAreaRatio);
+        if (options.FlatComponentThicknessRatio > 0) m = RemoveFlatComponents(m, options.FlatComponentThicknessRatio);
         if (options.HoleFillMaxPerimeter > 0) m = FillHoles(m, options.HoleFillMaxPerimeter);
         if (options.HoleFillMaxWidth > 0)
         {
@@ -280,7 +281,8 @@ public static class MeshCleaner
             for (int e = 0; e < 3; e++)
             {
                 int a = mesh.Indices[f * 3 + e], b = mesh.Indices[f * 3 + (e + 1) % 3];
-                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                // EdgeTable's key, not (a << 32) | b: a long hashes as its two halves XORed, which puts the edges between nearby vertices in a few buckets.
+                long key = EdgeTable.Key(a, b, mesh.VertexCount);
                 if (firstFace.TryGetValue(key, out int other))
                     Union(parent, f, other);
                 else
@@ -334,6 +336,113 @@ public static class MeshCleaner
             keep[f] = a >= largest || a >= areaRatio * total;
         }
         return keep;
+    }
+
+    /// <summary>The spread of the given vertices along the normal of their best-fitting plane (the least-variance eigenvector of their covariance, by Jacobi rotations): the thickness of a
+    /// piece whatever way it is turned. It is never below the piece's true smallest width, so a solid piece is never taken for a sheet.</summary>
+    internal static double PlaneThickness(float[] v, List<int> vertices)
+    {
+        double mx = 0, my = 0, mz = 0;
+        foreach (int i in vertices) { mx += v[i * 3]; my += v[i * 3 + 1]; mz += v[i * 3 + 2]; }
+        mx /= vertices.Count; my /= vertices.Count; mz /= vertices.Count;
+        double[,] a = new double[3, 3];
+        foreach (int i in vertices)
+        {
+            double[] d = [v[i * 3] - mx, v[i * 3 + 1] - my, v[i * 3 + 2] - mz];
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++)
+                    a[r, c] += d[r] * d[c];
+        }
+        double[,] e = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        for (int sweep = 0; sweep < 50 && Math.Abs(a[0, 1]) + Math.Abs(a[0, 2]) + Math.Abs(a[1, 2]) > 1e-15; sweep++)
+            for (int p = 0; p < 2; p++)
+                for (int q = p + 1; q < 3; q++)
+                {
+                    if (Math.Abs(a[p, q]) < 1e-300) continue;
+                    double theta = (a[q, q] - a[p, p]) / (2 * a[p, q]);
+                    double t = (theta >= 0 ? 1 : -1) / (Math.Abs(theta) + Math.Sqrt(theta * theta + 1));
+                    double cos = 1 / Math.Sqrt(t * t + 1), sin = t * cos;
+                    for (int k = 0; k < 3; k++) (a[k, p], a[k, q]) = (cos * a[k, p] - sin * a[k, q], sin * a[k, p] + cos * a[k, q]);
+                    for (int k = 0; k < 3; k++) (a[p, k], a[q, k]) = (cos * a[p, k] - sin * a[q, k], sin * a[p, k] + cos * a[q, k]);
+                    for (int k = 0; k < 3; k++) (e[k, p], e[k, q]) = (cos * e[k, p] - sin * e[k, q], sin * e[k, p] + cos * e[k, q]);
+                }
+        int least = a[0, 0] <= a[1, 1] ? (a[0, 0] <= a[2, 2] ? 0 : 2) : (a[1, 1] <= a[2, 2] ? 1 : 2);
+        double nx = e[0, least], ny = e[1, least], nz = e[2, least], low = double.MaxValue, high = double.MinValue;
+        foreach (int i in vertices)
+        {
+            double along = v[i * 3] * nx + v[i * 3 + 1] * ny + v[i * 3 + 2] * nz;
+            low = Math.Min(low, along);
+            high = Math.Max(high, along);
+        }
+        return (high - low) / Math.Max(1e-300, Math.Sqrt(nx * nx + ny * ny + nz * nz));
+    }
+
+    /// <summary>Removes vertex-connected components thinner than <paramref name="thicknessRatio"/> of the mesh's bounding-box diagonal, measured along the component's best-fitting plane
+    /// normal (see <see cref="PlaneThickness"/>) or its thinnest axis, so a tilted sheet counts the same as an axis-aligned one (see <see cref="MeshCleanOptions.FlatComponentThicknessRatio"/>).
+    /// The component with the most faces always stays.</summary>
+    public static Mesh RemoveFlatComponents(Mesh mesh, double thicknessRatio)
+    {
+        Validate(mesh);
+        if (!(thicknessRatio >= 0))
+            throw new ArgumentOutOfRangeException(nameof(thicknessRatio), "Ratio must be non-negative.");
+        int faces = mesh.TriangleCount;
+        float[] v = mesh.Vertices;
+        int[] parent = new int[mesh.VertexCount];
+        for (int i = 0; i < parent.Length; i++) parent[i] = i;
+        for (int f = 0; f < faces; f++)
+        {
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 1]);
+            Union(parent, mesh.Indices[f * 3], mesh.Indices[f * 3 + 2]);
+        }
+        // Per component root: face count and box (min x, y, z, max x, y, z).
+        int[] count = new int[mesh.VertexCount];
+        Dictionary<int, double[]> boxes = [];
+        double[] whole = [double.MaxValue, double.MaxValue, double.MaxValue, double.MinValue, double.MinValue, double.MinValue];
+        for (int f = 0; f < faces; f++)
+        {
+            int root = Find(parent, mesh.Indices[f * 3]);
+            count[root]++;
+            if (!boxes.TryGetValue(root, out double[]? box))
+                boxes[root] = box = [double.MaxValue, double.MaxValue, double.MaxValue, double.MinValue, double.MinValue, double.MinValue];
+            for (int k = 0; k < 3; k++)
+            {
+                int vertex = mesh.Indices[f * 3 + k] * 3;
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    box[axis] = Math.Min(box[axis], v[vertex + axis]);
+                    box[axis + 3] = Math.Max(box[axis + 3], v[vertex + axis]);
+                    whole[axis] = Math.Min(whole[axis], v[vertex + axis]);
+                    whole[axis + 3] = Math.Max(whole[axis + 3], v[vertex + axis]);
+                }
+            }
+        }
+        if (boxes.Count < 2)
+            return Compact(mesh.Vertices, mesh.Indices);
+        int biggest = boxes.Keys.MaxBy(root => count[root]);
+        double dx = whole[3] - whole[0], dy = whole[4] - whole[1], dz = whole[5] - whole[2];
+        double limit = Math.Sqrt(dx * dx + dy * dy + dz * dz) * thicknessRatio;
+        Dictionary<int, List<int>> members = [];
+        bool[] used = new bool[mesh.VertexCount];
+        foreach (int i in mesh.Indices) used[i] = true;
+        for (int vertex = 0; vertex < used.Length; vertex++)
+        {
+            if (!used[vertex]) continue;
+            int root = Find(parent, vertex);
+            if (!members.TryGetValue(root, out List<int>? list)) members[root] = list = [];
+            list.Add(vertex);
+        }
+        HashSet<int> flat = [];
+        foreach ((int root, double[] box) in boxes)
+        {
+            if (root == biggest) continue;
+            double axisAligned = Math.Min(box[3] - box[0], Math.Min(box[4] - box[1], box[5] - box[2]));
+            if (Math.Min(axisAligned, PlaneThickness(v, members[root])) < limit)
+                flat.Add(root);
+        }
+        bool[] keep = new bool[faces];
+        for (int f = 0; f < faces; f++)
+            keep[f] = !flat.Contains(Find(parent, mesh.Indices[f * 3]));
+        return Rebuild(mesh, keep);
     }
 
     /// <summary>Closes boundary loops whose perimeter is at most <paramref name="maxPerimeter"/> (mesh units): a triangle for three

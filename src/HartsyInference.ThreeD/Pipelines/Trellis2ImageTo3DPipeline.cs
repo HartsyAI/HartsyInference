@@ -236,7 +236,12 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
     /// <param name="onProgress">Reports one step per sampler step and per stage; it may throw to cancel, and every tensor is released.</param>
     /// <exception cref="HartsyInferenceException">The sampled structure or shape holds no geometry.</exception>
     public Mesh Generate(Trellis2InputImage image, Trellis2Options? options = null, Action<GenerationProgress>? onProgress = null)
-        => Run(image, options, onProgress, textured: false, CancellationToken.None).Mesh;
+        => Generate(image, options, onProgress, CancellationToken.None);
+
+    /// <summary>As <see cref="Generate(Trellis2InputImage, Trellis2Options?, Action{GenerationProgress}?)"/>, cancellable.</summary>
+    /// <param name="cancellationToken">Checked between the stages after sampling (decode, mesh extraction, clean-up), which report no steps of their own.</param>
+    public Mesh Generate(Trellis2InputImage image, Trellis2Options? options, Action<GenerationProgress>? onProgress, CancellationToken cancellationToken)
+        => Run(image, options, onProgress, textured: false, cancellationToken).Mesh;
 
     /// <summary>
     /// Generates a textured PBR model for one image: the shape path, then the texture flow over the shape latent's voxels, the
@@ -352,11 +357,13 @@ public sealed class Trellis2ImageTo3DPipeline : ThreeDPipelineBase
                 : ((ISparseShapeSubdivisionDecoder)_decoder).Decode(Backend, latent, guides);
             done++;
             Report();
+            cancellationToken.ThrowIfCancellationRequested();
             Begin(MeshStageNames.MeshExtraction, 1);
             SceneGrid grid = new() { Resolution = resolution, Origin = new Vector3(-0.5f), VoxelSize = 1f / resolution };
             Mesh mesh = _mesher.Extract(field, grid);
             if (mesh.TriangleCount == 0)
                 throw new HartsyInferenceException("The decoded shape holds no surface. Try another seed or a different grid.");
+            cancellationToken.ThrowIfCancellationRequested();
             if (!textured)
             {
                 mesh = ShapeMeshFinisher.Finish(

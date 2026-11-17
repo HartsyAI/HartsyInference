@@ -15,6 +15,7 @@ namespace HartsyInference.ThreeD.Models.Hunyuan3D.Paint;
 public sealed class HunyuanPaintPipeline
 {
     private const int FixedViews = 6;
+
     private readonly IBackend _backend;
     private readonly HunyuanPaintConfig _config;
     private readonly HunyuanPaintUnet _unet, _reference;
@@ -56,8 +57,25 @@ public sealed class HunyuanPaintPipeline
 
     /// <summary>Paints <paramref name="mesh"/> (unwrapped first if it has no UVs) from <paramref name="referenceRgb"/>, a square or any-size RGB image on white.</summary>
     public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, int referenceWidth, int referenceHeight, HunyuanPaintOptions? options = null,
-        Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default)
+        Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+        Generate(mesh, referenceRgb, default, referenceWidth, referenceHeight, options, progress, cancellationToken);
+
+    /// <summary>Paints <paramref name="mesh"/> from <paramref name="referenceRgb"/> (on white) with its subject mask <paramref name="referenceAlpha"/> (one byte per pixel, or empty).
+    /// With the mask and <see cref="HunyuanPaintOptions.ProjectReference"/>, the picture itself is baked into the front view; it should then be square, as the diffusion
+    /// sees it resized to the view size, and as large as it comes (it is sampled at the render resolution).</summary>
+    public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, ReadOnlySpan<byte> referenceAlpha, int referenceWidth, int referenceHeight,
+        HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null, CancellationToken cancellationToken = default) =>
+        Generate(mesh, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, [], options, progress, cancellationToken);
+
+    /// <summary>Paints <paramref name="mesh"/> as the overload without <paramref name="sides"/> does, and with <see cref="HunyuanPaintOptions.ProjectReference"/>
+    /// also bakes each side picture onto the surfaces its own camera sees. The diffusion is conditioned on the front picture alone.</summary>
+    /// <param name="sides">Pictures of the subject from other cameras, each with its subject mask; a side whose subject does not overlap the mesh's
+    /// silhouette from its camera by <see cref="PaintReferenceProjector.MinimumFit"/> is left out with a warning.</param>
+    public PbrPostProcessResult Generate(Mesh mesh, ReadOnlySpan<byte> referenceRgb, ReadOnlySpan<byte> referenceAlpha, int referenceWidth, int referenceHeight,
+        IReadOnlyList<PaintSideReference> sides, HunyuanPaintOptions? options = null, Action<GenerationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(sides);
         ArgumentNullException.ThrowIfNull(mesh);
         options ??= new HunyuanPaintOptions();
         Validate(options);
@@ -86,10 +104,33 @@ public sealed class HunyuanPaintPipeline
             : PaintViewCandidate.Fixed;
 
         Stage($"frame and views ({views.Count})");
+        List<PaintReferencePicture> pictures = [];
+        PaintReferenceProjection? projection = null;
+        if (options.ProjectReference && !referenceAlpha.IsEmpty)
+        {
+            // Only the placement is used: the bake samples the picture itself, at its own resolution, for every texel the front camera sees.
+            projection = PaintReferenceProjector.Project(renderer, referenceRgb, referenceAlpha, referenceWidth, referenceHeight, PlacementResolution, cancellationToken);
+            Stage(projection is null ? "reference projection (no subject or silhouette)"
+                : $"reference projection (fit {projection.Fit:F3}, mirrored {projection.MirroredFit:F3}, scale {projection.Scale:F1}, offset {projection.OffsetX:F1} {projection.OffsetY:F1})");
+            if (projection is not null && projection.Fit < PaintReferenceProjector.MinimumFit)
+            {
+                string poor = $"The reference picture overlaps the model's front by {projection.Fit:P0}, under the {PaintReferenceProjector.MinimumFit:P0} needed to bake it in place, "
+                    + "so the front was painted from the generated view only. A picture and model with the same pose and framing line up.";
+                StageLog?.Invoke(poor);
+                warnings.Add(poor);
+                projection = null;
+            }
+            if (projection is not null)
+                pictures.Add(new PaintReferencePicture(projection, referenceRgb.ToArray(), referenceAlpha.ToArray(), referenceWidth, referenceHeight));
+        }
+        if (options.ProjectReference)
+            foreach (PaintSideReference side in sides)
+                if (ProjectSide(renderer, side, warnings, cancellationToken) is { } placed)
+                    pictures.Add(placed);
         (byte[][] normalMaps, byte[][] positionMaps) = RenderConditions(renderer, views, options, cancellationToken);
         Stage("geometry maps");
         byte[][] generated = Diffuse(views, normalMaps, positionMaps, referenceRgb, referenceWidth, referenceHeight, options, progress, cancellationToken);
-        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, cancellationToken);
+        PbrPostProcessResult baked = Bake(mesh, frame, renderer, views, generated, options, pictures, cancellationToken);
         Stage("bake");
         return warnings.Count == 0 ? baked : baked with { Warnings = warnings };
     }
@@ -333,12 +374,13 @@ public sealed class HunyuanPaintPipeline
         return HunyuanPaintImages.FromArray(merged, views, 12, latent, latent);
     }
 
-    // u + g s (b - u) per view with s from the azimuth (2.1: b is the full prediction, see Diffuse) and s = 1 for 2.0.
+    // u + g s (b - u) per view with s = 1 (2.1: b is the full prediction, see Diffuse). Upstream's pipeline would scale each view by its azimuth
+    // (ViewScale) only when the caller passes camera_azims, and its texturing pipeline (textureGenPipeline -> multiview_utils.forward_one) never does,
+    // so every view is guided at s = 1. With this and upstream's own geometry maps and starting noise, the generated views match upstream's to 0.4 to 1.5/255 mean.
     private float[] Guide(float[][] branch, IReadOnlyList<PaintViewCandidate> views, float guidance, int n, int latent)
     {
         float[] scales = new float[n];
-        for (int v = 0; v < n; v++)
-            scales[v] = _config.UsePoseRope ? ViewScale(views[v].Azimuth) : 1f;
+        Array.Fill(scales, 1f);
         return Guide(branch, scales, guidance, n, latent);
     }
 
@@ -385,8 +427,29 @@ public sealed class HunyuanPaintPipeline
                     texture[i * 3 + c] = (float)(mean[c] / surface.Count);
     }
 
+    // Fits a side picture on its own camera; null, with a warning, when it has no subject or does not overlap the mesh's silhouette from there closely enough.
+    private PaintReferencePicture? ProjectSide(PaintViewRenderer renderer, PaintSideReference side, List<string> warnings, CancellationToken cancellationToken)
+    {
+        PaintReferenceProjection? placed = PaintReferenceProjector.Project(renderer, side.Rgb, side.Alpha, side.Width, side.Height, PlacementResolution,
+            0, side.Azimuth, cancellationToken);
+        Stage(placed is null ? $"side picture at {side.Azimuth:F0} degrees (no subject or silhouette)"
+            : $"side picture at {side.Azimuth:F0} degrees (fit {placed.Fit:F3}, mirrored {placed.MirroredFit:F3}, scale {placed.Scale:F1})");
+        if (placed is not null && placed.Fit >= PaintReferenceProjector.MinimumFit)
+            return new PaintReferencePicture(placed, side.Rgb, side.Alpha, side.Width, side.Height);
+        string poor = placed is null
+            ? $"The picture for {side.Azimuth:F0} degrees has no subject the mesh's silhouette from there overlaps, so that side was painted from the generated views only."
+            : $"The picture for {side.Azimuth:F0} degrees overlaps the model's silhouette from there by {placed.Fit:P0}, under the {PaintReferenceProjector.MinimumFit:P0} "
+                + "needed to bake it in place, so that side was painted from the generated views only.";
+        StageLog?.Invoke(poor);
+        warnings.Add(poor);
+        return null;
+    }
+
+    // Side of the front view the picture's placement is fitted on; the placement is in view units, so this sets only the fit's precision.
+    private const int PlacementResolution = 512;
+
     private PbrPostProcessResult Bake(Mesh mesh, PaintMeshFrame frame, PaintViewRenderer renderer, IReadOnlyList<PaintViewCandidate> views, byte[][] generated,
-        HunyuanPaintOptions o, CancellationToken cancellationToken)
+        HunyuanPaintOptions o, IReadOnlyList<PaintReferencePicture> pictures, CancellationToken cancellationToken)
     {
         int n = views.Count, materials = _config.MaterialCount, size = o.TextureSize, render = o.RenderResolution;
         PaintTexelSurface surface = PaintTexelSurface.Create(frame, mesh.Uvs!, size, size, cancellationToken);
@@ -410,8 +473,18 @@ public sealed class HunyuanPaintPipeline
                 merger.Add(bake, views[v].Weight);
             }
             (float[] texture, bool[] known) = merger.Finish();
+            // The pictures replace the merged views' albedo on the surfaces their cameras see; metal and roughness stay as generated.
+            if (m == 0 && pictures.Count > 0)
+            {
+                int fromPicture = PaintReferenceProjector.ApplyToTexels(pictures, renderer, surface, texture, known, o.Bake.DepthThreshold, cancellationToken);
+                StageLog?.Invoke($"reference projection: {fromPicture} texels from {(pictures.Count == 1 ? "the picture" : $"{pictures.Count} pictures")}");
+            }
             if (m == 0)
                 painted = known.Count(k => k);
+            // Upstream's uv_inpaint: colours spread over the mesh's vertices first, so a surface no view saw takes the colour around it on the mesh, then the 2D fill.
+            int seeded = PaintVertexInpaint.Seed(texture, known, size, size, 3, mesh.Vertices, mesh.Uvs!, mesh.Indices);
+            if (m == 0)
+                StageLog?.Invoke($"vertex inpaint: {seeded} texels seeded");
             textures[m] = Inpainter.Inpaint(texture, size, size, 3, known, o.InpaintRadius, clampToUnit: true, boundByNeighbours: true);
             FlattenFarGutter(textures[m], surface, size);
         }

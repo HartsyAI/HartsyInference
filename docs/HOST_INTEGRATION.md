@@ -55,7 +55,7 @@ code.
 | Member | Use |
 |---|---|
 | `IBackend.Capabilities` (`BackendCapabilities`) | What the backend supports: dtypes, quantized formats, SDPA, STFT, device name and vendor. |
-| `HostMemoryInfo.AvailableBytes()` | Available host RAM, cross-platform, best effort. |
+| `HostMemoryInfo.AvailableBytes()` | Available host RAM, cross-platform, best effort. On Linux it is also capped by the process's memory cgroup, so a container reports its own room, not the machine's. |
 | `DeviceKind.IsCpu` / `IsCuda` / `IsVulkan` / `IsGpu` | Device family of a tensor or backend. |
 
 ## 3D preflight (`IInferenceEngine.MeshPlanning`, `POST /v1/native/mesh/plan`)

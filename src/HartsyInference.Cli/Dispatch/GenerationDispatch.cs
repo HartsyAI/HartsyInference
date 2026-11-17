@@ -838,15 +838,26 @@ public static class GenerationDispatch
         RejectMaskForOtherModels(parameters.GetStringOrNull("mask"), meshId);
         if (paint && imagePath is null)
             throw new ArgumentException($"3D model '{meshId}' textures a mesh from a reference image; pass the image with --image.");
+        // The paint models take their texture size as the request's grid; --texture-size names it for them when --grid is not given.
+        int grid = parameters.GetInt("grid", 0);
+        int textureSize = parameters.GetInt("texture-size", 0);
+        if (paint && textureSize != 0)
+        {
+            if (grid != 0 && grid != textureSize)
+                throw new ArgumentException($"3D model '{meshId}' takes its texture size from --grid or --texture-size; pass one of them.");
+            grid = textureSize;
+            textureSize = 0;
+        }
         MeshRequest request = new MeshRequest
         {
             Vram = ParseVramOverrides(parameters),
             Image = paint ? LoadMeshImage(imagePath!) : scene ? null : WithMask(LoadMeshImage(prompt), parameters.GetStringOrNull("mask"), meshId),
+            Views = LoadMeshViews(parameters.GetStringOrNull("view")),
             SceneMesh = scene ? LoadSceneMesh(prompt) : null,
             Control = LoadMeshControl(parameters),
             ScenePrompt = LoadScenePrompt(parameters),
             Steps = parameters.GetInt("steps", 0),
-            GridResolution = parameters.GetInt("grid", 0),
+            GridResolution = grid,
             Seed = parameters.GetInt("seed", -1),
             FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
             Samples = parameters.GetInt("samples", 1),
@@ -855,9 +866,10 @@ public static class GenerationDispatch
             Chains = parameters.GetBool("no-chains", false) ? false : null,
             Texture = parameters.GetBool("texture", false),
             Remesh = parameters.GetBoolOrNull("remesh"),
-            TextureSize = parameters.GetInt("texture-size", 0),
+            TextureSize = textureSize,
             Mesh = parameters.GetBool("mesh", false),
             Quality = ParseMeshQuality(parameters.GetStringOrNull("quality")),
+            Preprocess = ParseMeshPreprocess(parameters.GetStringOrNull("preprocess")),
         };
 
         ConsoleStepProgress? progress = quiet ? null : new ConsoleStepProgress("mesh");
@@ -1701,6 +1713,31 @@ public static class GenerationDispatch
         text is null ? MeshQuality.Default
         : Enum.TryParse(text, ignoreCase: true, out MeshQuality quality) && Enum.IsDefined(quality) ? quality
         : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
+
+    /// <summary>The <c>--preprocess</c> value: none (the default) or auto.</summary>
+    internal static MeshPreprocess ParseMeshPreprocess(string? text) => string.IsNullOrWhiteSpace(text) ? MeshPreprocess.None
+        : !int.TryParse(text, out _) && Enum.TryParse(text, ignoreCase: true, out MeshPreprocess preprocess) && Enum.IsDefined(preprocess) ? preprocess
+        : throw new ArgumentException($"--preprocess must be none or auto; got '{text}'.");
+
+    /// <summary>The extra views from <c>--view side=path</c> (one per line), or null when none are given; the engine checks the sides are distinct and that the model takes views.</summary>
+    internal static IReadOnlyList<MeshViewImage>? LoadMeshViews(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+        List<MeshViewImage> views = [];
+        foreach (string entry in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int split = entry.IndexOf('=');
+            string side = split < 0 ? "" : entry[..split].Trim();
+            if (split < 0 || int.TryParse(side, out _) || !Enum.TryParse(side, ignoreCase: true, out MeshView view) || !Enum.IsDefined(view))
+                throw new ArgumentException($"--view takes side=path with side left, back or right; got '{entry}'.");
+            string path = entry[(split + 1)..].Trim().Trim('"');
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"--view {side}: no file at '{path}'.", path);
+            views.Add(new MeshViewImage { View = view, Image = LoadMeshImage(path) });
+        }
+        return views;
+    }
 
     /// <summary>A mesh input image with its alpha plane and EXIF orientation applied; a non-PNG file goes through <see cref="LoadImage"/>.</summary>
     private static ImageData LoadMeshImage(string promptPath)

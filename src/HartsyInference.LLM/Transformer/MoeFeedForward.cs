@@ -6,6 +6,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Experts;
 using HartsyInference.Core.Backends.Routing;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Memory.Host;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
@@ -62,9 +63,21 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertKey[] _offKeys = [];
     private ExpertAssignment[] _offPlan = [];
     private List<ExpertKey> _offMisses = [];
+
+    // Routed-expert prefetch scratch (BeginRoutedPrefetch), reused from call to call: the tensors to read, and each expert's [first, end)
+    // range in that list.
+    private readonly List<Tensor> _prefetchPending = [];
+    private int[] _prefetchFirst = [];
+    private int[] _prefetchEnd = [];
+    private int _prefetchLast = -1;   // the last expert in loop order with something to wait for
+    private IBackend? _prefetchBackend;
+    private Func<Tensor, bool>? _prefetchResident;
     private int[] _offHostPlan = [];
     private int[] _offHostOffset = [];
     private readonly ExpertLease _offLease = new();
+    private readonly ExpertLease _offAdmitLease = new();
+    private readonly List<ExpertKey> _offAdmit = [];
+    private readonly List<ExpertKey> _offAdmitMissed = [];
 
     /// <summary>
     /// Routes this layer's experts through <paramref name="offload"/>: the experts its device cache holds run on the device as before,
@@ -80,8 +93,9 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         if (_packed is not null) throw new NotSupportedException("Packed MXFP4 experts run resident; they cannot be offloaded.");
         ArgumentNullException.ThrowIfNull(offload);
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
-        // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward.
-        _ = HostExpertProgram(_moe.Activation);
+        // Offload may plan any expert on the host, so an activation the host runtime cannot run is refused here, not mid-forward. An offload
+        // without a host runner runs every miss on the device, where every activation runs.
+        if (offload.Host is not null) _ = HostExpertProgram(_moe.Activation);
         int e = _moe.NumExperts;
         offload.RegisterLayer(layer, e, ResolveExpert);
         _offIds = new int[e * Math.Max(1, _moe.NumExpertsPerTok)];
@@ -314,10 +328,13 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
     }
 
-    public IEnumerable<Tensor> EnumerateWeights()
+    /// <summary>Every weight of the block, the per-token ones (<see cref="EnumerateDenseWeights"/>) first, so a preload that runs out of
+    /// room drops routed experts rather than the router.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() => EnumerateDenseWeights().Concat(EnumerateExpertWeights());
+
+    /// <summary>The routed experts' projections, three per expert in expert order.</summary>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
     {
-        yield return _routerW;
-        if (_routerW2 is not null) yield return _routerW2;
         if (_packed is null)
         {
             for (int i = 0; i < _gateW.Length; i++) { yield return _gateW[i]; yield return _upW[i]; yield return _downW[i]; }
@@ -326,6 +343,14 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         {
             foreach (PackedMxfp4Expert x in _packed) { yield return x.Gate.Packed; yield return x.Up.Packed; yield return x.Down.Packed; }
         }
+    }
+
+    /// <summary>Every weight but the routed experts: the routers, the shared expert, and the latent projections and norms. These run
+    /// for every token, so a caller that keeps only part of the block on the device keeps these.</summary>
+    public IEnumerable<Tensor> EnumerateDenseWeights()
+    {
+        yield return _routerW;
+        if (_routerW2 is not null) yield return _routerW2;
         if (_shGateW is not null) { yield return _shGateW; yield return _shUpW!; yield return _shDownW!; }
         if (_shGateScoreW is not null) yield return _shGateScoreW;
         if (_correctionBiasT is not null) yield return _correctionBiasT;
@@ -387,13 +412,17 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     {
         RequireWholeBank();
         if (_latentDown is null) return ForwardRouted(backend, x, n, routerLogits);
-        Tensor? ownLogits = routerLogits is null ? ComputeRouterLogits(backend, x, n) : null;
+        Tensor? ownLogits;
+        using (StageProfiler.Begin(backend, "moe", "router"))
+            ownLogits = routerLogits is null ? ComputeRouterLogits(backend, x, n) : null;
         Tensor? expertSum = null;
         try
         {
             using (Tensor latent = new(new TensorShape(1, n, _hidden), DType.F32))
             {
-                GenericTransformer.Project(backend, latent, x, _latentDown, null, _lowVram);
+                using (StageProfiler.Begin(backend, "moe", "latent.down"))
+                    GenericTransformer.Project(backend, latent, x, _latentDown, null, _lowVram);
+                using StageProfiler.Scope routedScope = StageProfiler.Begin(backend, "moe", "routed");
                 if (_moe.LatentNorm == MoeLatentNorm.BeforeExperts)
                 {
                     using Tensor latentNormed = LatentRmsNorm(backend, latent);
@@ -406,13 +435,19 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             }
             if (_moe.LatentNorm == MoeLatentNorm.AfterCombine)
             {
+                using StageProfiler.Scope _ = StageProfiler.Begin(backend, "moe", "latent.norm");
                 Tensor normed = LatentRmsNorm(backend, expertSum);
                 expertSum.Dispose();
                 expertSum = normed;
             }
             Tensor output = new(new TensorShape(1, n, _modelHidden), DType.F32);
-            GenericTransformer.Project(backend, output, expertSum, _latentUp!, null, _lowVram);
-            if (_shGateW is not null) AddSharedExpert(backend, output, x, n);
+            using (StageProfiler.Begin(backend, "moe", "latent.up"))
+                GenericTransformer.Project(backend, output, expertSum, _latentUp!, null, _lowVram);
+            if (_shGateW is not null)
+            {
+                using StageProfiler.Scope _ = StageProfiler.Begin(backend, "moe", "shared");
+                AddSharedExpert(backend, output, x, n);
+            }
             return output;
         }
         finally
@@ -512,21 +547,93 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 if (!routed) output.Dispose();
             }
         }
-        for (int ex = 0; ex < e; ex++)
+        MappedTensorPrefetch.Batch prefetch = BeginRoutedPrefetch(backend, expertTokens);
+        try
         {
-            int ne = expertTokens[ex].Count;
-            if (ne == 0) continue;
-            int[] idx = [.. expertTokens[ex]];
-            float[] wts = [.. expertWeights[ex]];
+            for (int ex = 0; ex < e; ex++)
+            {
+                int ne = expertTokens[ex].Count;
+                if (ne == 0) continue;
+                int[] idx = [.. expertTokens[ex]];
+                float[] wts = [.. expertWeights[ex]];
 
-            Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
-            backend.GatherRows(gathered, x, idx);
-            Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
-            gathered.Dispose();
-            backend.ScatterAddRows(output, expOut, idx, wts);
-            expOut.Dispose();
+                // The readers work through the experts in this loop's order, so expert ex is usually read by the time the one before it
+                // has run, and the rest keep reading while it does.
+                if (_prefetchFirst[ex] < _prefetchEnd[ex])
+                {
+                    using (StageProfiler.Begin(backend, "moe", "prefetch.wait"))
+                        for (int p = _prefetchFirst[ex]; p < _prefetchEnd[ex]; p++) prefetch.WaitFor(p);
+                    // Nothing later waits on the batch, so end it now rather than holding the process-wide prefetch gate through the
+                    // remaining experts' compute.
+                    if (ex == _prefetchLast) prefetch.Dispose();
+                }
+
+                Tensor gathered = new(new TensorShape(1, ne, _hidden), DType.F32);
+                backend.GatherRows(gathered, x, idx);
+                Tensor expOut = RoutedExpert(backend, gathered, ne, ex);
+                gathered.Dispose();
+                backend.ScatterAddRows(output, expOut, idx, wts);
+                expOut.Dispose();
+            }
+        }
+        finally
+        {
+            prefetch.Dispose();
+            _prefetchPending.Clear();
         }
         return output;
+    }
+
+    /// <summary>Starts reading the selected routed experts that are not on the device into the page cache with parallel readers
+    /// (<see cref="MappedTensorPrefetch"/>), so the per-expert loop's uploads copy from memory instead of waiting on storage one expert at a
+    /// time. An empty batch when <c>numerics.moeExpertPrefetchThreads</c> is 0 or nothing needs reading. Fills
+    /// <see cref="_prefetchFirst"/> and <see cref="_prefetchEnd"/> for every selected expert.</summary>
+    private MappedTensorPrefetch.Batch BeginRoutedPrefetch(IBackend backend, List<int>[] expertTokens)
+    {
+        int threads = HartsyInference.Core.Configuration.EngineKnobs.MoeExpertPrefetchThreads.Value;
+        if (_prefetchFirst.Length != expertTokens.Length)
+        {
+            _prefetchFirst = new int[expertTokens.Length];
+            _prefetchEnd = new int[expertTokens.Length];
+        }
+        if (threads == 0)
+        {
+            Array.Clear(_prefetchFirst);
+            Array.Clear(_prefetchEnd);
+            return default;
+        }
+        // The delegate, the list and the range arrays are kept from call to call, so the prefetch adds no allocation to a forward.
+        if (!ReferenceEquals(_prefetchBackend, backend))
+        {
+            _prefetchBackend = backend;
+            _prefetchResident = backend.IsWeightResident;
+        }
+        RoutedPrefetchSet(expertTokens, _prefetchResident!, _prefetchPending, _prefetchFirst, _prefetchEnd);
+        _prefetchLast = -1;
+        for (int ex = expertTokens.Length - 1; ex >= 0 && _prefetchLast < 0; ex--)
+            if (_prefetchFirst[ex] < _prefetchEnd[ex]) _prefetchLast = ex;
+        return _prefetchPending.Count == 0 ? default : MappedTensorPrefetch.Begin(_prefetchPending, threads);
+    }
+
+    /// <summary>Fills <paramref name="pending"/> (cleared first) with the gate, up and down weights of every expert with at least one token
+    /// that <paramref name="resident"/> does not report on the device, in expert order, and sets <paramref name="first"/> and
+    /// <paramref name="end"/> to each expert's range in it (empty for an expert with no tokens or nothing to read). Packed experts read
+    /// through their own recipe, so none are listed for them.</summary>
+    internal void RoutedPrefetchSet(List<int>[] expertTokens, Func<Tensor, bool> resident, List<Tensor> pending, int[] first, int[] end)
+    {
+        pending.Clear();
+        for (int ex = 0; ex < expertTokens.Length; ex++)
+        {
+            first[ex] = pending.Count;
+            if (_packed is null && expertTokens[ex].Count > 0)
+            {
+                int local = ex - _firstExpert;
+                if (!resident(_gateW[local])) pending.Add(_gateW[local]);
+                if (!resident(_upW[local])) pending.Add(_upW[local]);
+                if (!resident(_downW[local])) pending.Add(_downW[local]);
+            }
+            end[ex] = pending.Count;
+        }
     }
 
     /// <summary>One routed expert over <paramref name="rows"/> gathered tokens, including the per-expert output norm when configured.</summary>
@@ -601,10 +708,21 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
         int distinct = ExpertScheduler.Plan(offload.Cache, _offIds.AsSpan(0, pairs), _offloadLayer, 0, e, offload.Policy, _offCounts,
             _offResident, _offKeys, _offPlan, _offMisses, _offLease);
+        bool admitBeforeRun = offload.Host is null;
         float[]? hostIn = null, hostOut = null;
         int[]? hostIndex = null;
         try
         {
+            // With no host runner every miss is uploaded anyway, so the ones admission takes are uploaded into the cache before they run
+            // and run from that copy: one read each, not a per-call copy now and a second read for admission after the layer. The second
+            // lease pins them (waiting for their uploads) so nothing evicts them before they run; one that did not upload stays a per-call
+            // miss. Pinning notes one more access for each, which the eviction scores count.
+            if (admitBeforeRun && offload.AdmitNow(_offMisses, _offAdmit) > 0)
+            {
+                _offAdmitMissed.Clear();
+                offload.Cache.AcquireResident(CollectionsMarshal.AsSpan(_offAdmit), _offAdmitMissed, _offAdmitLease);
+            }
+
             // Host experts: those planned on the CPU that serve too few rows to be worth an upload.
             int hostExperts = 0, hostRows = 0;
             for (int i = 0; i < distinct; i++)
@@ -667,7 +785,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 }
                 float[] inBuf = hostIn!, outBuf = hostOut!;
                 ExpertAssignment[] plan = _offPlan;
-                IExpertHostRunner runner = offload.Host;
+                IExpertHostRunner runner = offload.Host!;
                 // One expert at a time: the runner spreads each expert's rows across every core, which a layer's three or four
                 // single-row experts at decode could not fill on their own.
                 for (int j = 0; j < hostExperts; j++)
@@ -693,11 +811,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         finally
         {
             _offLease.Dispose();
+            _offAdmitLease.Dispose();
             if (hostIndex is not null) ArrayPool<int>.Shared.Return(hostIndex);
             if (hostIn is not null) ArrayPool<float>.Shared.Return(hostIn);
             if (hostOut is not null) ArrayPool<float>.Shared.Return(hostOut);
         }
-        offload.AfterLayer(_offMisses);
+        if (!admitBeforeRun) offload.AfterLayer(_offMisses);
     }
 
 
