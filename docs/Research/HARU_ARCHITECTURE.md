@@ -92,6 +92,14 @@ config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no 
 | `{encoder,decoder}.head.*` | `{encoder,decoder}.head.conv.conv.*` |
 | `norm`, `ffn_norm`, `gamma`, `ffn_gamma` | unchanged |
 
+## Engine integration
+
+- Catalog: `TtsCatalog` ids `haru` and `haru-4b` (`Audio/Tts/Models/HaruModel.cs`), a `ModelCatalog` entry and a `ModelIdentityCatalog` row, release files pinned by sha256 (config `ff29b2da...`, tokenizer `06b95093...`, weights `ad2c3534...`).
+- The runner is an `ITtsRunner` (cache, eviction, leases and footprint unchanged) that also implements `IDuplexSpeechRunner`; `Synthesize` refuses with a pointer to the duplex API.
+- Contract: `ISpeechService.OpenDuplexAsync` and `RespondAsync` as default interface members; `IDuplexSpeechSession` (`Start`, `Step`) over a lease that takes the call lock and the device gate per frame and pins the model. One conversation per loaded model.
+- Precisions: `HaruWeights` converts only the language model's attention, delta-rule and feed-forward matrices (Q8_0, Q6_K, or Q4_K/Q5_K for the feed-forward with Q6_K for the rest); the tied embedding table, head, projectors and codec stay as stored. Cache: `CacheRoot/tts/_gguf-cache/higurashi-ai_Haru-4B-<precision>-v1.gguf`.
+- Consumers: `hartsy duplex <recording> -m haru:q4 --reference voice.wav --card "..." --stereo`, `POST /v1/native/duplex/respond` (base64 clips in JSON, long-running queue).
+
 ## Evidence
 
 Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64, 4 layers, vocab 2048, latent 16, codec base
