@@ -11,6 +11,7 @@ public sealed partial class CpuBackend
     /// <inheritdoc/>
     public void Attention(in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         switch (LegacyRoute(in call))
         {
             case AttentionRoute.Dense:
@@ -35,6 +36,7 @@ public sealed partial class CpuBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         string reason = LegacyRoute(in call) switch
         {
             AttentionRoute.Dense => "cpu.simd: the vectorized head-major kernel",

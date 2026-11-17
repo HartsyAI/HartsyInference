@@ -43,6 +43,23 @@ public sealed class AttentionPlannerContractTests
     }
 
     [Fact]
+    public void F32NarrowingNeedsIndependentPermissionsForBothMultiplies()
+    {
+        using Operands operands = new();
+        AttentionKernelCapability capability = Capability("narrow") with { NarrowsF32To = AttentionFormats.F16 };
+        AttentionCall exact = operands.Call;
+        AttentionCall queryKeyOnly = exact with { Numerics = new() { QueryKey = AttentionFormats.F16 } };
+        AttentionCall both = exact with
+        {
+            Numerics = new() { QueryKey = AttentionFormats.F16, ProbValue = AttentionFormats.F16 },
+        };
+
+        Assert.Equal(AttentionExclusion.Numerics, capability.Excludes(in exact));
+        Assert.Equal(AttentionExclusion.Numerics, capability.Excludes(in queryKeyOnly));
+        Assert.Equal(AttentionExclusion.None, capability.Excludes(in both));
+    }
+
+    [Fact]
     public void RecoverableDeclinePreservesPreferenceOrder()
     {
         using Operands operands = new();

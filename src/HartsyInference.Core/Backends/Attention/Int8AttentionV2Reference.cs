@@ -177,7 +177,7 @@ public static class Int8AttentionV2Reference
 
     private static void Check(in AttentionCall call)
     {
-        AttentionHostReference.Validate(in call);
+        AttentionCallValidation.Validate(in call);
         if (call.Positions.OnDevice)
             throw new AttentionUnsupportedException("The INT8 attention v2 emulator reads host positions only.");
         if (call.QkHeadDim != call.ValueHeadDim)

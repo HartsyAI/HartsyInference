@@ -24,6 +24,7 @@ public sealed partial class VulkanBackend
 
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
         AttentionEvidence.Executed("vulkan", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
@@ -46,6 +47,7 @@ public sealed partial class VulkanBackend
     {
         if (call.LegacyGap() is { } gap)
         {
+            AttentionCallValidation.Validate(in call);
             // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
             if (AttentionFlashLowering.Gap(in call) is null)
             {
@@ -81,6 +83,7 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         // The token-major entry serves grouped K/V on its own rows and records the call as token-major; the rows read the
         // legacy kvLen, which a call without bounded positions leaves at 0 while Attention() passes all keys.
         AttentionCall planned = call.Route == AttentionRoute.TokenMajorGqa ? call with { Route = AttentionRoute.TokenMajor } : call;

@@ -22,6 +22,7 @@ public sealed partial class CudaBackend
     /// <summary>Runs the first row of <paramref name="rows"/> that covers, admits and completes the call, and records its route.</summary>
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
         AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
@@ -47,6 +48,7 @@ public sealed partial class CudaBackend
     {
         if (call.LegacyGap() is { } gap)
         {
+            AttentionCallValidation.Validate(in call);
             // Only the cuDNN rows read views, so the route's other rows exclude themselves and the planner refuses what none takes.
             if (call.Route is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa) || call.TermsGap() is not null)
             {
@@ -88,18 +90,13 @@ public sealed partial class CudaBackend
     /// <summary>A call the legacy entries cannot carry, planned over its route's rows with its own geometry checked first.</summary>
     private void RunViewCall(in AttentionCall call)
     {
-        AttentionHostReference.Validate(in call);
-        if (!float.IsFinite(call.Scale))
-            throw new ArgumentOutOfRangeException(nameof(call), "SDPA scale must be finite.");
-        Tensor output = call.Output.Storage;
-        if (ReferenceEquals(output, call.Query.Storage) || ReferenceEquals(output, call.Key.Storage) || ReferenceEquals(output, call.Value.Storage))
-            throw new ArgumentException("Attention output must not alias an input.", nameof(call));
         RunAttentionRows(RowsFor(call.Route), in call);
     }
 
     /// <inheritdoc/>
     public AttentionPlan PlanAttention(in AttentionCall call)
     {
+        AttentionCallValidation.Validate(in call);
         // The rows read the legacy kvLen, which a call without bounded positions leaves at 0; Attention() passes all keys.
         AttentionCall planned = call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded
             ? call with { Positions = call.Positions with { KvLength = call.KeyTokens, Bounded = true } } : call;
