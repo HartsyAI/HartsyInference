@@ -2,8 +2,6 @@
 
     python codec_reference.py <haru package dir> <codec-only safetensors> <wav> <out dir>
 """
-import json
-import struct
 import sys
 import wave
 from pathlib import Path

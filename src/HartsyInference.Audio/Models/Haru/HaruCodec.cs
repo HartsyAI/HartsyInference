@@ -11,10 +11,22 @@ internal static class HaruCodec
     /// <summary>Samples per latent frame the codec must have for the 133 ms frame loop.</summary>
     internal const int FrameSamples = 3200;
 
+    private static readonly HashSet<string> KnownFields = new(StringComparer.Ordinal)
+    {
+        "latent_dim", "base_channels", "ratios", "encoder_depths", "decoder_depths", "norm_eps", "latent_std",
+    };
+
     /// <summary>Reads the <c>codec</c> block (<c>latent_dim</c>, <c>base_channels</c>, <c>ratios</c>, the two depth lists, <c>norm_eps</c>,
     /// <c>latent_std</c>) into the tokenizer config, and refuses a layout whose frame is not <see cref="FrameSamples"/> long.</summary>
     internal static VibeVoiceTokenizerConfig ConfigFrom(JsonElement codec)
     {
+        foreach (JsonProperty field in codec.EnumerateObject())
+        {
+            if (!KnownFields.Contains(field.Name))
+            {
+                throw new InvalidDataException($"The Haru codec block has a field '{field.Name}' this loader does not read; refusing to load it against the defaults.");
+            }
+        }
         int[] ratios = Ints(codec, "ratios");
         int[] encoderDepths = Ints(codec, "encoder_depths");
         int[] decoderDepths = Ints(codec, "decoder_depths");
@@ -42,6 +54,8 @@ internal static class HaruCodec
             EncoderDepths = string.Join('-', encoderDepths),
             DecoderDepths = string.Join('-', decoderDepths),
             LayerNormEps = (float)codec.GetProperty("norm_eps").GetDouble(),
+            // Haru uses latent_std as the fixed spread of its posterior draw (HaruCodecSession), never VibeVoice's per-batch random std,
+            // so Sample() on this model is not part of the frame loop.
             FixStd = (float)codec.GetProperty("latent_std").GetDouble(),
         };
     }
@@ -55,7 +69,16 @@ internal static class HaruCodec
     internal static VibeVoiceAcousticTokenizerModel Create(VibeVoiceTokenizerConfig config, IReadOnlyDictionary<string, Tensor> weights)
     {
         VibeVoiceAcousticTokenizerModel model = new(config, HaruCodecWeights.Prefix);
-        model.LoadWeights(HaruCodecWeights.Remap(weights));
+        Dictionary<string, Tensor> remapped = HaruCodecWeights.Remap(weights);
+        model.LoadWeights(remapped);
+        // The shared loaders read only the keys they expect, so a tensor outside the configured layout (an extra stage, block or down/up
+        // layer) would load silently. Every remapped tensor must be one the model took.
+        int used = model.EnumerateWeights().Count();
+        if (used != remapped.Count)
+        {
+            throw new InvalidDataException(
+                $"The checkpoint has {remapped.Count} codec tensors but the configured codec uses {used}; the layout does not match the codec block.");
+        }
         return model;
     }
 

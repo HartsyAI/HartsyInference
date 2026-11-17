@@ -55,5 +55,38 @@ public sealed unsafe class HaruLmReferenceTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         Assert.Throws<ArgumentException>(() => lm.Embed(backend, [1, 2], new float[3], [], [], []));
         Assert.Throws<ArgumentException>(() => lm.Embed(backend, [], [], [], [], []));
+        Assert.Throws<ArgumentException>(() => lm.Embed(backend, [1, 2], new float[2 * config.LatentDim], new bool[3], [], []));
+    }
+
+    [Fact]
+    public void Forward_RefusesAnInputWhoseRowsAreNotTheClaimedCount()
+    {
+        using SafeTensorsLoader weights = new();
+        weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
+        HaruConfig config = HaruConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        using HaruLm lm = new(config, weights.GetAllTensors(), capacity: 8);
+        using CpuBackend backend = new();
+        using Tensor embeds = lm.Embed(backend, [1, 2, 3], [], [], [], []);
+        Assert.Throws<ArgumentException>(() => lm.Forward(backend, embeds, 2));
+    }
+
+    [Fact]
+    public void Logits_OfTheLastRowsOfAPrefill_MatchTheFullProjection()
+    {
+        using SafeTensorsLoader weights = new();
+        weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
+        HaruConfig config = HaruConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        using HaruLm lm = new(config, weights.GetAllTensors(), capacity: 16);
+        using CpuBackend backend = new();
+        int vocab = config.Lm.VocabSize;
+        using Tensor embeds = lm.Embed(backend, [3, 4, 5, 6], [], [], [], []);
+        using Tensor states = lm.Forward(backend, embeds, 4);
+        float[] full = Read(lm.Logits(backend, states, 4));
+        Assert.Equal(full[(3 * vocab)..], Read(lm.Logits(backend, states, 1)));
+        Assert.Equal(full[(2 * vocab)..], Read(lm.Logits(backend, states, 2)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => lm.Logits(backend, states, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => lm.Logits(backend, states, 5));
+        Assert.Throws<ArgumentOutOfRangeException>(() => lm.StreamLogits(states, 4, [config.PadTokenId], new float[1]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => lm.StreamLogits(states, 0, [vocab], new float[1]));
     }
 }

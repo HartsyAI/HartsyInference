@@ -1,3 +1,4 @@
+using System.Globalization;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Haru;
@@ -56,8 +57,11 @@ internal static class HaruCodecWeights
     private static string Leaf(string key, string leaf) =>
         leaf is "weight" or "bias" ? leaf : throw new InvalidDataException($"Unknown Haru codec tensor '{key}'.");
 
+    // Plain digits only: '01', ' 1' and '+1' would name the same layer as '1' under a different key.
     private static int Index(string key, string part) =>
-        int.TryParse(part, out int index) && index >= 0 ? index : throw new InvalidDataException($"Bad layer index in '{key}'.");
+        int.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture, out int index) && part.Length > 0 && (part.Length == 1 || part[0] != '0')
+            ? index
+            : throw new InvalidDataException($"Bad layer index in '{key}'.");
 
     private static string BlockLeaf(string key, string[] rest) => string.Join('.', rest) switch
     {

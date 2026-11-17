@@ -69,6 +69,39 @@ public sealed unsafe class HaruMeanFlowHeadTests(ITestOutputHelper output)
         Assert.True(rel < 2e-5f, $"relative error {rel:E3}");
     }
 
+    [Theory]
+    [InlineData(1, 1.0f)]
+    [InlineData(1, 2.0f)]
+    [InlineData(2, 1.5f)]
+    [InlineData(3, 1.25f)]
+    public void Sample_AtOtherStepCountsAndGuidance_MatchesUpstream(int steps, float guidance)
+    {
+        using Fixture f = new();
+        using SafeTensorsLoader want = new();
+        want.Load(Path.Combine(Dir, "haru_head_steps_expected.safetensors"));
+        using HaruMeanFlowHead head = new(f.Config);
+        head.LoadWeights(f.Tensors);
+        using CpuBackend backend = new();
+        float[] hidden = Read(f.Expected.GetTensor("ref.hidden"));
+        float[] noise = Read(f.Expected.GetTensor("in.noise"));
+        int n = hidden.Length / f.Config.HiddenSize;
+        using Tensor h = Make(hidden, 1, n, f.Config.HiddenSize);
+        using Tensor z = Make(noise, 1, n, f.Config.LatentDim);
+        using Tensor got = head.Sample(backend, h, z, guidance, steps);
+        float rel = RelativeError(Read(got), Read(want.GetTensor(FormattableString.Invariant($"ref.steps{steps}.guidance{guidance:0.0#}"))));
+        output.WriteLine($"steps {steps}, guidance {guidance}: rel={rel:E3}");
+        Assert.True(rel < 2e-5f, $"relative error {rel:E3}");
+    }
+
+    [Fact]
+    public void LoadWeights_RefusesASecondLoad()
+    {
+        using Fixture f = new();
+        using HaruMeanFlowHead head = new(f.Config);
+        head.LoadWeights(f.Tensors);
+        Assert.Throws<InvalidOperationException>(() => head.LoadWeights(f.Tensors));
+    }
+
     [Fact]
     public void Sample_WithBf16Weights_StaysCloseToTheF32Head()
     {
@@ -107,6 +140,8 @@ public sealed unsafe class HaruMeanFlowHeadTests(ITestOutputHelper output)
         Assert.Throws<ArgumentException>(() => head.Sample(backend, hidden, wrongNoise));
         using Tensor noise = Make(new float[2 * f.Config.LatentDim], 1, 2, f.Config.LatentDim);
         Assert.Throws<ArgumentOutOfRangeException>(() => head.Sample(backend, hidden, noise, guidance: 0f));
+        using Tensor flat = Make(new float[f.Config.HiddenSize], f.Config.HiddenSize);
+        Assert.Throws<ArgumentException>(() => head.Sample(backend, flat, noise));
     }
 
     [Fact]
