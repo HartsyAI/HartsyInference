@@ -11,7 +11,7 @@ public sealed class HaruCodecWeightsTests
     private static readonly string Dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Haru");
 
     // The codec block of higurashi-ai/Haru-4B config.json @ 8d6e83bc.
-    private const string ReleasedCodec = """
+    internal const string ReleasedCodec = """
         {"latent_dim":64,"base_channels":32,"ratios":[8,5,5,4,2,2],"encoder_depths":[3,3,3,3,3,3,8],
          "decoder_depths":[8,3,3,3,3,3,3],"norm_eps":1e-05,"latent_std":0.5}
         """;
