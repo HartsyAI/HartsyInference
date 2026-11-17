@@ -160,6 +160,9 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Control) => request.Control is not null,
         nameof(MeshRequest.Quality) => request.Quality != MeshQuality.Default,
         nameof(MeshRequest.Remesh) => request.Remesh is not null,
+        nameof(MeshRequest.Guidance) => request.Guidance is not null,
+        nameof(MeshRequest.SplatCount) => request.SplatCount != 0,
+        nameof(MeshRequest.Framing) => request.Framing != MeshFraming.Object,
         _ => false,
     };
 
@@ -201,6 +204,9 @@ public sealed class MeshPlanningService : IMeshPlanningService
         nameof(MeshRequest.Control) => request.Control?.Kind.ToString(),
         nameof(MeshRequest.Quality) => request.Quality.ToString(),
         nameof(MeshRequest.Remesh) => request.Remesh?.ToString().ToLowerInvariant(),
+        nameof(MeshRequest.Guidance) => request.Guidance?.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        nameof(MeshRequest.SplatCount) => request.SplatCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        nameof(MeshRequest.Framing) => request.Framing.ToString(),
         _ => null,
     };
 }

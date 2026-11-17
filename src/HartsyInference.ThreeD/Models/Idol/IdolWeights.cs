@@ -12,7 +12,8 @@ namespace HartsyInference.ThreeD.Models.Idol;
 public sealed class IdolWeights : IDisposable
 {
     /// <summary>The file name of the 98,304-byte raw F32 <c>[1, 8192, 3]</c> token positions, a slice of <c>speridlabs/idol</c>'s
-    /// <c>denoiser.safetensors</c>; it equals <c>SobolEngine(3, scramble=True, seed=123).draw(8192)</c>.</summary>
+    /// <c>denoiser.safetensors</c>; it equals <c>SobolEngine(3, scramble=True, seed=123).draw(8192)</c>. The engine carries it as an
+    /// embedded resource, so a model folder needs no copy.</summary>
     public const string PosPeFileName = "pos_pe_f32_1x8192x3.bin";
 
     /// <summary>SHA-256 of <see cref="PosPeFileName"/>.</summary>
@@ -38,17 +39,16 @@ public sealed class IdolWeights : IDisposable
     public Tensor this[string key]
         => Tensors.TryGetValue(key, out Tensor? t) ? t : throw new HartsyInferenceException($"The Idol checkpoint has no tensor '{key}'.");
 
-    /// <summary>Opens <paramref name="checkpointPath"/> and the pinned token positions in <paramref name="posPePath"/>, and checks every
-    /// tensor the architecture reads.</summary>
+    /// <summary>Opens <paramref name="checkpointPath"/> and the pinned token positions (the engine's embedded copy, or the file at
+    /// <paramref name="posPePath"/>), and checks every tensor the architecture reads.</summary>
     /// <exception cref="FileNotFoundException">A file is missing.</exception>
     /// <exception cref="HartsyInferenceException">A tensor is missing or mis-shaped, or the token positions do not match their pin.</exception>
-    public static IdolWeights Load(string checkpointPath, string posPePath, IdolConfig? config = null)
+    public static IdolWeights Load(string checkpointPath, string? posPePath = null, IdolConfig? config = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(posPePath);
         if (!File.Exists(checkpointPath))
             throw new FileNotFoundException($"Idol checkpoint not found: '{checkpointPath}'.", checkpointPath);
-        if (!File.Exists(posPePath))
+        if (posPePath is not null && !File.Exists(posPePath))
             throw new FileNotFoundException($"Idol token positions not found: '{posPePath}'.", posPePath);
         config ??= new IdolConfig();
 
@@ -106,19 +106,28 @@ public sealed class IdolWeights : IDisposable
         }
     }
 
-    private static unsafe Tensor ReadPosPe(string path, IdolConfig config)
+    private static unsafe Tensor ReadPosPe(string? path, IdolConfig config)
     {
-        byte[] raw = File.ReadAllBytes(path);
+        byte[] raw = path is not null ? File.ReadAllBytes(path) : EmbeddedPosPe();
         string hash = Convert.ToHexString(SHA256.HashData(raw)).ToLowerInvariant();
         if (config.Tokens == 8192 && hash != PosPeSha256)
-            throw new HartsyInferenceException($"'{path}' is not Idol's token positions: sha256 {hash}, expected {PosPeSha256}.");
+            throw new HartsyInferenceException($"'{path ?? "the embedded copy"}' is not Idol's token positions: sha256 {hash}, expected {PosPeSha256}.");
         long expected = (long)config.Tokens * 3 * sizeof(float);
         if (raw.Length != expected)
-            throw new HartsyInferenceException($"Idol token positions must be {expected} bytes; '{path}' has {raw.Length}.");
+            throw new HartsyInferenceException($"Idol token positions must be {expected} bytes; '{path ?? "the embedded copy"}' has {raw.Length}.");
         Tensor t = new(new TensorShape(1, config.Tokens, 3), DType.F32);
         fixed (byte* src = raw)
             Buffer.MemoryCopy(src, (void*)t.DataPointer, expected, expected);
         return t;
+    }
+
+    private static byte[] EmbeddedPosPe()
+    {
+        using Stream stream = typeof(IdolWeights).Assembly.GetManifestResourceStream($"idol/{PosPeFileName}")
+            ?? throw new HartsyInferenceException("The engine's embedded copy of Idol's token positions is missing.");
+        using MemoryStream copy = new();
+        stream.CopyTo(copy);
+        return copy.ToArray();
     }
 
     /// <summary>Every tensor the denoiser reads and its shape (<c>pos_pe</c> excluded: it comes from its own file).</summary>

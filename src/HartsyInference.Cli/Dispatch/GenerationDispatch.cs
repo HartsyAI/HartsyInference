@@ -860,6 +860,9 @@ public static class GenerationDispatch
             GridResolution = grid,
             Seed = parameters.GetInt("seed", -1),
             FieldOfViewRadians = parameters.GetDoubleOrNull("fov"),
+            Guidance = parameters.GetDoubleOrNull("guidance"),
+            SplatCount = parameters.GetInt("splats", 0),
+            Framing = ParseMeshFraming(parameters.GetStringOrNull("framing")),
             Samples = parameters.GetInt("samples", 1),
             Rigged = parameters.GetBool("rigged", false),
             Colors = parameters.GetBool("no-colors", false) ? false : null,
@@ -1715,6 +1718,15 @@ public static class GenerationDispatch
         : throw new ArgumentException($"--quality must be default, high or max; got '{text}'.");
 
     /// <summary>The <c>--preprocess</c> value: none (the default) or auto.</summary>
+    /// <summary>The Idol framing named on the command line: <c>object</c> (the default) or <c>photo</c>.</summary>
+    internal static MeshFraming ParseMeshFraming(string? text) => string.IsNullOrWhiteSpace(text) ? MeshFraming.Object
+        : text.Trim().ToLowerInvariant() switch
+        {
+            "object" => MeshFraming.Object,
+            "photo" => MeshFraming.Photo,
+            _ => throw new ArgumentException($"--framing is object or photo; got '{text}'."),
+        };
+
     internal static MeshPreprocess ParseMeshPreprocess(string? text) => string.IsNullOrWhiteSpace(text) ? MeshPreprocess.None
         : !int.TryParse(text, out _) && Enum.TryParse(text, ignoreCase: true, out MeshPreprocess preprocess) && Enum.IsDefined(preprocess) ? preprocess
         : throw new ArgumentException($"--preprocess must be none or auto; got '{text}'.");

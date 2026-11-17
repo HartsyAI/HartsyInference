@@ -15,6 +15,9 @@ public static class MeshModelIds
     /// <summary>SAM 3D Objects: image plus object mask to Gaussian splats (PLY); the mask is the request image's alpha plane and MoGe estimates the pointmap.</summary>
     public const string Sam3dObjects = "sam3d-objects";
 
+    /// <summary>Idol (Sperid Labs): image to Gaussian splats (PLY) with a 50-step guided rectified-flow denoiser; the engine mattes, frames and encodes the image itself.</summary>
+    public const string Idol = "idol";
+
     /// <summary>Hunyuan3D-2mv: the shape build conditioned on up to four views (<see cref="Requests.MeshRequest.Image"/> as the front and
     /// <see cref="Requests.MeshRequest.Views"/>).</summary>
     public const string Hunyuan3DMultiView = "hunyuan3d-mv";
@@ -23,7 +26,7 @@ public static class MeshModelIds
     public static readonly IReadOnlyList<string> Hunyuan3D = ["hunyuan3d", "hunyuan3d-fast", "hunyuan3d-turbo", "hunyuan3d-mini", Hunyuan3DMultiView];
 
     /// <summary>Image-to-3D models: their request carries <see cref="Requests.MeshRequest.Image"/>.</summary>
-    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D, Sam3dObjects];
+    public static readonly IReadOnlyList<string> ImageToMesh = ["triposr", .. Hunyuan3D, "trellis", "trellis2", Pixal3D, Sam3dObjects, Idol];
 
     /// <summary>Scene-decomposition models: their request carries <see cref="Requests.MeshRequest.SceneMesh"/>.</summary>
     public static readonly IReadOnlyList<string> SceneMesh = ["cola3d"];

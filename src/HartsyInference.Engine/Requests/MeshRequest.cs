@@ -64,6 +64,15 @@ public sealed record MeshRequest
     /// <summary>SAM 3D Objects: return a triangle mesh (a geometry-only GLB, from the mesh decoder and FlexiCubes at the 256 grid; the decoder's vertex colours are noisy, so they are not written) instead of Gaussian splats (a PLY). It needs <c>slat_decoder_mesh.safetensors</c> beside the other checkpoints. Other models reject it.</summary>
     public bool Mesh { get; init; }
 
+    /// <summary>Idol: classifier-free guidance strength <c>w</c> of the sampler (<c>(1 + w)·v(cond) − w·v(zeros)</c>); null takes the model's 3, 0 runs the conditional pass alone. Other models reject a value.</summary>
+    public double? Guidance { get; init; }
+
+    /// <summary>Idol: Gaussians to write, 32,768 to 1,048,576 in multiples of 32; 0 takes 262,144. Other models reject a value.</summary>
+    public int SplatCount { get; init; }
+
+    /// <summary>Idol: how tightly the picture is cropped around the object, <see cref="MeshFraming.Object"/> (default) for renders and generated pictures, <see cref="MeshFraming.Photo"/> for photographs. Other models reject <see cref="MeshFraming.Photo"/>.</summary>
+    public MeshFraming Framing { get; init; }
+
     /// <summary>Input image preparation: <see cref="MeshPreprocess.None"/> (default) uses the image as given, <see cref="MeshPreprocess.Auto"/> mattes and frames it for the model. Models that prepare their own input ignore it.</summary>
     public MeshPreprocess Preprocess { get; init; }
 

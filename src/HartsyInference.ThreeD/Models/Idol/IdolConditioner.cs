@@ -42,7 +42,11 @@ public sealed class IdolConditioner
     }
 
     /// <summary>The VAE stream <c>[1, 4101, 128]</c> of the prepared picture; the caller owns it.</summary>
-    public unsafe Tensor VaeTokens(IBackend backend, ReadOnlySpan<byte> rgb)
+    public Tensor VaeTokens(IBackend backend, ReadOnlySpan<byte> rgb) => VaeTokens(backend, _vae, _bnMean, _bnVar, rgb);
+
+    /// <summary>The VAE stream of the prepared <c>1024 × 1024</c> RGB24 picture from an encoder and the VAE's BatchNorm statistics; the
+    /// caller owns the result.</summary>
+    public static unsafe Tensor VaeTokens(IBackend backend, VaeEncoder vae, Tensor bnMean, Tensor bnVar, ReadOnlySpan<byte> rgb)
     {
         Require(rgb);
         int side = IdolImageProcessor.Size, plane = side * side;
@@ -54,8 +58,8 @@ public sealed class IdolConditioner
                 p[c * plane + i] = rgb[i * 3 + c] / 255f * 2f - 1f;
         }
 
-        using Tensor latent = _vae.Encode(backend, pixels);
-        using Tensor tokens = Flux2LatentOps.ToPackedTokens(latent, _bnMean, _bnVar, BatchNormEps, PatchSize);
+        using Tensor latent = vae.Encode(backend, pixels);
+        using Tensor tokens = Flux2LatentOps.ToPackedTokens(latent, bnMean, bnVar, BatchNormEps, PatchSize);
         using Tensor zeros = new(new TensorShape(1, ZeroTokens, tokens.Shape[2]), DType.F32);
         Tensor result = new(new TensorShape(1, ZeroTokens + tokens.Shape[1], tokens.Shape[2]), DType.F32);
         backend.Concat(result, [zeros, tokens], 1);

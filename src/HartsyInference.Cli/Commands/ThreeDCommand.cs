@@ -145,6 +145,21 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         [Description("pixal3d: the photo's horizontal field of view in radians, in (0, pi/2); default 0.8576. Upstream estimates it with MoGe, which is not ported, so set it for a photo with strong perspective (upstream suggests 0.2 for a distorted result).")]
         public double? Fov { get; init; }
 
+        /// <summary>idol: classifier-free guidance strength.</summary>
+        [CommandOption("--guidance")]
+        [Description("idol: classifier-free guidance strength w, (1 + w)*v(image) - w*v(blank); default 3, 0 runs one pass per step instead of two.")]
+        public double? Guidance { get; init; }
+
+        /// <summary>idol: Gaussians to write.</summary>
+        [CommandOption("--splats")]
+        [Description("idol: Gaussians to write, 32768 to 1048576 in multiples of 32; 0 or unset takes 262144.")]
+        public int Splats { get; init; }
+
+        /// <summary>idol: how tightly the picture is cropped around the object.</summary>
+        [CommandOption("--framing")]
+        [Description("idol: object (default; renders and generated pictures, the object fills 1/1.2 of the frame) or photo (photographs, 1/1.7).")]
+        public string? Framing { get; init; }
+
         /// <summary>RNG seed; &lt; 0 randomizes.</summary>
         [CommandOption("--seed")]
         [Description("RNG seed; negative randomizes.")]
@@ -212,6 +227,12 @@ public sealed class ThreeDCommand : Command<ThreeDCommand.Settings>
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
         if (settings.Fov is { } fov)
             parameters.Put("fov", fov.ToString("R", CultureInfo.InvariantCulture));
+        if (settings.Guidance is { } guidance)
+            parameters.Put("guidance", guidance.ToString("R", CultureInfo.InvariantCulture));
+        if (settings.Splats != 0)
+            parameters.Put("splats", settings.Splats.ToString(CultureInfo.InvariantCulture));
+        if (settings.Framing is not null)
+            parameters.Put("framing", settings.Framing);
         parameters.Put("samples", settings.Samples.ToString(CultureInfo.InvariantCulture));
         parameters.Put("rigged", settings.Rigged ? "true" : "false");
         parameters.Put("no-colors", settings.NoColors ? "true" : "false");
