@@ -22,6 +22,8 @@ internal static class HaruAudio
         return trimmed.ToArray();
     }
 
+    /// <summary>The span between the first and last 20 ms window louder than -45 dBFS, with a 0.2 s margin each side; empty when the whole
+    /// clip is quieter, the clip itself when it is shorter than one window.</summary>
     internal static ReadOnlySpan<float> TrimSilence(ReadOnlySpan<float> audio, int sampleRate)
     {
         int window = sampleRate / 50;

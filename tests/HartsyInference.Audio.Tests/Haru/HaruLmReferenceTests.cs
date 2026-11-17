@@ -81,9 +81,9 @@ public sealed unsafe class HaruLmReferenceTests(ITestOutputHelper output)
         int vocab = config.Lm.VocabSize;
         using Tensor embeds = lm.Embed(backend, [3, 4, 5, 6], [], [], [], []);
         using Tensor states = lm.Forward(backend, embeds, 4);
-        float[] full = Read(lm.Logits(backend, states, 4));
-        Assert.Equal(full[(3 * vocab)..], Read(lm.Logits(backend, states, 1)));
-        Assert.Equal(full[(2 * vocab)..], Read(lm.Logits(backend, states, 2)));
+        float[] full = HaruReferenceModel.Read(lm.Logits(backend, states, 4));
+        Assert.Equal(full[(3 * vocab)..], HaruReferenceModel.Read(lm.Logits(backend, states, 1)));
+        Assert.Equal(full[(2 * vocab)..], HaruReferenceModel.Read(lm.Logits(backend, states, 2)));
         Assert.Throws<ArgumentOutOfRangeException>(() => lm.Logits(backend, states, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => lm.Logits(backend, states, 5));
         Assert.Throws<ArgumentOutOfRangeException>(() => lm.StreamLogits(states, 4, [config.PadTokenId], new float[1]));

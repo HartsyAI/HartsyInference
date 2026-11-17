@@ -24,6 +24,29 @@ public sealed class HaruStreamDetokenizerTests
     }
 
     [Fact]
+    public void AGapGivesUpACharacterThatNeverCompleted()
+    {
+        HaruStreamDetokenizer d = new(Decode, Pad, Eop);
+        byte[] bytes = Encoding.UTF8.GetBytes("元");
+        Assert.Equal(string.Empty, d.Push(bytes[0]));
+        Assert.Equal("\uFFFD ", d.Push(Pad));
+        Assert.Equal("b", d.Push('b'));
+    }
+
+    [Fact]
+    public void HeldBytesAreGivenUpAfterTheLongestCharacter()
+    {
+        HaruStreamDetokenizer d = new(Decode, Pad, Eop);
+        for (int i = 1; i < HaruStreamDetokenizer.MaxHeldTokens; i++)
+        {
+            Assert.Equal(string.Empty, d.Push(0xE5));
+        }
+        string text = d.Push(0xE5);
+        Assert.StartsWith("\uFFFD", text);
+        Assert.Equal("a", d.Push('a'));
+    }
+
+    [Fact]
     public void ACharacterSplitOverTokensIsHeldBackUntilItIsWhole()
     {
         HaruStreamDetokenizer d = new(Decode, Pad, Eop);

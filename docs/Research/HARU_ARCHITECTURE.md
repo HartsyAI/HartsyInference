@@ -163,6 +163,10 @@ tests/HartsyInference.Audio.Tests -m:1 --filter FullyQualifiedName~HaruCodecReal
   pass channels-first. Not fixed here: the class is shared by every VibeVoice model.
 - `HaruLm` clamps its capacity to the model's `max_position_embeddings` and exposes the result as `Capacity`; the session reports
   a conversation that reaches it as done rather than failing inside the trunk cache.
+- Where the session follows upstream on purpose: the DRY penalty is applied to the raw logits before the temperature divides them
+  (`_emit` before `sample_token`), with PAD, EOP and EOS exempt; an EOS the model samples after the first frame is ordinary text, as
+  upstream does not end the session on it. Where it differs: bytes of a half-finished character are given up when a gap starts or
+  after four tokens, instead of being carried across the gap (`HaruStreamDetokenizer`); `Step` refuses to run after the last frame.
 
 ## Doc debt found
 
