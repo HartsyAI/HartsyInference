@@ -4,13 +4,15 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Vision.Dinov3;
 
-/// <summary>One DINOv3 transformer block: pre-norm RoPE self-attention and a GELU MLP, each scaled by a learned
-/// per-channel LayerScale before its residual add. The key projection has no bias (the reference masks the k-bias).</summary>
+/// <summary>One DINOv3 transformer block: pre-norm RoPE self-attention and an MLP (plain GELU, or SwiGLU when the checkpoint
+/// carries <c>mlp.gate_proj</c>, as the ViT-H+ does), each scaled by a learned per-channel LayerScale before its residual add.
+/// The key projection has no bias (the reference masks the k-bias).</summary>
 internal sealed unsafe class Dinov3Layer
 {
     private readonly int _hidden, _numHeads, _headDim, _inter;
     private readonly float _eps;
     private Tensor? _n1W, _n1B, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2;
+    private Tensor? _gateW, _gateB;   // SwiGLU only: silu(gate_proj(x)) * up_proj(x)
     private AttentionLayer? _attn;
     private Tensor? _qW, _qB, _kW, _vW, _vB, _oW, _oB;
 
@@ -42,6 +44,11 @@ internal sealed unsafe class Dinov3Layer
         _fc2W = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.weight", h, i));
         _fc2B = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.down_proj.bias", h));
         _ls2 = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.layer_scale2.lambda1", h));
+        if (w.ContainsKey($"{prefix}.mlp.gate_proj.weight"))
+        {
+            _gateW = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.gate_proj.weight", i, h));
+            _gateB = Dinov3VisionEncoder.F32(Dinov3VisionEncoder.Require(w, $"{prefix}.mlp.gate_proj.bias", i));
+        }
         _attn = new AttentionLayer(
             new AttentionLayerConfig { Heads = _numHeads, KvHeads = _numHeads, HeadDim = _headDim, ComputeDType = DType.F32 },
             new AttentionLayerWeights
@@ -52,7 +59,7 @@ internal sealed unsafe class Dinov3Layer
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_n1W, _n1B, _qW, _kW, _vW, _vB, _qB, _oW, _oB, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2];
+        Tensor?[] all = [_n1W, _n1B, _qW, _kW, _vW, _vB, _qB, _oW, _oB, _ls1, _n2W, _n2B, _fc1W, _fc1B, _fc2W, _fc2B, _ls2, _gateW, _gateB];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
@@ -92,11 +99,23 @@ internal sealed unsafe class Dinov3Layer
         return t;
     }
 
-    // Plain MLP with the exact-erf GELU that nn.GELU() uses in the reference.
+    // Plain MLP with the exact-erf GELU that nn.GELU() uses in the reference, or SwiGLU (silu(gate) * up) for a gated checkpoint.
     private Tensor Mlp(IBackend backend, Tensor input, int batch, int seq)
     {
         Tensor f1 = new(new TensorShape(batch, seq, _inter), DType.F32); backend.Linear(f1, input, _fc1W!, _fc1B!);
-        Tensor act = new(f1.Shape, DType.F32); backend.GeluErf(act, f1); f1.Dispose();
+        Tensor act = new(f1.Shape, DType.F32);
+        if (_gateW is null)
+        {
+            backend.GeluErf(act, f1);
+        }
+        else
+        {
+            Tensor gate = new(f1.Shape, DType.F32); backend.Linear(gate, input, _gateW, _gateB!);
+            Tensor gateAct = new(f1.Shape, DType.F32); backend.Silu(gateAct, gate); gate.Dispose();
+            backend.Mul(act, gateAct, f1); gateAct.Dispose();
+        }
+
+        f1.Dispose();
         Tensor f2 = new(new TensorShape(batch, seq, _hidden), DType.F32); backend.Linear(f2, act, _fc2W!, _fc2B!); act.Dispose();
         return f2;
     }
