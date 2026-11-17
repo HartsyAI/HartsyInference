@@ -29,8 +29,8 @@ namespace HartsyInference.LLM.Ernie5;
 /// stays on the device.</para>
 /// <para>With <see cref="Ernie5LoadOptions.Placement"/> the layers are split into ranges, one backend per range (a pipeline over several
 /// devices), and each range preloads onto its own device; the head read-out, LM head and MTP layer run on the last stage. With
-/// <see cref="Ernie5LoadOptions.PreloadExperts"/> the routed experts and every block-scale grid are preloaded too, and a stage whose weights do
-/// not fit its device refuses the load.</para>
+/// <see cref="Ernie5LoadOptions.PreloadExperts"/> the decoder layers' routed experts and every block-scale grid are preloaded too, and a stage
+/// whose weights do not fit its device refuses the load. The MTP layer is not preloaded in either case.</para>
 /// </remarks>
 public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
 {
@@ -291,63 +291,49 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
         List<Tensor> placed = [];
         _preloaded.Add((backend, placed));
         int count = stage.EndLayer - stage.StartLayer, layers = 0;
+        // Each layer's lists once, for both the budget and the upload.
+        List<Tensor>[] dense = [.. Enumerable.Range(stage.StartLayer, count).Select(i => _layers[i]!.EnumerateDenseWeights().ToList())];
+        List<IReadOnlyList<Tensor>>[] expertGroups = _options.PreloadExperts
+            ? [.. Enumerable.Range(stage.StartLayer, count).Select(i => _layers[i]!.EnumerateExpertPreloadGroups().ToList())]
+            : [];
         if (_options.PreloadExperts)
         {
-            long need = StageBytes(stage, last);
+            long need = (last ? Bytes([_lmHead!]) : 0) + dense.Sum(Bytes) + expertGroups.SelectMany(g => g).Sum(Bytes);
             if (need > budget)
                 throw new NotSupportedException($"ERNIE-5.5 layers [{stage.StartLayer}, {stage.EndLayer}){(last ? " and the LM head" : "")} need "
                     + $"{need / (1 << 20)} MB on {backend.Device}, but its preload budget is {Math.Max(budget, 0) / (1 << 20)} MB "
                     + $"({usage.FreeBytes / (1 << 20)} MB free less headroom). Spread the layers over more devices, or load without PreloadExperts.");
         }
-        for (int i = stage.StartLayer; i < stage.EndLayer; i++)
+        // Each set joins `placed` before its upload, so a failure partway through still frees what reached the device (freeing a weight that
+        // never arrived is a no-op).
+        foreach (List<Tensor> weights in dense)
         {
-            List<Tensor> weights = [.. _layers[i]!.EnumerateDenseWeights()];
             long bytes = Bytes(weights);
             if (used + bytes > budget) break;
-            backend.PreloadWeights(weights);
             placed.AddRange(weights);
+            backend.PreloadWeights(weights);
             used += bytes;
             layers++;
         }
         bool head = last && layers == count && used + Bytes([_lmHead!]) <= budget;
         if (head)
         {
-            backend.PreloadWeights([_lmHead!]);
             placed.Add(_lmHead!);
+            backend.PreloadWeights([_lmHead!]);
             used += Bytes([_lmHead!]);
         }
         long experts = 0;
-        if (_options.PreloadExperts)
+        foreach (List<IReadOnlyList<Tensor>> groups in expertGroups)
         {
-            for (int i = stage.StartLayer; i < stage.EndLayer; i++)
-            {
-                List<IReadOnlyList<Tensor>> groups = [.. _layers[i]!.EnumerateExpertPreloadGroups()];
-                backend.PreloadWeightGroups(groups);
-                foreach (IReadOnlyList<Tensor> group in groups)
-                {
-                    placed.AddRange(group);
-                    experts += Bytes(group);
-                }
-            }
-            used += experts;
+            foreach (IReadOnlyList<Tensor> group in groups) placed.AddRange(group);
+            backend.PreloadWeightGroups(groups);
+            experts += groups.Sum(Bytes);
         }
+        used += experts;
         Logs.Info($"[ernie5] stage layers [{stage.StartLayer}, {stage.EndLayer}) on {backend.Device}: preloaded {layers}/{count} layers' per-token "
             + $"weights{(head ? ", the LM head" : "")}{(_options.PreloadExperts ? $" and {experts / (1 << 20)} MB of routed experts" : "")}, "
             + $"{used / (1 << 20)} MB of a {Math.Max(budget, 0) / (1 << 20)} MB budget, in {Stopwatch.GetElapsedTime(start).TotalSeconds:F1} s"
             + DeviceSummary(backend));
-    }
-
-    // Every weight a stage holds with PreloadExperts: its layers' per-token weights and routed experts with their block-scale grids, and the LM
-    // head on the last stage.
-    private long StageBytes(LlmStage stage, bool last)
-    {
-        long bytes = last ? Bytes([_lmHead!]) : 0;
-        for (int i = stage.StartLayer; i < stage.EndLayer; i++)
-        {
-            bytes += Bytes(_layers[i]!.EnumerateDenseWeights());
-            foreach (IReadOnlyList<Tensor> group in _layers[i]!.EnumerateExpertPreloadGroups()) bytes += Bytes(group);
-        }
-        return bytes;
     }
 
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB, kept

@@ -118,6 +118,8 @@ public sealed class Ernie5TextPathTests : IDisposable
 
         NotSupportedException cpu = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "cpu"], 1));
         Assert.Contains("'cpu' is not (cuda:0 + cpu)", cpu.Message);
+        NotSupportedException mixed = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement(["cuda:0", "vulkan:0"], 1));
+        Assert.Contains("mixed GPU kinds", mixed.Message);
         NotSupportedException tp = Assert.Throws<NotSupportedException>(() => TextService.RequireRunnableErnie5Placement([], tensorParallelDegree: 2));
         Assert.Contains("tensor-parallel degree is 2", tp.Message);
     }

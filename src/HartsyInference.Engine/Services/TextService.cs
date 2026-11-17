@@ -1017,10 +1017,11 @@ public sealed partial class TextService : ITextService, IDisposable
     }
 
     /// <summary>Refuses an ERNIE-5.5 placement the model cannot run: tensor parallelism (it has none; several devices split its layers instead),
-    /// or a layer split that names a device that is not a GPU (the split exists to hold every weight in device memory).</summary>
+    /// a layer split that names a device that is not a GPU (the split exists to hold every weight in device memory), or one that mixes GPU kinds
+    /// (the stages hand off through host memory, which should work, but no mixed split has been run).</summary>
     /// <param name="shardDevices">The devices the request splits the layers over; empty when it names one device.</param>
     /// <param name="tensorParallelDegree">The engine's tensor-parallel degree.</param>
-    /// <exception cref="NotSupportedException">The engine's tensor-parallel degree is above 1, or a split names a non-GPU device.</exception>
+    /// <exception cref="NotSupportedException">The engine's tensor-parallel degree is above 1, or a split names a non-GPU device or mixes GPU kinds.</exception>
     internal static void RequireRunnableErnie5Placement(IReadOnlyList<string> shardDevices, int tensorParallelDegree)
     {
         if (tensorParallelDegree > 1)
@@ -1031,6 +1032,8 @@ public sealed partial class TextService : ITextService, IDisposable
                 if (!BackendFactory.IsDeviceKind(BackendFactory.Kind(device)))
                     throw new NotSupportedException($"An ERNIE-5.5 layer split holds every weight in device memory, so each stage must be a GPU; "
                         + $"'{device}' is not ({string.Join(" + ", shardDevices)}).");
+        if (shardDevices.Count >= 2 && shardDevices.Select(BackendFactory.Kind).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1)
+            throw new NotSupportedException($"An ERNIE-5.5 layer split over mixed GPU kinds has not been run; name devices of one kind ({string.Join(" + ", shardDevices)}).");
     }
 
     /// <summary>Plans an ERNIE-5.5 layer split over <paramref name="shardDevices"/> by the checkpoint's bytes per layer (explicit engine ratios win,

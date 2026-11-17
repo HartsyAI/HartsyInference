@@ -95,6 +95,9 @@ internal sealed class Ernie5Layer : IDisposable
         foreach (IReadOnlyList<Tensor> group in groups)
         {
             List<Tensor> scales = [.. group.Select(t => t.QuantInfo?.Fp8BlockScaleInv).OfType<Tensor>()];
+            // A projection's experts are all block-FP8 or none is; a mix would leave some grids out of the preload unnoticed.
+            if (scales.Count != 0 && scales.Count != group.Count)
+                throw new InvalidDataException($"Layer {Index}: {scales.Count} of {group.Count} experts of one projection carry a block-scale grid.");
             if (scales.Count > 0) yield return scales;
         }
     }

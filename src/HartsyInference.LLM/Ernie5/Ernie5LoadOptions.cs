@@ -24,8 +24,9 @@ public sealed record Ernie5LoadOptions
     /// Null runs every layer on the backend the model is built with. Needs <see cref="ResidentWeights"/> when it has more than one stage.</summary>
     public LlmPlacement? Placement { get; init; }
 
-    /// <summary>With <see cref="ResidentWeights"/> on GPU stages, also preloads every routed expert and every block-scale grid, so no weight is read
-    /// from the checkpoint during a forward. The load is refused, naming the stage, when a stage's weights do not fit its device's budget
+    /// <summary>With <see cref="ResidentWeights"/> on GPU stages, also preloads every decoder layer's routed experts and block-scale grids, so no
+    /// decoder-layer weight is read from the checkpoint during a forward. The MTP layer is not preloaded: with <see cref="Mtp"/> its weights still
+    /// upload per call. The load is refused, naming the stage, when a stage's weights do not fit its device's budget
     /// (<see cref="Ernie5Model.PreloadBudget"/>).</summary>
     public bool PreloadExperts { get; init; }
 }
