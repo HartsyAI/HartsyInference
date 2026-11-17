@@ -73,31 +73,7 @@ public static class Hardware
     }
 
     public static KnobProfile Defaults(out SortedDictionary<string, string> settings)
-    {
-        settings = new(StringComparer.Ordinal);
-        KnobProfile profile = KnobProfile.Create("benchmark-defaults");
-        foreach (object knob in KnobRegistry.All)
-        {
-            (string id, string type, object? value, KnobScope scope, KnobDomain domain, string summary) = KnobRegistry
-                .Describe(knob);
-            settings[id] = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "<null>";
-            profile = knob switch
-            {
-                Knob<bool> k => profile.With(k, k.Default),
-                Knob<int> k => profile.With(k, k.Default),
-                Knob<long> k => profile.With(k, k.Default),
-                Knob<float> k => profile.With(k, k.Default),
-                Knob<bool?> k => profile.With(k, k.Default),
-                Knob<int?> k => profile.With(k, k.Default),
-                Knob<long?> k => profile.With(k, k.Default),
-                Knob<float?> k => profile.With(k, k.Default),
-                Knob<string> k => profile.With(k, k.Default),
-                _ => throw new InvalidDataException("Unsupported knob type: " + type),
-            };
-        }
-
-        return profile;
-    }
+        => HartsyInference.Benchmarks.Shared.BenchmarkKnobProfiles.Capture(false, out settings);
 
     public static SortedDictionary<string, string> NativeLibraries()
     {

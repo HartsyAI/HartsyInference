@@ -155,6 +155,10 @@ public sealed class PagedKvCache : IKvCache
                 sliced.Dispose();
             }
         }
+        if (HartsyInference.Core.Backends.Attention.AttentionEvidence.Enabled)
+            HartsyInference.Core.Backends.Attention.AttentionEvidence.Observed(
+                HartsyInference.Core.Backends.Attention.AttentionEvidenceKind.PrefixGather,
+                isKey ? "paged.keys" : "paged.values", (long)_pool.NumKvHeads * len * headDim * sizeof(float), layer: layer);
         return scratch;
     }
 

@@ -31,11 +31,14 @@ public sealed class IdolWeights : IDisposable
         _owned = owned;
     }
 
+    /// <summary>The architecture these weights were checked against.</summary>
     public IdolConfig Config { get; }
 
     /// <summary>The tensors by idol-sdk key, all F32, plus <c>pos_pe</c>.</summary>
     public IReadOnlyDictionary<string, Tensor> Tensors { get; }
 
+    /// <summary>The tensor under idol-sdk key <paramref name="key"/>.</summary>
+    /// <exception cref="HartsyInferenceException">There is none.</exception>
     public Tensor this[string key]
         => Tensors.TryGetValue(key, out Tensor? t) ? t : throw new HartsyInferenceException($"The Idol checkpoint has no tensor '{key}'.");
 

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Backends.Attention;
 
 namespace HartsyInference.Core.Backends.Layout;
 
@@ -35,5 +36,8 @@ public static class StridedCopies
         if (output.ElementCount != source.ElementCount)
             throw new ArgumentException($"RepeatInterleave of {input.Shape} by {repeats} on axis {axis} needs {source.ElementCount} output elements; got {output.Shape}.", nameof(output));
         backend.CopyStrided(output, input, StridedCopySpec.Gather(source));
+        if (AttentionEvidence.Enabled)
+            AttentionEvidence.Observed(AttentionEvidenceKind.Repeat, "StridedCopies.RepeatInterleave",
+                output.DType.ComputeByteCount(output.ElementCount));
     }
 }

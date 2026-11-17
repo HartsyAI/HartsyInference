@@ -9,10 +9,19 @@ internal static class IdolAnchorEmbedding
 {
     private const float MaxResolutionExponent = 10f;
 
+    /// <summary>The number of points in <paramref name="points"/> (<c>N × 3</c> floats); a length that is not a multiple of 3, or no points, is a caller mistake and is refused here rather than truncated.</summary>
+    /// <exception cref="ArgumentException">The span is empty or its length is not a multiple of 3.</exception>
+    internal static int CheckedCount(ReadOnlySpan<float> points)
+    {
+        if (points.Length == 0 || points.Length % 3 != 0)
+            throw new ArgumentException($"Points are N × 3 floats with N at least 1; got {points.Length} values.", nameof(points));
+        return points.Length / 3;
+    }
+
     /// <summary>The embedding <c>[1, N, channels]</c> of points <paramref name="points"/> (<c>N × 3</c> floats in [0, 1]); the caller owns the result.</summary>
     public static unsafe Tensor Build(ReadOnlySpan<float> points, int channels)
     {
-        int count = points.Length / 3;
+        int count = CheckedCount(points);
         int freqDim = channels / 3 / 2;
         float[] freqs = Frequencies(freqDim);
         Tensor result = new(new TensorShape(1, count, channels), DType.F32);

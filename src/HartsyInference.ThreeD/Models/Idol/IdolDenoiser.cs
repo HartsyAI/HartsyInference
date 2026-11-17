@@ -28,25 +28,50 @@ public sealed class IdolDenoiser : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         _weights = weights;
         _config = weights.Config;
-        _noiseRefiner = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => new IdolBlock(weights, $"noise_refiner.{i}", _config, modulated: true))];
-        _contextRefiner = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => new IdolBlock(weights, $"context_refiner.{i}", _config, modulated: false))];
-        _blocks = [.. Enumerable.Range(0, _config.Blocks).Select(i => new IdolBlock(weights, $"blocks.{i}", _config, modulated: true))];
-        _noiseRepo = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => new IdolRePo(weights, $"noise_repo_layers.{i}", _config))];
-        _contextRepo = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => new IdolRePo(weights, $"context_repo_layers.{i}", _config))];
-        _repo = [.. Enumerable.Range(0, _config.Blocks).Select(i => new IdolRePo(weights, $"repo_layers.{i}", _config))];
-        _positionEmbedding = IdolPositionEmbedding.Build(weights["pos_pe"], _config.ModelChannels);
+        List<IDisposable> built = [];
+        T Own<T>(T item) where T : IDisposable
+        {
+            built.Add(item);
+            return item;
+        }
+
+        try
+        {
+            _noiseRefiner = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => Own(new IdolBlock(weights, $"noise_refiner.{i}", _config, modulated: true)))];
+            _contextRefiner = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => Own(new IdolBlock(weights, $"context_refiner.{i}", _config, modulated: false)))];
+            _blocks = [.. Enumerable.Range(0, _config.Blocks).Select(i => Own(new IdolBlock(weights, $"blocks.{i}", _config, modulated: true)))];
+            _noiseRepo = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => Own(new IdolRePo(weights, $"noise_repo_layers.{i}", _config)))];
+            _contextRepo = [.. Enumerable.Range(0, _config.RefinerBlocks).Select(i => Own(new IdolRePo(weights, $"context_repo_layers.{i}", _config)))];
+            _repo = [.. Enumerable.Range(0, _config.Blocks).Select(i => Own(new IdolRePo(weights, $"repo_layers.{i}", _config)))];
+            _positionEmbedding = Own(IdolPositionEmbedding.Build(weights["pos_pe"], _config.ModelChannels));
+        }
+        catch
+        {
+            foreach (IDisposable item in built)
+                item.Dispose();
+            throw;
+        }
     }
 
     public IdolConfig Config => _config;
 
-    /// <summary>The tensors the model reads, for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c>.</summary>
+    // The checkpoint keys the blocks and the rotary layers own; a forward pass reads them through the tensors those classes enumerate.
+    private static readonly string[] BlockPrefixes = ["blocks.", "noise_refiner.", "context_refiner.", "repo_layers.", "noise_repo_layers.", "context_repo_layers."];
+
+    /// <summary>Exactly the tensors a forward pass hands to the backend, for <c>IBackend.PreloadWeights</c> and <c>FreeWeights</c>: the model's own layers, the position embedding, and what each block and rotary layer reads
+    /// (their q and k gains as the reshaped views the kernels get, the head norm's ones, the angle matrices).</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (string key in IdolWeights.ExpectedShapes(_config).Keys)
-            yield return _weights[key];
+            if (!BlockPrefixes.Any(p => key.StartsWith(p, StringComparison.Ordinal)))
+                yield return _weights[key];
         yield return _positionEmbedding;
         foreach (IdolBlock b in _noiseRefiner.Concat(_contextRefiner).Concat(_blocks))
-            yield return b.HeadNormOnes;
+            foreach (Tensor t in b.EnumerateWeights())
+                yield return t;
+        foreach (IdolRePo r in _noiseRepo.Concat(_contextRepo).Concat(_repo))
+            foreach (Tensor t in r.EnumerateWeights())
+                yield return t;
     }
 
     /// <summary>The image stream <c>[1, condTokens, C]</c> from the DINOv3 tokens <paramref name="feature1"/> <c>[1, L, 1280]</c> and the FLUX.2
@@ -56,14 +81,26 @@ public sealed class IdolDenoiser : IDisposable
     {
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
-        int tokens = (int)feature1.Shape[1];
+        if (feature1.Shape.Rank != 3 || feature2.Shape.Rank != 3 || feature1.Shape[0] != 1 || feature2.Shape[0] != 1
+            || feature1.Shape[2] != _config.CondChannels || feature2.Shape[2] != _config.Cond2Channels || feature1.Shape[1] != feature2.Shape[1])
+            throw new ArgumentException($"Idol's image tokens are a [1, L, {_config.CondChannels}] DINOv3 stream and a [1, L, {_config.Cond2Channels}] VAE stream of the same L; got {feature1.Shape} and {feature2.Shape}.");
         using Tensor a = Linear(backend, feature1, "cond_embedder", _config.ModelChannels);
         using Tensor b = Linear(backend, feature2, "cond_embedder2", _config.ModelChannels);
         Tensor h = new(a.Shape, DType.F32);
         backend.Add(h, a, b);
         for (int i = 0; i < _contextRefiner.Length; i++)
         {
-            Tensor next = _contextRefiner[i].Forward(backend, h, null, _contextRepo[i]);
+            Tensor next;
+            try
+            {
+                next = _contextRefiner[i].Forward(backend, h, null, _contextRepo[i]);
+            }
+            catch
+            {
+                h.Dispose();
+                throw;
+            }
+
             h.Dispose();
             h = next;
         }
@@ -80,8 +117,11 @@ public sealed class IdolDenoiser : IDisposable
         ArgumentNullException.ThrowIfNull(backend);
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         int d = _config.ModelChannels, n = _config.Tokens;
-        if (latent.Shape[1] != n || camera.Shape[1] != 1)
+        if (latent.Shape.Rank != 3 || camera.Shape.Rank != 3 || latent.Shape[0] != 1 || camera.Shape[0] != 1 || latent.Shape[1] != n || camera.Shape[1] != 1
+            || latent.Shape[2] != _config.LatentChannels || camera.Shape[2] != _config.CameraChannels)
             throw new ArgumentException($"Idol takes a [1, {n}, {_config.LatentChannels}] latent and a [1, 1, {_config.CameraChannels}] camera; got {latent.Shape} and {camera.Shape}.");
+        if (context.Shape.Rank != 3 || context.Shape[0] != 1 || context.Shape[2] != d)
+            throw new ArgumentException($"Idol's context is [1, L, {d}] from EmbedContext; got {context.Shape}.");
 
         using Tensor timeEmbedding = TimeEmbedding(backend, t);
         using Tensor timeModulation = TimeModulation(backend, timeEmbedding);
@@ -90,7 +130,17 @@ public sealed class IdolDenoiser : IDisposable
         tap?.Invoke("embedded_tokens", hx);
         for (int i = 0; i < _noiseRefiner.Length; i++)
         {
-            Tensor next = _noiseRefiner[i].Forward(backend, hx, timeModulation, _noiseRepo[i]);
+            Tensor next;
+            try
+            {
+                next = _noiseRefiner[i].Forward(backend, hx, timeModulation, _noiseRepo[i]);
+            }
+            catch
+            {
+                hx.Dispose();
+                throw;
+            }
+
             hx.Dispose();
             hx = next;
         }
@@ -107,7 +157,17 @@ public sealed class IdolDenoiser : IDisposable
             Action<Tensor, Tensor>? rotationTap = i == 0 && tap is not null
                 ? (cos, sin) => { tap("repo0_cos", cos); tap("repo0_sin", sin); }
                 : null;
-            Tensor next = _blocks[i].Forward(backend, h, timeModulation, _repo[i], rotationTap);
+            Tensor next;
+            try
+            {
+                next = _blocks[i].Forward(backend, h, timeModulation, _repo[i], rotationTap);
+            }
+            catch
+            {
+                h.Dispose();
+                throw;
+            }
+
             h.Dispose();
             h = next;
             if (i == 0)

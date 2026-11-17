@@ -3,3 +3,4 @@
 # CommittedFixture_MatchesLiveGgufMetadata test compares them byte-for-byte against the live GGUF, so they
 # must never be line-ending-normalized on checkout.
 tests/HartsyInference.Engine.Tests/Fixtures/ChatTemplates/*.jinja -text
+benchmarks/attention/cases/*.json -text
