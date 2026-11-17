@@ -114,10 +114,7 @@ public sealed partial class CpuBackend : IBackend
     {
         ThrowIfDisposed();
         CheckDenseKernelOperands(output, query, key, value, mask); // before the call is built: HeadMajor indexes rank 4
-        // The same shared preflight Attention() and the CUDA/Vulkan entries run, so a call the GPUs reject is rejected here too.
-        AttentionCall call = AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16);
-        AttentionCallValidation.Validate(in call);
-        RunDenseAttention(in call);
+        Attention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
     }
 
     /// <summary>The SIMD kernel reads every operand as F32 <c>[B,H,S,D]</c> and K/V with Q's head count; anything else is
@@ -135,8 +132,8 @@ public sealed partial class CpuBackend : IBackend
         if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
     }
 
-    /// <summary>The SIMD kernel over a call <see cref="AttentionCallValidation"/> has already accepted. The operand check
-    /// repeats on the legacy path; it is a handful of comparisons and keeps <see cref="Attention"/> from misreading F16.</summary>
+    /// <summary>The SIMD kernel over a call <see cref="AttentionCallValidation"/> has accepted. The operand check keeps
+    /// <see cref="Attention"/> from misreading F16.</summary>
     private void RunDenseAttention(in AttentionCall call)
     {
         Tensor output = call.Output.Storage, query = call.Query.Storage, key = call.Key.Storage, value = call.Value.Storage;

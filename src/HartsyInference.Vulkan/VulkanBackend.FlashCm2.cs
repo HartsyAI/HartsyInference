@@ -32,44 +32,31 @@ public sealed partial class VulkanBackend
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int headDim, float scale, bool allowF16 = false) =>
-        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16);
-
-    private void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int headDim, float scale, AttentionNumerics numerics) =>
-        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, numerics);
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, heads, headDim, scale, allowF16));
 
     /// <inheritdoc/>
     public void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
         int heads, int kvHeads, int headDim, float scale, bool allowF16 = false) =>
-        ScaledDotProductAttentionTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, AttentionNumerics.FromLegacy(allowF16));
+        ExecuteTokenMajorAttention(AttentionCall.FromTokenMajor(output, query, key, value, mask, heads, kvHeads, headDim, scale, allowF16));
 
-    private void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
-        int heads, int kvHeads, int headDim, float scale, AttentionNumerics numerics)
+    private void ExecuteTokenMajorAttention(in AttentionCall call)
     {
         using OpScope _op = EnterOp();
-        long qWidth = (long)heads * headDim;
-        long kvWidth = (long)kvHeads * headDim;
+        Tensor query = call.Query.Storage, key = call.Key.Storage, value = call.Value.Storage, output = call.Output.Storage;
+        long qWidth = (long)call.Heads * call.QkHeadDim;
+        long kvWidth = (long)call.KvHeads * call.QkHeadDim;
         if (qWidth <= 0 || kvWidth <= 0 || query.ElementCount % qWidth != 0 || key.ElementCount % kvWidth != 0
             || value.ElementCount != key.ElementCount || output.ElementCount != query.ElementCount)
         {
             throw new ArgumentException(
-                $"Token-major attention needs Q/output as [S, {heads}*{headDim}] and K/V as [S, {kvHeads}*{headDim}]; got "
+                $"Token-major attention needs Q/output as [S, {call.Heads}*{call.QkHeadDim}] and K/V as [S, {call.KvHeads}*{call.QkHeadDim}]; got "
                 + $"Q {query.Shape}, K {key.Shape}, V {value.Shape}, out {output.Shape}.");
         }
-        int sq = (int)(query.ElementCount / qWidth);
-        int skv = (int)(key.ElementCount / kvWidth);
-        if (mask is not null) _ = AttentionMaskLayout.Of(mask, 1, heads, sq, skv);
-        // Vulkan reads a token-major operand as one sequence whatever its rank, so the call is described that way.
-        AttentionCall call = new()
-        {
-            Query = new(query, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
-            Key = new(key, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
-            Value = new(value, AttentionLayout.TokenMajor, 1, kvHeads, skv, headDim, 0, kvWidth * skv, headDim, kvWidth),
-            Output = new(output, AttentionLayout.TokenMajor, 1, heads, sq, headDim, 0, qWidth * sq, headDim, qWidth),
-            Scale = scale, Mask = AttentionMask.Additive(mask), Numerics = numerics,
-            Route = AttentionRoute.TokenMajor,
-        };
-        RunAttentionRows(TokenMajorAttentionRows, in call);
+        if (call.Mask.Bias is not null)
+            _ = AttentionMaskLayout.Of(call.Mask.Bias, 1, call.Heads, call.QueryTokens, call.KeyTokens);
+        // Vulkan records grouped calls on its single token-major row set.
+        AttentionCall planned = call with { Route = AttentionRoute.TokenMajor };
+        RunAttentionRows(TokenMajorAttentionRows, in planned);
     }
 
     /// <summary>Smallest query count worth a 64-row cooperative-matrix tile; decode (one row) and short chunks stay on the scalar kernel.</summary>
@@ -141,7 +128,8 @@ public sealed partial class VulkanBackend
         Permute0213(qMh, query, sq, heads, headDim);
         Permute0213(kMh, key, skv, kvHeads, headDim);
         Permute0213(vMh, value, skv, kvHeads, headDim);
-        ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, numerics);
+        ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16: false)
+            with { Numerics = numerics });
         Permute0213(output, attnMh, heads, sq, headDim);
     }
 

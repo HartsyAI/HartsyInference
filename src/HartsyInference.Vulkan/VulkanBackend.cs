@@ -1960,19 +1960,18 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     private const int FlashMaxHeadDim = 128;
 
     public void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale, bool allowF16 = false) =>
-        ScaledDotProductAttention(output, query, key, value, mask, scale, AttentionNumerics.FromLegacy(allowF16));
+        ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16));
 
-    // The call's numerics reach the rows whole, so a refusal survives the entry point.
-    private void ScaledDotProductAttention(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask, float scale,
-        AttentionNumerics numerics)
+    private void ExecuteDenseAttention(in AttentionCall call)
     {
         using OpScope _op = EnterOp();
+        Tensor query = call.Query.Storage, key = call.Key.Storage;
         if (query.Shape.Rank != 4)
             throw new NotImplementedException("VulkanBackend SDPA expects [B, H, S, D] inputs.");
-        if (mask is not null) _ = AttentionMaskLayout.Of(mask, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
+        if (call.Mask.Bias is not null)
+            _ = AttentionMaskLayout.Of(call.Mask.Bias, query.Shape[0], query.Shape[1], query.Shape[2], key.Shape[2]);
 
-        RunAttentionRows(DenseAttentionRows,
-            AttentionCall.FromScaledDotProductAttention(output, query, key, value, mask, scale, allowF16: false) with { Numerics = numerics });
+        RunAttentionRows(DenseAttentionRows, in call);
     }
 
     /// <summary>Fused online-softmax SDPA — never materializes the [Sq,Skv] score matrix. Shared by both <see cref="ScaledDotProductAttention"/> (causal=false, kvGroup/skv derived from tensor shapes) and <see cref="FlashAttention"/> (explicit kvLen/kvGroup — the KV-cache buffer may be over-allocated beyond the currently-valid length, and causal/qOffset/slidingWindow are real for decode).</summary>
@@ -2118,13 +2117,16 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
     /// <summary>Fused online-softmax attention (see <see cref="DispatchFlashAttention"/>) for the common case. Falls back to the CPU numeric reference — the same one <c>IBackend</c>'s own default uses — for softcap/sink/ALiBi (Gemma-2/GPT-OSS/MPT-class models) and head dims the shared-memory tile can't hold: a documented "flash-lite" scope boundary, not silently wrong output.</summary>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
+        => ExecuteFlashAttention(AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale,
+            softcap, sink, slidingWindow, alibiSlopes), kvGroup);
+
+    private void ExecuteFlashAttention(in AttentionCall call, int? legacyKvGroup = null)
     {
-        _ = ValidateFlashGroup(query, key, value, kvGroup);
-        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
-        if (kvLen < 0 || kvLen > key.Shape[2])
-            throw new ArgumentOutOfRangeException(nameof(kvLen), $"kvLen {kvLen} is outside the cache's {key.Shape[2]} rows.");
-        AttentionCall call = AttentionCall.FromFlashAttention(output, query, key, value, kvLen, causal, qOffset, scale, softcap, sink,
-            slidingWindow, alibiSlopes);
+        Tensor query = call.Query.Storage, key = call.Key.Storage;
+        _ = ValidateFlashGroup(query, key, call.Value.Storage, legacyKvGroup ?? call.KvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(call.Mask.LegacySlidingWindow);
+        if (call.ValidKvLength < 0 || call.ValidKvLength > key.Shape[2])
+            throw new ArgumentOutOfRangeException("kvLen", $"kvLen {call.ValidKvLength} is outside the cache's {key.Shape[2]} rows.");
         // One op for the device rows, the cm2 attempt and its fallback alike; the host reference runs outside any.
         if (!FlashOnDevice(in call))
         {
@@ -3879,11 +3881,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Self-attention whose kvLen/qOffset come from the device position buffer — the <c>FlashAttentionDev</c> counterpart to <see cref="KvCacheAppendDev"/>. Same scope boundary as <see cref="FlashAttention"/> (head dim &lt;= <see cref="FlashMaxHeadDim"/>, no softcap/sink/ALiBi, no mask — <c>FlashAttentionDev</c>'s signature has none) — anything outside that falls back to the IBackend default, which forwards the CALLER's placeholder <paramref name="kvLen"/>/<paramref name="qOffset"/> host ints straight to <see cref="FlashAttention"/>. That default is ONLY correct when those placeholders happen to be right for the eager (non-graph) case; real graph-decode callers pass 0s expecting devicePos to be authoritative, so anything reaching that fallback with devicePos-dependent placeholders would be silently wrong — scoped narrowly here specifically so it doesn't reach that default in the cases graph decode actually exercises.</summary>
     public unsafe void FlashAttentionDev(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, ulong devicePos,
         float softcap = 0f, int slidingWindow = 0)
+        => ExecuteFlashDeviceAttention(AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale,
+            devicePos, softcap, slidingWindow), kvGroup);
+
+    private void ExecuteFlashDeviceAttention(in AttentionCall call, int? legacyKvGroup = null)
     {
-        _ = ValidateFlashGroup(query, key, value, kvGroup);
-        ArgumentOutOfRangeException.ThrowIfNegative(slidingWindow);
-        AttentionCall call = AttentionCall.FromFlashAttentionDev(output, query, key, value, kvLen, causal, qOffset, scale, devicePos, softcap,
-            slidingWindow);
+        _ = ValidateFlashGroup(call.Query.Storage, call.Key.Storage, call.Value.Storage, legacyKvGroup ?? call.KvGroup);
+        ArgumentOutOfRangeException.ThrowIfNegative(call.Mask.LegacySlidingWindow);
         if (!DeviceKernelEligible(in call))
         {
             RunAttentionRows(FlashAttentionDeviceRows, in call);

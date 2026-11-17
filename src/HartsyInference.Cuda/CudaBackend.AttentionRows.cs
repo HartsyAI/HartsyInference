@@ -22,15 +22,15 @@ public sealed partial class CudaBackend
     /// <summary>Runs the first row of <paramref name="rows"/> that covers, admits and completes the call, and records its route.</summary>
     private void RunAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
-        AttentionCallValidation.Validate(in call);
-        RunValidatedAttentionRows(rows, in call);
+        AttentionCall prepared = AttentionExecution.Prepare(in call);
+        RunValidatedAttentionRows(rows, in prepared);
     }
 
     /// <summary><see cref="RunAttentionRows"/> for a call the caller has already passed through <see cref="AttentionCallValidation"/>.</summary>
     private void RunValidatedAttentionRows(AttentionKernelRow[] rows, in AttentionCall call)
     {
         if (EngineKnobs.AttentionCaptureDir.Value is { Length: > 0 } captureDir) CaptureAttentionCall(in call, captureDir);
-        AttentionKernelRow row = AttentionPlanner.Run(rows, in call);
+        AttentionKernelRow row = AttentionExecution.RunValidated(rows, in call);
         if (row is DelegateAttentionRow { Branch: { } branch }) t_attentionRoute = branch;
         AttentionEvidence.Executed("cuda", row.Capability.Id, t_attentionRoute, in call, row.Capability.Lowering);
         AttentionPlanLog.Ran("cuda", row, in call);
@@ -48,60 +48,48 @@ public sealed partial class CudaBackend
     };
 
     /// <inheritdoc/>
-    /// <remarks>Re-enters through the call's legacy entry point, which validates it and runs its rows; the entry points never
-    /// call this method, so the two cannot recurse.</remarks>
     public void Attention(in AttentionCall call)
     {
         if (call.LegacyGap() is { } gap)
         {
-            AttentionCallValidation.Validate(in call);
+            AttentionCall prepared = AttentionExecution.Prepare(in call);
             // Only the cuDNN rows read views, so the route's other rows exclude themselves and the planner refuses what none takes.
-            if (call.Route is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa) || call.TermsGap() is not null)
+            if (prepared.Route is not (AttentionRoute.Dense or AttentionRoute.TokenMajor or AttentionRoute.TokenMajorGqa)
+                || prepared.TermsGap() is not null)
             {
                 // An Auto call no legacy entry carries (the HCA and DSA single-query MQA calls) stages into the flash entry.
-                if (AttentionFlashLowering.Gap(in call) is null)
+                if (AttentionFlashLowering.Gap(in prepared) is null)
                 {
-                    AttentionFlashLowering.Run(this, in call);
+                    AttentionFlashLowering.Run(this, in prepared);
                     return;
                 }
                 throw new AttentionUnsupportedException($"CUDA attention serves a call its legacy entry point can carry; this one has {gap}.");
             }
-            RunValidatedAttentionRows(RowsFor(call.Route), in call);
+            RunValidatedAttentionRows(RowsFor(prepared.Route), in prepared);
             return;
         }
-        Tensor o = call.Output.Storage, q = call.Query.Storage, k = call.Key.Storage, v = call.Value.Storage;
         switch (call.Route)
         {
             case AttentionRoute.Dense:
-                ScaledDotProductAttention(o, q, k, v, call.Mask.Bias, call.Scale, call.Numerics);
+                ExecuteDenseAttention(in call);
                 break;
             case AttentionRoute.TokenMajor:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.QkHeadDim, call.Scale, call.Numerics);
+                ExecuteTokenMajorAttention(in call);
                 break;
             case AttentionRoute.TokenMajorGqa:
-                ScaledDotProductAttentionTokenMajor(o, q, k, v, call.Mask.Bias, call.Heads, call.KvHeads, call.QkHeadDim, call.Scale,
-                    call.Numerics);
+                ExecuteTokenMajorGqaAttention(in call);
                 break;
             case AttentionRoute.Flash:
-                FlashAttention(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
-                    call.Logits.Softcap, call.Logits.Sinks, call.Mask.LegacySlidingWindow, call.Logits.AlibiSlopes);
+                ExecuteFlashAttention(in call);
                 break;
             case AttentionRoute.FlashDevice:
-                FlashAttentionDev(o, q, k, v, call.ValidKvLength, call.KvGroup, call.Mask.Causal, call.Positions.QueryOffset, call.Scale,
-                    call.Positions.DeviceHandle, call.Logits.Softcap, call.Mask.LegacySlidingWindow);
+                ExecuteFlashDeviceAttention(in call);
                 break;
         }
     }
 
     /// <inheritdoc/>
-    public AttentionPlan PlanAttention(in AttentionCall call)
-    {
-        AttentionCallValidation.Validate(in call);
-        // The rows read the legacy kvLen, which a call without bounded positions leaves at 0; Attention() passes all keys.
-        AttentionCall planned = call.Route is AttentionRoute.Flash or AttentionRoute.FlashDevice && !call.Positions.Bounded
-            ? call with { Positions = call.Positions with { KvLength = call.KeyTokens, Bounded = true } } : call;
-        return AttentionPlanner.Plan(RowsFor(planned.Route), in planned);
-    }
+    public AttentionPlan PlanAttention(in AttentionCall call) => AttentionExecution.Plan(RowsFor(call.Route), in call);
 
     private static AttentionKernelCapability Cap(string id, AttentionRoute entry, AttentionDTypes q, AttentionDTypes kv,
         AttentionLayouts layouts) => new() { Id = id, Entry = entry, QueryTypes = q, KvTypes = kv, Layouts = layouts };
@@ -384,7 +372,8 @@ public sealed partial class CudaBackend
                 vMh.Dispose();
             }
             oMh = new Tensor(qMhShape, output.DType);
-            ScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh, c.Mask.Bias, c.Scale, c.Numerics);
+            ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(oMh, qMh, kRep ?? kMh, vRep ?? vMh,
+                c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
             qMh.Dispose();
             (kRep ?? kMh).Dispose();
             (vRep ?? vMh).Dispose();
@@ -412,7 +401,8 @@ public sealed partial class CudaBackend
             Permute0213(qMh, query, sq, heads, headDim);
             Permute0213(kMh, key, skv, heads, headDim);
             Permute0213(vMh, value, skv, heads, headDim);
-            ScaledDotProductAttention(oMh, qMh, kMh, vMh, c.Mask.Bias, c.Scale, c.Numerics);
+            ExecuteDenseAttention(AttentionCall.FromScaledDotProductAttention(oMh, qMh, kMh, vMh,
+                c.Mask.Bias, c.Scale, allowF16: false) with { Numerics = c.Numerics });
             Permute0213(output, oMh, heads, sq, headDim);
             t_attentionRoute = AttentionRouteText.Nested("M.3/", t_attentionRoute);
         }
