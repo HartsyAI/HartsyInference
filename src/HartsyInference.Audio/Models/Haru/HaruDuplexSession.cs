@@ -68,6 +68,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         }
     }
 
+    /// <summary>How many more <see cref="Step"/> calls the conversation can take: the frame limit and the model's position capacity, whichever
+    /// comes first. Meaningful after <see cref="Start"/>.</summary>
+    public int RemainingFrames => Math.Max(0, Math.Min(_options.MaxFrames - _index, _lm.Capacity - _lm.Position - 1));
+
     /// <summary>The longest voice reference this session keeps, in seconds.</summary>
     internal double ReferenceSeconds => _options.ReferenceSeconds;
 

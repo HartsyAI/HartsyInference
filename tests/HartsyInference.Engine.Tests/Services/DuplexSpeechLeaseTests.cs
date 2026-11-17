@@ -16,6 +16,8 @@ public sealed class DuplexSpeechLeaseTests
 
         public int FrameSamples => 4;
 
+        public int RemainingFrames => 100;
+
         public DuplexFrame Start()
         {
             Calls.Add("start");
@@ -50,6 +52,38 @@ public sealed class DuplexSpeechLeaseTests
         lease.Dispose();
         Assert.True(inner.Disposed);
         Assert.False(runtime.Tts.IsPinned("haru-test"));
+    }
+
+    [Fact]
+    public void DisposingThroughTheBaseLeaseOrTheInterfaceClosesTheSessionBeforeThePinIsGone()
+    {
+        AudioRuntime runtime = new();
+        using CpuBackend backend = new();
+
+        FakeSession viaBase = new();
+        AudioRunnerLease lease = new DuplexSpeechLease(runtime, "haru-test-base", viaBase, backend);
+        lease.Dispose();
+        Assert.True(viaBase.Disposed);
+        Assert.False(runtime.Tts.IsPinned("haru-test-base"));
+
+        FakeSession viaInterface = new();
+        IDuplexSpeechSession session = new DuplexSpeechLease(runtime, "haru-test-iface", viaInterface, backend);
+        session.Dispose();
+        Assert.True(viaInterface.Disposed);
+        Assert.False(runtime.Tts.IsPinned("haru-test-iface"));
+    }
+
+    [Fact]
+    public void ARevocationClosesTheSessionToo()
+    {
+        AudioRuntime runtime = new();
+        using CpuBackend backend = new();
+        FakeSession inner = new();
+        DuplexSpeechLease lease = new(runtime, "haru-test-revoke", inner, backend);
+        Assert.True(lease.Revoke(TimeSpan.FromSeconds(1)));
+        Assert.True(inner.Disposed);
+        Assert.False(runtime.Tts.IsPinned("haru-test-revoke"));
+        Assert.Throws<ObjectDisposedException>(() => lease.Start());
     }
 
     [Fact]

@@ -33,6 +33,7 @@ internal static class HaruModel
         ResolveRepo = _ => Repo,
         ResolveCacheTag = variant => ParsePrecision(variant) is HaruPrecision.Native ? "" : ParsePrecision(variant).ToString().ToLowerInvariant(),
         ResolveFiles = (_, _) => Task.FromResult(Files()),
+        IsDuplex = true,
         LoadAsync = LoadAsync,
     };
 
@@ -93,6 +94,8 @@ internal static class HaruModel
         public int SampleRate => sampleRate;
 
         public int FrameSamples => frameSamples;
+
+        public int RemainingFrames => inner.RemainingFrames;
 
         public DuplexFrame Start() => Map(inner.Start(card, reference));
 

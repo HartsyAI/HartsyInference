@@ -92,24 +92,27 @@ public sealed class HaruPipeline : IDisposable
         IDisposable owner, int capacity)
     {
         HaruLm lm = new(config, weights, capacity);
-        HaruMeanFlowHead head = new(config.Head);
-        VibeVoiceAcousticTokenizerModel codecModel;
+        HaruMeanFlowHead? head = null;
+        HaruCodecSession? codec = null;
         try
         {
+            head = new HaruMeanFlowHead(config.Head);
             head.LoadWeights(weights);
-            codecModel = HaruCodec.Create(config.Codec, weights);
+            VibeVoiceAcousticTokenizerModel codecModel = HaruCodec.Create(config.Codec, weights);
+            codec = new HaruCodecSession(codecModel, backend, config.LatentDim, config.Codec.FixStd);
+            HaruPipeline pipeline = new(config, lm, head, codec, codecModel, text, backend, owner);
+            pipeline.Preload();
+            Logs.Info($"[Audio][Haru] Loaded: {config.Lm.NumLayers}-layer Qwen3.5 trunk, {config.FrameRate:0.#} Hz frames, capacity {lm.Capacity} positions.");
+            return pipeline;
         }
         catch
         {
-            head.Dispose();
+            // The weights owner stays with the caller (Load disposes it); the parts made here do not outlive a failed build.
+            codec?.Dispose();
+            head?.Dispose();
             lm.Dispose();
             throw;
         }
-        HaruCodecSession codec = new(codecModel, backend, config.LatentDim, config.Codec.FixStd);
-        HaruPipeline pipeline = new(config, lm, head, codec, codecModel, text, backend, owner);
-        pipeline.Preload();
-        Logs.Info($"[Audio][Haru] Loaded: {config.Lm.NumLayers}-layer Qwen3.5 trunk, {config.FrameRate:0.#} Hz frames, capacity {lm.Capacity} positions.");
-        return pipeline;
     }
 
     /// <summary>A voice reference (mono, 24 kHz) as the model is prompted with it: silence trimmed, the last three minutes kept.</summary>

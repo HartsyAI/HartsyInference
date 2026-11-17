@@ -31,8 +31,8 @@ public sealed class NativeDuplexRespondRequest : NativeArtifactRequest
     /// <summary>The user's recording, any rate, mixed down to mono.</summary>
     public required AudioClip User { get; set; }
 
-    /// <summary>Frames of silence after the recording, so the model can finish speaking (3200 samples each, 133 ms).</summary>
-    public int TailFrames { get; set; }
+    /// <summary>Seconds of silence after the recording, so the model can finish speaking; 0 to 60.</summary>
+    public double TailSeconds { get; set; }
 
     /// <summary>Return the conversation as a stereo WAV, the user on the left and the model on the right, instead of the model alone.</summary>
     public bool Stereo { get; set; }

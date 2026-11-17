@@ -36,8 +36,9 @@ public interface ISpeechService
         throw new NotSupportedException("This speech-service implementation does not expose full-duplex conversations.");
 
     /// <summary>Plays a recording of the user (<paramref name="user"/>, any rate, mixed to mono) to a full-duplex model frame by frame, as in
-    /// a live conversation, and returns what it answered. <paramref name="tailFrames"/> extra frames of silence let the model finish after the
-    /// recording ends.</summary>
-    Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, int tailFrames = 0, CancellationToken cancel = default) =>
+    /// a live conversation, and returns what it answered. <paramref name="tailSeconds"/> of silence (up to
+    /// <see cref="SpeechService.MaxTailSeconds"/>) let the model finish after the recording ends. A recording longer than the request's
+    /// <see cref="DuplexSpeechRequest.MaxFrames"/> or than the model's capacity is refused before it is played.</summary>
+    Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, double tailSeconds = 0, CancellationToken cancel = default) =>
         throw new NotSupportedException("This speech-service implementation does not expose full-duplex conversations.");
 }

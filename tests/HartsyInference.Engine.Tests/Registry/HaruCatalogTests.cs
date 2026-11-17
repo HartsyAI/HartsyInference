@@ -25,6 +25,13 @@ public sealed class HaruCatalogTests
     }
 
     [Fact]
+    public void OnlyHaruIsMarkedAsAFullDuplexModel()
+    {
+        Assert.True(HaruModel.Descriptor.IsDuplex);
+        Assert.False(TtsCatalog.Resolve("kokoro").IsDuplex);
+    }
+
+    [Fact]
     public void AnUnknownPrecisionIsRefusedByName() =>
         Assert.Contains("q3", Assert.Throws<ArgumentException>(() => HaruModel.ParsePrecision("q3")).Message);
 

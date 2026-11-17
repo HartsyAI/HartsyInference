@@ -26,6 +26,9 @@ internal sealed class DuplexSpeechLease : AudioRunnerLease, IDuplexSpeechSession
     public int FrameSamples => _inner.FrameSamples;
 
     /// <inheritdoc/>
+    public int RemainingFrames => _inner.RemainingFrames;
+
+    /// <inheritdoc/>
     public DuplexFrame Start()
     {
         ThrowIfClosed();
@@ -49,10 +52,6 @@ internal sealed class DuplexSpeechLease : AudioRunnerLease, IDuplexSpeechSession
         }
     }
 
-    /// <summary>Closes the conversation, then releases the pin.</summary>
-    public new void Dispose()
-    {
-        base.Dispose();
-        _inner.Dispose();
-    }
+    /// <summary>Closes the conversation, so the model can open another, before the pin is released; runs on Dispose and on revocation.</summary>
+    protected override void OnClosed() => _inner.Dispose();
 }

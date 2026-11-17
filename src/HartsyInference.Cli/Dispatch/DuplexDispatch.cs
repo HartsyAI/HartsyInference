@@ -25,15 +25,16 @@ internal static class DuplexDispatch
             Guidance = parameters.GetFloatOrNull("guidance-scale") ?? defaults.Guidance,
             Temperature = parameters.GetFloatOrNull("temperature") ?? defaults.Temperature,
             TopK = parameters.GetIntOrNull("top-k") ?? defaults.TopK,
+            TopP = parameters.GetFloatOrNull("top-p") ?? defaults.TopP,
+            MaxFrames = parameters.GetIntOrNull("max-frames") ?? defaults.MaxFrames,
             RepetitionPenalty = !parameters.GetBool("no-dry", false),
             EopBias = parameters.GetFloatOrNull("eop-bias") ?? 0f,
             SpeakFirst = parameters.GetBool("speak-first", false),
             Seed = parameters.GetInt("seed", defaults.Seed),
         };
         double tailSeconds = parameters.GetDoubleOrNull("tail-seconds") ?? 0d;
-        int tailFrames = (int)Math.Ceiling(Math.Max(0d, tailSeconds) * 24000 / 3200);
 
-        DuplexResult result = await engine.Speech.RespondAsync(spec, request, user, tailFrames, cancel).ConfigureAwait(false);
+        DuplexResult result = await engine.Speech.RespondAsync(spec, request, user, tailSeconds, cancel).ConfigureAwait(false);
         double seconds = result.ModelAudio.Length / (double)result.SampleRate;
         string summary = string.Create(CultureInfo.InvariantCulture,
             $"{seconds:F1}s, {result.Frames} frames, {result.MedianFrameSeconds * 1000:F0} ms median per frame ({result.MaxFrameSeconds * 1000:F0} ms max)");

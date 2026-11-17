@@ -107,6 +107,10 @@ public sealed class SpeechService : ISpeechService
     {
         ArgumentNullException.ThrowIfNull(request);
         TtsTarget target = ResolveTarget(spec, voice: null);
+        if (!target.Descriptor.IsDuplex)
+        {
+            throw new NotSupportedException($"'{target.Key}' is a text-to-speech model with no user stream to listen to; open a full-duplex model such as 'haru'.");
+        }
         float[]? reference = request.Reference is { Data.Length: > 0 } ? AudioClipCodec.DecodeMono(request.Reference, ReferenceSampleRate) : null;
         AudioRuntime runtime = _engine.AudioRuntime;
         DuplexSpeechLease lease = await runtime.OpenLeaseAsync(target.Backend, runtime.Tts, target.Key,
@@ -120,22 +124,35 @@ public sealed class SpeechService : ISpeechService
     }
 
     /// <inheritdoc/>
-    public async Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, int tailFrames = 0,
+    public async Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, double tailSeconds = 0,
         CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(user);
-        ArgumentOutOfRangeException.ThrowIfNegative(tailFrames);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!(tailSeconds >= 0 && tailSeconds <= MaxTailSeconds))
+        {
+            throw new ArgumentOutOfRangeException(nameof(tailSeconds), tailSeconds, $"The tail is 0 to {MaxTailSeconds} seconds.");
+        }
         using IDuplexSpeechSession session = await OpenDuplexAsync(spec, request, cancel).ConfigureAwait(false);
         float[] recording = AudioClipCodec.DecodeMono(user, session.SampleRate);
-        return await Task.Run(() => Respond(session, recording, tailFrames, cancel), cancel).ConfigureAwait(false);
+        return await Task.Run(() => Respond(session, recording, tailSeconds, request.MaxFrames, cancel), cancel).ConfigureAwait(false);
     }
+
+    /// <summary>The longest silence <see cref="RespondAsync"/> appends after a recording: a minute is more than any reply needs to finish.</summary>
+    public const double MaxTailSeconds = 60;
 
     /// <summary>Plays <paramref name="recording"/> to the session frame by frame, as in a live conversation: model frame t is heard while the
     /// user speaks frame t, so the last user frame needs no step and the reply is as long as the padded recording.</summary>
-    private static DuplexResult Respond(IDuplexSpeechSession session, float[] recording, int tailFrames, CancellationToken cancel)
+    private static DuplexResult Respond(IDuplexSpeechSession session, float[] recording, double tailSeconds, int maxFrames, CancellationToken cancel)
     {
         int frame = session.FrameSamples;
-        int count = Math.Max(1, (recording.Length + frame - 1) / frame) + tailFrames;
+        long total = Math.Max(1L, (recording.Length + (long)frame - 1) / frame) + (long)Math.Ceiling(tailSeconds * session.SampleRate / frame);
+        if (total > maxFrames || total * frame > Array.MaxLength)
+        {
+            throw new ArgumentException($"The recording and its tail take {total} frames, more than the {maxFrames} this conversation may run; "
+                + "shorten the recording or raise MaxFrames.");
+        }
+        int count = (int)total;
         float[] userAudio = new float[count * frame];
         recording.CopyTo(userAudio, 0);
         float[] reply = new float[count * frame];
@@ -145,6 +162,11 @@ public sealed class SpeechService : ISpeechService
         {
             cancel.ThrowIfCancellationRequested();
             DuplexFrame model = i == 0 ? session.Start() : session.Step(userAudio.AsSpan((i - 1) * frame, frame));
+            if (i == 0 && count - 1 > session.RemainingFrames)
+            {
+                throw new ArgumentException($"The recording needs {count - 1} more frames after the prompt but the model has room for "
+                    + $"{session.RemainingFrames}; shorten the recording, the reference or the card, or load the model for more positions.");
+            }
             model.Audio.CopyTo(reply, i * frame);
             text.Append(model.Text);
             seconds[i] = model.ComputeSeconds;

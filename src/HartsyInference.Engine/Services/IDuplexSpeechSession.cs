@@ -21,6 +21,10 @@ public interface IDuplexSpeechSession : IDisposable
     /// <summary>Samples in one frame of either stream.</summary>
     int FrameSamples { get; }
 
+    /// <summary>How many more <see cref="Step"/> calls the conversation can take before it is done: its frame limit or the model's
+    /// position capacity, whichever comes first. Meaningful after <see cref="Start"/>, which is where the prompt takes its share.</summary>
+    int RemainingFrames { get; }
+
     /// <summary>Runs the character card and the voice reference and returns the model's frame 0.</summary>
     DuplexFrame Start();
 

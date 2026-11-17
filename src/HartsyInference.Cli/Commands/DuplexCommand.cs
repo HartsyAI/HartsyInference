@@ -72,6 +72,16 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         [Description("Text sampling top-k (default 25).")]
         public int? TopK { get; init; }
 
+        /// <summary>Top-p.</summary>
+        [CommandOption("--top-p")]
+        [Description("Text sampling top-p; 1 keeps every token (default 1).")]
+        public float? TopP { get; init; }
+
+        /// <summary>Longest conversation.</summary>
+        [CommandOption("--max-frames")]
+        [Description("Most frames the conversation may run, 7.5 per second (default 27000, an hour). A longer recording is refused.")]
+        public int? MaxFrames { get; init; }
+
         /// <summary>Turn off the repetition penalty.</summary>
         [CommandOption("--no-dry")]
         [Description("Turn off the repetition penalty of the text stream.")]
@@ -109,6 +119,11 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         if (!CommandRunner.RequireNonEmpty(settings.Input, "A recording of the user is required.", out int exitCode))
             return exitCode;
 
+        if (!string.IsNullOrEmpty(settings.Card) && !string.IsNullOrEmpty(settings.CardFile))
+        {
+            AnsiConsole.MarkupLine("[red]Give the character card with --card or --card-file, not both.[/]");
+            return 1;
+        }
         string card = settings.CardFile is { Length: > 0 } file ? File.ReadAllText(file).Trim() : settings.Card ?? "";
         ParamState parameters = new ParamState(Modality.Speech) { Backend = settings.Backend, Model = settings.Model, OutputDir = settings.Output };
         parameters.Put("duplex", "true");
@@ -126,6 +141,8 @@ public sealed class DuplexCommand : Command<DuplexCommand.Settings>
         parameters.PutIfSet("guidance-scale", settings.Guidance);
         parameters.PutIfSet("temperature", settings.Temperature);
         parameters.PutIfSet("top-k", settings.TopK);
+        parameters.PutIfSet("top-p", settings.TopP);
+        parameters.PutIfSet("max-frames", settings.MaxFrames);
         parameters.PutIfSet("eop-bias", settings.EopBias);
         parameters.PutIfSet("seed", settings.Seed);
         if (settings.Transcript is { Length: > 0 })

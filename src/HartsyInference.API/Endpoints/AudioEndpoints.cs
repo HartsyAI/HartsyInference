@@ -34,12 +34,13 @@ public static class AudioEndpoints
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Speech);
             try
             {
-                DuplexResult result = await queue.EnqueueAsync(() => engine.Speech.RespondAsync(spec, req.Request, req.User, req.TailFrames, ct), ct);
+                DuplexResult result = await queue.EnqueueAsync(() => engine.Speech.RespondAsync(spec, req.Request, req.User, req.TailSeconds, ct), ct);
                 byte[] wav = req.Stereo ? result.ToStereoWav() : result.ToModelWav();
                 return Results.Ok(new
                 {
                     Data = wav,
                     Format = "wav",
+                    // Of one channel: the model's reply and, with Stereo, the user's recording beside it are the same length.
                     DurationSeconds = result.ModelAudio.Length / (double)result.SampleRate,
                     result.SampleRate,
                     result.Text,
