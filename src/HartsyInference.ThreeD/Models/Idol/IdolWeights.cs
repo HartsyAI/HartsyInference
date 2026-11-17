@@ -43,7 +43,10 @@ public sealed class IdolWeights : IDisposable
     /// <paramref name="posPePath"/>), and checks every tensor the architecture reads.</summary>
     /// <exception cref="FileNotFoundException">A file is missing.</exception>
     /// <exception cref="HartsyInferenceException">A tensor is missing or mis-shaped, or the token positions do not match their pin.</exception>
-    public static IdolWeights Load(string checkpointPath, string? posPePath = null, IdolConfig? config = null)
+    /// <param name="linearDType">What the blocks' linear weights (qkv, out and the MLP of the refiners and joint blocks, nearly all of the 370 M parameters) are held as:
+    /// F32 (an exact widening of the file, what the parity tests use) or F16, which halves their memory and runs the GEMMs on 16-bit tensor cores with F32 accumulation, as idol-sdk does
+    /// (its blocks are F16). Embedders, the rotary layers, norms and heads stay F32.</param>
+    public static IdolWeights Load(string checkpointPath, string? posPePath = null, IdolConfig? config = null, DType? linearDType = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(checkpointPath);
         if (!File.Exists(checkpointPath))
@@ -63,10 +66,11 @@ public sealed class IdolWeights : IDisposable
             {
                 if (!source.TryGetValue(key, out Tensor? t))
                     throw new HartsyInferenceException($"The Idol checkpoint has no tensor '{key}'.");
-                Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);
-                if (!ReferenceEquals(f32, t))
-                    owned.Add(f32);
-                tensors[key] = f32;
+                DType target = linearDType is { } narrow && narrow != DType.F32 && IsBlockLinear(key) ? narrow : DType.F32;
+                Tensor converted = t.DType == target ? t : t.CastTo(target);
+                if (!ReferenceEquals(converted, t))
+                    owned.Add(converted);
+                tensors[key] = converted;
             }
 
             Tensor posPe = ReadPosPe(posPePath, config);
@@ -120,6 +124,12 @@ public sealed class IdolWeights : IDisposable
             Buffer.MemoryCopy(src, (void*)t.DataPointer, expected, expected);
         return t;
     }
+
+    // The matrices of the attention and MLP in the refiners and the joint blocks.
+    private static bool IsBlockLinear(string key)
+        => (key.StartsWith("blocks.", StringComparison.Ordinal) || key.StartsWith("noise_refiner.", StringComparison.Ordinal) || key.StartsWith("context_refiner.", StringComparison.Ordinal))
+            && (key.EndsWith(".attn.qkv.weight", StringComparison.Ordinal) || key.EndsWith(".attn.out.weight", StringComparison.Ordinal)
+                || key.EndsWith(".mlp.mlp.0.weight", StringComparison.Ordinal) || key.EndsWith(".mlp.mlp.2.weight", StringComparison.Ordinal));
 
     private static byte[] EmbeddedPosPe()
     {

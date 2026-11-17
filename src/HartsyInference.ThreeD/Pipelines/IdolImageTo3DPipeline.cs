@@ -77,13 +77,19 @@ public sealed unsafe class IdolImageTo3DPipeline
     private readonly string _directory;
     private readonly IForegroundMatter? _matter;
     private readonly Func<string, Flux2VaeEncoderHandle> _loadVae;
+    private readonly DType _blockDType;
 
     /// <param name="backend">Runs every stage.</param>
     /// <param name="directory">The model folder.</param>
     /// <param name="matter">Mattes an image without alpha; null refuses one.</param>
     /// <param name="loadVae">Opens the FLUX.2 VAE file as an encoder; the pipeline disposes the handle.</param>
-    public IdolImageTo3DPipeline(IBackend backend, string directory, IForegroundMatter? matter, Func<string, Flux2VaeEncoderHandle> loadVae)
+    /// <param name="blockDType">What the denoiser's and the decoders' block matrices are held as: null takes F16 ( idol-sdk's own precision for its blocks, half the memory and 16-bit GEMMs) or F32.</param>
+    public IdolImageTo3DPipeline(IBackend backend, string directory, IForegroundMatter? matter, Func<string, Flux2VaeEncoderHandle> loadVae, DType? blockDType = null)
     {
+        DType dtype = blockDType ?? DType.F16;
+        if (dtype != DType.F16 && dtype != DType.F32)
+            throw new ArgumentOutOfRangeException(nameof(blockDType), dtype, "Idol's blocks are held as F16 or F32.");
+        _blockDType = dtype;
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _directory = directory ?? throw new ArgumentNullException(nameof(directory));
         _matter = matter;
@@ -190,7 +196,7 @@ public sealed unsafe class IdolImageTo3DPipeline
     private Tensor Denoise(Tensor feature1, Tensor feature2, int seed, int steps, float guidance, double rescaleT, Action<int> onStep, Action<string>? log)
     {
         Stopwatch clock = Stopwatch.StartNew();
-        using IdolWeights weights = IdolWeights.Load(Path.Combine(_directory, DenoiserFile));
+        using IdolWeights weights = IdolWeights.Load(Path.Combine(_directory, DenoiserFile), linearDType: _blockDType);
         using IdolDenoiser model = new(weights);
         IdolConfig config = weights.Config;
         _backend.PreloadWeights(model.EnumerateWeights());
@@ -219,7 +225,7 @@ public sealed unsafe class IdolImageTo3DPipeline
     {
         Stopwatch clock = Stopwatch.StartNew();
         string path = Path.Combine(_directory, DecoderFile);
-        using IdolDecoderWeights weights = IdolDecoderWeights.Load(path);
+        using IdolDecoderWeights weights = IdolDecoderWeights.Load(path, linearDType: _blockDType);
         IdolDecoderConfig config = weights.Config;
         int anchors = splats / config.GaussiansPerAnchor;
         float[] points;
