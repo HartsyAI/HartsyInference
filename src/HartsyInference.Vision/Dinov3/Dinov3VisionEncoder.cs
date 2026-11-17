@@ -94,7 +94,7 @@ public sealed unsafe class Dinov3VisionEncoder
         int seqLen = prefix + numPatches;
 
         Tensor seq = EmbedTokens(backend, pixelValues, batch, hidden, gridH, gridW, prefix, seqLen);
-        (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(batch, prefix, gridH, gridW, HeadDim);
+        (Tensor cos, Tensor sin) = Dinov3RopeTables.Build(batch, prefix, gridH, gridW, HeadDim, _preset.RoundRopePeriodsToBf16);
         try
         {
             Tensor h = seq;
