@@ -99,7 +99,8 @@ def budget3d_model(ckpt_path, turbo=False):
 
 def save(out_dir, name, tensors, meta=None):
     os.makedirs(out_dir, exist_ok=True)
-    tensors = {k: v.detach().contiguous().float() if v.is_floating_point() else v.detach().contiguous()
+    # clone: safetensors refuses tensors that share storage (a view and its source, e.g. a transposed copy)
+    tensors = {k: (v.detach().contiguous().float() if v.is_floating_point() else v.detach().contiguous()).clone()
                for k, v in tensors.items()}
     save_file(tensors, os.path.join(out_dir, name + ".safetensors"),
               metadata={k: str(v) for k, v in (meta or {}).items()})
