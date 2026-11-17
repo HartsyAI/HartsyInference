@@ -122,6 +122,9 @@ public sealed class Ernie5RealCheckpointTests
         CudaBackend OpenCuda(int ordinal) => production ? new CudaBackend(ordinal, Ernie5ModelGpuParityTests.PtxDirectory())
             : new CudaBackend(ordinal, Ernie5ModelGpuParityTests.PtxDirectory()) { HighPrecisionGemm = true };
         using DisposeAll earlierStages = new([.. stages.SkipLast(1).Select(o => (IBackend)OpenCuda(o))]);
+        // As the Text path's split does: with every weight preloaded, a cached cast would spend the small headroom left.
+        if (stages.Length > 1)
+            foreach (IBackend stage in earlierStages.Items) stage.CacheWeightCasts = false;
         using IBackend backend = device switch
         {
             "cuda" => OpenCuda(stages.Length > 1 ? stages[^1] : 0),
@@ -138,6 +141,7 @@ public sealed class Ernie5RealCheckpointTests
         LlmPlacement? placement = null;
         if (stages.Length > 1)
         {
+            backend.CacheWeightCasts = false;
             int layerCount = Ernie5Config.Load(Path.Combine(dir, "config.json")).NumHiddenLayers;
             IBackend[] stageBackends = [.. earlierStages.Items, backend];
             placement = new([.. stageBackends.Select((b, k) => new LlmStage(b, k * layerCount / stages.Length, (k + 1) * layerCount / stages.Length))]);

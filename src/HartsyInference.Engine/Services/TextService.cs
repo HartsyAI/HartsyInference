@@ -1081,7 +1081,14 @@ public sealed partial class TextService : ITextService, IDisposable
         List<IBackend> backends = [];
         try
         {
-            foreach (LlmStagePlan stage in plan) backends.Add(CreateBackendFor(stage.Device));
+            foreach (LlmStagePlan stage in plan)
+            {
+                IBackend stageBackend = CreateBackendFor(stage.Device);
+                backends.Add(stageBackend);
+                // Every weight is preloaded, so only the small headroom PreloadBudget keeps is left; a cached 16-bit copy of a weight would
+                // spend it. Recomputing the cast per call keeps the device's use to the preloaded weights and each op's buffers.
+                stageBackend.CacheWeightCasts = false;
+            }
         }
         catch
         {

@@ -339,7 +339,8 @@ public sealed class Ernie5Model : IDisposable, IExpertOffloadTarget
     /// <summary>Device bytes the preload may take: <paramref name="free"/> less a headroom of 15% of <paramref name="total"/>, at least 3 GiB, kept
     /// for activations and the routed experts uploaded per call. With <paramref name="allWeights"/> (every routed expert preloaded, so none is
     /// uploaded during a forward) the headroom is 5%, at least 4 GiB: the residual stream and the attention caches are host arrays, so the
-    /// device holds only each op's transient buffers. That lets four 80 GB cards hold the real checkpoint's 280 GB of layer weights. Zero when the backend does not report its memory.</summary>
+    /// device holds only each op's transient buffers. That lets four 80 GB cards hold the real checkpoint's 280 GB of layer weights. Zero
+    /// when the backend does not report its memory.</summary>
     internal static long PreloadBudget(long free, long total, bool allWeights = false)
     {
         if (free <= 0 || total <= 0) return 0;
