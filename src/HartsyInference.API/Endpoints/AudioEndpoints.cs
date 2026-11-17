@@ -3,6 +3,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -19,6 +20,34 @@ public static class AudioEndpoints
             {
                 AudioResult result = await queue.EnqueueAsync(() => engine.Speech.SynthesizeAsync(spec, req.Request, ct), ct);
                 return Results.Ok(WithSavedPath(result, ArtifactPersistence.Save(req, result.Data, req.Request.Text, result.Format)));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        // A full-duplex model answers a recording of the user; a live conversation is a session, not a request (see ISpeechService.OpenDuplexAsync).
+        app.MapPost("/v1/native/duplex/respond", async (NativeDuplexRespondRequest req, IInferenceEngine engine,
+            [FromKeyedServices(QueueKeys.LongRunning)] InferenceQueue queue, CancellationToken ct) =>
+        {
+            ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Speech);
+            try
+            {
+                DuplexResult result = await queue.EnqueueAsync(() => engine.Speech.RespondAsync(spec, req.Request, req.User, req.TailFrames, ct), ct);
+                byte[] wav = req.Stereo ? result.ToStereoWav() : result.ToModelWav();
+                return Results.Ok(new
+                {
+                    Data = wav,
+                    Format = "wav",
+                    DurationSeconds = result.ModelAudio.Length / (double)result.SampleRate,
+                    result.SampleRate,
+                    result.Text,
+                    result.Frames,
+                    result.MedianFrameSeconds,
+                    result.MaxFrameSeconds,
+                    savedPath = ArtifactPersistence.Save(req, wav, "duplex", "wav"),
+                });
             }
             catch (Exception ex)
             {

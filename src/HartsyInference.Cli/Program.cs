@@ -90,6 +90,9 @@ public static class Program
             config.AddCommand<SpeechCommand>("speak")
                 .WithDescription("Synthesize speech from text with Piper (saves a WAV).")
                 .WithExample("speak", "\"Hello world\"", "-m", "en_US-lessac-medium");
+            config.AddCommand<DuplexCommand>("duplex")
+                .WithDescription("Answer a recording of the user with a full-duplex speech-to-speech model (Haru-4B).")
+                .WithExample("duplex", "user.wav", "-m", "haru:q4", "--reference", "voice.wav", "--stereo");
             config.AddCommand<WakeTrainCommand>("wake-train")
                 .WithDescription("Train a new wake word from its text using the engine's own TTS voices.")
                 .WithExample("wake-train", "\"hey hartsy\"", "--negative-audio", "~/recordings");

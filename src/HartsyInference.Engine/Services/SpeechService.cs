@@ -102,6 +102,63 @@ public sealed class SpeechService : ISpeechService
             cancel, target.StageBackends, target.EstimateWeightBytes).ConfigureAwait(false);
     }
 
+    /// <inheritdoc/>
+    public async Task<IDuplexSpeechSession> OpenDuplexAsync(ModelSpec spec, DuplexSpeechRequest request, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        TtsTarget target = ResolveTarget(spec, voice: null);
+        float[]? reference = request.Reference is { Data.Length: > 0 } ? AudioClipCodec.DecodeMono(request.Reference, ReferenceSampleRate) : null;
+        AudioRuntime runtime = _engine.AudioRuntime;
+        DuplexSpeechLease lease = await runtime.OpenLeaseAsync(target.Backend, runtime.Tts, target.Key,
+            token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token),
+            runner => runner is IDuplexSpeechRunner duplex
+                ? new DuplexSpeechLease(runtime, target.Key, duplex.Open(request, reference), target.Backend)
+                : throw new NotSupportedException($"'{target.Variant}' is a text-to-speech model with no user stream to listen to; "
+                    + "open a full-duplex model such as 'haru'."),
+            cancel, target.StageBackends, target.EstimateWeightBytes).ConfigureAwait(false);
+        return lease;
+    }
+
+    /// <inheritdoc/>
+    public async Task<DuplexResult> RespondAsync(ModelSpec spec, DuplexSpeechRequest request, AudioClip user, int tailFrames = 0,
+        CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        ArgumentOutOfRangeException.ThrowIfNegative(tailFrames);
+        using IDuplexSpeechSession session = await OpenDuplexAsync(spec, request, cancel).ConfigureAwait(false);
+        float[] recording = AudioClipCodec.DecodeMono(user, session.SampleRate);
+        return await Task.Run(() => Respond(session, recording, tailFrames, cancel), cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Plays <paramref name="recording"/> to the session frame by frame, as in a live conversation: model frame t is heard while the
+    /// user speaks frame t, so the last user frame needs no step and the reply is as long as the padded recording.</summary>
+    private static DuplexResult Respond(IDuplexSpeechSession session, float[] recording, int tailFrames, CancellationToken cancel)
+    {
+        int frame = session.FrameSamples;
+        int count = Math.Max(1, (recording.Length + frame - 1) / frame) + tailFrames;
+        float[] userAudio = new float[count * frame];
+        recording.CopyTo(userAudio, 0);
+        float[] reply = new float[count * frame];
+        System.Text.StringBuilder text = new();
+        double[] seconds = new double[count];
+        for (int i = 0; i < count; i++)
+        {
+            cancel.ThrowIfCancellationRequested();
+            DuplexFrame model = i == 0 ? session.Start() : session.Step(userAudio.AsSpan((i - 1) * frame, frame));
+            model.Audio.CopyTo(reply, i * frame);
+            text.Append(model.Text);
+            seconds[i] = model.ComputeSeconds;
+            if (model.Done && i < count - 1)
+            {
+                throw new InvalidOperationException($"The conversation reached its limit after {i + 1} of {count} frames; "
+                    + "shorten the recording, the reference or the card, or raise MaxFrames.");
+            }
+        }
+        double[] steps = count > 1 ? seconds[1..] : seconds;
+        Array.Sort(steps);
+        return new DuplexResult(reply, userAudio, text.ToString().Trim(), session.SampleRate, count, steps[steps.Length / 2], steps[^1]);
+    }
+
     /// <summary>Resolves the runner a request names: descriptor, load variant, backend, load context and cache key. The
     /// one formula the service calls and the leases share, so a lease and a service call on one spec meet in one cache
     /// entry.</summary>

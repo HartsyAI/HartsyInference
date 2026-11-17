@@ -112,6 +112,9 @@ public sealed class HaruPipeline : IDisposable
         return pipeline;
     }
 
+    /// <summary>A voice reference (mono, 24 kHz) as the model is prompted with it: silence trimmed, the last three minutes kept.</summary>
+    public static float[] PrepareReference(ReadOnlySpan<float> pcm24k) => HaruAudio.PrepareReference(pcm24k, 24000);
+
     /// <summary>Starts a conversation. Only one may be open: dispose the session before opening the next.</summary>
     public HaruDuplexSession OpenSession(HaruDuplexOptions options) => OpenSession(options, null);
 

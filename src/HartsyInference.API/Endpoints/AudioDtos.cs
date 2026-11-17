@@ -15,6 +15,29 @@ public sealed class NativeSpeechRequest : NativeArtifactRequest
     public required SpeechRequest Request { get; set; }
 }
 
+/// <summary>Envelope for <c>/v1/native/duplex/respond</c>: a recording of the user played to a full-duplex speech-to-speech model. The
+/// recording and the voice reference travel as base64 inside the JSON body.</summary>
+public sealed class NativeDuplexRespondRequest : NativeArtifactRequest
+{
+    /// <summary>Catalog id with an optional precision (<c>haru</c>, <c>haru:q4</c>), local path, or HuggingFace repo id.</summary>
+    public required string Model { get; set; }
+
+    /// <summary>Explicit checkpoint path override; wins over catalog/HF resolution. Must be an absolute path.</summary>
+    public string? ModelPath { get; set; }
+
+    /// <summary>The character card, the voice reference and the sampling knobs.</summary>
+    public DuplexSpeechRequest Request { get; set; } = new();
+
+    /// <summary>The user's recording, any rate, mixed down to mono.</summary>
+    public required AudioClip User { get; set; }
+
+    /// <summary>Frames of silence after the recording, so the model can finish speaking (3200 samples each, 133 ms).</summary>
+    public int TailFrames { get; set; }
+
+    /// <summary>Return the conversation as a stereo WAV, the user on the left and the model on the right, instead of the model alone.</summary>
+    public bool Stereo { get; set; }
+}
+
 /// <summary>Envelope for <c>/v1/native/music</c>.</summary>
 public sealed class NativeMusicRequest : NativeArtifactRequest
 {
