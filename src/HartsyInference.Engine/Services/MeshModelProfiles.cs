@@ -157,8 +157,10 @@ internal static class MeshModelProfiles
                     Grid(null, null, 1, null, "Marching-cubes samples per axis; the checkpoint's default when unset."),
                     Rejected(nameof(MeshRequest.FieldOfViewRadians)), Seed(), .. NoHairDeck(), .. NoTexture()],
                 new MeshLicence { Summary = Hunyuan2Terms, Restrictions = HunyuanRestrictions },
-                new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
-                note: "Expects the foreground recentred on white at 512 px; the engine does not prepare the image yet.",
+                id == MeshModelIds.Hunyuan3DMultiView
+                    ? new MeshCost { TypicalSeconds = 120, Basis = "One RTX 3060 (12 GB) run at the defaults: 120 s from the front picture alone and 185 s with left, back and right added (each view lengthens the conditioning); peak memory not measured." }
+                    : new MeshCost { Basis = "Verified stage by stage against the Python reference; the recorded times are historical and differ by build." },
+                note: "Expects the foreground recentred on white at 512 px; Preprocess Auto prepares it.",
                 presets: Presets(
                     new MeshPreset { GridResolution = 384, Basis = "The Gradio demo's High decoding mode; the default grid is 256. Not run at 384 on the 3060." },
                     new MeshPreset { GridResolution = 512, Basis = "The largest grid the demo offers; not run on the 3060 (the FlashVDM and dense decodes both grow with the cube)." }));

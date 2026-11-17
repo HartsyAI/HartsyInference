@@ -58,7 +58,8 @@ public static class MeshModelIds
     /// <summary>Every id with a wired pipeline; anything else is rejected before a checkpoint loads.</summary>
     public static readonly IReadOnlyList<string> All = [.. ImageToMesh, .. SceneMesh, .. RigMesh, .. PaintMesh, .. PartMesh, .. XPartMesh, .. OmniMesh];
 
-    /// <summary>Whether the model takes <see cref="Requests.MeshRequest.Views"/>: Hunyuan3D-2mv builds the shape from them and Hunyuan3D Paint bakes them.</summary>
+    /// <summary>Whether the model takes <see cref="Requests.MeshRequest.Views"/>: Hunyuan3D-2mv builds the shape from them and Hunyuan3D Paint bakes them.
+    /// The 2mv-Fast and 2mv-Turbo builds take views too once they are wired; add them here (and to <see cref="Hunyuan3D"/>) when they are.</summary>
     public static bool TakesViews(string id) => id == Hunyuan3DMultiView || PaintMesh.Contains(id);
 
     /// <summary><see cref="All"/> and <see cref="HairDeck"/>: every id a host can describe and plan.</summary>
