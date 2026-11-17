@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Backends.Attention;
+using HartsyInference.Core.Backends.Latent;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer.Dsa;
 using HartsyInference.LLM.Transformer.Sparse;
@@ -12,8 +13,10 @@ namespace HartsyInference.LLM.Transformer.Compression;
 /// mix, the inverse RoPE, a grouped low-rank output with an optional sigmoid gate, and the output projection.</summary>
 /// <remarks>
 /// <para>Each query at position <c>p</c> attends the positions <c>max(p - Window + 1, 0) .. p</c> and the latents
-/// <c>0 .. (p + 1) / CompressRatio - 1</c>, as DeepSeek V4's <c>fill_short_context_topk_indices</c> builds them for C128 layers. The
-/// attention goes through <see cref="IBackend.Attention"/> over that query's gathered rows.</para>
+/// <c>0 .. (p + 1) / CompressRatio - 1</c>, as DeepSeek V4's <c>fill_short_context_topk_indices</c> builds them for C128 layers. A prefill from
+/// position 0 or a one-token decode step on a GPU runs every query in one <see cref="IBackend.SparseLatentAttention"/> call over the window
+/// rows and the compressed latents, the op DeepSeek-V4.1 attention uses. The CPU, and a chunk that starts past position 0 with more than one
+/// token, run <see cref="IBackend.Attention"/> per query over its gathered rows.</para>
 /// <para>Any chunk length works; a call at position 0 starts a new sequence. Rows are cached in F32; the reference stores them as
 /// BF16 or FP8 depending on the serving KV-cache dtype.</para>
 /// </remarks>
@@ -127,8 +130,46 @@ public sealed class HcaAttention : IDisposable
         latent.AsSpan(0, rows * hd).CopyTo(state.Compressed.AsSpan(first * hd, rows * hd));
     }
 
-    // Each query attends its own window rows plus every visible compressed latent; the row is both key and value (MQA, one KV head).
+    // Every query in one SparseLatentAttention call: window rows (the chunk's own rows in a prefill from 0, the ring in a decode step) and the
+    // visible compressed latents, each row both key and value (MQA, one KV head). Index columns: the window slots, then latent j as
+    // windowRows + j where the query sees it, -1 where it does not.
     private float[] Attend(float[] q, float[] kv, int tokens, int startPos, HcaAttentionState state)
+    {
+        // The CPU's SparseLatentAttention is the scalar reference, slower than its SIMD attention, so the CPU keeps the per-query path.
+        if (!_backend.Device.IsGpu || (startPos > 0 && tokens > 1)) return AttendPerQuery(q, kv, tokens, startPos, state);
+        HcaAttentionSettings s = _s;
+        int h = s.Heads, hd = s.HeadDim, win = s.Window, ratio = s.CompressRatio;
+        bool prefill = startPos == 0;
+        // A decode step reads the ring, so this step's row goes in before the call (Forward writes the same row again after it).
+        if (!prefill) kv.AsSpan(0, hd).CopyTo(state.Window.AsSpan(startPos % win * hd, hd));
+        int windowRows = prefill ? tokens : win;
+        (int idxRows, int idxCols) = WindowIndicesReference.Shape(win, tokens, startPos);
+        using Tensor windowIdx = new(new TensorShape(idxRows, idxCols), DType.I32);
+        WindowIndicesReference.Apply(windowIdx, win, tokens, startPos);
+        ReadOnlySpan<int> slots = windowIdx.AsReadOnlySpan<int>();
+        int compressed = (startPos + tokens) / ratio, cols = idxCols + compressed;
+        using Tensor indexT = new(new TensorShape(tokens, cols), DType.I32);
+        Span<int> index = indexT.AsSpan<int>();
+        for (int t = 0; t < tokens; t++)
+        {
+            Span<int> row = index.Slice(t * cols, cols);
+            slots.Slice((idxRows == 1 ? 0 : t) * idxCols, idxCols).CopyTo(row);
+            int visible = (startPos + t + 1) / ratio;
+            for (int j = 0; j < compressed; j++) row[idxCols + j] = j < visible ? windowRows + j : -1;
+        }
+        using Tensor windowCodes = HostMath.Tensor(prefill ? kv.AsSpan(0, tokens * hd) : state.Window, windowRows, hd);
+        using Tensor? mainCodes = compressed > 0 ? HostMath.Tensor(state.Compressed.AsSpan(0, compressed * hd), compressed, hd) : null;
+        LatentSource window = new(LatentEncoding.F32, windowCodes, null, windowRows, hd);
+        LatentSource main = mainCodes is null ? LatentSource.Empty : new LatentSource(LatentEncoding.F32, mainCodes, null, compressed, hd);
+        using Tensor query = HostMath.Tensor(q, tokens, h, hd);
+        using Tensor output = new(new TensorShape(tokens, h, hd), DType.F32);
+        _backend.SparseLatentAttention(output, query, window, main, indexT, windowRows, _w.Sink, s.Scale);
+        return output.AsReadOnlySpan<float>().ToArray();
+    }
+
+    // Each query attends its own window rows plus every visible compressed latent through IBackend.Attention, one call per query: the CPU's
+    // path, and a chunk that starts past position 0 with more than one token, which the window-index layout above does not describe.
+    private float[] AttendPerQuery(float[] q, float[] kv, int tokens, int startPos, HcaAttentionState state)
     {
         HcaAttentionSettings s = _s;
         int h = s.Heads, hd = s.HeadDim, win = s.Window;
