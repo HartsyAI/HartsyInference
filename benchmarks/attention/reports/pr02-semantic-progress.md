@@ -55,8 +55,33 @@ a direct kernel control, located the mechanism before any candidate-output toler
   the first normalized row; with `rcp.approx` restored all three pass on the RTX 3060. Fully excluded rows still
   give zero and NaN still propagates.
 
-This explains a CUDA-only, all-pixel identity break. It does not by itself clear the Krea gate: a real Krea 2
-Turbo generation must still reproduce `main` exactly on the frozen request, and the 4090 cohort must rerun it.
+### Local real-generation check (RTX 3060)
+
+Expectation stated before the run: bit-identical pixels on every arm, because the encoder's `-1e30` sentinel never
+excludes a whole row, the DiT's cuDNN path is unchanged and the remaining F16 softmax rows are covered by the
+kernel control. Arms: `main` 1c7d20c49 (the commit merged into the stack) and the integrated stack head
+(`codex/attention-validation-pr04` 0fb826ee2), both built fresh, alternated main/stack/main/stack. Request:
+`krea2:turbo` (`krea2_turbo_fp8_scaled.safetensors`, local SwarmUI models root with `qwen3vl_4b_fp8_scaled` and
+`qwen_image_vae`), prompt "a red fox sitting in fresh snow at dawn, detailed fur, soft light", seed 42, CFG 1,
+CUDA, default VRAM policy. Pixel digest is SHA-256 of the decoded RGB array.
+
+| Size, steps | Arm | Wall clock | Peak VRAM (whole card) | Pixel SHA-256 (16) |
+|---|---|---:|---:|---|
+| 512², 2 | main | 67.3 s (cold load) | 7,126 MiB | `380d4d2d16f3a3ab` |
+| 512², 2 | stack | 35.1 s | 7,231 MiB | `380d4d2d16f3a3ab` |
+| 1024², 8 | main r1 | 143.6 s | 7,231 MiB | `4471d4a05fd18f3b` |
+| 1024², 8 | stack r1 | 175.7 s | 7,422 MiB | `4471d4a05fd18f3b` |
+| 1024², 8 | main r2 | 227.0 s | 7,432 MiB | `4471d4a05fd18f3b` |
+| 1024², 8 | stack r2 | 215.5 s | 7,234 MiB | `4471d4a05fd18f3b` |
+
+Every arm is pixel-identical. Negative control: the stack build with only `attention_softmax.ptx` replaced by the
+pre-fix (`rcp.rn`) PTX changes the 512² image (`ac3bbe2f95666286`; 82.8% of pixels differ, max 136/255), so the
+real request does exercise this kernel and the fix is what restores identity.
+
+The 12 GB card streams the 13 GB DiT; per-step times (10–31 s) and wall clock vary with paging and desktop load.
+They are recorded, not compared: this is an identity check, not a timing result. VRAM is whole-card use sampled
+each second, including about 2 GB of desktop. The frozen 4090 request (its own asset hashes, prompt bytes and
+quiet-window protocol) must still be rerun against the new candidate before the gate is marked cleared there.
 The identity gate is unchanged; no tolerance was derived.
 
 ## Local validation
