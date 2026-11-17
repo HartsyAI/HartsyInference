@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using Xunit;
+using static HartsyInference.Diffusion.Tests.TinyWanCheckpoint;
 
 namespace HartsyInference.Diffusion.Tests;
 
@@ -12,14 +13,6 @@ namespace HartsyInference.Diffusion.Tests;
 /// numbers it had. The golden sums are values this code produced, not values from a reference.</summary>
 public sealed class WanTransformerForwardPinTests
 {
-    private const int Heads = 2;
-    private const int HeadDim = 128;
-    private const int Inner = Heads * HeadDim;
-    private const int Layers = 2;
-    private const int Ffn = 64;
-    private const int Channels = 4;
-    private const int TextDim = 32;
-    private const int FreqDim = 32;
     private const int TextLength = 5;
     private const int LatentFrames = 3;
     private const int LatentHeight = 4;
@@ -43,7 +36,7 @@ public sealed class WanTransformerForwardPinTests
     [Fact]
     public void DetectorReadsTheTinyCheckpointBackToItsConfig()
     {
-        using TinyCheckpoint checkpoint = new();
+        using TinyWanCheckpoint checkpoint = new();
 
         WanVideoConfig detected = WanConfigDetector.Detect(checkpoint.Weights);
 
@@ -89,7 +82,7 @@ public sealed class WanTransformerForwardPinTests
     private static (double Sum, double Squares) Forward(float[] timesteps)
     {
         using CpuBackend backend = new();
-        using TinyCheckpoint checkpoint = new();
+        using TinyWanCheckpoint checkpoint = new();
         using WanVideoTransformer transformer = new(TinyConfig);
         transformer.LoadWeights(checkpoint.Weights);
         using Tensor latent = IrisZTestData.Random(new Random(11), 1, Channels, LatentFrames, LatentHeight, LatentWidth);
@@ -114,62 +107,5 @@ public sealed class WanTransformerForwardPinTests
             $"sum {sum:R} against the pinned {expectedSum:R}");
         Assert.True(Math.Abs(squares - expectedSquares) <= RelativeTolerance * Math.Max(1.0, expectedSquares),
             $"sum of squares {squares:R} against the pinned {expectedSquares:R}");
-    }
-
-    /// <summary>A diffusers-named Wan checkpoint with random weights, built in memory.</summary>
-    private sealed class TinyCheckpoint : IDisposable
-    {
-        private readonly Random _rng = new(7);
-
-        public TinyCheckpoint()
-        {
-            Weights["patch_embedding.weight"] = Random(Inner, Channels, 1, 2, 2);
-            Weights["patch_embedding.bias"] = Random(Inner);
-            Weights["proj_out.weight"] = Random(Channels * 4, Inner);
-            Weights["proj_out.bias"] = Random(Channels * 4);
-            Weights["scale_shift_table"] = Random(1, 2, Inner);
-            Weights["condition_embedder.time_embedder.linear_1.weight"] = Random(Inner, FreqDim);
-            Weights["condition_embedder.time_embedder.linear_1.bias"] = Random(Inner);
-            Weights["condition_embedder.time_embedder.linear_2.weight"] = Random(Inner, Inner);
-            Weights["condition_embedder.time_embedder.linear_2.bias"] = Random(Inner);
-            Weights["condition_embedder.time_proj.weight"] = Random(6 * Inner, Inner);
-            Weights["condition_embedder.time_proj.bias"] = Random(6 * Inner);
-            Weights["condition_embedder.text_embedder.linear_1.weight"] = Random(Inner, TextDim);
-            Weights["condition_embedder.text_embedder.linear_1.bias"] = Random(Inner);
-            Weights["condition_embedder.text_embedder.linear_2.weight"] = Random(Inner, Inner);
-            Weights["condition_embedder.text_embedder.linear_2.bias"] = Random(Inner);
-            for (int i = 0; i < Layers; i++)
-            {
-                string block = $"blocks.{i}";
-                Weights[$"{block}.scale_shift_table"] = Random(1, 6, Inner);
-                foreach (string attention in new[] { "attn1", "attn2" })
-                {
-                    foreach (string projection in new[] { "to_q", "to_k", "to_v", "to_out.0" })
-                    {
-                        Weights[$"{block}.{attention}.{projection}.weight"] = Random(Inner, Inner);
-                        Weights[$"{block}.{attention}.{projection}.bias"] = Random(Inner);
-                    }
-                    Weights[$"{block}.{attention}.norm_q.weight"] = Ones(Inner);
-                    Weights[$"{block}.{attention}.norm_k.weight"] = Ones(Inner);
-                }
-                Weights[$"{block}.norm2.weight"] = Ones(Inner);
-                Weights[$"{block}.norm2.bias"] = Random(Inner);
-                Weights[$"{block}.ffn.net.0.proj.weight"] = Random(Ffn, Inner);
-                Weights[$"{block}.ffn.net.0.proj.bias"] = Random(Ffn);
-                Weights[$"{block}.ffn.net.2.weight"] = Random(Inner, Ffn);
-                Weights[$"{block}.ffn.net.2.bias"] = Random(Inner);
-            }
-        }
-
-        public Dictionary<string, Tensor> Weights { get; } = [];
-
-        public void Dispose()
-        {
-            foreach (Tensor tensor in Weights.Values) tensor.Dispose();
-        }
-
-        private Tensor Random(params long[] dims) => IrisZTestData.Random(_rng, dims);
-
-        private static Tensor Ones(params long[] dims) => IrisZTestData.Filled(1f, dims);
     }
 }
