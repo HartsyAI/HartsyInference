@@ -57,15 +57,21 @@ internal sealed unsafe class AdaLnSwiGluStack : IDisposable
     internal Tensor Forward(IBackend backend, Tensor x, Tensor activeCondition)
     {
         int n = (int)x.Shape[1];
-        Tensor current = LayerForward(backend, x, activeCondition, _layers[0], n);
-        for (int i = 1; i < _layers.Length; i++)
+        Tensor current = x;
+        foreach (Layer layer in _layers)
         {
-            Tensor next = LayerForward(backend, current, activeCondition, _layers[i], n);
-            current.Dispose();
+            Tensor next = LayerForward(backend, current, activeCondition, layer, n);
+            if (!ReferenceEquals(current, x))
+            {
+                current.Dispose();
+            }
             current = next;
         }
         Tensor result = FinalForward(backend, current, activeCondition, n);
-        current.Dispose();
+        if (!ReferenceEquals(current, x))
+        {
+            current.Dispose();
+        }
         return result;
     }
 
