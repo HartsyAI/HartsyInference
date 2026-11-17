@@ -27,13 +27,16 @@ public sealed class OkLabTests
     [Fact]
     public void TransferFunctionRoundTripsAndKeepsItsFixedPoints()
     {
-        Assert.Equal(0f, OkLab.SrgbToLinear(0f));
-        Assert.Equal(1f, OkLab.SrgbToLinear(1f), 6);
-        Assert.Equal(1f, OkLab.LinearToSrgb(1f), 6);
-        Assert.Equal(0.21404f, OkLab.SrgbToLinear(0.5f), 4);
-        for (float value = -0.2f; value <= 1.2f; value += 0.01f)
-            Assert.Equal(value, OkLab.LinearToSrgb(OkLab.SrgbToLinear(value)), 5);
-        Assert.True(float.IsFinite(OkLab.SrgbToLinear(-0.3f)) && OkLab.SrgbToLinear(-0.3f) < 0f);
+        Assert.Equal(0f, Srgb.ToLinear(0f));
+        Assert.Equal(1f, Srgb.ToLinear(1f), 6);
+        Assert.Equal(1f, Srgb.FromLinear(1f), 6);
+        Assert.Equal(0.21404f, Srgb.ToLinear(0.5f), 4);
+        for (int step = -20; step <= 120; step++)
+        {
+            float value = step / 100f;
+            Assert.Equal(value, Srgb.FromLinear(Srgb.ToLinear(value)), 5);
+        }
+        Assert.True(float.IsFinite(Srgb.ToLinear(-0.3f)) && Srgb.ToLinear(-0.3f) < 0f);
     }
 
     [Fact]
@@ -67,13 +70,33 @@ public sealed class OkLabTests
 
         for (int i = 0; i < pixels; i++)
         {
-            (float l, float a, float b) = OkLab.FromLinearSrgb(OkLab.SrgbToLinear(srgb[i]),
-                OkLab.SrgbToLinear(srgb[pixels + i]), OkLab.SrgbToLinear(srgb[2 * pixels + i]));
+            (float l, float a, float b) = OkLab.FromLinearSrgb(Srgb.ToLinear(srgb[i]),
+                Srgb.ToLinear(srgb[pixels + i]), Srgb.ToLinear(srgb[2 * pixels + i]));
             Assert.Equal(l, okLab[i]);
             Assert.Equal(a, okLab[pixels + i]);
             Assert.Equal(b, okLab[2 * pixels + i]);
         }
         for (int i = 0; i < srgb.Length; i++) Assert.InRange(back[i], srgb[i] - 5e-5f, srgb[i] + 5e-5f);
+    }
+
+    [Fact]
+    public void PlanarConversionCanRunInPlaceOnOneBuffer()
+    {
+        const int pixels = 100;
+        Random rng = new(8);
+        float[] original = new float[3 * pixels];
+        for (int i = 0; i < original.Length; i++) original[i] = (float)rng.NextDouble();
+        float[] separate = new float[3 * pixels];
+        OkLab.FromSrgbPlanar(original, separate, pixels);
+        float[] inPlace = (float[])original.Clone();
+
+        OkLab.FromSrgbPlanar(inPlace, inPlace, pixels);
+
+        Assert.True(separate.AsSpan().SequenceEqual(inPlace));
+        float[] backSeparate = new float[3 * pixels];
+        OkLab.ToSrgbPlanar(separate, backSeparate, pixels);
+        OkLab.ToSrgbPlanar(inPlace, inPlace, pixels);
+        Assert.True(backSeparate.AsSpan().SequenceEqual(inPlace));
     }
 
     [Fact]
@@ -91,6 +114,8 @@ public sealed class OkLabTests
         (float rawR, float rawG, _) = OkLab.ToLinearSrgb(0.5f, 0.3f, 0.3f);
         Assert.True(rawR > 1f || rawG < 0f, "the test colour must start outside the gamut");
         float[] inside = [0.6f, 0.05f, -0.04f];
+        (float insideR, float insideG, float insideB) = OkLab.ToLinearSrgb(0.6f, 0.05f, -0.04f);
+        foreach (float component in new[] { insideR, insideG, insideB }) Assert.InRange(component, 0f, 1f);
         float[] insideBefore = (float[])inside.Clone();
 
         OkLab.ClipToSrgbGamut(outside, 1);
@@ -132,5 +157,10 @@ public sealed class OkLabTests
         Assert.Throws<ArgumentException>(() => new OkLabNormalization([0f, 0f, 0f], [1f, 0f, 1f]));
         Assert.Throws<ArgumentException>(() => new OkLabNormalization([0f, 0f], [1f, 1f]));
         Assert.Throws<InvalidOperationException>(() => default(OkLabNormalization).Normalize(new float[3], 1));
+        Assert.Throws<ArgumentException>(() => new OkLabNormalization([0f, 0f, 0f], [1f, float.PositiveInfinity, 1f]));
+        // Equal numbers make equal values.
+        OkLabNormalization same = new([0.5f, 0.01f, -0.02f], [0.2f, 0.05f, 0.08f]);
+        Assert.Equal(normalization, same);
+        Assert.Equal(normalization.GetHashCode(), same.GetHashCode());
     }
 }
