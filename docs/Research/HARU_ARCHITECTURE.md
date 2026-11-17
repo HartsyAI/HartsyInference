@@ -112,7 +112,9 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
 - 2026-11-17, MeanFlow head, CPU F32 (`HaruMeanFlowHeadTests`): latents from the tiny checkpoint's hidden states and noise,
   un-normalized as the session does, 8.9e-7 relative to upstream. The same head with BF16 weights as stored stays within 1.2e-2
   of the F32 head. `VibeVoiceDiffusionHead` now runs on the same stack and scalar embedder; its output bits on a tiny random
-  head are unchanged (`VibeVoiceDiffusionHeadGoldenTests`, pinned before the move, CPU F32).
+  head are unchanged (`VibeVoiceDiffusionHeadGoldenTests`: bit-identical on the reference host, pinned before the move; the test
+  keeps the values with a 1e-6 tolerance so it holds on other CPUs). Other step counts and guidance weights match upstream to the same
+  bound (`haru_head_steps_expected.safetensors`, `tools/haru/head_steps_reference.py`).
 - 2026-11-17, language model, CPU F32 (`HaruLmReferenceTests`): the stream-summed input (text embedding plus both projected
   latent streams, masks, `(raw + bias) * scale`), the trunk over the 22-position prompt in one call and then six single
   positions: hidden states 3.8e-6 relative to upstream, text logits of the six steps 8.6e-7, the F32 PAD/EOP logits 7.0e-7.
@@ -131,6 +133,19 @@ through Whisper, Qwen3.5 GGUF greedy digest) need weights that are not on the de
 To rerun the real-weight codec check: fetch the `codec.*` range into a standalone safetensors file (`tools/haru/fetch_codec.py`), run the upstream codec
 on a clip (`tools/haru/codec_reference.py`) to write `codec_real_expected.safetensors`, then `HARU_CODEC_REAL_DIR=<dir> HARTSY_REQUIRE_REAL_WEIGHTS=1 dotnet test
 tests/HartsyInference.Audio.Tests -m:1 --filter FullyQualifiedName~HaruCodecRealWeights`.
+
+## Costs and traps
+
+- The tied head is BF16 `[248,320, 2,560]`. On the CPU backend `LinearTransB` widens a non-F32 weight to F32 on every call, about
+  2.5 GB of allocation per projection, so a CPU run must project only the rows it needs: `HaruLm.Logits` takes the last `rows`
+  rows of a hidden-state tensor, and the frame loop asks for one. PAD and EOP never go through the table; `StreamLogits` reads
+  their two rows directly.
+- `VibeVoiceAcousticTokenizerModel.Decode` tells channels-last `[B, T, D]` from channels-first `[B, D, T]` by `Shape[1] == VaeDim`. A
+  whole-clip decode of exactly `VaeDim` frames (64 frames, 8.53 s, on the release; 16 on the tiny fixture) is read the wrong way
+  with no error. The frame loop decodes one frame at a time (`Shape[1] == 1`), which is safe; a whole decode of that length must
+  pass channels-first. Not fixed here: the class is shared by every VibeVoice model.
+- `HaruLm` clamps its capacity to the model's `max_position_embeddings` and exposes the result as `Capacity`; the session reports
+  a conversation that reaches it as done rather than failing inside the trunk cache.
 
 ## Doc debt found
 
