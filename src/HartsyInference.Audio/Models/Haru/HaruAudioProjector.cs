@@ -76,9 +76,13 @@ internal sealed class HaruAudioProjector : IDisposable
 
     private Tensor Vector(IReadOnlyDictionary<string, Tensor> weights, string key, int size)
     {
-        if (!weights.TryGetValue(key, out Tensor? t) || t.ElementCount != size)
+        if (!weights.TryGetValue(key, out Tensor? t))
         {
-            throw new InvalidDataException($"The Haru checkpoint needs '{key}' with {size} values.");
+            throw new KeyNotFoundException($"The Haru checkpoint has no tensor '{key}'.");
+        }
+        if (t.ElementCount != size)
+        {
+            throw new InvalidDataException($"'{key}' must hold {size} values, it has {t.ElementCount}.");
         }
         if (t.DType == DType.F32)
         {

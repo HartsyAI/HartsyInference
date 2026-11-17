@@ -75,6 +75,34 @@ public sealed unsafe class HaruSessionReferenceTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Start_RefusesAPromptThatDoesNotFitTheCapacity_AndStepStopsAfterTheLastFrame()
+    {
+        using SafeTensorsLoader weights = new();
+        weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
+        HaruConfig config = HaruConfig.FromJson(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        Dictionary<string, Tensor> tensors = weights.GetAllTensors();
+        using CpuBackend backend = new();
+        using HaruMeanFlowHead head = new(config.Head);
+        head.LoadWeights(tensors);
+        using HaruCodecSession codec = new(HaruCodec.Create(config.Codec, tensors), backend, config.LatentDim, config.Codec.FixStd);
+        HaruDuplexOptions options = new() { Temperature = 0f, MaxFrames = 3 };
+
+        using (HaruLm small = new(config, tensors, capacity: 8))
+        {
+            HaruDuplexSession tooSmall = new(config, small, head, codec, ByteCodec, backend, options);
+            Assert.Throws<ArgumentException>(() => tooSmall.Start("a card that does not fit in eight positions", []));
+            Assert.Throws<InvalidOperationException>(() => tooSmall.Step(new float[config.FrameSamples])); // the failed Start left no conversation
+        }
+
+        using HaruLm lm = new(config, tensors, capacity: 64);
+        HaruDuplexSession session = new(config, lm, head, codec, ByteCodec, backend, options);
+        Assert.False(session.Start("x", []).Done);
+        Assert.False(session.Step(new float[config.FrameSamples]).Done);
+        Assert.True(session.Step(new float[config.FrameSamples]).Done);
+        Assert.Throws<InvalidOperationException>(() => session.Step(new float[config.FrameSamples]));
+    }
+
+    [Fact]
     public void Respond_PlaysARecordingAndReturnsAReplyOfTheSameLength()
     {
         using SafeTensorsLoader weights = new();

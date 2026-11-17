@@ -69,7 +69,9 @@ public sealed unsafe class HaruCodecRealWeightsTests(ITestOutputHelper output)
         Check("whole clip encode", Read(mean), wantMean);
 
         int frames = (int)mean.Shape[1];
-        using Tensor lat = Make(wantMean, 1, frames, 64);
+        int latentDim = model.Config.VaeDim;
+        int frameSamples = HaruCodec.FrameSamples;
+        using Tensor lat = Make(wantMean, 1, frames, latentDim);
         using Tensor audio = model.Decode(backend, lat, 1);
         Check("whole decode", Read(audio), Read(expected.GetTensor("ref.audio")));
 
@@ -78,8 +80,8 @@ public sealed unsafe class HaruCodecRealWeightsTests(ITestOutputHelper output)
         List<float> streamedMean = [];
         for (int f = 0; f < 3; f++)
         {
-            using Tensor one = Make(firstFrames[(f * 3200)..((f + 1) * 3200)], 1, 1, 3200);
-            using Tensor m = model.Encode(backend, one, 1, 3200, encoderCache, [0]);
+            using Tensor one = Make(firstFrames[(f * frameSamples)..((f + 1) * frameSamples)], 1, 1, frameSamples);
+            using Tensor m = model.Encode(backend, one, 1, frameSamples, encoderCache, [0]);
             streamedMean.AddRange(Read(m));
         }
         Check("streamed encode", [.. streamedMean], Read(expected.GetTensor("ref.stream_mean")));
@@ -88,7 +90,7 @@ public sealed unsafe class HaruCodecRealWeightsTests(ITestOutputHelper output)
         List<float> streamedAudio = [];
         for (int f = 0; f < 3; f++)
         {
-            using Tensor one = Make(wantMean[(f * 64)..((f + 1) * 64)], 1, 1, 64);
+            using Tensor one = Make(wantMean[(f * latentDim)..((f + 1) * latentDim)], 1, 1, latentDim);
             using Tensor a = model.Decode(backend, one, 1, decoderCache, [0]);
             streamedAudio.AddRange(Read(a));
         }

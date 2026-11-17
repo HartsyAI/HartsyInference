@@ -87,6 +87,10 @@ internal sealed record HaruConfig
         {
             throw new InvalidDataException("The PAD and EOP tokens must differ.");
         }
+        if (EosTokenId is int eos && (eos < 0 || eos >= Lm.VocabSize || eos == PadTokenId || eos == EopTokenId))
+        {
+            throw new InvalidDataException($"eos_token_id {eos} must be inside the {Lm.VocabSize}-token vocabulary and differ from PAD and EOP.");
+        }
         if (!Lm.TieWordEmbeddings)
         {
             throw new InvalidDataException("Haru reads its text logits from the tied embedding table; tie_word_embeddings must be true.");

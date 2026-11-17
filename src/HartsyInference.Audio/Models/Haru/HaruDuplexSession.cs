@@ -33,6 +33,7 @@ public sealed unsafe class HaruDuplexSession : IDisposable
     private readonly Action? _release;
     private int _index;
     private int _disposed;
+    private bool _done;
 
     /// <summary>Creates a session; <paramref name="noise"/> defaults to a generator seeded with <see cref="HaruDuplexOptions.Seed"/>.</summary>
     internal HaruDuplexSession(HaruConfig config, HaruLm lm, HaruMeanFlowHead head, HaruCodecSession codec, HaruTextCodec text,
@@ -67,6 +68,9 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         }
     }
 
+    /// <summary>The longest voice reference this session keeps, in seconds.</summary>
+    internal double ReferenceSeconds => _options.ReferenceSeconds;
+
     /// <summary>Runs the card and the voice reference (prepared mono 24 kHz audio, or empty) and returns the model's frame 0.</summary>
     public HaruFrame Start(string card, ReadOnlySpan<float> reference)
     {
@@ -79,6 +83,8 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         }
         _lm.Reset();
         _codec.Reset();
+        _latent = null; // a Start that fails below leaves no conversation to Step
+        _done = false;
         _history.Clear();
         _sampler = BuildSampler();
         _detokenizer = new HaruStreamDetokenizer(_text.Decode, _config.PadTokenId, _config.EopTokenId);
@@ -92,17 +98,23 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         }
         int d = _config.LatentDim;
         Tensor? last = null;
-        for (int start = 0; start < prompt.Length; start += PrefillChunk)
+        try
         {
-            int rows = Math.Min(PrefillChunk, prompt.Length - start);
-            using Tensor embeds = _lm.Embed(_backend, prompt.Tokens.AsSpan(start, rows), prompt.ModelLatents.AsSpan(start * d, rows * d),
-                prompt.ModelMask.AsSpan(start, rows), prompt.UserLatents.AsSpan(start * d, rows * d), prompt.UserMask.AsSpan(start, rows));
-            using Tensor hidden = _lm.Forward(_backend, embeds, rows);
-            last?.Dispose();
-            last = LastRow(hidden, rows);
+            for (int start = 0; start < prompt.Length; start += PrefillChunk)
+            {
+                int rows = Math.Min(PrefillChunk, prompt.Length - start);
+                using Tensor embeds = _lm.Embed(_backend, prompt.Tokens.AsSpan(start, rows), prompt.ModelLatents.AsSpan(start * d, rows * d),
+                    prompt.ModelMask.AsSpan(start, rows), prompt.UserLatents.AsSpan(start * d, rows * d), prompt.UserMask.AsSpan(start, rows));
+                using Tensor hidden = _lm.Forward(_backend, embeds, rows);
+                last?.Dispose();
+                last = LastRow(hidden, rows);
+            }
+            return Emit(last!, started);
         }
-        using Tensor row = last!;
-        return Emit(row, started);
+        finally
+        {
+            last?.Dispose();
+        }
     }
 
     /// <summary>Consumes the user's next frame (3200 samples at 24 kHz) and returns the model's next frame.</summary>
@@ -112,6 +124,10 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         if (_latent is null || _sampler is null)
         {
             throw new InvalidOperationException("Call Start before Step.");
+        }
+        if (_done)
+        {
+            throw new InvalidOperationException("The conversation is done: it reached its frame limit or the model position capacity.");
         }
         if (userFrame.Length != _config.FrameSamples)
         {
@@ -154,7 +170,8 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         _history.Add(token);
         string text = _detokenizer!.Push(token);
         int index = _index++;
-        return new HaruFrame(audio, token, text, index, Stopwatch.GetElapsedTime(started).TotalSeconds, _index >= _options.MaxFrames || _lm.Position + 1 >= _lm.Capacity);
+        _done = _index >= _options.MaxFrames || _lm.Position + 1 >= _lm.Capacity;
+        return new HaruFrame(audio, token, text, index, Stopwatch.GetElapsedTime(started).TotalSeconds, _done);
     }
 
     /// <summary>The text logits of a hidden row, with the PAD and EOP logits taken in F32, the EOP bias added and, for the first frame of a
@@ -182,6 +199,8 @@ public sealed unsafe class HaruDuplexSession : IDisposable
         return logits;
     }
 
+    /// <summary>DRY first, on the raw logits, then temperature, top-k and top-p: upstream applies the penalty in <c>_emit</c> before
+    /// <c>sample_token</c> divides by the temperature, so a penalty is not scaled by it. The silent and end tokens are exempt.</summary>
     private SamplerChain BuildSampler()
     {
         List<ISamplerStep> steps = [];

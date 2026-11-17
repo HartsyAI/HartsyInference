@@ -11,8 +11,10 @@ public sealed record HaruDuplexOptions
     /// <summary>Text sampling temperature; zero or less takes the most likely token.</summary>
     public float Temperature { get; init; } = 0.7f;
 
+    /// <summary>Sampling keeps only this many of the most likely tokens; zero or less keeps all.</summary>
     public int TopK { get; init; } = 25;
 
+    /// <summary>Sampling keeps the smallest set of tokens whose probabilities add up to this; 1 keeps all.</summary>
     public float TopP { get; init; } = 1.0f;
 
     /// <summary>The repetition penalty of the text stream; null turns it off.</summary>

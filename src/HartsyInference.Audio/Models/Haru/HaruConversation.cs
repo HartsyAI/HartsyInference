@@ -20,7 +20,7 @@ internal static class HaruConversation
         float[] user = new float[count * frame];
         userAudio.CopyTo(user);
 
-        float[] prepared = HaruAudio.PrepareReference(reference, config.SampleRate);
+        float[] prepared = HaruAudio.PrepareReference(reference, config.SampleRate, session.ReferenceSeconds);
         List<HaruFrame> frames = [session.Start(card, prepared)];
         for (int i = 0; i < count - 1; i++)
         {
