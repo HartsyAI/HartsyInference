@@ -38,6 +38,27 @@ P2 production pin remains immutable while the corrected harness and first-diverg
   Only actual negative infinity represents the exclusion tested here. New F32/F16/BF16 controls pin finite
   sentinel behavior and separate nonzero-score/ordinary-bias mixing at the existing dtype tolerances.
 
+## Krea CUDA identity failure: diagnosis
+
+The 4090 report's P2 Krea CUDA image failed the identity gate while Vulkan stayed identical. Source tracing, then
+a direct kernel control, located the mechanism before any candidate-output tolerance was considered:
+
+- Krea 2's Qwen3-VL-4B text encoder runs strict-F32 SDPA (no `allowF16`) with a finite `-1e30` causal mask, so on
+  CUDA it takes the materialized or query-tiled rows. Its DiT attention is unmasked grouped token-major cuDNN F16,
+  which PR 02 does not change. The Vulkan scalar path has no PR 02 source change.
+- PR 02 replaced the legacy `softmax_f32`/`softmax_f16` PTX on those rows with `attention_softmax`. Both compute
+  `ex2.approx((x - max) * log2e)` with the same 256-thread block and reduction order, but the new kernel normalized
+  with `rcp.rn` (`1.0f / sum`) where the legacy kernel used `rcp.approx`. Every finite F32 row therefore changed in
+  its last bits, masked or not; F16 storage rounding hid the difference there.
+- `AttentionSoftmaxReproducesLegacySoftmaxBitsOnFiniteRows` compares the two kernels bit for bit on 37×1031 rows
+  (F32 masked with a `-1e30` sentinel, F32 unmasked, F16 unmasked). With the previous PTX both F32 cases fail at
+  the first normalized row; with `rcp.approx` restored all three pass on the RTX 3060. Fully excluded rows still
+  give zero and NaN still propagates.
+
+This explains a CUDA-only, all-pixel identity break. It does not by itself clear the Krea gate: a real Krea 2
+Turbo generation must still reproduce `main` exactly on the frozen request, and the 4090 cohort must rerun it.
+The identity gate is unchanged; no tolerance was derived.
+
 ## Local validation
 
 The new GPU semantic class covers 45 cases: softcap/ALiBi ordering, empty local windows with non-finite sinks,
