@@ -99,6 +99,40 @@ public sealed class IdolTurboTests : IDisposable
     }
 
     [Fact]
+    public void EachWeightCarriesTheSlowTermThenTheFastTermWithTheirOwnFactors()
+    {
+        IdolConfig tiny = IdolModelTests.TinyConfig();
+        Dictionary<string, Tensor> baseTensors = IdolModelTests.TinyTensors(tiny, seed: 6);
+        string slowPath = WriteLora("slow.safetensors", tiny, seed: 1, ""), fastPath = WriteLora("fast.safetensors", tiny, seed: 2, "");
+        try
+        {
+            using IdolWeights weights = IdolWeights.FromTensors(tiny, baseTensors);
+            using IdolTurboAdapters turbo = IdolTurboAdapters.Attach(Backend, weights, slowPath, fastPath);
+            using SafeTensorsLoader slowLoader = new(), fastLoader = new();
+            slowLoader.Load(slowPath);
+            fastLoader.Load(fastPath);
+            Dictionary<string, Tensor> slow = slowLoader.GetAllTensors(), fast = fastLoader.GetAllTensors();
+
+            foreach (string module in new[] { "blocks.0.attn.qkv", "noise_refiner.0.mlp.mlp.2", "context_refiner.0.attn.out", "blocks.1.mlp.mlp.0" })
+            {
+                LowRankAdjunct adjunct = turbo.Weights[module + ".weight"].LowRankAdjunct!;
+                Assert.Equal(2, adjunct.Terms.Count);
+                Assert.Equal(slow[module + ".lora_down.weight"].AsReadOnlySpan<float>().ToArray(), adjunct.Terms[0].Down.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(slow[module + ".lora_up.weight"].AsReadOnlySpan<float>().ToArray(), adjunct.Terms[0].Up!.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(fast[module + ".lora_down.weight"].AsReadOnlySpan<float>().ToArray(), adjunct.Terms[1].Down.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(fast[module + ".lora_up.weight"].AsReadOnlySpan<float>().ToArray(), adjunct.Terms[1].Up!.AsReadOnlySpan<float>().ToArray());
+                Assert.Equal(1f, adjunct.Terms[0].Scale);
+                Assert.Equal(1f, adjunct.Terms[1].Scale);
+                Assert.NotSame(adjunct.Terms[0].Gate, adjunct.Terms[1].Gate);
+            }
+        }
+        finally
+        {
+            foreach (Tensor t in baseTensors.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
     public void AFileThatDoesNotMatchTheDenoiserIsRefusedByName()
     {
         IdolConfig tiny = IdolModelTests.TinyConfig();

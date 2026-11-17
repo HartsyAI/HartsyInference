@@ -40,13 +40,13 @@ public sealed class IdolTurboParityTests
             using IdolTurboAdapters turbo = IdolTurboAdapters.Attach(new CpuBackend(), inputs.Weights, inputs.SlowPath, inputs.FastPath);
             using IdolDenoiser model = new(turbo.Weights);
             CpuBackend backend = new();
-            using Tensor context = model.EmbedContext(backend, inputs.Cond["feature1"], inputs.Cond["feature2"]);
+            using PhaseContexts contexts = turbo.EmbedContexts(backend, model, inputs.Cond["feature1"], inputs.Cond["feature2"]);
             Dictionary<string, Tensor> want = inputs.Want("den", "idol-turbo.safetensors");
             List<string> failures = [];
             foreach ((string phase, float t) in new[] { ("slow", 800f), ("fast", 200f) })
             {
                 using IDisposable scope = turbo.Phase(t);
-                (Tensor velocity, Tensor camera) = model.Forward(backend, inputs.Denoiser["latent"], inputs.Denoiser["camera"], t, context);
+                (Tensor velocity, Tensor camera) = model.Forward(backend, inputs.Denoiser["latent"], inputs.Denoiser["camera"], t, contexts.At(t));
                 using (velocity)
                 using (camera)
                 {
@@ -69,10 +69,10 @@ public sealed class IdolTurboParityTests
             CpuBackend backend = new();
             using IdolTurboAdapters turbo = IdolTurboAdapters.Attach(backend, inputs.Weights, inputs.SlowPath, inputs.FastPath);
             using IdolDenoiser model = new(turbo.Weights);
-            using Tensor context = model.EmbedContext(backend, inputs.Cond["feature1"], inputs.Cond["feature2"]);
+            using PhaseContexts contexts = turbo.EmbedContexts(backend, model, inputs.Cond["feature1"], inputs.Cond["feature2"]);
             Dictionary<string, Tensor> want = inputs.Want("samp", "sampler-idol-turbo.safetensors");
-            (Tensor latent, Tensor camera) = IdolSampler.Sample(backend, model, context, context, inputs.Denoiser["latent"], inputs.Denoiser["camera"],
-                IdolTurboAdapters.DefaultSteps, guidance: 0f, IdolSampler.DefaultRescaleT, passScope: turbo.Phase);
+            (Tensor latent, Tensor camera) = IdolSampler.Sample(backend, model, contexts.Slow, contexts.Slow, inputs.Denoiser["latent"], inputs.Denoiser["camera"],
+                IdolTurboAdapters.DefaultSteps, guidance: 0f, IdolSampler.DefaultRescaleT, passScope: turbo.Phase, contextAt: contexts.At);
             List<string> failures = [];
             using (latent)
             using (camera)

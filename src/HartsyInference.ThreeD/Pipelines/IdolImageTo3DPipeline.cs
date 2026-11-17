@@ -210,14 +210,16 @@ public sealed unsafe class IdolImageTo3DPipeline
         _backend.PreloadWeights(model.EnumerateWeights());
         try
         {
-            using Tensor positive = model.EmbedContext(_backend, feature1, feature2);
+            using Tensor? positive = adapters is null ? model.EmbedContext(_backend, feature1, feature2) : null;
+            using PhaseContexts? phases = adapters?.EmbedContexts(_backend, model, feature1, feature2);
             // Without guidance there is no blank pass, so the blank image streams are not embedded.
             using Tensor zero1 = new(feature1.Shape, DType.F32), zero2 = new(feature2.Shape, DType.F32);
             using Tensor? blank = adapters is null ? model.EmbedContext(_backend, zero1, zero2) : null;
             using Tensor noise = SeedGenerator.CreateNoise(new TensorShape(1, config.Tokens, config.LatentChannels), seed);
             using Tensor cameraNoise = SeedGenerator.CreateNoise(new TensorShape(1, 1, config.CameraChannels), CameraSeed(seed));
             log?.Invoke($"denoiser loaded, image streams embedded ({clock.Elapsed.TotalSeconds:F1} s)");
-            (Tensor latent, Tensor camera) = IdolSampler.Sample(_backend, model, positive, blank ?? positive, noise, cameraNoise, steps, guidance, rescaleT, onStep, adapters is null ? null : adapters.Phase);
+            (Tensor latent, Tensor camera) = IdolSampler.Sample(_backend, model, positive ?? phases!.Slow, blank ?? positive ?? phases!.Slow, noise, cameraNoise, steps, guidance, rescaleT, onStep,
+                adapters is null ? null : adapters.Phase, phases is null ? null : phases.At);
             camera.Dispose();
             _ = latent.DataPointer;
             log?.Invoke($"{steps} steps ({clock.Elapsed.TotalSeconds:F1} s)");

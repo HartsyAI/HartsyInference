@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora;
@@ -92,11 +93,35 @@ public sealed class IdolTurboAdapters : IDisposable
         }
     }
 
+    /// <summary>Whether a pass at <paramref name="tModel"/> (Idol's <c>1000·t</c>) is in the slow phase.</summary>
+    public static bool IsSlow(float tModel) => tModel / 1000f >= PhaseThreshold;
+
+    /// <summary>The image stream of <paramref name="model"/> under each expert. The context refiner's four matrices per block carry the experts too, so the stream depends on the phase and is embedded once under each, not once for the picture as the base model does.</summary>
+    public PhaseContexts EmbedContexts(IBackend backend, IdolDenoiser model, Tensor feature1, Tensor feature2)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        Tensor slow, fast;
+        using (Phase(1000f))
+            slow = model.EmbedContext(backend, feature1, feature2);
+        try
+        {
+            using (Phase(0f))
+                fast = model.EmbedContext(backend, feature1, feature2);
+        }
+        catch
+        {
+            slow.Dispose();
+            throw;
+        }
+
+        return new PhaseContexts(slow, fast);
+    }
+
     /// <summary>The scope that runs one forward pass at <paramref name="tModel"/> (Idol's <c>1000·t</c>) with its phase's expert on: slow at or above <see cref="PhaseThreshold"/>, fast below.</summary>
     public IDisposable Phase(float tModel)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return (tModel / 1000f >= PhaseThreshold ? _slow : _fast).Enable(1f);
+        return (IsSlow(tModel) ? _slow : _fast).Enable(1f);
     }
 
     /// <summary>Releases the aliases the stack made and the two files.</summary>
