@@ -78,8 +78,8 @@ user stream. Prefill runs in chunks of 512. There is no explicit barge-in logic:
 | Head | `VibeVoiceDiffusionHead` is key-bound and `internal` | new shared layer stack, see the plan |
 | DRY sampler | none in `src/` | new `ISamplerStep` |
 
-Codec key map (Haru to engine; `tok.` is the caller's prefix). Verified on the tiny checkpoint below with no change to the
-shared classes:
+Codec key map (Haru to engine), implemented in `Audio/Models/Haru/HaruCodecWeights.cs` (a key outside it throws) with the
+config in `HaruCodec.ConfigFrom`. Verified on the tiny checkpoint below with no change to the shared classes:
 
 | Haru | Engine |
 |---|---|
@@ -98,7 +98,7 @@ Tiny checkpoint: `tools/haru/haru_reference.py` builds a random Haru (hidden 64,
 1) from the unmodified upstream modules and writes fixtures under `tests/HartsyInference.Audio.Tests/Fixtures/Haru/`
 (upstream `7fe6b766`, transformers 5.22.2, torch 2.6.0, CPU F32, one thread).
 
-- 2026-11-17, codec, unmodified engine classes through the key map above, CPU F32: whole clip ending mid-frame
+- 2026-11-17, codec, unmodified engine classes built by `HaruCodec.Create`, CPU F32 (`HaruCodecReferenceTests`): whole clip ending mid-frame
   (5 x 3200 + 1234 samples) encode 9.1e-7 relative, whole decode 2.1e-6, three streamed encode frames 8.3e-7, three
   streamed decode frames 3.1e-6. Streaming and whole-clip agree in the engine on a separate synthetic codec
   (`VibeVoiceCodecStreamingTests`, bit-exact on CPU). This settles the codec questions: down/up index base is 0 with a

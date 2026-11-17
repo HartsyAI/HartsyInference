@@ -1,4 +1,5 @@
-using System.Text.RegularExpressions;
+using System.Text.Json;
+using HartsyInference.Audio.Models.Haru;
 using HartsyInference.Audio.Models.VibeVoice;
 using HartsyInference.Core.Backends.Cpu;
 using HartsyInference.Core.Tensors;
@@ -8,26 +9,13 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Audio.Tests.VibeVoice;
 
-/// <summary>The engine's VibeVoice codec classes, fed Haru's codec tensors through a key map, against the upstream Haru codec
+/// <summary>The engine's VibeVoice codec classes, built by <see cref="HaruCodec"/> from Haru's config and tensors, against the upstream Haru codec
 /// (<c>tools/haru/haru_reference.py</c>, CPU F32) on a tiny random checkpoint: a whole clip ending mid-frame, a whole decode,
 /// and frame-by-frame streaming in both directions.</summary>
 public sealed unsafe class HaruCodecReferenceTests(ITestOutputHelper output)
 {
     private const float RelativeTolerance = 2e-5f;
     private static readonly string Dir = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Haru");
-
-    private static string RemapKey(string key)
-    {
-        string k = key["codec.".Length..];
-        k = Regex.Replace(k, @"^encoder\.stem\.", "encoder.downsample_layers.0.0.conv.conv.");
-        k = Regex.Replace(k, @"^encoder\.down\.(\d+)\.", m => $"encoder.downsample_layers.{int.Parse(m.Groups[1].Value) + 1}.0.conv.conv.");
-        k = Regex.Replace(k, @"^decoder\.stem\.", "decoder.upsample_layers.0.0.conv.conv.");
-        k = Regex.Replace(k, @"^decoder\.up\.(\d+)\.", m => $"decoder.upsample_layers.{int.Parse(m.Groups[1].Value) + 1}.0.convtr.convtr.");
-        k = Regex.Replace(k, @"\.stages\.(\d+)\.(\d+)\.conv\.", ".stages.$1.$2.mixer.conv.conv.conv.");
-        k = Regex.Replace(k, @"^(encoder|decoder)\.head\.", "$1.head.conv.conv.");
-        k = k.Replace(".fc1.", ".ffn.linear1.").Replace(".fc2.", ".ffn.linear2.");
-        return "tok." + k;
-    }
 
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>((void*)t.DataPointer, (int)t.ElementCount).ToArray();
 
@@ -59,19 +47,9 @@ public sealed unsafe class HaruCodecReferenceTests(ITestOutputHelper output)
         weights.Load(Path.Combine(Dir, "haru_tiny.safetensors"));
         using SafeTensorsLoader expected = new();
         expected.Load(Path.Combine(Dir, "haru_tiny_expected.safetensors"));
-        Dictionary<string, Tensor> codec = new(StringComparer.Ordinal);
-        foreach (string name in weights.Descriptors.Keys.Where(static n => n.StartsWith("codec.", StringComparison.Ordinal)))
-        {
-            codec[RemapKey(name)] = weights.GetTensor(name);
-        }
-        VibeVoiceTokenizerConfig config = new()
-        {
-            EncoderNFilters = 1, DecoderNFilters = 1, VaeDim = 16,
-            EncoderRatios = [8, 5, 5, 4, 2, 2], DecoderRatios = [8, 5, 5, 4, 2, 2],
-            EncoderDepths = "1-1-1-1-1-1-2", DecoderDepths = "2-1-1-1-1-1-1",
-        };
-        VibeVoiceAcousticTokenizerModel model = new(config, "tok");
-        model.LoadWeights(codec);
+        Dictionary<string, Tensor> tensors = weights.GetAllTensors();
+        using JsonDocument config = JsonDocument.Parse(File.ReadAllText(Path.Combine(Dir, "config.json")));
+        VibeVoiceAcousticTokenizerModel model = HaruCodec.Create(config.RootElement.GetProperty("codec"), tensors);
         using CpuBackend backend = new();
 
         float[] clip = Read(expected.GetTensor("in.clip"));
